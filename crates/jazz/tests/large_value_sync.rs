@@ -12,7 +12,7 @@ use std::rc::Rc;
 use jazz::db::{
     CellDelta, Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadTier, RemoteLinkHint,
     SubscriptionStream, SyncCell, SyncMessage, Transport, TransportError, WireDelta, WireError,
-    WireKind, WireOp, WireTarget, block_on, encode_frames,
+    WireKind, WireOp, WirePull, WireTarget, block_on, encode_frames,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::ReadViewSourceSpec;
@@ -273,6 +273,136 @@ fn a_range_read_on_a_replica_fetches_only_what_it_covers() {
     let (after, _) = alice.large_value_nodes_for_test().unwrap();
     let (total, _) = server.large_value_nodes_for_test().unwrap();
     assert!(after < total, "only the covering path: {after} of {total}");
+}
+
+#[test]
+fn a_range_read_pulls_its_whole_path_in_one_round_trip() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let alice = open(1, user(1));
+    let log = connect(&server, &alice, user(1));
+    let blob: Vec<u8> = (0..LARGE * 16).map(|n| (n * 7 % 251) as u8).collect();
+    insert(
+        &server,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String("small".into())),
+            ("blob", Value::Bytes(blob.clone())),
+        ],
+    );
+    let _stream = subscribe(&alice, Query::from("docs").select(["body"]));
+    pump(&server, &[&alice]);
+    log.borrow_mut().clear();
+    let range = 3_000_000..3_000_100;
+    let first = block_on(alice.read_value_range("docs", row(1), "blob", range.clone()));
+    assert!(first.is_err(), "the first read asks for the range");
+    // One pull up, one answer down: the whole path, not a level per trip.
+    block_on(alice.tick()).unwrap();
+    block_on(server.tick()).unwrap();
+    block_on(alice.tick()).unwrap();
+    let got = block_on(alice.read_value_range("docs", row(1), "blob", range.clone()));
+    assert_eq!(got.unwrap(), blob[3_000_000..3_000_100]);
+    let pulls = log
+        .borrow()
+        .iter()
+        .filter(|kind| **kind == "requests")
+        .count();
+    assert_eq!(pulls, 1, "{:?}", log.borrow());
+    let (after, _) = alice.large_value_nodes_for_test().unwrap();
+    let (total, _) = server.large_value_nodes_for_test().unwrap();
+    assert!(after < total, "only the covering path: {after} of {total}");
+}
+
+#[test]
+fn pulls_answer_only_for_versions_the_reader_may_read() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let mallory = open(9, user(9));
+    let (_, up, down) = connect_wires(&server, &mallory, user(9));
+    let _stream = subscribe(&mallory, Query::from("docs").select(["blob"]));
+    pump(&server, &[&mallory]);
+    insert(
+        &server,
+        "drafts",
+        2,
+        vec![("body", Value::String(text(8, LARGE)))],
+    );
+    insert(
+        &server,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String(text(1, LARGE))),
+            ("blob", Value::Bytes(Vec::new())),
+        ],
+    );
+    let draft = jazz::large_values::prepare(
+        jazz::large_values::LargeValueKind::String,
+        text(8, LARGE).as_bytes(),
+    )
+    .unwrap()
+    .value_ref
+    .root
+    .object_hash
+    .0;
+    // The doc's version as shipped to Mallory, read off the wire before
+    // her replica takes it.
+    for _ in 0..4 {
+        block_on(server.tick()).unwrap();
+    }
+    let (seq, key, doc) = down
+        .borrow()
+        .iter()
+        .find_map(|message| match message {
+            SyncMessage::Rows { images } => images.iter().find_map(|image| {
+                let cell = image.cells.iter().find_map(|(name, cell)| match cell {
+                    SyncCell::Large(descriptor) if name.ends_with("body") => Some(descriptor),
+                    _ => None,
+                })?;
+                let value = jazz::large_values::decode_large_value_ref(cell).ok()?;
+                Some((image.seq, image.key.clone(), value.root.object_hash.0))
+            }),
+            _ => None,
+        })
+        .expect("the doc's image");
+    down.borrow_mut().clear();
+    let pull = |table: &str, id: u8, seq: u64, root: [u8; 32], nodes: Vec<[u8; 32]>| WirePull {
+        table: table.to_owned(),
+        id: *row(id).0.as_bytes(),
+        key: key.clone(),
+        seq,
+        root,
+        nodes,
+        span: Some((0, LARGE as u64)),
+    };
+    let mut pulls = vec![
+        // The doc's own tree, through its version: answered.
+        pull("docs", 1, seq, doc, vec![doc]),
+        // The draft's tree through the doc's version, as its root or as
+        // a node under the doc's: neither is that version's.
+        pull("docs", 1, seq, draft, vec![draft]),
+        pull("docs", 1, seq, doc, vec![draft]),
+    ];
+    // Through the draft's own row, at any version: she may read none.
+    pulls.extend((0..seq + 4).map(|seq| pull("drafts", 2, seq, draft, vec![draft])));
+    up.borrow_mut()
+        .push_back(SyncMessage::ChunkRequests { pulls });
+    block_on(server.tick()).unwrap();
+    let mut sent = BTreeSet::new();
+    let mut missing = BTreeSet::new();
+    for message in down.borrow().iter() {
+        if let SyncMessage::Chunks {
+            nodes,
+            missing: absent,
+        } = message
+        {
+            sent.extend(nodes.iter().map(|node| node.hash));
+            missing.extend(absent.iter().map(|node| node.hash));
+        }
+    }
+    assert!(sent.contains(&doc), "the doc's tree is answered");
+    assert!(sent.len() > 1, "with the nodes beneath it the span covers");
+    assert!(!sent.contains(&draft), "the draft's tree never is");
+    assert!(missing.contains(&draft));
 }
 
 #[test]

@@ -387,7 +387,7 @@ fn a_plain_sqlite_connection_runs_the_schema_queries_and_triggers() {
     let durable = |plain: &rusqlite::Connection| -> i64 {
         plain
             .query_row(
-                "SELECT COALESCE(SUM(durable), 0) FROM _jazz_lv_root",
+                "SELECT COALESCE(SUM(refs), 0) FROM _jazz_lv_root",
                 [],
                 |r| r.get(0),
             )

@@ -644,13 +644,24 @@ pub struct WireChunk {
     pub bytes: Vec<u8>,
 }
 
-impl WireChunkRef {
-    fn of(request: &ChunkRequest) -> Self {
-        Self {
-            hash: request.object_hash,
-        }
-    }
+/// A pull of a large value's nodes, citing the version of a row that
+/// holds it (SPEC 19.8): the authority answers only for a version the
+/// reader may read, and only with nodes of that version's tree `root`.
+/// `nodes` are the ones the reader lacks; `span`, base-tree bytes
+/// `[start, end)` a read needs, asks for every node beneath them that
+/// covers those bytes in the same answer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WirePull {
+    pub table: String,
+    pub id: [u8; 16],
+    pub key: Vec<u8>,
+    pub seq: u64,
+    pub root: [u8; 32],
+    pub nodes: Vec<[u8; 32]>,
+    pub span: Option<(u64, u64)>,
+}
 
+impl WireChunkRef {
     fn request(&self) -> ChunkRequest {
         ChunkRequest {
             object_hash: self.hash,
@@ -670,6 +681,9 @@ impl WireChunk {
 /// flushed once it reaches this, so with one more node at most and the
 /// message's framing it still fits one wire frame.
 const CHUNK_BATCH_BYTES: usize = jazz_protocol::protocol_limits::MAX_WIRE_FRAME_BYTES / 2;
+/// The most node bytes one range pull is answered with: a read past them
+/// pulls again for the rest.
+const PULL_BYTES: usize = 4 << 20;
 const _: () = assert!(
     CHUNK_BATCH_BYTES + jazz_types::large_values::MAX_ENCODED_NODE_BYTES + 64 * 1024
         <= jazz_protocol::protocol_limits::MAX_WIRE_FRAME_BYTES
@@ -768,10 +782,10 @@ pub enum SyncMessage {
         /// `pending` nodes stand for.
         origin: Option<([u8; 16], u64)>,
     },
-    /// Large-value nodes the client's descriptors name and it lacks
-    /// (pulled by hash).
+    /// Large-value nodes the client lacks, pulled through the row
+    /// versions that hold them.
     ChunkRequests {
-        requests: Vec<WireChunkRef>,
+        pulls: Vec<WirePull>,
     },
     /// Nodes of the client's new large values, sent ahead of the commit
     /// that references them. The server holds them under a receipt until
@@ -3074,31 +3088,64 @@ fn encode<T: Serialize>(value: &T) -> Vec<u8> {
 }
 
 impl Inner {
+    /// Pulls of `wanted` nodes, each through the received row version
+    /// whose tree holds it, with the ranges reads of each tree wait on
+    /// (SPEC 19.8). A node no received version holds is unavailable.
+    fn pulls(
+        &mut self,
+        wanted: Vec<ChunkRequest>,
+        spans: &HashMap<[u8; 32], std::ops::Range<u64>>,
+    ) -> Result<Vec<WirePull>, Error> {
+        let mut by_root: BTreeMap<[u8; 32], WirePull> = BTreeMap::new();
+        for request in wanted {
+            let Some((root, via)) = crate::large::via_of(&self.conn, &request.object_hash)? else {
+                let client = self.client.as_mut().expect("client");
+                client.requested.remove(&request);
+                client.unavailable.insert(request);
+                continue;
+            };
+            by_root
+                .entry(root)
+                .or_insert_with(|| WirePull {
+                    table: via.table,
+                    id: via.id,
+                    key: via.key,
+                    seq: via.seq,
+                    root,
+                    nodes: Vec::new(),
+                    span: spans.get(&root).map(|span| (span.start, span.end)),
+                })
+                .nodes
+                .push(request.object_hash);
+        }
+        Ok(by_root.into_values().collect())
+    }
+
     /// Store requested nodes the server sent.
     fn receive_chunks(
         &mut self,
         nodes: Vec<WireChunk>,
         missing: Vec<WireChunkRef>,
     ) -> Result<(), Error> {
-        let client = self.client.as_mut().expect("client");
-        let mut accepted = Vec::new();
         for node in nodes {
             let request = node.request();
-            // Only nodes this replica asked for, verified against the hash
-            // it learned from the parent or descriptor.
-            if client.requested.remove(&request) {
-                accepted.push((request, node.bytes));
+            // Only nodes this replica asked for, or that a parent it holds
+            // names (a range pull sends them parents first), verified
+            // against the hash it learned from the parent or descriptor.
+            let client = self.client.as_mut().expect("client");
+            if client.requested.remove(&request)
+                || crate::large::has_parent(&self.conn, &request.object_hash)?
+            {
+                crate::large::install_fetched(&self.conn, &self.chunks, &request, node.bytes)?;
             }
         }
+        let client = self.client.as_mut().expect("client");
         for missing in missing {
             let request = missing.request();
             client.requested.remove(&request);
             client.unavailable.insert(request);
         }
         client.arrived = true;
-        for (request, bytes) in accepted {
-            crate::large::install_fetched(&self.conn, &self.chunks, &request, bytes)?;
-        }
         Ok(())
     }
 
@@ -3186,6 +3233,22 @@ impl Inner {
             batches.push(SyncMessage::PushChunks { nodes: batch });
         }
         Ok(Some((hashes, batches)))
+    }
+
+    /// Record the version each chunked value of a received image
+    /// arrived in (`table` as the wire names it): pulls of its nodes cite
+    /// it.
+    fn record_vias(&self, table: &str, image: &Image) -> Result<(), Error> {
+        let via = crate::large::Via {
+            table: table.to_owned(),
+            id: image.id,
+            key: image.key.clone(),
+            seq: image.seq,
+        };
+        for root in self.large_roots(&image.table, image)? {
+            crate::large::record_via(&self.conn, &root, &via)?;
+        }
+        Ok(())
     }
 
     /// The roots of an image's chunked values.
@@ -4730,6 +4793,7 @@ impl Db {
                                 inner.ask_whole(named);
                                 continue;
                             }
+                            inner.record_vias(&named.0, &image)?;
                             let shadowed = inner.receive_image(image)?;
                             rebase |= shadowed;
                             shadow_changed |= shadowed;
@@ -4975,12 +5039,15 @@ impl Db {
             .into_iter()
             .filter(|r| !client.requested.contains(r) && !client.unavailable.contains(r))
             .collect();
-        for batch in wanted.chunks(256) {
-            client.requested.extend(batch.iter().cloned());
+        client.requested.extend(wanted.iter().cloned());
+        let spans = inner.chunks.take_spans();
+        let pulls = inner.pulls(wanted, &spans)?;
+        for batch in pulls.chunks(64) {
             out.push(SyncMessage::ChunkRequests {
-                requests: batch.iter().map(WireChunkRef::of).collect(),
+                pulls: batch.to_vec(),
             });
         }
+        let client = inner.client.as_mut().expect("client");
         let mut commits = std::mem::take(&mut client.unsent);
         // Each commit's large-value nodes go ahead of it. A commit whose
         // nodes must be fetched first waits, and so do those after it.
@@ -7109,44 +7176,11 @@ impl Db {
                     });
                 }
             }
-            SyncMessage::ChunkRequests { requests } => {
-                let mut inner = self.inner.borrow_mut();
-                let mut replies = Vec::new();
-                let mut nodes = Vec::new();
-                let mut missing = Vec::new();
-                let mut size = 0;
-                let mut fetching = false;
-                for request in requests {
-                    // A node only in an asynchronous chunk store fails the
-                    // whole batch as missing before anything is sent: it
-                    // is served again once its nodes are fetched.
-                    let stored =
-                        crate::large::stored_bytes(&inner.conn, &inner.chunks, &request.request());
-                    match stored {
-                        Err(error) if crate::large::is_missing(&error) => fetching = true,
-                        Err(error) => return Err(error),
-                        Ok(Some(bytes)) => {
-                            size += bytes.len();
-                            nodes.push(WireChunk {
-                                hash: request.hash,
-                                bytes,
-                            });
-                            if size >= CHUNK_BATCH_BYTES {
-                                replies.push(SyncMessage::Chunks {
-                                    nodes: std::mem::take(&mut nodes),
-                                    missing: Vec::new(),
-                                });
-                                size = 0;
-                            }
-                        }
-                        Ok(None) => missing.push(request),
-                    }
-                }
-                if fetching {
-                    return Err(crate::large::missing());
-                }
-                replies.push(SyncMessage::Chunks { nodes, missing });
-                inner.sessions[index].outbox.extend(replies);
+            SyncMessage::ChunkRequests { pulls } => {
+                let replies = db.answer_pulls(policy, pulls)?;
+                self.inner.borrow_mut().sessions[index]
+                    .outbox
+                    .extend(replies);
             }
             SyncMessage::PushChunks { nodes } => {
                 let inner = self.inner.borrow();
@@ -7242,6 +7276,79 @@ impl Db {
             *cell = large_delta::wrap(Value::Large(Box::new(value)), delta.depth);
         }
         Ok((ops, roots))
+    }
+
+    /// Answer pulls (SPEC 19.8): each only where `identity` may read the
+    /// version it cites and that version holds its root, and only with
+    /// nodes of that tree. Everything else comes back missing, so naming
+    /// a hash never reads another row's content. A node only in an
+    /// asynchronous chunk store fails the whole batch as missing before
+    /// anything is sent: it is answered again once its nodes are fetched.
+    fn answer_pulls(
+        &self,
+        identity: Option<AuthorSubject>,
+        pulls: Vec<WirePull>,
+    ) -> Result<Vec<SyncMessage>, Error> {
+        let inner = self.inner();
+        let mut replies = Vec::new();
+        let mut nodes = Vec::new();
+        let mut missing = Vec::new();
+        let mut size = 0;
+        let mut fetching = false;
+        for pull in pulls {
+            let row = RowUuid::from_bytes(pull.id);
+            let image = match inner.schema.stored_table(&pull.table) {
+                Ok(table)
+                    if readable_version(&inner, table, row, &pull.key, pull.seq, identity)? =>
+                {
+                    inner
+                        .version_image(table, row, &pull.key, pull.seq)?
+                        .map(|image| (table, image))
+                }
+                _ => None,
+            };
+            let holds = match &image {
+                Some((table, image)) => inner.large_roots(table, image)?.contains(&pull.root),
+                None => false,
+            };
+            if !holds {
+                missing.extend(pull.nodes.into_iter().map(|hash| WireChunkRef { hash }));
+                continue;
+            }
+            let span = pull.span.map(|(start, end)| start..end);
+            let found = crate::large::pulled(
+                &inner.conn,
+                &inner.chunks,
+                &pull.root,
+                &pull.nodes,
+                span,
+                PULL_BYTES,
+            );
+            let (found, absent) = match found {
+                Err(error) if crate::large::is_missing(&error) => {
+                    fetching = true;
+                    continue;
+                }
+                found => found?,
+            };
+            missing.extend(absent.into_iter().map(|hash| WireChunkRef { hash }));
+            for (hash, bytes) in found {
+                size += bytes.len();
+                nodes.push(WireChunk { hash, bytes });
+                if size >= CHUNK_BATCH_BYTES {
+                    replies.push(SyncMessage::Chunks {
+                        nodes: std::mem::take(&mut nodes),
+                        missing: Vec::new(),
+                    });
+                    size = 0;
+                }
+            }
+        }
+        if fetching {
+            return Err(crate::large::missing());
+        }
+        replies.push(SyncMessage::Chunks { nodes, missing });
+        Ok(replies)
     }
 
     /// The roots of the chunked values of the settled versions a commit

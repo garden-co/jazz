@@ -1,3 +1,18 @@
+A pull names the row version it reads through (table, row, branch, version),
+the root of the tree it reads there, the hashes of the nodes it lacks, and
+optionally a range of that tree's bytes. A read maps its logical range through
+the edit tail to the smallest base-tree range covering it; the requester holds
+everything above the nodes it lacks, so a range pull is answered with those
+nodes and every node beneath them on the paths covering the range, parents
+first, in one round trip (up to a bounded number of bytes per answer; a read
+past them pulls again). The requester accepts a node it asked for or one a
+parent it holds names. The authority answers only when the requester may read
+that version and the version holds that root, and only with nodes reachable
+from it. Anything else is answered as for an absent node. A replica records,
+for each root it receives, the version it arrived in, and pulls through it. A
+relay answers from its own store when it holds the nodes and forwards upstream
+otherwise.
+
 # jazz — Specification · 19. Large values
 
 ## Overview

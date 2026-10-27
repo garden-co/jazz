@@ -235,13 +235,14 @@ impl Inner {
                     value.byte_length
                 };
                 check_range(&range, len)?;
-                self.chunks.run(|inputs| {
-                    if utf16 {
-                        lv::utf16_range_attempt(&value, range.clone(), inputs)
-                    } else {
+                if utf16 {
+                    self.chunks
+                        .run(|inputs| lv::utf16_range_attempt(&value, range.clone(), inputs))
+                } else {
+                    self.chunks.run_range(&value, range.clone(), |inputs| {
                         lv::byte_range_attempt(&value, range.clone(), inputs)
-                    }
-                })
+                    })
+                }
             }
         }
     }
@@ -427,11 +428,9 @@ impl Db {
                 let mut offset = 0;
                 while offset < value.byte_length {
                     let end = (offset + lv::LEAF_MIN_BYTES as u64).min(value.byte_length);
-                    source.extend(
-                        inner
-                            .chunks
-                            .run(|inputs| lv::byte_range_attempt(&value, offset..end, inputs))?,
-                    );
+                    source.extend(inner.chunks.run_range(&value, offset..end, |inputs| {
+                        lv::byte_range_attempt(&value, offset..end, inputs)
+                    })?);
                     offset = end;
                     match lv::json_pointer_prefix(&source, pointer)
                         .map_err(|e| query(e.to_string()))?
@@ -440,13 +439,12 @@ impl Db {
                         lv::JsonPointerPrefix::NeedMore => {}
                         lv::JsonPointerPrefix::RequiresFullDocument => {
                             if offset < value.byte_length {
-                                source.extend(inner.chunks.run(|inputs| {
-                                    lv::byte_range_attempt(
-                                        &value,
-                                        offset..value.byte_length,
-                                        inputs,
-                                    )
-                                })?);
+                                let rest = offset..value.byte_length;
+                                source.extend(inner.chunks.run_range(
+                                    &value,
+                                    rest.clone(),
+                                    |inputs| lv::byte_range_attempt(&value, rest.clone(), inputs),
+                                )?);
                             }
                             break;
                         }

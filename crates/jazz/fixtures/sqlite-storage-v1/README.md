@@ -11,9 +11,9 @@ are stored, a rejection's reason name changed how fates are recorded, and
 large values moved to epochs with integer cells, BLOB bytes and key columns, and pending commits gained their large-value deltas).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `0f32147938b214dfa551b853f661e8277af58eda90349d593e6865aba72a85e0`.
+  the SQLite file `6dac9d1eec4cceffc3985337a4a86a49c88878404efd2dd8d15fda08b0078820`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `e3950f655c2572ea1c1fc7c09788a30fcb28c563495c46edcb77fca9342852eb`.
+  `9aeaf511c5f7ae747dd85a828f9ec52bc1a4847a26cbc9954fe60e87894d47ac`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,

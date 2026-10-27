@@ -79,7 +79,7 @@ const CACHE_BYTES: usize = 64 * 1024 * 1024;
 /// branch, epoch, pushed-node receipt or local upload lease names it.
 /// A root's `base` is the descriptor of its tree (no edit tail) once this
 /// store built or validated it; later descriptors over the same root are
-/// checked against it instead of walking the tree again; `durable` counts
+/// checked against it instead of walking the tree again; `refs` counts
 /// the epochs over it.
 /// `_jazz_lv_epoch` holds a tree (`root`, and `base`, its descriptor) and
 /// the edits applied on top of it (`edits`, `count` of them, encoded as
@@ -92,14 +92,17 @@ const CACHE_BYTES: usize = 64 * 1024 * 1024;
 /// this replica wrote that its upstream may not have yet; `_jazz_lv_upload`
 /// leases a local streaming upload's nodes (`_jazz_lv_upload_node`) until
 /// its row commits, it is aborted, or it goes untouched past the staging
-/// policy's maximum age.
+/// policy's maximum age. `_jazz_lv_via` names, for a root a replica
+/// received, the row version (`tbl` as the wire names it, `id`, `key`,
+/// `seq`) its pulls cite: the upstream answers a pull only for nodes of a
+/// version the reader may read (SPEC 19.8).
 pub(crate) const DDL: &str = "\
 CREATE TABLE IF NOT EXISTS _jazz_lv_node (hash BLOB PRIMARY KEY, bytes BLOB NOT NULL) \
  WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS _jazz_lv_edge (child BLOB NOT NULL, parent BLOB NOT NULL, \
  PRIMARY KEY (child, parent)) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS _jazz_lv_edge_parent ON _jazz_lv_edge (parent);
-CREATE TABLE IF NOT EXISTS _jazz_lv_root (root BLOB PRIMARY KEY, durable INTEGER NOT NULL \
+CREATE TABLE IF NOT EXISTS _jazz_lv_root (root BLOB PRIMARY KEY, refs INTEGER NOT NULL \
  DEFAULT 0, base BLOB) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS _jazz_lv_epoch (id INTEGER PRIMARY KEY, root BLOB NOT NULL, \
  base BLOB NOT NULL, edits BLOB NOT NULL, count INTEGER NOT NULL, \
@@ -115,16 +118,18 @@ CREATE TABLE IF NOT EXISTS _jazz_lv_upload_node (id BLOB NOT NULL, hash BLOB NOT
  PRIMARY KEY (id, hash)) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS _jazz_lv_upload_node_hash ON _jazz_lv_upload_node (hash);
 CREATE TABLE IF NOT EXISTS _jazz_lv_reclaim (root BLOB PRIMARY KEY) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS _jazz_lv_via (root BLOB PRIMARY KEY, tbl TEXT NOT NULL, \
+ id BLOB NOT NULL, key BLOB NOT NULL, seq INTEGER NOT NULL) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS _jazz_lv_scratch (slot INTEGER NOT NULL, cell INTEGER NOT NULL, \
  v BLOB, k, PRIMARY KEY (slot, cell)) WITHOUT ROWID;
 CREATE TRIGGER IF NOT EXISTS _jazz_lv_root_unreferenced AFTER UPDATE ON _jazz_lv_root \
- WHEN NEW.durable = 0 BEGIN \
+ WHEN NEW.refs = 0 BEGIN \
  INSERT OR IGNORE INTO _jazz_lv_reclaim (root) VALUES (NEW.root); END;
 CREATE TRIGGER IF NOT EXISTS _jazz_lv_epoch_ins AFTER INSERT ON _jazz_lv_epoch BEGIN \
- INSERT INTO _jazz_lv_root (root, durable) VALUES (NEW.root, 1) \
- ON CONFLICT (root) DO UPDATE SET durable = durable + 1; END;
+ INSERT INTO _jazz_lv_root (root, refs) VALUES (NEW.root, 1) \
+ ON CONFLICT (root) DO UPDATE SET refs = refs + 1; END;
 CREATE TRIGGER IF NOT EXISTS _jazz_lv_epoch_del AFTER DELETE ON _jazz_lv_epoch BEGIN \
- UPDATE _jazz_lv_root SET durable = durable - 1 WHERE root = OLD.root; END;
+ UPDATE _jazz_lv_root SET refs = refs - 1 WHERE root = OLD.root; END;
 CREATE TRIGGER IF NOT EXISTS _jazz_lv_epoch_free AFTER UPDATE OF refs ON _jazz_lv_epoch \
  WHEN NEW.refs <= 0 BEGIN DELETE FROM _jazz_lv_epoch WHERE id = NEW.id; END;
 ";
@@ -509,6 +514,9 @@ struct State {
     reader: Option<Connection>,
     /// Chunks a statement needed and nothing local holds.
     demand: BTreeSet<ChunkRequest>,
+    /// The base-tree byte ranges reads of a value (by root) waited on:
+    /// the next pull asks for each range whole (SPEC 19.8).
+    spans: HashMap<[u8; 32], std::ops::Range<u64>>,
     /// Offloaded nodes a statement needed that the chunk store could not
     /// answer at once: the next fetch reads them.
     fetch: BTreeSet<ChunkRequest>,
@@ -581,6 +589,7 @@ impl Chunks {
                 clock: 0,
                 reader,
                 demand: BTreeSet::new(),
+                spans: HashMap::new(),
                 fetch: BTreeSet::new(),
                 lost: BTreeSet::new(),
                 pumping: false,
@@ -847,6 +856,23 @@ impl Chunks {
         std::mem::take(&mut self.state.lock().expect("chunk cache").demand)
     }
 
+    /// The base-tree ranges reads waited on, by root.
+    pub(crate) fn take_spans(&self) -> HashMap<[u8; 32], std::ops::Range<u64>> {
+        std::mem::take(&mut self.state.lock().expect("chunk cache").spans)
+    }
+
+    /// [`Self::run`] for a read of `value`'s logical bytes `range`: when
+    /// it waits on absent nodes, the pull for them asks for the whole
+    /// range at once.
+    pub(crate) fn run_range<T>(
+        &self,
+        value: &LargeValueRef,
+        range: std::ops::Range<u64>,
+        attempt: impl FnMut(&mut ChunkInputs) -> Result<T, AttemptError>,
+    ) -> Result<T, Error> {
+        self.read_attempt(attempt, |_| {}, Some((value, range)))
+    }
+
     /// The verified bytes of one node, if anything local holds it.
     fn get(&self, request: &ChunkRequest) -> Result<Local, Error> {
         let mut state = self.state.lock().expect("chunk cache");
@@ -949,8 +975,17 @@ impl Chunks {
     /// [`Self::run`], reporting the size of each node it reads.
     fn run_reading<T>(
         &self,
+        attempt: impl FnMut(&mut ChunkInputs) -> Result<T, AttemptError>,
+        read: impl Fn(usize),
+    ) -> Result<T, Error> {
+        self.read_attempt(attempt, read, None)
+    }
+
+    fn read_attempt<T>(
+        &self,
         mut attempt: impl FnMut(&mut ChunkInputs) -> Result<T, AttemptError>,
         read: impl Fn(usize),
+        span: Option<(&LargeValueRef, std::ops::Range<u64>)>,
     ) -> Result<T, Error> {
         let mut inputs = ChunkInputs::default();
         loop {
@@ -971,9 +1006,24 @@ impl Chunks {
                         }
                     }
                     if !absent.is_empty() || !fetching.is_empty() {
+                        let span =
+                            span.filter(|_| !absent.is_empty())
+                                .and_then(|(value, range)| {
+                                    let span = lv::base_byte_span(value, range).ok()??;
+                                    Some((value.root.object_hash.0, span))
+                                });
                         let mut state = self.state.lock().expect("chunk cache");
                         state.demand.extend(absent);
                         state.fetch.extend(fetching);
+                        if let Some((root, span)) = span {
+                            state
+                                .spans
+                                .entry(root)
+                                .and_modify(|held| {
+                                    *held = held.start.min(span.start)..held.end.max(span.end)
+                                })
+                                .or_insert(span);
+                        }
                         return Err(missing());
                     }
                 }
@@ -993,9 +1043,9 @@ impl Chunks {
     fn range(&self, value: &Logical<'_>, range: std::ops::Range<u64>) -> Result<Vec<u8>, Error> {
         match value {
             Logical::Inline(bytes) => Ok(bytes[range.start as usize..range.end as usize].to_vec()),
-            Logical::Chunked(value) => {
-                self.run(|inputs| lv::byte_range_attempt(value, range.clone(), inputs))
-            }
+            Logical::Chunked(value) => self.run_range(value, range.clone(), |inputs| {
+                lv::byte_range_attempt(value, range.clone(), inputs)
+            }),
         }
     }
 
@@ -1003,7 +1053,9 @@ impl Chunks {
     pub(crate) fn value_bytes(&self, value: &LargeValueRef) -> Result<Vec<u8>, Error> {
         #[cfg(feature = "testing")]
         FULL_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
-        self.run(|inputs| lv::materialize_attempt(value, inputs))
+        self.run_range(value, 0..value.byte_length, |inputs| {
+            lv::materialize_attempt(value, inputs)
+        })
     }
 
     /// The sort prefix of a chunked value, read from its first chunks.
@@ -1991,6 +2043,229 @@ pub(crate) fn possessed(
     Ok(true)
 }
 
+/// The row version a replica's pulls of a root's nodes cite.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Via {
+    pub table: String,
+    pub id: [u8; 16],
+    pub key: Vec<u8>,
+    pub seq: u64,
+}
+
+/// Record that `root` arrived in `via`, the version later pulls of its
+/// nodes cite.
+pub(crate) fn record_via(conn: &Connection, root: &[u8; 32], via: &Via) -> Result<(), Error> {
+    conn.prepare_cached(
+        "INSERT OR REPLACE INTO _jazz_lv_via (root, tbl, id, key, seq) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+    )
+    .and_then(|mut statement| {
+        statement.execute(rusqlite::params![
+            root.as_slice(),
+            via.table,
+            via.id.as_slice(),
+            via.key,
+            via.seq as i64
+        ])
+    })
+    .map_err(storage)?;
+    Ok(())
+}
+
+/// Parents an upward walk visits before it gives up on the edges and
+/// walks the tree down from its root instead.
+const UPWARD_WALK: usize = 4096;
+
+/// The received root `hash` hangs under, with the version that names it:
+/// walks up the stored edges (a replica learns a node's hash only from a
+/// stored parent or a descriptor).
+pub(crate) fn via_of(conn: &Connection, hash: &[u8; 32]) -> Result<Option<([u8; 32], Via)>, Error> {
+    let mut via = conn
+        .prepare_cached("SELECT tbl, id, key, seq FROM _jazz_lv_via WHERE root = ?1")
+        .map_err(storage)?;
+    let mut parents = conn
+        .prepare_cached("SELECT parent FROM _jazz_lv_edge WHERE child = ?1")
+        .map_err(storage)?;
+    let mut stack = vec![*hash];
+    let mut seen = BTreeSet::new();
+    while let Some(hash) = stack.pop() {
+        if !seen.insert(hash) || seen.len() > UPWARD_WALK {
+            continue;
+        }
+        let found = via
+            .query_row([hash.as_slice()], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, Vec<u8>>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            })
+            .optional()
+            .map_err(storage)?;
+        if let Some((table, id, key, seq)) = found
+            && let Ok(id) = <[u8; 16]>::try_from(id.as_slice())
+        {
+            let seq = seq as u64;
+            return Ok(Some((
+                hash,
+                Via {
+                    table,
+                    id,
+                    key,
+                    seq,
+                },
+            )));
+        }
+        let found: Vec<Vec<u8>> = parents
+            .query_map([hash.as_slice()], |r| r.get(0))
+            .and_then(|rows| rows.collect())
+            .map_err(storage)?;
+        stack.extend(
+            found
+                .iter()
+                .filter_map(|p| <[u8; 32]>::try_from(p.as_slice()).ok()),
+        );
+    }
+    Ok(None)
+}
+
+/// Whether `hash` is a node of `root`'s tree: walked up the stored edges,
+/// or down from the root once the walk up spreads too far (a node many
+/// trees share). `down` caches the walk down.
+fn under(
+    conn: &Connection,
+    root: &[u8; 32],
+    hash: &[u8; 32],
+    down: &mut Option<std::collections::HashSet<[u8; 32]>>,
+) -> Result<bool, Error> {
+    if let Some(down) = down {
+        return Ok(down.contains(hash));
+    }
+    let mut parents = conn
+        .prepare_cached("SELECT parent FROM _jazz_lv_edge WHERE child = ?1")
+        .map_err(storage)?;
+    let mut stack = vec![*hash];
+    let mut seen = BTreeSet::new();
+    while let Some(hash) = stack.pop() {
+        if hash == *root {
+            return Ok(true);
+        }
+        if !seen.insert(hash) {
+            continue;
+        }
+        if seen.len() > UPWARD_WALK {
+            let nodes = named_nodes(conn, &BTreeSet::from([*root]))?;
+            let found = nodes.contains(&hash);
+            *down = Some(nodes);
+            return Ok(found);
+        }
+        let found: Vec<Vec<u8>> = parents
+            .query_map([hash.as_slice()], |r| r.get(0))
+            .and_then(|rows| rows.collect())
+            .map_err(storage)?;
+        stack.extend(
+            found
+                .iter()
+                .filter_map(|p| <[u8; 32]>::try_from(p.as_slice()).ok()),
+        );
+    }
+    Ok(false)
+}
+
+/// Answer a pull of `root`'s tree (a version the reader may read): the
+/// nodes of `wanted` under it and, for `span` (base-tree bytes), every
+/// node on the paths covering those bytes beneath a wanted one, parents
+/// first, until `budget` bytes. Returns what was found and the wanted
+/// nodes not sent. A node the chunk store answers only asynchronously
+/// fails the pull as missing; it is answered again once fetched.
+pub(crate) fn pulled(
+    conn: &Connection,
+    chunks: &Chunks,
+    root: &[u8; 32],
+    wanted: &[[u8; 32]],
+    span: Option<std::ops::Range<u64>>,
+    budget: usize,
+) -> Result<(Vec<([u8; 32], Vec<u8>)>, Vec<[u8; 32]>), Error> {
+    let wanted_set: BTreeSet<[u8; 32]> = wanted.iter().copied().collect();
+    let mut out = Vec::new();
+    let mut sent = BTreeSet::new();
+    let mut size = 0;
+    if let Some(span) = span.filter(|span| !span.is_empty()) {
+        // Walk down through the bytes the read needs, sending what lies
+        // beneath a wanted node: the replica holds what is above it.
+        let mut stack = vec![(*root, 0u64, wanted_set.contains(root))];
+        while let Some((hash, offset, send)) = stack.pop() {
+            if size >= budget {
+                break;
+            }
+            let Some(raw) = node(conn, &hash)? else {
+                continue;
+            };
+            let bytes = if send {
+                let Some(bytes) = stored_bytes(conn, chunks, &ChunkRequest { object_hash: hash })?
+                else {
+                    continue;
+                };
+                bytes
+            } else {
+                raw
+            };
+            // An offloaded leaf's bytes are elsewhere: it has no children.
+            if !bytes.is_empty()
+                && let ChunkNode::Branch { children, .. } =
+                    lv::decode_node_untyped_verified(&bytes).map_err(corrupt)?
+            {
+                let mut at = offset;
+                let mut next = Vec::new();
+                for child in children {
+                    let end = at.saturating_add(child.metrics.byte_length);
+                    if at < span.end && span.start < end {
+                        let child = child.node_ref.object_hash.0;
+                        next.push((child, at, send || wanted_set.contains(&child)));
+                    }
+                    at = end;
+                }
+                stack.extend(next.into_iter().rev());
+            }
+            if send && sent.insert(hash) {
+                size += bytes.len();
+                out.push((hash, bytes));
+            }
+        }
+    }
+    let mut down = None;
+    let mut missing = Vec::new();
+    for hash in wanted {
+        if sent.contains(hash) {
+            continue;
+        }
+        if !under(conn, root, hash, &mut down)? {
+            missing.push(*hash);
+            continue;
+        }
+        match stored_bytes(conn, chunks, &ChunkRequest { object_hash: *hash })? {
+            Some(bytes) => {
+                sent.insert(*hash);
+                out.push((*hash, bytes));
+            }
+            None => missing.push(*hash),
+        }
+    }
+    Ok((out, missing))
+}
+
+/// Whether a parent this store holds names `hash`: a node a range pull
+/// sent beneath one this replica asked for.
+pub(crate) fn has_parent(conn: &Connection, hash: &[u8; 32]) -> Result<bool, Error> {
+    conn.cached_row(
+        "SELECT EXISTS (SELECT 1 FROM _jazz_lv_edge WHERE child = ?1)",
+        [hash.as_slice()],
+        |r| r.get(0),
+    )
+    .map_err(storage)
+}
+
 /// Every node under `roots` this store knows of, through its edges.
 fn named_nodes(
     conn: &Connection,
@@ -2054,7 +2329,7 @@ pub(crate) fn reclaim(conn: &Connection, chunks: &Chunks, budget: usize) -> Resu
         let referenced: bool = conn
             .cached_row(
                 "SELECT EXISTS (SELECT 1 FROM _jazz_lv_root WHERE root = ?1 \
-                 AND durable > 0) \
+                 AND refs > 0) \
                  OR EXISTS (SELECT 1 FROM _jazz_lv_edge WHERE child = ?1) \
                  OR EXISTS (SELECT 1 FROM _jazz_lv_receipt WHERE hash = ?1) \
                  OR EXISTS (SELECT 1 FROM _jazz_lv_upload_node WHERE hash = ?1)",
@@ -2071,6 +2346,7 @@ pub(crate) fn reclaim(conn: &Connection, chunks: &Chunks, budget: usize) -> Resu
             .map_err(|_| corrupt(lv::Error::MalformedNode))?;
         let bytes = node(conn, &key)?;
         conn.execute("DELETE FROM _jazz_lv_root WHERE root = ?1", [&hash])
+            .and_then(|_| conn.execute("DELETE FROM _jazz_lv_via WHERE root = ?1", [&hash]))
             .map_err(storage)?;
         let Some(bytes) = bytes else {
             continue;
@@ -2425,7 +2701,7 @@ mod tests {
         let cell = |i: usize| Sql::Integer(intern(&conn, &chunks, &values[i].value_ref).unwrap());
         // How many cells hold the value's tree: through its epochs, which
         // hold its root.
-        let durable = |i: usize| {
+        let refs = |i: usize| {
             let refs: i64 = conn
                 .query_row(
                     "SELECT coalesce(sum(refs), 0) FROM _jazz_lv_epoch WHERE root = ?1",
@@ -2435,7 +2711,7 @@ mod tests {
                 .unwrap();
             let roots: i64 = conn
                 .query_row(
-                    "SELECT coalesce(sum(durable), 0) FROM _jazz_lv_root WHERE root = ?1",
+                    "SELECT coalesce(sum(refs), 0) FROM _jazz_lv_root WHERE root = ?1",
                     [values[i].value_ref.root.object_hash.as_bytes().as_slice()],
                     |r| r.get(0),
                 )
@@ -2449,19 +2725,19 @@ mod tests {
             [&cell(one), &cell(two)],
         )
         .unwrap();
-        assert_eq!((durable(one), durable(two)), (1, 1));
+        assert_eq!((refs(one), refs(two)), (1, 1));
         // Swapping one column's tree releases the old and retains the new;
         // an unchanged column keeps its count.
         conn.execute("UPDATE t SET a = ?1, b = b WHERE id = 1", [&cell(three)])
             .unwrap();
-        assert_eq!((durable(one), durable(two), durable(three)), (0, 1, 1));
+        assert_eq!((refs(one), refs(two), refs(three)), (0, 1, 1));
         // Moving an epoch between columns never frees it in between.
         conn.execute("UPDATE t SET a = b, b = ?1 WHERE id = 1", [&cell(one)])
             .unwrap();
-        assert_eq!((durable(one), durable(two), durable(three)), (1, 1, 0));
+        assert_eq!((refs(one), refs(two), refs(three)), (1, 1, 0));
         conn.execute("UPDATE t SET b = a, a = ?1 WHERE id = 1", [&cell(three)])
             .unwrap();
-        assert_eq!((durable(one), durable(two), durable(three)), (0, 1, 1));
+        assert_eq!((refs(one), refs(two), refs(three)), (0, 1, 1));
         // A column added later gets its own set beside the first.
         conn.execute_batch("ALTER TABLE t ADD COLUMN c; ALTER TABLE t__h ADD COLUMN c;")
             .unwrap();
@@ -2475,9 +2751,9 @@ mod tests {
         );
         conn.execute("UPDATE t SET c = ?1 WHERE id = 1", [&cell(one)])
             .unwrap();
-        assert_eq!((durable(one), durable(two), durable(three)), (1, 1, 1));
+        assert_eq!((refs(one), refs(two), refs(three)), (1, 1, 1));
         conn.execute("DELETE FROM t WHERE id = 1", []).unwrap();
-        assert_eq!((durable(one), durable(two), durable(three)), (0, 0, 0));
+        assert_eq!((refs(one), refs(two), refs(three)), (0, 0, 0));
     }
 
     #[test]
@@ -2612,7 +2888,7 @@ mod tests {
         assert_eq!(count(), staged, "the leases hold every staged node");
         // The first upload's row commits; the second is abandoned.
         conn.execute(
-            "INSERT INTO _jazz_lv_root (root, durable) VALUES (?1, 1)",
+            "INSERT INTO _jazz_lv_root (root, refs) VALUES (?1, 1)",
             [kept.value_ref.root.object_hash.as_bytes().as_slice()],
         )
         .unwrap();

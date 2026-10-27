@@ -3981,6 +3981,30 @@ pub fn byte_range_attempt(
     range_attempt(value, range, RangeUnit::Bytes, inputs)
 }
 
+/// The smallest byte range of `value`'s base tree that a read of its
+/// logical bytes `range` touches: `None` when the edit tail holds them
+/// all. A replica asks for this range in one pull (SPEC 19.8).
+pub fn base_byte_span(
+    value: &LargeValueRef,
+    range: std::ops::Range<u64>,
+) -> Result<Option<std::ops::Range<u64>>, Error> {
+    if range.start > range.end || range.end > value.byte_length {
+        return Err(Error::MalformedScalar);
+    }
+    let mut span: Option<std::ops::Range<u64>> = None;
+    for piece in map_final_range_to_base(range, &value.edit_tail, RangeUnit::Bytes)? {
+        if let RangePiece::Base(range) = piece
+            && !range.is_empty()
+        {
+            span = Some(match span {
+                Some(span) => span.start.min(range.start)..span.end.max(range.end),
+                None => range,
+            });
+        }
+    }
+    Ok(span)
+}
+
 /// [`byte_range_attempt`] in UTF-16 code-unit coordinates.
 pub fn utf16_range_attempt(
     value: &LargeValueRef,

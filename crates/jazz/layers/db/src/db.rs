@@ -51,9 +51,9 @@ use crate::values::{
 pub use sync::{
     BuiltOn, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad, FrameJoiner, Image, LOCAL_BASE,
     NON_DURABLE_BASE, RelationSnapshot, RemoteLinkHint, SerializedReadResult, SubscriberId,
-    SyncMessage, Transport, TransportError, Upstream, WireBase, WireDelta, WireError, WireKind,
-    WireOp, WireTarget, WireTransport, WireTransportAdapter, WriteConflict, decode_message, duplex,
-    encode_frames, validate_frame_batch_for_corpus,
+    SyncMessage, Transport, TransportError, Upstream, WireBase, WireChunk, WireChunkRef, WireDelta,
+    WireError, WireKind, WireOp, WirePull, WireTarget, WireTransport, WireTransportAdapter,
+    WriteConflict, decode_message, duplex, encode_frames, validate_frame_batch_for_corpus,
 };
 
 /// Shape identity: equal for bindings of one query against one schema.
@@ -1407,7 +1407,7 @@ impl Db {
             .conn
             .cached_row(
                 "SELECT (SELECT count(*) FROM _jazz_lv_node), \
-                 (SELECT count(*) FROM _jazz_lv_root WHERE durable > 0)",
+                 (SELECT count(*) FROM _jazz_lv_root WHERE refs > 0)",
                 [],
                 |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
             )
