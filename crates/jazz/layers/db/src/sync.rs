@@ -1238,6 +1238,10 @@ pub(crate) struct Session {
     /// Inbound messages held back by the rate limit, or reads waiting for
     /// large-value chunks from this relay's upstream, in order.
     backlog: VecDeque<SyncMessage>,
+    /// The tables each read in `backlog` depends on (`None`: unknown), so a
+    /// read held across ticks is not compiled again on each; valid while
+    /// the schema (and its policies) it was worked out under is current.
+    backlog_reads: (Option<Rc<Schema>>, HashMap<u64, Option<BTreeSet<String>>>),
     /// The schema version the client declared (`None`: the current one).
     version: Option<crate::ids::SchemaVersionId>,
     /// Fetches whose upstream answer arrived, or that this relay already
@@ -1286,6 +1290,7 @@ impl Session {
             generation: 0,
             ingress: (Instant::now(), 0),
             backlog: VecDeque::new(),
+            backlog_reads: (None, HashMap::new()),
             version: None,
             fetched_upstream: BTreeSet::new(),
             told_unadmitted: false,
@@ -4886,6 +4891,12 @@ impl Db {
                 held.push_back(message);
                 continue;
             }
+            if let SyncMessage::Subscribe { id, .. } | SyncMessage::Fetch { id, .. } = &message {
+                self.inner.borrow_mut().sessions[index]
+                    .backlog_reads
+                    .1
+                    .remove(id);
+            }
             if let SyncMessage::PushChunks { nodes } = &message {
                 let bytes: usize = nodes.iter().map(|node| node.bytes.len()).sum();
                 let mut inner = self.inner.borrow_mut();
@@ -4979,6 +4990,9 @@ impl Db {
         match message {
             SyncMessage::Unsubscribe { id } => !barrier.reads.contains(id),
             SyncMessage::Advise { .. } => true,
+            // A read frozen at a snapshot may name the held commits
+            // themselves, which the server cannot resolve until they apply.
+            SyncMessage::Fetch { view, .. } if frozen_at(view).is_some() => false,
             SyncMessage::Subscribe { .. } | SyncMessage::Fetch { .. } => {
                 let Some(written) = &barrier.tables else {
                     return false;
@@ -5025,11 +5039,26 @@ impl Db {
     /// that session (its policies and claims); `None` when they cannot be
     /// told, so the read is not let ahead of anything.
     fn read_dependencies(&self, index: usize, message: &SyncMessage) -> Option<BTreeSet<String>> {
-        let (SyncMessage::Subscribe { query, binding, .. }
-        | SyncMessage::Fetch { query, binding, .. }) = message
+        let (SyncMessage::Subscribe {
+            id, query, binding, ..
+        }
+        | SyncMessage::Fetch {
+            id, query, binding, ..
+        }) = message
         else {
             return None;
         };
+        {
+            let mut inner = self.inner.borrow_mut();
+            let owner = inner.owner.clone();
+            let cache = &mut inner.sessions[index].backlog_reads;
+            if !cache.0.as_ref().is_some_and(|at| Rc::ptr_eq(at, &owner)) {
+                *cache = (Some(owner), HashMap::new());
+            }
+            if let Some(known) = cache.1.get(id) {
+                return known.clone();
+            }
+        }
         let (identity, policy, claims) = {
             let inner = self.inner.borrow();
             let session = &inner.sessions[index];
@@ -5042,7 +5071,7 @@ impl Db {
         let vouched = claims
             .filter(|_| identity != AuthorSubject::SYSTEM)
             .map(|claims| (identity, claims));
-        self.with_claims(vouched, || {
+        let tables = self.with_claims(vouched, || {
             let prepared = self
                 .session_db(index)
                 .prepare_query_bound(query, binding.clone())
@@ -5051,7 +5080,12 @@ impl Db {
                 .borrow()
                 .read_dependencies(&prepared, policy)
                 .ok()
-        })
+        });
+        self.inner.borrow_mut().sessions[index]
+            .backlog_reads
+            .1
+            .insert(*id, tables.clone());
+        tables
     }
 
     /// Server half of a tick: take every session's messages (commits apply

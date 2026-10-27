@@ -639,8 +639,11 @@ transport:
   depends on a table the held commits write (its query's tables and the
   tables their read policies read), and anything whose effect on reads is
   not known. Other reads, unsubscribes of reads not held, and permission
-  advice are served ahead. A read held this way waits until the bytes
-  queued ahead of it are admitted, i.e. for (bytes ahead) / (admitted rate).
+  advice are served ahead; a read frozen at a snapshot never is, since the
+  snapshot may name the held commits. A read held this way waits until the
+  bytes queued ahead of it are admitted, i.e. for (bytes ahead) / (admitted
+  rate). (What a receiver holds is not yet bounded by the sender's credit:
+  #4291.)
 - "Answered" means stored or decided **at this node**. A Core answers with the
   terminal fate. A relay or local receiver answers with its local
   acknowledgement once the write is durable there, so its clients keep reading
