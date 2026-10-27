@@ -384,6 +384,13 @@ type NativeDb = {
   onMutationError(callback: (event: MutationErrorEvent) => void): void;
   /** A native host's upstream refused the credential; ticks keep running. */
   onAuthRejected?(callback: (reason: string) => void): void;
+  /**
+   * A native host's upstream connection failed for another reason, or
+   * recovered (`null`); ticks keep running.
+   */
+  onUpstreamFailure?(
+    callback: (failure: { reason: string; retrying: boolean } | null) => void,
+  ): void;
   setNonDurableClient?(): void;
   /** Exact wire features compiled into the native artifact backing this DB. */
   wireFeatures?(): number;
@@ -969,6 +976,18 @@ export class NativeRuntimeAdapter implements Runtime {
         this.scheduleCoreWake(urgency as CoreTickWake);
       }
     }) as (error: Error | null, urgency: string) => void);
+    // A native host's socket reports a failed upstream connection as
+    // connection state, as the web socket path does: the remote link is
+    // unavailable and remote subscriptions fail once it stops retrying,
+    // while local work keeps running (#4337).
+    this.db.onUpstreamFailure?.((failure) => {
+      if (!failure) return this.clearRemoteServerTransportError();
+      this.handleServerTransportError(
+        new Error(failure.reason),
+        this.serverConnectionGeneration,
+        failure.retrying,
+      );
+    });
   }
 
   createPeerAuthority(): { node: Uint8Array; epoch: bigint; features: number } {
@@ -1314,6 +1333,8 @@ export class NativeRuntimeAdapter implements Runtime {
         this.nativeLinkEverConnected = true;
         return "connected";
       }
+      // The socket reported a failed connection it may still be retrying.
+      if (this.serverTransportError) return "unavailable";
       // A native socket reports only whether it is connected. Before its
       // first connection that means "still connecting"; afterwards it is
       // reconnecting after a drop.

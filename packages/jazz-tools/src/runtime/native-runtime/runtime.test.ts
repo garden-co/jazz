@@ -854,6 +854,82 @@ describe("NativeRuntimeAdapter server transport", () => {
     }
   });
 
+  // #4337: a native upstream that refuses the connection for another reason
+  // than the credential (TLS behind a captive portal, a proxy refusing the
+  // upgrade) is connection state, as on the web socket path: the remote link
+  // is unavailable and the server-transport-error path hears of it once,
+  // nothing is thrown, and the link recovers with the connection.
+  it("reports a native upstream's refused connection as connection state, not a crash", async () => {
+    const thrown: unknown[] = [];
+    const queue = globalThis.queueMicrotask;
+    const spy = vi.spyOn(globalThis, "queueMicrotask").mockImplementation((callback) =>
+      queue(() => {
+        try {
+          callback();
+        } catch (error) {
+          thrown.push(error);
+        }
+      }),
+    );
+    try {
+      let schedule: ((urgency: "immediate" | "deferred") => void) | undefined;
+      let reportUpstreamFailure:
+        | ((failure: { reason: string; retrying: boolean } | null) => void)
+        | undefined;
+      let connected = false;
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () =>
+            fakeDb({
+              setTickScheduler: (callback: (urgency: "immediate" | "deferred") => void) => {
+                schedule = callback;
+              },
+              tick: () => undefined,
+              onUpstreamFailure: (
+                callback: (failure: { reason: string; retrying: boolean } | null) => void,
+              ) => {
+                reportUpstreamFailure = callback;
+              },
+              nativeConnectionStatus: () => ({
+                configured: true,
+                explicitlyOffline: false,
+                connected,
+                authRejected: null,
+              }),
+              isNativeForegroundClosed: () => false,
+            }),
+          openBrowser: async () => {
+            throw new Error("not used");
+          },
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      const transportErrors: string[] = [];
+      runtime.onServerTransportError((error) => transportErrors.push(error.message));
+      expect(runtime.remoteLinkState()).toBe("connecting");
+
+      const refusal = "native relay socket connect failed: TLS handshake failed";
+      reportUpstreamFailure!({ reason: refusal, retrying: true });
+      schedule!("immediate");
+      for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+      expect(runtime.remoteLinkState()).toBe("unavailable");
+      expect(transportErrors).toEqual([refusal]);
+      expect(thrown).toEqual([]);
+
+      connected = true;
+      reportUpstreamFailure!(null);
+      expect(runtime.remoteLinkState()).toBe("connected");
+      expect(transportErrors).toEqual([refusal]);
+      expect(thrown).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("reports pre-hello auth failures and reconnects with refreshed auth", async () => {
     const sockets: FakeWebSocket[] = [];
     let allowServerHello = false;

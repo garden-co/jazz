@@ -457,27 +457,41 @@ it("decodes the native connection status with a refused credential's reason", ()
   );
 });
 
-it("decodes tick events with the current credential refusal and its sequence", () => {
+it("decodes tick events with the current credential refusal and upstream failure", () => {
   const relay = loadRelay(null);
   // The bytes the Rust relay pins in tick_events_command_and_response_have_pinned_bytes.
   expect(
-    relay.decodeNativeForegroundResponse(Uint8Array.of(26, 2, 91, 93, 1, 0xac, 0x02, 2, 110, 111)),
+    relay.decodeNativeForegroundResponse(
+      Uint8Array.of(26, 2, 91, 93, 1, 0xac, 0x02, 2, 110, 111, 1, 2, 3, 116, 108, 115, 1),
+    ),
   ).toEqual({
     type: "tickEvents",
     eventsJson: "[]",
     authRejection: { sequence: 300, reason: "no" },
+    upstreamFailure: { sequence: 2, reason: "tls", retrying: true },
   });
-  expect(relay.decodeNativeForegroundResponse(Uint8Array.of(26, 2, 91, 93, 0))).toEqual({
+  expect(relay.decodeNativeForegroundResponse(Uint8Array.of(26, 2, 91, 93, 0, 0))).toEqual({
     type: "tickEvents",
     eventsJson: "[]",
     authRejection: null,
+    upstreamFailure: null,
+  });
+  expect(
+    relay.decodeNativeForegroundResponse(Uint8Array.of(26, 2, 91, 93, 0, 1, 7, 1, 120, 0)),
+  ).toEqual({
+    type: "tickEvents",
+    eventsJson: "[]",
+    authRejection: null,
+    upstreamFailure: { sequence: 7, reason: "x", retrying: false },
   });
   for (const malformed of [
     Uint8Array.of(26, 2, 91, 93),
-    Uint8Array.of(26, 2, 91, 93, 0, 0),
-    Uint8Array.of(26, 2, 91, 93, 2),
-    Uint8Array.of(26, 2, 91, 93, 1, 7),
-    Uint8Array.of(26, 2, 91, 93, 1, 7, 2, 110, 111, 0),
+    Uint8Array.of(26, 2, 91, 93, 0),
+    Uint8Array.of(26, 2, 91, 93, 0, 0, 0),
+    Uint8Array.of(26, 2, 91, 93, 2, 0),
+    Uint8Array.of(26, 2, 91, 93, 0, 1, 7, 1, 120),
+    Uint8Array.of(26, 2, 91, 93, 0, 1, 7, 1, 120, 2),
+    Uint8Array.of(26, 2, 91, 93, 1, 7, 2, 110, 111),
   ])
     expect(() => relay.decodeNativeForegroundResponse(malformed)).toThrow();
 });
