@@ -607,6 +607,11 @@ pub enum ForegroundDbCommandResponse {
         configured: bool,
         explicitly_offline: bool,
         connected: bool,
+        /// The upstream refused the scope's credential, with its reason. Set
+        /// until a connection with a refreshed credential succeeds; the host
+        /// renews the credential rather than treating the failed tick as
+        /// fatal (#4248).
+        auth_rejected: Option<String>,
     },
     NativeSessionMetadata {
         node: [u8; 16],
@@ -764,6 +769,10 @@ struct PrivateScopeSocketWorker {
     /// and must not poison a valid foreground (#3630). A reconnect that the
     /// upstream then rejects latches as usual.
     terminal_error: Arc<Mutex<Option<String>>>,
+    /// The upstream refused this worker's credential. The worker stops on
+    /// it, so only a replacement built with a refreshed credential (or an
+    /// explicit reconnect) can connect again.
+    auth_rejected: Arc<Mutex<Option<String>>>,
     /// The worker's socket loop has exited and will never reconnect on its
     /// own. An explicit reconnect replaces such a worker.
     stopped: Arc<AtomicBool>,
@@ -1033,6 +1042,8 @@ impl NativeRelayHost {
         let connected_for_event = Arc::clone(&connected);
         let stopped = Arc::new(AtomicBool::new(false));
         let stopped_for_event = Arc::clone(&stopped);
+        let auth_rejected = Arc::new(Mutex::new(None::<String>));
+        let auth_rejected_for_event = Arc::clone(&auth_rejected);
         // A failure of an established link, held until the worker either
         // retries it (connection state) or stops on it (terminal).
         let link_failure = Mutex::new(None::<String>);
@@ -1061,7 +1072,20 @@ impl NativeRelayHost {
                         NativeRelaySocketEvent::Connected => {
                             connected_for_event.store(true, Ordering::Release);
                             *link_failure = None;
+                            *auth_rejected_for_event
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
                             set_terminal(None);
+                        }
+                        // A refused credential is a rejected session: it
+                        // latches like one, and the worker stops on it.
+                        NativeRelaySocketEvent::AuthRejected(error) => {
+                            connected_for_event.store(false, Ordering::Release);
+                            *auth_rejected_for_event
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                                Some(error.clone());
+                            set_terminal(Some(error));
                         }
                         NativeRelaySocketEvent::TerminalError(error) => {
                             if connected_for_event.swap(false, Ordering::AcqRel) {
@@ -1092,6 +1116,7 @@ impl NativeRelayHost {
             _worker: worker,
             connected,
             terminal_error,
+            auth_rejected,
             stopped,
         })
     }
@@ -1162,6 +1187,13 @@ impl NativeRelayHost {
                 .private_scope_workers
                 .get(&scope)
                 .is_some_and(|worker| worker.connected.load(Ordering::Acquire)),
+            auth_rejected: self.private_scope_workers.get(&scope).and_then(|worker| {
+                worker
+                    .auth_rejected
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone()
+            }),
         })
     }
 
@@ -2941,6 +2973,7 @@ mod tests {
 
     mod host;
     mod snapshot_capture_codec;
+    mod socket_worker;
 
     /// The C header's ABI define, which the C and C++ probes compare the
     /// artifact against, is the ABI this crate speaks.

@@ -266,6 +266,45 @@ function renderColumnOperationExpression(
   }
 }
 
+/**
+ * A column kept under the same name must keep its type and optionality: no
+ * migration step changes them in place, so a stub for such a change could
+ * never typecheck (#2163). That includes a JSON column's schema and an enum
+ * column's variants. Refuse it with the supported alternative.
+ */
+function refuseUnsupportedSharedColumnChanges(
+  tableName: string,
+  fromTable: WasmSchema[string],
+  toTable: WasmSchema[string],
+): void {
+  for (const column of toTable.columns) {
+    const source = fromTable.columns.find((candidate) => candidate.name === column.name);
+    if (!source) continue;
+    const name = `${tableName}.${column.name}`;
+    if (source.nullable !== column.nullable) {
+      throw new Error(
+        `Changing column ${JSON.stringify(name)} from ${source.nullable ? "optional" : "required"} ` +
+          `to ${column.nullable ? "optional" : "required"} is not supported yet. ` +
+          "Add a column under a new name and drop the old one instead.",
+      );
+    }
+    if (columnTypeSignature(source.column_type) !== columnTypeSignature(column.column_type)) {
+      // A migration can only add, drop or rename a column, so a column's
+      // JSON Schema and its enum variants are part of its type too.
+      const change =
+        source.column_type.type === "Json" && column.column_type.type === "Json"
+          ? "the JSON Schema of"
+          : source.column_type.type === "Enum" && column.column_type.type === "Enum"
+            ? "the enum variants of"
+            : "the type of";
+      throw new Error(
+        `Changing ${change} column ${JSON.stringify(name)} is not supported yet. ` +
+          "Add a column under a new name and drop the old one instead.",
+      );
+    }
+  }
+}
+
 function inferTableSuggestions(
   tableName: string,
   fromTable: WasmSchema[string],
@@ -382,6 +421,7 @@ function renderMigrationBody(
     const fromTable = fromSchema[tableName]!;
     const toTable = toSchema[tableName]!;
 
+    refuseUnsupportedSharedColumnChanges(tableName, fromTable, toTable);
     const suggestion = inferTableSuggestions(tableName, fromTable, toTable);
     lines.push(`${JSON.stringify(tableName)}: {`);
     for (const comment of suggestion.comments) {

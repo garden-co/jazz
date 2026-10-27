@@ -262,6 +262,8 @@ type NativeDb = {
     configured: boolean;
     explicitlyOffline: boolean;
     connected: boolean;
+    /** The upstream refused the scope's credential, with its reason. */
+    authRejected?: string | null;
   };
   registerSchema(schema: Uint8Array): NativeDb;
   beginTransaction(
@@ -804,7 +806,6 @@ export class NativeRuntimeAdapter implements Runtime {
   private nativeLinkPoll: ReturnType<typeof setInterval> | null = null;
   private firstLoadWaitSeen = false;
   private readonly remoteLink = new RemoteLinkStatePublisher(() => this.readRemoteLinkState());
-  private readonly queuedServerFrames: Uint8Array[] = [];
   private readonly pendingInboundServerFrames: Uint8Array[] = [];
   private serverInboundRouting: Promise<void> = Promise.resolve();
   private serverInboundProcessed = false;
@@ -1434,7 +1435,6 @@ export class NativeRuntimeAdapter implements Runtime {
     this.resolveServerTransportWorkWaiters();
     this.peerTransportWorkListeners.clear();
     this.localSettlementListeners.clear();
-    this.queuedServerFrames.length = 0;
     this.pendingInboundServerFrames.length = 0;
     const serverTransport = this.serverTransport;
     this.serverTransport = null;
@@ -2496,7 +2496,6 @@ export class NativeRuntimeAdapter implements Runtime {
         this.watchAuxiliaryOutbound(transport, carrier, generation).catch((error) =>
           this.handleServerTransportError(error, generation),
         );
-        this.flushQueuedServerFrames(carrier);
         this.pumpServerTransport().catch((error) =>
           this.handleServerTransportError(error, generation),
         );
@@ -2605,7 +2604,6 @@ export class NativeRuntimeAdapter implements Runtime {
     this.serverTransport = null;
     this.serverEndpointUrl = null;
     this.serverAuthJson = null;
-    this.queuedServerFrames.length = 0;
     this.pendingInboundServerFrames.length = 0;
     this.serverPumpScheduled = false;
     this.serverPumpAgain = false;
@@ -3395,6 +3393,7 @@ export class NativeRuntimeAdapter implements Runtime {
         // from a still-live scope with an actual transport/core failure.
         try {
           if (this.db.isNativeForegroundClosed?.()) return;
+          if (this.reportNativeAuthRejection()) return;
         } catch (livenessError) {
           reportAsyncRuntimeError(livenessError);
           return;
@@ -3402,6 +3401,22 @@ export class NativeRuntimeAdapter implements Runtime {
         reportAsyncRuntimeError(error);
       });
     });
+  }
+
+  /**
+   * A native tick fails while the upstream refuses the scope's credential,
+   * for example a bearer that expired while the app was in the background
+   * (#4248). That is an auth failure the app renews from, as on the web
+   * socket path, not a runtime crash: report it through `onAuthFailure`
+   * (the auth state deduplicates repeats) and let renewal replace the
+   * upstream. Returns whether the failure was reported that way.
+   */
+  private reportNativeAuthRejection(): boolean {
+    const rejected = this.db?.nativeConnectionStatus?.().authRejected;
+    const callback = this.ownerRuntime.authFailureCallback;
+    if (!rejected || !callback) return false;
+    callback(rejected);
+    return true;
   }
 
   private runCoreTick(): Promise<void> {
@@ -3783,33 +3798,22 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private sendServerFrames(
     frames: Uint8Array[],
-    carrier = this.serverCarrier,
-    generation = this.serverConnectionGeneration,
+    carrier: WebSocketCarrier,
+    generation: number,
   ): void {
-    if (
-      !carrier ||
-      generation !== this.serverConnectionGeneration ||
-      carrier !== this.serverCarrier
-    ) {
-      this.queuedServerFrames.push(...frames);
-      return;
-    }
+    // A retired connection's frames belong to its channel state; the next
+    // connection must never carry them. Every carrier change starts a new
+    // generation, so frames are only ever sent on the carrier they were made for.
+    if (generation !== this.serverConnectionGeneration || carrier !== this.serverCarrier) return;
     void carrier.sendBatch(frames).catch((error) => {
       this.handleServerTransportError(error, generation);
-    });
-  }
-
-  private flushQueuedServerFrames(carrier: WebSocketCarrier): void {
-    if (this.queuedServerFrames.length === 0 || carrier !== this.serverCarrier) return;
-    const frames = this.queuedServerFrames.splice(0);
-    void carrier.sendBatch(frames).catch((error) => {
-      this.handleServerTransportError(error);
     });
   }
 
   private handleServerTransportError(
     error: unknown,
     generation = this.serverConnectionGeneration,
+    reconnecting = false,
   ): void {
     if (generation !== this.serverConnectionGeneration) return;
     const message = errorMessage(error);
@@ -3817,7 +3821,9 @@ export class NativeRuntimeAdapter implements Runtime {
     const isFirstTerminalError = this.serverTransportError === null;
     this.serverTransportError = error instanceof Error ? error : new Error(message);
     this.remoteLink.changed();
-    this.failRemoteSubscriptions(this.serverTransportError);
+    // An outage the client keeps reconnecting through leaves remote
+    // subscriptions open: their native sources resume on the next connection.
+    if (!reconnecting) this.failRemoteSubscriptions(this.serverTransportError);
     this.resolveServerTransportErrorWaiters(this.serverTransportError);
     if (isFirstTerminalError) this.serverTransportErrorCallback?.(this.serverTransportError);
   }
@@ -3898,7 +3904,7 @@ export class NativeRuntimeAdapter implements Runtime {
     void recovery.catch(() => undefined);
     if (publishOutage) {
       this.serverOutageReported = true;
-      this.handleServerTransportError(new Error(error.message));
+      this.handleServerTransportError(new Error(error.message), generation, true);
     }
     return recovery;
   }

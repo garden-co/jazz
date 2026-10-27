@@ -1602,6 +1602,7 @@ mod tests {
             ty: crate::records::ValueType::String,
             default: None,
             json: false,
+            json_type: None,
             merge: Default::default(),
         };
         conn.execute_batch(&triggers(&table, &[&column], None))
@@ -1670,6 +1671,7 @@ mod tests {
             ty: crate::records::ValueType::String,
             default: None,
             json: false,
+            json_type: None,
             merge: Default::default(),
         };
         let (a, b, c) = (column("a"), column("b"), column("c"));

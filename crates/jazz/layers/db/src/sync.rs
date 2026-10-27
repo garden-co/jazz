@@ -1855,6 +1855,16 @@ fn from_wire(op: WireOp) -> Result<StagedOp, Error> {
     })
 }
 
+/// The watch key marking a row the client declared holding on resume
+/// (`Hold`), apart from the rows a session watches because it shipped them.
+fn held_key(table: &str, id: &[u8; 16]) -> u64 {
+    wk((
+        table.to_owned(),
+        "\0held".to_owned(),
+        watch_key(&Sql::Blob(id.to_vec())),
+    ))
+}
+
 /// The image filter for one row version. `+_seq` keeps the planner on
 /// the row-id index: after a bulk commit every row shares one `_seq`, and
 /// the `_seq` index would scan them all for each lookup.
@@ -1892,7 +1902,7 @@ impl Inner {
         }
         support.extend(self.array_support(table, &query.array_subqueries)?);
         support.extend(self.join_support(table, &query.joins)?);
-        support.extend(self.inherited_support(table, crate::compile::DEFAULT_INHERITS_DEPTH)?);
+        support.extend(self.policy_support(table, crate::compile::DEFAULT_INHERITS_DEPTH)?);
         for via in &query.reachable {
             // Seed rows that reference the rows the walk starts from.
             if let Some(seed) = via.seed.as_ref().filter(|seed| seed.team_column != "id") {
@@ -1934,6 +1944,80 @@ impl Inner {
                 outer_array: crate::compile::is_array(parent, &array.outer_column),
                 inner_array: crate::compile::is_array(child, &array.inner_column),
                 nested: self.array_support(child, &array.nested_arrays)?,
+            });
+        }
+        Ok(support)
+    }
+
+    /// The rows a read of `table` rests on under its read policy: the
+    /// parents it inherits from and the rows its correlated `EXISTS`
+    /// clauses consult. A replica (or a backend reading for a request's
+    /// session) evaluates the policy locally over them.
+    fn policy_support(
+        &self,
+        table: &crate::values::Table,
+        depth: usize,
+    ) -> Result<Vec<Support>, Error> {
+        let mut support = self.inherited_support(table, depth)?;
+        support.extend(self.exists_support(table, depth)?);
+        Ok(support)
+    }
+
+    /// The rows of each table a correlated `EXISTS` in `table`'s read
+    /// policy consults, `depth` levels down: those whose correlated column
+    /// equals the read row's, as if the reader had read them itself. An
+    /// uncorrelated `EXISTS` has no per-row support.
+    fn exists_support(
+        &self,
+        table: &crate::values::Table,
+        depth: usize,
+    ) -> Result<Vec<Support>, Error> {
+        use crate::tools::{CmpOp, Operation, PolicyExpr, PolicyValue};
+        /// The `(inner, outer)` columns an `EXISTS` condition correlates.
+        fn correlation(condition: &PolicyExpr) -> Option<(&str, &str)> {
+            match condition {
+                PolicyExpr::Cmp {
+                    column,
+                    op: CmpOp::Eq,
+                    value: PolicyValue::SessionRef(path),
+                } => match path.as_slice() {
+                    [outer_row, outer] if outer_row == "__jazz_outer_row" => Some((column, outer)),
+                    _ => None,
+                },
+                PolicyExpr::And(parts) => parts.iter().find_map(correlation),
+                _ => None,
+            }
+        }
+        fn clauses<'p>(policy: &'p PolicyExpr, out: &mut Vec<(&'p str, &'p PolicyExpr)>) {
+            match policy {
+                PolicyExpr::Exists { table, condition } => out.push((table, condition)),
+                PolicyExpr::And(parts) | PolicyExpr::Or(parts) => {
+                    parts.iter().for_each(|part| clauses(part, out))
+                }
+                PolicyExpr::Not(part) => clauses(part, out),
+                _ => {}
+            }
+        }
+        let mut support = Vec::new();
+        if depth == 0 {
+            return Ok(support);
+        }
+        let mut exists = Vec::new();
+        if let Some(policy) = table.policy(Operation::Select) {
+            clauses(policy, &mut exists);
+        }
+        for (consulted, condition) in exists {
+            let Some((inner, outer)) = correlation(condition) else {
+                continue;
+            };
+            let consulted = self.schema.table(consulted)?;
+            support.push(Support::Array {
+                table: consulted.stored.clone(),
+                inner: consulted.stored_name(inner).to_owned(),
+                outer: table.stored_name(outer).to_owned(),
+                outer_array: crate::compile::is_array(table, outer),
+                inner_array: crate::compile::is_array(consulted, inner),
+                nested: self.policy_support(consulted, depth - 1)?,
             });
         }
         Ok(support)
@@ -2218,9 +2302,11 @@ impl Inner {
                 "id".to_owned(),
                 watch_key(&Sql::Blob(found.id.to_vec())),
             )));
-            // Not watched yet, so the replica does not hold it (rows it
-            // declared on resume are watched already).
-            let ship = fresh || unwatched;
+            // Not watched yet, so the replica does not hold it; or a new
+            // correlation's row, unless the replica declared holding it on
+            // resume (`Hold` re-ships it if stale).
+            let declared = watch.contains(&held_key(table, &found.id));
+            let ship = unwatched || fresh && !declared;
             if nested.is_empty() {
                 if ship {
                     out.push(found);
@@ -2460,7 +2546,7 @@ impl Inner {
                         "_c" => image.content = r.get::<_, i64>(i)? != 0,
                         // The authority's record of what the version was
                         // built on; never replicated.
-                        "_base" | "_on" | "_cols" => {}
+                        "_base" | "_cols" => {}
                         _ => image
                             .cells
                             .push((name.clone(), Cell::from(r.get::<_, Sql>(i)?))),
@@ -3658,6 +3744,7 @@ impl Db {
         // newest pending commit to the row, else the settled image under
         // its pending writes.
         let mut bases = Vec::new();
+        let by_row = inner.row_ops(&ops);
         for (table, row, key) in &rows {
             let row_key = (table.clone(), *row, key.clone());
             let client = inner.client.as_ref().expect("client");
@@ -3678,10 +3765,12 @@ impl Db {
             };
             if relayed.is_none()
                 && let Some(on) = on
-                && let Some(op) = inner.op_writing(&ops, table, *row)
+                && let Some(&op) = by_row
+                    .get(&(table.clone(), *row))
+                    .and_then(|ops| ops.first())
             {
                 bases.push(WireBase {
-                    op,
+                    op: op as u32,
                     key: key.clone(),
                     on,
                 });
@@ -6110,6 +6199,7 @@ impl Db {
                                     "id".to_owned(),
                                     watch_key(&Sql::Blob(id.to_vec())),
                                 )));
+                                watch.insert(held_key(&stored, &id));
                                 if now != seq || !can {
                                     touched.push((stored.clone(), RowUuid::from_bytes(id), key));
                                 }
@@ -6749,11 +6839,12 @@ impl Db {
         // What each row was built on (SPEC 4 §4.6), before anything is
         // applied: a base on a rejected commit rejects the upload. A relay
         // renames the bases for its upstream; the authority resolves them.
+        let by_row = self.inner().row_ops(&ops);
         let (bases, mut built) = {
             let inner = self.inner();
             let resolved = if relay {
                 inner
-                    .relay_bases(origin, bases)
+                    .relay_bases(origin, &ops, bases)
                     .map(|bases| (bases, HashMap::new()))
             } else {
                 inner
@@ -6823,7 +6914,7 @@ impl Db {
         .and_then(|rows| {
             if !relay {
                 let inner = self.inner.borrow();
-                inner.record_bases(&ops, &built, seq, &rows)?;
+                inner.record_bases(&ops, &by_row, &built, seq, &rows)?;
                 inner.record_text_in(seq)?;
             }
             Ok(rows)
@@ -6832,9 +6923,6 @@ impl Db {
         match finished {
             Ok(rows) => {
                 end_savepoint(&inner.conn, "upload", true).map_err(|e| (e, Vec::new()))?;
-                if !relay {
-                    inner.note_columns_table().map_err(|e| (e, Vec::new()))?;
-                }
                 drop(inner);
                 self.notify();
                 Ok(rows)
