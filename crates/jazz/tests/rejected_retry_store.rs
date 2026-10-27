@@ -223,3 +223,49 @@ fn without_a_reporting_host_nothing_is_kept() {
     assert_eq!(count(&client, Query::from("notes")), 0);
     assert!(client.rejected_transactions().unwrap().is_empty());
 }
+
+/// The retry store comes with the first refusal it keeps: a store written
+/// before it existed, reopened and read without a write, stays
+/// byte-identical.
+#[test]
+fn reopening_a_store_without_a_refusal_writes_nothing() {
+    let path = scratch("untouched");
+    let open = || {
+        block_on(Db::open_at(
+            DbConfig::new(schema(), identity(0xa1, alice())),
+            &path,
+            FileOptions::default(),
+        ))
+        .unwrap()
+    };
+    {
+        let client = open();
+        client.track_upstream_rejections();
+        block_on(client.insert(
+            "notes",
+            BTreeMap::from([
+                ("owner".to_owned(), subject(alice())),
+                ("title".to_owned(), Value::String("mine".into())),
+            ]),
+            InsertOptions::default(),
+        ))
+        .unwrap();
+    }
+    // As written by a build before the retry store.
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch("DROP TABLE IF EXISTS _jazz_rejected")
+        .unwrap();
+    let before = std::fs::read(&path).unwrap();
+
+    {
+        let reopened = open();
+        reopened.track_upstream_rejections();
+        assert_eq!(count(&reopened, Query::from("notes")), 1);
+        assert!(reopened.rejected_transactions().unwrap().is_empty());
+    }
+    assert!(
+        std::fs::read(&path).unwrap() == before,
+        "a reopen without a write changed the file"
+    );
+}

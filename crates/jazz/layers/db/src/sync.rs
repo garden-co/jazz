@@ -2653,8 +2653,13 @@ pub(crate) const SYNC_DDL: &str = "\
     CREATE TABLE IF NOT EXISTS _jazz_applied (node BLOB NOT NULL, tx INTEGER NOT NULL, result BLOB NOT NULL, PRIMARY KEY (node, tx));\
     CREATE TABLE IF NOT EXISTS _jazz_settled (node BLOB NOT NULL, tx INTEGER NOT NULL, seq INTEGER, PRIMARY KEY (node, tx));\
     CREATE INDEX IF NOT EXISTS _jazz_settled_by_seq ON _jazz_settled (seq);\
-    CREATE TABLE IF NOT EXISTS _jazz_nodes (node BLOB PRIMARY KEY, author INTEGER NOT NULL) WITHOUT ROWID;\
-    CREATE TABLE IF NOT EXISTS _jazz_rejected (tx INTEGER PRIMARY KEY, commit_msg BLOB NOT NULL, error BLOB NOT NULL, serializable INTEGER NOT NULL);";
+    CREATE TABLE IF NOT EXISTS _jazz_nodes (node BLOB PRIMARY KEY, author INTEGER NOT NULL) WITHOUT ROWID;";
+
+/// The retry store for refused commits. It is created by the first refusal
+/// it keeps, not on open, so that opening an existing store without writing
+/// leaves the file byte-identical.
+const REJECTED_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_rejected \
+    (tx INTEGER PRIMARY KEY, commit_msg BLOB NOT NULL, error BLOB NOT NULL, serializable INTEGER NOT NULL)";
 
 type RowKey = (String, RowUuid, Vec<u8>);
 
@@ -2763,6 +2768,7 @@ impl Inner {
     /// Move refused commit `tx`'s payload from the upload queue into the
     /// retry store.
     fn retain_rejected(&self, tx: u64, error: &Error, serializable: bool) -> Result<(), Error> {
+        self.exec(REJECTED_DDL, []).map_err(storage)?;
         self.exec(
             "INSERT OR REPLACE INTO _jazz_rejected (tx, commit_msg, error, serializable) \
              SELECT tx, commit_msg, ?2, ?3 FROM _jazz_pending WHERE tx = ?1",
@@ -2774,6 +2780,9 @@ impl Inner {
 
     /// The refused commits in the retry store, oldest first.
     pub(crate) fn rejected_transactions(&self) -> Result<Vec<RejectedTransaction>, Error> {
+        if !self.has_rejected_store()? {
+            return Ok(Vec::new());
+        }
         let mut statement = self
             .conn
             .prepare_cached(
@@ -2811,9 +2820,22 @@ impl Inner {
 
     /// Drop refused commit `tx` from the retry store.
     pub(crate) fn discard_rejected(&self, tx: u64) -> Result<(), Error> {
+        if !self.has_rejected_store()? {
+            return Ok(());
+        }
         self.exec("DELETE FROM _jazz_rejected WHERE tx = ?1", [tx as i64])
             .map_err(storage)?;
         Ok(())
+    }
+
+    fn has_rejected_store(&self) -> Result<bool, Error> {
+        self.conn
+            .query_row(
+                "SELECT count(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = '_jazz_rejected'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(storage)
     }
 
     fn forget_pending(&self, tx: u64) -> Result<(), Error> {
