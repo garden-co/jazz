@@ -156,6 +156,15 @@ function builderExpressionForColumn(column: ColumnDescriptor): string {
   if (column.merge_strategy === "GSet") {
     return `${withOptional}.merge("g-set")`;
   }
+  if (column.merge_strategy === "Text") {
+    return `${withOptional}.merge("text")`;
+  }
+  if (column.merge_strategy === "Markdown") {
+    return `${withOptional}.merge("markdown")`;
+  }
+  if (column.merge_strategy === "Html") {
+    return `${withOptional}.merge("html")`;
+  }
   return withOptional;
 }
 

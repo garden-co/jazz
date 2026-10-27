@@ -510,9 +510,11 @@ Transactions accept `applyDiffs` on `tx.update`. Coordinates address the value
 the transaction reads, its snapshot overlaid with its own earlier writes, so
 repeated diffs in one transaction compose into one version. The row read counts
 as a transaction point read, so a serializable transaction conflicts if the row
-changes before commit; in a mergeable transaction the diffed column resolves
-through its merge strategy, or last-writer-wins. Branch views reject
-`applyDiffs` explicitly.
+changes before commit; in a mergeable transaction the diffed column is authored
+like any patched column: last-writer-wins at commit, or merged with concurrent
+edits when the column is text-merging (ch. 4 §4.3, `INV-HIST-24`). Branch views
+reject `applyDiffs` explicitly, as do React Native transactions until its
+foreground codec carries the descriptor.
 
 `Db` exposes `value_delta(table, row, column, from_version, to_version)`,
 returning `delta` (§19.6) as splices in the column's coordinates, for callers

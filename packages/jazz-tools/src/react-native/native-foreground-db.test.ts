@@ -189,3 +189,83 @@ it("rejects unknown transaction reads before invoking native commands", () => {
   expect(execute).not.toHaveBeenCalled();
   expect(tick).not.toHaveBeenCalled();
 });
+
+// #4296: a refused credential is auth state, not a failed tick. Each tick
+// drains its events in one native call, and each refusal is reported once:
+// a renewed credential refused again, even for the same reason, is reported
+// again.
+it("reports each new upstream credential refusal once while ticks keep running", async () => {
+  const refusal = (sequence: number) => ({ sequence, reason: "token expired" });
+  const drains = [null, refusal(1), refusal(1), null, refusal(2), refusal(2)];
+  let authRejection: { sequence: number; reason: string } | null = null;
+  const tick = vi.fn(() => {
+    authRejection = drains.shift() ?? null;
+  });
+  const execute = vi.fn((command: Uint8Array) => command);
+  const db = new NativeForegroundDb({ execute, tick, close: () => true }, {
+    encodeNativeForegroundCommand: (command: { type: string }) => {
+      expect(command).toEqual({ type: "drainTickEvents" });
+      return Uint8Array.of(35);
+    },
+    decodeNativeForegroundResponse: () => ({
+      type: "tickEvents",
+      eventsJson: "[]",
+      authRejection,
+    }),
+  } as never);
+  const reported: string[] = [];
+  db.onAuthRejected((reason) => reported.push(reason));
+
+  for (let turn = 0; turn < 6; turn += 1) db.tick();
+  await Promise.resolve();
+
+  expect(tick).toHaveBeenCalledTimes(6);
+  expect(execute).toHaveBeenCalledTimes(6);
+  expect(reported).toEqual(["token expired", "token expired"]);
+});
+
+// #4337: another upstream connection failure is connection state too. Each
+// change is reported once: a new failure, the socket giving up retrying it,
+// and its recovery.
+it("reports each upstream connection failure change once while ticks keep running", async () => {
+  const failure = (sequence: number, retrying: boolean) => ({ sequence, reason: "tls", retrying });
+  const drains = [
+    null,
+    failure(1, true),
+    failure(1, true),
+    failure(1, false),
+    failure(1, false),
+    null,
+    null,
+    failure(2, true),
+  ];
+  let upstreamFailure: { sequence: number; reason: string; retrying: boolean } | null = null;
+  const tick = vi.fn(() => {
+    upstreamFailure = drains.shift() ?? null;
+  });
+  const db = new NativeForegroundDb(
+    { execute: (command: Uint8Array) => command, tick, close: () => true },
+    {
+      encodeNativeForegroundCommand: () => Uint8Array.of(35),
+      decodeNativeForegroundResponse: () => ({
+        type: "tickEvents",
+        eventsJson: "[]",
+        authRejection: null,
+        upstreamFailure,
+      }),
+    } as never,
+  );
+  const reported: unknown[] = [];
+  db.onUpstreamFailure((change) => reported.push(change));
+
+  for (let turn = 0; turn < 8; turn += 1) db.tick();
+  await Promise.resolve();
+
+  expect(tick).toHaveBeenCalledTimes(8);
+  expect(reported).toEqual([
+    { reason: "tls", retrying: true },
+    { reason: "tls", retrying: false },
+    null,
+    { reason: "tls", retrying: true },
+  ]);
+});

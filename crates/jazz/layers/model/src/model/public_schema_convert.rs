@@ -998,6 +998,9 @@ fn convert_merge_strategy(
     match strategy {
         ColumnMergeStrategy::Counter => Ok(MergeStrategy::Counter),
         ColumnMergeStrategy::GSet => Ok(MergeStrategy::GSet),
+        ColumnMergeStrategy::Text => Ok(MergeStrategy::Text),
+        ColumnMergeStrategy::Markdown => Ok(MergeStrategy::Markdown),
+        ColumnMergeStrategy::Html => Ok(MergeStrategy::Html),
     }
 }
 
