@@ -373,7 +373,7 @@ describe("cli migrations", () => {
     await typecheckGeneratedMigration(filePath);
   }, 30_000);
 
-  it("still creates a migration file for nullability-only schema changes", async () => {
+  it("refuses a same-column nullability change instead of emitting a stub that cannot typecheck", async () => {
     const { root } = await createWorkspace();
     const migrationsDir = join(root, "migrations");
     const fromHash = "3030303030303030303030303030303030303030303030303030303030303030";
@@ -404,7 +404,8 @@ describe("cli migrations", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const { result, logs } = await captureConsoleLogs(() =>
+    // #2163: no migration step changes a kept column's optionality.
+    await expect(
       createMigration({
         schemaDir: root,
         serverUrl: "http://localhost:1625",
@@ -413,11 +414,12 @@ describe("cli migrations", () => {
         fromHash: fromHash.slice(0, 12),
         toHash: toHash.slice(0, 12),
       }),
+    ).rejects.toThrow(
+      'Changing column "todos.done" from required to optional is not supported yet. Add a column under a new name and drop the old one instead.',
     );
-
-    expect(result).not.toBeNull();
-    expect(logs.some((line) => line.startsWith("Generated:"))).toBe(true);
-    expect((await readdir(migrationsDir)).filter((name) => name.endsWith(".ts"))).toHaveLength(1);
+    expect(
+      (await readdir(migrationsDir).catch(() => [])).filter((name) => name.endsWith(".ts")),
+    ).toHaveLength(0);
   });
 
   it("uses --name to generate a named migration file and skips the rename reminder", async () => {
