@@ -4992,7 +4992,9 @@ impl Db {
             SyncMessage::Advise { .. } => true,
             // A read frozen at a snapshot may name the held commits
             // themselves, which the server cannot resolve until they apply.
-            SyncMessage::Fetch { view, .. } if frozen_at(view).is_some() => false,
+            SyncMessage::Fetch { view, .. } if frozen_at(view).is_some() => {
+                barrier.tables.is_some() && !barrier.commits
+            }
             SyncMessage::Subscribe { .. } | SyncMessage::Fetch { .. } => {
                 let Some(written) = &barrier.tables else {
                     return false;
@@ -5013,6 +5015,7 @@ impl Db {
             }
             SyncMessage::Unsubscribe { .. } | SyncMessage::Advise { .. } => {}
             SyncMessage::Commit { ops, .. } => {
+                barrier.commits = true;
                 let schema = {
                     let mut inner = self.inner.borrow_mut();
                     inner
@@ -5081,10 +5084,15 @@ impl Db {
                 .read_dependencies(&prepared, policy)
                 .ok()
         });
-        self.inner.borrow_mut().sessions[index]
-            .backlog_reads
-            .1
-            .insert(*id, tables.clone());
+        // An unadmitted version may be admitted without the owner schema
+        // changing: what it resolved to then is not kept.
+        let mut inner = self.inner.borrow_mut();
+        if !inner.session_unadmitted(index) {
+            inner.sessions[index]
+                .backlog_reads
+                .1
+                .insert(*id, tables.clone());
+        }
         tables
     }
 
@@ -6573,6 +6581,8 @@ struct HeldWrites {
     /// Stored tables the held commits write; `None` once something is held
     /// whose effect on reads is not known.
     tables: Option<BTreeSet<String>>,
+    /// A commit is held: a snapshot read may name it.
+    commits: bool,
     /// Held reads, which their unsubscribes must not overtake.
     reads: HashSet<u64>,
 }
@@ -6581,6 +6591,7 @@ impl Default for HeldWrites {
     fn default() -> Self {
         Self {
             tables: Some(BTreeSet::new()),
+            commits: false,
             reads: HashSet::new(),
         }
     }

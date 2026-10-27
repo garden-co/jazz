@@ -629,8 +629,9 @@ transport:
   settled, is answered on arrival: a recovering relay acknowledges a write it
   restored from its own storage before the writer's resent copy reaches it.
   A terminal fate ends that standing. Messages on
-  other channels are never held. Held requests keep their buffer leases, so
-  the sender's request credit bounds what a receiver holds. When a turn's
+  other channels are never held. Held requests are meant to keep their buffer
+  leases, so the sender's request credit bounds what a receiver holds; the
+  server does not enforce that bound yet (#4291). When a turn's
   input runs out with requests held, the receiver sends the answers it has
   ready and serves the requests they release in that same turn, so the
   barrier costs no extra turn when the write is handled at once.

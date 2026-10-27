@@ -636,6 +636,15 @@ fn reads_reaching_a_held_table_through_policies_or_includes_wait() {
             "a read through {what} is answered once the upload lands"
         );
     }
+    // The control: the same tables without the include, the policy-free
+    // `links`, depend on nothing held and are served at once.
+    let (server, alice, _wires) = held_upload();
+    let mut stream = remote_subscribe(&alice, "links");
+    pump(&server, &[&alice]);
+    assert!(
+        drain(&mut stream, &mut BTreeSet::new()),
+        "a read of links alone overtakes"
+    );
 }
 
 /// A read frozen at a snapshot that names the writer's held commit waits
