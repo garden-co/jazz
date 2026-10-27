@@ -232,6 +232,29 @@ export type NativeForegroundResponse =
   | { type: "mutationCommitted"; txId: Uint8Array; rowId: Uint8Array }
   | { type: "permissionAdvice"; advice: "allowed" | "denied" | "unknown" };
 
+type NativeForegroundSubscriptionFailureCode =
+  | "TableNotFound"
+  | "SchemaResolution"
+  | "QueryValidation"
+  | "QueryLowering"
+  | "PolicyEvaluation"
+  | "Internal"
+  | "QueryResultProtocol";
+
+function isNativeForegroundSubscriptionFailureCode(
+  value: string,
+): value is NativeForegroundSubscriptionFailureCode {
+  return (
+    value === "TableNotFound" ||
+    value === "SchemaResolution" ||
+    value === "QueryValidation" ||
+    value === "QueryLowering" ||
+    value === "PolicyEvaluation" ||
+    value === "Internal" ||
+    value === "QueryResultProtocol"
+  );
+}
+
 export type NativeForegroundSubscriptionEvent =
   | {
       type: "delta";
@@ -241,7 +264,10 @@ export type NativeForegroundSubscriptionEvent =
       delta: Uint8Array;
       terminalOperations?: unknown[];
     }
-  | { type: "rejected"; reason: string }
+  | {
+      type: "rejected";
+      code: NativeForegroundSubscriptionFailureCode;
+    }
   | { type: "closed" };
 
 function foregroundRuntimeInstallationError(): Error {
@@ -904,9 +930,13 @@ function decodeForegroundSubscriptionEvents(
       });
     } else if (tag === 1) {
       const length = readVarint();
-      const reason = decodeForegroundUtf8(bytes, offset, length, "rejection");
+      const rawCode = decodeForegroundUtf8(bytes, offset, length, "rejection");
       offset += length;
-      events.push({ type: "rejected", reason });
+      if (!isNativeForegroundSubscriptionFailureCode(rawCode)) {
+        throw new Error("Jazz native foreground returned unknown subscription failure code");
+      }
+      const code = rawCode;
+      events.push({ type: "rejected", code });
     } else if (tag === 2) events.push({ type: "closed" });
     else throw new Error("Jazz native foreground returned unknown subscription event");
   }

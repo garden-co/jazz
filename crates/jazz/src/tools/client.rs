@@ -250,10 +250,8 @@ impl Shared {
                             },
                         },
                     },
-                    SubscriptionEvent::Rejected { reason } => SubscriptionStreamItem::Rejected {
-                        reason: SubscriptionRejectReason::UnsupportedShapeCapability {
-                            detail: reason,
-                        },
+                    SubscriptionEvent::Rejected { code } => SubscriptionStreamItem::Rejected {
+                        reason: SubscriptionRejectReason::ServerFailure { code },
                     },
                     SubscriptionEvent::Closed => return false,
                 };
@@ -897,7 +895,12 @@ impl JazzClient {
                     added.sort_by_key(|row| row.index);
                     added.into_iter().map(|row| row.row).collect()
                 }
-                SubscriptionEvent::Rejected { reason } => return Err(JazzError::Query(reason)),
+                SubscriptionEvent::Rejected { code } => {
+                    return Err(JazzError::Query(format!(
+                        "server rejected subscription: {}",
+                        code.as_str()
+                    )));
+                }
                 SubscriptionEvent::Closed => {
                     return Err(JazzError::Query("the read closed before answering".into()));
                 }

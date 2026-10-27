@@ -193,6 +193,40 @@ pub struct RemovedRow {
     pub index: usize,
 }
 
+/// Stable, client-safe classifications for a server-side subscription failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubscriptionServerFailureCode {
+    /// The requested table was absent on the serving peer.
+    TableNotFound,
+    /// The server could not resolve the requested schema or shape.
+    SchemaResolution,
+    /// The server rejected the query during validation.
+    QueryValidation,
+    /// The server could not lower the query.
+    QueryLowering,
+    /// The server could not evaluate the subscription's policy.
+    PolicyEvaluation,
+    /// The server could not decode or project a prepared query result.
+    QueryResultProtocol,
+    /// Another server-side failure occurred.
+    Internal,
+}
+
+impl SubscriptionServerFailureCode {
+    /// Stable public name used by host bindings.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TableNotFound => "TableNotFound",
+            Self::SchemaResolution => "SchemaResolution",
+            Self::QueryValidation => "QueryValidation",
+            Self::QueryLowering => "QueryLowering",
+            Self::PolicyEvaluation => "PolicyEvaluation",
+            Self::QueryResultProtocol => "QueryResultProtocol",
+            Self::Internal => "Internal",
+        }
+    }
+}
+
 /// Subscription events, shaped like `crate::options::SubscriptionEvent`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SubscriptionEvent {
@@ -206,7 +240,7 @@ pub enum SubscriptionEvent {
         tier: DurabilityTier,
     },
     Rejected {
-        reason: String,
+        code: SubscriptionServerFailureCode,
     },
     Closed,
 }
@@ -272,6 +306,8 @@ pub struct SubscriptionStream {
     group: Weak<RefCell<fanout::Group>>,
     /// Why the server refused the remote read, once it has; reported once.
     refused: Option<Rc<RefCell<Option<Error>>>>,
+    /// A rejected stream reports one terminal event, then stays exhausted.
+    terminated: bool,
     /// The remote attachment to release on drop.
     remote: Option<(
         Rc<Store>,
@@ -284,23 +320,41 @@ pub struct SubscriptionStream {
 
 impl Drop for SubscriptionStream {
     fn drop(&mut self) {
-        self.dropped.set(self.dropped.get() + 1);
-        if let Some((inner, query, binding, include_deleted, reach)) = self.remote.take() {
-            Db { inner, view: None }.detach_remote(&query, &binding, include_deleted, reach);
+        if !self.terminated {
+            self.dropped.set(self.dropped.get() + 1);
+            if let Some((inner, query, binding, include_deleted, reach)) = self.remote.take() {
+                Db { inner, view: None }.detach_remote(&query, &binding, include_deleted, reach);
+            }
         }
     }
 }
 
 impl SubscriptionStream {
     pub fn try_next_event(&mut self) -> Option<SubscriptionEvent> {
-        let reason = self
+        if self.terminated {
+            return None;
+        }
+        let refused = self
             .refused
             .as_ref()
-            .and_then(|refused| refused.borrow().as_ref().map(Error::to_string));
-        if let Some(reason) = reason {
+            .and_then(|refused| refused.borrow().clone());
+        if let Some(error) = refused {
             self.refused = None;
-            self.gate = None;
-            return Some(SubscriptionEvent::Rejected { reason });
+            let code = sync::subscription_server_failure_code(&error);
+            self.retire();
+            return Some(SubscriptionEvent::Rejected { code });
+        }
+        // A local projection failure ends the stream even while its remote
+        // opening is withheld. No queued delta can be delivered past it.
+        if self.gate.is_some() {
+            let rejection = self.queue.borrow().iter().find_map(|event| match event {
+                SubscriptionEvent::Rejected { code } => Some(*code),
+                _ => None,
+            });
+            if let Some(code) = rejection {
+                self.retire();
+                return Some(SubscriptionEvent::Rejected { code });
+            }
         }
         if let Some(gate) = &self.gate {
             if !gate.open() {
@@ -335,7 +389,30 @@ impl SubscriptionStream {
             }
             return Some(event);
         }
-        self.queue.borrow_mut().pop_front()
+        let event = self.queue.borrow_mut().pop_front();
+        match event {
+            Some(SubscriptionEvent::Rejected { code }) => {
+                self.retire();
+                Some(SubscriptionEvent::Rejected { code })
+            }
+            event => event,
+        }
+    }
+
+    fn retire(&mut self) {
+        if self.terminated {
+            return;
+        }
+        self.terminated = true;
+        self.gate = None;
+        self.queue.borrow_mut().clear();
+        // The fanout group holds only a weak reference to this queue. Dropping
+        // it retires the member even if the caller keeps the terminal stream.
+        self.queue = Rc::new(RefCell::new(VecDeque::new()));
+        self.dropped.set(self.dropped.get() + 1);
+        if let Some((inner, query, binding, include_deleted, reach)) = self.remote.take() {
+            Db { inner, view: None }.detach_remote(&query, &binding, include_deleted, reach);
+        }
     }
 
     pub async fn close(self) -> Result<(), Error> {
@@ -1440,6 +1517,7 @@ impl Db {
             gate,
             group,
             refused: remote.as_ref().map(|(_, refused, _)| refused.clone()),
+            terminated: false,
             remote: remote.zip(reach).map(|(_, reach)| {
                 (
                     self.inner.clone(),
@@ -1518,6 +1596,16 @@ impl Db {
             active_prepared_shapes: shapes.len(),
             active_shape_params: live.iter().filter(|(_, bound)| *bound).count(),
         }
+    }
+
+    /// Inject a one-shot prepared-membership result failure into the next
+    /// refresh for `table`.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn fail_next_membership_refresh_for_test(&self, table: &str, error: Error) -> bool {
+        self.inner()
+            .fan
+            .fail_next_membership_refresh_for_test(table, error)
     }
 
     pub fn fanout_stats(&self) -> fanout::FanoutStats {

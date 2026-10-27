@@ -231,7 +231,7 @@ export class NativeForegroundDb {
       if (event.type === "closed") return event;
       return {
         type: "rejected",
-        reason: { type: "ServerFailure", code: event.reason },
+        reason: { type: "ServerFailure", code: event.code },
       };
     });
   }

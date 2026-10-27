@@ -903,7 +903,10 @@ pub struct SubscriptionClosedEvent {
 pub struct SubscriptionServerFailureReason {
     #[napi(js_name = "type", ts_type = "'ServerFailure'")]
     pub reason_type: String,
-    /// The server's reason.
+    /// Stable, client-safe failure class.
+    #[napi(
+        ts_type = "'TableNotFound' | 'SchemaResolution' | 'QueryValidation' | 'QueryLowering' | 'PolicyEvaluation' | 'Internal' | 'QueryResultProtocol'"
+    )]
     pub code: String,
 }
 
@@ -932,11 +935,11 @@ fn subscription_event(event: CoreEvent) -> napi::Result<SubscriptionEvent> {
                 settled,
                 tier,
             }),
-            EventChunk::Rejected { detail } => Either3::B(SubscriptionRejectedEvent {
+            EventChunk::Rejected { code } => Either3::B(SubscriptionRejectedEvent {
                 event_type: "rejected".to_owned(),
                 reason: SubscriptionServerFailureReason {
                     reason_type: "ServerFailure".to_owned(),
-                    code: detail,
+                    code: code.as_str().to_owned(),
                 },
             }),
             EventChunk::Closed => Either3::C(SubscriptionClosedEvent {

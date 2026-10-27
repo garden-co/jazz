@@ -1807,10 +1807,10 @@ fn event_chunk_to_js(chunk: EventChunk) -> Result<JsValue, JsValue> {
         EventChunk::Closed => {
             set_prop(&object, "type", JsValue::from_str("closed"))?;
         }
-        EventChunk::Rejected { detail } => {
+        EventChunk::Rejected { code } => {
             let reason = js_sys::Object::new();
             set_prop(&reason, "type", JsValue::from_str("ServerFailure"))?;
-            set_prop(&reason, "detail", JsValue::from_str(&detail))?;
+            set_prop(&reason, "code", JsValue::from_str(code.as_str()))?;
             set_prop(&object, "type", JsValue::from_str("rejected"))?;
             set_prop(&object, "reason", reason.into())?;
         }

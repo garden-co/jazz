@@ -95,6 +95,8 @@ mod serializable_relay;
 mod serializable_sqlite;
 #[path = "../serializable_sync.rs"]
 mod serializable_sync;
+#[path = "../served_query_failures.rs"]
+mod served_query_failures;
 #[path = "../session_policy_values.rs"]
 mod session_policy_values;
 #[path = "../session_write_checks.rs"]

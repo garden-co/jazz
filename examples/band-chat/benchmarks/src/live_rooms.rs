@@ -170,8 +170,8 @@ fn drain_events(streams: &mut [SubscriptionStream]) -> Vec<Delta> {
                             .removed
                             .extend(removed.into_iter().map(|row| row.row_uuid));
                     }
-                    SubscriptionEvent::Rejected { reason } => {
-                        panic!("room view rejected: {reason:?}")
+                    SubscriptionEvent::Rejected { code } => {
+                        panic!("room view rejected: {code:?}")
                     }
                     SubscriptionEvent::Closed => panic!("room view closed"),
                 }

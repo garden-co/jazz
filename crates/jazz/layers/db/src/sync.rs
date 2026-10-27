@@ -53,6 +53,37 @@ use super::*;
 pub use crate::options::{FirstLoad, RemoteLinkHint};
 pub use crate::wire::TransportError;
 
+const SERVED_SUBSCRIPTION_FAILURE: &str = "jazz-served-subscription-failure:";
+
+/// Convert internal errors to the client-safe classification carried by a
+/// rejected subscription. A marker preserves the original class across relays.
+pub(crate) fn subscription_server_failure_code(error: &Error) -> SubscriptionServerFailureCode {
+    if let Some(code) = error.message.strip_prefix(SERVED_SUBSCRIPTION_FAILURE) {
+        return match code {
+            "TableNotFound" => SubscriptionServerFailureCode::TableNotFound,
+            "SchemaResolution" => SubscriptionServerFailureCode::SchemaResolution,
+            "QueryValidation" => SubscriptionServerFailureCode::QueryValidation,
+            "QueryLowering" => SubscriptionServerFailureCode::QueryLowering,
+            "PolicyEvaluation" => SubscriptionServerFailureCode::PolicyEvaluation,
+            "QueryResultProtocol" => SubscriptionServerFailureCode::QueryResultProtocol,
+            _ => SubscriptionServerFailureCode::Internal,
+        };
+    }
+    match error.code {
+        ErrorCode::Schema => SubscriptionServerFailureCode::SchemaResolution,
+        ErrorCode::Query => SubscriptionServerFailureCode::QueryValidation,
+        ErrorCode::Protocol => SubscriptionServerFailureCode::QueryResultProtocol,
+        _ => SubscriptionServerFailureCode::Internal,
+    }
+}
+
+fn served_subscription_failure(code: SubscriptionServerFailureCode) -> Error {
+    Error::new(
+        ErrorCode::Protocol,
+        format!("{SERVED_SUBSCRIPTION_FAILURE}{}", code.as_str()),
+    )
+}
+
 /// Wall-clock Unix ms.
 fn now_ms() -> i64 {
     web_time::SystemTime::now()
@@ -716,8 +747,8 @@ pub enum SyncMessage {
         through: u64,
         rows: Vec<[u8; 16]>,
     },
-    /// A `Subscribe` or `Fetch` the server cannot serve, with why: the
-    /// read ends with this error instead of waiting for an answer.
+    /// A `Subscribe` or `Fetch` the server cannot serve, or an active
+    /// subscription whose query failed: the read ends instead of waiting.
     Refused {
         id: u64,
         code: ErrorCode,
@@ -4272,8 +4303,10 @@ impl Db {
                     SyncMessage::Refused { id, code, message } => {
                         let client = inner.client.as_mut().expect("client");
                         let error = Error::new(code, message);
+                        let remote_subscription = client.remote_ids.contains_key(&id);
                         client.relay_ready |=
-                            client.relayed_fetches.iter().any(|f| f.upstream == id);
+                            client.relayed_fetches.iter().any(|f| f.upstream == id)
+                                || remote_subscription;
                         if let Some(slot) = client.answers.get_mut(&id) {
                             *slot = Some(Err(error));
                         } else if let Some(key) = client.remote_ids.get(&id)
@@ -5099,6 +5132,34 @@ impl Db {
             }
             let mut evictions = Vec::new();
             let mut settled = Vec::new();
+            // A relay's local group can still produce rows after its upstream
+            // subscription has failed. Forward that typed terminal failure
+            // using the downstream subscription id.
+            let mut rejected_routes: Vec<(u64, SubscriptionServerFailureCode)> = {
+                let session = &inner.sessions[index];
+                if let Some(client) = inner.client.as_ref() {
+                    session
+                        .relayed
+                        .iter()
+                        .filter(|(id, _)| session.subs.contains_key(id))
+                        .filter_map(|(id, (query, binding, include_deleted))| {
+                            let key = remote_key(
+                                &remote_query(query),
+                                binding,
+                                *include_deleted,
+                                RemoteReach::REMOTE,
+                            );
+                            let error = client
+                                .remote
+                                .get(&key)
+                                .and_then(|remote| remote.refused.borrow().clone())?;
+                            Some((*id, subscription_server_failure_code(&error)))
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                }
+            };
             let subs: Vec<(u64, fanout::Queue, Weak<RefCell<fanout::Group>>, bool)> = inner
                 .sessions[index]
                 .subs
@@ -5115,10 +5176,21 @@ impl Db {
                 if events.is_empty() {
                     continue;
                 }
-                // A relay's result settles once its upstream answered.
-                let answered = events
+                let event_rejections: Vec<_> = events
                     .iter()
-                    .any(|event| matches!(event, SubscriptionEvent::Delta { settled: true, .. }));
+                    .filter_map(|event| match event {
+                        SubscriptionEvent::Rejected { code } => Some(*code),
+                        _ => None,
+                    })
+                    .collect();
+                let upstream_failed = rejected_routes.iter().any(|(failed, _)| *failed == id);
+                rejected_routes.extend(event_rejections.iter().map(|code| (id, *code)));
+                // A relay's result settles once its upstream answered.
+                let answered = !upstream_failed
+                    && event_rejections.is_empty()
+                    && events.iter().any(|event| {
+                        matches!(event, SubscriptionEvent::Delta { settled: true, .. })
+                    });
                 let global = events.iter().any(|event| {
                     matches!(event, SubscriptionEvent::Delta { settled: true, tier, .. } if *tier == DurabilityTier::Global)
                 });
@@ -5158,7 +5230,10 @@ impl Db {
                         ..
                     } = event
                     else {
-                        continue;
+                        // A rejection is terminal for this route. Preserve
+                        // deltas produced before it, and ignore anything
+                        // queued after the failure.
+                        break;
                     };
                     for row in added.iter().chain(updated.iter()) {
                         for (table, joined) in joined_tables.iter().zip(row.joined_rows()) {
@@ -5388,6 +5463,17 @@ impl Db {
             out.extend(evictions);
             out.extend(std::mem::take(&mut session.outbox));
             out.extend(settled);
+            rejected_routes.sort_by_key(|(id, _)| *id);
+            rejected_routes.dedup_by_key(|(id, _)| *id);
+            out.extend(
+                rejected_routes
+                    .iter()
+                    .map(|(id, code)| SyncMessage::Refused {
+                        id: *id,
+                        code: ErrorCode::Protocol,
+                        message: served_subscription_failure(*code).message,
+                    }),
+            );
             for message in out {
                 let Some(message) = message_out(&names, message) else {
                     continue;
@@ -5409,6 +5495,29 @@ impl Db {
                     inner.forget_relayed(index);
                     break;
                 }
+            }
+            let mut release = Vec::new();
+            let mut retired = 0;
+            {
+                let session = &mut inner.sessions[index];
+                for (id, _) in rejected_routes {
+                    if session.subs.remove(&id).is_some() {
+                        retired += 1;
+                    }
+                    session.support.remove(&id);
+                    session.resume.remove(&id);
+                    session.first_load.remove(&id);
+                    if let Some(read) = session.relayed.remove(&id) {
+                        release.push(read);
+                    }
+                }
+            }
+            inner.fan.dropped.set(inner.fan.dropped.get() + retired);
+            if retired > 0 {
+                inner.fan.collect();
+            }
+            for (query, binding, include_deleted) in release {
+                inner.release_remote(&query, &binding, include_deleted, RemoteReach::REMOTE);
             }
         }
         Ok(())

@@ -658,7 +658,7 @@ pub enum ForegroundSubscriptionEvent {
         delta: Vec<u8>,
     },
     Rejected {
-        reason: String,
+        code: String,
     },
     Closed,
     /// Existing terminal-operation JSON codec, alongside ordinary row deltas.
