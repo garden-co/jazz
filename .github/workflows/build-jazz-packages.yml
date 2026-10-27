@@ -256,7 +256,7 @@ jobs:
           restore-keys: |
             linux-napi-${{ matrix.platform }}-${{ hashFiles('dev/artifacts/linux-napi/Dockerfile') }}-${{ hashFiles('Cargo.lock') }}-
 
-      - name: Build Linux NAPI on pinned AL2023 userspace
+      - name: Build Linux NAPI on pinned Bullseye userspace
         if: startsWith(matrix.platform, 'linux-')
         run: dev/artifacts/linux-napi/build.sh ${{ matrix.platform }}
 
@@ -553,7 +553,7 @@ jobs:
         with:
           name: pkg-jazz-napi
           path: crates/jazz-napi
-      - name: Execute packed memory and persistence receipts on AL2023
+      - name: Execute packed memory and persistence receipts on Bullseye, AL2023 and Lambda
         run: dev/artifacts/linux-napi/run-packed-smoke.sh ${{ matrix.platform }} "${RUNNER_TEMP}/packed-linux-napi"
 
   assemble-jazz-rn:
