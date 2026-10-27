@@ -41,21 +41,23 @@ use jazz_types::large_values::{
 use rusqlite::{Connection, OptionalExtension};
 
 use crate::chunk_store::{ChunkStore, NodeKey};
-use crate::options::{Error, ErrorCode};
+use crate::options::{Error, ErrorCode, Reason};
 use crate::values::{Column, Table, quote, storage};
 
-/// First byte of an inline bytes cell.
 #[cfg(feature = "testing")]
-static FULL_MATERIALIZATIONS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
-/// How many chunked values have been rebuilt whole, so tests can tell a
-/// range read from a full materialization.
-#[cfg(feature = "testing")]
-pub fn full_materializations_for_test() -> usize {
-    FULL_MATERIALIZATIONS.load(std::sync::atomic::Ordering::Relaxed)
+thread_local! {
+    static FULL_MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// How many chunked values have been rebuilt whole on this thread, so tests
+/// can tell a range read from a full materialization. Per thread, so tests
+/// running in parallel in one process do not count each other's reads.
+#[cfg(feature = "testing")]
+pub fn full_materializations_for_test() -> usize {
+    FULL_MATERIALIZATIONS.with(std::cell::Cell::get)
+}
+
+/// First byte of an inline bytes cell.
 pub(crate) const BYTES: u8 = 0xFE;
 /// First byte of a chunked cell.
 pub(crate) const CHUNKED: u8 = 0xFF;
@@ -477,7 +479,7 @@ const MISSING: &str = "large-value chunks are not available locally yet; they we
      from upstream, so retry after the next sync tick";
 
 pub(crate) fn missing() -> Error {
-    Error::new(ErrorCode::NotObserved, MISSING)
+    Error::with_reason(ErrorCode::NotObserved, Reason::MissingChunks, MISSING)
 }
 
 /// An offloaded node its chunk store does not hold: data loss, not demand.
@@ -498,7 +500,7 @@ fn unconfigured() -> Error {
 
 /// Whether `error` is a statement that needed chunks this store lacks.
 pub(crate) fn is_missing(error: &Error) -> bool {
-    error.code == ErrorCode::NotObserved && error.message == MISSING
+    error.reason == Some(Reason::MissingChunks)
 }
 
 /// Verified chunks this process has read or written, and the way to read
@@ -891,7 +893,7 @@ impl Chunks {
     /// The whole logical value of a descriptor.
     pub(crate) fn value_bytes(&self, value: &LargeValueRef) -> Result<Vec<u8>, Error> {
         #[cfg(feature = "testing")]
-        FULL_MATERIALIZATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        FULL_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
         self.run(|inputs| lv::materialize_attempt(value, inputs))
     }
 

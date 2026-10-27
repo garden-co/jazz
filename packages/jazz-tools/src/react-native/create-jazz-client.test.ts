@@ -212,7 +212,7 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
           return Uint8Array.from([23, ...new Uint8Array(16).fill(4), ...rowId]);
         }
         case 21:
-          return Uint8Array.of(16, 1, 0, 1);
+          return Uint8Array.of(16, 1, 0, 1, 0);
         case 22:
           return encodeNativeSession("reader");
         case 24:
@@ -291,7 +291,7 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
     ]);
     nativeForegroundTest.execute = (command) => {
       if (command[0] === 2) return encodeBytesResponse(2, rows);
-      if (command[0] === 21) return Uint8Array.of(16, 1, 0, 1);
+      if (command[0] === 21) return Uint8Array.of(16, 1, 0, 1, 0);
       if (command[0] === 22) return encodeNativeSession("old-reader");
       if (command[0] === 24) return Uint8Array.of(19, 2, 91, 93);
       if (command[0] === 6) return Uint8Array.of(6, 1);

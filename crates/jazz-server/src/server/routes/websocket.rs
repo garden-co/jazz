@@ -3502,6 +3502,165 @@ mod tests {
         }
     }
 
+    /// Wait times of host-table work (account logins, catalogue writes) on
+    /// a durable store while sessions upload as fast as the server ingests.
+    /// Host work shares the store's thread with the runtime, so it must not
+    /// queue behind more than one tick of it.
+    #[test]
+    fn host_work_waits_at_most_one_tick_under_write_load() {
+        const WRITERS: u8 = 6;
+        const ROWS_PER_ROUND: usize = 64;
+        const LOAD: Duration = Duration::from_secs(4);
+        let server = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
+        let state = server.block_on(async {
+            ServerBuilder::new(AppId::random())
+                .with_auth_config(AuthConfig {
+                    admin_secret: Some("admin-secret".to_owned()),
+                    backend_secret: Some("backend-secret".to_owned()),
+                    ..Default::default()
+                })
+                .with_storage(StorageBackend::Persistent {
+                    path: data_dir.path().to_path_buf(),
+                })
+                .with_schema(Schema::new())
+                .with_core_server_shell_schema(ws_public_schema_convert())
+                .build()
+                .await
+                .expect("build durable load test state")
+                .state
+        });
+        let addr = server.block_on(start_ws_test_server(state.clone()));
+        let accounts = state.accounts.as_ref().unwrap();
+        let catalogue = state
+            .store
+            .as_ref()
+            .unwrap()
+            .kv(crate::kv::CATALOGUE)
+            .unwrap();
+        let principal = jazz::account_registry::Principal {
+            issuer: "https://issuer.example".into(),
+            subject: "load-probe".into(),
+        };
+        server
+            .block_on(accounts.login_or_register(principal.clone()))
+            .unwrap();
+        // This machine's cost of one durable host write (one fsync), before
+        // the writers connect: the bounds below are in units of it.
+        let mut idle = (0..20)
+            .map(|n: u32| {
+                let at = std::time::Instant::now();
+                catalogue
+                    .write_many(&[(b"idle-probe".to_vec(), n.to_le_bytes().to_vec())])
+                    .unwrap();
+                at.elapsed()
+            })
+            .collect::<Vec<_>>();
+        idle.sort();
+        let idle_write = idle[idle.len() / 2];
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let written = Arc::new(AtomicU64::new(0));
+        let writers: Vec<_> = (0..WRITERS)
+            .map(|n| {
+                let (state, stop, written) = (state.clone(), stop.clone(), written.clone());
+                std::thread::spawn(move || {
+                    let client_runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+                    client_runtime.block_on(async move {
+                        let seed = 0xd0 + n;
+                        let client =
+                            TestClient::new(ws_public_schema_convert(), seed, u64::from(seed) << 8)
+                                .await;
+                        let mut ws = open_negotiated_ws(
+                            addr,
+                            &state,
+                            AuthorSubject::for_test_bytes([seed; 16]),
+                        )
+                        .await;
+                        let mut round = 0;
+                        while !stop.load(Ordering::Acquire) {
+                            for row in 0..ROWS_PER_ROUND {
+                                client.write_todo(&format!("load {n}/{round}/{row}"));
+                            }
+                            round += 1;
+                            pump_core_websocket_transport_once(&client, &mut ws).await;
+                            written.fetch_add(ROWS_PER_ROUND as u64, Ordering::Relaxed);
+                        }
+                    });
+                })
+            })
+            .collect();
+
+        // Let the writers reach steady state before measuring.
+        std::thread::sleep(Duration::from_millis(500));
+        let mut logins = Vec::new();
+        let mut writes = Vec::new();
+        let started = std::time::Instant::now();
+        while started.elapsed() < LOAD {
+            let at = std::time::Instant::now();
+            server.block_on(accounts.login(principal.clone())).unwrap();
+            logins.push(at.elapsed());
+            let at = std::time::Instant::now();
+            catalogue
+                .write_many(&[(
+                    b"probe".to_vec(),
+                    at.elapsed().as_nanos().to_le_bytes().to_vec(),
+                )])
+                .unwrap();
+            writes.push(at.elapsed());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        stop.store(true, Ordering::Release);
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        let rows = written.load(Ordering::Relaxed);
+        let summary = |name: &str, samples: &mut Vec<Duration>| {
+            samples.sort();
+            let at = |q: f64| samples[((samples.len() - 1) as f64 * q) as usize];
+            eprintln!(
+                "{name}: n={} p50={:?} p99={:?} max={:?}",
+                samples.len(),
+                at(0.5),
+                at(0.99),
+                samples[samples.len() - 1]
+            );
+            at(0.5)
+        };
+        eprintln!(
+            "rows uploaded under load: {rows} ({:.0}/s)",
+            rows as f64 / (LOAD.as_secs_f64() + 0.5)
+        );
+        let login = summary("login", &mut logins);
+        let write = summary("catalogue write", &mut writes);
+        assert!(rows > 0, "the writers must load the server");
+        server.block_on(async {
+            state.shutdown.request_shutdown();
+            state.run_shutdown_finalization().await;
+        });
+        // Measured (6 writers, durable store, one fsync per commit, release
+        // build): login p50 ~0.25ms (reads never queue behind the runtime),
+        // catalogue write p50 ~8ms: at most one tick slice (one session's
+        // commits, up to 16 fsyncs) ahead of it. Unsized ticks put every
+        // session's commits (6 x 16 fsyncs) ahead of it. The bound is in
+        // units of this machine's own fsync, with room for a slow CI disk
+        // and a busy scheduler, and still catches unsized ticks.
+        let bound = idle_write * 40 + Duration::from_millis(50);
+        eprintln!("idle catalogue write: {idle_write:?}; bound {bound:?}");
+        for (name, median) in [("login", login), ("catalogue write", write)] {
+            assert!(
+                median < bound,
+                "{name} waited {median:?} (median) behind the runtime; bound {bound:?}"
+            );
+        }
+    }
+
     // Internal route-boundary guard: WebSocket message boundaries are not
     // observable through the public JazzClient facade. Two real Db clients and
     // the public websocket route are therefore required to prove that a fate

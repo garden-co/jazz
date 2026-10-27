@@ -509,7 +509,7 @@ async fn local_persistence() {
             Some(&Value::Text("Persist me".to_string()))
         );
 
-        // Shutdown client to release RocksDB file handles
+        // Shutdown client to release SQLite file handles
         client.shutdown().await.unwrap();
         row_id
     };

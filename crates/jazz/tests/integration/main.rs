@@ -45,6 +45,8 @@ mod flat_joins;
 mod gather_policy_double_ref;
 #[path = "../history_reads.rs"]
 mod history_reads;
+#[path = "../host_tables.rs"]
+mod host_tables;
 #[path = "../include_live.rs"]
 mod include_live;
 #[path = "../large_value_append.rs"]
@@ -85,6 +87,10 @@ mod relation_policies;
 mod relation_queries;
 #[path = "../relation_results.rs"]
 mod relation_results;
+#[path = "../relational_delete_retraction.rs"]
+mod relational_delete_retraction;
+#[path = "../relay_local_seqs.rs"]
+mod relay_local_seqs;
 #[path = "../relay_policy_subscriptions.rs"]
 mod relay_policy_subscriptions;
 #[path = "../schema_activation.rs"]

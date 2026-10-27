@@ -200,6 +200,8 @@ export type NativeForegroundResponse =
       configured: boolean;
       explicitlyOffline: boolean;
       connected: boolean;
+      /** The upstream refused the scope's credential, with its reason. */
+      authRejected: string | null;
     }
   | { type: "probe"; abiVersion: number }
   | { type: "ticked" }
@@ -214,6 +216,8 @@ export type NativeForegroundResponse =
       reason: string;
       /** The stable core `ErrorCode` string when a core error caused the failure. */
       code?: string;
+      /** The stable core `Reason` name when the core error has one. */
+      reasonName?: string;
     }
   | { type: "cancelled"; cancelled: boolean }
   | { type: "transactionOpened"; transaction: number }
@@ -689,29 +693,36 @@ export function decodeNativeForegroundResponse(bytes: Uint8Array): NativeForegro
   if (tag === 22 && bytes.length === 2 && (bytes[1] === 0 || bytes[1] === 1))
     return { type: "streamingMutationAborted", aborted: bytes[1] === 1 };
   if (tag === 25) {
-    // CodedOperationError: postcard code string, then the reason string.
-    let codeEnd = 1;
-    while (codeEnd < bytes.length && (bytes[codeEnd]! & 0x80) !== 0) codeEnd++;
-    if (codeEnd >= bytes.length) throw new Error("Malformed native operation error code");
-    const codeLength = decodeForegroundU64(bytes.subarray(1, codeEnd + 1), "error code length");
-    const next = codeEnd + 1 + codeLength;
-    if (next > bytes.length) throw new Error("Malformed native operation error code");
-    return {
-      type: "operationError",
-      code: decodeForegroundUtf8(bytes, codeEnd + 1, codeLength, "error code"),
-      reason: decodeForegroundString(bytes.subarray(next), "operation error"),
-    };
+    // CodedOperationError: postcard code string, optional reason name, then
+    // the reason string.
+    const [code, afterCode] = decodeForegroundPrefixedString(bytes, 1, "error code");
+    const option = bytes[afterCode];
+    let reasonName: string | undefined;
+    let next = afterCode + 1;
+    if (option === 1) {
+      [reasonName, next] = decodeForegroundPrefixedString(bytes, next, "error reason name");
+    } else if (option !== 0) {
+      throw new Error("Malformed native operation error reason name");
+    }
+    const reason = decodeForegroundString(bytes.subarray(next), "operation error");
+    return reasonName === undefined
+      ? { type: "operationError", code, reason }
+      : { type: "operationError", code, reasonName, reason };
   }
   if (
     tag === 16 &&
-    bytes.length === 4 &&
-    bytes.subarray(1).every((value) => value === 0 || value === 1)
+    bytes.length >= 5 &&
+    bytes.subarray(1, 5).every((value) => value === 0 || value === 1) &&
+    (bytes[4] === 1 || bytes.length === 5)
   ) {
+    // Three flags, then postcard `Option<String>`: 0, or 1 and the string.
     return {
       type: "nativeConnectionStatus",
       configured: bytes[1] === 1,
       explicitlyOffline: bytes[2] === 1,
       connected: bytes[3] === 1,
+      authRejected:
+        bytes[4] === 1 ? decodeForegroundString(bytes.subarray(5), "auth rejection") : null,
     };
   }
   if (tag === 14 && bytes.length === 2 && (bytes[1] === 0 || bytes[1] === 1)) {
@@ -820,6 +831,21 @@ function decodeForegroundBytes(bytes: Uint8Array, label: string): Uint8Array {
     multiplier *= 128;
   }
   throw new Error(`Jazz native foreground returned malformed ${label}`);
+}
+
+/** A postcard length-prefixed string at `start`, and the offset after it. */
+function decodeForegroundPrefixedString(
+  bytes: Uint8Array,
+  start: number,
+  label: string,
+): [string, number] {
+  let lengthEnd = start;
+  while (lengthEnd < bytes.length && (bytes[lengthEnd]! & 0x80) !== 0) lengthEnd++;
+  if (lengthEnd >= bytes.length) throw new Error(`Malformed native operation ${label}`);
+  const length = decodeForegroundU64(bytes.subarray(start, lengthEnd + 1), `${label} length`);
+  const next = lengthEnd + 1 + length;
+  if (next > bytes.length) throw new Error(`Malformed native operation ${label}`);
+  return [decodeForegroundUtf8(bytes, lengthEnd + 1, length, label), next];
 }
 
 function decodeForegroundString(bytes: Uint8Array, label: string): string {
