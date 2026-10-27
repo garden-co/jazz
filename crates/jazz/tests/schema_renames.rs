@@ -350,6 +350,82 @@ fn reopening_finds_the_renamed_columns_again() {
     assert_eq!(stored(&path), after_rename, "reopening adds nothing");
 }
 
+/// `table(body?)`: a nullable text column under the name `table`.
+fn documents(table: &str) -> JazzSchema {
+    schema(vec![
+        TableSchemaBuilder::new(table)
+            .nullable_column("body", ColumnType::Text)
+            .policies(allow_all_policies()),
+    ])
+}
+
+fn bodies(values: &[Option<&str>]) -> Vec<Value> {
+    values
+        .iter()
+        .map(|value| Value::Nullable(value.map(|v| Box::new(text(v)))))
+        .collect()
+}
+
+/// #3005: across a table rename, an owner reopened on either version reads
+/// and writes the same rows, and a fresh receiver on the renamed table reads
+/// the nullable text an old version wrote.
+#[test]
+fn a_table_rename_holds_across_reopen_and_for_a_fresh_receiver() {
+    let (before, after) = (documents("notes"), documents("documents"));
+    let rename = lens(&before, &after, "notes", "documents", vec![]);
+    let path = scratch("table-reopen");
+    {
+        let db = open_at(before.clone(), &path);
+        insert(&db, "notes", 1, "body", "a");
+        block_on(db.activate_schema_with_lenses(after.clone(), &[rename])).unwrap();
+        let old = block_on(db.register_schema_view(before.clone())).unwrap();
+        insert(&old, "notes", 2, "body", "b");
+    }
+    {
+        let db = open_at(after.clone(), &path);
+        assert_eq!(
+            read(&db, "documents", "body"),
+            bodies(&[Some("a"), Some("b")])
+        );
+        let old = block_on(db.register_schema_view(before.clone())).unwrap();
+        insert(&old, "notes", 3, "body", "c");
+        block_on(old.insert(
+            "notes",
+            [("body".to_owned(), Value::Nullable(None))].into(),
+            InsertOptions {
+                row_id: Some(row(4)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    }
+    {
+        let db = open_at(before.clone(), &path);
+        update(&db, "notes", 1, "body", "a2");
+        assert_eq!(read(&db, "notes", "body").len(), 4);
+    }
+
+    let server = open_at(after.clone(), &path);
+    server.set_authority();
+    let fresh = block_on(Db::open(config(after, 2, user(2)))).unwrap();
+    let (client_side, server_side) = pipe();
+    let _link = block_on(fresh.connect_upstream(client_side));
+    server.accept_subscriber(server_side, user(2));
+    let query = fresh.prepare_query(&Query::from("documents")).unwrap();
+    let mut stream = block_on(fresh.subscribe(&query, ReadOpts::default())).unwrap();
+    pump(&server, &[&fresh]);
+    while let Some(event) = stream.try_next_event() {
+        assert!(
+            !matches!(event, SubscriptionEvent::Rejected { .. }),
+            "{event:?}"
+        );
+    }
+    assert_eq!(
+        read_query(&fresh, Query::from("documents"), "body", local()),
+        bodies(&[Some("a2"), Some("b"), Some("c"), None])
+    );
+}
+
 #[test]
 fn a_name_freed_by_a_rename_gets_its_own_stored_column() {
     let path = scratch("freed");

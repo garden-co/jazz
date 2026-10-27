@@ -570,3 +570,89 @@ fn a_subscription_survives_a_server_restart_and_receives_the_pending_write() {
     assert_eq!(added, [pending.row_uuid()]);
     assert_eq!(removed, []);
 }
+
+/// #3760, #3762: a write, including a trusted session's upsert that merges
+/// a read-authorized preimage, completes in its first poll while another
+/// operation on the same database is suspended, so a synchronous caller
+/// never spins in `block_on`, and the suspended operation still finishes.
+#[test]
+fn writes_complete_in_one_poll_while_another_operation_waits() {
+    let schema = || {
+        compile_schema(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("notes")
+                        .column("title", ColumnType::Text)
+                        .policies(allow_all_policies()),
+                )
+                .build(),
+        )
+    };
+    let server = authority(schema());
+    let client = replica(schema(), &server, 0xa1, alice());
+    let first = block_on(client.insert(
+        "notes",
+        cells(vec![("title", text("first"))]),
+        InsertOptions {
+            row_id: Some(row(1, 1)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+
+    let mut context = Context::from_waker(Waker::noop());
+    let mut global =
+        pin!(client.wait_for_transaction(first.mergeable_tx_id(), DurabilityTier::Global));
+    assert!(global.as_mut().poll(&mut context).is_pending());
+
+    fn once<T>(future: impl Future<Output = T>) -> T {
+        let mut context = Context::from_waker(Waker::noop());
+        match pin!(future).poll(&mut context) {
+            Poll::Ready(result) => result,
+            Poll::Pending => panic!("a write waited on a suspended operation"),
+        }
+    }
+    let as_alice = jazz::db::WriteIdentity::Session(alice());
+    once(client.insert(
+        "notes",
+        cells(vec![("title", text("second"))]),
+        InsertOptions {
+            row_id: Some(row(1, 2)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    once(client.update(
+        "notes",
+        row(1, 1),
+        cells(vec![("title", text("renamed"))]),
+        Default::default(),
+    ))
+    .unwrap();
+    once(server.upsert(
+        "notes",
+        row(1, 3),
+        cells(vec![("title", text("served"))]),
+        jazz::db::UpsertOptions {
+            identity: as_alice.clone(),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    once(server.upsert(
+        "notes",
+        row(1, 3),
+        cells(vec![("title", text("merged"))]),
+        jazz::db::UpsertOptions {
+            identity: as_alice,
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    once(client.delete("notes", row(1, 2), Default::default())).unwrap();
+    once(client.restore("notes", row(1, 2), None, Default::default())).unwrap();
+
+    drive(&[&client, &server], global).unwrap();
+    let notes = ids(&server, Query::from("notes"), ReadTier::LocalOnly);
+    assert_eq!(notes.len(), 3);
+}
