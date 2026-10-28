@@ -35,8 +35,8 @@ pub use fanout::FanoutStats;
 #[path = "large_ops.rs"]
 mod large_ops;
 pub use large_ops::{
-    JsonSetEdit, LargeValueStagingPolicy, LargeValueUpdate, LargeValueUpdatePage,
-    LargeValueUpdateSplice, StreamingMutationKind, StreamingValueUpload,
+    JsonSetEdit, LargeValueDeltaSplice, LargeValueStagingPolicy, LargeValueUpdate,
+    LargeValueUpdatePage, LargeValueUpdateSplice, StreamingMutationKind, StreamingValueUpload,
 };
 #[path = "sync.rs"]
 pub(crate) mod sync;
@@ -49,11 +49,12 @@ use crate::values::{
     in_savepoint, quote, storage, to_sql, unsupported,
 };
 pub use sync::{
-    BuiltOn, Cell as SyncCell, CorpusReader, FirstLoad, FrameJoiner, Image, LOCAL_BASE,
+    BuiltOn, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad, FrameJoiner, Image, LOCAL_BASE,
     NON_DURABLE_BASE, RejectedTransaction, RelationSnapshot, RemoteLinkHint, SerializedReadResult,
-    SubscriberId, SyncMessage, Transport, TransportError, Upstream, WireBase, WireError, WireKind,
-    WireOp, WireTarget, WireTransport, WireTransportAdapter, WriteConflict, decode_message, duplex,
-    encode_frames, validate_frame_batch_for_corpus,
+    SubscriberId, SyncMessage, Transport, TransportError, Upstream, WireBase, WireChunk,
+    WireChunkRef, WireDelta, WireError, WireKind, WireOp, WirePull, WireTarget, WireTransport,
+    WireTransportAdapter, WriteConflict, decode_message, duplex, encode_frames,
+    validate_frame_batch_for_corpus,
 };
 
 /// Shape identity: equal for bindings of one query against one schema.
@@ -170,6 +171,10 @@ pub struct SubscriptionOutputRow {
     pub row: CurrentRow,
     pub previous_index: Option<usize>,
     pub index: usize,
+    /// For an updated row, each [`ReadOpts::splices`] column's change from
+    /// the row's previous result, when both versions are still held and
+    /// readable. A column left out changed in a way the reader takes whole.
+    pub splices: Vec<(String, Vec<LargeValueDeltaSplice>)>,
 }
 
 impl std::ops::Deref for SubscriptionOutputRow {
@@ -223,6 +228,9 @@ struct ReadSpec {
     settled_only: bool,
     view: Option<View>,
     cut: Option<Cut>,
+    /// Columns whose changes updated rows carry as splices
+    /// ([`ReadOpts::splices`]).
+    splices: Vec<String>,
 }
 
 impl ReadSpec {
@@ -255,6 +263,7 @@ impl ReadSpec {
             settled_only: inner.client.is_some() && opts.tier == ReadTier::Remote,
             view,
             cut,
+            splices: opts.splices.clone(),
         })
     }
 
@@ -398,6 +407,9 @@ struct Inner {
     /// Descriptors this store's own edit derived for the write in flight:
     /// trusted as built, so binding them re-validates nothing.
     derived: Vec<jazz_types::large_values::LargeValueRef>,
+    /// What the session whose commit is being applied holds (SPEC 19.4):
+    /// set while a synced commit applies, `None` for local writes.
+    pub(crate) possession: Option<crate::large::Possession>,
     /// Limits on local streaming uploads and on pushed nodes awaiting
     /// their commit.
     staging: LargeValueStagingPolicy,
@@ -480,6 +492,12 @@ struct Inner {
 
 /// Large-value nodes one tick may reclaim.
 const RECLAIM_NODES_PER_TICK: usize = 256;
+
+/// Leaves one tick may move to, or delete from, the chunk store.
+const CHUNK_STORE_NODES_PER_TICK: usize = 256;
+
+/// Chunk-store operations in flight at once.
+const CHUNK_STORE_CONCURRENCY: usize = 16;
 
 /// File store settings.
 #[derive(Clone, Copy, Debug)]
@@ -632,7 +650,23 @@ fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> 
                     .contains(&column.as_str())
             })
             .collect();
-        tables.insert(name.clone(), Table::stored_only(name, columns));
+        let mut table = Table::stored_only(name.clone(), columns);
+        // A large-capable column has a partial index of its chunked rows
+        // (`large::triggers`): its kind comes from the schemas unioned in.
+        for column in &mut table.columns {
+            let index = format!("{name}__lv_{}", column.stored);
+            let large: bool = conn
+                .query_row(
+                    "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1)",
+                    [&index],
+                    |row| row.get(0),
+                )
+                .map_err(storage)?;
+            if large {
+                column.ty = ValueType::Nullable(Box::new(ValueType::String));
+            }
+        }
+        tables.insert(name, table);
     }
     Ok(Schema {
         tables,
@@ -644,7 +678,7 @@ fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> 
 /// Run a script of statements one at a time. SQLite's statement length
 /// limit applies to the whole text handed to one prepare, and schema DDL
 /// outgrows Durable Object SQLite's 100 KB.
-fn execute_script(conn: &Connection, script: &str) -> Result<(), Error> {
+pub(crate) fn execute_script(conn: &Connection, script: &str) -> Result<(), Error> {
     let mut start = 0;
     for (end, _) in script.match_indices(';') {
         let statement = &script[start..=end];
@@ -835,6 +869,7 @@ fn normalize_relation(query: &Query, schema: &Schema) -> Result<Option<Query>, E
     }
     resolved.array_subqueries = query.array_subqueries.clone();
     resolved.select = query.select.clone();
+    resolved.partial = query.partial.clone();
     resolved.relation = None;
     Ok(Some(resolved))
 }
@@ -1032,11 +1067,12 @@ impl Db {
         let mut names = crate::names::Names::load(&conn)?;
         let schema = names.resolve(&config.schema, &[], names.latest())?;
         names.check_branches(&schema)?;
-        let chunks = crate::large::Chunks::install(path)?;
+        let chunks = crate::large::Chunks::install(path, config.chunk_store.clone())?;
         // Statements are keyed per table and verb; the default 16 entries
         // thrash as soon as a schema has a few tables.
         conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
         conn.execute_batch(crate::large::DDL).map_err(storage)?;
+        crate::large::open_offload(&conn, &chunks)?;
         // Nodes a transaction writes stay cached until it ends: until then
         // the reader connection cannot see them.
         let committed = chunks.clone();
@@ -1067,6 +1103,7 @@ impl Db {
             let mut physical = stored_schema(&conn, &config.schema)?;
             let ddl = physical.union(&schema)?;
             execute_script(&conn, &ddl)?;
+            crate::large::fill_keys(&conn, &chunks, &physical)?;
             physical
         };
         names.admit(&conn, &schema)?;
@@ -1105,6 +1142,7 @@ impl Db {
                 text_in: RefCell::new(BTreeMap::new()),
                 overlay: None,
                 derived: Vec::new(),
+                possession: None,
                 staging: LargeValueStagingPolicy::default(),
                 ingress: RefCell::new((0, 0)),
                 schema: owner.clone(),
@@ -1284,10 +1322,166 @@ impl Db {
             return Err(Error::new(code, "a tick failure injected by a test"));
         }
         self.sync_tick()?;
-        let mut inner = self.inner();
-        inner.fan.collect();
-        inner.reclaim_large_values(RECLAIM_NODES_PER_TICK)?;
-        Ok(())
+        {
+            let mut inner = self.inner();
+            inner.fan.collect();
+            inner.reclaim_large_values(RECLAIM_NODES_PER_TICK)?;
+        }
+        self.pump_chunk_store().await
+    }
+
+    /// Fetch the offloaded nodes reads wait on, move settled leaves to the
+    /// chunk store and delete reclaimed ones from it ([`crate::chunk_store`]).
+    /// A failed operation is retried next tick; the first failure is
+    /// returned once the rest ran.
+    async fn pump_chunk_store(&self) -> Result<(), Error> {
+        let chunks = self.inner().chunks.clone();
+        let Some(store) = chunks.store().cloned() else {
+            return Ok(());
+        };
+        let Some(wanted) = chunks.begin_fetch() else {
+            return Ok(());
+        };
+        let any = !wanted.is_empty();
+        let mut fetched = self.fetch_from(&chunks, &*store, wanted).await;
+        if any && fetched.is_ok() {
+            // Messages held for those nodes are served now, not a tick later.
+            fetched = self.sync_tick();
+        }
+        let moved = match chunks.offload_store() {
+            Some(_) => self.offload_to(&*store).await,
+            None => Ok(()),
+        };
+        chunks.end_fetch();
+        fetched.and(moved)
+    }
+
+    /// Install what the chunk store holds for `wanted`; reads waiting on
+    /// those nodes run again.
+    async fn fetch_from(
+        &self,
+        chunks: &crate::large::Chunks,
+        store: &dyn crate::chunk_store::ChunkStore,
+        wanted: Vec<jazz_types::large_values::chunks::ChunkRequest>,
+    ) -> Result<(), Error> {
+        use futures::StreamExt;
+        if wanted.is_empty() {
+            return Ok(());
+        }
+        let keys: Vec<_> = wanted
+            .iter()
+            .map(crate::chunk_store::NodeKey::from)
+            .collect();
+        let answers: Vec<_> = futures::stream::iter(keys.iter().map(|key| store.get(key)))
+            .buffered(CHUNK_STORE_CONCURRENCY)
+            .collect()
+            .await;
+        let mut first = None;
+        for (request, answer) in wanted.iter().zip(answers) {
+            match answer.and_then(|bytes| chunks.install_from_store(request, bytes)) {
+                Ok(()) => {}
+                Err(error) => {
+                    // Asked again by the next read that needs it.
+                    first.get_or_insert(error);
+                }
+            }
+        }
+        self.inner().retry_awaiting();
+        first.map_or(Ok(()), Err)
+    }
+
+    /// Move a batch of settled leaves to the chunk store, then delete a
+    /// batch of reclaimed ones from it. Puts start only between SQLite
+    /// transactions, so the mark that a put may have landed is durable
+    /// before it does.
+    async fn offload_to(&self, store: &dyn crate::chunk_store::ChunkStore) -> Result<(), Error> {
+        use futures::StreamExt;
+        let mut first = None;
+        let batch = {
+            let inner = self.inner();
+            if inner.conn.is_autocommit() {
+                crate::large::begin_offload(&inner.conn, CHUNK_STORE_NODES_PER_TICK)?
+            } else {
+                Vec::new()
+            }
+        };
+        if !batch.is_empty() {
+            let puts: Vec<_> =
+                futures::stream::iter(batch.iter().map(|(key, bytes)| store.put(key, bytes)))
+                    .buffered(CHUNK_STORE_CONCURRENCY)
+                    .collect()
+                    .await;
+            let inner = self.inner();
+            in_savepoint(&inner.conn, "jazz_lv_offloaded", || {
+                for ((key, _), put) in batch.iter().zip(puts) {
+                    match put {
+                        Ok(()) => crate::large::offloaded(&inner.conn, key)?,
+                        Err(error) => {
+                            first.get_or_insert(error);
+                        }
+                    }
+                }
+                Ok(())
+            })?;
+        }
+        let deletes =
+            crate::large::pending_deletes(&self.inner().conn, CHUNK_STORE_NODES_PER_TICK)?;
+        if !deletes.is_empty() {
+            let done: Vec<_> = futures::stream::iter(deletes.iter().map(|key| store.delete(key)))
+                .buffered(CHUNK_STORE_CONCURRENCY)
+                .collect()
+                .await;
+            let inner = self.inner();
+            in_savepoint(&inner.conn, "jazz_lv_deleted", || {
+                for (key, done) in deletes.iter().zip(done) {
+                    match done {
+                        Ok(()) => crate::large::deleted(&inner.conn, key)?,
+                        Err(error) => {
+                            first.get_or_insert(error);
+                        }
+                    }
+                }
+                Ok(())
+            })?;
+        }
+        first.map_or(Ok(()), Err)
+    }
+
+    /// [`Self::fetching`] over a fresh copy of `arg` per attempt; without a
+    /// chunk store `arg` is not copied.
+    async fn fetching_with<A: Clone, T>(
+        &self,
+        arg: A,
+        attempt: impl Fn(A) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        if self.inner().chunks.store().is_none() {
+            return attempt(arg);
+        }
+        self.fetching(|| attempt(arg.clone())).await
+    }
+
+    /// Run `attempt` until it no longer waits on offloaded nodes that only
+    /// an asynchronous chunk store can answer, fetching them in between.
+    /// Without such a store (or while a tick's fetch runs) a wait is the
+    /// usual missing-chunks error.
+    async fn fetching<T>(&self, mut attempt: impl FnMut() -> Result<T, Error>) -> Result<T, Error> {
+        loop {
+            match attempt() {
+                Err(error) if crate::large::is_missing(&error) => {
+                    let chunks = self.inner().chunks.clone();
+                    let Some(store) = chunks.store().cloned().filter(|_| chunks.has_fetch()) else {
+                        return Err(error);
+                    };
+                    let Some(wanted) = chunks.begin_fetch() else {
+                        return Err(error);
+                    };
+                    let fetched = self.fetch_from(&chunks, &*store, wanted).await;
+                    chunks.end_fetch();
+                    fetched?;
+                }
+                result => return result,
+            }
+        }
     }
 
     /// Make the next ticks fail with `codes`, in order, before doing any
@@ -1307,7 +1501,20 @@ impl Db {
             .conn
             .cached_row(
                 "SELECT (SELECT count(*) FROM _jazz_lv_node), \
-                 (SELECT count(*) FROM _jazz_lv_root WHERE durable > 0)",
+                 (SELECT count(*) FROM _jazz_lv_root WHERE refs > 0)",
+                [],
+                |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
+            )
+            .map_err(storage)
+    }
+
+    /// Diagnostics: (epochs, encoded edit bytes they hold).
+    #[doc(hidden)]
+    pub fn large_value_epochs_for_test(&self) -> Result<(u64, u64), Error> {
+        self.inner()
+            .conn
+            .cached_row(
+                "SELECT count(*), coalesce(sum(length(edits)), 0) FROM _jazz_lv_epoch",
                 [],
                 |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
             )
@@ -1473,8 +1680,11 @@ impl Db {
         prepared: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let inner = self.inner();
-        inner.run(prepared, None, &ReadSpec::of(&opts, &inner)?)
+        self.fetching(|| {
+            let inner = self.inner();
+            inner.run(prepared, None, &ReadSpec::of(&opts, &inner)?)
+        })
+        .await
     }
 
     /// Root rows with each array relation nested in a cell under its
@@ -1703,7 +1913,8 @@ impl Db {
             opts.row_id = Some(self.inner().ids.next_row_id());
         }
         let who = who(opts.identity);
-        self.write_op(StagedOp::Insert(table.to_owned(), cells, opts), who)
+        let op = StagedOp::Insert(table.to_owned(), cells, opts);
+        self.fetching_with(op, |op| self.write_op(op, who)).await
     }
 
     pub async fn update(
@@ -1714,7 +1925,8 @@ impl Db {
         opts: UpdateOptions,
     ) -> Result<WriteHandle, Error> {
         let who = who(opts.identity);
-        self.write_op(StagedOp::Update(table.to_owned(), row, cells, opts), who)
+        let op = StagedOp::Update(table.to_owned(), row, cells, opts);
+        self.fetching_with(op, |op| self.write_op(op, who)).await
     }
 
     pub async fn upsert(
@@ -1725,7 +1937,8 @@ impl Db {
         opts: UpsertOptions,
     ) -> Result<WriteHandle, Error> {
         let who = who(opts.identity);
-        self.write_op(StagedOp::Upsert(table.to_owned(), row, cells, opts), who)
+        let op = StagedOp::Upsert(table.to_owned(), row, cells, opts);
+        self.fetching_with(op, |op| self.write_op(op, who)).await
     }
 
     pub async fn delete(
@@ -1735,7 +1948,8 @@ impl Db {
         opts: DeleteOptions,
     ) -> Result<WriteHandle, Error> {
         let who = who(opts.identity);
-        self.write_op(StagedOp::Delete(table.to_owned(), row, opts), who)
+        let op = StagedOp::Delete(table.to_owned(), row, opts);
+        self.fetching_with(op, |op| self.write_op(op, who)).await
     }
 
     pub async fn restore(
@@ -1746,7 +1960,8 @@ impl Db {
         opts: RestoreOptions,
     ) -> Result<WriteHandle, Error> {
         let who = who(opts.identity);
-        self.write_op(StagedOp::Restore(table.to_owned(), row, content, opts), who)
+        let op = StagedOp::Restore(table.to_owned(), row, content, opts);
+        self.fetching_with(op, |op| self.write_op(op, who)).await
     }
 
     /// One write. On a client, a local (unauthenticated) write is also an
@@ -2109,6 +2324,7 @@ impl Inner {
     ) -> Result<(), Error> {
         let ddl = self.physical.union(target)?;
         execute_script(&self.conn, &ddl)?;
+        crate::large::fill_keys(&self.conn, &self.chunks, &self.physical)?;
         // A new copy holds its source's values, in every row version.
         for cell in &cells {
             if let crate::names::LensCellRule::Copy(source) = &cell.rule {
@@ -2609,8 +2825,15 @@ impl Inner {
         let mut arms: Vec<Arc<str>> = Vec::new();
         while let Some(row) = rows.next().map_err(storage)? {
             let id: Vec<u8> = if compiled.aggregate {
+                // A group's key: the group-by cell (which a chunked value's
+                // class stands for in SQL) by its value.
                 let key = match row.get_ref(0).map_err(storage)? {
-                    ValueRef::Text(cell) => format!("{:?}", self.chunks.materialize(cell)?),
+                    cell @ ValueRef::Integer(_) if compiled.large_group => {
+                        format!("{:?}", self.chunks.materialize(cell)?)
+                    }
+                    ValueRef::Text(cell) | ValueRef::Blob(cell) if compiled.large_group => {
+                        format!("{cell:?}")
+                    }
                     cell => format!("{:?}", Sql::from(cell)),
                 };
                 blake3::hash(key.as_bytes()).as_bytes()[..16].to_vec()
@@ -2673,7 +2896,11 @@ impl Inner {
                 .enumerate()
                 .map(|(i, (name, ty))| {
                     let cell = row.get_ref(first + i).map_err(storage)?;
-                    match from_sql(ty, cell, &self.chunks) {
+                    let value = match compiled.partial.get(i).and_then(Option::as_ref) {
+                        Some(part) => self.partial_cell(ty, cell, part),
+                        None => from_sql(ty, cell, &self.chunks),
+                    };
+                    match value {
                         Err(error) if crate::large::is_missing(&error) => {
                             blocked = true;
                             Ok((name.clone(), None))
@@ -3195,7 +3422,7 @@ impl Inner {
         Ok(out)
     }
 
-    fn check(
+    pub(crate) fn check(
         &self,
         table: &Table,
         row: RowUuid,
@@ -3704,10 +3931,10 @@ impl Inner {
         let prepared = jazz_types::large_values::prepare(crate::large::kind(column), logical)
             .map_err(|e| rejected(format!("`{}`: {e}", column.name)))?;
         crate::large::store(&self.conn, &self.chunks, &prepared, self.client.is_some())?;
-        let prefix = crate::large::sort_prefix(crate::large::kind(column), logical);
-        Ok(Sql::Text(crate::large::chunked_cell(
+        Ok(Sql::Integer(crate::large::intern(
+            &self.conn,
+            &self.chunks,
             &prepared.value_ref,
-            &prefix,
         )?))
     }
 
@@ -3738,6 +3965,15 @@ impl Inner {
         } else if self.derived.contains(large) {
             // Derived here from a stored tree by an append or splice.
             complete = self.client.is_none();
+        } else if let Some(possession) = &self.possession
+            && !crate::large::possessed(&self.conn, &self.chunks, large, possession)?
+        {
+            // Answered as for absent nodes: no oracle for what this store
+            // holds for others (SPEC 19.9).
+            return Err(rejected(format!(
+                "`{}`: the large-value descriptor names chunks this store does not hold",
+                column.name
+            )));
         } else if self.client.is_some() {
             // A replica's tree may be only partly fetched: the authority
             // checks the value when it admits the write.
@@ -3767,27 +4003,71 @@ impl Inner {
             })?;
             json.check_text(text, &column.name).map_err(rejected)?;
         }
-        crate::large::settle_receipts(&self.conn, &large.root.locator)?;
+        if let Some(possession) = &self.possession {
+            possession.settle.borrow_mut().push(large.root.object_hash);
+        }
         self.large_cell(large)
+    }
+
+    /// Settle the receipts of the trees the applied commit's cells proved
+    /// (SPEC 19.4): only after all its cells, which may share nodes.
+    pub(crate) fn settle_possession(&self) -> Result<(), Error> {
+        let Some(possession) = &self.possession else {
+            return Ok(());
+        };
+        for root in possession.settle.take() {
+            crate::large::settle_receipts(&self.conn, &root, &possession.author)?;
+        }
+        Ok(())
     }
 
     /// The cell of a chunked value this store holds the chunks for. A value
     /// an edit shrank to the inline threshold is stored inline, so each
-    /// logical value has exactly one cell and equality compares cells.
+    /// logical value has exactly one inline cell.
     pub(crate) fn large_cell(
         &self,
         large: &jazz_types::large_values::LargeValueRef,
     ) -> Result<Sql, Error> {
-        use jazz_types::large_values::LargeValueKind;
         if large.byte_length <= jazz_types::large_values::INLINE_VALUE_MAX_BYTES as u64 {
             let bytes = self.chunks.value_bytes(large)?;
-            return Ok(Sql::Text(match large.kind {
-                LargeValueKind::Bytes => crate::large::inline_bytes(&bytes),
-                LargeValueKind::String | LargeValueKind::Json => bytes,
-            }));
+            return Ok(crate::large::inline_cell(large.kind, bytes));
         }
-        let prefix = self.chunks.prefix(large)?;
-        Ok(Sql::Text(crate::large::chunked_cell(large, &prefix)?))
+        Ok(Sql::Integer(crate::large::intern(
+            &self.conn,
+            &self.chunks,
+            large,
+        )?))
+    }
+
+    /// The key cell for a cell of a large-capable column: a chunked value's
+    /// sort prefix, NULL otherwise.
+    pub(crate) fn key_cell(&self, cell: &Sql) -> Result<Sql, Error> {
+        match cell {
+            Sql::Integer(cell) => self.chunks.prefix(&self.chunks.descriptor(*cell)?),
+            _ => Ok(Sql::Null),
+        }
+    }
+
+    /// The key cells the stored columns `written` (with their cells) need
+    /// in `table`'s physical table: (key column, key cell).
+    fn key_cells<'a>(
+        &self,
+        table: &Table,
+        written: impl Iterator<Item = (&'a str, &'a Sql)>,
+    ) -> Result<Vec<(String, Sql)>, Error> {
+        let Some(physical) = self.physical.tables.get(&table.stored) else {
+            return Ok(Vec::new());
+        };
+        if physical.keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut keys = Vec::new();
+        for (stored, cell) in written {
+            if let Some(key) = physical.key_of(stored) {
+                keys.push((key.stored.clone(), self.key_cell(cell)?));
+            }
+        }
+        Ok(keys)
     }
 
     /// Every stored column of `table`, including ones only other schema
@@ -4294,16 +4574,26 @@ impl Inner {
             values.push(Sql::Integer(deleted as i64));
             sets.push(format!("_del = ?{}", values.len()));
         }
+        let mut written = Vec::new();
         for (name, value) in cells {
-            values.push(match table.column(name) {
+            let cell = match table.column(name) {
                 Some(column) => self.bind_cell(column, value, source)?,
                 None => Self::bind_value(value)?,
-            });
+            };
+            written.push((table.stored_name(name).to_owned(), cell.clone()));
+            values.push(cell);
             sets.push(format!(
                 "{} = ?{}",
                 quote(table.stored_name(name)),
                 values.len()
             ));
+        }
+        for (key, cell) in self.key_cells(
+            table,
+            written.iter().map(|(name, cell)| (name.as_str(), cell)),
+        )? {
+            values.push(cell);
+            sets.push(format!("{} = ?{}", quote(&key), values.len()));
         }
         for (name, value) in self.stamp()?.updated() {
             values.push(value);
@@ -4382,6 +4672,7 @@ impl Inner {
             Sql::Blob(key.clone()),
             Sql::Integer(seq as i64),
         ];
+        let mut written: Vec<(String, Sql)> = Vec::new();
         for column in &table.columns {
             let value = match (cells.get(&column.name), &column.default) {
                 (Some(value), _) => self.bind_cell(column, value, source)?,
@@ -4392,11 +4683,20 @@ impl Inner {
                 }
             };
             for (_, copy) in copies.iter().filter(|(c, _)| *c == column.name) {
+                written.push((copy.clone(), value.clone()));
                 names.push(quote(copy));
                 values.push(value.clone());
             }
+            written.push((column.stored.clone(), value.clone()));
             names.push(quote(&column.stored));
             values.push(value);
+        }
+        for (key, cell) in self.key_cells(
+            table,
+            written.iter().map(|(name, cell)| (name.as_str(), cell)),
+        )? {
+            names.push(quote(&key));
+            values.push(cell);
         }
         for (stored, default) in dropped {
             names.push(quote(&stored));
@@ -6305,6 +6605,14 @@ impl Db {
 }
 
 impl TxRef<'_> {
+    /// Stage one write, fetching what an asynchronous chunk store holds for
+    /// it first if it needs that.
+    async fn stage(&self, op: StagedOp) -> Result<(), Error> {
+        self.db
+            .fetching_with(op, |op| self.db.stage(self.id, op))
+            .await
+    }
+
     pub async fn insert(
         &self,
         table: &str,
@@ -6317,8 +6625,8 @@ impl TxRef<'_> {
             None => self.db.inner.staging().ids.next_row_id(),
         };
         opts.row_id = Some(row);
-        self.db
-            .stage(self.id, StagedOp::Insert(table.to_owned(), cells, opts))?;
+        self.stage(StagedOp::Insert(table.to_owned(), cells, opts))
+            .await?;
         Ok(WriteHandle { row, seq: 0 })
     }
 
@@ -6329,10 +6637,8 @@ impl TxRef<'_> {
         cells: BTreeMap<String, Value>,
         opts: UpdateOptions,
     ) -> Result<WriteHandle, Error> {
-        self.db.stage(
-            self.id,
-            StagedOp::Update(table.to_owned(), row, cells, opts),
-        )?;
+        self.stage(StagedOp::Update(table.to_owned(), row, cells, opts))
+            .await?;
         Ok(WriteHandle { row, seq: 0 })
     }
 
@@ -6343,10 +6649,8 @@ impl TxRef<'_> {
         cells: BTreeMap<String, Value>,
         opts: UpsertOptions,
     ) -> Result<WriteHandle, Error> {
-        self.db.stage(
-            self.id,
-            StagedOp::Upsert(table.to_owned(), row, cells, opts),
-        )?;
+        self.stage(StagedOp::Upsert(table.to_owned(), row, cells, opts))
+            .await?;
         Ok(WriteHandle { row, seq: 0 })
     }
 
@@ -6356,8 +6660,8 @@ impl TxRef<'_> {
         row: RowUuid,
         opts: DeleteOptions,
     ) -> Result<WriteHandle, Error> {
-        self.db
-            .stage(self.id, StagedOp::Delete(table.to_owned(), row, opts))?;
+        self.stage(StagedOp::Delete(table.to_owned(), row, opts))
+            .await?;
         Ok(WriteHandle { row, seq: 0 })
     }
 
@@ -6369,10 +6673,8 @@ impl TxRef<'_> {
         content: Option<BTreeMap<String, Value>>,
         opts: RestoreOptions,
     ) -> Result<WriteHandle, Error> {
-        self.db.stage(
-            self.id,
-            StagedOp::Restore(table.to_owned(), row, content, opts),
-        )?;
+        self.stage(StagedOp::Restore(table.to_owned(), row, content, opts))
+            .await?;
         Ok(WriteHandle { row, seq: 0 })
     }
 
