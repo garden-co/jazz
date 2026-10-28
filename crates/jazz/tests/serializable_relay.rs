@@ -337,8 +337,13 @@ fn assert_conflict(result: Result<(), jazz::db::Error>) {
     assert_eq!(error.code, ErrorCode::TransactionConflict, "{error}");
 }
 
-fn assert_rejected(result: Result<(), jazz::db::Error>) {
-    common::assert_serialization_conflict(&result.expect_err("the authority rejects the commit"));
+/// The commit fails as a conflict: the tab catches it itself once the newer
+/// version has reached it, or the authority rejects it otherwise.
+fn assert_conflict_or_rejected(result: Result<(), jazz::db::Error>) {
+    let error = result.expect_err("the commit conflicts");
+    if error.code != ErrorCode::TransactionConflict {
+        common::assert_serialization_conflict(&error);
+    }
 }
 
 #[test]
@@ -354,7 +359,7 @@ fn a_tabs_serializable_redemption_through_its_worker_joins() {
 fn a_revocation_after_a_tabs_read_rejects_its_redemption() {
     let net = Net::new(1);
     let invite = net.write_invite("abc");
-    assert_rejected(net.redeem(net.tab(0), "abc", || net.revoke(invite)));
+    assert_conflict_or_rejected(net.redeem(net.tab(0), "abc", || net.revoke(invite)));
     assert_eq!(net.count(&members_query("abc")), 0);
 }
 
@@ -405,7 +410,7 @@ fn a_tabs_blind_write_over_a_newer_version_conflicts() {
                 .update("seats", seat, holder("tab"), Default::default()),
         )
         .unwrap();
-        assert_rejected(net.finish(tab, open));
+        assert_conflict_or_rejected(net.finish(tab, open));
         assert_eq!(
             net.holders(),
             ["direct"],
