@@ -187,13 +187,10 @@ fn split_rows(
     split_rows(rest, parts)
 }
 
-/// One frame's [`SyncMessage`]: exactly one postcard value, so a frame
-/// with bytes after its message is malformed rather than truncated.
+/// One frame's [`SyncMessage`]: exactly one canonical postcard value.
+/// Alternate varint spellings and bytes after its message are malformed.
 pub fn decode_message(frame: &[u8]) -> Result<SyncMessage, postcard::Error> {
-    match postcard::take_from_bytes(frame)? {
-        (message, []) => Ok(message),
-        _ => Err(postcard::Error::DeserializeBadEncoding),
-    }
+    jazz_types::postcard_exact::decode_postcard_exact(frame)
 }
 
 /// Joins a `Rows` message's frames (see [`encode_frames`]) back into the
@@ -4046,6 +4043,7 @@ impl Db {
         strict: bool,
         view: &ReadViewSourceSpec,
     ) -> Result<Option<u64>, Error> {
+        self.ensure_storage_owner_active()?;
         let tier = reach.tier;
         // Held on a live link: leaving it (even for a new attempt) releases
         // the read, as it releases a gated opening.
@@ -4083,6 +4081,18 @@ impl Db {
         // The request in flight, and the connection it went out on.
         let mut asked: Option<(u64, u64)> = None;
         let answer = poll_fn(|_| {
+            if let Err(error) = self.ensure_storage_owner_active() {
+                if let Some((id, _)) = asked {
+                    self.inner
+                        .borrow_mut()
+                        .client
+                        .as_mut()
+                        .expect("client")
+                        .answers
+                        .remove(&id);
+                }
+                return Poll::Ready(Err(error));
+            }
             let mut inner = self.inner.borrow_mut();
             let answerable = answerable(&inner);
             let client = inner.client.as_mut().expect("client");
@@ -4163,6 +4173,7 @@ impl Db {
     /// replica can read; writes still pending after that (offline) are
     /// named individually and stay readable here and at the authority.
     pub async fn capture_snapshot(&self) -> Result<SnapshotRef, Error> {
+        self.ensure_storage_owner_active()?;
         let node = self.inner.borrow().identity.node;
         if !self.is_client() {
             return Ok(SnapshotRef {
@@ -4178,6 +4189,9 @@ impl Db {
             client.pending.iter().map(|p| p.tx).collect()
         };
         poll_fn(|_| {
+            if let Err(error) = self.ensure_storage_owner_active() {
+                return Poll::Ready(Err(error));
+            }
             let inner = self.inner.borrow();
             let client = inner.client.as_ref().expect("client");
             let settling = client.transport.is_some()
@@ -4186,10 +4200,10 @@ impl Db {
             if settling {
                 Poll::Pending
             } else {
-                Poll::Ready(())
+                Poll::Ready(Ok(()))
             }
         })
-        .await;
+        .await?;
         let inner = self.inner.borrow();
         let client = inner.client.as_ref().expect("client");
         Ok(SnapshotRef {
@@ -4221,10 +4235,14 @@ impl Db {
 
     /// Wait for a local transaction's fate at `tier`.
     pub async fn wait_for_transaction(&self, tx: u64, tier: DurabilityTier) -> Result<u64, Error> {
+        self.ensure_storage_owner_active()?;
         if !self.waits_upstream(tier) {
             return Ok(tx);
         }
         poll_fn(|_| {
+            if let Err(error) = self.ensure_storage_owner_active() {
+                return Poll::Ready(Err(error));
+            }
             let inner = self.inner.borrow();
             let client = inner.client.as_ref().expect("client");
             match client.fates.get(&tx) {
@@ -4252,6 +4270,7 @@ impl Db {
     /// ones included) reaches `tier`, failing with the first the server
     /// rejected. Writes made after the call are not waited for.
     pub async fn wait_for_pending_writes(&self, tier: DurabilityTier) -> Result<(), Error> {
+        self.ensure_storage_owner_active()?;
         if !self.waits_upstream(tier) {
             return Ok(());
         }
@@ -4335,6 +4354,10 @@ impl Db {
     /// link fails or the request was cancelled first.
     pub async fn permission_advice(&self, id: u64) -> PermissionAdvice {
         poll_fn(|_| {
+            if self.ensure_storage_owner_active().is_err() {
+                self.cancel_permission_advice_request(id);
+                return Poll::Ready(PermissionAdvice::Unknown);
+            }
             let mut inner = self.inner.borrow_mut();
             let Some(client) = inner.client.as_mut() else {
                 return Poll::Ready(PermissionAdvice::Unknown);

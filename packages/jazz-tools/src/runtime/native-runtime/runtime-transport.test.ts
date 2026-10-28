@@ -50,6 +50,68 @@ describe("NativeRuntimeAdapter server transport", () => {
     globalThis.WebSocket = previousWebSocket;
   });
 
+  it("lets a tab reach Local through its healthy worker after a remote server failure", async () => {
+    const persisted = deferred<void>();
+    const runtime = NativeRuntimeAdapter.fromDb(
+      fakeDb({
+        setNonDurableClient: () => undefined,
+        insert: () => ({ ...fakeWrite(), wait: () => persisted.promise }),
+        tick: () => undefined,
+      }) as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      false,
+    );
+    runtime.setNonDurableClient();
+    try {
+      const receipt = runtime.insert("todos", { title: { type: "Text", value: "offline" } });
+      const wait = runtime.waitForTransaction(await committedTxId(receipt), "local");
+      runtime.reportRemoteServerTransportError(new Error("cloud disconnected"));
+      persisted.resolve();
+      await expect(wait).resolves.toBeUndefined();
+      await expect(runtime.flushLocalSettlements()).resolves.toBeUndefined();
+    } finally {
+      persisted.resolve();
+      await runtime.close();
+    }
+  });
+
+  it("allows new Local waits after a failed worker is replaced", async () => {
+    const persisted = deferred<void>();
+    const runtime = NativeRuntimeAdapter.fromDb(
+      fakeDb({
+        setNonDurableClient: () => undefined,
+        connectUpstream: () => new FakeTransport([]),
+        insert: () => ({ ...fakeWrite(), wait: () => persisted.promise }),
+        tick: () => undefined,
+      }) as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      false,
+    );
+    runtime.setNonDurableClient();
+    try {
+      const receipt = runtime.insert("todos", { title: { type: "Text", value: "replayed" } });
+      const txId = await committedTxId(receipt);
+      const wait = runtime.waitForTransaction(txId, "local");
+      const failure = new Error("worker storage failed");
+      runtime.reportLocalRelayError(failure);
+      await expect(wait).rejects.toBe(failure);
+      await expect(runtime.waitForTransaction(txId, "local")).rejects.toBe(failure);
+      const replacement = await runtime.connectUpstreamPeer();
+      persisted.resolve();
+      await expect(runtime.waitForTransaction(txId, "local")).resolves.toBeUndefined();
+      replacement.close();
+    } finally {
+      persisted.resolve();
+      await runtime.close();
+    }
+  });
+
   it("coalesces receive deadlines, advances earlier wakes and re-arms later peers", async () => {
     vi.useFakeTimers();
     let schedule: ((urgency: "immediate" | "deferred" | `after:${number}`) => void) | undefined;
@@ -2464,6 +2526,122 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     expect(transportTicks).toBeGreaterThanOrEqual(2);
     expect(write.wait).toHaveBeenCalledExactlyOnceWith("global");
+  });
+
+  it("lets the caller run while a global write wait has inbound transport work queued", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+
+    let releaseFirstRoute!: () => void;
+    const firstRouteRelease = new Promise<void>((resolve) => {
+      releaseFirstRoute = resolve;
+    });
+    let firstRouteStarted!: () => void;
+    const firstRouteStart = new Promise<void>((resolve) => {
+      firstRouteStarted = resolve;
+    });
+    let secondRouteProcessed!: () => void;
+    const secondRoute = new Promise<void>((resolve) => {
+      secondRouteProcessed = resolve;
+    });
+    let settleWrite!: () => void;
+    const settlement = new Promise<void>((resolve) => {
+      settleWrite = resolve;
+    });
+    // Bound a regressed microtask loop so this test itself cannot starve its
+    // timeout forever. The real timer below still proves caller progress.
+    let forcedRelease = false;
+    let settlementPolls = 0;
+    const originalThen = settlement.then.bind(settlement);
+    vi.spyOn(settlement, "then").mockImplementation((fulfilled, rejected) => {
+      if (++settlementPolls === 100) {
+        forcedRelease = true;
+        releaseFirstRoute();
+        settleWrite();
+      }
+      return originalThen(fulfilled, rejected);
+    });
+    const receivedTransport = new FakeTransport([]);
+    const transport: Transport = receivedTransport;
+    let routedFrames = 0;
+    transport.routeAuxiliaryWireFrame = async (frame) => {
+      routedFrames += 1;
+      if (routedFrames === 1) {
+        firstRouteStarted();
+        await firstRouteRelease;
+      } else if (routedFrames === 2) {
+        secondRouteProcessed();
+        settleWrite();
+      }
+      return frame;
+    };
+    const write = {
+      ...fakeWrite(),
+      wait: (tier: string) => (tier === "local" ? Promise.resolve() : settlement),
+    };
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            insert: () => write,
+            connectUpstream: () => transport,
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+    try {
+      runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+      await runtime.waitForUpstreamServerConnection();
+      const inserted = runtime.insert(
+        "todos",
+        { title: { type: "Text", value: "yield during queued server work" } },
+        null,
+        "00000000-0000-0000-0000-000000000011",
+      );
+      const txId = await committedTxId(inserted);
+
+      sockets[0]!.emitMessage(encodeWebSocketFrameBatch([Uint8Array.from([42])]));
+      await firstRouteStart;
+      sockets[0]!.emitMessage(encodeWebSocketFrameBatch([Uint8Array.from([43])]));
+
+      let waitSettled = false;
+      const waiting = runtime.waitForTransaction(txId, "global").then(() => {
+        waitSettled = true;
+      });
+      // This must reach the host task queue; fake timers cannot expose microtask starvation.
+      const callerTurn = new Promise<void>((resolve) => {
+        setTimeout(() => {
+          resolve();
+        }, 0);
+      });
+
+      await callerTurn;
+      expect(forcedRelease).toBe(false);
+      expect(waitSettled).toBe(false);
+      expect(routedFrames).toBe(1);
+      expect(receivedTransport.received).toEqual([]);
+
+      releaseFirstRoute();
+      await Promise.all([secondRoute, waiting]);
+      expect(receivedTransport.received).toEqual([Uint8Array.from([42]), Uint8Array.from([43])]);
+    } finally {
+      releaseFirstRoute();
+      await runtime.close();
+    }
   });
 
   it("uses the binding scheduler to drive native db ticks outside server pumps", async () => {

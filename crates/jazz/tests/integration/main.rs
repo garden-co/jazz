@@ -19,6 +19,8 @@ mod authorization_scope_reentry;
 mod binding_host;
 #[path = "../branch_views.rs"]
 mod branch_views;
+#[path = "../callback_transaction_cancellation.rs"]
+mod callback_transaction_cancellation;
 #[path = "../claims_change.rs"]
 mod claims_change;
 #[path = "../column_defaults.rs"]
@@ -119,6 +121,8 @@ mod session_write_checks;
 mod slow_queries;
 #[path = "../snapshots.rs"]
 mod snapshots;
+#[path = "../sqlite_sync_ingress.rs"]
+mod sqlite_sync_ingress;
 #[path = "../staged_streaming.rs"]
 mod staged_streaming;
 #[path = "../storage_corpus.rs"]
@@ -165,3 +169,10 @@ mod union_queries;
 mod uuid_page_probe;
 #[path = "../write_check_evidence.rs"]
 mod write_check_evidence;
+
+#[path = "../storage_owner_retirement.rs"]
+mod storage_owner_retirement;
+#[path = "../transaction_read_prefix.rs"]
+mod transaction_read_prefix;
+#[path = "../write_receipt_owner.rs"]
+mod write_receipt_owner;

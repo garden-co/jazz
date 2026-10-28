@@ -46,6 +46,7 @@ pub mod options;
 pub mod slow;
 #[cfg(feature = "sql-trace")]
 mod sql_trace;
+pub mod sync_codec;
 pub(crate) mod text_merge;
 pub mod values;
 

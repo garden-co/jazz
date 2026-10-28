@@ -369,6 +369,7 @@ struct Inner {
     conn: Connection,
     /// One-way, owner-wide fence for new application mutations during close.
     mutation_admission_closed: bool,
+    retired: bool,
     /// Large-value chunks: the cache the collation and decoders read.
     chunks: Arc<crate::large::Chunks>,
     /// Nodes a large-value edit consolidated, stored when the edited cell
@@ -1097,6 +1098,7 @@ impl Db {
             inner: Rc::new(Store::new(Inner {
                 conn,
                 mutation_admission_closed: false,
+                retired: false,
                 chunks,
                 pending_nodes: Vec::new(),
                 merging: false,
@@ -1236,6 +1238,7 @@ impl Db {
     }
 
     pub async fn tick(&self) -> Result<(), Error> {
+        self.ensure_storage_owner_active()?;
         self.sync_tick()?;
         let mut inner = self.inner();
         inner.fan.collect();
@@ -1290,6 +1293,31 @@ impl Db {
     /// a new storage owner starts with mutation admission open.
     pub fn stop_mutation_admission(&self) {
         self.inner().mutation_admission_closed = true;
+    }
+
+    /// Revoke the owner connection before releasing its external storage lease.
+    /// Retained views, streams and transports may still own Db clones, but none
+    /// may read or write this file after retirement. SQLite's authorizer also
+    /// expires statements already in the preparation cache. This is a one-way
+    /// runtime fence, not a stored application policy.
+    pub fn retire_storage_owner(&self) -> Result<(), Error> {
+        let mut inner = self.inner();
+        inner
+            .conn
+            .authorizer(Some(|_: rusqlite::hooks::AuthContext<'_>| {
+                rusqlite::hooks::Authorization::Deny
+            }))
+            .map_err(storage)?;
+        inner.retired = true;
+        Ok(())
+    }
+
+    pub(crate) fn ensure_storage_owner_active(&self) -> Result<(), Error> {
+        if self.inner.borrow().retired {
+            Err(Error::new(ErrorCode::Storage, "storage owner is retired"))
+        } else {
+            Ok(())
+        }
     }
 
     // ---- preparation ----------------------------------------------------
@@ -1813,6 +1841,11 @@ impl Db {
             let seq = inner.seq + 1;
             inner.tx = Some((seq, BTreeSet::new()));
         }
+        let mut guard = CallbackTransactionGuard {
+            db: self,
+            prior_seq: self.inner.borrow().seq,
+            active: true,
+        };
         let mut tx = MergeableTx { db: self, identity };
         let result = callback(&mut tx).await.and_then(|value| {
             self.inner().require_mutation_admission()?;
@@ -1834,6 +1867,7 @@ impl Db {
                 }
                 Err(_) => {
                     inner.abandon_savepoint("tx")?;
+                    guard.active = false;
                     None
                 }
             }
@@ -1845,9 +1879,11 @@ impl Db {
             let mut inner = self.inner();
             inner.seq = prior;
             inner.abandon_savepoint("tx")?;
+            guard.active = false;
             return Err(error);
         }
         end_savepoint(&self.inner.borrow().conn, "tx", true)?;
+        guard.active = false;
         self.notify();
         Ok((value, TxReceipt(seq)))
     }
@@ -2048,6 +2084,33 @@ fn delta(
         removed,
         settled: true,
         tier: DurabilityTier::Local,
+    }
+}
+
+/// A callback may suspend at any await. Cancellation or unwinding must undo
+/// both its SQLite savepoint and its runtime state before another unit starts.
+struct CallbackTransactionGuard<'a> {
+    db: &'a Db,
+    prior_seq: u64,
+    active: bool,
+}
+
+impl Drop for CallbackTransactionGuard<'_> {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let mut inner = self.db.inner.borrow_mut();
+        if inner.abandon_savepoint("tx").is_err() {
+            // Drop cannot return the storage error. Do not admit another write
+            // if SQLite could not confirm that this unit was rolled back.
+            inner.mutation_admission_closed = true;
+        }
+        inner.seq = self.prior_seq;
+        inner.tx = None;
+        inner.capture.clear();
+        inner.writer = None;
+        inner.clear_derived();
     }
 }
 
@@ -5113,6 +5176,25 @@ pub(crate) struct LargeEdits {
     pub(crate) pending_nodes: Vec<jazz_types::large_values::PreparedLargeValue>,
 }
 
+/// An admitted read's boundary in the batch's append-only staging buffers.
+/// Capturing lengths retains no copy of unrelated staged writes.
+#[derive(Clone, Copy)]
+struct BatchPrefix {
+    ops: usize,
+    derived: usize,
+    pending_nodes: usize,
+}
+
+impl Batch {
+    fn prefix(&self) -> BatchPrefix {
+        BatchPrefix {
+            ops: self.ops.len(),
+            derived: self.edits.derived.len(),
+            pending_nodes: self.edits.pending_nodes.len(),
+        }
+    }
+}
+
 enum BatchKind {
     Mergeable,
     /// Serializable: reads see the store as of `snapshot` plus the batch's
@@ -5860,6 +5942,61 @@ impl Db {
         result
     }
 
+    /// A pending read evaluates only the writes admitted before it first
+    /// waited for authority coverage. Ordinary staging keeps its cached overlay.
+    fn in_overlay_prefix<R>(
+        &self,
+        id: OpenTransactionId,
+        prefix: BatchPrefix,
+        read: impl FnOnce(&mut Inner, Option<Cut>) -> Result<R, Error>,
+    ) -> Result<R, Error> {
+        let mut inner = self.inner();
+        let batch = inner
+            .batches
+            .get(&id)
+            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
+        let unavailable = || {
+            Error::new(
+                ErrorCode::NotObserved,
+                "transaction staged prefix is no longer available",
+            )
+        };
+        let ops = batch
+            .ops
+            .get(..prefix.ops)
+            .ok_or_else(unavailable)?
+            .to_vec();
+        let edits = LargeEdits {
+            derived: batch
+                .edits
+                .derived
+                .get(..prefix.derived)
+                .ok_or_else(unavailable)?
+                .to_vec(),
+            pending_nodes: batch
+                .edits
+                .pending_nodes
+                .get(..prefix.pending_nodes)
+                .ok_or_else(unavailable)?
+                .to_vec(),
+        };
+        let snapshot = match &batch.kind {
+            BatchKind::Mergeable => None,
+            BatchKind::Serializable { snapshot, own, .. } => {
+                Some(inner.serializable_cut(*snapshot, own)?)
+            }
+        };
+        let own = inner.seq + 1;
+        begin_savepoint(&inner.conn, "overlay")?;
+        let mark = inner.changed.borrow().len();
+        let result = inner
+            .apply_with_edits(&ops, &edits, ops.len(), own)
+            .and_then(|()| read(&mut inner, snapshot.map(|cut| Cut { own, ..cut })));
+        inner.changed.borrow_mut().truncate(mark);
+        end_savepoint(&inner.conn, "overlay", false)?;
+        result
+    }
+
     fn stage(&self, id: OpenTransactionId, op: StagedOp) -> Result<(), Error> {
         self.stage_with_edits(id, op, LargeEdits::default())
     }
@@ -6143,6 +6280,15 @@ impl TxRef<'_> {
                 identity
             }
         };
+        // Capture before hydration: later writes must not leak into an
+        // already admitted read, including when another read is cancelled.
+        let prefix = self
+            .db
+            .inner()
+            .batches
+            .get(&self.id)
+            .ok_or_else(|| rejected("transaction is not open"))?
+            .prefix();
         // Except for LocalOnly, a client hydrates a serializable read from
         // the authority at the snapshot first. LocalFirst may answer from
         // the replica when the link cannot answer.
@@ -6232,7 +6378,7 @@ impl TxRef<'_> {
             }
         }
         // Relations nest inside the overlay, so they see staged rows too.
-        let rows = self.db.in_overlay(self.id, None, |inner, cut| {
+        let rows = self.db.in_overlay_prefix(self.id, prefix, |inner, cut| {
             let read = ReadSpec {
                 include_deleted,
                 cut,

@@ -23,9 +23,6 @@ use wasm_bindgen::prelude::*;
 const IDB_VFS: &str = "jazz-idb";
 const OPFS_VFS: &str = "jazz-opfs";
 const OPFS_DIRECTORY: &str = "jazz";
-/// Deleting this never-opened file is queued behind every pending commit,
-/// so its completion is a flush barrier.
-const IDB_BARRIER: &str = "/.jazz-flush-barrier";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Backend {
@@ -36,10 +33,11 @@ pub(crate) enum Backend {
 pub(crate) struct StoreSpec {
     backend: Backend,
     path: String,
+    require_existing: bool,
 }
 
 impl StoreSpec {
-    /// `storage` is `{ backend?: "indexeddb" | "opfs", path?: string }`, or
+    /// `storage` is `{ backend?: "indexeddb" | "opfs", path?: string, requireExisting?: boolean }`, or
     /// `undefined` for the IndexedDB default. Without a path the file is
     /// named after `database`, the physical database name the worker
     /// admitted (one per app, environment, auth scope and dbName).
@@ -82,14 +80,33 @@ impl StoreSpec {
         } else {
             format!("/{path}")
         };
-        Ok(Self { backend, path })
+        let require_existing = if storage.is_null() || storage.is_undefined() {
+            false
+        } else {
+            let value = js_sys::Reflect::get(storage, &JsValue::from_str("requireExisting"))?;
+            if value.is_undefined() {
+                false
+            } else {
+                value
+                    .as_bool()
+                    .ok_or_else(|| JsValue::from_str("storage.requireExisting must be a boolean"))?
+            }
+        };
+        Ok(Self {
+            backend,
+            path,
+            require_existing,
+        })
     }
 }
 
 /// The open file's backing storage, kept by the database's host.
 #[derive(Clone)]
 pub(crate) enum Store {
-    IndexedDb(Rc<RelaxedIdbUtil>),
+    IndexedDb {
+        util: Rc<RelaxedIdbUtil>,
+        path: String,
+    },
     Opfs,
 }
 
@@ -97,8 +114,8 @@ impl Store {
     /// Resolves once every commit so far is in the backing storage.
     pub(crate) async fn flush(&self) -> Result<(), JsValue> {
         match self {
-            Store::IndexedDb(util) => util
-                .delete_db(IDB_BARRIER)
+            Store::IndexedDb { util, path } => util
+                .flush_db(path)
                 .map_err(vfs_error)?
                 .await
                 .map_err(vfs_error),
@@ -150,12 +167,20 @@ pub(crate) async fn open(spec: &StoreSpec, config: DbConfig) -> Result<(Db, Stor
         Backend::IndexedDb => {
             let util = install_idb().await?;
             // IndexedDB reads are async; SQLite's are not, so the file is
-            // loaded whole before opening.
-            util.preload_db(vec![spec.path.clone()])
-                .await
-                .map_err(vfs_error)?;
+            // loaded whole before opening. The previous owner has closed and
+            // flushed under the physical ownership lock. Reload this file so a
+            // cached image cannot hide a replacement, corruption or deletion.
+            util.reload_db(&spec.path).await.map_err(vfs_error)?;
+            if spec.require_existing && !util.exists(&spec.path) {
+                return Err(JsValue::from_str(
+                    "Admitted SQLite browser file is missing; reset this storage root before reopening",
+                ));
+            }
             (
-                Store::IndexedDb(Rc::new(util)),
+                Store::IndexedDb {
+                    util: Rc::new(util),
+                    path: spec.path.clone(),
+                },
                 FileOptions {
                     vfs: Some(IDB_VFS),
                     journal: Journal::Memory,
@@ -169,7 +194,12 @@ pub(crate) async fn open(spec: &StoreSpec, config: DbConfig) -> Result<(Db, Stor
         }
         Backend::Opfs => {
             require_sync_access_handles()?;
-            install_opfs().await?;
+            let util = install_opfs().await?;
+            if spec.require_existing && !util.exists(&spec.path).map_err(vfs_error)? {
+                return Err(JsValue::from_str(
+                    "Admitted SQLite browser file is missing; reset this storage root before reopening",
+                ));
+            }
             (
                 Store::Opfs,
                 FileOptions {

@@ -1733,7 +1733,7 @@ impl Owner {
         };
         let mut inbound = owner_session.queues.inbound.borrow_mut();
         for frame in frames {
-            match jazz::db::decode_message(&frame) {
+            match jazz::sync_codec::decode_sync_message(&frame) {
                 Ok(SyncMessage::Commit { tx, .. }) if gated => {
                     owner_session
                         .queues
