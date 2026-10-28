@@ -1379,6 +1379,10 @@ impl TxRef<'_> {
         mutations: Vec<LargeValueUpdate>,
         opts: UpdateOptions,
     ) -> Result<WriteHandle, Error> {
+        let opts = UpdateOptions {
+            identity: self.db.transaction_write_identity(self.id, opts.identity)?,
+            ..opts
+        };
         let edits = self.db.in_overlay(self.id, None, |inner, _| {
             let identity = identity_of(opts.identity);
             let lowered = inner.lower_large_mutations(table, row, &mut patch, mutations, identity);

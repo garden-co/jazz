@@ -2826,6 +2826,15 @@ impl Drop for Inner {
 }
 
 impl Inner {
+    fn require_attribution_backend(&self) -> Result<(), Error> {
+        if self.identity.author != AuthorSubject::SYSTEM {
+            return Err(unsupported(
+                "backend-attributed transactions outside a SYSTEM backend",
+            ));
+        }
+        Ok(())
+    }
+
     /// Undo everything since `SAVEPOINT name`. Its changes are forgotten
     /// first, so no subscriber hears of them whatever happens next.
     fn abandon_savepoint(&self, name: &str) -> Result<(), Error> {
@@ -6061,11 +6070,22 @@ impl Store {
 
 struct Batch {
     kind: BatchKind,
+    /// None retains the ordinary per-operation identity contract.
+    identity: Option<WriteIdentity>,
     ops: Vec<(Rc<Schema>, StagedOp)>,
     /// What the batch's partial large-value updates built: descriptors
     /// derived from stored trees and the nodes consolidations prepared,
     /// trusted and stored whenever the staged writes apply.
     edits: LargeEdits,
+}
+
+impl Batch {
+    fn reader(&self) -> Option<AuthorSubject> {
+        match self.identity.map(who) {
+            Some(Who::Session(author)) => Some(author),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -6406,6 +6426,82 @@ impl Db {
         )
     }
 
+    /// Open an owner-wide mergeable batch for an authenticated session.
+    /// Reads and writes through every schema view retain this identity.
+    /// Delegated replica reads require LocalOnly until scoped remote coverage
+    /// is available. The authority authenticates every uploaded commit.
+    pub async fn begin_mergeable_for_identity(
+        &self,
+        id: OpenTransactionId,
+        author: AuthorSubject,
+    ) -> Result<(), Error> {
+        self.begin_mergeable(id).await?;
+        self.bind_transaction_identity(id, WriteIdentity::Session(author));
+        Ok(())
+    }
+
+    /// Open an owner-wide serializable batch for an authenticated session.
+    /// A replica may read remotely as its own identity; delegated remote reads
+    /// require scoped coverage and currently return an unsupported-shape error.
+    pub async fn begin_serializable_for_identity(
+        &self,
+        id: OpenTransactionId,
+        author: AuthorSubject,
+    ) -> Result<(), Error> {
+        self.begin_serializable(id).await?;
+        self.bind_transaction_identity(id, WriteIdentity::Session(author));
+        Ok(())
+    }
+
+    /// Open a SYSTEM backend mergeable batch with separate row provenance.
+    /// Attribution does not apply the named author's session read policies.
+    pub async fn begin_mergeable_for_attribution(
+        &self,
+        id: OpenTransactionId,
+        author: AuthorSubject,
+    ) -> Result<(), Error> {
+        self.inner().require_attribution_backend()?;
+        self.begin_mergeable(id).await?;
+        self.bind_transaction_identity(id, WriteIdentity::Attribution(author));
+        Ok(())
+    }
+
+    /// Open a SYSTEM backend serializable batch with separate row provenance.
+    /// The authority still authenticates the connection receiving a replica's
+    /// commit; selecting an attribution is not an upstream credential.
+    pub async fn begin_serializable_for_attribution(
+        &self,
+        id: OpenTransactionId,
+        author: AuthorSubject,
+    ) -> Result<(), Error> {
+        self.inner().require_attribution_backend()?;
+        self.begin_serializable(id).await?;
+        self.bind_transaction_identity(id, WriteIdentity::Attribution(author));
+        Ok(())
+    }
+
+    fn bind_transaction_identity(&self, id: OpenTransactionId, identity: WriteIdentity) {
+        self.inner().batches.get_mut(&id).expect("opened").identity = Some(identity);
+    }
+
+    /// Resolve a staged operation before it reads or chunks any cell.
+    pub(crate) fn transaction_write_identity(
+        &self,
+        id: OpenTransactionId,
+        requested: WriteIdentity,
+    ) -> Result<WriteIdentity, Error> {
+        let inner = self.inner.staging();
+        let batch = inner
+            .batches
+            .get(&id)
+            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
+        match batch.identity {
+            None => Ok(requested),
+            Some(bound) if requested == WriteIdentity::Database || requested == bound => Ok(bound),
+            Some(_) => Err(rejected("write identity differs from its transaction")),
+        }
+    }
+
     fn begin(&self, id: OpenTransactionId, kind: BatchKind) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
         if inner.batches.contains_key(&id) {
@@ -6415,6 +6511,7 @@ impl Db {
             id,
             Batch {
                 kind,
+                identity: None,
                 ops: Vec::new(),
                 edits: LargeEdits::default(),
             },
@@ -6534,7 +6631,7 @@ impl Db {
                         include_deleted: read.include_deleted,
                         ..ReadSpec::default()
                     };
-                    let now = inner.read_versions(&read.prepared, None, &spec)?;
+                    let now = inner.read_versions(&read.prepared, batch.reader(), &spec)?;
                     let changed = now.len() != read.rows.len()
                         || now.iter().zip(&read.rows).any(|(now, then)| {
                             now.0 != then.0
@@ -6590,7 +6687,7 @@ impl Db {
                     include_deleted: read.include_deleted,
                     ..ReadSpec::default()
                 };
-                if inner.read_versions(&read.prepared, None, &spec)? != read.rows {
+                if inner.read_versions(&read.prepared, batch.reader(), &spec)? != read.rows {
                     return Err(conflict(
                         "a row read by the transaction changed since its snapshot",
                     ));
@@ -6612,8 +6709,15 @@ impl Db {
             begin_savepoint(&inner.conn, "commit_batch")?;
             let mark = inner.changed.borrow().len();
             inner.defer_checks();
+            // Session-bound batches recheck current permissions at commit.
+            // Ordinary unbound batches keep their existing replay contract.
+            let checked = if batch.reader().is_some() {
+                0
+            } else {
+                ops.len()
+            };
             let applied = inner
-                .apply_with_edits(ops, &batch.edits, ops.len(), seq)
+                .apply_with_edits(ops, &batch.edits, checked, seq)
                 .and_then(|()| inner.finish_checks(seq));
             if let Err(error) = applied {
                 inner.abandon_checks();
@@ -6630,11 +6734,12 @@ impl Db {
         };
         // `commit_ops` holds the upload record and the commit in one SQLite
         // transaction and rolls both back on an error.
-        if let Err(error) = self.record_upload(
+        if let Err(error) = self.record_upload_with_identity(
             ops.iter().map(|(_, op)| op.clone()).collect(),
             seq,
             kind,
             None,
+            batch.identity,
         ) {
             let mut inner = self.inner();
             inner.seq = prior;
@@ -6795,6 +6900,13 @@ impl Db {
         mut op: StagedOp,
         mut edits: LargeEdits,
     ) -> Result<(), Error> {
+        if let Some(requested) = op.identity() {
+            match self.transaction_write_identity(id, requested)? {
+                WriteIdentity::Session(author) => op.attribute(author, true),
+                WriteIdentity::Attribution(author) => op.attribute(author, false),
+                WriteIdentity::Database => {}
+            }
+        }
         let marks = {
             let mut inner = self.inner.staging();
             inner.schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
@@ -6826,19 +6938,22 @@ impl Db {
         include_deleted: bool,
     ) -> Result<(), Error> {
         let mut inner = self.inner();
-        let Some(Batch {
-            kind: BatchKind::Serializable { snapshot, own, .. },
-            ..
-        }) = inner.batches.get(&id)
+        let Some(
+            batch @ Batch {
+                kind: BatchKind::Serializable { snapshot, own, .. },
+                ..
+            },
+        ) = inner.batches.get(&id)
         else {
             return Ok(());
         };
+        let identity = batch.reader();
         let read = ReadSpec {
             include_deleted,
             cut: Some(inner.serializable_cut(*snapshot, own)?),
             ..ReadSpec::default()
         };
-        let rows = inner.read_versions(prepared, None, &read)?;
+        let rows = inner.read_versions(prepared, identity, &read)?;
         if let Some(Batch {
             kind: BatchKind::Serializable { reads, pinned, .. },
             ..
@@ -6947,7 +7062,9 @@ impl TxRef<'_> {
     }
 
     /// As [`Self::all_prepared_with`], seeing only what `identity`'s read
-    /// policies let it see (`None`: everything).
+    /// policies let it see. In a bound batch, `None` inherits the batch's
+    /// identity and a different explicit identity is rejected. In an unbound
+    /// batch, `None` retains the unrestricted read contract.
     pub async fn all_prepared_as(
         &self,
         prepared: &PreparedQuery,
@@ -6969,6 +7086,41 @@ impl TxRef<'_> {
         identity: Option<AuthorSubject>,
         tier: ReadTier,
     ) -> Result<Vec<CurrentRow>, Error> {
+        let identity = {
+            let inner = self.db.inner();
+            let batch = inner
+                .batches
+                .get(&self.id)
+                .ok_or_else(|| rejected("transaction is not open"))?;
+            if batch.identity.is_some() {
+                let reader = batch.reader();
+                let author = reader.unwrap_or(AuthorSubject::SYSTEM);
+                if identity.is_some_and(|requested| requested != author)
+                    || prepared
+                        .request_claims
+                        .as_ref()
+                        .is_some_and(|(requested, _)| *requested != author)
+                {
+                    return Err(rejected(
+                        "transaction read identity differs from its bound identity",
+                    ));
+                }
+                if inner.client.is_some() && tier != ReadTier::LocalOnly {
+                    let changed_claims =
+                        prepared.request_claims.as_ref().is_some_and(|(_, claims)| {
+                            *claims != inner.claims.get(&author).cloned().unwrap_or_default()
+                        });
+                    if author != inner.identity.author || changed_claims {
+                        return Err(unsupported(
+                            "delegated remote transaction reads without scoped coverage",
+                        ));
+                    }
+                }
+                reader
+            } else {
+                identity
+            }
+        };
         // Except for LocalOnly, a client hydrates a serializable read from
         // the authority at the snapshot first. LocalFirst may answer from
         // the replica when the link cannot answer.

@@ -161,6 +161,8 @@ mod text_merge;
 mod transaction_commit_kind;
 #[path = "../transaction_handles.rs"]
 mod transaction_handles;
+#[path = "../transaction_identity.rs"]
+mod transaction_identity;
 #[path = "../transaction_read_tiers.rs"]
 mod transaction_read_tiers;
 #[path = "../union_queries.rs"]
