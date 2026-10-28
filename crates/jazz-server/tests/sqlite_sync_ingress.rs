@@ -87,7 +87,10 @@ async fn malformed_sqlite_message_closes_only_its_session() {
         })
         .await
         .unwrap();
-        assert!(result.contains("malformed sync frame"), "{result}");
+        assert!(
+            result.message.contains("malformed sync frame"),
+            "{result:?}"
+        );
         assert!(
             tokio::time::timeout(Duration::from_secs(5), stream.recv())
                 .await

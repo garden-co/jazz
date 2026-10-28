@@ -1,8 +1,8 @@
 //! Dedicated owner for the Rust account registry and its durable adapter.
 use super::account_store::{RegistryError, StoredAccountRegistry};
-use crate::kv::SqliteKv;
+use crate::kv::HostKv;
 use jazz::account_registry::{AccountCommand, AccountCommandResult, Assignment, Principal};
-use std::{path::PathBuf, sync::mpsc};
+use std::sync::mpsc;
 use tokio::sync::oneshot;
 
 /// Tests can make the next journal append fail after it commits.
@@ -39,18 +39,15 @@ pub(crate) struct AccountRegistryOwner {
 }
 
 impl AccountRegistryOwner {
-    pub(crate) fn open(durable: Option<PathBuf>) -> Result<Self, String> {
+    /// Own the registry whose journal is `storage`.
+    pub(crate) fn open(storage: HostKv) -> Result<Self, String> {
         let (sender, receiver) = mpsc::channel();
         let (notify, changes) = tokio::sync::watch::channel(0u64);
         let (ready, opened) = mpsc::sync_channel(1);
         std::thread::Builder::new()
             .name("jazz-account-registry".into())
             .spawn(move || {
-                let storage = match durable {
-                    Some(path) => SqliteKv::open(&path),
-                    None => SqliteKv::memory(),
-                };
-                let registry = storage.and_then(|storage| {
+                let registry = {
                     #[cfg(test)]
                     let failpoint = storage.failpoint();
                     #[cfg(not(test))]
@@ -58,7 +55,7 @@ impl AccountRegistryOwner {
                     StoredAccountRegistry::open(storage)
                         .map(|registry| (registry, failpoint))
                         .map_err(|error| error.to_string())
-                });
+                };
                 let mut registry = match registry {
                     Ok((registry, failpoint)) => {
                         if ready.send(Ok(failpoint)).is_err() {
@@ -126,6 +123,13 @@ impl AccountRegistryOwner {
             #[cfg(test)]
             failpoint: _failpoint,
         })
+    }
+
+    /// Tests: a registry whose journal lives in memory.
+    #[cfg(test)]
+    pub(crate) fn in_memory_for_test() -> Self {
+        let store = crate::runtime::AppStore::memory().expect("memory store");
+        Self::open(store.kv(crate::kv::ACCOUNTS).expect("accounts table")).expect("registry")
     }
 
     /// Tests: the next journal append commits and then reports a failure.
@@ -214,7 +218,7 @@ mod tests {
     // Observer invalidation is an internal owner contract, not an HTTP result.
     #[tokio::test]
     async fn login_or_register_notifies_only_new_assignments() {
-        let owner = AccountRegistryOwner::open(None).unwrap();
+        let owner = AccountRegistryOwner::in_memory_for_test();
         let mut changes = owner.subscribe();
         let principal = Principal {
             issuer: "https://issuer.example".into(),
@@ -236,7 +240,7 @@ mod tests {
     // the websocket failed-flush test covers them.)
     #[tokio::test]
     async fn changes_skip_rejected_requests_and_close_with_the_owner() {
-        let owner = AccountRegistryOwner::open(None).unwrap();
+        let owner = AccountRegistryOwner::in_memory_for_test();
         let mut changes = owner.subscribe();
         assert!(!changes.has_changed().unwrap());
         let unknown = Principal {
@@ -268,8 +272,11 @@ mod tests {
     #[tokio::test]
     async fn disk_recovery_preserves_pending_links_and_permanent_revoked_assignments() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("accounts.sqlite");
-        let open = || AccountRegistryOwner::open(Some(path.clone())).unwrap();
+        let storage = crate::runtime::StorageConfig::data_dir(directory.path());
+        let open = || {
+            let store = crate::runtime::AppStore::open(&storage).unwrap();
+            AccountRegistryOwner::open(store.kv(crate::kv::ACCOUNTS).unwrap()).unwrap()
+        };
         let alice = Principal {
             issuer: "https://issuer.example".into(),
             subject: "alice".into(),

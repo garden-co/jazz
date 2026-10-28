@@ -24,11 +24,15 @@ pub use db::block_on;
 pub use jazz_db::binding_args;
 pub use jazz_db::binding_codec;
 pub use jazz_db::binding_host;
+pub use jazz_db::chunk_store;
 pub use jazz_db::db;
 pub use jazz_db::format;
 #[cfg(feature = "testing")]
 pub use jazz_db::full_materializations_for_test;
+pub use jazz_db::host;
+pub use jazz_db::link;
 pub use jazz_db::result_tree;
+pub use jazz_db::slow;
 pub use jazz_db::sync_codec;
 pub use jazz_model::model;
 pub use jazz_model::query;

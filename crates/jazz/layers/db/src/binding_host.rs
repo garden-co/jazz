@@ -33,11 +33,11 @@ use serde::{Deserialize, Serialize};
 use crate::binding_args;
 use crate::db::{
     Db, DbConfig, DbIdentity, DeleteOptions, Error, ErrorCode, ExactWriteTarget, FirstLoad,
-    InsertOptions, LargeValueStagingPolicy, LargeValueUpdate, ReadOpts, ReadTier, RemoteLinkHint,
-    RestoreOptions, SeededRowIdSource, SerializedReadResult, StreamingMutationKind,
-    StreamingValueUpload, SubscriberId, SubscriptionEvent, SubscriptionStream, TransportError,
-    UpdateOptions, UpsertOptions, Upstream, WireTransport, WireTransportAdapter, WriteHandle,
-    WriteIdentity, block_on,
+    FrameJoiner, InsertOptions, LargeValueStagingPolicy, LargeValueUpdate, ReadOpts, ReadTier,
+    RemoteLinkHint, RestoreOptions, SeededRowIdSource, SerializedReadResult, StreamingMutationKind,
+    StreamingValueUpload, SubscriberId, SubscriptionEvent, SubscriptionStream, SyncMessage,
+    Transport, TransportError, UpdateOptions, UpsertOptions, Upstream, WriteHandle, WriteIdentity,
+    block_on,
 };
 
 /// Named cells, as the binding codec decodes them.
@@ -326,7 +326,7 @@ fn restore_options_as<O: HostObject>(
     })
 }
 
-/// `{ read_view? | readView?, tier?, include_deleted?, first_load_remote_wait_ms? }`.
+/// `{ read_view? | readView?, tier?, include_deleted?, first_load_remote_wait_ms?, splices? }`.
 pub fn read_opts<O: HostObject>(options: &O) -> HostResult<ReadOpts> {
     let mut opts = ReadOpts::default();
     for name in ["read_view", "readView"] {
@@ -357,6 +357,10 @@ pub fn read_opts<O: HostObject>(options: &O) -> HostResult<ReadOpts> {
         if opts.tier == ReadTier::LocalFirst {
             opts.first_load = FirstLoad::WaitForRemote { timeout_ms };
         }
+    }
+    if let Some(splices) = options.get("splices")? {
+        opts.splices = O::decode::<Vec<String>>(splices)
+            .map_err(|_| HostError::Argument("splices must be an array of column names".into()))?;
     }
     Ok(opts)
 }
@@ -617,7 +621,9 @@ impl<F: Future> Future for Parked<F> {
 pub type HostFuture<T> = Pin<Box<dyn Future<Output = HostResult<T>>>>;
 
 /// See [`Hooks::rejected`].
-pub type RejectedHook = Box<dyn Fn(&TransactionId, &Error, bool, Option<Rc<Cell<bool>>>)>;
+/// Told of a refused upload no wait claimed; returns whether the refusal
+/// reached the application (a listener was there to take it).
+pub type RejectedHook = Box<dyn Fn(&TransactionId, &Error, bool, Option<Rc<Cell<bool>>>) -> bool>;
 
 /// Hooks a host gives the database it binds.
 #[derive(Default)]
@@ -669,7 +675,10 @@ impl Hooks {
 
     /// Tell [`Hooks::rejected`] of each refused upload no wait claimed.
     /// A relayed session's refused commit is reported under its own id.
-    fn report(&self, node: NodeUuid, rejections: Vec<crate::db::UpstreamRejection>) {
+    /// Returns the seqs of `node`'s own refusals that reached the
+    /// application, through a wait or the hook.
+    fn report(&self, node: NodeUuid, rejections: Vec<crate::db::UpstreamRejection>) -> Vec<u64> {
+        let mut delivered = Vec::new();
         for rejection in rejections {
             let (seq, error) = (rejection.seq, &rejection.error);
             let writer = NodeUuid::from_bytes(rejection.writer);
@@ -677,14 +686,19 @@ impl Hooks {
                 .then(|| self.claims.borrow_mut().remove(&seq))
                 .flatten()
                 .and_then(|claim| claim.upgrade());
-            if claim.as_ref().is_some_and(|claim| claim.get()) {
-                continue;
-            }
-            if let Some(rejected) = self.rejected.borrow().as_ref() {
+            let reached = if claim.as_ref().is_some_and(|claim| claim.get()) {
+                true
+            } else if let Some(rejected) = self.rejected.borrow().as_ref() {
                 let tx_id = TransactionId::from_committed_tx(TxId::new(TxTime(seq), writer));
-                rejected(&tx_id, error, rejection.serializable, claim);
+                rejected(&tx_id, error, rejection.serializable, claim)
+            } else {
+                false
+            };
+            if reached && writer == node {
+                delivered.push(seq);
             }
         }
+        delivered
     }
 }
 
@@ -721,6 +735,7 @@ struct WriteResultPayload {
 /// A committed write as a binding returns it.
 #[derive(Clone, Debug)]
 pub struct Write {
+    node: NodeUuid,
     /// postcard `{ row_id, tx_id }`.
     pub payload: Vec<u8>,
     /// The written row (zero for a transaction commit).
@@ -757,6 +772,8 @@ pub struct Binding {
     /// Local-first accounts a backend admitted (see
     /// [`Binding::admit_local_first_session`]), by canonical author.
     admitted: Rc<RefCell<BTreeMap<String, SelfSignedProof>>>,
+    /// Whether the next tick reports the retry store's refusals again.
+    requeue: Rc<Cell<bool>>,
 }
 
 /// A Jazz self-signed proof of a local-first account.
@@ -784,6 +801,7 @@ impl Binding {
             refused: Rc::default(),
             bound: Rc::default(),
             admitted: Rc::default(),
+            requeue: Rc::new(Cell::new(true)),
         }
     }
 
@@ -910,6 +928,7 @@ impl Binding {
     fn receipt(&self, row_id: RowUuid, seq: u64) -> HostResult<Write> {
         let tx_id = TxId::new(TxTime(seq), self.node);
         Ok(Write {
+            node: self.node,
             payload: postcard::to_allocvec(&WriteResultPayload { row_id, tx_id })
                 .map_err(|error| HostError::Argument(error.to_string()))?,
             row_id,
@@ -1454,6 +1473,9 @@ impl Binding {
     /// Resolve once `write` reached `tier`; fail at once with its
     /// rejection, if it was rejected.
     pub fn wait_for_write(&self, write: &Write, tier: &str) -> HostResult<HostFuture<()>> {
+        if self.node != write.node {
+            return Err("write belongs to a different database node".into());
+        }
         if let Some(error) = &write.rejected {
             binding_args::durability_tier(tier)?;
             let error = error.clone();
@@ -1472,13 +1494,60 @@ impl Binding {
         }))
     }
 
+    /// How many local commits still wait for the server's verdict.
+    pub fn pending_upload_count(&self) -> usize {
+        self.db.pending_upload_count()
+    }
+
     /// Apply received frames and send what is due; waits wake.
     pub async fn tick(&self) -> HostResult<()> {
         let result = self.db.tick().await;
-        self.hooks
-            .report(self.node, self.db.take_upstream_rejections());
+        // Refusals kept from before (a reopened store's, or ones no
+        // listener took) go out again first.
+        let requeued = if self.requeue.replace(false) {
+            self.db.requeue_rejected_transactions()
+        } else {
+            Ok(())
+        };
+        let rejections = self.db.take_upstream_rejections();
+        let delivered = self.hooks.report(self.node, rejections);
+        // Delivered: the retry store lets go of their payloads. One no
+        // listener took stays, for the next listener or the next open.
+        let discarded = delivered
+            .into_iter()
+            .try_for_each(|seq| self.db.discard_rejected_transaction(seq));
         self.hooks.progress.wake_all();
-        Ok(result?)
+        result?;
+        requeued?;
+        Ok(discarded?)
+    }
+
+    /// Report the refusals the retry store still holds again on the next
+    /// tick: the host now has a listener for them.
+    pub fn redeliver_rejections(&self) {
+        self.requeue.set(true);
+        self.hooks.schedule_tick();
+    }
+
+    /// The slow-query report due now: one line per slow query shape,
+    /// naming `app`: the first at once, then at most every 10 seconds. The host
+    /// writes the lines where it reports problems (`console.warn`).
+    pub fn take_slow_query_report(&self, app: Option<&str>) -> Vec<String> {
+        self.db.take_slow_query_report(app)
+    }
+
+    /// Report query runs of at least `ms` milliseconds; 0 turns the log
+    /// off.
+    pub fn set_slow_query_threshold_ms(&self, ms: f64) -> HostResult<()> {
+        if !ms.is_finite() || ms < 0.0 {
+            return Err(HostError::Argument(format!(
+                "slow query threshold must be a non-negative number of milliseconds, not {ms}"
+            )));
+        }
+        self.db.set_slow_query_threshold(
+            (ms > 0.0).then(|| std::time::Duration::from_secs_f64(ms / 1000.0)),
+        );
+        Ok(())
     }
 
     /// Make this store the optimistic, non-durable foreground of a durable
@@ -1602,9 +1671,11 @@ impl Binding {
     /// out on the next tick.
     pub fn connect_upstream(&self) -> Link {
         let queues = WireQueues::default();
-        let transport = Box::new(WireTransportAdapter::current(QueueTransport {
+        let transport = Box::new(QueueTransport {
             queues: queues.clone(),
-        }));
+            joiner: FrameJoiner::default(),
+            failed: None,
+        });
         let upstream = block_on(self.db.connect_upstream(transport));
         self.hooks.schedule_tick();
         Link {
@@ -1618,9 +1689,11 @@ impl Binding {
     pub fn accept_subscriber(&self, identity: AuthorSubject, claims: Cells) -> Link {
         self.db.set_identity_claims(identity, claims);
         let queues = WireQueues::default();
-        let transport = Box::new(WireTransportAdapter::current(QueueTransport {
+        let transport = Box::new(QueueTransport {
             queues: queues.clone(),
-        }));
+            joiner: FrameJoiner::default(),
+            failed: None,
+        });
         let subscriber = self.db.accept_subscriber(transport, identity);
         Link {
             binding: self.clone(),
@@ -1825,26 +1898,63 @@ impl StreamingMutation {
 /// The frame queues between a link and its host carrier.
 #[derive(Clone, Default)]
 pub struct WireQueues {
-    inbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
+    inbound: Rc<RefCell<VecDeque<InboundFrame>>>,
     outbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
     outbound_ready: Rc<RefCell<Option<Box<dyn Fn()>>>>,
 }
 
-struct QueueTransport {
-    queues: WireQueues,
+enum InboundFrame {
+    Raw(Vec<u8>),
+    Decoded {
+        message: Box<SyncMessage>,
+        bytes: usize,
+    },
 }
 
-impl WireTransport for QueueTransport {
-    fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
-        self.queues.outbound.borrow_mut().push_back(frame);
-        if let Some(ready) = self.queues.outbound_ready.borrow().as_ref() {
-            ready();
+struct QueueTransport {
+    queues: WireQueues,
+    joiner: FrameJoiner,
+    failed: Option<Option<TransportError>>,
+}
+
+impl Transport for QueueTransport {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        for frame in crate::db::encode_frames(message)
+            .map_err(|error| TransportError::Failed(error.to_string()))?
+        {
+            self.queues.outbound.borrow_mut().push_back(frame);
+            if let Some(ready) = self.queues.outbound_ready.borrow().as_ref() {
+                ready();
+            }
         }
         Ok(())
     }
 
-    fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
-        self.queues.inbound.borrow_mut().pop_front()
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        if self.failed.is_some() {
+            return None;
+        }
+        loop {
+            let frame = self.queues.inbound.borrow_mut().pop_front()?;
+            let joined = match frame {
+                InboundFrame::Raw(bytes) => self.joiner.push(&bytes),
+                InboundFrame::Decoded { message, bytes } => {
+                    self.joiner.push_decoded(*message, bytes)
+                }
+            };
+            match joined {
+                Ok(Some(message)) => return Some(message),
+                Ok(None) => {}
+                Err(error) => {
+                    self.failed = Some(Some(error));
+                    return None;
+                }
+            }
+        }
+    }
+
+    fn take_failure(&mut self) -> Option<TransportError> {
+        self.failed.as_mut().and_then(Option::take)
     }
 }
 
@@ -1872,8 +1982,32 @@ impl Link {
 
     /// Frames received from the peer; applied on the next tick.
     pub fn receive(&self, frames: impl IntoIterator<Item = Vec<u8>>) {
-        self.queues.inbound.borrow_mut().extend(frames);
+        self.queues
+            .inbound
+            .borrow_mut()
+            .extend(frames.into_iter().map(InboundFrame::Raw));
         self.binding.hooks.schedule_tick();
+    }
+
+    /// Canonically decode the entire host batch before admitting any prefix.
+    /// Multipart ordering and cumulative limits remain enforced by the link.
+    pub fn receive_checked(
+        &self,
+        frames: impl IntoIterator<Item = impl AsRef<[u8]>>,
+    ) -> Result<(), Error> {
+        let decoded = frames
+            .into_iter()
+            .map(|frame| {
+                let bytes = frame.as_ref();
+                crate::sync_codec::decode_sync_message(bytes).map(|message| InboundFrame::Decoded {
+                    message: Box::new(message),
+                    bytes: bytes.len(),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.queues.inbound.borrow_mut().extend(decoded);
+        self.binding.hooks.schedule_tick();
+        Ok(())
     }
 
     /// Frames to send to the peer, oldest first.
