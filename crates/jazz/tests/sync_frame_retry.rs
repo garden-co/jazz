@@ -175,3 +175,26 @@ fn zero_progress_retry_and_subsequent_identical_send_are_distinct() {
     let frame = encode_frames(message).unwrap().pop().unwrap();
     assert_eq!(state.borrow().sent, vec![frame.clone(), frame]);
 }
+
+/// Bob refuses Alice's first frame without accepting any bytes. Alice can then
+/// send a different message before retrying the original publication, as the
+/// client's outbox may reorder messages between ticks. The public wire adapter
+/// exposes the backpressure boundary without relying on host scheduling.
+#[test]
+fn zero_progress_allows_another_message_before_retry() {
+    for message in [SyncMessage::Unsubscribe { id: 128 }, publication()] {
+        let (mut alice, state) = setup();
+        assert_eq!(
+            alice.send(message.clone()),
+            Err(TransportError::Backpressure)
+        );
+        assert!(state.borrow().sent.is_empty());
+        state.borrow_mut().allowance = usize::MAX;
+        let other = SyncMessage::Unsubscribe { id: 256 };
+        alice.send(other.clone()).unwrap();
+        alice.send(message.clone()).unwrap();
+        let mut expected = encode_frames(other).unwrap();
+        expected.extend(encode_frames(message).unwrap());
+        assert_eq!(state.borrow().sent, expected);
+    }
+}

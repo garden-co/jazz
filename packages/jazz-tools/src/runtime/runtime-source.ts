@@ -1,4 +1,5 @@
 import type { RemoteLinkState } from "./remote-link-state.js";
+import type { LinkStatus } from "./sync-status.js";
 import type { WasmSchema } from "../drivers/types.js";
 import type { JazzClient } from "./client.js";
 import type { DbConfig } from "./db.js";
@@ -87,7 +88,7 @@ export interface BrowserWorkerConnectionContext<RuntimeConfig extends DbConfig =
   /** The worker namespace's explicit offline state changed. */
   onExplicitOfflineChange?: (offline: boolean) => void;
   /** The worker's live upstream server reachability changed. */
-  onRemoteLinkChange?: (state: RemoteLinkState) => void;
+  onRemoteLinkChange?: (state: RemoteLinkState, link?: LinkStatus) => void;
   onFailure: (error: unknown) => void;
   onStorageReset?: (resetId: number) => void;
   onStorageInvalidated?: () => void;
@@ -102,7 +103,7 @@ export interface BrowserFollowerConnectionContext<RuntimeConfig extends DbConfig
   /** The worker namespace's explicit offline state changed. */
   onExplicitOfflineChange?: (offline: boolean) => void;
   /** The worker's live upstream server reachability changed. */
-  onRemoteLinkChange?: (state: RemoteLinkState) => void;
+  onRemoteLinkChange?: (state: RemoteLinkState, link?: LinkStatus) => void;
   onFailure: (error: unknown) => void;
   onStorageReset?: (resetId: number) => void;
   onStorageInvalidated?: () => void;

@@ -24,6 +24,8 @@ export {
   createAccountManager,
   type AccountManagerConfig,
 } from "../accounts/create-account-manager.js";
+export { useSyncStatus } from "./use-sync-status.js";
+export type { LinkStatus, SyncStatus } from "../runtime/sync-status.js";
 export * from "../accounts/exports.js";
 
 export { createAccountState } from "./create-account-state.js";
