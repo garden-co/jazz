@@ -219,10 +219,13 @@ fn collect_relation_union_leaf_projections(
             let label = label.ok_or_else(|| {
                 relation_unification_error("UNION leaf projection has no arm label")
             })?;
-            if projections.insert(
-                label.to_owned(),
-                inherited.unwrap_or_else(|| columns.clone()),
-            ).is_some() {
+            if projections
+                .insert(
+                    label.to_owned(),
+                    inherited.unwrap_or_else(|| columns.clone()),
+                )
+                .is_some()
+            {
                 return Err(relation_unification_error(
                     "UNION leaf projection labels must be unique",
                 ));
@@ -232,15 +235,16 @@ fn collect_relation_union_leaf_projections(
         | RelationExpr::Join { .. }
         | RelationExpr::Gather { .. }
         | RelationExpr::Distinct { .. } => {
-            let label = label.ok_or_else(|| {
-                relation_unification_error("UNION leaf has no output projection")
-            })?;
+            let label = label
+                .ok_or_else(|| relation_unification_error("UNION leaf has no output projection"))?;
             let columns = if let Some(columns) = inherited {
                 columns
             } else {
                 relation_projection_from_expr(expr)?
                     .map(|(_, columns)| columns)
-                    .ok_or_else(|| relation_unification_error("UNION leaf has no output projection"))?
+                    .ok_or_else(|| {
+                        relation_unification_error("UNION leaf has no output projection")
+                    })?
             };
             if projections.insert(label.to_owned(), columns).is_some() {
                 return Err(relation_unification_error(
@@ -502,12 +506,13 @@ fn relation_gather_to_query(expr: &RelationExpr) -> Result<Option<Query>, QueryE
         return Ok(None);
     };
 
-    let shape = recognize_relation_gather(seed, step, frontier_key, bound, dedupe_key)
-        .map_err(|message| {
+    let shape = recognize_relation_gather(seed, step, frontier_key, bound, dedupe_key).map_err(
+        |message| {
             relation_unification_error(
                 message.replace("not supported yet", "not supported in queries yet"),
             )
-        })?;
+        },
+    )?;
     // A query returns rows of the table the walk visits: the seed hop's
     // target, or else the seed table itself.
     let (seed_table, seed_team_column) = match shape.seed.hop_table {
@@ -648,10 +653,10 @@ fn peel_relation_output_steps(
         }
     }
 
-    let (offset, limit) = output_steps.into_iter().rev().fold(
-        (0, None),
-        fold_relation_output_step,
-    );
+    let (offset, limit) = output_steps
+        .into_iter()
+        .rev()
+        .fold((0, None), fold_relation_output_step);
     Ok((current, filters, order_by, offset, limit))
 }
 
@@ -745,6 +750,7 @@ fn build_relation_path_join(
         .cloned()
         .ok_or_else(|| relation_unification_error("relation query join scope is unknown"))?;
     let mut join = JoinVia {
+        source_mode: CandidateSourceMode::AcceptedOnly,
         table: join_table,
         on_column: right_column,
         target: JoinTarget::Column,
@@ -937,13 +943,18 @@ fn relation_predicate_to_query_predicate(
 fn relation_query_conjuncts(
     predicate: &RelationPredicate,
 ) -> Result<Vec<RelationConjunct<'_>>, QueryError> {
-    lower_relation_conjuncts(predicate, &mut |value| match relation_value_to_operand(value) {
-        Ok(operand) => Ok(RelationOperand::Operand(operand)),
-        Err(QueryError::UnsupportedRelationQuery(message)) => Err(message),
-        Err(error) => Err(error.to_string()),
-    })
+    lower_relation_conjuncts(
+        predicate,
+        &mut |value| match relation_value_to_operand(value) {
+            Ok(operand) => Ok(RelationOperand::Operand(operand)),
+            Err(QueryError::UnsupportedRelationQuery(message)) => Err(message),
+            Err(error) => Err(error.to_string()),
+        },
+    )
     .map_err(|message| {
-        relation_unification_error(message.replace("not supported yet", "not supported in queries yet"))
+        relation_unification_error(
+            message.replace("not supported yet", "not supported in queries yet"),
+        )
     })
 }
 
@@ -957,11 +968,9 @@ fn relation_conjunction(mut predicates: Vec<Predicate>) -> Option<Predicate> {
 
 fn relation_value_to_operand(value: &RelationValueRef) -> Result<Operand, QueryError> {
     match value {
-        RelationValueRef::Literal(value) => {
-            Ok(Operand::Literal(
-                relation_literal_to_record_value(value).map_err(relation_unification_error)?,
-            ))
-        }
+        RelationValueRef::Literal(value) => Ok(Operand::Literal(
+            relation_literal_to_record_value(value).map_err(relation_unification_error)?,
+        )),
         RelationValueRef::Param(name) => Ok(Operand::Param(name.clone())),
         RelationValueRef::SessionRef(path) => {
             if let Some(name) = crate::query::author_claim_path_key(path) {
@@ -984,4 +993,3 @@ fn relation_value_to_operand(value: &RelationValueRef) -> Result<Operand, QueryE
         )),
     }
 }
-

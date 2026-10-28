@@ -168,6 +168,15 @@ pub enum PolicyExpr {
 
     /// Always false - denies all rows.
     False,
+
+    /// Include independently authorized root inserts from the same exclusive commit.
+    ///
+    /// Version 1 is restricted to positive, scalar correlated INSERT checks.
+    /// Ordinary EXISTS and nested unmarked sources remain accepted-only.
+    ExistsIncludingCreated {
+        table: String,
+        condition: Box<PolicyExpr>,
+    },
 }
 
 /// Serde adapter for an internally tagged newtype variant: its payload is
@@ -210,6 +219,15 @@ one_field_payload!(exprs_payload, exprs: Vec<PolicyExpr>);
 one_field_payload!(expr_payload, expr: Box<PolicyExpr>);
 
 impl PolicyExpr {
+    /// Require a correlated source row, including independently authorized inserts
+    /// from the same exclusive commit. Only supported in positive INSERT checks.
+    pub fn exists_including_created(table: impl Into<String>, condition: PolicyExpr) -> Self {
+        Self::ExistsIncludingCreated {
+            table: table.into(),
+            condition: Box::new(condition),
+        }
+    }
+
     /// Create a comparison expression: column = @session.path
     pub fn eq_session(column: impl Into<String>, session_path: Vec<String>) -> Self {
         PolicyExpr::Cmp {
@@ -533,7 +551,7 @@ mod tests {
                 "unknown variant `Nope`, expected one of `Cmp`, `SessionCmp`, `IsNull`, \
                  `SessionIsNull`, `IsNotNull`, `SessionIsNotNull`, `Contains`, \
                  `SessionContains`, `In`, `InList`, `SessionInList`, `Exists`, `ExistsRel`, \
-                 `Inherits`, `InheritsReferencing`, `And`, `Or`, `Not`, `True`, `False` at line \
+                 `Inherits`, `InheritsReferencing`, `And`, `Or`, `Not`, `True`, `False`, `ExistsIncludingCreated` at line \
                  1 column 14",
             ),
         ] {

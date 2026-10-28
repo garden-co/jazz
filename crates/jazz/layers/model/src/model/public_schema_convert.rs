@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use crate::query::{
-    InheritsOperation, JoinCorrelation, JoinSourceLookup, JoinTarget, JoinVia, Operand,
-    PolicyBranch, Predicate, Query,
+    CandidateSourceMode, InheritsOperation, JoinCorrelation, JoinSourceLookup, JoinTarget, JoinVia,
+    Operand, PolicyBranch, Predicate, Query,
 };
 use crate::schema::{
     ColumnSchema as CoreColumnSchema, JazzSchema, MergeStrategy, RuntimeSchema,
@@ -657,6 +657,52 @@ fn convert_table(
         }
     }
     converted.merge_strategies = merge_strategies;
+    for (path, expression, allow_created) in [
+        (
+            "policies.select.using",
+            table.policies.select.using.as_ref(),
+            false,
+        ),
+        (
+            "policies.select.with_check",
+            table.policies.select.with_check.as_ref(),
+            false,
+        ),
+        (
+            "policies.insert.using",
+            table.policies.insert.using.as_ref(),
+            false,
+        ),
+        (
+            "policies.insert.with_check",
+            table.policies.insert.with_check.as_ref(),
+            true,
+        ),
+        (
+            "policies.update.using",
+            table.policies.update.using.as_ref(),
+            false,
+        ),
+        (
+            "policies.update.with_check",
+            table.policies.update.with_check.as_ref(),
+            false,
+        ),
+        (
+            "policies.delete.using",
+            table.policies.delete.using.as_ref(),
+            false,
+        ),
+        (
+            "policies.delete.with_check",
+            table.policies.delete.with_check.as_ref(),
+            false,
+        ),
+    ] {
+        if let Some(expression) = expression {
+            validate_created_policy_context(name, path, expression, allow_created)?;
+        }
+    }
     converted.read_policy = convert_optional_policy(
         schema,
         table,
@@ -1004,6 +1050,36 @@ fn convert_merge_strategy(
     }
 }
 
+fn validate_created_policy_context(
+    table: &TableName,
+    path: &str,
+    expr: &PolicyExpr,
+    allow_created: bool,
+) -> Result<(), SchemaConversionError> {
+    match expr {
+        PolicyExpr::ExistsIncludingCreated { condition, .. } => {
+            if !allow_created {
+                return Err(err(
+                    format!("$.{}.{path}", table.as_str()),
+                    "ExistsIncludingCreated is supported only in positive INSERT checks, not NOT or inheritance",
+                ));
+            }
+            validate_created_policy_context(table, path, condition, allow_created)
+        }
+        PolicyExpr::Exists { condition, .. } => {
+            validate_created_policy_context(table, path, condition, allow_created)
+        }
+        PolicyExpr::And(exprs) | PolicyExpr::Or(exprs) => {
+            for expr in exprs {
+                validate_created_policy_context(table, path, expr, allow_created)?;
+            }
+            Ok(())
+        }
+        PolicyExpr::Not(expr) => validate_created_policy_context(table, path, expr, false),
+        _ => Ok(()),
+    }
+}
+
 fn convert_optional_policy(
     schema: &Schema,
     table_schema: &TableSchema,
@@ -1043,6 +1119,7 @@ fn convert_expanded_inherited_policy(
     operation: Operation,
     expansion_path: &mut Vec<(String, Operation)>,
 ) -> Result<Query, SchemaConversionError> {
+    validate_created_policy_context(table, path, expr, false)?;
     let key = (table.as_str().to_owned(), operation);
     if let Some(start) = expansion_path.iter().position(|active| active == &key) {
         let cycle = expansion_path[start..]
@@ -1106,6 +1183,7 @@ fn policy_requires_branch(expr: &PolicyExpr) -> bool {
         PolicyExpr::Inherits { max_depth: _, .. }
         | PolicyExpr::InheritsReferencing { .. }
         | PolicyExpr::Exists { .. }
+        | PolicyExpr::ExistsIncludingCreated { .. }
         | PolicyExpr::ExistsRel { .. } => true,
         PolicyExpr::And(exprs) | PolicyExpr::Or(exprs) => exprs.iter().any(policy_requires_branch),
         PolicyExpr::Not(expr) => policy_requires_branch(expr),
@@ -1203,6 +1281,12 @@ fn append_policy_clause(
             table: exists_table,
             condition,
         } => append_exists_policy_clause(schema, table, path, query, exists_table, condition),
+        PolicyExpr::ExistsIncludingCreated {
+            table: exists_table,
+            condition,
+        } => {
+            append_created_exists_policy_clause(schema, table, path, query, exists_table, condition)
+        }
         PolicyExpr::ExistsRel { rel } => {
             append_exists_rel_policy_clause(schema, table, path, query, rel)
         }
@@ -1424,6 +1508,28 @@ fn append_inherited_referencing_policy_branches(
     Ok(query)
 }
 
+fn append_created_exists_policy_clause(
+    schema: &Schema,
+    table: &TableName,
+    path: &str,
+    query: Query,
+    exists_table: &str,
+    condition: &PolicyExpr,
+) -> Result<Query, SchemaConversionError> {
+    let source_index = query.joins.len();
+    let mut query =
+        append_exists_policy_clause(schema, table, path, query, exists_table, condition)?;
+    let source = &mut query.joins[source_index];
+    if source.target == JoinTarget::Uncorrelated {
+        return Err(err(
+            format!("$.{}.{path}", table.as_str()),
+            "ExistsIncludingCreated requires a scalar declared-reference correlation",
+        ));
+    }
+    source.source_mode = CandidateSourceMode::IncludeAuthorizedCreatedV1;
+    Ok(query)
+}
+
 fn append_exists_policy_clause(
     schema: &Schema,
     table: &TableName,
@@ -1462,7 +1568,21 @@ fn append_exists_policy_clause(
             PolicyExpr::Exists {
                 table: nested_table,
                 condition: nested_condition,
-            } => nested_exists.push((index, nested_table.as_str(), nested_condition.as_ref())),
+            } => nested_exists.push((
+                index,
+                nested_table.as_str(),
+                nested_condition.as_ref(),
+                false,
+            )),
+            PolicyExpr::ExistsIncludingCreated {
+                table: nested_table,
+                condition: nested_condition,
+            } => nested_exists.push((
+                index,
+                nested_table.as_str(),
+                nested_condition.as_ref(),
+                true,
+            )),
             PolicyExpr::ExistsRel { rel } => nested_exists_rel.push((index, rel)),
             other => filters.push(convert_policy_predicate(
                 &exists_table_name,
@@ -1481,9 +1601,34 @@ fn append_exists_policy_clause(
         ));
         query
     } else {
+        // A row-id equality is not necessarily a declared reference (for
+        // example a polymorphic identifier). Prefer a correlation
+        // whose two endpoints declare the same entity; retain every remaining
+        // scalar equality as a checked correlation on that bounded lookup.
+        let reference = |name: &TableName, column: &str| {
+            if column == "id" {
+                return Some(*name);
+            }
+            schema
+                .get(name)?
+                .columns
+                .columns
+                .iter()
+                .find(|candidate| candidate.name.as_str() == column)?
+                .references
+        };
         let primary_index = outer_correlations
             .iter()
-            .position(|correlation| correlation.join_column == "id")
+            .position(|correlation| {
+                let source = reference(table, &correlation.source_column);
+                source.is_some()
+                    && source == reference(&exists_table_name, &correlation.join_column)
+            })
+            .or_else(|| {
+                outer_correlations
+                    .iter()
+                    .position(|correlation| correlation.join_column == "id")
+            })
             .unwrap_or(0);
         let primary = outer_correlations.remove(primary_index);
         let join_column = primary.join_column;
@@ -1517,8 +1662,13 @@ fn append_exists_policy_clause(
     // FK edge remains independently validated by the core query contract.
     let query = nested_exists.into_iter().try_fold(
         query,
-        |query, (index, nested_table, nested_condition)| {
-            append_exists_policy_clause(
+        |query, (index, nested_table, nested_condition, include_created)| {
+            let append = if include_created {
+                append_created_exists_policy_clause
+            } else {
+                append_exists_policy_clause
+            };
+            append(
                 schema,
                 table,
                 &format!("{path}.Exists[{index}]"),
@@ -1735,6 +1885,7 @@ fn uncorrelated_exists_join(
     nested_joins: Vec<JoinVia>,
 ) -> JoinVia {
     JoinVia {
+        source_mode: CandidateSourceMode::AcceptedOnly,
         table,
         on_column: String::new(),
         target: JoinTarget::Uncorrelated,
@@ -1780,6 +1931,7 @@ fn root_exists_rel_at_correlation(
             )
         })?;
         let reverse = JoinVia {
+            source_mode: CandidateSourceMode::AcceptedOnly,
             table: previous_table,
             target: if source_column == "id" {
                 JoinTarget::RowId
@@ -1995,6 +2147,7 @@ fn append_exists_rel_policy_clause(
             }
         }
         query.joins.push(JoinVia {
+            source_mode: CandidateSourceMode::AcceptedOnly,
             table: lowered_table.clone(),
             on_column: correlation_column.clone(),
             target: if correlation_column == "id" {
@@ -2316,6 +2469,7 @@ fn lower_exists_rel(
                 )
             })?;
             let join = JoinVia {
+                source_mode: CandidateSourceMode::AcceptedOnly,
                 table: right_table,
                 on_column: on.right.column.clone(),
                 target: if on.right.column == "id" {
@@ -2754,6 +2908,7 @@ fn inherited_parent_branch_to_child_query(
     for join in branch.joins {
         let JoinVia {
             table: join_table,
+            source_mode,
             on_column,
             target,
             source_column,
@@ -2775,6 +2930,11 @@ fn inherited_parent_branch_to_child_query(
                     .joins
                     .push(uncorrelated_exists_join(join_table, filters, nested_joins));
                 query
+                    .joins
+                    .last_mut()
+                    .expect("just appended join")
+                    .source_mode = source_mode;
+                query
             }
             JoinTarget::Column => {
                 if let Some(source_column) = source_column {
@@ -2786,6 +2946,7 @@ fn inherited_parent_branch_to_child_query(
                     let mut query = query;
                     query.joins.push(JoinVia {
                         table: join_table,
+                        source_mode,
                         on_column,
                         target: JoinTarget::Column,
                         source_column: Some(source_lookup.value_column.clone()),
@@ -2803,6 +2964,7 @@ fn inherited_parent_branch_to_child_query(
                         filters,
                     );
                     if let Some(last) = query.joins.last_mut() {
+                        last.source_mode = source_mode;
                         last.correlated_filters = correlated_filters;
                         last.nested_joins = nested_joins;
                     }
@@ -2819,6 +2981,7 @@ fn inherited_parent_branch_to_child_query(
                     let mut query = query;
                     query.joins.push(JoinVia {
                         table: join_table,
+                        source_mode,
                         on_column,
                         target: JoinTarget::RowId,
                         source_column: Some(source_lookup.value_column.clone()),
@@ -2838,6 +3001,7 @@ fn inherited_parent_branch_to_child_query(
                     let mut query =
                         query.join_via_row_id(join_table, via_column.to_owned(), filters);
                     if let Some(last) = query.joins.last_mut() {
+                        last.source_mode = source_mode;
                         last.correlated_filters = correlated_filters;
                         last.nested_joins = nested_joins;
                     }

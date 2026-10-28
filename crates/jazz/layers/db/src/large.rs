@@ -1889,3 +1889,57 @@ mod tests {
         assert_eq!(count(), kept.staged_chunks.len() as i64);
     }
 }
+
+/// Answer a permission comparison from only its bounded dependency cells.
+pub(crate) fn answer_cells(
+    conn: &Connection,
+    chunks: &Chunks,
+    prep: &crate::compile::Prep,
+    cells: &BTreeSet<Vec<u8>>,
+) -> Result<bool, Error> {
+    use crate::compile::{MatchTest, Prep};
+    if matches!(prep, Prep::Rank { .. }) {
+        return Err(crate::values::unsupported(
+            "rank preparations in candidate-created permission proofs",
+        ));
+    }
+    let mut insert = conn
+        .prepare_cached("INSERT OR REPLACE INTO _jazz_lv_scratch(slot,cell,v) VALUES(?1,?2,?3)")
+        .map_err(storage)?;
+    for cell in cells {
+        if cell.first() != Some(&CHUNKED) {
+            continue;
+        }
+        let value = match prep {
+            Prep::Class { .. } => {
+                Some(blake3::hash(&chunks.materialize(cell)?).as_bytes().to_vec())
+            }
+            Prep::Match { test, .. } => {
+                let pass = match test {
+                    MatchTest::Contains(needle) => chunks.contains(cell, needle)?,
+                    MatchTest::Cmp(op, literal) => {
+                        let ordering = shortcut(cell, literal, op)?
+                            .map_or_else(|| chunks.compare(cell, literal), Ok)?;
+                        match op {
+                            crate::tools::CmpOp::Eq => ordering.is_eq(),
+                            crate::tools::CmpOp::Ne => ordering.is_ne(),
+                            crate::tools::CmpOp::Lt => ordering.is_lt(),
+                            crate::tools::CmpOp::Le => ordering.is_le(),
+                            crate::tools::CmpOp::Gt => ordering.is_gt(),
+                            crate::tools::CmpOp::Ge => ordering.is_ge(),
+                        }
+                    }
+                };
+                if !pass {
+                    continue;
+                }
+                None
+            }
+            Prep::Rank { .. } => unreachable!("rank preparation handled above"),
+        };
+        insert
+            .execute(rusqlite::params![prep.slot(), cell, value])
+            .map_err(storage)?;
+    }
+    Ok(false)
+}

@@ -196,3 +196,12 @@ mod storage_owner_retirement;
 mod transaction_read_prefix;
 #[path = "../write_receipt_owner.rs"]
 mod write_receipt_owner;
+
+#[path = "../sqlite_candidates.rs"]
+mod sqlite_candidates;
+
+#[path = "../sqlite_candidate_relations.rs"]
+mod sqlite_candidate_relations;
+
+#[path = "../sqlite_candidate_uuid_correlations.rs"]
+mod sqlite_candidate_uuid_correlations;
