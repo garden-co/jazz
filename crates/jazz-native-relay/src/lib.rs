@@ -513,6 +513,10 @@ pub enum ForegroundDbCommandRequest {
     SetSlowQueryThresholdMs {
         ms: u64,
     },
+    /// How many of the foreground's commits still wait for the server's
+    /// verdict (append-only: an older native build answers it with an error
+    /// and the host reports none).
+    PendingUploadCount,
 }
 
 /// One refusal of a scope's credential by its upstream. Every refusal gets a
@@ -709,6 +713,10 @@ pub enum ForegroundDbCommandResponse {
     },
     /// Answer to [`ForegroundDbCommandRequest::SetSlowQueryThresholdMs`].
     SlowQueryThresholdSet,
+    /// Answer to [`ForegroundDbCommandRequest::PendingUploadCount`].
+    PendingUploadCount {
+        count: u64,
+    },
 }
 
 /// One already-materialized subscription event.  The byte payload deliberately
