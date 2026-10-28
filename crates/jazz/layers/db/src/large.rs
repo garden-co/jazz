@@ -120,7 +120,6 @@ CREATE INDEX IF NOT EXISTS _jazz_lv_upload_node_hash ON _jazz_lv_upload_node (ha
 CREATE TABLE IF NOT EXISTS _jazz_lv_reclaim (root BLOB PRIMARY KEY) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS _jazz_lv_via (root BLOB PRIMARY KEY, tbl TEXT NOT NULL, \
  id BLOB NOT NULL, key BLOB NOT NULL, seq INTEGER NOT NULL) WITHOUT ROWID;
-DROP TABLE IF EXISTS _jazz_lv_scratch;
 CREATE TRIGGER IF NOT EXISTS _jazz_lv_root_unreferenced AFTER UPDATE OF refs ON _jazz_lv_root \
  WHEN NEW.refs = 0 BEGIN \
  INSERT INTO _jazz_lv_reclaim (root) SELECT NEW.root \

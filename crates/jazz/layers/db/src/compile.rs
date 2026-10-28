@@ -225,7 +225,7 @@ impl Prep {
 
 /// SQL: whether the chunked cell `cell` is among a match prep's answers
 /// (a JSON array of cells).
-fn scratch_has(slot: i64, cell: &str) -> String {
+fn prep_has(slot: i64, cell: &str) -> String {
     format!("({cell} IN (SELECT value FROM json_each(?{slot})))")
 }
 
@@ -243,19 +243,19 @@ fn answer_of(slot: i64, cell: &str, value: &str) -> String {
 }
 
 /// SQL: a class prep's content id for the chunked cell `cell`.
-fn scratch_class(slot: i64, cell: &str) -> String {
+fn prep_class(slot: i64, cell: &str) -> String {
     answer_of(slot, cell, "unhex(value)")
 }
 
 /// SQL: a rank prep's rank for the chunked cell `cell`, NULL when no other
 /// value shares its sort key.
-fn scratch_rank(slot: i64, cell: &str) -> String {
+fn prep_rank(slot: i64, cell: &str) -> String {
     answer_of(slot, cell, "json_extract(value, '$[2]')")
 }
 
 /// SQL: a rank prep's sort key for the chunked cell `cell`: TEXT or BLOB,
 /// as the key column would hold it.
-fn scratch_key(slot: i64, cell: &str) -> String {
+fn prep_key(slot: i64, cell: &str) -> String {
     answer_of(
         slot,
         cell,
@@ -656,7 +656,7 @@ impl<'a> Ctx<'a> {
                         let by = format!(
                             "(CASE WHEN {} THEN {} ELSE {sql} END)",
                             crate::large::chunked_sql(&sql),
-                            scratch_class(slot, &sql)
+                            prep_class(slot, &sql)
                         );
                         let (key, _) = self.order_key(&large);
                         (sql.clone(), by, key)
@@ -3222,9 +3222,9 @@ impl Ctx<'_> {
                     Some(key) => {
                         let prefix = crate::large::sort_prefix(column.kind, logical);
                         let k = self.bind(prefix);
-                        format!("({key} IS {k} AND {chunked} AND {})", scratch_has(slot, c))
+                        format!("({key} IS {k} AND {chunked} AND {})", prep_has(slot, c))
                     }
-                    None => format!("({chunked} AND {})", scratch_has(slot, c)),
+                    None => format!("({chunked} AND {})", prep_has(slot, c)),
                 })
             }
             // A chunked value's key is a prefix of it at least as long as
@@ -3241,7 +3241,7 @@ impl Ctx<'_> {
                 let slot = self.prep_match(column, MatchTest::Cmp(op.clone(), logical.to_vec()));
                 format!(
                     "(CASE WHEN {chunked} THEN {} ELSE {} END)",
-                    scratch_has(slot, c),
+                    prep_has(slot, c),
                     cmp_plain(op, c, p)
                 )
             }
@@ -3269,10 +3269,10 @@ impl Ctx<'_> {
             None => format!(
                 "(CASE WHEN {} THEN {} ELSE {c} END)",
                 crate::large::chunked_sql(c),
-                scratch_key(slot, c)
+                prep_key(slot, c)
             ),
         };
-        (sql, scratch_rank(slot, c))
+        (sql, prep_rank(slot, c))
     }
 
     fn prep_match(&mut self, column: &LargeColumn, test: MatchTest) -> i64 {
@@ -3320,8 +3320,8 @@ impl Ctx<'_> {
             "(CASE WHEN COALESCE({} OR {}, 0) THEN {} IS {} ELSE {} IS {} END)",
             crate::large::chunked_sql(&a.cell),
             crate::large::chunked_sql(&b.cell),
-            scratch_class(slot, &a.cell),
-            scratch_class(slot, &b.cell),
+            prep_class(slot, &a.cell),
+            prep_class(slot, &b.cell),
             a.cell,
             b.cell
         );
@@ -3432,7 +3432,7 @@ impl Ctx<'_> {
         format!(
             "(CASE WHEN {} THEN {} ELSE {} END)",
             crate::large::chunked_sql(l),
-            scratch_has(slot, l),
+            prep_has(slot, l),
             instr(l, r)
         )
     }
