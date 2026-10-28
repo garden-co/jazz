@@ -2194,14 +2194,23 @@ fn under(
 }
 
 /// What a pull is answered with: the nodes found, the wanted nodes not
-/// under the cited tree, and the wanted nodes under it this store lacks.
-pub(crate) type Pulled = (Vec<([u8; 32], Vec<u8>)>, Vec<[u8; 32]>, Vec<[u8; 32]>);
+/// under the cited tree, the wanted nodes under it this store lacks, and
+/// the wanted nodes left for a later answer once `budget` ran out.
+pub(crate) type Pulled = (
+    Vec<([u8; 32], Vec<u8>)>,
+    Vec<[u8; 32]>,
+    Vec<[u8; 32]>,
+    Vec<[u8; 32]>,
+);
 
 /// Answer a pull of `root`'s tree (a version the reader may read): the
 /// nodes of `wanted` under it and, for `span` (base-tree bytes), every
 /// node on the paths covering those bytes beneath a wanted one, parents
-/// first, until `budget` bytes (see [`Pulled`]). A node the chunk store answers only asynchronously
-/// fails the pull as missing; it is answered again once fetched.
+/// first, until `budget` bytes (see [`Pulled`]). Nodes in `sent` (already
+/// in this answer) are not sent again; at least one wanted node is
+/// answered whatever the budget, so a pull always progresses. A node the
+/// chunk store answers only asynchronously fails the pull as missing; it
+/// is answered again once fetched.
 pub(crate) fn pulled(
     conn: &Connection,
     chunks: &Chunks,
@@ -2209,10 +2218,10 @@ pub(crate) fn pulled(
     wanted: &[[u8; 32]],
     span: Option<std::ops::Range<u64>>,
     budget: usize,
+    sent: &mut std::collections::HashSet<[u8; 32]>,
 ) -> Result<Pulled, Error> {
     let wanted_set: BTreeSet<[u8; 32]> = wanted.iter().copied().collect();
     let mut out = Vec::new();
-    let mut sent = BTreeSet::new();
     let mut size = 0;
     if let Some(span) = span.filter(|span| !span.is_empty()) {
         // Walk down through the bytes the read needs, sending what lies
@@ -2260,8 +2269,13 @@ pub(crate) fn pulled(
     let mut down = None;
     let mut foreign = Vec::new();
     let mut absent = Vec::new();
+    let mut rest = Vec::new();
     for hash in wanted {
         if sent.contains(hash) {
+            continue;
+        }
+        if size >= budget && !out.is_empty() {
+            rest.push(*hash);
             continue;
         }
         if !under(conn, root, hash, &mut down)? {
@@ -2271,12 +2285,13 @@ pub(crate) fn pulled(
         match stored_bytes(conn, chunks, &ChunkRequest { object_hash: *hash })? {
             Some(bytes) => {
                 sent.insert(*hash);
+                size += bytes.len();
                 out.push((*hash, bytes));
             }
             None => absent.push(*hash),
         }
     }
-    Ok((out, foreign, absent))
+    Ok((out, foreign, absent, rest))
 }
 
 /// Whether a parent this store holds names `hash`: a node a range pull

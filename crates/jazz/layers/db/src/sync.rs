@@ -684,6 +684,9 @@ const CHUNK_BATCH_BYTES: usize = jazz_protocol::protocol_limits::MAX_WIRE_FRAME_
 /// The most node bytes one range pull is answered with: a read past them
 /// pulls again for the rest.
 const PULL_BYTES: usize = 4 << 20;
+/// The most node bytes one `ChunkRequests` is answered with, across all
+/// its pulls: the rest is answered once that has been sent.
+const ANSWER_PULL_BYTES: usize = 4 * PULL_BYTES;
 const _: () = assert!(
     CHUNK_BATCH_BYTES + jazz_types::large_values::MAX_ENCODED_NODE_BYTES + 64 * 1024
         <= jazz_protocol::protocol_limits::MAX_WIRE_FRAME_BYTES
@@ -1423,6 +1426,9 @@ pub(crate) struct Session {
     /// A relay's pulls of nodes it is still fetching from its upstream:
     /// answered from its store once they arrive (or are unavailable).
     parked_pulls: Vec<WirePull>,
+    /// Pulls past an answer's byte budget: answered once the session's
+    /// outbox has drained (SPEC 19.8).
+    deferred_pulls: Vec<WirePull>,
     /// The client was told its declared version is not admitted.
     told_unadmitted: bool,
     /// On a relay, the upstream subscription each of the client's
@@ -1471,6 +1477,7 @@ impl Session {
             version: None,
             fetched_upstream: BTreeSet::new(),
             parked_pulls: Vec::new(),
+            deferred_pulls: Vec::new(),
             told_unadmitted: false,
             schema: None,
             relayed: BTreeMap::new(),
@@ -3248,17 +3255,19 @@ impl Inner {
     /// Record the version each chunked value of a received image
     /// arrived in (`table` as the wire names it): pulls of its nodes cite
     /// it.
-    fn record_vias(&self, table: &str, image: &Image) -> Result<(), Error> {
+    /// Whether the image had any.
+    fn record_vias(&self, table: &str, image: &Image) -> Result<bool, Error> {
         let via = crate::large::Via {
             table: table.to_owned(),
             id: image.id,
             key: image.key.clone(),
             seq: image.seq,
         };
-        for root in self.large_roots(&image.table, image)? {
-            crate::large::record_via(&self.conn, &root, &via)?;
+        let roots = self.large_roots(&image.table, image)?;
+        for root in &roots {
+            crate::large::record_via(&self.conn, root, &via)?;
         }
-        Ok(())
+        Ok(!roots.is_empty())
     }
 
     /// The roots of an image's chunked values.
@@ -3820,6 +3829,8 @@ impl Db {
         let version = *inner.owner_version.as_bytes();
         let client = inner.client.as_mut().expect("client");
         client.outbox.insert(0, SyncMessage::Schema { version });
+        // What the old session could not answer, the new one may.
+        client.unavailable.clear();
         // Reading the held rows can fail, and connecting cannot: the send
         // that reads them reports the error, and the next one tries again.
         client.hold_owed = true;
@@ -4803,7 +4814,11 @@ impl Db {
                                 inner.ask_whole(named);
                                 continue;
                             }
-                            inner.record_vias(&named.0, &image)?;
+                            if inner.record_vias(&named.0, &image)? {
+                                // A node no version held may be held by
+                                // this one: missing answers are transient.
+                                inner.client.as_mut().expect("client").unavailable.clear();
+                            }
                             let shadowed = inner.receive_image(image)?;
                             rebase |= shadowed;
                             shadow_changed |= shadowed;
@@ -5700,6 +5715,15 @@ impl Db {
         }
         if let Some(pulls) = self.inner.borrow_mut().parked_pulls_ready(index)? {
             inbound.push_front(SyncMessage::ChunkRequests { pulls });
+        }
+        // Pulls an earlier answer deferred, once what it sent has drained.
+        {
+            let mut inner = self.inner.borrow_mut();
+            let session = &mut inner.sessions[index];
+            if session.outbox.is_empty() && !session.deferred_pulls.is_empty() {
+                let pulls = std::mem::take(&mut session.deferred_pulls);
+                inbound.push_front(SyncMessage::ChunkRequests { pulls });
+            }
         }
         // Writes held back by the ingress limit, and what the session sent
         // after them, in order. A read is never answered ahead of a commit
@@ -7228,11 +7252,12 @@ impl Db {
                 }
             }
             SyncMessage::ChunkRequests { pulls } => {
-                let (replies, parked) = db.answer_pulls(policy, pulls)?;
+                let (replies, parked, deferred) = db.answer_pulls(policy, pulls)?;
                 let mut inner = self.inner.borrow_mut();
                 let session = &mut inner.sessions[index];
                 session.outbox.extend(replies);
                 session.parked_pulls.extend(parked);
+                session.deferred_pulls.extend(deferred);
             }
             SyncMessage::PushChunks { nodes } => {
                 let inner = self.inner.borrow();
@@ -7336,19 +7361,30 @@ impl Db {
     /// a hash never reads another row's content. A node only in an
     /// asynchronous chunk store fails the whole batch as missing before
     /// anything is sent: it is answered again once its nodes are fetched.
+    ///
+    /// One answer carries at most about [`ANSWER_PULL_BYTES`], each node
+    /// once: the pulls (and wanted nodes) past it come back deferred, to
+    /// be answered once the session's outbox has drained.
     fn answer_pulls(
         &self,
         identity: Option<AuthorSubject>,
         pulls: Vec<WirePull>,
-    ) -> Result<(Vec<SyncMessage>, Vec<WirePull>), Error> {
+    ) -> Result<(Vec<SyncMessage>, Vec<WirePull>, Vec<WirePull>), Error> {
         let inner = self.inner();
         let mut replies = Vec::new();
         let mut parked = Vec::new();
+        let mut deferred = Vec::new();
         let mut nodes = Vec::new();
         let mut missing = Vec::new();
         let mut size = 0;
+        let mut answered = 0;
+        let mut sent = std::collections::HashSet::new();
         let mut fetching = false;
         for pull in pulls {
+            if answered >= ANSWER_PULL_BYTES {
+                deferred.push(pull);
+                continue;
+            }
             let row = RowUuid::from_bytes(pull.id);
             let image = match inner.schema.stored_table(&pull.table) {
                 Ok(table)
@@ -7377,9 +7413,10 @@ impl Db {
                 &pull.root,
                 &pull.nodes,
                 span.clone(),
-                PULL_BYTES,
+                PULL_BYTES.min(ANSWER_PULL_BYTES - answered),
+                &mut sent,
             );
-            let (found, foreign, absent) = match found {
+            let (found, foreign, absent, rest) = match found {
                 Err(error) if crate::large::is_missing(&error) => {
                     fetching = true;
                     continue;
@@ -7387,6 +7424,13 @@ impl Db {
                 found => found?,
             };
             missing.extend(foreign.into_iter().map(|hash| WireChunkRef { hash }));
+            if !rest.is_empty() {
+                deferred.push(WirePull {
+                    nodes: rest,
+                    span: None,
+                    ..pull.clone()
+                });
+            }
             // A relay fetches what it lacks from its upstream, through the
             // version it received, and answers once it arrives; what its
             // upstream cannot answer is missing here too.
@@ -7413,6 +7457,7 @@ impl Db {
             }
             for (hash, bytes) in found {
                 size += bytes.len();
+                answered += bytes.len();
                 nodes.push(WireChunk { hash, bytes });
                 if size >= CHUNK_BATCH_BYTES {
                     replies.push(SyncMessage::Chunks {
@@ -7427,7 +7472,7 @@ impl Db {
             return Err(crate::large::missing());
         }
         replies.push(SyncMessage::Chunks { nodes, missing });
-        Ok((replies, parked))
+        Ok((replies, parked, deferred))
     }
 
     /// The roots of the chunked values of the settled versions a commit
