@@ -433,7 +433,10 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       // Keep this distinct from a fate rejection. The runtime records the
       // error before any later port teardown so active Global waits and
       // remote subscriptions wake, while Local durability stays valid.
-      this.runtime.reportRemoteServerTransportError(deserializeBrowserRelayError(message.error));
+      this.runtime.reportRemoteServerTransportError(
+        deserializeBrowserRelayError(message.error),
+        message.retrying === true,
+      );
       return;
     }
     if (message.type === "storage-reset") {
