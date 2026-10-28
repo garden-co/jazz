@@ -208,16 +208,17 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
       authorBytesForSession({ issuer: "https://jazz.invalid", user_id: "backend-open" }),
       1,
       true,
-      this.config.driver.type === "persistent"
-        ? {
-            persistentPath: this.config.driver.dataPath,
-            readAuthorizationHost: "trusted-serving",
-            backendMode: true,
-          }
-        : {
-            readAuthorizationHost: "trusted-serving",
-            backendMode: true,
-          },
+      {
+        ...(this.config.driver.type === "persistent"
+          ? { persistentPath: this.config.driver.dataPath }
+          : {}),
+        readAuthorizationHost: "trusted-serving",
+        backendMode: true,
+        slowQueryLog: {
+          appId: this.config.appId,
+          thresholdMs: this.config.slowQueryThresholdMs,
+        },
+      },
     );
 
     if (this.nodeClock?.initialHighWater !== undefined) {

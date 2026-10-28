@@ -209,6 +209,39 @@ pub struct OrderedUpdated {
     pub old_index: usize,
     pub new_index: usize,
     pub row: Option<Row>,
+    /// Per opted-in column, the splices from the value the previous delta
+    /// showed. A column without an entry has no splices to offer.
+    pub splices: Vec<(String, Vec<LargeValueDeltaSplice>)>,
+}
+
+/// One edit of a `Db::value_delta`: replace `delete` bytes at `at` with
+/// `insert`. Edits apply in order, each in the coordinates of the value the
+/// earlier ones made. Text edits also carry the same edit in UTF-16 code
+/// units; they are zero for bytes columns.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct LargeValueDeltaSplice {
+    /// Byte offset.
+    pub at: u64,
+    /// Bytes removed.
+    pub delete: u64,
+    /// Bytes inserted, UTF-8 for text.
+    pub insert: Vec<u8>,
+    /// UTF-16 offset (text only).
+    pub at_utf16: u64,
+    /// UTF-16 code units removed (text only).
+    pub delete_utf16: u64,
+}
+
+impl From<jazz_types::large_values::ReplaceEdit> for LargeValueDeltaSplice {
+    fn from(edit: jazz_types::large_values::ReplaceEdit) -> Self {
+        LargeValueDeltaSplice {
+            at: edit.offset,
+            delete: edit.delete_length,
+            insert: edit.insert_bytes,
+            at_utf16: edit.utf16_offset,
+            delete_utf16: edit.delete_utf16_length,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]

@@ -1,0 +1,5 @@
+---
+"jazz-tools": patch
+---
+
+A write's `wait({ tier: "global" })` and a serializable transaction's `wait()` now stay pending through network outages and reconnects instead of rejecting once the client reports the outage. They settle when the server acknowledges the write. They reject when the client stops trying to reach the server: a protocol error, closing the client, a disabled or revoked account, or any refused credential that nothing renews. An account's refresh cycle (and an owned local-first token) renews an expired credential, so its waits outlast the refresh; a client with a static token or a backend secret rejects them, and fails its remote subscriptions, as before. If an account's renewal never succeeds, its waits stay pending until a timeout or shutdown. Pass `timeoutMs` (up to 2147483647) to bound a wait: it then rejects with the new `WriteWaitTimeoutError` (`code: "timeout"`), and the write stays queued. React Native now treats a refused credential the same way as the web. Remote reads still fail during an outage.

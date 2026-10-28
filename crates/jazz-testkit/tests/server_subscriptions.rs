@@ -497,6 +497,88 @@ async fn public_subscription_stream_yields_delta_items_for_normal_changes() {
         .await;
 }
 
+async fn next_delta(stream: &mut jazz::tools::SubscriptionStream) -> jazz::tools::OrderedRowDelta {
+    match tokio::time::timeout(Duration::from_secs(10), stream.next())
+        .await
+        .expect("subscription item arrives")
+        .expect("subscription stays open")
+    {
+        SubscriptionStreamItem::Delta(delta) => delta,
+        SubscriptionStreamItem::Rejected { reason } => {
+            panic!("subscription was rejected: {reason:?}")
+        }
+    }
+}
+
+/// A `JazzClient` subscription that opts a column into splices gets, on each
+/// updated row, the splices from the value the previous delta showed.
+#[tokio::test(flavor = "current_thread")]
+async fn public_subscription_stream_carries_opted_in_splices() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = todo_schema();
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
+            let client = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema)
+                .with_user_id("00000000-0000-4000-8000-000000000102")
+                .ready_on("todos", Duration::from_secs(30))
+                .connect()
+                .await;
+            let (todo_id, _, transaction_id) = client
+                .insert("todos", row_input!("title" => "draft", "done" => false))
+                .expect("insert todo");
+            support::wait_for_global_txs(&client, &[transaction_id.unwrap()]).await;
+
+            let opts = jazz::db::ReadOpts::for_read_tier(jazz::tools::ReadTier::LocalOnly)
+                .with_splices(["title"]);
+            let mut stream = client
+                .subscribe_with_opts(jazz::query::Query::from("todos"), opts)
+                .await
+                .expect("subscription with splices opens");
+            loop {
+                if next_delta(&mut stream)
+                    .await
+                    .added
+                    .iter()
+                    .any(|row| row.id == todo_id)
+                {
+                    break;
+                }
+            }
+
+            let tx = client
+                .update(
+                    "todos",
+                    todo_id,
+                    vec![("title".into(), Value::Text("final".into()))],
+                )
+                .expect("update todo");
+            support::wait_for_global_txs(&client, &[tx.unwrap()]).await;
+            let updated = loop {
+                let delta = next_delta(&mut stream).await;
+                if let Some(row) = delta.updated.into_iter().find(|row| row.id == todo_id) {
+                    break row;
+                }
+            };
+            assert_eq!(updated.splices.len(), 1);
+            let (column, splices) = &updated.splices[0];
+            assert_eq!(column, "title");
+            let mut title = b"draft".to_vec();
+            for splice in splices {
+                let at = splice.at as usize;
+                title.splice(
+                    at..at + splice.delete as usize,
+                    splice.insert.iter().copied(),
+                );
+            }
+            assert_eq!(title, b"final");
+        })
+        .await;
+}
+
 fn policy_graph_policy_schema() -> Schema {
     SchemaBuilder::new()
         .table(

@@ -16,6 +16,11 @@ cd "$root"
 # value and renamed column, resends its uploads, accepts current writes, and
 # reopens again.
 dev/t --test integration --exact storage_corpus::pinned_sqlite_corpus_reopens_and_accepts_current_writes
+# The pinned server data dir (a catalogue-driven server's jazz.sqlite: rows,
+# runtime catalogue, and the server catalogue and account journal host tables)
+# serves its deployments, accounts and rows, accepts current writes, and
+# reopens again.
+dev/t -p jazz-server --exact server::data_dir_corpus::pinned_server_data_dir_reopens_and_accepts_current_writes
 # Damage is reported as a storage error, never read as rows.
 dev/t --test integration --exact storage_corpus::a_damaged_store_is_refused_rather_than_read
 # Another storage format, or a SQLite file Jazz did not write, is refused with

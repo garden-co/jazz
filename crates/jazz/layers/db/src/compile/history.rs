@@ -120,10 +120,12 @@ impl Ctx<'_> {
             projection,
             tables: self.tables,
             aggregate: false,
+            large_group: false,
             joined: 0,
             versioned: true,
             union: false,
             preps: self.preps,
+            partial: Vec::new(),
         })
     }
     /// The versions of the rows of `source` that `bound` names, as a SQL
@@ -234,6 +236,7 @@ pub(super) fn versions_table(table: &Table) -> Table {
             ty,
             default: None,
             json: false,
+            json_type: None,
             merge: Default::default(),
         });
     }
@@ -246,6 +249,7 @@ pub(super) fn versions_table(table: &Table) -> Table {
             ty: ValueType::Nullable(Box::new(ValueType::U64)),
             default: None,
             json: false,
+            json_type: None,
             merge: Default::default(),
         });
     }
