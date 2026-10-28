@@ -1549,8 +1549,16 @@ export class TypedTableQueryBuilder<
       : seedSource._clone<TInclude, TSelection, TRequired, TDeleted>();
     clone._conditions = [];
     clone._hops = [];
+    const seed = needsExplicitSeed ? seedSource._serializeRelation() : undefined;
+    if (seed) {
+      // These modifiers remain on the gathered result. Keep only windows
+      // nested inside the seed (such as individual UNION arms).
+      delete seed.orderBy;
+      delete seed.limit;
+      delete seed.offset;
+    }
     clone._gatherVal = {
-      ...(needsExplicitSeed ? { seed: seedSource._serializeRelation() } : {}),
+      ...(seed ? { seed } : {}),
       max_depth: maxDepth,
       step_table: stepBuilt.table,
       step_current_column: currentCondition.column,
