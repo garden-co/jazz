@@ -361,6 +361,8 @@ export interface BrowserWorkerInitOptions {
   selfSignedClientProof?: NativeSelfSignedClientProof;
   initialSyncFlushEvery: number;
   appId: string;
+  /** Slow-query log threshold for the worker's store; 0 turns the log off. */
+  slowQueryThresholdMs?: number;
   /** Non-secret logical owner pinned to an explicitly selected physical IDB root. */
   storageOwner: string;
   authSessionKey: string;

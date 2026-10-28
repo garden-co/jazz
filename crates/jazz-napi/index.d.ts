@@ -139,6 +139,17 @@ export declare class NapiDb {
    */
   createUpstreamLink(seed: number): UpstreamLink
   /**
+   * The slow-query report due now: one line per slow query shape,
+   * naming `app`: the first at once, then at most every 10 seconds. The caller
+   * writes each line with `console.warn`.
+   */
+  takeSlowQueryReport(app?: string | undefined | null): Array<string>
+  /**
+   * Report query runs of at least `ms` milliseconds (default 50); 0
+   * turns the slow-query log off.
+   */
+  setSlowQueryThresholdMs(ms: number): void
+  /**
    * Connect to the server over byte frames the host carries: each frame
    * is one postcard `SyncMessage`.
    */

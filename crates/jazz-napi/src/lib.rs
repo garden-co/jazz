@@ -1832,6 +1832,24 @@ impl NapiDb {
         NapiUpstreamLink::new(seed)
     }
 
+    /// The slow-query report due now: one line per slow query shape,
+    /// naming `app`: the first at once, then at most every 10 seconds. The caller
+    /// writes each line with `console.warn`.
+    #[napi(js_name = "takeSlowQueryReport")]
+    pub fn take_slow_query_report(&self, app: Option<String>) -> js::Result<Vec<String>> {
+        Ok(self.binding()?.take_slow_query_report(app.as_deref()))
+    }
+
+    /// Report query runs of at least `ms` milliseconds (default 50); 0
+    /// turns the slow-query log off.
+    #[napi(js_name = "setSlowQueryThresholdMs")]
+    pub fn set_slow_query_threshold_ms(&self, ms: f64) -> js::Result<()> {
+        self.binding()?
+            .set_slow_query_threshold_ms(ms)
+            .map_err(host_error)?;
+        Ok(())
+    }
+
     /// Connect to the server over byte frames the host carries: each frame
     /// is one postcard `SyncMessage`.
     #[napi(js_name = "connectUpstream")]

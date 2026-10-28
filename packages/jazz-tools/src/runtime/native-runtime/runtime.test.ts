@@ -8094,3 +8094,61 @@ it("passes different claims independently on same-query reads", async () => {
     await runtime.close();
   }
 });
+
+it("surfaces the native slow-query report on console.warn after each core tick, naming the app", async () => {
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  const reports = [["slow query in app app-1 on todos: 1 slow run(s)"], []];
+  const takeSlowQueryReport = vi.fn((_app?: string) => reports.shift() ?? []);
+  const setSlowQueryThresholdMs = vi.fn();
+  const runtime = NativeRuntimeAdapter.fromDb(
+    fakeDb({ tick: () => undefined, takeSlowQueryReport, setSlowQueryThresholdMs }),
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+    { slowQueryLog: { appId: "app-1", thresholdMs: 200 } },
+  );
+  try {
+    expect(setSlowQueryThresholdMs).toHaveBeenCalledExactlyOnceWith(200);
+    await runtime.progressPeerTransport();
+    expect(takeSlowQueryReport).toHaveBeenCalledWith("app-1");
+    expect(warn).toHaveBeenCalledExactlyOnceWith(
+      "[jazz] slow query in app app-1 on todos: 1 slow run(s)",
+    );
+    await runtime.progressPeerTransport();
+    expect(warn).toHaveBeenCalledOnce();
+  } finally {
+    warn.mockRestore();
+    await runtime.close();
+  }
+});
+
+it("rejects a negative slow-query threshold and leaves the native default without one", async () => {
+  const setSlowQueryThresholdMs = vi.fn();
+  expect(() =>
+    NativeRuntimeAdapter.fromDb(
+      fakeDb({ tick: () => undefined, setSlowQueryThresholdMs }),
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+      { slowQueryLog: { thresholdMs: -1 } },
+    ),
+  ).toThrow("slowQueryThresholdMs must be a non-negative number of milliseconds");
+  const runtime = NativeRuntimeAdapter.fromDb(
+    fakeDb({ tick: () => undefined, setSlowQueryThresholdMs }),
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+    { slowQueryLog: { appId: "app-1" } },
+  );
+  try {
+    expect(setSlowQueryThresholdMs).not.toHaveBeenCalled();
+  } finally {
+    await runtime.close();
+  }
+});

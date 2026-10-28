@@ -502,6 +502,16 @@ pub enum ForegroundDbCommandRequest {
     /// errors and the upstream's current refusal of the scope's credential
     /// (#4296).
     DrainTickEvents,
+    /// The slow-query report due now, naming `app` (append-only: an older
+    /// native build answers it with an error and the host stops asking).
+    TakeSlowQueryReport {
+        app: Option<String>,
+    },
+    /// Report query runs of at least `ms` milliseconds; 0 turns the
+    /// slow-query log off (append-only, as above).
+    SetSlowQueryThresholdMs {
+        ms: u64,
+    },
 }
 
 /// One refusal of a scope's credential by its upstream. Every refusal gets a
@@ -691,6 +701,13 @@ pub enum ForegroundDbCommandResponse {
         auth_rejection: Option<NativeAuthRejection>,
         upstream_failure: Option<NativeUpstreamFailure>,
     },
+    /// Answer to [`ForegroundDbCommandRequest::TakeSlowQueryReport`]: a
+    /// JSON array of report lines (empty between reports).
+    SlowQueryReport {
+        lines_json: String,
+    },
+    /// Answer to [`ForegroundDbCommandRequest::SetSlowQueryThresholdMs`].
+    SlowQueryThresholdSet,
 }
 
 /// One already-materialized subscription event.  The byte payload deliberately

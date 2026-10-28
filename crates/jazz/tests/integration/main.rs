@@ -113,6 +113,8 @@ mod serializable_sync;
 mod session_policy_values;
 #[path = "../session_write_checks.rs"]
 mod session_write_checks;
+#[path = "../slow_queries.rs"]
+mod slow_queries;
 #[path = "../snapshots.rs"]
 mod snapshots;
 #[path = "../storage_corpus.rs"]

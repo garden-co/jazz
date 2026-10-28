@@ -58,6 +58,8 @@ export class NativeForegroundDb {
   /** The upstream failure last reported, so each change is reported once. */
   private reportedUpstreamFailure: { sequence: number; retrying: boolean } | null = null;
   private readonly transactions = new Map<string, NativeForegroundTransaction>();
+  /** A native build without the (append-only) slow-query commands. */
+  private slowQueryLogUnsupported = false;
 
   constructor(
     private readonly runtime: NativeForegroundRuntime,
@@ -220,6 +222,39 @@ export class NativeForegroundDb {
       // platform logout revoked the capability just before this call).
       this.runtime.close();
     }
+  }
+
+  /**
+   * The slow-query report due now: one line per slow query shape, naming
+   * `app`. An older native build without the command reports nothing.
+   */
+  takeSlowQueryReport(app?: string): string[] {
+    if (this.slowQueryLogUnsupported || this.closed) return [];
+    let response: ForegroundResponse;
+    try {
+      response = this.execute({ type: "takeSlowQueryReport", app });
+    } catch {
+      this.slowQueryLogUnsupported = true;
+      return [];
+    }
+    if (response.type !== "slowQueryReport") {
+      this.slowQueryLogUnsupported = true;
+      return [];
+    }
+    return response.lines;
+  }
+
+  /** Report query runs of at least `ms` milliseconds; 0 turns the log off. */
+  setSlowQueryThresholdMs(ms: number): void {
+    if (this.slowQueryLogUnsupported || this.closed) return;
+    let response: ForegroundResponse;
+    try {
+      response = this.execute({ type: "setSlowQueryThresholdMs", ms: Math.round(ms) });
+    } catch {
+      this.slowQueryLogUnsupported = true;
+      return;
+    }
+    if (response.type !== "slowQueryThresholdSet") this.slowQueryLogUnsupported = true;
   }
 
   isNativeForegroundClosed(): boolean {
