@@ -171,6 +171,8 @@ mod transaction_commit_kind;
 mod transaction_handles;
 #[path = "../transaction_identity.rs"]
 mod transaction_identity;
+#[path = "../transaction_read_guards.rs"]
+mod transaction_read_guards;
 #[path = "../transaction_read_tiers.rs"]
 mod transaction_read_tiers;
 #[path = "../union_queries.rs"]
