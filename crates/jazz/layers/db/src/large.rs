@@ -992,7 +992,7 @@ fn store_chunk(
 }
 
 /// Open a local streaming upload's lease. Until [`end_upload`] or
-/// [`expire_uploads`], every node staged under `id` is held from
+/// [`expire_uploads_except`], every node staged under `id` is held from
 /// reclamation, so the row that will reference the finished value never
 /// races the reclaimer.
 pub(crate) fn begin_upload(conn: &Connection, id: &[u8; 32], now: i64) -> Result<(), Error> {
@@ -1068,7 +1068,18 @@ pub(crate) fn end_upload(conn: &Connection, id: &[u8; 32]) -> Result<(), Error> 
 }
 
 /// End every upload not touched since `before` (ms); returns how many.
-pub(crate) fn expire_uploads(conn: &Connection, before: i64) -> Result<usize, Error> {
+#[cfg(test)]
+fn expire_uploads(conn: &Connection, before: i64) -> Result<usize, Error> {
+    expire_uploads_except(conn, before, &std::collections::BTreeSet::new())
+}
+
+/// Live transaction batches pin their upload leases. After a crash there are
+/// no live batches, so the same persisted receipts expire normally on reopen.
+pub(crate) fn expire_uploads_except(
+    conn: &Connection,
+    before: i64,
+    pinned: &std::collections::BTreeSet<[u8; 32]>,
+) -> Result<usize, Error> {
     let ids: Vec<Vec<u8>> = conn
         .prepare("SELECT id FROM _jazz_lv_upload WHERE touched <= ?1")
         .and_then(|mut statement| {
@@ -1077,14 +1088,18 @@ pub(crate) fn expire_uploads(conn: &Connection, before: i64) -> Result<usize, Er
                 .collect::<Result<_, _>>()
         })
         .map_err(storage)?;
+    let mut expired = 0;
     for id in &ids {
         let id: [u8; 32] = id
             .as_slice()
             .try_into()
             .map_err(|_| Error::new(ErrorCode::Storage, "large value: malformed upload id"))?;
-        end_upload(conn, &id)?;
+        if !pinned.contains(&id) {
+            end_upload(conn, &id)?;
+            expired += 1;
+        }
     }
-    Ok(ids.len())
+    Ok(expired)
 }
 
 /// One stored node: (object hash, encoded bytes).

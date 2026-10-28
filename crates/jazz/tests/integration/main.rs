@@ -119,6 +119,8 @@ mod session_write_checks;
 mod slow_queries;
 #[path = "../snapshots.rs"]
 mod snapshots;
+#[path = "../staged_streaming.rs"]
+mod staged_streaming;
 #[path = "../storage_corpus.rs"]
 mod storage_corpus;
 #[path = "../storage_errors.rs"]
