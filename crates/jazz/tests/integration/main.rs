@@ -129,6 +129,8 @@ mod storage_corpus;
 mod storage_errors;
 #[path = "../structured_result_tree.rs"]
 mod structured_result_tree;
+#[path = "../sync_access_loss.rs"]
+mod sync_access_loss;
 #[path = "../sync_aggregates.rs"]
 mod sync_aggregates;
 #[path = "../sync_differential.rs"]
