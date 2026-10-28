@@ -534,3 +534,20 @@ fn validate_snapshot(
         records,
     ))
 }
+
+// The SQL compiler receives this capability rather than a caller-populated map.
+// Each lookup touches only the selected schema/table's accepted durable record.
+impl crate::compile::CatalogueIdentityLookup for Inner {
+    fn table_identity(&self, schema: SchemaVersionId, table: &str) -> Result<uuid::Uuid, Error> {
+        if self.catalogue_head()?.is_none() {
+            return Err(unsupported(
+                "CatalogueTableIdentityV1 without accepted catalogue metadata",
+            ));
+        }
+        self.catalogue_table(schema, table)?
+            .map(|table| table.id.0)
+            .ok_or_else(|| unsupported(format!(
+                "CatalogueTableIdentityV1 has no accepted manifest for schema {schema:?} table `{table}`"
+            )))
+    }
+}

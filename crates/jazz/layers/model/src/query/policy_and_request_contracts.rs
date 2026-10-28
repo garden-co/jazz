@@ -792,6 +792,9 @@ pub enum Operand {
 /// Public policy paths remain `session.claims[<name>]`.
 pub const PROVIDER_CLAIM_PREFIX: &str = "\0claims:";
 
+/// CatalogueTableIdentityV1: resolved from the policy schema, never session claims.
+pub const TABLE_IDENTITY_OPERAND_PREFIX: &str = "\0jazz-table-identity-v1:";
+
 /// Collision-proof storage key for a raw provider claim exposed as
 /// `session.claims[name]` in public policies.
 pub fn provider_claim_key(name: &str) -> String {

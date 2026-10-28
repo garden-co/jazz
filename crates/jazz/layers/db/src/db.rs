@@ -1439,7 +1439,9 @@ impl Db {
         // options are not known yet: validate the widest read (deleted rows
         // included, so their metadata columns are accepted).
         let session = Session::system();
-        Ctx::new(&inner.schema, None, &session, &binding).compile_query(query, true)?;
+        Ctx::new(&inner.schema, None, &session, &binding)
+            .with_catalogue(&*inner)
+            .compile_query(query, true)?;
         let shape =
             blake3::hash(format!("{query:?}{:?}", inner.schema.jazz.version_id()).as_bytes());
         let bound = blake3::hash(format!("{binding:?}").as_bytes());
@@ -2443,6 +2445,7 @@ impl Inner {
     ) -> Ctx<'s> {
         let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
         Ctx::new(schema, policy, claims, &prepared.binding)
+            .with_catalogue(self)
             .with_view(read.view.clone())
             .with_cut(read.cut.clone(), read.settled_only)
             .with_history_origin(self.history_origin())
@@ -2984,7 +2987,9 @@ impl Inner {
     ) -> Result<(String, Vec<Sql>, Vec<crate::compile::Prep>), Error> {
         let binding = BTreeMap::new();
         let claims = Session::default();
-        let mut ctx = Ctx::new(&self.schema, None, &claims, &binding).with_cut(cut, false);
+        let mut ctx = Ctx::new(&self.schema, None, &claims, &binding)
+            .with_catalogue(self)
+            .with_cut(cut, false);
         let condition = policy(&mut ctx)?;
         let preps = std::mem::take(&mut ctx.preps);
         let mut params = ctx.params;
@@ -3048,7 +3053,9 @@ impl Inner {
     ) -> Result<bool, Error> {
         let binding = BTreeMap::new();
         let claims = Session::default();
-        let mut ctx = Ctx::new(&self.schema, None, &claims, &binding).with_cut(Some(cut), false);
+        let mut ctx = Ctx::new(&self.schema, None, &claims, &binding)
+            .with_catalogue(self)
+            .with_cut(Some(cut), false);
         let condition = policy(&mut ctx)?;
         let source = ctx.source(table)?;
         let preps = std::mem::take(&mut ctx.preps);
@@ -3097,7 +3104,7 @@ impl Inner {
     ) -> Result<Vec<([u8; 16], Vec<u8>, u64, bool, bool)>, Error> {
         let binding = BTreeMap::new();
         let claims = Session::default();
-        let mut ctx = Ctx::new(&self.schema, None, &claims, &binding);
+        let mut ctx = Ctx::new(&self.schema, None, &claims, &binding).with_catalogue(self);
         let condition = match author {
             Some(author) => {
                 let session = self.session(author);

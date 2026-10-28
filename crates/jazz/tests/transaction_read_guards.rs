@@ -2,8 +2,8 @@
 
 use crate::common::{allow_all_policies, compile_schema};
 use jazz::db::{
-    Db, DbConfig, DbIdentity, ErrorCode, ReadOpts, ReadTier, RemoteLinkHint, SerializedReadResult,
-    SyncMessage, Transport, TransportError, block_on, duplex,
+    Db, DbConfig, DbIdentity, ErrorCode, ReadOpts, ReadTier, RemoteLinkHint, SyncMessage,
+    Transport, TransportError, block_on, duplex,
 };
 use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::query::Query;

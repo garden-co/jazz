@@ -3006,6 +3006,16 @@ fn convert_session_path_operand(
     path: &str,
     path_segments: &[String],
 ) -> Result<Operand, SchemaConversionError> {
+    if let [namespace, name] = path_segments
+        && namespace == "__jazz_table_identity_v1"
+        && !name.is_empty()
+    {
+        return Ok(Operand::Claim(format!(
+            "{}{name}",
+            crate::query::TABLE_IDENTITY_OPERAND_PREFIX,
+        )));
+    }
+
     if let Some(name) = crate::query::author_claim_path_key(path_segments) {
         return Ok(Operand::Claim(name));
     }

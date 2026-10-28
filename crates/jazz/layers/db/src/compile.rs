@@ -114,6 +114,16 @@ impl Session {
     }
 }
 
+/// Accepted catalogue metadata supplied by the database, separate from claims.
+/// The compiler names the policy schema, including through a governed old view.
+pub trait CatalogueIdentityLookup {
+    fn table_identity(
+        &self,
+        schema: crate::ids::SchemaVersionId,
+        table: &str,
+    ) -> Result<uuid::Uuid, Error>;
+}
+
 fn unwrap_nullable(value: Value) -> Option<Value> {
     match value {
         Value::Nullable(None) => None,
@@ -233,6 +243,7 @@ fn scratch_value(slot: i64, cell: &str) -> String {
 /// SQL text plus its positional parameters.
 pub struct Ctx<'a> {
     pub schema: &'a Schema,
+    catalogue: Option<&'a dyn CatalogueIdentityLookup>,
     /// `Some` applies read policies as this session (unless it is system).
     pub policy: Option<&'a Session>,
     /// Supplies `Operand::Claim` values.
@@ -329,6 +340,7 @@ impl<'a> Ctx<'a> {
     ) -> Self {
         Self {
             schema,
+            catalogue: None,
             policy: policy.filter(|session| !session.system),
             claims,
             binding,
@@ -341,6 +353,47 @@ impl<'a> Ctx<'a> {
             history_origin: None,
             next_alias: 0,
         }
+    }
+
+    pub fn with_catalogue(mut self, catalogue: &'a dyn CatalogueIdentityLookup) -> Self {
+        self.catalogue = Some(catalogue);
+        self
+    }
+
+    fn catalogue_identity(&self, table: &str) -> Result<Value, Error> {
+        let schema = self.schema.policy_schema();
+        if table.is_empty() || !schema.tables.contains_key(table) {
+            return Err(query_error(format!(
+                "CatalogueTableIdentityV1 names unknown policy table `{table}`"
+            )));
+        }
+        let catalogue = self.catalogue.ok_or_else(|| {
+            unsupported("CatalogueTableIdentityV1 without accepted catalogue metadata")
+        })?;
+        catalogue
+            .table_identity(schema.jazz.version_id(), table)
+            .map(Value::Uuid)
+    }
+
+    /// Reserved paths never enter Session's provider/user claim resolution.
+    fn session_value(&self, path: &[String], session: &Session) -> Result<Option<Value>, Error> {
+        if path.first().map(String::as_str) == Some("__jazz_table_identity_v1") {
+            let [_, table] = path else {
+                return Err(query_error("malformed CatalogueTableIdentityV1 path"));
+            };
+            return self.catalogue_identity(table).map(Some);
+        }
+        Ok(session.resolve(path))
+    }
+
+    fn session_is_null(&self, path: &[String], session: &Session) -> Result<bool, Error> {
+        if path.first().map(String::as_str) == Some("__jazz_table_identity_v1") {
+            // Even IS NULL must require accepted metadata, not turn its absence
+            // into a truthy predicate. A resolved table UUID is never null.
+            self.session_value(path, session)?;
+            return Ok(false);
+        }
+        Ok(session.is_null(path))
     }
 
     pub fn with_history_origin(mut self, origin: Option<[u8; 16]>) -> Self {
@@ -1609,6 +1662,9 @@ impl<'a> Ctx<'a> {
                 self.value_term(&value)
             }
             Operand::Claim(key) => {
+                if let Some(table) = key.strip_prefix(crate::query::TABLE_IDENTITY_OPERAND_PREFIX) {
+                    return self.value_term(&self.catalogue_identity(table)?);
+                }
                 let value = self.claims.claim(key);
                 self.present(value)
             }
@@ -1798,7 +1854,7 @@ impl<'a> Ctx<'a> {
                 self.column_term(table, alias, column)
             }
             PolicyValue::SessionRef(path) => {
-                let value = session.resolve(path);
+                let value = self.session_value(path, session)?;
                 self.present(value)
             }
         }
@@ -1852,7 +1908,7 @@ impl<'a> Ctx<'a> {
             {
                 // A claim is JSON, so a UUID claim arrives as its string:
                 // compare it with a UUID column as the UUID it spells.
-                let value = match session.resolve(path) {
+                let value = match self.session_value(path, session)? {
                     Some(Value::String(text)) => text.parse().map(Value::Uuid).ok(),
                     value => value,
                 };
@@ -1866,7 +1922,7 @@ impl<'a> Ctx<'a> {
                 self.cmp(op.clone(), left, right)?
             }
             PolicyExpr::SessionCmp { path, op, value } => {
-                let left = session.resolve(path);
+                let left = self.session_value(path, session)?;
                 let left = self.present(left)?;
                 let right = self.value_term(&public_value(value)?)?;
                 self.cmp(op.clone(), left, right)?
@@ -1877,8 +1933,10 @@ impl<'a> Ctx<'a> {
             PolicyExpr::IsNotNull { column } => {
                 format!("({} IS NOT NULL)", column_sql(table, alias, column)?)
             }
-            PolicyExpr::SessionIsNull { path } => bool_sql(session.is_null(path)),
-            PolicyExpr::SessionIsNotNull { path } => bool_sql(session.resolve(path).is_some()),
+            PolicyExpr::SessionIsNull { path } => bool_sql(self.session_is_null(path, session)?),
+            PolicyExpr::SessionIsNotNull { path } => {
+                bool_sql(self.session_value(path, session)?.is_some())
+            }
             PolicyExpr::Contains { column, value } => {
                 let left = self.column_term(table, alias, column)?;
                 let right = self.policy_value(value, outer, session)?;
@@ -1893,7 +1951,7 @@ impl<'a> Ctx<'a> {
                 session_path,
             } => {
                 let left = self.column_term(table, alias, column)?;
-                let options = match session.resolve(session_path) {
+                let options = match self.session_value(session_path, session)? {
                     Some(Value::Array(values)) => values
                         .iter()
                         .map(|value| self.value_term(value))
@@ -1912,7 +1970,7 @@ impl<'a> Ctx<'a> {
                 self.in_list(left, options)?
             }
             PolicyExpr::SessionInList { path, values } => {
-                let left = session.resolve(path);
+                let left = self.session_value(path, session)?;
                 let left = self.present(left)?;
                 let options = values
                     .iter()
@@ -1930,7 +1988,7 @@ impl<'a> Ctx<'a> {
                     }
                     (a, b) => a == b,
                 };
-                bool_sql(match session.resolve(path) {
+                bool_sql(match self.session_value(path, session)? {
                     Some(Value::Array(items)) => items.iter().any(|item| {
                         unwrap_nullable(item.clone()).is_some_and(|i| same(&i, &needle))
                     }),
@@ -2312,7 +2370,7 @@ impl<'a> Ctx<'a> {
                 self.value_term(&value)
             }
             RelationValueRef::SessionRef(path) => {
-                let value = scope.session.resolve(path);
+                let value = self.session_value(path, scope.session)?;
                 self.present(value)
             }
             RelationValueRef::OuterColumn(column) => {
