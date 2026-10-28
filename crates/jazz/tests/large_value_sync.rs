@@ -10,9 +10,9 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 
 use jazz::db::{
-    CellDelta, Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadTier, RemoteLinkHint,
-    SubscriptionStream, SyncCell, SyncMessage, Transport, TransportError, WireDelta, WireError,
-    WireKind, WireOp, WirePull, WireTarget, block_on, encode_frames,
+    CellDelta, Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadSpan, ReadTier,
+    RemoteLinkHint, SubscriptionStream, SyncCell, SyncMessage, Transport, TransportError,
+    WireDelta, WireError, WireKind, WireOp, WirePull, WireTarget, block_on, encode_frames,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::ReadViewSourceSpec;
@@ -1484,19 +1484,21 @@ fn a_snapshot_read_naming_a_held_commit_waits_for_it() {
     // Alice's own store answers that read itself, so the read goes up as a
     // relay would send it: on the wire, behind the held commit.
     const READ: u64 = 9_999;
-    up.borrow_mut().push_back(SyncMessage::Fetch {
+    up.borrow_mut().push_back(SyncMessage::Read {
         id: READ,
-        query: Query::from("titled"),
+        query: Box::new(Query::from("titled")),
         binding: BTreeMap::new(),
-        at: None,
         include_deleted: false,
         tier: ReadTier::Remote,
         wait: None,
-        view: ReadViewSourceSpec::Snapshot { snapshot },
+        span: ReadSpan::Once {
+            at: None,
+            view: Box::new(ReadViewSourceSpec::Snapshot { snapshot }),
+        },
     });
     let reply = || {
         down.borrow().iter().find_map(|message| match message {
-            SyncMessage::Answer { id: READ, .. } => Some(Ok(())),
+            SyncMessage::Settled { id: READ, .. } => Some(Ok(())),
             SyncMessage::Refused {
                 id: READ, message, ..
             } => Some(Err(message.clone())),

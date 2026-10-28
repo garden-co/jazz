@@ -26,8 +26,8 @@ use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
 use jazz::db::{
-    CorpusReader, Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadTier, Reason, SyncMessage,
-    Transport, UpdateOptions, WireError as SyncWireError, block_on, encode_frames,
+    CorpusReader, Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadSpan, ReadTier, Reason,
+    SyncMessage, Transport, UpdateOptions, WireError as SyncWireError, block_on, encode_frames,
     validate_frame_batch_for_corpus,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
@@ -52,18 +52,16 @@ const FORMAT: &str = "jazz-sqlite-sync-wire-corpus-v1";
 /// a replica sends only when a large value's delta cannot apply. A
 /// message too large for one frame travels in parts below the message
 /// layer (binding_host's frame-split test covers it).
-const VARIANTS: [&str; 20] = [
-    "Subscribe",
+const VARIANTS: [&str; 18] = [
+    "Read",
     "Unsubscribe",
-    "Fetch",
+    "Settled",
     "Commit",
     "ChunkRequests",
     "PushChunks",
     "Chunks",
     "Rows",
     "Evict",
-    "Settled",
-    "Answer",
     "Refused",
     "Fate",
     "Advise",
@@ -418,7 +416,7 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     .unwrap();
     block_on(server.update("notes", shared, note(1, large(2)), UpdateOptions::default())).unwrap();
 
-    // Schema, SchemaAdmission, Subscribe, Rows, Settled, ChunkRequests,
+    // Schema, SchemaAdmission, Read (live), Rows, Settled, ChunkRequests,
     // Chunks: a client subscribes and pulls the large value it reads.
     let alice = open(0x51, user(1), false);
     connect(&alice, &server, user(1), &recorded);
@@ -441,9 +439,9 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     .unwrap();
     pump(&[&alice, &server, &alice]);
 
-    // Fetch, Answer: a serializable transaction's second read is
-    // pinned to its snapshot, so after a newer write it answers from
-    // history.
+    // Read (once), Settled with a listing: a serializable
+    // transaction's second read is pinned to its snapshot, so after a
+    // newer write it answers from history.
     let open_tx = OpenTransactionId::new();
     block_on(alice.begin_serializable(open_tx)).unwrap();
     let _ = drive(
@@ -550,14 +548,14 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     let schema = postcard::from_bytes::<SyncMessage>(&recorded.borrow()["Schema"].1).unwrap();
     let inbound = Rc::new(RefCell::new(VecDeque::from([
         schema,
-        SyncMessage::Subscribe {
+        SyncMessage::Read {
             id: 1,
-            query: Query::from("missing"),
+            query: Box::new(Query::from("missing")),
             binding: BTreeMap::new(),
-            since: None,
             include_deleted: false,
             tier: ReadTier::LocalFirst,
             wait: None,
+            span: ReadSpan::Live { since: None },
         },
     ])));
     server.accept_subscriber(

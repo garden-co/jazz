@@ -712,27 +712,34 @@ const _: () = assert!(
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SyncMessage {
     // client → server
-    /// `since`: a resumed subscription the client held settled through
-    /// that seq; its opening ships only rows changed after it.
+    // Variants before `Commit` keep their wire tags: a replica stores its
+    // pending uploads as `Commit` frames.
+    /// A read of `query`, kept current until `Unsubscribe` or answered
+    /// once (see [`ReadSpan`]). Either way the server ships the result's
+    /// rows and supporting rows, then `Settled` (or `Refused`).
     /// `include_deleted`: the result also lists deleted rows (the root's),
     /// which ship as their deleted current versions.
-    /// `tier`: how far the subscription reaches, as for `Fetch`: a relay
-    /// serves a LocalOnly one from its store alone, without its upstream
-    /// (a non-durable foreground's LocalOnly read). An authority's store
-    /// is the answer either way.
-    /// `wait`: how long (ms) a relay waits for its upstream's answer
-    /// before it serves its own store: a LocalFirst one's first load (the
-    /// reader's `firstLoadRemoteWaitMs`). `None`: a LocalFirst one waits
-    /// while the upstream may answer, a Remote one however long it takes
-    /// (only the authority confirms a remote result).
-    Subscribe {
+    /// `tier`: how far the read reaches past a relay: `LocalOnly` is served
+    /// from the relay's store alone (a non-durable foreground's LocalOnly
+    /// read), `LocalFirst` from it too while the relay asks its upstream,
+    /// `Remote` once its upstream answered. An authority's store is the
+    /// answer either way.
+    /// `wait`: how long (ms) a relay waits for its upstream's answer while
+    /// it may give one, then serves its store: a LocalFirst read's first
+    /// load (the reader's `firstLoadRemoteWaitMs`), or a one-shot Remote
+    /// read that takes the relay's view when the authority cannot answer (a
+    /// serializable transaction's snapshot). `None`: a live LocalFirst read
+    /// waits while the upstream may answer, a one-shot one is served now;
+    /// a Remote one waits however long it takes (only the authority
+    /// confirms a remote result).
+    Read {
         id: u64,
-        query: Query,
+        query: Box<Query>,
         binding: BTreeMap<String, Value>,
-        since: Option<u64>,
         include_deleted: bool,
         tier: ReadTier,
         wait: Option<u64>,
+        span: ReadSpan,
     },
     Unsubscribe {
         id: u64,
@@ -745,30 +752,18 @@ pub enum SyncMessage {
     Hold {
         rows: Vec<(String, [u8; 16], Vec<u8>, u64)>,
     },
-    /// A one-shot read, at the current state or as of a server seq.
-    /// `tier` is how far it reaches past a relay: `LocalOnly` is served
-    /// from the relay's store, `LocalFirst` too while the relay asks its
-    /// upstream to refresh it, `Remote` once its upstream answered. An
-    /// authority's store answers any tier. `wait`: how long (ms) a relay
-    /// waits for its upstream's answer while it may give one, then serves
-    /// its store: a LocalFirst read's first load, or a Remote read that
-    /// takes the relay's view when the authority cannot answer (a
-    /// serializable transaction's snapshot). `None`: a LocalFirst read is
-    /// served now, a Remote one once the upstream answered. `view`: the
-    /// branch view the read observes, so its window and versions are the
-    /// view's. A view frozen at a snapshot reference is resolved by the
-    /// receiver (a reopened tab's capture, which its worker settled), which
-    /// also sends the origins of the commits it names (see
-    /// [`SyncMessage::Rows`]).
-    Fetch {
+    /// A read's result is complete through server seq `through`.
+    /// `listing`: the result's rows, in order: always for a one-shot
+    /// read, and for a live one's opening and window changes when it is
+    /// limited or its opening could not tell what left it; the replica
+    /// drops cached rows a listing leaves out. `global`: the result is the
+    /// global authority's (directly, or through relays that settle by
+    /// their upstream), not a relay's own store.
+    Settled {
         id: u64,
-        query: Query,
-        binding: BTreeMap<String, Value>,
-        at: Option<u64>,
-        include_deleted: bool,
-        tier: ReadTier,
-        wait: Option<u64>,
-        view: ReadViewSourceSpec,
+        through: u64,
+        listing: Option<Vec<[u8; 16]>>,
+        global: bool,
     },
     /// `author`: the provenance the writes carry when it is not the
     /// sender's own (a trusted session or an attribution), as a canonical
@@ -837,22 +832,7 @@ pub enum SyncMessage {
         id: [u8; 16],
         key: Vec<u8>,
     },
-    /// A subscription's result is complete through server seq `through`;
-    /// `window` lists its rows when it is limited. `global`: the result is
-    /// the global authority's (directly, or through relays that settle by
-    /// their upstream), not a relay's own store.
-    Settled {
-        id: u64,
-        through: u64,
-        window: Option<Vec<[u8; 16]>>,
-        global: bool,
-    },
-    Answer {
-        id: u64,
-        through: u64,
-        rows: Vec<[u8; 16]>,
-    },
-    /// A `Subscribe` or `Fetch` the server cannot serve, with why: the
+    /// A `Read` the server cannot serve, with why: the
     /// read ends with this error instead of waiting for an answer.
     Refused {
         id: u64,
@@ -910,6 +890,12 @@ pub enum SyncMessage {
     /// it: the commit is `Local` for a non-durable session (a tab over its
     /// worker), whose own store is memory. Its fate follows once the
     /// relay's upstream answers.
+    ///
+    /// This is durability progress, never a decision: a `Stored` commit
+    /// can still be rejected, and a [`SyncMessage::Fate`] always follows
+    /// it. It is not a non-global `Fate` either: that one is the final
+    /// word of a replica with no upstream, which never comes back with a
+    /// global verdict, while a relay's `Stored` promises one.
     Stored {
         tx: u64,
     },
@@ -930,6 +916,25 @@ pub enum SyncMessage {
     Catalogue {
         versions: Vec<CatalogueVersion>,
         cells: Vec<CatalogueCell>,
+    },
+}
+
+/// How long a [`SyncMessage::Read`] lasts.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum ReadSpan {
+    /// Kept current until `Unsubscribe`: what changes in the result
+    /// ships as it changes, and each settled state is a `Settled`.
+    /// `since`: resumed, the replica holding the result as it settled
+    /// through that seq; the opening ships only what changed after it.
+    Live { since: Option<u64> },
+    /// Answered once, at the current state or as of server seq `at`, in
+    /// branch view `view`, whose window and versions the read observes. A
+    /// view frozen at a snapshot reference is resolved by the receiver (a
+    /// reopened tab's capture, which its worker settled), which also sends
+    /// the origins of the commits it names (see [`SyncMessage::Rows`]).
+    Once {
+        at: Option<u64>,
+        view: Box<ReadViewSourceSpec>,
     },
 }
 
@@ -957,10 +962,9 @@ impl SyncMessage {
     /// The variant's name, for errors and diagnostics.
     pub fn kind(&self) -> &'static str {
         match self {
-            Self::Subscribe { .. } => "Subscribe",
+            Self::Read { .. } => "Read",
             Self::Unsubscribe { .. } => "Unsubscribe",
             Self::Hold { .. } => "Hold",
-            Self::Fetch { .. } => "Fetch",
             Self::Commit { .. } => "Commit",
             Self::ChunkRequests { .. } => "ChunkRequests",
             Self::PushChunks { .. } => "PushChunks",
@@ -968,7 +972,6 @@ impl SyncMessage {
             Self::Rows { .. } => "Rows",
             Self::Evict { .. } => "Evict",
             Self::Settled { .. } => "Settled",
-            Self::Answer { .. } => "Answer",
             Self::Refused { .. } => "Refused",
             Self::Fate { .. } => "Fate",
             Self::Advise { .. } => "Advise",
@@ -1103,7 +1106,7 @@ pub(crate) struct Remote {
     query: Query,
     binding: BTreeMap<String, Value>,
     include_deleted: bool,
-    /// How far it reaches (see `SyncMessage::Subscribe`).
+    /// How far it reaches (see `SyncMessage::Read`).
     reach: RemoteReach,
     pub(crate) answered: Rc<StdCell<bool>>,
     /// Whether the last answer was the global authority's.
@@ -1245,7 +1248,7 @@ type RelayedAnswer = (
     u64,
 );
 
-/// A session's `Fetch` a relay asked its upstream for.
+/// A session's one-shot `Read` a relay asked its upstream for.
 struct RelayedFetch {
     /// The relay's own fetch id upstream.
     upstream: u64,
@@ -1258,7 +1261,7 @@ struct RelayedFetch {
     /// longer answer, or its wait runs out (`None`: never).
     until: Option<Instant>,
     session: usize,
-    /// The session's `Fetch`, served locally once the upstream answered.
+    /// The session's `Read`, served locally once the upstream answered.
     message: SyncMessage,
 }
 
@@ -1272,7 +1275,7 @@ fn remote_key(
 }
 
 /// How far a read reaches past a relay: its tier, and how long the relay
-/// waits for its upstream (see `SyncMessage::Subscribe` and `Fetch`).
+/// waits for its upstream (see `SyncMessage::Read`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct RemoteReach {
     pub(crate) tier: ReadTier,
@@ -4442,14 +4445,14 @@ impl Db {
         let resubscribe: Vec<SyncMessage> = client
             .remote
             .values_mut()
-            .map(|r| SyncMessage::Subscribe {
+            .map(|r| SyncMessage::Read {
                 id: r.id,
-                query: r.query.clone(),
+                query: Box::new(r.query.clone()),
                 binding: r.binding.clone(),
-                since: r.through,
                 include_deleted: r.include_deleted,
                 tier: r.reach.tier,
                 wait: r.reach.wait,
+                span: ReadSpan::Live { since: r.through },
             })
             .collect();
         // Commits, their chunk pushes and chunk requests a full queue held
@@ -4457,8 +4460,10 @@ impl Db {
         client.outbox.retain(|m| {
             !matches!(
                 m,
-                SyncMessage::Subscribe { .. }
-                    | SyncMessage::Schema { .. }
+                SyncMessage::Read {
+                    span: ReadSpan::Live { .. },
+                    ..
+                } | SyncMessage::Schema { .. }
                     | SyncMessage::Holds { .. }
                     | SyncMessage::Commit { .. }
                     | SyncMessage::PushChunks { .. }
@@ -4491,7 +4496,7 @@ impl Db {
         let relayed: HashSet<u64> = client.relayed_fetches.iter().map(|f| f.upstream).collect();
         client
             .outbox
-            .retain(|m| !matches!(m, SyncMessage::Fetch { id, .. } if relayed.contains(id)));
+            .retain(|m| !matches!(m, SyncMessage::Read { id, .. } if relayed.contains(id)));
         client.outbox.extend(reask);
         // Sent-but-unsettled commits go first, in their original order.
         let mut resend = client.sent.clone();
@@ -4900,14 +4905,14 @@ impl Db {
         // A replica that cannot read its watermark opens the query fresh.
         let through = inner.watermark(&watermark).ok().flatten();
         let client = inner.client.as_mut()?;
-        client.outbox.push(SyncMessage::Subscribe {
+        client.outbox.push(SyncMessage::Read {
             id,
-            query: query.clone().into_owned(),
+            query: Box::new(query.clone().into_owned()),
             binding: prepared.binding.clone(),
-            since: through,
             include_deleted,
             tier: reach.tier,
             wait: reach.wait,
+            span: ReadSpan::Live { since: through },
         });
         client.remote.insert(
             key.clone(),
@@ -5020,15 +5025,17 @@ impl Db {
                 return Ok(None);
             }
         }
-        let message = |id: u64| SyncMessage::Fetch {
+        let message = |id: u64| SyncMessage::Read {
             id,
-            query: remote_query(&prepared.query).into_owned(),
+            query: Box::new(remote_query(&prepared.query).into_owned()),
             binding: prepared.binding.clone(),
-            at,
             include_deleted,
             tier,
             wait: reach.wait,
-            view: view.clone(),
+            span: ReadSpan::Once {
+                at,
+                view: Box::new(view.clone()),
+            },
         };
         // The request in flight, and the connection it went out on.
         let mut asked: Option<(u64, u64)> = None;
@@ -5504,11 +5511,18 @@ impl Db {
                     SyncMessage::Settled {
                         id,
                         through,
-                        window,
+                        listing,
                         global,
                     } => {
                         let client = inner.client.as_mut().expect("client");
                         client.known = client.known.max(through);
+                        // A one-shot read's answer.
+                        if let Some(slot) = client.answers.get_mut(&id) {
+                            *slot = Some(Ok((through, listing.unwrap_or_default())));
+                            client.relay_ready |=
+                                client.relayed_fetches.iter().any(|f| f.upstream == id);
+                            continue;
+                        }
                         let Some(key) = client.remote_ids.get(&id).cloned() else {
                             continue;
                         };
@@ -5518,7 +5532,7 @@ impl Db {
                         remote.through = Some(through);
                         let watermark = remote.watermark;
                         // Cached rows the server's result lacks are stale.
-                        if let Some(ids) = window {
+                        if let Some(ids) = listing {
                             answered_remotes.push((
                                 remote.query.clone(),
                                 remote.binding.clone(),
@@ -5536,15 +5550,6 @@ impl Db {
                         if let Some(slot @ None) = client.advice.get_mut(&id) {
                             *slot = Some(advice);
                         }
-                    }
-                    SyncMessage::Answer { id, through, rows } => {
-                        let client = inner.client.as_mut().expect("client");
-                        client.known = client.known.max(through);
-                        if let Some(slot) = client.answers.get_mut(&id) {
-                            *slot = Some(Ok((through, rows)));
-                        }
-                        client.relay_ready |=
-                            client.relayed_fetches.iter().any(|f| f.upstream == id);
                     }
                     SyncMessage::SchemaAdmission { admitted } => {
                         inner.client.as_mut().expect("client").unadmitted = !admitted;
@@ -5712,7 +5717,7 @@ impl Db {
         // writer's own earlier writes however its ticks are sliced.
         let first_read = out
             .iter()
-            .position(|m| matches!(m, SyncMessage::Subscribe { .. } | SyncMessage::Fetch { .. }))
+            .position(|m| matches!(m, SyncMessage::Read { .. }))
             .unwrap_or(out.len());
         let reads = out.split_off(first_read);
         let wanted: Vec<ChunkRequest> = std::mem::take(&mut client.wanted)
@@ -5971,7 +5976,7 @@ impl Inner {
                 continue;
             }
             let answer = client.answers.remove(&fetch.upstream).flatten();
-            let SyncMessage::Fetch { id, .. } = &fetch.message else {
+            let SyncMessage::Read { id, .. } = &fetch.message else {
                 continue;
             };
             match answer {
@@ -5981,20 +5986,19 @@ impl Inner {
                     message: error.message,
                 }),
                 Some(Ok((through, listed))) => {
-                    if let SyncMessage::Fetch {
+                    if let SyncMessage::Read {
                         query,
                         binding,
-                        at: None,
                         include_deleted,
-                        view,
+                        span: ReadSpan::Once { at: None, view },
                         ..
                     } = &fetch.ask
                     {
                         answers.push((
-                            query.clone(),
+                            (**query).clone(),
                             binding.clone(),
                             *include_deleted,
-                            view.clone(),
+                            (**view).clone(),
                             listed,
                             through,
                         ));
@@ -6419,7 +6423,7 @@ impl Db {
                 held.push_back(message);
                 continue;
             }
-            if let SyncMessage::Subscribe { id, .. } | SyncMessage::Fetch { id, .. } = &message {
+            if let SyncMessage::Read { id, .. } = &message {
                 self.inner.borrow_mut().sessions[index]
                     .backlog_reads
                     .1
@@ -6464,10 +6468,17 @@ impl Db {
             // A read the server cannot serve is refused to the client,
             // which would otherwise wait on it.
             let read = match &message {
-                SyncMessage::Subscribe { id, .. } | SyncMessage::Fetch { id, .. } => Some(*id),
+                SyncMessage::Read { id, .. } => Some(*id),
                 _ => None,
             };
-            let fetch = matches!(message, SyncMessage::Fetch { .. }).then(|| message.clone());
+            let fetch = matches!(
+                message,
+                SyncMessage::Read {
+                    span: ReadSpan::Once { .. },
+                    ..
+                }
+            )
+            .then(|| message.clone());
             // A message served while the chunk store fetches the nodes it
             // needs is served again once they arrive.
             let again = (fetch.is_none() && self.inner.borrow().chunks.store().is_some())
@@ -6534,10 +6545,11 @@ impl Db {
             SyncMessage::Advise { .. } => true,
             // A read frozen at a snapshot may name the held commits
             // themselves, which the server cannot resolve until they apply.
-            SyncMessage::Fetch { view, .. } if frozen_at(view).is_some() => {
-                barrier.tables.is_some() && !barrier.commits
-            }
-            SyncMessage::Subscribe { .. } | SyncMessage::Fetch { .. } => {
+            SyncMessage::Read {
+                span: ReadSpan::Once { view, .. },
+                ..
+            } if frozen_at(view).is_some() => barrier.tables.is_some() && !barrier.commits,
+            SyncMessage::Read { .. } => {
                 let Some(written) = &barrier.tables else {
                     return false;
                 };
@@ -6552,7 +6564,7 @@ impl Db {
     fn note_held(&self, index: usize, barrier: &mut HeldWrites, message: &SyncMessage) {
         match message {
             SyncMessage::PushChunks { .. } | SyncMessage::ChunkRequests { .. } => {}
-            SyncMessage::Subscribe { id, .. } | SyncMessage::Fetch { id, .. } => {
+            SyncMessage::Read { id, .. } => {
                 barrier.reads.insert(*id);
             }
             SyncMessage::Unsubscribe { .. } | SyncMessage::Advise { .. } => {}
@@ -6584,12 +6596,9 @@ impl Db {
     /// that session (its policies and claims); `None` when they cannot be
     /// told, so the read is not let ahead of anything.
     fn read_dependencies(&self, index: usize, message: &SyncMessage) -> Option<BTreeSet<String>> {
-        let (SyncMessage::Subscribe {
+        let SyncMessage::Read {
             id, query, binding, ..
-        }
-        | SyncMessage::Fetch {
-            id, query, binding, ..
-        }) = message
+        } = message
         else {
             return None;
         };
@@ -6999,7 +7008,7 @@ impl Db {
                     settled.push(SyncMessage::Settled {
                         id,
                         through,
-                        window,
+                        listing: window,
                         global,
                     });
                     // The settled opening listed the result.
@@ -7382,14 +7391,14 @@ impl Db {
                 session.version = Some(crate::ids::SchemaVersionId::from_bytes(version));
                 session.schema = None;
             }
-            SyncMessage::Subscribe {
+            SyncMessage::Read {
                 id,
                 query,
                 binding,
-                since,
                 include_deleted,
                 tier,
                 wait,
+                span: ReadSpan::Live { since },
             } => {
                 let local = tier == ReadTier::LocalOnly;
                 let prepared = with_claims(db.prepare_query_bound(&query, binding)?);
@@ -7571,15 +7580,14 @@ impl Db {
                     .outbox
                     .push(SyncMessage::Advice { id, advice });
             }
-            SyncMessage::Fetch {
+            SyncMessage::Read {
                 id,
                 query,
                 binding,
-                at,
                 include_deleted,
                 tier,
                 wait,
-                view,
+                span: ReadSpan::Once { at, view },
             } => {
                 // A relay asks its upstream first for a Remote read, then
                 // serves it from its store once the answer's rows are in
@@ -7612,15 +7620,17 @@ impl Db {
                     let client = inner.client.as_mut().expect("client");
                     let upstream = client.next_id;
                     client.next_id += 1;
-                    client.outbox.push(SyncMessage::Fetch {
+                    client.outbox.push(SyncMessage::Read {
                         id: upstream,
-                        query: remote_query(&prepared.query).into_owned(),
+                        query: Box::new(remote_query(&prepared.query).into_owned()),
                         binding: prepared.binding.clone(),
-                        at,
                         include_deleted,
                         tier: ReadTier::Remote,
                         wait: None,
-                        view: view.clone(),
+                        span: ReadSpan::Once {
+                            at,
+                            view: view.clone(),
+                        },
                     });
                 }
                 if let Some(strict) = relay {
@@ -7630,15 +7640,17 @@ impl Db {
                     let upstream = client.next_id;
                     client.next_id += 1;
                     client.answers.insert(upstream, None);
-                    let ask = SyncMessage::Fetch {
+                    let ask = SyncMessage::Read {
                         id: upstream,
-                        query: remote_query(&prepared.query).into_owned(),
+                        query: Box::new(remote_query(&prepared.query).into_owned()),
                         binding: prepared.binding.clone(),
-                        at,
                         include_deleted,
                         tier: ReadTier::Remote,
                         wait: None,
-                        view: view.clone(),
+                        span: ReadSpan::Once {
+                            at,
+                            view: view.clone(),
+                        },
                     };
                     client.outbox.push(ask.clone());
                     client.relayed_fetches.push(RelayedFetch {
@@ -7647,15 +7659,14 @@ impl Db {
                         ask,
                         strict,
                         until: wait.and_then(wait_until),
-                        message: SyncMessage::Fetch {
+                        message: SyncMessage::Read {
                             id,
                             query,
                             binding,
-                            at,
                             include_deleted,
                             tier,
                             wait,
-                            view,
+                            span: ReadSpan::Once { at, view },
                         },
                     });
                     return Ok(());
@@ -7684,7 +7695,7 @@ impl Db {
                 }
                 let opts = ReadOpts {
                     read_view: crate::protocol::ReadViewSpec {
-                        source: view,
+                        source: *view,
                         include_deleted,
                     },
                     ..ReadOpts::default()
@@ -7781,14 +7792,18 @@ impl Db {
                 let mut origins = inner.origins(&seqs)?;
                 origins.extend(named);
                 let through = at.unwrap_or(inner.served_through());
+                let authority = inner.client.is_none();
                 let session = &mut inner.sessions[index];
                 if !images.is_empty() || !origins.is_empty() {
                     session.outbox.push(SyncMessage::Rows { images, origins });
                 }
-                session.outbox.push(SyncMessage::Answer {
+                session.outbox.push(SyncMessage::Settled {
                     id,
                     through,
-                    rows: rows.iter().map(|r| *r.id.0.as_bytes()).collect(),
+                    listing: Some(rows.iter().map(|r| *r.id.0.as_bytes()).collect()),
+                    // A strict read at a relay is served once its upstream
+                    // answered, from the settled rows alone.
+                    global: authority || strict,
                 });
             }
             SyncMessage::Commit {

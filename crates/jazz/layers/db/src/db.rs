@@ -50,10 +50,10 @@ use crate::values::{
 };
 pub use sync::{
     BuiltOn, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad, FrameJoiner, Image, LOCAL_BASE,
-    NON_DURABLE_BASE, RejectedTransaction, RelationSnapshot, RemoteLinkHint, SerializedReadResult,
-    SubscriberId, SyncMessage, Transport, TransportError, Upstream, WireBase, WireChunk,
-    WireChunkRef, WireDelta, WireError, WireKind, WireOp, WirePull, WireTarget, WireTransport,
-    WireTransportAdapter, WriteConflict, decode_message, duplex, encode_frames,
+    NON_DURABLE_BASE, ReadSpan, RejectedTransaction, RelationSnapshot, RemoteLinkHint,
+    SerializedReadResult, SubscriberId, SyncMessage, Transport, TransportError, Upstream, WireBase,
+    WireChunk, WireChunkRef, WireDelta, WireError, WireKind, WireOp, WirePull, WireTarget,
+    WireTransport, WireTransportAdapter, WriteConflict, decode_message, duplex, encode_frames,
     validate_frame_batch_for_corpus,
 };
 

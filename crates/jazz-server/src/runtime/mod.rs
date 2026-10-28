@@ -1756,9 +1756,8 @@ impl Owner {
                         });
                 }
                 Ok(Some(
-                    message @ (SyncMessage::Subscribe { .. }
+                    message @ (SyncMessage::Read { .. }
                     | SyncMessage::Unsubscribe { .. }
-                    | SyncMessage::Fetch { .. }
                     | SyncMessage::Hold { .. }),
                 )) if gated => owner_session.held.push_back(message),
                 Ok(Some(message)) => inbound.push_back(message),
