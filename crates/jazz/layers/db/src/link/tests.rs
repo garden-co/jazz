@@ -259,6 +259,20 @@ fn a_starting_server_is_retried_quickly_while_readers_wait() {
     assert_eq!(alice.link.phase(), &LinkPhase::Live);
 }
 
+/// A server that answers the attempt with a non-auth refusal is retried, but
+/// reported at once: there is no outage to wait out.
+#[test]
+fn a_refused_attempt_is_retried_and_published_at_once() {
+    let mut alice = Host::configured();
+    alice.fail(LinkFailure::Refused("proxy refused the upgrade".into()));
+    assert_eq!(alice.link.phase(), &LinkPhase::Backoff);
+    assert!(alice.link.status().outage_published);
+    assert!(alice.timer.is_some());
+    alice.fire();
+    alice.admit();
+    assert!(!alice.link.status().outage_published);
+}
+
 /// After a link was live, "not ready" is an outage like any other.
 #[test]
 fn a_server_not_ready_after_admission_backs_off_like_an_outage() {
@@ -295,7 +309,10 @@ fn a_refused_credential_waits_for_a_new_one() {
     );
     assert_eq!(
         alice.auth_events(),
-        vec![LinkEvent::AuthFailed(AuthFailureReason::Expired)]
+        vec![LinkEvent::AuthFailed {
+            reason: AuthFailureReason::Expired,
+            message: "token expired".into(),
+        }]
     );
 
     alice.now += 3_600_000;
@@ -324,8 +341,14 @@ fn every_refusal_is_reported_and_one_restoration_follows() {
     assert_eq!(
         alice.auth_events(),
         vec![
-            LinkEvent::AuthFailed(AuthFailureReason::Invalid),
-            LinkEvent::AuthFailed(AuthFailureReason::Expired),
+            LinkEvent::AuthFailed {
+                reason: AuthFailureReason::Invalid,
+                message: "token invalid".into(),
+            },
+            LinkEvent::AuthFailed {
+                reason: AuthFailureReason::Expired,
+                message: "token expired".into(),
+            },
             LinkEvent::AuthRestored,
         ]
     );
@@ -591,7 +614,7 @@ fn random_interleavings_keep_the_invariants() {
             );
             for event in host.link.drain_events() {
                 match event {
-                    LinkEvent::AuthFailed(_) => unrestored = true,
+                    LinkEvent::AuthFailed { .. } => unrestored = true,
                     LinkEvent::AuthRestored => {
                         assert!(unrestored, "restored without a refusal");
                         unrestored = false;

@@ -34,6 +34,10 @@ use crate::db::{
     UpdateOptions, UpsertOptions, Upstream, WireTransportAdapter, WriteIdentity,
 };
 use crate::ids::{AuthorSubject, NodeUuid, RowUuid};
+use crate::link::{
+    AttemptId, AuthFailureReason, LinkAction, LinkEvent, LinkFailure, LinkInput, LinkPolicy,
+    LinkStatus, TimerToken, UpstreamLink,
+};
 use crate::model::public_api::types::{
     OrderedAdded, OrderedRemoved, OrderedUpdated, QueryResultField,
 };
@@ -47,8 +51,8 @@ use crate::query::Query;
 use crate::records::Value as CoreValue;
 use crate::schema::history;
 use crate::tools::native_transport_connector::{
-    NativeTransportConnector, NativeTransportError, NativeTransportLink, NativeTransportRequest,
-    NativeTransportTerminalFuture,
+    NativeTransportConnector, NativeTransportError, NativeTransportFuture, NativeTransportLink,
+    NativeTransportRequest, NativeTransportTerminal, NativeTransportTerminalFuture,
 };
 use crate::tools::sync::{DurabilityTier, ReadTier};
 use crate::tools::websocket_prelude_auth::AuthConfig;
@@ -61,8 +65,6 @@ use crate::tx::{DurabilityTier as CoreDurabilityTier, TxId};
 /// The driver ticks at least this often while it runs, so read deadlines
 /// (`FirstLoad::WaitForRemote`) expire without other work.
 const FALLBACK_TICK: Duration = Duration::from_millis(50);
-const RECONNECT_BASE_DELAY: Duration = Duration::from_millis(50);
-const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(2);
 /// The local store under `AppContext::data_dir`.
 const STORE_FILE: &str = "jazz.sqlite";
 /// The node id a persistent store's writes are uploaded under. It must
@@ -100,6 +102,8 @@ struct Shared {
     /// True while a test holds the upstream detached; the keeper neither
     /// keeps nor re-opens a link until it turns false.
     upstream_paused: watch::Sender<bool>,
+    /// The credential the next connection attempt presents.
+    credentials: watch::Sender<AuthConfig>,
     /// No server is configured, so nothing can confirm a write past Local.
     serverless: bool,
     /// The upstream link is a trusted backend or admin link, which may
@@ -125,6 +129,8 @@ struct State {
     driven: bool,
     /// Failed upstream connect attempts so far, and the last one's error.
     connect_failures: (u64, Option<String>),
+    /// The upstream link's last published status; `None` without a server.
+    link_status: Option<LinkStatus>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -377,74 +383,204 @@ async fn drive(shared: Weak<Shared>, work: Arc<Notify>) {
     }
 }
 
-/// Keeps one upstream link: waits for the attached link to stop, detaches
-/// it, and reconnects with backoff.
+/// Drives the shared upstream link machine ([`UpstreamLink`]): this task owns
+/// the socket and the timer, the machine decides when to connect, back off,
+/// wait for a new credential or stop.
 async fn keep_upstream(
     shared: Weak<Shared>,
     connector: Arc<dyn NativeTransportConnector>,
-    request: NativeTransportRequest,
-    mut attached: Option<NativeTransportTerminalFuture>,
+    mut request: NativeTransportRequest,
+    mut keeper: LinkKeeper,
 ) {
-    let mut delay = RECONNECT_BASE_DELAY;
-    let mut paused = match shared.upgrade() {
-        Some(shared) => shared.upstream_paused.subscribe(),
+    let (mut paused, mut credentials) = match shared.upgrade() {
+        Some(shared) => (
+            shared.upstream_paused.subscribe(),
+            shared.credentials.subscribe(),
+        ),
         None => return,
     };
+    let mut connecting: Option<(AttemptId, NativeTransportFuture)> = None;
+    let mut timer: Option<(TimerToken, std::pin::Pin<Box<tokio::time::Sleep>>)> = None;
     loop {
-        let terminal = match attached.take() {
-            Some(terminal) => terminal,
-            None => {
-                if paused.wait_for(|paused| !*paused).await.is_err() {
-                    return;
+        for action in std::mem::take(&mut keeper.actions) {
+            match action {
+                LinkAction::Connect { attempt, .. } => {
+                    connecting = Some((attempt, connector.connect(request.clone())));
                 }
-                {
-                    let Some(shared) = shared.upgrade() else {
-                        return;
-                    };
-                    if shared.state.borrow().closed {
-                        return;
+                LinkAction::Close(attempt) => {
+                    if connecting
+                        .as_ref()
+                        .is_some_and(|(open, _)| *open == attempt)
+                    {
+                        connecting = None;
                     }
-                    shared.db.set_remote_link_hint(RemoteLinkHint::Attempting);
+                    if keeper
+                        .live
+                        .as_ref()
+                        .is_some_and(|(open, _)| *open == attempt)
+                    {
+                        keeper.live = None;
+                        if let Some(shared) = shared.upgrade() {
+                            detach(&shared);
+                        }
+                    }
                 }
-                match connector.connect(request.clone()).await {
+                LinkAction::ArmTimer { token, after_ms } => {
+                    timer = Some((
+                        token,
+                        Box::pin(tokio::time::sleep(Duration::from_millis(after_ms))),
+                    ));
+                }
+                LinkAction::CancelTimer(_) => timer = None,
+            }
+        }
+        {
+            let Some(shared) = shared.upgrade() else {
+                return;
+            };
+            if shared.state.borrow().closed {
+                return;
+            }
+            keeper.publish(&shared);
+        }
+        let input = tokio::select! {
+            result = async { connecting.as_mut().expect("guarded").1.as_mut().await },
+                if connecting.is_some() =>
+            {
+                let (attempt, _) = connecting.take().expect("guarded");
+                match result {
                     Ok(link) => {
                         let Some(shared) = shared.upgrade() else {
                             return;
                         };
                         attach(&shared, link.transport).await;
-                        delay = RECONNECT_BASE_DELAY;
-                        link.terminal
+                        keeper.live = Some((attempt, link.terminal));
+                        LinkInput::Admitted(attempt)
                     }
                     Err(error) => {
                         tracing::debug!(%error, "jazz client upstream connect failed");
                         if let Some(shared) = shared.upgrade() {
-                            shared.db.set_remote_link_hint(RemoteLinkHint::Failed);
                             let mut state = shared.state();
                             let failures = state.connect_failures.0 + 1;
                             state.connect_failures = (failures, Some(error.to_string()));
-                            drop(state);
-                            shared.tick_soon();
                         }
-                        tokio::time::sleep(delay).await;
-                        delay = (delay * 2).min(RECONNECT_MAX_DELAY);
-                        continue;
+                        LinkInput::Ended(attempt, link_failure(error))
                     }
                 }
             }
-        };
-        tokio::select! {
-            stopped = terminal => {
+            stopped = async { keeper.live.as_mut().expect("guarded").1.as_mut().await },
+                if keeper.live.is_some() =>
+            {
                 tracing::debug!(?stopped, "jazz client upstream stopped");
+                let (attempt, _) = keeper.live.take().expect("guarded");
+                if let Some(shared) = shared.upgrade() {
+                    detach(&shared);
+                }
+                LinkInput::Ended(attempt, terminal_failure(stopped))
             }
-            // A test detached the link; dropping its terminal closes it.
-            _ = paused.wait_for(|paused| *paused) => {}
-        }
-        let Some(shared) = shared.upgrade() else {
-            return;
+            () = async { timer.as_mut().expect("guarded").1.as_mut().await },
+                if timer.is_some() =>
+            {
+                let (token, _) = timer.take().expect("guarded");
+                LinkInput::TimerFired(token)
+            }
+            changed = paused.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                LinkInput::SetOffline(*paused.borrow_and_update())
+            }
+            changed = credentials.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                request.auth = credentials.borrow_and_update().clone();
+                LinkInput::CredentialUpdated
+            }
         };
-        detach(&shared);
-        shared.db.set_remote_link_hint(RemoteLinkHint::Failed);
-        shared.tick_soon();
+        keeper.handle(input);
+    }
+}
+
+/// The client's [`UpstreamLink`] with the clock it is driven by, the actions
+/// it still owes, and the established link it admitted.
+struct LinkKeeper {
+    link: UpstreamLink,
+    started: tokio::time::Instant,
+    actions: Vec<LinkAction>,
+    live: Option<(AttemptId, NativeTransportTerminalFuture)>,
+}
+
+impl LinkKeeper {
+    fn new() -> Self {
+        let seed = Uuid::new_v4().as_u64_pair().0;
+        let mut keeper = Self {
+            link: UpstreamLink::new(LinkPolicy::default(), seed),
+            started: tokio::time::Instant::now(),
+            actions: Vec::new(),
+            live: None,
+        };
+        keeper.handle(LinkInput::ServerConfigured(true));
+        keeper
+    }
+
+    fn handle(&mut self, input: LinkInput) {
+        let now = self.started.elapsed().as_millis() as u64;
+        let actions = self.link.handle(now, input);
+        self.actions.extend(actions);
+    }
+
+    /// The connect the machine asked for, taken to be carried out inline.
+    fn take_connect(&mut self) -> Option<AttemptId> {
+        let at = self
+            .actions
+            .iter()
+            .position(|action| matches!(action, LinkAction::Connect { .. }))?;
+        match self.actions.remove(at) {
+            LinkAction::Connect { attempt, .. } => Some(attempt),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Hand the machine's view to the read gate and the status accessor.
+    fn publish(&mut self, shared: &Shared) {
+        shared.db.set_remote_link_hint(self.link.remote_link_hint());
+        for event in self.link.drain_events() {
+            if let LinkEvent::Status(status) = event {
+                shared.state().link_status = Some(status);
+            }
+        }
+    }
+}
+
+/// A failed connection attempt, as the shared link classifies it. A
+/// connector's `Terminal` (TLS, a proxy refusing the upgrade) can clear on
+/// its own, so it is a refusal the link retries.
+fn link_failure(error: NativeTransportError) -> LinkFailure {
+    match error {
+        NativeTransportError::AuthRejected(message) => LinkFailure::AuthRejected {
+            reason: AuthFailureReason::from_message(&message),
+            message,
+        },
+        NativeTransportError::Terminal(message) => LinkFailure::Refused(message),
+        NativeTransportError::Retryable(message) => LinkFailure::Network(message),
+    }
+}
+
+/// How an established link ended. Losing an admitted link is an outage,
+/// whatever the transport calls it, unless the server refused the credential.
+fn terminal_failure(stopped: NativeTransportTerminal) -> LinkFailure {
+    match stopped {
+        NativeTransportTerminal::Failed(error @ NativeTransportError::AuthRejected(_)) => {
+            link_failure(error)
+        }
+        NativeTransportTerminal::Failed(
+            NativeTransportError::Terminal(message) | NativeTransportError::Retryable(message),
+        )
+        | NativeTransportTerminal::PeerClosed(message) => LinkFailure::Network(message),
+        NativeTransportTerminal::OwnerDropped => {
+            LinkFailure::Network("upstream connection dropped".to_owned())
+        }
     }
 }
 
@@ -453,7 +589,6 @@ async fn attach(shared: &Shared, transport: Box<dyn crate::wire::WireTransport +
         .db
         .connect_upstream(Box::new(WireTransportAdapter::current(transport)))
         .await;
-    shared.db.set_remote_link_hint(RemoteLinkHint::Live);
     shared.state().upstream = Some(upstream);
     shared.tick_soon();
 }
@@ -531,6 +666,17 @@ impl JazzClient {
             work: work.clone(),
             progress,
             upstream_paused: watch::channel(false).0,
+            credentials: watch::channel(AuthConfig {
+                jwt_token: if context.backend_secret.is_some() {
+                    None
+                } else {
+                    context.jwt_token.clone()
+                },
+                backend_secret: context.backend_secret.clone(),
+                admin_secret: context.admin_secret.clone(),
+                backend_session: None,
+            })
+            .0,
             serverless: connector.is_none(),
             trusted: context.backend_secret.is_some() || context.admin_secret.is_some(),
             state: RefCell::new(State::default()),
@@ -548,25 +694,19 @@ impl JazzClient {
                 server_url: context.server_url.clone(),
                 app_id: context.app_id,
                 peer_identity: identity.author,
-                auth: AuthConfig {
-                    jwt_token: if context.backend_secret.is_some() {
-                        None
-                    } else {
-                        context.jwt_token.clone()
-                    },
-                    backend_secret: context.backend_secret.clone(),
-                    admin_secret: context.admin_secret.clone(),
-                    backend_session: None,
-                },
+                auth: shared.credentials.borrow().clone(),
                 wake: Arc::new(move || wake.notify_one()),
             };
-            shared.db.set_remote_link_hint(RemoteLinkHint::Attempting);
             // The first attempt decides whether the server admits this
             // client at all; an unreachable server only means offline.
-            let attached = match connector.connect(request.clone()).await {
+            let mut keeper = LinkKeeper::new();
+            keeper.publish(&shared);
+            let attempt = keeper.take_connect().expect("a configured link connects");
+            match connector.connect(request.clone()).await {
                 Ok(link) => {
                     attach(&shared, link.transport).await;
-                    Some(link.terminal)
+                    keeper.live = Some((attempt, link.terminal));
+                    keeper.handle(LinkInput::Admitted(attempt));
                 }
                 Err(
                     NativeTransportError::Terminal(error)
@@ -574,17 +714,17 @@ impl JazzClient {
                 ) => {
                     return Err(JazzError::Connection(error));
                 }
-                Err(NativeTransportError::Retryable(error)) => {
+                Err(error @ NativeTransportError::Retryable(_)) => {
                     tracing::debug!(%error, "jazz client starts offline");
-                    shared.db.set_remote_link_hint(RemoteLinkHint::Failed);
-                    None
+                    keeper.handle(LinkInput::Ended(attempt, link_failure(error)));
                 }
-            };
+            }
+            keeper.publish(&shared);
             let keeper = tokio::task::spawn_local(keep_upstream(
                 Rc::downgrade(&shared),
                 connector,
                 request,
-                attached,
+                keeper,
             ));
             shared.state().tasks.push(keeper);
             shared.ensure_driven();
@@ -1359,6 +1499,27 @@ impl JazzClient {
     }
 
     /// Check if connected to server.
+    /// Present a new bearer token upstream. A live link reconnects with it;
+    /// a link whose token the server refused connects again with it.
+    pub fn update_auth_token(&self, jwt_token: String) -> Result<()> {
+        self.shared.ensure_open()?;
+        if self.shared.serverless || self.shared.trusted {
+            return Err(JazzError::Connection(
+                "only a client with a bearer-authenticated server can update its token".to_owned(),
+            ));
+        }
+        self.shared
+            .credentials
+            .send_modify(|auth| auth.jwt_token = Some(jwt_token));
+        Ok(())
+    }
+
+    /// The upstream link's status, including why it is not live and whether
+    /// it waits for a new token. `None` for a client without a server.
+    pub fn upstream_status(&self) -> Option<LinkStatus> {
+        self.shared.state.borrow().link_status.clone()
+    }
+
     pub fn is_connected(&self) -> bool {
         self.shared.state.borrow().upstream.is_some()
     }

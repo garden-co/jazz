@@ -136,6 +136,12 @@ pub enum LinkFailure {
     /// The network or socket failed, or the server closed the link. Retried
     /// with backoff for as long as it takes.
     Network(String),
+    /// The server answered a connection attempt with a refusal that is not
+    /// about the credential (TLS, a proxy refusing the upgrade, a rejected
+    /// session). Retried like an outage, since it can clear on its own, but
+    /// published at once: the server answered, so there is nothing to wait
+    /// out.
+    Refused(String),
     /// The server is still starting and refused the handshake. Retried
     /// quickly; readers keep waiting, since this is still the first attempt.
     ServerNotReady(String),
@@ -154,6 +160,7 @@ impl LinkFailure {
     fn message(&self) -> &str {
         match self {
             Self::Network(message)
+            | Self::Refused(message)
             | Self::ServerNotReady(message)
             | Self::AuthRejected { message, .. }
             | Self::Fatal(message) => message,
@@ -221,6 +228,19 @@ pub enum LinkPhase {
 }
 
 impl LinkPhase {
+    /// The hint the database's read gate consumes: only a first attempt is
+    /// worth waiting for.
+    pub fn remote_link_hint(&self) -> RemoteLinkHint {
+        match self {
+            Self::NoServer => RemoteLinkHint::NoServer,
+            Self::Connecting => RemoteLinkHint::Attempting,
+            Self::Live => RemoteLinkHint::Live,
+            Self::Offline | Self::Backoff | Self::AwaitingCredential(_) | Self::Stopped => {
+                RemoteLinkHint::Failed
+            }
+        }
+    }
+
     /// Whether the link has stopped trying on its own: waits for the server
     /// fail instead of staying pending (#3923). An outage it is retrying,
     /// and a refusal a new credential can fix, are not terminal.
@@ -253,7 +273,10 @@ pub struct LinkStatus {
 pub enum LinkEvent {
     Status(LinkStatus),
     /// The server refused the current credential.
-    AuthFailed(AuthFailureReason),
+    AuthFailed {
+        reason: AuthFailureReason,
+        message: String,
+    },
     /// A credential was admitted after a refusal.
     AuthRestored,
 }
@@ -322,15 +345,7 @@ impl UpstreamLink {
 
     /// The hint the database's read gate consumes.
     pub fn remote_link_hint(&self) -> RemoteLinkHint {
-        match self.phase {
-            LinkPhase::NoServer => RemoteLinkHint::NoServer,
-            LinkPhase::Connecting => RemoteLinkHint::Attempting,
-            LinkPhase::Live => RemoteLinkHint::Live,
-            LinkPhase::Offline
-            | LinkPhase::Backoff
-            | LinkPhase::AwaitingCredential(_)
-            | LinkPhase::Stopped => RemoteLinkHint::Failed,
-        }
+        self.phase.remote_link_hint()
     }
 
     /// The credential epoch the next attempt connects with.
@@ -430,11 +445,12 @@ impl UpstreamLink {
     fn ended(&mut self, now_ms: u64, failure: LinkFailure, actions: &mut Vec<LinkAction>) {
         self.reason = Some(failure.message().to_owned());
         match failure {
-            LinkFailure::AuthRejected { reason, .. } => {
+            LinkFailure::AuthRejected { reason, message } => {
                 self.cancel_timer(actions);
                 self.phase = LinkPhase::AwaitingCredential(reason);
                 self.auth_unrestored = true;
-                self.events.push_back(LinkEvent::AuthFailed(reason));
+                self.events
+                    .push_back(LinkEvent::AuthFailed { reason, message });
             }
             LinkFailure::Fatal(_) => {
                 self.cancel_timer(actions);
@@ -451,8 +467,11 @@ impl UpstreamLink {
             }
             // A server that is not ready after it once admitted this link is
             // an outage like any other.
-            LinkFailure::ServerNotReady(_) | LinkFailure::Network(_) => {
+            LinkFailure::ServerNotReady(_) | LinkFailure::Network(_) | LinkFailure::Refused(_) => {
                 let started = *self.outage_started_at.get_or_insert(now_ms);
+                if matches!(failure, LinkFailure::Refused(_)) {
+                    self.outage_published = true;
+                }
                 if !self.outage_published
                     && now_ms.saturating_sub(started) >= self.policy.outage_report_ms
                 {
