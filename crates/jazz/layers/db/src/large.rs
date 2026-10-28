@@ -122,9 +122,10 @@ CREATE TABLE IF NOT EXISTS _jazz_lv_via (root BLOB PRIMARY KEY, tbl TEXT NOT NUL
  id BLOB NOT NULL, key BLOB NOT NULL, seq INTEGER NOT NULL) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS _jazz_lv_scratch (slot INTEGER NOT NULL, cell INTEGER NOT NULL, \
  v BLOB, k, PRIMARY KEY (slot, cell)) WITHOUT ROWID;
-CREATE TRIGGER IF NOT EXISTS _jazz_lv_root_unreferenced AFTER UPDATE ON _jazz_lv_root \
+CREATE TRIGGER IF NOT EXISTS _jazz_lv_root_unreferenced AFTER UPDATE OF refs ON _jazz_lv_root \
  WHEN NEW.refs = 0 BEGIN \
- INSERT OR IGNORE INTO _jazz_lv_reclaim (root) VALUES (NEW.root); END;
+ INSERT INTO _jazz_lv_reclaim (root) SELECT NEW.root \
+ WHERE NOT EXISTS (SELECT 1 FROM _jazz_lv_reclaim WHERE root = NEW.root); END;
 CREATE TRIGGER IF NOT EXISTS _jazz_lv_epoch_ins AFTER INSERT ON _jazz_lv_epoch BEGIN \
  INSERT INTO _jazz_lv_root (root, refs) VALUES (NEW.root, 1) \
  ON CONFLICT (root) DO UPDATE SET refs = refs + 1; END;
@@ -2903,6 +2904,47 @@ mod tests {
         // Only the other push, still ahead of its commit, keeps receipts,
         // so expiring them later touches nothing the commit holds.
         assert_eq!(receipts(), pending_nodes);
+    }
+
+    /// Recording a base on a root that is already queued for reclamation
+    /// leaves the queue as it is. An upsert's update runs the triggers it
+    /// fires with ABORT, whatever conflict clause they name, so a trigger
+    /// that fired here and inserted the root again would fail the write.
+    #[test]
+    fn recording_a_base_on_a_queued_root_keeps_the_queue() {
+        let (conn, chunks) = chunks();
+        let built = lv::prepare(LargeValueKind::String, &text(11, 300_000)).unwrap();
+        // Two uploads of the same value; the first ends before the second
+        // finishes, which queues the shared root.
+        for id in [[1; 32], [2; 32]] {
+            begin_upload(&conn, &id, 1_000).unwrap();
+            stage_upload(&conn, &chunks, &id, &built.staged_chunks, false).unwrap();
+        }
+        end_upload(&conn, &[1; 32]).unwrap();
+        finish_upload(&conn, &built.value_ref).unwrap();
+        finish_upload(&conn, &built.value_ref).unwrap();
+        let queued: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM _jazz_lv_reclaim WHERE root = ?1",
+                [built.value_ref.root.object_hash.as_bytes().as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(queued, 1);
+        // Losing the last reference still queues the root exactly once.
+        let root = built.value_ref.root.object_hash.as_bytes().to_vec();
+        conn.execute("UPDATE _jazz_lv_root SET refs = 1 WHERE root = ?1", [&root])
+            .unwrap();
+        conn.execute("UPDATE _jazz_lv_root SET refs = 0 WHERE root = ?1", [&root])
+            .unwrap();
+        let queued: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM _jazz_lv_reclaim WHERE root = ?1",
+                [&root],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(queued, 1);
     }
 
     #[test]
