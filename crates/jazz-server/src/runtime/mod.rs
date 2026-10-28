@@ -1718,7 +1718,13 @@ impl Owner {
                 subscriber,
                 untrusted: identity != AuthorSubject::SYSTEM,
                 held: VecDeque::new(),
-                joiner: jazz::db::FrameJoiner::default(),
+                // An untrusted peer's split message must fit the budget
+                // its frames are admitted against (SPEC 8.1).
+                joiner: if identity != AuthorSubject::SYSTEM {
+                    jazz::db::FrameJoiner::with_ceiling(SESSION_QUEUE_BUDGET)
+                } else {
+                    jazz::db::FrameJoiner::default()
+                },
                 queues,
                 output,
                 egress,
@@ -1763,11 +1769,7 @@ impl Owner {
                 Ok(Some(message)) => inbound.push_back(message),
                 Err(error) => {
                     drop(inbound);
-                    let error = match error {
-                        jazz::db::TransportError::Failed(error) => error,
-                        jazz::db::TransportError::Backpressure => "backpressure".to_owned(),
-                    };
-                    let _ = owner_session.output.send((Err(error), 0));
+                    let _ = owner_session.output.send((Err(error.to_string()), 0));
                     self.close_session(session);
                     return;
                 }
@@ -1831,6 +1833,7 @@ impl Owner {
             let mut outbound = session.queues.outbound.borrow_mut();
             let mut frames = Vec::new();
             let mut bytes = 0;
+            let mut failed = None;
             while session.egress.load(Ordering::Acquire) + bytes < SESSION_QUEUE_BUDGET
                 && let Some(message) = outbound.pop_front()
             {
@@ -1839,10 +1842,22 @@ impl Owner {
                         bytes += encoded.iter().map(Vec::len).sum::<usize>();
                         frames.extend(encoded);
                     }
+                    // Dropped, the message would leave the client waiting
+                    // on it: the session ends with why instead.
                     Err(error) => {
                         tracing::error!(%error, "encode outbound sync message");
+                        failed = Some(error.to_string());
+                        break;
                     }
                 }
+            }
+            if let Some(error) = failed {
+                drop(outbound);
+                let _ = session
+                    .output
+                    .send((Err(format!("sync session closed: {error}")), 0));
+                gone.push(*id);
+                continue;
             }
             if frames.is_empty() {
                 continue;

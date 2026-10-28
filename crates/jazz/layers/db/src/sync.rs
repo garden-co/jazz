@@ -103,6 +103,12 @@ pub trait Transport {
     fn take_failure(&mut self) -> Option<TransportError> {
         None
     }
+    /// Send what an earlier `send` accepted but could not yet hand on
+    /// whole (the rest of a split message). `Backpressure` means some is
+    /// still waiting for the queue to drain.
+    fn flush(&mut self) -> Result<(), TransportError> {
+        Ok(())
+    }
 }
 
 /// An in-process link (a worker and its tab, or tests): each side's sends
@@ -149,6 +155,11 @@ pub struct WireTransportAdapter<W> {
     /// A frame failed to decode: nothing more is read, and
     /// [`Transport::take_failure`] reports it once.
     failed: Option<Option<TransportError>>,
+    /// The parts of a split message a full queue held back after its
+    /// first went out. They go ahead of anything sent later: a reader
+    /// joins parts in order, so the message is never sent again from its
+    /// start.
+    unsent: VecDeque<Vec<u8>>,
 }
 
 /// The largest encoded message one wire frame carries, leaving room for
@@ -167,9 +178,20 @@ const LAST_PART: u8 = 0xFE;
 /// result, one commit's fan-out, a large commit). Then its encoding
 /// travels in as many parts as it takes, each behind a part marker, and
 /// [`FrameJoiner`] makes them one message again. Splitting is a transport
-/// matter: any message may be split, and no message knows it was.
-pub fn encode_frames(message: SyncMessage) -> Result<Vec<Vec<u8>>, postcard::Error> {
-    let bytes = postcard::to_allocvec(&message)?;
+/// matter: any message may be split, and no message knows it was. A
+/// message beyond the logical message ceiling no reader joins is refused
+/// here, not sent.
+pub fn encode_frames(message: SyncMessage) -> Result<Vec<Vec<u8>>, TransportError> {
+    let bytes =
+        postcard::to_allocvec(&message).map_err(|e| TransportError::Failed(e.to_string()))?;
+    if bytes.len() > jazz_protocol::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES {
+        return Err(TransportError::Failed(format!(
+            "a {} message of {} bytes is over the {}-byte message ceiling: not supported yet",
+            message.kind(),
+            bytes.len(),
+            jazz_protocol::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES,
+        )));
+    }
     if bytes.len() <= MAX_MESSAGE_FRAME_BYTES {
         return Ok(vec![bytes]);
     }
@@ -197,13 +219,30 @@ pub fn decode_message(frame: &[u8]) -> Result<SyncMessage, postcard::Error> {
 
 /// Joins a split message's frames (see [`encode_frames`]) back into the
 /// one message they encode.
-#[derive(Default)]
 pub struct FrameJoiner {
     /// The bytes of the parts received since the last whole message.
     parts: Option<Vec<u8>>,
+    /// The most bytes a joined message may have.
+    ceiling: usize,
+}
+
+impl Default for FrameJoiner {
+    fn default() -> Self {
+        Self::with_ceiling(jazz_protocol::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES)
+    }
 }
 
 impl FrameJoiner {
+    /// A joiner refusing split messages over `ceiling` bytes: a server
+    /// bounds what an untrusted peer makes it buffer by the connection's
+    /// budget.
+    pub fn with_ceiling(ceiling: usize) -> Self {
+        Self {
+            parts: None,
+            ceiling,
+        }
+    }
+
     /// The message `frame` completes, if any. A frame that does not decode,
     /// a whole message between a split message's parts, a last part with
     /// no leading ones, or parts beyond the logical message ceiling are the
@@ -219,9 +258,7 @@ impl FrameJoiner {
                     }
                     (_, parts) => parts.unwrap_or_default(),
                 };
-                if parts.len() + part.len()
-                    > jazz_protocol::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES
-                {
+                if parts.len() + part.len() > self.ceiling {
                     return Err(failed(
                         "a split message beyond the message ceiling".to_owned(),
                     ));
@@ -254,14 +291,31 @@ impl<W> WireTransportAdapter<W> {
             wire,
             joiner: FrameJoiner::default(),
             failed: None,
+            unsent: VecDeque::new(),
         }
     }
 }
 
 impl<W: WireTransport> Transport for WireTransportAdapter<W> {
+    /// Accepts `message` once its first frame is queued: `Backpressure`
+    /// means none of it was, so the caller keeps it. Parts a full queue
+    /// refuses after that wait in `unsent` for [`Transport::flush`].
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
-        for frame in encode_frames(message).map_err(|e| TransportError::Failed(e.to_string()))? {
-            self.wire.send_frame(frame)?;
+        self.flush()?;
+        let mut frames = encode_frames(message)?.into_iter();
+        let first = frames.next().expect("a message encodes to a frame");
+        self.wire.send_frame(first)?;
+        self.unsent.extend(frames);
+        match self.flush() {
+            Err(TransportError::Backpressure) => Ok(()),
+            result => result,
+        }
+    }
+
+    fn flush(&mut self) -> Result<(), TransportError> {
+        while let Some(frame) = self.unsent.front() {
+            self.wire.send_frame(frame.clone())?;
+            self.unsent.pop_front();
         }
         Ok(())
     }
@@ -326,12 +380,7 @@ pub fn validate_frame_batch_for_corpus(
     };
     // Frames of a split message join across the batch, as a reader's do.
     let mut joiner = FrameJoiner::default();
-    let mut message = |frame: &[u8]| {
-        joiner.push(frame).map(drop).map_err(|error| match error {
-            TransportError::Failed(error) => error,
-            TransportError::Backpressure => "backpressure".to_owned(),
-        })
-    };
+    let mut message = |frame: &[u8]| joiner.push(frame).map(drop).map_err(|e| e.to_string());
     let frames = decode_websocket_frame_batch(batch)
         .map_err(|error| format!("malformed websocket frame batch: {error}"))?;
     match reader {
@@ -419,6 +468,57 @@ pub struct Image {
     /// reads list only content versions.
     pub content: bool,
     pub cells: Vec<(String, Cell)>,
+}
+
+/// The most image bytes one `Rows` carries: a first result of any size
+/// travels as several, each well under the logical message ceiling a
+/// reader joins split frames up to.
+const ROWS_MESSAGE_BYTES: usize = jazz_protocol::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES / 4;
+
+/// `images` (and the `origins` they come with) as `Rows` messages of at
+/// most `limit` ([`ROWS_MESSAGE_BYTES`]) of images each. A reader installs each
+/// message whole, so a commit's versions (one seq) never straddle two: a
+/// result that needs more than one goes in seq order, and a single
+/// commit larger than the bound still travels as one.
+fn rows_messages(
+    mut images: Vec<Image>,
+    origins: Vec<(u64, [u8; 16], u64)>,
+    limit: usize,
+) -> Vec<SyncMessage> {
+    let size = |image: &Image| {
+        postcard::serialize_with_flavor(image, postcard::ser_flavors::Size::default())
+            .unwrap_or(usize::MAX)
+    };
+    let sizes: Vec<usize> = images.iter().map(size).collect();
+    if sizes.iter().fold(0usize, |sum, n| sum.saturating_add(*n)) <= limit {
+        if images.is_empty() && origins.is_empty() {
+            return Vec::new();
+        }
+        return vec![SyncMessage::Rows { images, origins }];
+    }
+    let mut sized: Vec<(usize, Image)> = sizes.into_iter().zip(images.drain(..)).collect();
+    sized.sort_by_key(|(_, image)| image.seq);
+    let mut out = Vec::new();
+    let mut origins = Some(origins);
+    let mut batch: Vec<Image> = Vec::new();
+    let mut bytes = 0usize;
+    for (n, image) in sized {
+        let same_commit = batch.last().is_some_and(|last| last.seq == image.seq);
+        if !batch.is_empty() && !same_commit && bytes.saturating_add(n) > limit {
+            out.push(SyncMessage::Rows {
+                images: std::mem::take(&mut batch),
+                origins: origins.take().unwrap_or_default(),
+            });
+            bytes = 0;
+        }
+        bytes = bytes.saturating_add(n);
+        batch.push(image);
+    }
+    out.push(SyncMessage::Rows {
+        images: batch,
+        origins: origins.take().unwrap_or_default(),
+    });
+    out
 }
 
 /// A row a commit writes, as the writer's replica holds it afterwards:
@@ -5884,7 +5984,12 @@ impl Db {
                 Err(e) => return Err(Error::new(ErrorCode::Storage, format!("{e:?}"))),
             }
         }
-        Ok(())
+        // With nothing new to send, the rest of a split message still goes
+        // out as the queue drains.
+        match transport.flush() {
+            Ok(()) | Err(TransportError::Backpressure) => Ok(()),
+            Err(e) => Err(Error::new(ErrorCode::Storage, format!("{e:?}"))),
+        }
     }
 
     /// Push a settled marker to subscriptions whose remote answered without
@@ -7257,9 +7362,7 @@ impl Db {
                     }
                 }
             }
-            if !images.is_empty() || !origins.is_empty() {
-                out.push(SyncMessage::Rows { images, origins });
-            }
+            out.extend(rows_messages(images, origins, ROWS_MESSAGE_BYTES));
             out.extend(evictions);
             out.extend(std::mem::take(&mut session.outbox));
             out.extend(settled);
@@ -8911,5 +9014,93 @@ impl Db {
                 .collect::<BTreeMap<_, _>>(),
             client.transport.is_some(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn image(id: u8, seq: u64, body: usize) -> Image {
+        Image {
+            table: "notes".to_owned(),
+            id: [id; 16],
+            key: Vec::new(),
+            seq,
+            deleted: false,
+            content: true,
+            cells: vec![("body".to_owned(), Cell::Blob(vec![0; body]))],
+        }
+    }
+
+    fn shipped(messages: &[SyncMessage]) -> Vec<Vec<(u8, u64)>> {
+        messages
+            .iter()
+            .map(|message| match message {
+                SyncMessage::Rows { images, .. } => images
+                    .iter()
+                    .map(|image| (image.id[0], image.seq))
+                    .collect(),
+                other => panic!("not Rows: {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rows_over_the_bound_split_between_commits_in_seq_order() {
+        let images = vec![
+            image(1, 3, 100),
+            image(2, 1, 100),
+            image(3, 3, 100),
+            image(4, 2, 100),
+        ];
+        let origins = vec![(1, [9; 16], 1)];
+        let messages = rows_messages(images, origins.clone(), 300);
+        // seq 1 and 2 fit together; seq 3's two versions stay together.
+        assert_eq!(
+            shipped(&messages),
+            [vec![(2, 1), (4, 2)], vec![(1, 3), (3, 3)]]
+        );
+        let SyncMessage::Rows { origins: first, .. } = &messages[0] else {
+            unreachable!()
+        };
+        assert_eq!(first, &origins, "the origins go with the first part");
+    }
+
+    #[test]
+    fn one_commit_over_the_bound_still_travels_whole() {
+        let images = vec![image(1, 5, 300), image(2, 5, 300)];
+        assert_eq!(
+            shipped(&rows_messages(images, Vec::new(), 250)),
+            [vec![(1, 5), (2, 5)]]
+        );
+    }
+
+    #[test]
+    fn rows_under_the_bound_keep_their_order_in_one_message() {
+        let images = vec![image(1, 3, 10), image(2, 1, 10)];
+        assert_eq!(
+            shipped(&rows_messages(images, Vec::new(), 250)),
+            [vec![(1, 3), (2, 1)]]
+        );
+        assert!(rows_messages(Vec::new(), Vec::new(), 250).is_empty());
+    }
+
+    #[test]
+    fn a_joiner_refuses_a_split_message_over_its_ceiling() {
+        let bytes = postcard::to_allocvec(&SyncMessage::Unsubscribe { id: 7 }).unwrap();
+        let parts = [
+            [&[PART], &bytes[..1]].concat(),
+            [&[LAST_PART], &bytes[1..]].concat(),
+        ];
+        let mut joiner = FrameJoiner::with_ceiling(bytes.len());
+        assert!(joiner.push(&parts[0]).unwrap().is_none());
+        assert!(matches!(
+            joiner.push(&parts[1]).unwrap(),
+            Some(SyncMessage::Unsubscribe { id: 7 })
+        ));
+        let mut joiner = FrameJoiner::with_ceiling(bytes.len() - 1);
+        assert!(joiner.push(&parts[0]).unwrap().is_none());
+        assert!(joiner.push(&parts[1]).is_err());
     }
 }

@@ -130,8 +130,9 @@ its first byte.
 A WebSocket binary message is one postcard `Vec<Vec<u8>>` batch of frames.
 The first frame each way is a `WireFrame::Hello`; the server may send a
 `WireFrame::Error` and close. Every other frame is a sync frame: a postcard
-`SyncMessage`, or a part of one (§8.8). Each frame is exactly one complete
-postcard value: a decoder rejects trailing bytes (`INV-WIRE-1`).
+`SyncMessage`, or a part of one (§8.8). Each whole message, unsplit or
+joined from its parts, is exactly one complete postcard value: a decoder
+rejects trailing bytes (`INV-WIRE-1`).
 
 Every endpoint advertises exactly `min_protocol_version = 6,
 max_protocol_version = 6`. A receiver reads a Hello's version range before
@@ -277,7 +278,7 @@ ends with that error. `listing` is the result's row ids in order. It is
 always present for a one-shot read, and for a live read's opening and window
 changes when the read is limited or the opening could not tell what left it.
 Cached rows a listing leaves out are no longer in that result; the replica
-keeps them as cached copies.
+evicts them (a row a pending write touches waits for the server's word on it).
 `global` says the answer is the global authority's (directly, or through
 relays that settle by their upstream), not a relay's own store.
 
@@ -372,11 +373,22 @@ A receiver treats these as the peer's error and ends the link: a frame that
 does not decode, a whole message between a split message's parts, a last part
 with no leading ones, and parts beyond the joined-message ceiling.
 
+A sender hands a split message's parts on in order and never restarts one: a
+part a full queue refuses waits ahead of anything sent later
+(`WireTransportAdapter`). A disconnect drops a half-received message with the
+connection.
+
 Limits:
 
 - An encoded frame is at most `MAX_WIRE_FRAME_BYTES` (2 MiB); a part carries
   at most that less the carrier's prefix room.
-- A joined message is at most `MAX_LOGICAL_MESSAGE_BYTES` (256 MiB).
+- A joined message is at most `MAX_LOGICAL_MESSAGE_BYTES` (256 MiB); a
+  sender refuses a larger one ("not supported yet") rather than send it. A
+  server joins an untrusted session's split messages only up to its
+  connection's queue budget (8 MiB).
+- A server ships a session's rows as `Rows` of at most a quarter of the
+  joined-message ceiling of images each, so a first result of any size
+  travels. One commit's versions (one seq) stay in one `Rows`.
 - A WebSocket batch carries at most `MAX_WIRE_BATCH_FRAMES` frames; senders
   split batches by bytes across binary messages.
 - `PushChunks` and `Chunks` flush at half a frame of node bytes, so each fits

@@ -152,3 +152,85 @@ fn a_commit_split_across_frames_is_applied_whole() {
     }
     panic!("the commit never arrived: {seen:?}");
 }
+
+/// A wire whose outbound queue takes `room` frames, then refuses with
+/// `Backpressure` until the test makes room again.
+struct NarrowWire {
+    outbound: Queue,
+    inbound: Queue,
+    room: Rc<RefCell<usize>>,
+}
+
+impl WireTransport for NarrowWire {
+    fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
+        let mut room = self.room.borrow_mut();
+        if *room == 0 {
+            return Err(TransportError::Backpressure);
+        }
+        *room -= 1;
+        self.outbound.borrow_mut().push_back(frame);
+        Ok(())
+    }
+
+    fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+        self.inbound.borrow_mut().pop_front()
+    }
+}
+
+#[test]
+fn a_split_commit_a_full_queue_interrupts_arrives_whole() {
+    let server = open(0xc1, AuthorSubject::SYSTEM);
+    let writer_author = AuthorSubject::for_test_bytes([0x52; 16]);
+    let writer = open(0x52, writer_author);
+
+    let to_server: Queue = Rc::default();
+    let to_writer: Queue = Rc::default();
+    let room = Rc::new(RefCell::new(usize::MAX));
+    let writer_side = NarrowWire {
+        outbound: Rc::clone(&to_server),
+        inbound: Rc::clone(&to_writer),
+        room: Rc::clone(&room),
+    };
+    let server_side = GatedWire {
+        outbound: to_writer,
+        inbound: to_server,
+        released: Rc::new(RefCell::new(usize::MAX)),
+    };
+    block_on(writer.connect_upstream(Box::new(WireTransportAdapter::current(writer_side))));
+    server.accept_subscriber(
+        Box::new(WireTransportAdapter::current(server_side)),
+        writer_author,
+    );
+    for _ in 0..20 {
+        block_on(writer.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+    }
+
+    // One commit of about 3 MB: more than one 2 MiB frame carries, so it
+    // leaves in parts.
+    let tx = OpenTransactionId::new();
+    block_on(writer.begin_mergeable(tx)).unwrap();
+    let body = "x".repeat(BODY);
+    for _ in 0..ROWS {
+        let values = BTreeMap::from([("body".to_owned(), Value::String(body.clone()))]);
+        block_on(
+            writer
+                .tx_ref(tx)
+                .insert("notes", values, Default::default()),
+        )
+        .unwrap();
+    }
+    block_on(writer.commit_mergeable_handle(tx)).unwrap();
+
+    // The queue takes one frame per tick: the commit's first part goes
+    // out, the rest are refused and must follow, not restart it.
+    for _ in 0..50 {
+        *room.borrow_mut() = 1;
+        block_on(writer.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+        if visible(&server) == ROWS {
+            return;
+        }
+    }
+    panic!("the server has {} of {ROWS} rows", visible(&server));
+}
