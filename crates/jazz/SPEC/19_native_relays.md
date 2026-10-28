@@ -220,7 +220,8 @@ capabilities and trusted revocation; no earlier implementation number or
 compatibility path is part of the released contract. ABI 2 (alpha.58) adds
 coded operation errors (response 25) as answers to existing commands, and
 ABI 3 (alpha.60) adds their optional reason name; see §19.6 ("Coded operation
-errors"). The exported constant keeps its `NATIVE_RELAY_ABI_V1` name and carries
+errors"). ABI 4 (alpha.60) ends each subscription delta with its updated rows'
+splices (`updated_splices`, SPEC 18). The exported constant keeps its `NATIVE_RELAY_ABI_V1` name and carries
 the current version.
 
 The ABI stays coarse and binary:

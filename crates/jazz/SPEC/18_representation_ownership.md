@@ -124,7 +124,8 @@ each updated row, its opted-in columns' splices as `column, splices` pairs,
 each splice `at, delete, insert, at_utf16, delete_utf16` (SPEC 19.12); a row
 with no splices has an empty list. These positions, postcard enum
 discriminants in nested descriptors, and raw record bytes are frozen once
-emitted, and binding payloads are first emitted by alpha.60: future ABI
+emitted, and the field list above, with `updated_splices`, first ships in
+alpha.60 (alpha.59 shipped the ten fields before it): future ABI
 evolution requires a new explicitly versioned envelope, never a reordered
 field, permissive fallback, or in-place migration. A host and its JavaScript
 come from one build: NAPI and WASM artifacts carry an ABI fingerprint the

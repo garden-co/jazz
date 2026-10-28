@@ -189,6 +189,9 @@ Splices are only supported for `string` and `bytes` columns without a column
 transform. Other columns, including `json`, are rejected with a "not supported
 yet" error when you subscribe, and so is a range-selected column that a
 computed field or field transform depends on, since that column is read whole.
+A computed field's dependencies can first show up on a later update; if one
+of them is such a column, the subscription ends then with the same error
+through `onError`.
 One-shot reads ignore the option.
 
 ## Missing references

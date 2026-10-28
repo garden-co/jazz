@@ -1402,7 +1402,6 @@ fn large_cell(cell: &Sql) -> bool {
     matches!(cell, Sql::Text(_) | Sql::Blob(_) | Sql::Integer(_))
 }
 
-/// The UTF-16 length of inline text `bytes`; zero for bytes columns.
 /// The splices that turn `a` into `b`: none when they are equal, else one
 /// replace of the bytes between their common prefix and suffix, kept on
 /// character boundaries for text.
@@ -1443,6 +1442,7 @@ pub(crate) fn byte_splices(a: &[u8], b: &[u8], text: bool) -> Vec<LargeValueDelt
     }]
 }
 
+/// The UTF-16 length of inline text `bytes`; zero for bytes columns.
 fn utf16_len(bytes: &[u8], text: bool) -> Result<u64, Error> {
     if !text {
         return Ok(0);
