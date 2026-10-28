@@ -29,6 +29,12 @@ pub use crate::options::{
 use crate::compile::{Compiled, Ctx, Cut, Session, View};
 use crate::tools::{CmpOp, PolicyExpr};
 
+#[path = "catalogue.rs"]
+mod catalogue;
+pub use catalogue::{CatalogueHeadV1, CatalogueSchemaV1};
+#[path = "catalogue_policy.rs"]
+mod catalogue_policy;
+pub use catalogue_policy::PolicyDescriptorV1;
 #[path = "fanout.rs"]
 mod fanout;
 pub use fanout::FanoutStats;
@@ -1072,6 +1078,8 @@ impl Db {
         };
         names.admit(&conn, &schema)?;
         conn.execute_batch(sync::SYNC_DDL).map_err(storage)?;
+        conn.execute_batch(catalogue::DDL).map_err(storage)?;
+        conn.execute_batch(catalogue_policy::DDL).map_err(storage)?;
         // The commit seq resumes after the newest stored version.
         let mut seq = 0u64;
         for table in physical.tables.keys() {
