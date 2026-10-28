@@ -1455,7 +1455,8 @@ impl Db {
         arg: A,
         attempt: impl Fn(A) -> Result<T, Error>,
     ) -> Result<T, Error> {
-        if self.inner().chunks.store().is_none() {
+        // A peek: the store gate would undo a transaction's cached overlay.
+        if self.inner.staging().chunks.store().is_none() {
             return attempt(arg);
         }
         self.fetching(|| attempt(arg.clone())).await
@@ -6076,7 +6077,7 @@ pub(crate) struct LargeEdits {
 
 /// An admitted read's boundary in the batch's append-only staging buffers.
 /// Capturing lengths retains no copy of unrelated staged writes.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct BatchPrefix {
     ops: usize,
     derived: usize,
@@ -6748,14 +6749,28 @@ impl Db {
         result
     }
 
-    /// A pending read evaluates only the writes admitted before it first
-    /// waited for authority coverage. Ordinary staging keeps its cached overlay.
+    /// Run `read` over the batch's writes staged before `prefix` was
+    /// captured, so a read that waited (for authority coverage, or behind a
+    /// cancelled read) does not see writes staged meanwhile. When nothing
+    /// was staged since, this is [`Self::in_overlay`] and keeps its cached
+    /// overlay; otherwise the prefix is replayed in a throwaway savepoint,
+    /// which undoes the cached overlay, so the next stage replays the batch.
     fn in_overlay_prefix<R>(
         &self,
         id: OpenTransactionId,
         prefix: BatchPrefix,
         read: impl FnOnce(&mut Inner, Option<Cut>) -> Result<R, Error>,
     ) -> Result<R, Error> {
+        // Peek without the store gate, which would undo the cached overlay.
+        let grown = self
+            .inner
+            .staging()
+            .batches
+            .get(&id)
+            .is_none_or(|batch| batch.prefix() != prefix);
+        if !grown {
+            return self.in_overlay(id, None, read);
+        }
         let mut inner = self.inner();
         let batch = inner
             .batches
@@ -6896,6 +6911,17 @@ impl Db {
         prepared: &PreparedQuery,
         include_deleted: bool,
     ) -> Result<(), Error> {
+        // A mergeable read records nothing: peek without the store gate,
+        // so the batch's cached overlay stays for its next stage or read.
+        if !matches!(
+            self.inner.staging().batches.get(&id),
+            Some(Batch {
+                kind: BatchKind::Serializable { .. },
+                ..
+            })
+        ) {
+            return Ok(());
+        }
         let mut inner = self.inner();
         let Some(Batch {
             kind: BatchKind::Serializable { snapshot, own, .. },
@@ -7038,9 +7064,11 @@ impl TxRef<'_> {
     ) -> Result<Vec<CurrentRow>, Error> {
         // Capture before hydration: later writes must not leak into an
         // already admitted read, including when another read is cancelled.
+        // Peeks skip the store gate, which would undo the cached overlay.
         let prefix = self
             .db
-            .inner()
+            .inner
+            .staging()
             .batches
             .get(&self.id)
             .ok_or_else(|| rejected("transaction is not open"))?
@@ -7048,7 +7076,7 @@ impl TxRef<'_> {
         // A client hydrates a serializable read from the authority at the
         // snapshot first, unless the link cannot answer (then the replica
         // answers and the authority's validation decides).
-        let snapshot = match self.db.inner.borrow().batches.get(&self.id) {
+        let snapshot = match self.db.inner.staging().batches.get(&self.id) {
             Some(Batch {
                 kind:
                     BatchKind::Serializable {
