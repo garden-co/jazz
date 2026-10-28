@@ -126,3 +126,19 @@ it("rejects an invalid timeout before waiting", async () => {
     await db.shutdown();
   }
 });
+
+it("ends a pending wait when the Db shuts down", async () => {
+  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  const db = await createDb(await localAccountConfig(server.appId, server.url));
+  try {
+    await db.disconnect();
+    await db.insert(app.notes, { title: "never sent" }).wait({ tier: "local" });
+    const wait = db.waitForSync();
+    wait.catch(() => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await db.shutdown();
+    await expect(wait).rejects.toThrow();
+  } finally {
+    await server.stop();
+  }
+}, 60_000);

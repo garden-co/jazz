@@ -233,7 +233,11 @@ type NativeRestoreOptions = NativeWriteOptions & {
 
 type NativeDb = {
   captureSnapshot?(): NativeReadResult | Promise<NativeReadResult>;
-  waitForPendingWrites?(tier: string): NativeReadResult | Promise<NativeReadResult | void>;
+  /** WASM settles its promise-shaped wait early once `cancelled` settles. */
+  waitForPendingWrites?(
+    tier: string,
+    cancelled?: Promise<void>,
+  ): NativeReadResult | Promise<NativeReadResult | void>;
   // Native runtime adapters may close synchronously or asynchronously and may
   // report whether they transitioned state. The adapter awaits either form and
   // owns idempotence, so callers never observe that implementation detail.
@@ -3045,7 +3049,6 @@ export class NativeRuntimeAdapter implements Runtime {
     this.deliverMutationError(event);
   }
 
-  /** General graceful-shutdown barrier, including recovered durable writes. */
   /**
    * Wait until every write committed so far reaches `tier`. By default a
    * reported outage fails the wait; `throughOutage` keeps it pending until a
@@ -3065,26 +3068,34 @@ export class NativeRuntimeAdapter implements Runtime {
     this.throwServerTransportErrorForTier(tier, throughOutage);
     this.startServerPump();
     const failure = this.waitForServerTransportError(tier, throughOutage);
-    let onAbort: (() => void) | undefined;
-    const aborted = signal
-      ? new Promise<never>((_, reject) => {
-          onAbort = () => reject(signal.reason);
-          signal.addEventListener("abort", onAbort, { once: true });
-        })
-      : null;
+    // Whichever way this wait ends, stop the binding's wait with it: a
+    // cancelled native read releases its core waiter.
+    const stop = new AbortController();
+    const aborted = new Promise<never>((_, reject) => {
+      stop.signal.addEventListener("abort", () => reject(stop.signal.reason), { once: true });
+    });
+    aborted.catch(() => undefined);
+    const cancelled = new Promise<void>((resolve) => {
+      stop.signal.addEventListener("abort", () => resolve(), { once: true });
+    });
+    const forwardAbort = () => stop.abort(signal?.reason);
+    signal?.addEventListener("abort", forwardAbort, { once: true });
     try {
       const wait = this.awaitNativeRead(
-        Promise.resolve(this.db.waitForPendingWrites(tier)).then(
+        Promise.resolve(this.db.waitForPendingWrites(tier, cancelled)).then(
           (result) => result ?? new Uint8Array(),
         ),
+        undefined,
+        stop.signal,
       );
-      const races: Promise<unknown>[] = [wait];
+      wait.catch(() => undefined);
+      const races: Promise<unknown>[] = [wait, aborted];
       if (failure) races.push(failure.promise);
-      if (aborted) races.push(aborted);
-      await (races.length > 1 ? Promise.race(races) : wait);
+      await Promise.race(races);
     } finally {
       failure?.cancel();
-      if (onAbort) signal?.removeEventListener("abort", onAbort);
+      signal?.removeEventListener("abort", forwardAbort);
+      stop.abort(new Error("waitForPendingWrites ended"));
     }
   }
 
@@ -3280,6 +3291,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private async awaitNativeRead(
     started: NativeReadResult | Promise<NativeReadResult>,
     tier?: string,
+    signal?: AbortSignal,
   ): Promise<Uint8Array> {
     const result = await started;
     if (!isPendingNativeRead(result)) return result;
@@ -3289,6 +3301,7 @@ export class NativeRuntimeAdapter implements Runtime {
       for (;;) {
         if (this.closed || this.ownerRuntime.closed)
           throw new Error("native read was cancelled by runtime shutdown");
+        signal?.throwIfAborted();
         if (tier) this.throwServerTransportErrorForTier(tier);
         const bytes = result.poll();
         if (bytes !== null) return bytes;

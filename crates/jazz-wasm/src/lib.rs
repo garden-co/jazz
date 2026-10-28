@@ -1414,24 +1414,42 @@ impl WasmDb {
         wasm_read_or_pending(Box::pin(async move { capture.await.map_err(host_error) }))
     }
 
-    /// Resolve once every local write so far reached `tier`.
+    /// Resolve once every local write so far reached `tier`. Settling
+    /// `cancelled` stops a wait that is still pending and rejects it, so a
+    /// caller that gives up does not leave the core waiter parked.
     #[wasm_bindgen(js_name = waitForPendingWrites)]
-    pub fn wait_for_pending_writes(&self, tier: String) -> js_sys::Promise {
+    pub fn wait_for_pending_writes(
+        &self,
+        tier: String,
+        cancelled: Option<js_sys::Promise>,
+    ) -> js_sys::Promise {
         let inner = match self.open_inner() {
             Ok(inner) => inner,
             Err(error) => return js_sys::Promise::reject(&error),
         };
         future_to_promise(async move {
-            match durability_tier_from_str(&tier)? {
-                DurabilityTier::None => {}
-                DurabilityTier::Local => inner.host.flush().await?,
-                DurabilityTier::Global => inner
-                    .binding
-                    .wait_for_pending_writes_global()
-                    .await
-                    .map_err(host_error)?,
+            let wait = async move {
+                match durability_tier_from_str(&tier)? {
+                    DurabilityTier::None => {}
+                    DurabilityTier::Local => inner.host.flush().await?,
+                    DurabilityTier::Global => inner
+                        .binding
+                        .wait_for_pending_writes_global()
+                        .await
+                        .map_err(host_error)?,
+                }
+                Ok(JsValue::UNDEFINED)
+            };
+            let Some(cancelled) = cancelled else {
+                return wait.await;
+            };
+            let cancelled = wasm_bindgen_futures::JsFuture::from(cancelled);
+            match futures_util::future::select(Box::pin(wait), cancelled).await {
+                futures_util::future::Either::Left((settled, _)) => settled,
+                futures_util::future::Either::Right(_) => {
+                    Err(JsValue::from_str("waitForPendingWrites was cancelled"))
+                }
             }
-            Ok(JsValue::UNDEFINED)
         })
     }
 

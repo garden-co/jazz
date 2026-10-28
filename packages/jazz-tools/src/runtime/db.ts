@@ -2589,7 +2589,8 @@ export class Db {
    * server's error for the first of those writes it rejected, when the link
    * stops for good, with a {@link WriteWaitTimeoutError} once `timeoutMs`
    * passes, or with `signal.reason` when `signal` aborts. Ending the wait
-   * never cancels the writes: they stay queued.
+   * never cancels the writes: they stay queued. In a browser tab it covers
+   * that tab's own writes, not ones the shared worker recovered from storage.
    */
   async waitForSync(options: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<void> {
     const { timeoutMs, signal } = options;
@@ -2599,6 +2600,9 @@ export class Db {
     const control = new AbortController();
     const forward = () => control.abort(signal!.reason);
     signal?.addEventListener("abort", forward, { once: true });
+    // Shutdown ends the wait instead of leaving it parked on a closed runtime.
+    const shutdown = () => control.abort(new Error("Db was shut down"));
+    this.shutdownAbort.signal.addEventListener("abort", shutdown, { once: true });
     const timer =
       timeoutMs === undefined
         ? undefined
@@ -2611,6 +2615,7 @@ export class Db {
     } finally {
       if (timer !== undefined) clearTimeout(timer);
       signal?.removeEventListener("abort", forward);
+      this.shutdownAbort.signal.removeEventListener("abort", shutdown);
     }
   }
 

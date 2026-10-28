@@ -41,6 +41,8 @@ import {
 import { encodeSchema } from "../runtime/native-runtime/schema-codec.js";
 import { deliverMutationErrorToAttachedPeers } from "./mutation-error-delivery.js";
 import { toError } from "../runtime/util.js";
+import type { RemoteLinkState } from "../runtime/remote-link-state.js";
+import { sameLinkStatus, type LinkStatus } from "../runtime/sync-status.js";
 
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 
@@ -1141,14 +1143,16 @@ async function initialize(context: RuntimeContext): Promise<void> {
         post(peer.port, { type: "mutation-error", event: received }),
       );
     });
+    let announced: { state: RemoteLinkState; link: LinkStatus } | null = null;
     const announceLink = () => {
       // Only the current runtime speaks for this namespace's upstream.
       if (context.runtime !== runtime) return;
-      broadcast(context, {
-        type: "remote-link",
-        state: runtime.remoteLinkState(),
-        link: runtime.upstreamLinkStatus(),
-      });
+      const state = runtime.remoteLinkState();
+      const link = runtime.upstreamLinkStatus();
+      // Both sources can report one transition; attaching peers get their own copy.
+      if (announced?.state === state && sameLinkStatus(announced.link, link)) return;
+      announced = { state, link };
+      broadcast(context, { type: "remote-link", state, link });
     };
     runtime.onRemoteLinkStateChange(announceLink, new AbortController().signal);
     runtime.onUpstreamLinkStatusChange(announceLink, new AbortController().signal);

@@ -30,8 +30,10 @@ export interface SyncStatus {
   link: LinkStatus;
   /**
    * Transactions this client committed that the server has neither accepted
-   * nor rejected yet, including ones recovered from local storage after a
-   * restart. Rejections are reported through `db.onMutationError`.
+   * nor rejected yet. In Node and React Native this includes ones recovered
+   * from local storage after a restart; a browser tab counts only its own
+   * commits, since the shared worker uploads recovered ones. Rejections are
+   * reported through `db.onMutationError`.
    */
   pendingUploads: number;
   /**

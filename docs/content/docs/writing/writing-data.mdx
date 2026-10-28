@@ -287,8 +287,7 @@ Need to clear local data during development? See [Auth Lifecycle](/docs/auth/lif
 ## Showing sync status
 
 To show whether the user's changes have reached the server, read the Db's sync status. It combines
-the upstream connection with the number of transactions the server has not accepted or rejected yet,
-including ones recovered from local storage after a restart:
+the upstream connection with the number of transactions the server has not accepted or rejected yet:
 
 ```ts
 const status = db.getSyncStatus();
@@ -312,6 +311,11 @@ const unsubscribe = db.onSyncStatusChange((status) => renderBadge(status));
 
 A brief drop shows as `connecting`, not `offline`, so a status badge doesn't flicker. `synced` is
 `true` when nothing waits for upload and the link is `connected` (or `local-only`).
+
+In Node and React Native, `pendingUploads` includes transactions recovered from local storage after a
+restart. In the browser, each tab counts only the transactions it committed itself. Transactions
+recovered after a reload, or written by another tab, are uploaded by the shared worker and are not
+counted, and `db.waitForSync()` does not wait for them.
 
 The framework bindings expose the same object: `useSyncStatus()` in React, React Native and Solid
 (an accessor), `useSyncStatus()` in Vue (a ref), and `syncStatus()` in Svelte (a store, read as

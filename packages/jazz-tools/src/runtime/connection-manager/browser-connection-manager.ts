@@ -657,7 +657,11 @@ export class BrowserConnectionManager extends ConnectionManager {
   protected override transportLinkStatus(): LinkStatus {
     // A failed follower cannot receive the worker's answer.
     if (this.connectionError) return offlineLink("stopped");
-    if (this.workerLinkStatus) return this.workerLinkStatus;
+    // This Db has a server configured, so a worker that has not dialled yet
+    // (it may still wait for a credential) is about to connect, not local-only.
+    if (this.workerLinkStatus) {
+      return this.workerLinkStatus.state === "local-only" ? CONNECTING : this.workerLinkStatus;
+    }
     switch (this.workerRemoteLink) {
       case "connected":
         return CONNECTED;
