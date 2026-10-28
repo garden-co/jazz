@@ -827,10 +827,11 @@ pub enum SyncMessage {
     },
     // client → server
     /// The schema version the client reads and writes by, sent first on
-    /// every connection. Its queries, writes, row images, evictions and held
-    /// versions use that version's table and column names; the server maps
-    /// them onto its stored rows. A version the server has not admitted is
-    /// named like the server's current schema.
+    /// every connection and again ahead of commits staged under another
+    /// version. Its queries and writes use that version's table and column
+    /// names, which the server resolves to its stored names; row images
+    /// and evictions travel by stored names either way. A version the
+    /// server has not admitted is named like the server's current schema.
     Schema {
         version: [u8; 16],
     },
