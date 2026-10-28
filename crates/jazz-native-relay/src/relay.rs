@@ -2012,7 +2012,12 @@ async fn run_socket_worker(
     wake: Arc<tokio::sync::Notify>,
 ) {
     let started = Instant::now();
-    let seed = started.elapsed().as_nanos() as u64 ^ std::process::id() as u64;
+    // A fresh random seed per worker, so a fleet of devices does not retry
+    // in lockstep after a server restart.
+    let seed = {
+        use std::hash::BuildHasher;
+        std::collections::hash_map::RandomState::new().hash_one(std::process::id())
+    };
     let mut link = UpstreamLink::new(LinkPolicy::default(), seed);
     let mut actions = link.handle(0, LinkInput::ServerConfigured(true));
     loop {

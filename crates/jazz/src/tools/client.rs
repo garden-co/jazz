@@ -386,19 +386,17 @@ async fn drive(shared: Weak<Shared>, work: Arc<Notify>) {
 /// Drives the shared upstream link machine ([`UpstreamLink`]): this task owns
 /// the socket and the timer, the machine decides when to connect, back off,
 /// wait for a new credential or stop.
+///
+/// `paused` and `credentials` are subscribed before the first attempt, so a
+/// change made before this task first runs is still seen.
 async fn keep_upstream(
     shared: Weak<Shared>,
     connector: Arc<dyn NativeTransportConnector>,
     mut request: NativeTransportRequest,
     mut keeper: LinkKeeper,
+    mut paused: watch::Receiver<bool>,
+    mut credentials: watch::Receiver<AuthConfig>,
 ) {
-    let (mut paused, mut credentials) = match shared.upgrade() {
-        Some(shared) => (
-            shared.upstream_paused.subscribe(),
-            shared.credentials.subscribe(),
-        ),
-        None => return,
-    };
     let mut connecting: Option<(AttemptId, NativeTransportFuture)> = None;
     let mut timer: Option<(TimerToken, std::pin::Pin<Box<tokio::time::Sleep>>)> = None;
     loop {
@@ -689,12 +687,14 @@ impl JazzClient {
         }
         if let Some(connector) = connector {
             let wake = work.clone();
+            let paused = shared.upstream_paused.subscribe();
+            let mut credentials = shared.credentials.subscribe();
             let request = NativeTransportRequest {
                 requested_link: NativeTransportLink::OrdinarySession,
                 server_url: context.server_url.clone(),
                 app_id: context.app_id,
                 peer_identity: identity.author,
-                auth: shared.credentials.borrow().clone(),
+                auth: credentials.borrow_and_update().clone(),
                 wake: Arc::new(move || wake.notify_one()),
             };
             // The first attempt decides whether the server admits this
@@ -725,6 +725,8 @@ impl JazzClient {
                 connector,
                 request,
                 keeper,
+                paused,
+                credentials,
             ));
             shared.state().tasks.push(keeper);
             shared.ensure_driven();
@@ -1498,7 +1500,6 @@ impl JazzClient {
         Ok(self.shared.schema.clone())
     }
 
-    /// Check if connected to server.
     /// Present a new bearer token upstream. A live link reconnects with it;
     /// a link whose token the server refused connects again with it.
     pub fn update_auth_token(&self, jwt_token: String) -> Result<()> {
@@ -1520,6 +1521,7 @@ impl JazzClient {
         self.shared.state.borrow().link_status.clone()
     }
 
+    /// Check if connected to server.
     pub fn is_connected(&self) -> bool {
         self.shared.state.borrow().upstream.is_some()
     }
@@ -1615,7 +1617,11 @@ impl JazzClient {
             (state.connect_failures.0, state.upstream.is_some())
         };
         // Neither detached nor reconnecting: nothing to reattach.
-        if !self.shared.upstream_paused.send_replace(false) && attached {
+        let resumed = self
+            .shared
+            .upstream_paused
+            .send_if_modified(|paused| std::mem::replace(paused, false));
+        if !resumed && attached {
             return Ok(false);
         }
         // The first attempt either attaches or fails; the keeper retries

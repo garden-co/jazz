@@ -518,7 +518,8 @@ pub struct NativeAuthRejection {
 /// rejected session) or a lost link the worker gave up on. It is connection
 /// state, not a failed tick: local work keeps running, as on the web and Node
 /// transports (#4337). `retrying` is whether the worker is still trying to
-/// connect. Every failure gets a new `sequence`, as a refusal does.
+/// connect. A new `sequence` is issued whenever the reason or `retrying`
+/// changes, so a link failing the same way on every retry reports once.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct NativeUpstreamFailure {
     pub sequence: u64,
@@ -1193,11 +1194,12 @@ impl NativeRelayHost {
                     .identity
                     .author;
                 let was_offline = self.explicitly_offline_scopes.remove(&scope);
-                // A worker that gave up after a terminal failure is no longer
-                // an upstream. Explicit reconnect replaces it (dropping it
-                // only joins an already-exited thread) so its latched failure
-                // cannot outlive the caller's request to try again. A worker
-                // that is still connected or retrying is left untouched.
+                // A worker that stopped after a terminal failure, or that is
+                // parked waiting for a new credential, is no longer an
+                // upstream. Explicit reconnect replaces it so its latched
+                // failure cannot outlive the caller's request to try again.
+                // A worker that is still connected or retrying is left
+                // untouched.
                 if self
                     .private_scope_workers
                     .get(&scope)

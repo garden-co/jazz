@@ -15,6 +15,9 @@
 //! `{"type": "close", "attempt"}`, `{"type": "armTimer", "token", "afterMs"}`
 //! or `{"type": "cancelTimer", "token"}`, and an event is a `status`, an
 //! `authFailed` (`reason`, `message`) or an `authRestored`.
+//!
+//! The surface is append-only: wasm, napi and the TypeScript runtime ship
+//! separately, so a field or variant is added, never renamed or removed.
 
 use serde::Deserialize;
 use serde_json::{Value, json};

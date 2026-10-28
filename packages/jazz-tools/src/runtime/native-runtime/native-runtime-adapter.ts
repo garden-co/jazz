@@ -2393,6 +2393,11 @@ export class NativeRuntimeAdapter implements Runtime {
         this.applyLinkStatus(previous, step.status);
         this.remoteLink.changed();
       }
+    } catch (error) {
+      // Inputs queued behind a failed step belong to a link state that no
+      // longer holds; never replay them.
+      this.linkInputs.length = 0;
+      throw error;
     } finally {
       this.linkStepping = false;
     }
