@@ -10,8 +10,8 @@ A native host owns one **process-local relay** per explicit `{ app namespace,
 storage namespace, auth scope }`. The relay contains a durable ordinary client
 `Db` over a portable ordered-KV backend (SQLite in the first native host). Each
 UI runtime gets a separate, in-memory ordinary client `Db`; it attaches to the
-relay through the normal peer protocol. The relay may itself attach to an
-upstream server through that same protocol.
+relay through the normal peer protocol. The relay may itself attach to Core
+through that same protocol; it never attaches to another relay (ch. 9 §9.5).
 
 This chapter defines the host boundary only. Chapters 3–8, 13, and 16 continue
 to own transactions, permissions, sync, client API, and subscriptions.

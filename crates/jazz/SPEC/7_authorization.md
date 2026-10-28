@@ -472,10 +472,9 @@ result. A scope-isolated relay may publish retained rows and repair payloads to
 an exactly same-scope foreground without re-running policy. For Global
 results it must use the exact policy-scoped membership emitted by the authority;
 for Local results it uses retained knowledge, including previously delivered
-rows that a later authority result removes. A multiplexed relay must keep each
-policy binding's authoritative membership separate and may not treat possession
-of a cached row as permission to reveal it to another scope (ch. 9,
-`INV-EDGE-21..24`).
+rows that a later authority result removes. A relay serves one auth scope
+only, and possession of a cached row is never permission to reveal it to
+another scope (ch. 9, `INV-EDGE-21..24`).
 
 effective branch-view reads evaluate ordinary table policy over the effective branch-view
 view. Partition columns are normal policy-visible values, including references

@@ -225,6 +225,16 @@ Grow-only sets are useful for things like:
   throws at schema construction time.
 </Callout>
 
+#### Text
+
+A string column has the same problem with prose: under the default merge, if Alice adds a sentence
+while Bob fixes a typo elsewhere in the same field, one of the two edits is lost. Use
+`.merge("text")`, `.merge("markdown")` or `.merge("html")` to merge the edits inside the string
+instead. Core merges them against the version each writer started from, so changes to different
+parts of the text all survive. See
+[mergeable text columns](/docs/schemas/column-types#mergeable-text-columns) and
+[how text merges work](/docs/concepts/how-sync-works#text-merges).
+
 ### Cold start
 
 On startup, Jazz loads indices first rather than eagerly decoding every row. Row content is then
