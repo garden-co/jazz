@@ -7223,10 +7223,16 @@ impl Db {
             inner.merging = true;
             inner.merge_bases = std::mem::take(&mut built);
             inner.text_in.borrow_mut().clear();
-            let applied = ops
+            let unit = ops
                 .iter()
-                .try_for_each(|op| inner.apply_as(op, who, seq).map(drop))
-                .and_then(|()| inner.finish_checks(seq));
+                .map(|op| (inner.schema.clone(), op.clone()))
+                .collect::<Vec<_>>();
+            let serializable = matches!(kind, WireKind::Serializable { .. });
+            let applied = inner.candidate_unit(&unit, seq, serializable, false, |inner| {
+                ops.iter()
+                    .try_for_each(|op| inner.apply_as(op, who, seq).map(drop))
+                    .and_then(|()| inner.finish_checks(seq))
+            });
             inner.merging = false;
             built = std::mem::take(&mut inner.merge_bases);
             if let Err(error) = applied {

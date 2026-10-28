@@ -18,6 +18,8 @@ use crate::tools::{CmpOp, Operation, PolicyExpr, PolicyValue};
 
 use crate::values::{Schema, Sql, Table, query_error, quote, to_sql, unsupported};
 
+mod array_permissions;
+mod candidate_relations;
 mod history;
 
 /// Inherits chains with no explicit bound unroll this deep.
@@ -240,6 +242,69 @@ fn scratch_value(slot: i64, cell: &str) -> String {
     format!("(SELECT v FROM _jazz_lv_scratch WHERE slot = {slot} AND cell = CAST({cell} AS BLOB))")
 }
 
+/// A mandatory UUID equality with an indexed target. The public policy
+/// validator checks reference compatibility; the SQLite source needs a bounded
+/// lookup, including when both endpoints refer to a third table (an account) or
+/// an extra scope UUID supplies a narrower key. Every other predicate remains.
+pub(crate) fn candidate_correlation<'a>(
+    condition: &'a PolicyExpr,
+    outer: &Table,
+    target: &Table,
+) -> Option<(&'a str, &'a str)> {
+    match condition {
+        PolicyExpr::And(items) => items
+            .iter()
+            .find_map(|p| candidate_correlation(p, outer, target)),
+        PolicyExpr::Cmp {
+            column,
+            op: CmpOp::Eq,
+            value: crate::tools::PolicyValue::SessionRef(path),
+        } if path.len() == 2 && path[0] == "__jazz_outer_row" => {
+            let parent = path[1].as_str();
+            let uuid = |table: &Table, column: &str| {
+                column == "id"
+                    || table.column(column).is_some_and(|column| {
+                        let ty = match &column.ty {
+                            ValueType::Nullable(inner) => inner.as_ref(),
+                            ty => ty,
+                        };
+                        matches!(ty, ValueType::Uuid)
+                    })
+            };
+            (uuid(outer, parent)
+                && uuid(target, column)
+                && (column == "id"
+                    || target
+                        .indexes
+                        .iter()
+                        .any(|index| index.first() == Some(column))))
+            .then_some((column.as_str(), parent))
+        }
+        _ => None,
+    }
+}
+
+/// Private permission-evaluation scope. Only the transaction executor supplies
+/// this capability; request queries and session claims cannot construct it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CandidateEvidence {
+    pub accepted: u64,
+    pub publication: u64,
+    pub post: bool,
+}
+
+/// A bounded lookup within one candidate authorization unit.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum PermissionEvidence {
+    Candidate(CandidateEvidence),
+}
+
+impl From<CandidateEvidence> for PermissionEvidence {
+    fn from(value: CandidateEvidence) -> Self {
+        Self::Candidate(value)
+    }
+}
+
 /// SQL text plus its positional parameters.
 pub struct Ctx<'a> {
     pub schema: &'a Schema,
@@ -266,6 +331,11 @@ pub struct Ctx<'a> {
     /// transaction it knows.
     pub history_origin: Option<[u8; 16]>,
     next_alias: usize,
+    permission_evidence: Option<PermissionEvidence>,
+    in_policy: bool,
+    in_inherited_policy: bool,
+    /// Bounded source queries used to prepare candidate relation cells.
+    candidate_inputs: Option<Vec<(String, String)>>,
 }
 
 /// A frozen snapshot: the state as of commit `seq`, plus the open
@@ -352,6 +422,10 @@ impl<'a> Ctx<'a> {
             preps: Vec::new(),
             history_origin: None,
             next_alias: 0,
+            permission_evidence: None,
+            in_policy: false,
+            in_inherited_policy: false,
+            candidate_inputs: None,
         }
     }
 
@@ -394,6 +468,16 @@ impl<'a> Ctx<'a> {
             return Ok(false);
         }
         Ok(session.is_null(path))
+    }
+
+    pub(crate) fn with_candidate_evidence(mut self, evidence: Option<CandidateEvidence>) -> Self {
+        self.permission_evidence = evidence.map(PermissionEvidence::Candidate);
+        self
+    }
+
+    pub(crate) fn with_permission_evidence(mut self, evidence: PermissionEvidence) -> Self {
+        self.permission_evidence = Some(evidence);
+        self
     }
 
     pub fn with_history_origin(mut self, origin: Option<[u8; 16]>) -> Self {
@@ -504,6 +588,128 @@ impl<'a> Ctx<'a> {
     /// mask), then base rows the head does not override. Filters, policies,
     /// ordering and windows all apply after this masking.
     pub(crate) fn source(&mut self, table: &Table) -> Result<String, Error> {
+        if self.in_policy && self.permission_evidence.is_some() {
+            return Err(unsupported(
+                "permission dependencies without a bounded scalar correlation in candidate authorization units",
+            ));
+        }
+        self.ordinary_source(table)
+    }
+
+    /// Put the correlation inside every UNION arm. SQLite does not reliably
+    /// push a correlated outer predicate through a historical compound source.
+    pub(crate) fn candidate_source(
+        &mut self,
+        table: &Table,
+        include_created: bool,
+        column: &str,
+        value: &str,
+    ) -> Result<String, Error> {
+        if is_array(table, column) {
+            return self.candidate_array_source(table, include_created, column, value);
+        }
+        let scope = self.permission_evidence.ok_or_else(|| {
+            unsupported(
+                "ExistsIncludingCreated permission checks without a SQLite authorization unit",
+            )
+        })?;
+        let PermissionEvidence::Candidate(scope) = scope;
+        let lookup_index = if column == "id" {
+            String::new()
+        } else {
+            let index = table
+                .indexes
+                .iter()
+                .find(|index| index.first().is_some_and(|first| first == column))
+                .filter(|_| table.branch_by.is_empty())
+                .ok_or_else(|| {
+                    unsupported(
+                        "candidate permission correlations without a leading declared index",
+                    )
+                })?;
+            format!(
+                " INDEXED BY {}",
+                quote(&format!(
+                    "{}__ix({})",
+                    table.stored,
+                    table.stored_index(index).join(",")
+                ))
+            )
+        };
+        if self.view.is_some() && !table.branch_by.is_empty() {
+            return Err(unsupported(
+                "branch-view permission dependencies in candidate authorization units",
+            ));
+        }
+        let columns = std::iter::once("rid, id, _b, _seq, _del".to_owned())
+            .chain(table.stored().map(|c| quote(&c.stored)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let qualified = |alias: &str, history: bool| {
+            columns
+                .split(", ")
+                .map(|column| {
+                    if history && column == "rid" {
+                        "NULL".to_owned()
+                    } else {
+                        format!("{alias}.{column}")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let current = quote(&table.stored);
+        let history = quote(&format!("{}__h", table.stored));
+        let key = quote(table.stored_name(column));
+        let accepted = self.bind(Sql::Integer(scope.accepted as i64));
+        let publication = self.bind(Sql::Integer(scope.publication as i64));
+        // Accepted-only baseline sources do not reference the scratch-table
+        // key. Do not append an unused final parameter to standalone prep SQL.
+        let stored = (scope.post || include_created)
+            .then(|| self.bind(Sql::Text(table.stored.as_bytes().to_vec())));
+        let c = self.alias("proof_current");
+        let h = self.alias("proof_history");
+        let base = if scope.post {
+            let stored = stored.as_ref().expect("post-state key");
+            format!(
+                "SELECT {} FROM {current} AS {c}{lookup_index} WHERE {c}.{key}={value} AND ({c}._seq<={accepted} OR {c}._seq={publication}) AND NOT EXISTS (SELECT 1 FROM _jazz_candidate_created_v1 x WHERE x.t={stored} AND x.id={c}.id)",
+                qualified(&c, false)
+            )
+        } else {
+            // Only this unit's current images can supersede the accepted cut.
+            // Drive history from that bounded set through the sequence index,
+            // then look up each exact coordinate's prior image by primary key.
+            let index = quote(&format!("{}__by_seq", table.stored));
+            format!(
+                "SELECT {} FROM {current} AS {c}{lookup_index} WHERE {c}.{key}={value} AND {c}._seq<={accepted} UNION ALL SELECT {} FROM {current} AS {c} INDEXED BY {index} CROSS JOIN {history} AS {h} WHERE {c}._seq={publication} AND {h}.id={c}.id AND {h}._b={c}._b AND {h}.{key}={value} AND {h}._seq=(SELECT MAX(prior._seq) FROM {history} AS prior WHERE prior.id={c}.id AND prior._b={c}._b AND prior._seq<={accepted})",
+                qualified(&c, false),
+                qualified(&h, true)
+            )
+        };
+        if !include_created {
+            return Ok(format!("({base})"));
+        }
+        let stored = stored.as_ref().expect("created-source key");
+        Ok(format!(
+            "({base} UNION ALL SELECT {} FROM {current} AS {c}{lookup_index} WHERE {c}.{key}={value} AND {c}._seq={publication} AND {c}._b=x'' AND EXISTS (SELECT 1 FROM _jazz_candidate_qualified_v1 q WHERE q.t={stored} AND q.id={c}.id))",
+            qualified(&c, false)
+        ))
+    }
+
+    fn candidate_dependency(
+        &mut self,
+        table: &Table,
+        outer: &Table,
+        alias: &str,
+        condition: &PolicyExpr,
+        include_created: bool,
+    ) -> Result<String, Error> {
+        let (column,parent)=candidate_correlation(condition,outer,table).ok_or_else(|| unsupported("permission dependencies without a scalar declared-reference correlation or indexed UUID equality in candidate authorization units"))?;
+        let value = column_sql(outer, alias, parent)?;
+        self.candidate_source(table, include_created, column, &value)
+    }
+
+    fn ordinary_source(&mut self, table: &Table) -> Result<String, Error> {
         // Explicit columns: a schema view reads its own columns of the
         // physical (unioned) table.
         let mut columns = "rid, id, _b, _seq, _del".to_owned();
@@ -1467,6 +1673,9 @@ impl<'a> Ctx<'a> {
         table: &Table,
         alias: &str,
     ) -> Result<String, Error> {
+        if join.source_mode != crate::query::CandidateSourceMode::AcceptedOnly {
+            return Err(unsupported("candidate-created join sources on SQLite"));
+        }
         let target = self.table(&join.table)?;
         let j = self.alias("j");
         let mut conds = vec![format!("{j}._del = 0")];
@@ -1788,12 +1997,15 @@ impl<'a> Ctx<'a> {
         if session.system {
             return Ok("1".to_owned());
         }
-        self.under_policy_schema(table, |ctx, table| match table.policy(operation) {
+        let previous = std::mem::replace(&mut self.in_policy, true);
+        let result = self.under_policy_schema(table, |ctx, table| match table.policy(operation) {
             None => Ok("0".to_owned()),
             Some(policy) => {
                 ctx.policy_expr(policy, table, alias, None, session, DEFAULT_INHERITS_DEPTH)
             }
-        })
+        });
+        self.in_policy = previous;
+        result
     }
 
     /// Compile a policy of `table` under the schema whose names its policies
@@ -1827,12 +2039,15 @@ impl<'a> Ctx<'a> {
         if session.system {
             return Ok("1".to_owned());
         }
-        self.under_policy_schema(table, |ctx, table| match policy {
+        let previous = std::mem::replace(&mut self.in_policy, true);
+        let result = self.under_policy_schema(table, |ctx, table| match policy {
             None => Ok("0".to_owned()),
             Some(policy) => {
                 ctx.policy_expr(policy, table, alias, None, session, DEFAULT_INHERITS_DEPTH)
             }
-        })
+        });
+        self.in_policy = previous;
+        result
     }
 
     fn policy_value(
@@ -2001,6 +2216,24 @@ impl<'a> Ctx<'a> {
             }
             // Policy EXISTS reads its table as raw evidence: the dependency
             // table's own policy is not composed in (INV-RLS-21).
+            PolicyExpr::ExistsIncludingCreated {
+                table: target,
+                condition,
+            } => {
+                if self.in_inherited_policy {
+                    return Err(unsupported(
+                        "ExistsIncludingCreated through inherited permission policies",
+                    ));
+                }
+                let target = self.table(target)?;
+                let e = self.alias("created");
+                let inner =
+                    self.policy_expr(condition, target, &e, Some((table, alias)), session, depth)?;
+                format!(
+                    "EXISTS (SELECT 1 FROM {} AS {e} WHERE {e}._del=0 AND {inner})",
+                    self.candidate_dependency(target, table, alias, condition, true)?
+                )
+            }
             PolicyExpr::Exists {
                 table: target,
                 condition,
@@ -2009,8 +2242,13 @@ impl<'a> Ctx<'a> {
                 let e = self.alias("e");
                 let inner =
                     self.policy_expr(condition, target, &e, Some((table, alias)), session, depth)?;
+                let source = if self.permission_evidence.is_some() {
+                    self.candidate_dependency(target, table, alias, condition, false)?
+                } else {
+                    self.source(target)?
+                };
                 semi_join(
-                    format!("{} AS {e}", self.source(target)?),
+                    format!("{source} AS {e}"),
                     vec![format!("{e}._del = 0"), inner],
                 )
             }
@@ -2035,7 +2273,9 @@ impl<'a> Ctx<'a> {
                     ))
                 })?;
                 let target = self.table(target_name)?;
-                if let Some(chain) = recursive_base(table, target, *operation, via_column) {
+                if self.permission_evidence.is_none()
+                    && let Some(chain) = recursive_base(table, target, *operation, via_column)
+                {
                     // Distance n is checked with depth - n left, so the
                     // hop below the first stops at its own bound.
                     let bound = depth.min(chain.depth.map_or(usize::MAX, |d| d.saturating_add(1)));
@@ -2043,18 +2283,32 @@ impl<'a> Ctx<'a> {
                         .ancestor_closure(target, alias, via_column, &chain, bound, session);
                 }
                 let p = self.alias("p");
-                let inner = match target.policy(*operation) {
-                    None => "0".to_owned(),
-                    Some(policy) => {
-                        self.policy_expr(policy, target, &p, None, session, depth - 1)?
+                let inner = self.inherited_policy(target, *operation, &p, session, depth - 1)?;
+                let root = column_sql(table, alias, via_column)?;
+                if is_array(table, via_column) {
+                    if !crate::array_index::uuid_array(table, via_column) {
+                        return Err(unsupported("inheritance through non-UUID arrays"));
                     }
-                };
-                // An array reference inherits from any row it names.
-                let on = self.join_key((target, &p, "id"), (table, alias, via_column))?;
-                semi_join(
-                    format!("{} AS {p}", self.source(target)?),
-                    vec![on, format!("{p}._del = 0"), inner],
-                )
+                    let element = self.alias("inherit_element");
+                    let member = array_element_id(&element);
+                    let source = if self.permission_evidence.is_some() {
+                        self.candidate_source(target, false, "id", &member)?
+                    } else {
+                        self.source(target)?
+                    };
+                    format!(
+                        "EXISTS (SELECT 1 FROM json_each({root}) {element} WHERE EXISTS (SELECT 1 FROM {source} {p} WHERE {p}.id={member} AND {p}._del=0 AND {inner}))"
+                    )
+                } else {
+                    let source = if self.permission_evidence.is_some() {
+                        self.candidate_source(target, false, "id", &root)?
+                    } else {
+                        self.source(target)?
+                    };
+                    format!(
+                        "EXISTS (SELECT 1 FROM {source} {p} WHERE {p}.id={root} AND {p}._del=0 AND {inner})"
+                    )
+                }
             }
             PolicyExpr::InheritsReferencing {
                 operation,
@@ -2068,15 +2322,15 @@ impl<'a> Ctx<'a> {
                 }
                 let source = self.table(source_table)?;
                 let s = self.alias("s");
-                let inner = match source.policy(*operation) {
-                    None => "0".to_owned(),
-                    Some(policy) => {
-                        self.policy_expr(policy, source, &s, None, session, depth - 1)?
-                    }
+                let inner = self.inherited_policy(source, *operation, &s, session, depth - 1)?;
+                let from = if self.permission_evidence.is_some() {
+                    self.candidate_source(source, false, via_column, &format!("{alias}.id"))?
+                } else {
+                    self.source(source)?
                 };
                 // An array reference grants when it lists the row's id.
                 semi_join(
-                    format!("{} AS {s}", self.source(source)?),
+                    format!("{from} AS {s}"),
                     vec![
                         correlate(source, &s, via_column, &format!("{alias}.id"))?,
                         format!("{s}._del = 0"),
@@ -2085,6 +2339,32 @@ impl<'a> Ctx<'a> {
                 )
             }
         })
+    }
+
+    /// Inherited capabilities use accepted roots and cannot expose a marked
+    /// predicate from the target's INSERT policy. Restore the context before
+    /// compiling siblings so an independent marked OR arm keeps its own mode.
+    fn inherited_policy(
+        &mut self,
+        table: &Table,
+        operation: Operation,
+        alias: &str,
+        session: &Session,
+        depth: usize,
+    ) -> Result<String, Error> {
+        let previous = std::mem::replace(&mut self.in_inherited_policy, true);
+        let result = self.under_policy_schema(table, |ctx, table| {
+            match if ctx.permission_evidence.is_some() {
+                table.inherited_policy(operation)
+            } else {
+                table.policy(operation)
+            } {
+                None => Ok("0".to_owned()),
+                Some(policy) => ctx.policy_expr(policy, table, alias, None, session, depth),
+            }
+        });
+        self.in_inherited_policy = previous;
+        result
     }
 
     /// A row's ancestors through its own reference `via`, up to `bound`
@@ -2151,11 +2431,8 @@ impl<'a> Ctx<'a> {
         } else {
             format!("WITH RECURSIVE {} ", rel.ctes.join(", "))
         };
-        Ok(format!(
-            "EXISTS ({with}SELECT 1 FROM {} WHERE {})",
-            rel.sql_from_clause(),
-            and(&rel.wheres)
-        ))
+        let arms = self.rel_selects(&rel, "1", None, &[])?;
+        Ok(format!("EXISTS ({with}{})", arms.join(" UNION ALL ")))
     }
 
     fn relation(&mut self, expr: &RelationExpr, scope: &RelScope<'_>) -> Result<Rel, Error> {
@@ -2167,17 +2444,24 @@ impl<'a> Ctx<'a> {
                     ctes: Vec::new(),
                     wheres: vec![format!("{r}._del = 0")],
                     from: vec![Src {
-                        sql: self.source(table)?,
+                        sql: if self.permission_evidence.is_some() {
+                            quote(&table.stored)
+                        } else {
+                            self.source(table)?
+                        },
                         alias: r,
                         scope: alias.clone().unwrap_or_else(|| table.name.clone()),
                         table: Some(table.name.clone()),
                     }],
                     id: None,
+                    bounds: Vec::new(),
                 })
             }
             RelationExpr::Filter { input, predicate } => {
                 let mut rel = self.relation(input, scope)?;
-                let condition = self.rel_predicate(predicate, &rel, scope)?;
+                let mut bounds = Vec::new();
+                let condition = self.rel_predicate(predicate, &rel, scope, Some(&mut bounds))?;
+                rel.bounds.extend(bounds);
                 rel.wheres.push(condition);
                 Ok(rel)
             }
@@ -2191,19 +2475,36 @@ impl<'a> Ctx<'a> {
                     return Err(unsupported("outer relation joins"));
                 }
                 let mut left = self.relation(left, scope)?;
-                let right = self.relation(right, scope)?;
+                let mut right = self.relation(right, scope)?;
                 let mut conditions = Vec::new();
                 for condition in on {
-                    conditions.push(format!(
-                        "{} = {}",
-                        self.resolve(&left, &condition.left)?,
-                        self.resolve(&right, &condition.right)?
-                    ));
+                    let l = self.resolve(&left, &condition.left)?;
+                    let r = self.resolve(&right, &condition.right)?;
+                    if let Some(bound) = self.rel_bound(
+                        &left,
+                        &condition.left,
+                        r.clone(),
+                        Some(self.resolve_src(&right, &condition.right)?.alias.clone()),
+                    ) {
+                        left.bounds.push(bound);
+                    }
+                    if let Some(bound) = self.rel_bound(
+                        &right,
+                        &condition.right,
+                        l.clone(),
+                        Some(self.resolve_src(&left, &condition.left)?.alias.clone()),
+                    ) {
+                        right.bounds.push(bound);
+                    }
+                    if self.candidate_inputs.is_none() {
+                        conditions.push(format!("{l} = {r}"));
+                    }
                 }
                 left.ctes.extend(right.ctes);
                 left.from.extend(right.from);
                 left.wheres.extend(right.wheres);
                 left.wheres.extend(conditions);
+                left.bounds.extend(right.bounds);
                 left.id = None;
                 Ok(left)
             }
@@ -2253,16 +2554,15 @@ impl<'a> Ctx<'a> {
                     RecursionBound::Fixpoint => (FIXPOINT_GUARD, true),
                 };
                 let _ = guard;
-                let cte = format!(
-                    "{g}(id, d) AS (SELECT {}, 0 FROM {} WHERE {} \
-                     UNION SELECT {}, {g}.d + 1 FROM {g}, {} WHERE {g}.d < {max} AND {})",
-                    seed.output_id(),
-                    seed.sql_from_clause(),
-                    and(&seed.wheres),
-                    step.output_id(),
-                    step.sql_from_clause(),
-                    and(&step.wheres),
-                );
+                let mut arms =
+                    self.rel_selects(&seed, &format!("{}, 0", seed.output_id()), None, &[])?;
+                arms.extend(self.rel_selects(
+                    &step,
+                    &format!("{}, {g}.d + 1", step.output_id()),
+                    Some(&g),
+                    &[format!("{g}.d < {max}")],
+                )?);
+                let cte = format!("{g}(id, d) AS ({})", arms.join(" UNION "));
                 let mut ctes = seed.ctes;
                 ctes.extend(step.ctes);
                 ctes.push(cte);
@@ -2277,6 +2577,7 @@ impl<'a> Ctx<'a> {
                         table: None,
                     }],
                     id: None,
+                    bounds: Vec::new(),
                 })
             }
             other => Err(unsupported(format!(
@@ -2289,7 +2590,7 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    fn resolve(&self, rel: &Rel, column: &RelationColumnRef) -> Result<String, Error> {
+    fn resolve_src<'r>(&self, rel: &'r Rel, column: &RelationColumnRef) -> Result<&'r Src, Error> {
         let has = |src: &Src| match &src.table {
             Some(table) => self.schema.tables[table].has_column(&column.column),
             None => column.column == "id",
@@ -2308,6 +2609,11 @@ impl<'a> Ctx<'a> {
                 "relation column {column:?} does not exist"
             )));
         }
+        Ok(src)
+    }
+
+    fn resolve(&self, rel: &Rel, column: &RelationColumnRef) -> Result<String, Error> {
+        let src = self.resolve_src(rel, column)?;
         Ok(match &src.table {
             Some(table) => column_sql(&self.schema.tables[table], &src.alias, &column.column)?,
             None if column.column == "id" => format!("{}.id", src.alias),
@@ -2389,31 +2695,63 @@ impl<'a> Ctx<'a> {
         predicate: &RelationPredicate,
         rel: &Rel,
         scope: &RelScope<'_>,
+        mut bounds: Option<&mut Vec<RelBound>>,
     ) -> Result<String, Error> {
+        // Input preparation walks a bounded superset. Only mandatory indexed
+        // UUID equalities restrict it; large-value predicates are evaluated by
+        // the real permission query after these cells have been prepared.
+        if self.candidate_inputs.is_some()
+            && !matches!(predicate, RelationPredicate::And(_))
+            && !matches!(predicate, RelationPredicate::Cmp { left, op: RelationCmpOp::Eq, .. }
+                if self.rel_bound(rel, left, "0".into(), None).is_some())
+        {
+            return Ok("1".into());
+        }
         Ok(match predicate {
             RelationPredicate::True => "1".to_owned(),
             RelationPredicate::False => "0".to_owned(),
             RelationPredicate::And(parts) => {
                 let parts = parts
                     .iter()
-                    .map(|part| self.rel_predicate(part, rel, scope))
+                    .map(|part| self.rel_predicate(part, rel, scope, bounds.as_deref_mut()))
                     .collect::<Result<Vec<_>, _>>()?;
                 and(&parts)
             }
             RelationPredicate::Or(parts) => {
                 let parts = parts
                     .iter()
-                    .map(|part| self.rel_predicate(part, rel, scope))
+                    .map(|part| self.rel_predicate(part, rel, scope, None))
                     .collect::<Result<Vec<_>, _>>()?;
                 or(&parts)
             }
             RelationPredicate::Not(part) => format!(
                 "(NOT COALESCE({}, 0))",
-                self.rel_predicate(part, rel, scope)?
+                self.rel_predicate(part, rel, scope, None)?
             ),
             RelationPredicate::Cmp { left, op, right } => {
+                let right_term = self.rel_value(right, rel, scope)?;
+                if *op == RelationCmpOp::Eq
+                    && let Some(bounds) = bounds
+                {
+                    let value = match &right_term {
+                        Term::Large(_) => None,
+                        Term::Missing | Term::NaN => Some("NULL"),
+                        other => other.sql(),
+                    };
+                    let dependency = match right {
+                        RelationValueRef::RowId(RelationRowIdRef::Current) => {
+                            rel.from.first().map(|s| s.alias.clone())
+                        }
+                        _ => None,
+                    };
+                    if let Some(value) = value
+                        && let Some(bound) = self.rel_bound(rel, left, value.to_owned(), dependency)
+                    {
+                        bounds.push(bound);
+                    }
+                }
                 let left = self.resolve_term(rel, left)?;
-                let right = self.rel_value(right, rel, scope)?;
+                let right = right_term;
                 let op = match op {
                     RelationCmpOp::Eq => CmpOp::Eq,
                     RelationCmpOp::Ne => CmpOp::Ne,
@@ -2474,7 +2812,15 @@ struct Src {
     table: Option<String>,
 }
 
+struct RelBound {
+    alias: String,
+    column: String,
+    value: String,
+    dependency: Option<String>,
+}
+
 struct Rel {
+    bounds: Vec<RelBound>,
     ctes: Vec<String>,
     from: Vec<Src>,
     wheres: Vec<String>,
@@ -2813,11 +3159,14 @@ fn semi_join(from: String, conds: Vec<String>) -> String {
     let mut terms = Vec::with_capacity(conds.len());
     for cond in conds {
         match plain_exists(&cond) {
-            Some((source, term)) => {
+            // A derived source can refer to the enclosing row. Keep its
+            // EXISTS boundary: hoisting it beside that row would require a
+            // lateral FROM item, which SQLite does not support.
+            Some((source, term)) if !source.contains('(') => {
                 sources.push(source.to_owned());
                 terms.push(term.to_owned());
             }
-            None => terms.push(cond),
+            _ => terms.push(cond),
         }
     }
     format!(
@@ -3601,7 +3950,8 @@ fn inherits(policy: &PolicyExpr) -> bool {
         PolicyExpr::Inherits { .. } | PolicyExpr::InheritsReferencing { .. } => true,
         PolicyExpr::And(parts) | PolicyExpr::Or(parts) => parts.iter().any(inherits),
         PolicyExpr::Not(inner) => inherits(inner),
-        PolicyExpr::Exists { condition, .. } => inherits(condition),
+        PolicyExpr::Exists { condition, .. }
+        | PolicyExpr::ExistsIncludingCreated { condition, .. } => inherits(condition),
         _ => false,
     }
 }

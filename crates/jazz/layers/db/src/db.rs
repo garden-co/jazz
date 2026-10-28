@@ -29,6 +29,8 @@ pub use crate::options::{
 use crate::compile::{Compiled, Ctx, Cut, Session, View};
 use crate::tools::{CmpOp, PolicyExpr};
 
+#[path = "candidates.rs"]
+mod candidates;
 #[path = "catalogue.rs"]
 mod catalogue;
 pub use catalogue::{CatalogueHeadV1, CatalogueSchemaV1};
@@ -455,6 +457,9 @@ struct Inner {
     changed: RefCell<Vec<(String, RowUuid, Vec<u8>)>>,
     /// The write checks of the unit being applied, run at its end.
     deferred: RefCell<Option<Vec<DeferredCheck>>>,
+    candidate_checks: RefCell<Option<Vec<candidates::DeferredCheck>>>,
+    candidate_read_evidence: Option<crate::compile::CandidateEvidence>,
+    candidate_callback_budget: Option<usize>,
     /// The open transaction's seq and the tables it wrote.
     tx: Option<(u64, BTreeSet<String>)>,
     publications: Vec<SchemaPublication>,
@@ -656,7 +661,7 @@ fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> 
 /// Run a script of statements one at a time. SQLite's statement length
 /// limit applies to the whole text handed to one prepare, and schema DDL
 /// outgrows Durable Object SQLite's 100 KB.
-fn execute_script(conn: &Connection, script: &str) -> Result<(), Error> {
+pub(crate) fn execute_script(conn: &Connection, script: &str) -> Result<(), Error> {
     let mut start = 0;
     for (end, _) in script.match_indices(';') {
         let statement = &script[start..=end];
@@ -1080,6 +1085,8 @@ impl Db {
             execute_script(&conn, &ddl)?;
             physical
         };
+        crate::array_index::install(&conn, &schema)?;
+        conn.execute_batch(candidates::TEMP_DDL).map_err(storage)?;
         names.admit(&conn, &schema)?;
         conn.execute_batch(sync::SYNC_DDL).map_err(storage)?;
         conn.execute_batch(catalogue::DDL).map_err(storage)?;
@@ -1144,6 +1151,9 @@ impl Db {
                 fan: fanout::Fanout::default(),
                 changed: RefCell::new(Vec::new()),
                 deferred: RefCell::new(None),
+                candidate_checks: RefCell::new(None),
+                candidate_read_evidence: None,
+                candidate_callback_budget: None,
                 tx: None,
                 publications: Vec::new(),
                 client: None,
@@ -1753,7 +1763,10 @@ impl Db {
                 let edits = inner.chunk_large_cells(&mut op)?;
                 inner.counter_deltas(&mut op)?;
                 inner.pending_nodes.extend(edits.pending_nodes);
-                let applied = inner.apply_as(&op, who, seq);
+                let unit = [(inner.schema.clone(), op.clone())];
+                let applied = inner.candidate_unit(&unit, seq, false, false, |inner| {
+                    inner.apply_as(&op, who, seq)
+                });
                 inner.clear_derived();
                 applied
             })?;
@@ -1866,6 +1879,10 @@ impl Db {
             begin_savepoint(&inner.conn, "tx")?;
             inner.changed.borrow_mut().clear();
             let seq = inner.seq + 1;
+            if let Err(error) = inner.begin_candidate_callback(seq) {
+                inner.abandon_savepoint("tx")?;
+                return Err(error);
+            }
             inner.tx = Some((seq, BTreeSet::new()));
         }
         let mut guard = CallbackTransactionGuard {
@@ -1875,7 +1892,9 @@ impl Db {
         };
         let mut tx = MergeableTx { db: self, identity };
         let result = callback(&mut tx).await.and_then(|value| {
-            self.inner().require_mutation_admission()?;
+            let mut inner = self.inner();
+            inner.require_mutation_admission()?;
+            inner.finish_candidate_callback()?;
             Ok(value)
         });
         let captured;
@@ -1893,6 +1912,7 @@ impl Db {
                     Some((seq, tables))
                 }
                 Err(_) => {
+                    inner.abandon_candidate_callback();
                     inner.abandon_savepoint("tx")?;
                     guard.active = false;
                     None
@@ -2044,6 +2064,7 @@ impl Db {
             }
             let ddl = inner.physical.union(&target)?;
             execute_script(&inner.conn, &ddl)?;
+            crate::array_index::install(&inner.conn, &target)?;
             // A new copy holds its source's values, in every row version.
             for cell in &cells {
                 if let crate::names::LensCellRule::Copy(source) = &cell.rule {
@@ -2088,6 +2109,7 @@ impl Db {
 fn policy_reads_other_rows(policy: &PolicyExpr) -> bool {
     match policy {
         PolicyExpr::Exists { .. }
+        | PolicyExpr::ExistsIncludingCreated { .. }
         | PolicyExpr::ExistsRel { .. }
         | PolicyExpr::Inherits { .. }
         | PolicyExpr::InheritsReferencing { .. } => true,
@@ -2133,6 +2155,7 @@ impl Drop for CallbackTransactionGuard<'_> {
             // if SQLite could not confirm that this unit was rolled back.
             inner.mutation_admission_closed = true;
         }
+        inner.abandon_candidate_callback();
         inner.seq = self.prior_seq;
         inner.tx = None;
         inner.capture.clear();
@@ -2430,8 +2453,15 @@ impl Inner {
         read: &ReadSpec,
     ) -> Result<Compiled, Error> {
         let (policy, claims) = self.read_sessions(prepared, identity);
-        self.read_ctx(prepared, policy.as_ref(), &claims, read)
-            .compile_query(&prepared.query, read.include_deleted)
+        let compiled = self
+            .read_ctx(prepared, policy.as_ref(), &claims, read)
+            .compile_query(&prepared.query, read.include_deleted)?;
+        if self.candidate_read_evidence.is_some() && !compiled.preps.is_empty() {
+            return Err(unsupported(
+                "provisional reads requiring large-value preprocessing in candidate authorization units",
+            ));
+        }
+        Ok(compiled)
     }
 
     /// The compile context of a read of `prepared` (or of one of its
@@ -2446,6 +2476,7 @@ impl Inner {
         let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
         Ctx::new(schema, policy, claims, &prepared.binding)
             .with_catalogue(self)
+            .with_candidate_evidence(self.candidate_read_evidence)
             .with_view(read.view.clone())
             .with_cut(read.cut.clone(), read.settled_only)
             .with_history_origin(self.history_origin())
@@ -2989,7 +3020,8 @@ impl Inner {
         let claims = Session::default();
         let mut ctx = Ctx::new(&self.schema, None, &claims, &binding)
             .with_catalogue(self)
-            .with_cut(cut, false);
+            .with_cut(cut, false)
+            .with_candidate_evidence(self.candidate_read_evidence);
         let condition = policy(&mut ctx)?;
         let preps = std::mem::take(&mut ctx.preps);
         let mut params = ctx.params;
@@ -3171,6 +3203,9 @@ impl Inner {
         author: AuthorSubject,
         operation: Operation,
     ) -> Result<bool, Error> {
+        if self.defer_candidate_check(table, row, key, author, table.policy(operation))? {
+            return Ok(true);
+        }
         let session = self.session(author);
         self.holds(table, row, key, |ctx| {
             ctx.operation_policy(table, operation, "a", &session)
@@ -3190,6 +3225,18 @@ impl Inner {
         check: WriteCheck,
         seq: u64,
     ) -> Result<(), Error> {
+        let clause = match check {
+            WriteCheck::Insert => table.policy(Operation::Insert),
+            WriteCheck::Restore => table.policy(Operation::Update),
+            WriteCheck::WithCheck { .. } => table.policies.update.with_check.as_ref().or(table
+                .policies
+                .update
+                .using
+                .as_ref()),
+        };
+        if self.defer_candidate_check(table, row, key, author, clause)? {
+            return Ok(());
+        }
         let deferred = DeferredCheck {
             table: table.name.clone(),
             row,
@@ -3332,6 +3379,9 @@ impl Inner {
         author: AuthorSubject,
         clause: Option<&crate::tools::PolicyExpr>,
     ) -> Result<bool, Error> {
+        if self.defer_candidate_check(table, row, key, author, clause)? {
+            return Ok(true);
+        }
         let session = self.session(author);
         self.holds(table, row, key, |ctx| {
             ctx.policy_clause(clause, table, "a", &session)
@@ -5106,6 +5156,7 @@ impl Db {
             let logical = inner.names.resolve(&schema, &[], Some(&base))?;
             let ddl = inner.physical.union(&logical)?;
             execute_script(&inner.conn, &ddl)?;
+            crate::array_index::install(&inner.conn, &logical)?;
             let Inner { names, conn, .. } = &mut *inner;
             names.admit(conn, &logical)?;
             inner
@@ -5863,9 +5914,19 @@ impl Db {
             } else {
                 ops.len()
             };
-            let applied = inner
-                .apply_with_edits(ops, &batch.edits, checked, seq)
-                .and_then(|()| inner.finish_checks(seq));
+            let serializable = matches!(batch.kind, BatchKind::Serializable { .. });
+            let applied = inner.candidate_unit(ops, seq, serializable, false, |inner| {
+                // Staging defers marked checks, so all marked writes must be
+                // rechecked when the complete transaction is available.
+                let checked = if inner.candidate_checks.borrow().is_some() {
+                    0
+                } else {
+                    checked
+                };
+                inner
+                    .apply_with_edits(ops, &batch.edits, checked, seq)
+                    .and_then(|()| inner.finish_checks(seq))
+            });
             if let Err(error) = applied {
                 inner.abandon_checks();
                 inner.changed.borrow_mut().truncate(mark);
@@ -5941,7 +6002,9 @@ impl Db {
             inner.settle_overlay();
             begin_savepoint(&inner.conn, "overlay")?;
             let mark = inner.changed.borrow().len();
-            if let Err(error) = inner.apply_all_checking(&ops, ops.len(), own) {
+            if let Err(error) = inner.candidate_unit(&ops, own, snapshot.is_some(), true, |inner| {
+                inner.apply_all_checking(&ops, ops.len(), own)
+            }) {
                 inner.clear_derived();
                 inner.changed.borrow_mut().truncate(mark);
                 end_savepoint(&inner.conn, "overlay", false)?;
@@ -5962,8 +6025,10 @@ impl Db {
         let joins = extra.is_some();
         let applied = match extra {
             Some(op) => inner.counter_deltas(op).and_then(|()| {
-                let schema = inner.schema.clone();
-                inner.apply_all_checking(&[(schema, op.clone())], 0, own)
+                let unit = [(inner.schema.clone(), op.clone())];
+                inner.candidate_unit(&unit, own, snapshot.is_some(), true, |inner| {
+                    inner.apply_all_checking(&unit, 0, own)
+                })
             }),
             None => Ok(()),
         };
@@ -6031,9 +6096,10 @@ impl Db {
         let own = inner.seq + 1;
         begin_savepoint(&inner.conn, "overlay")?;
         let mark = inner.changed.borrow().len();
-        let result = inner
-            .apply_with_edits(&ops, &edits, ops.len(), own)
-            .and_then(|()| read(&mut inner, snapshot.map(|cut| Cut { own, ..cut })));
+        let result = inner.candidate_unit(&ops, own, snapshot.is_some(), true, |inner| {
+            inner.apply_with_edits(&ops, &edits, ops.len(), own)?;
+            read(inner, snapshot.map(|cut| Cut { own, ..cut }))
+        });
         inner.changed.borrow_mut().truncate(mark);
         end_savepoint(&inner.conn, "overlay", false)?;
         result
