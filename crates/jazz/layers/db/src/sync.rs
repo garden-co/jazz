@@ -728,9 +728,9 @@ pub enum SyncMessage {
     },
     /// Rows, as (stored table, id, branch key, seq), whose shipped deltas
     /// the replica could not apply: it lacks the version a delta was made
-    /// over (SPEC 19.8). The server ships each whole, or evicts it. A
-    /// subscription's rows are never declared: its opening brings them up
-    /// to date from `since`. The seq is not read.
+    /// over (SPEC 19.8). The server ships each whole, or evicts it. Sent
+    /// when a delta fails, and again on each connection until the row
+    /// arrives whole. The seq is not read.
     Hold {
         rows: Vec<(String, [u8; 16], Vec<u8>, u64)>,
     },
@@ -1224,6 +1224,9 @@ pub(crate) struct Client {
     /// each, so no result it settles is the server's: no watermark is
     /// stored while any is owed, and each is asked again on reconnect.
     whole: HashSet<(String, [u8; 16], Vec<u8>)>,
+    /// No resume point was stored since they were last all forgotten, so
+    /// forgetting them again (another eviction this tick) costs nothing.
+    forgotten: bool,
 }
 
 /// A session's commit a relay uploads as its own, for its upload: the
@@ -3657,6 +3660,9 @@ impl Inner {
     /// rare enough that a fresh opening costs less than knowing which
     /// results held the row.
     fn forget_watermarks(&mut self) -> Result<(), Error> {
+        if self.client.as_ref().is_some_and(|client| client.forgotten) {
+            return Ok(());
+        }
         if self.has_table("_jazz_watermarks")? {
             self.exec("DELETE FROM _jazz_watermarks", [])
                 .map_err(storage)?;
@@ -3665,6 +3671,7 @@ impl Inner {
             for remote in client.remote.values_mut() {
                 remote.through = None;
             }
+            client.forgotten = true;
         }
         Ok(())
     }
@@ -4393,6 +4400,13 @@ impl Client {
                 ((table, row, key), image)
             })
             .collect();
+        self.whole = std::mem::take(&mut self.whole)
+            .into_iter()
+            .map(|(table, id, key)| {
+                let table = if table == from { to.to_owned() } else { table };
+                (table, id, key)
+            })
+            .collect();
     }
 
     /// Its host says there is no server: it is the last word on its store.
@@ -4439,6 +4453,7 @@ impl Client {
             relay_ready: false,
             unadmitted: false,
             whole: HashSet::new(),
+            forgotten: false,
         }
     }
 }
@@ -4462,6 +4477,10 @@ impl Db {
         // A new server session knows nothing: attach every remote query
         // again and resend unsettled commits (the server dedupes by node
         // and transaction).
+        // What the old session refused, the new one answers afresh.
+        for remote in client.remote.values() {
+            remote.refused.borrow_mut().take();
+        }
         let resubscribe: Vec<SyncMessage> = client
             .remote
             .values_mut()
@@ -4636,7 +4655,10 @@ impl Db {
                 }
             }
             drop(inner);
-            let inner = self.inner.borrow();
+            let mut inner = self.inner.borrow_mut();
+            if !evict.is_empty() {
+                inner.forget_watermarks()?;
+            }
             for (row, key) in evict {
                 inner.evict(&table, row, &key)?;
             }
@@ -5564,6 +5586,7 @@ impl Db {
                         let resumable = client.whole.is_empty();
                         if resumable {
                             remote.through = Some(through);
+                            client.forgotten = false;
                         }
                         let watermark = remote.watermark;
                         // Cached rows the server's result lacks are stale.
@@ -5934,10 +5957,9 @@ impl Inner {
         }
     }
 
-    /// Drop the upstream link: reads stop waiting, writes queue.
     /// The upstream sent what this store cannot follow (a catalogue it
     /// cannot mirror): drop the link, and fail every remote read with
-    /// `error`. Each connection that sends it again is dropped the same.
+    /// `error` until the next connection answers it afresh.
     fn refuse_upstream(&mut self, error: Error) {
         self.detach_upstream();
         if let Some(client) = self.client.as_mut() {
@@ -5947,6 +5969,7 @@ impl Inner {
         }
     }
 
+    /// Drop the upstream link: reads stop waiting, writes queue.
     fn detach_upstream(&mut self) {
         let Some(client) = self.client.as_mut() else {
             return;
