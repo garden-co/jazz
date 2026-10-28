@@ -12,6 +12,7 @@ import {
 import { accountAppId } from "./local-first.js";
 import {
   createDbWithRuntimeSource,
+  holdCredentialRenewal,
   releaseUnusedLease,
   startBrowserWorkerLease,
   type Db,
@@ -198,6 +199,8 @@ export async function createAccountDbWithRuntimeSource(
         refreshing = false;
       }
     };
+    // The refresh cycle below renews every refusal a new token can fix.
+    const releaseRenewal = holdCredentialRenewal(opened);
     const stopAuth = opened.onAuthChanged((state) => {
       // A refused credential renews whatever the server called it: a
       // rotated signing key reads as "invalid" until a new token is issued.
@@ -214,6 +217,7 @@ export async function createAccountDbWithRuntimeSource(
       stopped = true;
       if (timer) clearTimeout(timer);
       stopAuth();
+      releaseRenewal();
       stopBound?.();
       unsubscribe();
     });

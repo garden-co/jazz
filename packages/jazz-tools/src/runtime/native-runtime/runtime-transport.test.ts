@@ -996,6 +996,124 @@ describe("NativeRuntimeAdapter server transport", () => {
     }
   });
 
+  it.each(["close", "abort"] as const)(
+    "ends a Global wait held through an outage on %s",
+    async (end) => {
+      vi.useFakeTimers();
+      const sockets: FakeWebSocket[] = [];
+      let serverDown = false;
+      globalThis.WebSocket = class extends FakeWebSocket {
+        constructor(url: string) {
+          super(url);
+          sockets.push(this);
+          if (serverDown) queueMicrotask(() => this.emitServerClose());
+        }
+      } as unknown as typeof WebSocket;
+      const settlement = deferred<void>();
+      const write = {
+        ...fakeWrite(),
+        wait: (tier: string) => (tier === "local" ? Promise.resolve() : settlement.promise),
+      };
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () =>
+            fakeDb({
+              insert: () => write,
+              connectUpstream: () => new FakeTransport([]),
+              tick: () => undefined,
+            }),
+          openBrowser: async () => {
+            throw new Error("not used");
+          },
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      try {
+        runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+        await runtime.waitForUpstreamServerConnection();
+        const txId = await committedTxId(
+          runtime.insert(
+            "todos",
+            { title: { type: "Text", value: "held then ended" } },
+            null,
+            "00000000-0000-0000-0000-000000000013",
+          ),
+        );
+        const control = new AbortController();
+        let outcome: unknown = "pending";
+        void runtime.waitForTransaction(txId, "global", { signal: control.signal }).then(
+          () => (outcome = "resolved"),
+          (error: unknown) => (outcome = error),
+        );
+        serverDown = true;
+        sockets[0]!.emitServerClose();
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(outcome).toBe("pending");
+
+        const reason = new Error("caller stopped waiting");
+        if (end === "close") await runtime.close();
+        else control.abort(reason);
+        await vi.advanceTimersByTimeAsync(10);
+        if (end === "close") {
+          expect(outcome).toBeInstanceOf(Error);
+          expect((outcome as Error).message).toMatch(/closed/);
+        } else {
+          expect(outcome).toBe(reason);
+        }
+      } finally {
+        settlement.resolve();
+        await runtime.close();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("keeps a tab's remote subscription open while its worker retries, and fails it once terminal", async () => {
+    const nativeSubscription = {
+      closed: false,
+      readAll: () => [],
+      close() {
+        this.closed = true;
+        return true;
+      },
+    };
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            subscribe: () => nativeSubscription,
+            connectUpstream: () => new FakeTransport([]),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    try {
+      const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "remote");
+      const updates = vi.fn();
+      runtime.executeSubscription(handle, updates);
+      runtime.reportRemoteServerTransportError(new Error("websocket closed (code=1006)"), true);
+      expect(nativeSubscription.closed).toBe(false);
+      expect(updates).not.toHaveBeenCalledWith(expect.any(Error));
+      runtime.reportRemoteServerTransportError(new Error("Protocol: bad frame"), false);
+      expect(nativeSubscription.closed).toBe(true);
+      expect(updates).toHaveBeenCalledWith(expect.any(Error));
+    } finally {
+      await runtime.close();
+    }
+  });
+
   it("fails a remote subscription that survived an outage once the reconnect hits a terminal error", async () => {
     vi.useFakeTimers();
     const sockets: FakeWebSocket[] = [];

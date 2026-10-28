@@ -2144,6 +2144,9 @@ export class Db {
         return thisDb.shutdownPromise !== null;
       },
       markUnauthenticated: (reason) => this.markUnauthenticated(reason),
+      renewsCredential: (reason) =>
+        (credentialRenewers.get(this) ?? 0) > 0 ||
+        (reason === "expired" && this.localFirstRefreshOwned),
       clearAuthError: () => this.authStateStore.clearError(),
       onMutationError: (event) => this.handleMutationError(event),
       enableAuthenticatedInspectorLocalReads: (physicalDbName) =>
@@ -4024,4 +4027,21 @@ export function assertNoClientBackendSecret(config: object): void {
 
 function isBrowserRuntime(): boolean {
   return typeof window !== "undefined" && typeof Worker !== "undefined";
+}
+
+const credentialRenewers = new WeakMap<object, number>();
+
+/**
+ * @internal Declare that the caller renews this Db's credential whenever the
+ * server refuses it, until the returned release is called. Global write waits
+ * then outlast a renewable refusal instead of failing (#3923).
+ */
+export function holdCredentialRenewal(db: object): () => void {
+  credentialRenewers.set(db, (credentialRenewers.get(db) ?? 0) + 1);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    credentialRenewers.set(db, (credentialRenewers.get(db) ?? 1) - 1);
+  };
 }

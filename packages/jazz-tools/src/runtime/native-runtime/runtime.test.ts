@@ -930,6 +930,69 @@ describe("NativeRuntimeAdapter server transport", () => {
     }
   });
 
+  // The native host stops its link on a refused credential and reports a
+  // terminal upstream failure. A credential the app can renew restarts it,
+  // so the refusal counts as retrying, as it does on the web socket path
+  // (#3923); one no credential fixes stays terminal.
+  it.each([
+    ["authentication expired", true],
+    ["account disabled", false],
+  ] as const)("treats a native refusal (%s) as retrying: %s", async (reason, retrying) => {
+    let reportAuthRejected: ((reason: string) => void) | undefined;
+    let reportUpstreamFailure:
+      | ((failure: { reason: string; retrying: boolean } | null) => void)
+      | undefined;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            setTickScheduler: () => undefined,
+            tick: () => undefined,
+            onAuthRejected: (callback: (reason: string) => void) => {
+              reportAuthRejected = callback;
+            },
+            onUpstreamFailure: (
+              callback: (failure: { reason: string; retrying: boolean } | null) => void,
+            ) => {
+              reportUpstreamFailure = callback;
+            },
+            nativeConnectionStatus: () => ({
+              configured: true,
+              explicitlyOffline: false,
+              connected: false,
+              authRejected: null,
+            }),
+            isNativeForegroundClosed: () => false,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const authFailures: string[] = [];
+    runtime.onAuthFailure((failure) => authFailures.push(failure));
+    const transportErrors: Array<{ message: string; retrying: boolean }> = [];
+    runtime.onServerTransportError((error, state) =>
+      transportErrors.push({ message: error.message, retrying: state.retrying }),
+    );
+
+    reportAuthRejected!(reason);
+    reportUpstreamFailure!({ reason, retrying: false });
+    expect(authFailures).toEqual([reason]);
+    expect(transportErrors).toEqual([{ message: reason, retrying }]);
+
+    // A renewed credential reconnects and clears the refusal.
+    reportUpstreamFailure!(null);
+    reportUpstreamFailure!({ reason: "socket reset", retrying: false });
+    expect(transportErrors.at(-1)).toEqual({ message: "socket reset", retrying: false });
+    await runtime.close();
+  });
+
   it("reports pre-hello auth failures and reconnects with refreshed auth", async () => {
     const sockets: FakeWebSocket[] = [];
     let allowServerHello = false;

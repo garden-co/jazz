@@ -1,5 +1,6 @@
 import { copyAccountConfigAdmission } from "../../accounts/config-capability.js";
 import type { WasmSchema } from "../../drivers/types.js";
+import { reportCredentialRefusal } from "../client.js";
 import type { JazzClient, AuthUpdate } from "../client.js";
 import { resolveClientInternalSessionSync } from "../client-session.js";
 import { getTrustedReservedSession, setTrustedReservedSession } from "../db-internal-session.js";
@@ -110,7 +111,11 @@ export class BrowserConnectionManager extends ConnectionManager {
       config: workerConfig,
       schema: input.schema,
       client: input.client,
-      onAuthFailure: (reason) => this.host.markUnauthenticated(reason),
+      onAuthFailure: (reason) => {
+        // A tab hears of a refusal from its worker, not from its own runtime.
+        reportCredentialRefusal(input.client, reason);
+        this.host.markUnauthenticated(reason);
+      },
       onAuthRestored: () => this.host.clearAuthError(),
       onExplicitOfflineChange: (offline) => this.setExplicitOffline(connection, offline),
       onRemoteLinkChange: (state) => this.setWorkerRemoteLink(connection, state),
