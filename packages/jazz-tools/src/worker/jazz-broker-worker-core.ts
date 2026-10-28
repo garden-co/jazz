@@ -1120,7 +1120,11 @@ async function initialize(context: RuntimeContext): Promise<void> {
       options.author,
       1,
       false,
-      { selfSignedClientProof: proof, scopeIsolatedRelay: true },
+      {
+        selfSignedClientProof: proof,
+        scopeIsolatedRelay: true,
+        slowQueryLog: { appId: options.appId, thresholdMs: options.slowQueryThresholdMs },
+      },
     );
     context.runtime = runtime;
     unownedDb = null;

@@ -13,6 +13,8 @@ type NativeForegroundCommand =
   | "close"
   | { type: "captureSnapshot" }
   | { type: "drainTickEvents" }
+  | { type: "takeSlowQueryReport"; app?: string }
+  | { type: "setSlowQueryThresholdMs"; ms: number }
   | {
       type: "all";
       query: Uint8Array;
@@ -666,4 +668,34 @@ it("decodes terminal-operation JSON exactly on the ASCII fast path and strictly 
   expect(() => relay.decodeNativeForegroundResponse(deltaEvent(malformed))).toThrow(
     /malformed UTF-8 terminal operations/,
   );
+});
+
+it("encodes and decodes the slow-query log commands with the native relay's pinned bytes", () => {
+  const relay = loadRelay(null);
+  const ascii = (text: string) => Array.from(text, (char) => char.charCodeAt(0));
+  expect(Array.from(relay.encodeNativeForegroundCommand({ type: "takeSlowQueryReport" }))).toEqual([
+    36, 0,
+  ]);
+  expect(
+    Array.from(relay.encodeNativeForegroundCommand({ type: "takeSlowQueryReport", app: "a" })),
+  ).toEqual([36, 1, 1, ...ascii("a")]);
+  expect(
+    Array.from(relay.encodeNativeForegroundCommand({ type: "setSlowQueryThresholdMs", ms: 200 })),
+  ).toEqual([37, 200, 1]);
+
+  expect(relay.decodeNativeForegroundResponse(Uint8Array.of(27, 2, ...ascii("[]")))).toEqual({
+    type: "slowQueryReport",
+    lines: [],
+  });
+  const json = JSON.stringify(["slow query in app a on todos: 1 slow run(s)"]);
+  expect(
+    relay.decodeNativeForegroundResponse(Uint8Array.of(27, json.length, ...ascii(json))),
+  ).toEqual({ type: "slowQueryReport", lines: ["slow query in app a on todos: 1 slow run(s)"] });
+  expect(relay.decodeNativeForegroundResponse(Uint8Array.of(28))).toEqual({
+    type: "slowQueryThresholdSet",
+  });
+  // A report that isn't a JSON array of strings fails closed.
+  expect(() =>
+    relay.decodeNativeForegroundResponse(Uint8Array.of(27, 4, ...ascii("[1 ]"))),
+  ).toThrow();
 });

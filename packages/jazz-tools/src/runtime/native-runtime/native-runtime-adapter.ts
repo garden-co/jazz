@@ -437,6 +437,10 @@ type NativeDb = {
     localEpoch?: bigint,
   ): Transport | Promise<Transport>;
   tick(): void | Promise<void>;
+  /** The slow-query report due now: one line per slow query shape. */
+  takeSlowQueryReport?(app?: string): string[];
+  /** Report query runs of at least `ms` milliseconds; 0 turns the log off. */
+  setSlowQueryThresholdMs?(ms: number): void;
   close?(): void;
   free?(): void;
 };
@@ -741,6 +745,16 @@ function openMemoryDb(
   );
 }
 
+/**
+ * The slow-query log: queries whose runs take at least `thresholdMs`
+ * (default 50; 0 turns the log off) are reported with `console.warn`, one
+ * line per query shape, naming `appId`.
+ */
+export type SlowQueryLogOptions = {
+  appId?: string;
+  thresholdMs?: number;
+};
+
 export class NativeRuntimeAdapter implements Runtime {
   private readonly auxiliaryReceiveDeadlines = new Map<Transport, AuxiliaryReceiveDeadline>();
   private readonly pendingNativeAdmissionCancels = new Set<() => void>();
@@ -770,6 +784,8 @@ export class NativeRuntimeAdapter implements Runtime {
   // publication boundary FIFO; ordinary writes and source reads stay parallel.
   private streamingFinalization: Promise<void> = Promise.resolve();
   private readonly ownerRuntime: NativeRuntimeAdapter;
+  /** The app named in slow-query reports (owner runtime only). */
+  private slowQueryApp: string | undefined;
   get preparationOwner(): object {
     return this.ownerRuntime;
   }
@@ -870,13 +886,14 @@ export class NativeRuntimeAdapter implements Runtime {
     historyComplete: boolean,
     opts?: Pick<
       NonNullable<ConstructorParameters<typeof NativeRuntimeAdapter>[6]>,
-      "selfSignedClientProof" | "scopeIsolatedRelay"
+      "selfSignedClientProof" | "scopeIsolatedRelay" | "slowQueryLog"
     >,
   ): NativeRuntimeAdapter {
     return new NativeRuntimeAdapter(null, schema, node, author, sourceId, historyComplete, {
       db,
       selfSignedClientProof: opts?.selfSignedClientProof,
       scopeIsolatedRelay: opts?.scopeIsolatedRelay,
+      slowQueryLog: opts?.slowQueryLog,
     });
   }
 
@@ -908,6 +925,8 @@ export class NativeRuntimeAdapter implements Runtime {
       readAuthorizationHost?: ReadAuthorizationHost;
       backendMode?: boolean;
       owner?: NativeRuntimeAdapter;
+      /** Where slow queries are reported (`console.warn`): see {@link SlowQueryLogOptions}. */
+      slowQueryLog?: SlowQueryLogOptions;
     },
   ) {
     this.ownerRuntime = opts?.owner?.ownerRuntime ?? this;
@@ -962,6 +981,14 @@ export class NativeRuntimeAdapter implements Runtime {
       );
     }
     if (opts?.owner) return;
+    this.slowQueryApp = opts?.slowQueryLog?.appId;
+    const threshold = opts?.slowQueryLog?.thresholdMs;
+    if (threshold !== undefined) {
+      if (!Number.isFinite(threshold) || threshold < 0) {
+        throw new Error("slowQueryThresholdMs must be a non-negative number of milliseconds");
+      }
+      this.db.setSlowQueryThresholdMs?.(threshold);
+    }
     if (typeof this.db.setTickScheduler !== "function") {
       throw new Error("Native runtime requires db.setTickScheduler");
     }
@@ -3452,12 +3479,24 @@ export class NativeRuntimeAdapter implements Runtime {
     return completion;
   }
 
+  /**
+   * Write the slow-query report due now with `console.warn`: each line is a
+   * query shape that held the database for at least the threshold, with its
+   * plan and the index that would likely make it fast.
+   */
+  private reportSlowQueries(): void {
+    for (const line of this.db.takeSlowQueryReport?.(this.ownerRuntime.slowQueryApp) ?? []) {
+      console.warn(`[jazz] ${line}`);
+    }
+  }
+
   private async driveCoreTicks(): Promise<void> {
     let yielded = false;
     try {
       for (let round = 0; ; round += 1) {
         this.coreTickAgain = false;
         await this.db.tick();
+        this.reportSlowQueries();
         this.pumpSubscriptions();
         this.scheduleServerPump();
         this.notifyPeerTransportWork();

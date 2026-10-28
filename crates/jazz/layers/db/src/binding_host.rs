@@ -1515,6 +1515,27 @@ impl Binding {
         self.hooks.schedule_tick();
     }
 
+    /// The slow-query report due now: one line per slow query shape,
+    /// naming `app`: the first at once, then at most every 10 seconds. The host
+    /// writes the lines where it reports problems (`console.warn`).
+    pub fn take_slow_query_report(&self, app: Option<&str>) -> Vec<String> {
+        self.db.take_slow_query_report(app)
+    }
+
+    /// Report query runs of at least `ms` milliseconds; 0 turns the log
+    /// off.
+    pub fn set_slow_query_threshold_ms(&self, ms: f64) -> HostResult<()> {
+        if !ms.is_finite() || ms < 0.0 {
+            return Err(HostError::Argument(format!(
+                "slow query threshold must be a non-negative number of milliseconds, not {ms}"
+            )));
+        }
+        self.db.set_slow_query_threshold(
+            (ms > 0.0).then(|| std::time::Duration::from_secs_f64(ms / 1000.0)),
+        );
+        Ok(())
+    }
+
     /// Make this store the optimistic, non-durable foreground of a durable
     /// relay (a browser tab over its worker): its store starts empty, so
     /// every subscription's opening waits for the relay's answer.

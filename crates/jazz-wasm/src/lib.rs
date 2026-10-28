@@ -1510,6 +1510,23 @@ impl WasmDb {
             .map_err(host_error)
     }
 
+    /// The slow-query report due now: one line per slow query shape,
+    /// naming `app`: the first at once, then at most every 10 seconds. The caller
+    /// writes each line with `console.warn`.
+    #[wasm_bindgen(js_name = takeSlowQueryReport)]
+    pub fn take_slow_query_report(&self, app: Option<String>) -> Result<Vec<String>, JsValue> {
+        Ok(self.binding()?.take_slow_query_report(app.as_deref()))
+    }
+
+    /// Report query runs of at least `ms` milliseconds (default 50); 0
+    /// turns the slow-query log off.
+    #[wasm_bindgen(js_name = setSlowQueryThresholdMs)]
+    pub fn set_slow_query_threshold_ms(&self, ms: f64) -> Result<(), JsValue> {
+        self.binding()?
+            .set_slow_query_threshold_ms(ms)
+            .map_err(host_error)
+    }
+
     /// The newest transaction time this database handed out under its
     /// node (a `TxTime` is the commit seq). A leased node's next holder
     /// seeds it through `seedForegroundTxTimeHighWater`.
