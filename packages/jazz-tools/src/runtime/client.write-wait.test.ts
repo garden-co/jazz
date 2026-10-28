@@ -58,8 +58,6 @@ function heldWaitClient() {
   };
 }
 
-const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
-
 function track(promise: Promise<unknown>) {
   const state: { value: unknown } = { value: "pending" };
   promise.then(
