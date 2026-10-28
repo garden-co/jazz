@@ -15,6 +15,7 @@ import type {
   NativeTerminalOperation,
   RuntimeSubscriptionDelta,
   RuntimeTerminalOperation,
+  RuntimeValueSplice,
   TablePolicies,
   Value,
   WasmRow,
@@ -63,6 +64,7 @@ import {
   readNativeSubscriptionDelta,
   type NativeRelationSubscriptionSnapshot,
   type NativeRowBatch,
+  type NativeSplice,
   type NativeSubscriptionDelta,
   type NativeSelfSignedClientProof,
   type QueryArraySubquery,
@@ -4629,6 +4631,9 @@ function readOptions(
   }
   const readView = options.read_view ?? options.readView;
   if (readView != null) readOptions.read_view = readView;
+  if (Array.isArray(options.splices) && options.splices.length > 0) {
+    readOptions.splices = options.splices;
+  }
   return readOptions;
 }
 
@@ -6491,26 +6496,39 @@ export function decodeSubscriptionDelta(
   reset = false,
   outputColumns: SubscriptionOutputColumns | null = null,
 ): RuntimeSubscriptionDelta {
-  const decodeRows = (batches: NativeRowBatch[], keys: Uint8Array[], indices: number[]) => {
+  const decodeRows = (
+    batches: NativeRowBatch[],
+    keys: Uint8Array[],
+    indices: number[],
+    splices?: NativeSubscriptionDelta["updatedSplices"],
+  ) => {
     const rows = rowsFromSubscriptionBatches(batches, schema, outputColumns, "full-record");
     if (rows.length !== keys.length)
       throw new Error("subscription occurrence sidecar length mismatch");
-    return rows.flatMap((row, index) =>
-      outputColumns && row.table !== outputColumns.rootTable
-        ? []
-        : [
-            {
-              sourceId: row.id,
-              occurrenceKey: keys[index]!,
-              index: indices[index]!,
-              row: runtimeSubscriptionRow(row, schema, outputColumns),
-            },
-          ],
-    );
+    return rows.flatMap((row, index) => {
+      if (outputColumns && row.table !== outputColumns.rootTable) return [];
+      const rowSplices = splices?.[index];
+      return [
+        {
+          sourceId: row.id,
+          occurrenceKey: keys[index]!,
+          index: indices[index]!,
+          row: runtimeSubscriptionRow(row, schema, outputColumns),
+          ...(rowSplices && rowSplices.length > 0
+            ? { splices: runtimeRowSplices(rowSplices, schema, row.table) }
+            : {}),
+        },
+      ];
+    });
   };
   return {
     added: decodeRows(delta.added, delta.addedOccurrenceKeys, delta.addedIndices),
-    updated: decodeRows(delta.updated, delta.updatedOccurrenceKeys, delta.updatedIndices),
+    updated: decodeRows(
+      delta.updated,
+      delta.updatedOccurrenceKeys,
+      delta.updatedIndices,
+      delta.updatedSplices,
+    ),
     removed: delta.removed.flatMap((row, index) =>
       outputColumns && row.table !== outputColumns.rootTable
         ? []
@@ -6524,6 +6542,37 @@ export function decodeSubscriptionDelta(
     ),
     ...(reset ? { reset: true } : {}),
   };
+}
+
+/** Convert native splices to each column's public coordinates: UTF-16 for TEXT, bytes for BYTEA. */
+function runtimeRowSplices(
+  columns: NativeSubscriptionDelta["updatedSplices"][number],
+  schema: WasmSchema,
+  table: string,
+): Record<string, RuntimeValueSplice[]> {
+  const descriptors = resolveQueryTable(schema, table)?.columns ?? [];
+  const result: Record<string, RuntimeValueSplice[]> = {};
+  for (const { column, splices } of columns) {
+    const type = descriptors.find((descriptor) => descriptor.name === column)?.column_type.type;
+    if (type === "Text") {
+      result[column] = splices.map((splice: NativeSplice) => ({
+        at: splice.atUtf16,
+        delete: splice.deleteUtf16,
+        insert: textDecoder.decode(splice.insert),
+      }));
+    } else if (type === "Bytea") {
+      result[column] = splices.map((splice: NativeSplice) => ({
+        at: splice.at,
+        delete: splice.delete,
+        insert: splice.insert,
+      }));
+    } else {
+      throw new Error(
+        `subscription splices for column "${column}" of type ${type} are not supported yet`,
+      );
+    }
+  }
+  return result;
 }
 
 function rowsFromSubscriptionBatches(

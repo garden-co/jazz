@@ -39,6 +39,7 @@ export type {
   NativeRow,
   NativeRowBatch,
   NativeRowDescriptorField,
+  NativeSplice,
   NativeSubscriptionDelta,
   DescriptorField,
   ValueType,
