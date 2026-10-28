@@ -36,7 +36,7 @@ pub use fanout::FanoutStats;
 mod large_ops;
 pub use large_ops::{
     JsonSetEdit, LargeValueStagingPolicy, LargeValueUpdate, LargeValueUpdatePage,
-    LargeValueUpdateSplice, StreamingMutationKind, StreamingValueUpload,
+    LargeValueUpdateSplice, StagedStreamingValue, StreamingMutationKind, StreamingValueUpload,
 };
 #[path = "sync.rs"]
 pub(crate) mod sync;
@@ -5090,6 +5090,7 @@ struct Batch {
     kind: BatchKind,
     /// None retains the ordinary per-operation identity contract.
     identity: Option<WriteIdentity>,
+    uploads: Vec<Rc<large_ops::UploadLease>>,
     ops: Vec<(Rc<Schema>, StagedOp)>,
     /// What the batch's partial large-value updates built: descriptors
     /// derived from stored trees and the nodes consolidations prepared,
@@ -5531,6 +5532,7 @@ impl Db {
             Batch {
                 kind,
                 identity: None,
+                uploads: Vec::new(),
                 ops: Vec::new(),
                 edits: LargeEdits::default(),
             },
