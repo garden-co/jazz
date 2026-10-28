@@ -196,3 +196,11 @@ mod storage_owner_retirement;
 mod transaction_read_prefix;
 #[path = "../write_receipt_owner.rs"]
 mod write_receipt_owner;
+
+#[path = "../sqlite_relation_aliases.rs"]
+mod sqlite_relation_aliases;
+#[path = "../sqlite_union_queries.rs"]
+mod sqlite_union_queries;
+
+#[path = "../sqlite_union_prefixes.rs"]
+mod sqlite_union_prefixes;

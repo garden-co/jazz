@@ -19,6 +19,7 @@ use crate::tools::{CmpOp, Operation, PolicyExpr, PolicyValue};
 use crate::values::{Schema, Sql, Table, query_error, quote, to_sql, unsupported};
 
 mod history;
+mod unions;
 
 /// Inherits chains with no explicit bound unroll this deep.
 pub(crate) const DEFAULT_INHERITS_DEPTH: usize = 10;
@@ -241,6 +242,7 @@ fn scratch_value(slot: i64, cell: &str) -> String {
 }
 
 /// SQL text plus its positional parameters.
+#[derive(Clone)]
 pub struct Ctx<'a> {
     pub schema: &'a Schema,
     catalogue: Option<&'a dyn CatalogueIdentityLookup>,
@@ -744,7 +746,30 @@ impl<'a> Ctx<'a> {
         query: &Query,
         include_deleted: bool,
     ) -> Result<Compiled, Error> {
-        if let Some(column) = deletion_column(query) {
+        if crate::db::relation::is_union(query) {
+            return self.compile_union(query, include_deleted);
+        }
+        let retained = crate::db::relation::columns(query)?.map(|mut columns| {
+            columns.retain(|column| column.source != "id" || column.alias != "id");
+            columns
+        });
+        if retained.is_some()
+            && (query.select.is_some()
+                || !query.array_subqueries.is_empty()
+                || query.aggregate.is_some())
+        {
+            return Err(unsupported(
+                "presentation over a retained relation projection",
+            ));
+        }
+        if let Some(column) = deletion_column(query).or_else(|| {
+            retained.as_ref().and_then(|columns| {
+                columns
+                    .iter()
+                    .find(|column| crate::values::is_deletion(&column.source))
+                    .map(|column| column.source.clone())
+            })
+        }) {
             if !include_deleted {
                 return Err(query_error(format!(
                     "Reading {column} requires includeDeleted"
@@ -770,15 +795,9 @@ impl<'a> Ctx<'a> {
         if query.flat_join.is_some() {
             return self.compile_flat_join(query);
         }
-        if let Some(plan) = crate::db::union_plan(query, self.schema)? {
-            return self.compile_union(plan, include_deleted);
-        }
-        if !query.policy_branches.is_empty()
-            || !query.inherits.is_empty()
-            || query.relation.is_some()
-        {
+        if !query.policy_branches.is_empty() || !query.inherits.is_empty() {
             return Err(unsupported(
-                "this query form (policy branches, inherits, relation)",
+                "this query form (policy branches, inherits) on SQLite",
             ));
         }
         let (table, projection, wheres) = self.root_rows(query, include_deleted)?;
@@ -795,7 +814,13 @@ impl<'a> Ctx<'a> {
         let (order, ranked_order) = self.order_sql(table, alias, &query.order_by)?;
         let columns = projection
             .iter()
-            .map(|(name, _)| Ok(format!(", {}", column_sql(table, alias, name)?)))
+            .enumerate()
+            .map(|(index, (name, _))| {
+                let source = retained
+                    .as_ref()
+                    .map_or(name.as_str(), |columns| columns[index].source.as_str());
+                Ok(format!(", {}", column_sql(table, alias, source)?))
+            })
             .collect::<Result<String, Error>>()?;
         let limit = self.bind(Sql::Integer(query.limit.map_or(-1, |l| l as i64)));
         let offset = self.bind(Sql::Integer(query.offset as i64));
@@ -830,7 +855,33 @@ impl<'a> Ctx<'a> {
         include_deleted: bool,
     ) -> Result<(&'a Table, Vec<(String, ValueType)>, Vec<String>), Error> {
         let table = self.table(&query.table)?;
-        let projection = projection(table, query.select.as_deref())?;
+        let retained = crate::db::relation::columns(query)?.map(|mut columns| {
+            columns.retain(|column| column.source != "id" || column.alias != "id");
+            columns
+        });
+        let projection = match &retained {
+            None => projection(table, query.select.as_deref())?,
+            Some(columns) => columns
+                .iter()
+                .map(|column| {
+                    let ty = if column.source == "id" {
+                        ValueType::Uuid
+                    } else {
+                        table
+                            .column(&column.source)
+                            .ok_or_else(|| {
+                                query_error(format!(
+                                    "unknown column `{}.{}`",
+                                    table.name, column.source
+                                ))
+                            })?
+                            .ty
+                            .clone()
+                    };
+                    Ok((column.alias.clone(), ty))
+                })
+                .collect::<Result<Vec<_>, Error>>()?,
+        };
         let alias = "t";
         let mut wheres = Vec::new();
         if !include_deleted {
@@ -872,135 +923,6 @@ impl<'a> Ctx<'a> {
             wheres.push(self.read_policy(table, alias, session)?);
         }
         Ok((table, projection, wheres))
-    }
-
-    /// A union: each arm's rows under its own conditions and read policy,
-    /// labelled with the arm (column 3), `UNION ALL`, then ordered and
-    /// windowed as a whole. Ties break by row id, then by arm label, in
-    /// the last key's direction, so a row matched by several arms has a
-    /// stable place for each.
-    fn compile_union(
-        mut self,
-        plan: crate::db::UnionPlan,
-        include_deleted: bool,
-    ) -> Result<Compiled, Error> {
-        let alias = "t";
-        let mut projection = Vec::new();
-        // Each arm as (plain, ranked) statement text.
-        let mut arms = Vec::with_capacity(plan.arms.len());
-        let mut keys = Vec::new();
-        for (label, arm) in &plan.arms {
-            let unsupported_arm = [
-                (arm.flat_join.is_some(), "flat joins"),
-                (
-                    crate::schema::history::history_source_table(&arm.table).is_some(),
-                    "history reads",
-                ),
-                (!arm.policy_branches.is_empty(), "policy branches"),
-                (!arm.inherits.is_empty(), "inherited-policy traversals"),
-                (arm.aggregate.is_some(), "aggregates"),
-                (!arm.includes.is_empty(), "includes"),
-                (!arm.array_subqueries.is_empty(), "array subqueries"),
-                (arm.select.is_some(), "select projections"),
-            ];
-            if let Some((_, feature)) = unsupported_arm.iter().find(|(present, _)| *present) {
-                return Err(unsupported(format!("union arms with {feature}")));
-            }
-            if let Some(column) = deletion_column(arm) {
-                if !include_deleted {
-                    return Err(query_error(format!(
-                        "Reading {column} requires includeDeleted"
-                    )));
-                }
-                if !arm.joins.is_empty() {
-                    return Err(unsupported(format!("reading {column} in joins")));
-                }
-            }
-            let (table, arm_projection, wheres) = self.root_rows(arm, include_deleted)?;
-            let columns = arm_projection
-                .iter()
-                .enumerate()
-                .map(|(i, (name, _))| Ok(format!(", {} AS c{i}", column_sql(table, alias, name)?)))
-                .collect::<Result<String, Error>>()?;
-            let label = self.bind(Sql::Text(label.as_bytes().to_vec()));
-            keys = self.order_terms(table, alias, &plan.order_by)?;
-            let mut plain_keys = String::new();
-            let mut ranked_keys = String::new();
-            for (i, key) in keys.iter().enumerate() {
-                plain_keys.push_str(&format!(", {} AS k{i}", key.sql));
-                ranked_keys.push_str(&format!(", {} AS k{i}", key.sql));
-                if let Some(rank) = &key.rank {
-                    ranked_keys.push_str(&format!(", {rank} AS r{i}"));
-                }
-            }
-            let source = self.source(table)?;
-            let body = |keys: &str| {
-                format!(
-                    "SELECT {alias}.id AS id, {alias}._seq AS _seq, {alias}._del AS _del, \
-                     {label} AS _arm{columns}{keys} FROM {source} AS {alias} WHERE {}",
-                    and(&wheres)
-                )
-            };
-            let (mut plain, mut ranked) = (body(&plain_keys), body(&ranked_keys));
-            // An arm's own window applies before the union.
-            if arm.limit.is_some() || arm.offset != 0 {
-                let (order, ranked_order) = self.order_sql(table, alias, &arm.order_by)?;
-                let ranked_order = ranked_order.unwrap_or_else(|| order.clone());
-                let limit = self.bind(Sql::Integer(arm.limit.map_or(-1, |l| l as i64)));
-                let offset = self.bind(Sql::Integer(arm.offset as i64));
-                let window = |body: &str, order: &str| {
-                    format!("SELECT * FROM ({body} ORDER BY {order} LIMIT {limit} OFFSET {offset})")
-                };
-                plain = window(&plain, &order);
-                ranked = window(&ranked, &ranked_order);
-            }
-            projection = arm_projection;
-            arms.push((plain, ranked));
-        }
-        let tie = match plan.order_by.last().map(|key| key.direction) {
-            Some(OrderDirection::Desc) => "DESC",
-            _ => "ASC",
-        };
-        let order = |ranked: bool| {
-            let mut order = Vec::new();
-            for (i, key) in keys.iter().enumerate() {
-                order.push(format!("k{i} {}", key.direction));
-                if ranked && key.rank.is_some() {
-                    order.push(format!("r{i} {}", key.direction));
-                }
-            }
-            order.push(format!("id {tie}"));
-            order.push(format!("_arm {tie}"));
-            order.join(", ")
-        };
-        let limit = self.bind(Sql::Integer(plan.limit.map_or(-1, |l| l as i64)));
-        let offset = self.bind(Sql::Integer(plan.offset as i64));
-        let columns: String = (0..projection.len()).map(|i| format!(", c{i}")).collect();
-        let statement = |ranked: bool| {
-            let arms: Vec<&str> = arms
-                .iter()
-                .map(|(plain, with_ranks)| if ranked { with_ranks } else { plain }.as_str())
-                .collect();
-            format!(
-                "SELECT id, _seq, _del, _arm{columns} FROM ({}) ORDER BY {} \
-                 LIMIT {limit} OFFSET {offset}",
-                arms.join(" UNION ALL "),
-                order(ranked)
-            )
-        };
-        let ranked = keys.iter().any(|key| key.rank.is_some());
-        Ok(Compiled {
-            sql: statement(false),
-            ranked_sql: ranked.then(|| statement(true)),
-            params: self.params,
-            projection,
-            tables: self.tables,
-            aggregate: false,
-            joined: 0,
-            versioned: false,
-            union: true,
-            preps: self.preps,
-        })
     }
 
     /// A flat join: one row per matching tuple of the root and each joined
@@ -3356,10 +3278,22 @@ impl Ctx<'_> {
         alias: &str,
         order: &[crate::query::OrderBy],
     ) -> Result<(String, Option<String>), Error> {
+        self.order_projected_sql(table, alias, order, &BTreeMap::new())
+    }
+
+    /// Output aliases name SQL cells; large-value ranks still use the physical
+    /// source column that supplied them.
+    fn order_projected_sql(
+        &mut self,
+        table: &Table,
+        alias: &str,
+        order: &[crate::query::OrderBy],
+        sources: &BTreeMap<String, String>,
+    ) -> Result<(String, Option<String>), Error> {
         let mut keys = Vec::new();
         let mut ranked = Vec::new();
         let mut any_large = false;
-        for key in self.order_terms(table, alias, order)? {
+        for key in self.order_terms(table, alias, order, sources)? {
             let direction = key.direction;
             keys.push(format!("{} {direction}", key.sql));
             ranked.push(format!("{} {direction}", key.sql));
@@ -3388,6 +3322,7 @@ impl Ctx<'_> {
         table: &Table,
         alias: &str,
         order: &[crate::query::OrderBy],
+        sources: &BTreeMap<String, String>,
     ) -> Result<Vec<OrderTerm>, Error> {
         let mut terms = Vec::with_capacity(order.len());
         for key in order {
@@ -3401,7 +3336,19 @@ impl Ctx<'_> {
                     key.column
                 )));
             }
-            terms.push(match self.column_term(table, alias, &key.column)? {
+            let mut term = self.column_term(
+                table,
+                alias,
+                sources.get(&key.column).unwrap_or(&key.column),
+            )?;
+            if sources.contains_key(&key.column) {
+                let cell = format!("{alias}.{}", quote(table.stored_name(&key.column)));
+                match &mut term {
+                    Term::Large(column) => column.cell = cell,
+                    _ => term = Term::Sql(cell),
+                }
+            }
+            terms.push(match term {
                 Term::Large(column) => {
                     let question = format!("rank {} {}", column.table, column.column);
                     let slot = self.prep(
@@ -3489,47 +3436,6 @@ fn json_value(json: &serde_json::Value) -> Result<Value, Error> {
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{plain_exists, semi_join};
-
-    #[test]
-    fn nested_exists_conditions_join_into_one_level() {
-        let inner = semi_join(
-            r#""b" AS b"#.to_owned(),
-            vec!["b.x = a.id".to_owned(), "b.s IS 'W) WHERE ('".to_owned()],
-        );
-        let outer = semi_join(
-            r#""a" AS a"#.to_owned(),
-            vec!["a._del = 0".to_owned(), inner],
-        );
-        assert_eq!(
-            outer,
-            r#"EXISTS (SELECT 1 FROM "a" AS a, "b" AS b WHERE (a._del = 0 AND (b.x = a.id AND b.s IS 'W) WHERE (')))"#
-        );
-        // A subquery source keeps its own WHERE.
-        let sourced =
-            r#"EXISTS (SELECT 1 FROM (SELECT * FROM "c" WHERE k = 1) AS c WHERE c.v = 2)"#;
-        assert_eq!(
-            plain_exists(sourced),
-            Some((r#"(SELECT * FROM "c" WHERE k = 1) AS c"#, "c.v = 2"))
-        );
-    }
-
-    #[test]
-    fn only_a_single_bare_exists_is_joined_in() {
-        for sql in [
-            "EXISTS (SELECT 1 FROM a WHERE x) OR EXISTS (SELECT 1 FROM b WHERE y)",
-            "NOT EXISTS (SELECT 1 FROM a WHERE x)",
-            "EXISTS (SELECT 1 FROM a WHERE x LIMIT 1)",
-            "EXISTS (SELECT 1 FROM json_each(?1) WHERE value = 3) AND 1",
-            "EXISTS (SELECT 1 FROM json_each(t.a) WHERE value = 3)",
-        ] {
-            assert_eq!(plain_exists(sql), None, "{sql}");
-        }
-    }
-}
-
 /// `target`'s `operation` policy split as a parent chain: when `table`
 /// inherits from its own rows through the scalar reference `via` and that
 /// policy is `base OR (guards AND INHERITS(operation, via))`, the other
@@ -3603,5 +3509,46 @@ fn inherits(policy: &PolicyExpr) -> bool {
         PolicyExpr::Not(inner) => inherits(inner),
         PolicyExpr::Exists { condition, .. } => inherits(condition),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{plain_exists, semi_join};
+
+    #[test]
+    fn nested_exists_conditions_join_into_one_level() {
+        let inner = semi_join(
+            r#""b" AS b"#.to_owned(),
+            vec!["b.x = a.id".to_owned(), "b.s IS 'W) WHERE ('".to_owned()],
+        );
+        let outer = semi_join(
+            r#""a" AS a"#.to_owned(),
+            vec!["a._del = 0".to_owned(), inner],
+        );
+        assert_eq!(
+            outer,
+            r#"EXISTS (SELECT 1 FROM "a" AS a, "b" AS b WHERE (a._del = 0 AND (b.x = a.id AND b.s IS 'W) WHERE (')))"#
+        );
+        // A subquery source keeps its own WHERE.
+        let sourced =
+            r#"EXISTS (SELECT 1 FROM (SELECT * FROM "c" WHERE k = 1) AS c WHERE c.v = 2)"#;
+        assert_eq!(
+            plain_exists(sourced),
+            Some((r#"(SELECT * FROM "c" WHERE k = 1) AS c"#, "c.v = 2"))
+        );
+    }
+
+    #[test]
+    fn only_a_single_bare_exists_is_joined_in() {
+        for sql in [
+            "EXISTS (SELECT 1 FROM a WHERE x) OR EXISTS (SELECT 1 FROM b WHERE y)",
+            "NOT EXISTS (SELECT 1 FROM a WHERE x)",
+            "EXISTS (SELECT 1 FROM a WHERE x LIMIT 1)",
+            "EXISTS (SELECT 1 FROM json_each(?1) WHERE value = 3) AND 1",
+            "EXISTS (SELECT 1 FROM json_each(t.a) WHERE value = 3)",
+        ] {
+            assert_eq!(plain_exists(sql), None, "{sql}");
+        }
     }
 }

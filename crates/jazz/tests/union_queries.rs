@@ -281,8 +281,10 @@ fn a_union_reads_every_arms_rows_with_their_arm() {
     );
 }
 
+/// Alice cannot reuse a sibling label, but a nested arm keeps its semantic
+/// path and does not include Bob's completed row.
 #[test]
-fn union_arm_labels_must_be_unique_and_unions_do_not_nest() {
+fn union_arm_labels_must_be_unique_and_nested_paths_are_preserved() {
     let db = open(schema(None), 1);
     let duplicate = db
         .prepare_query(&union(
@@ -300,10 +302,14 @@ fn union_arm_labels_must_be_unique_and_unions_do_not_nest() {
             input: not_done(),
         }],
     };
+    insert(&db, 1, "alpha", false, "alice");
+    insert(&db, 2, "complete", true, "bob");
     let nested = db
         .prepare_query(&union(vec![("outer", inner)], None, None, None))
-        .expect_err("a nested union is refused");
-    assert!(nested.to_string().contains("not supported yet"), "{nested}");
+        .unwrap();
+    let rows = block_on(db.all(&nested, ReadOpts::default())).unwrap();
+    assert_eq!(shown(&rows), [pair("alpha", "5:outer5:inner")]);
+    assert_eq!(rows[0].row_uuid(), todo_id(1));
 }
 
 /// Every arm is read through the table's read policy: an arm that names
