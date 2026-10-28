@@ -2190,6 +2190,7 @@ impl Inner {
 
     /// Ship the readable supporting rows of one shipped image, and watch
     /// their keys so later writes reach the replica.
+    #[allow(clippy::too_many_arguments)]
     fn follow_support(
         &self,
         support: &[Support],
@@ -2198,6 +2199,7 @@ impl Inner {
         out: &mut Vec<Image>,
         watch: &mut HashSet<u64>,
         held: &mut BTreeMap<String, BTreeMap<(RowUuid, Vec<u8>), bool>>,
+        followed: &mut HashSet<(usize, u64)>,
     ) -> Result<(), Error> {
         for item in support {
             let (table, column, values, nested, contains) = match item {
@@ -2245,7 +2247,7 @@ impl Inner {
             };
             for value in values {
                 self.follow_value(
-                    table, column, value, contains, nested, identity, out, watch, held,
+                    table, column, value, contains, nested, identity, out, watch, held, followed,
                 )?;
             }
         }
@@ -2267,12 +2269,23 @@ impl Inner {
         out: &mut Vec<Image>,
         watch: &mut HashSet<u64>,
         held: &mut BTreeMap<String, BTreeMap<(RowUuid, Vec<u8>), bool>>,
+        followed: &mut HashSet<(usize, u64)>,
     ) -> Result<(), Error> {
         // A watched key's rows were shipped with it, and later writes
         // to them ship as they happen. Nested support is followed
         // again: a child that joined since may have unwatched children.
-        let fresh = watch.insert(wk((table.to_owned(), column.to_owned(), watch_key(&value))));
+        let key = wk((table.to_owned(), column.to_owned(), watch_key(&value)));
+        let fresh = watch.insert(key);
         if !fresh && nested.is_empty() {
+            return Ok(());
+        }
+        // Once per traversal, though: a policy whose EXISTS consults its
+        // own table (a member reads the band's members) nests the same
+        // support at every depth, and each row reaches the same key
+        // again, so following it anew costs (rows per key)^depth. The
+        // nested support node tells depths apart, so a key reached with
+        // deeper support than before is still followed.
+        if !followed.insert((nested.as_ptr() as usize, key)) {
             return Ok(());
         }
         let filter = if column == "id" {
@@ -2315,7 +2328,7 @@ impl Inner {
             if ship {
                 out.push(found.clone());
             }
-            self.follow_support(nested, &found, identity, out, watch, held)?;
+            self.follow_support(nested, &found, identity, out, watch, held, followed)?;
         }
         Ok(())
     }
@@ -5688,6 +5701,7 @@ impl Db {
                     }
                     basis.extend(held);
                     let mut extra = Vec::new();
+                    let mut followed = HashSet::new();
                     for image in &basis {
                         inner.follow_support(
                             &support,
@@ -5696,6 +5710,7 @@ impl Db {
                             &mut extra,
                             &mut watch,
                             &mut held_rows,
+                            &mut followed,
                         )?;
                     }
                     images.extend(extra);
@@ -6515,9 +6530,16 @@ impl Db {
                             .insert((RowUuid::from_bytes(image.id), image.key.clone()), true);
                     }
                 }
+                let mut followed = HashSet::new();
                 for image in &images {
                     inner.follow_support(
-                        &support, image, policy, &mut extra, &mut watch, &mut held,
+                        &support,
+                        image,
+                        policy,
+                        &mut extra,
+                        &mut watch,
+                        &mut held,
+                        &mut followed,
                     )?;
                 }
                 images.extend(extra);

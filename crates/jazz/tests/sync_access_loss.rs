@@ -3,6 +3,10 @@
 //! write of the row, or through the reader's own write made offline, while
 //! the rows it lost sit only in its store. Found by the simulation soak
 //! (`sync_differential`).
+//!
+//! Also: the rows a self-referential read policy rests on (members of a
+//! band read the band's members) ship in time linear in the band, not
+//! exponential in the policy's nesting depth.
 
 use crate::common;
 
@@ -242,4 +246,94 @@ fn rows_a_reconnecting_replica_holds_are_evicted_by_its_own_offline_write() {
         Vec::<RowUuid>::new(),
         "the messages of the room she left are evicted (INV-SYNC-14)"
     );
+}
+
+/// Members of a band read the band's members: the policy's EXISTS consults
+/// its own table, so the rows it rests on nest the same support at every
+/// depth (DEFAULT_INHERITS_DEPTH). Following each member's support anew
+/// visited (members)^depth rows; BandBook's fourth member took a minute of
+/// server CPU to join.
+#[test]
+fn a_self_referential_read_policy_ships_its_support_in_linear_time() {
+    // Exponential, this is 12^10 policy checks per holder and never ends;
+    // linear, a few hundred. Run it on its own thread so a regression fails
+    // here rather than hanging the suite.
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        ship_a_band_roster();
+        let _ = done.send(());
+    });
+    match finished.recv_timeout(std::time::Duration::from_secs(60)) {
+        Ok(()) => {}
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            panic!("shipping a 12-member band's roster did not finish in 60 s")
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("shipping a band's roster failed (see its panic above)")
+        }
+    }
+}
+
+fn ship_a_band_roster() {
+    let schema = || {
+        compile_schema(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("bands")
+                        .column("name", ColumnType::Text)
+                        .policies(allow_all_policies()),
+                )
+                .table(
+                    TableSchemaBuilder::new("members")
+                        .fk_column("band", "bands")
+                        .column("account", ColumnType::Text)
+                        .policies(
+                            TablePolicies::new()
+                                .with_select(PolicyExpr::or(vec![
+                                    session_eq("account", &ME),
+                                    exists(
+                                        "members",
+                                        vec![outer_eq("band", "band"), session_eq("account", &ME)],
+                                    ),
+                                ]))
+                                .with_insert(PolicyExpr::True)
+                                .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+                                .with_delete(PolicyExpr::True),
+                        ),
+                )
+                .build(),
+        )
+    };
+    const MEMBERS: u8 = 12;
+    let server = open(schema(), 0, AuthorSubject::SYSTEM);
+    seed(&server, "bands", id(1, 1), cells(&[("name", "b".into())]));
+    for n in 0..MEMBERS {
+        seed(
+            &server,
+            "members",
+            id(2, n),
+            cells(&[("band", Value::Uuid(id(1, 1).0)), ("account", subject(n))]),
+        );
+    }
+    let ada = open(schema(), 1, user(0));
+    let _link = connect(&server, &ada, user(0));
+    let members = ada.prepare_query(&Query::from("members")).unwrap();
+    let _live = block_on(ada.subscribe(&members, ReadOpts::default())).unwrap();
+    pump(&server, &[&ada]);
+    // A newcomer's join re-follows the band's support for every holder.
+    block_on(server.insert(
+        "members",
+        cells(&[
+            ("band", Value::Uuid(id(1, 1).0)),
+            ("account", subject(MEMBERS)),
+        ]),
+        InsertOptions {
+            row_id: Some(id(2, MEMBERS)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    pump(&server, &[&ada]);
+
+    assert_eq!(local(&ada, "members").len(), usize::from(MEMBERS) + 1);
 }
