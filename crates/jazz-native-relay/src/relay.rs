@@ -979,6 +979,7 @@ impl RelayWorker {
                     claimed,
                     event: mutation_error_event(&tx_id.to_string(), error, serializable, true),
                 });
+                true
             }));
         self.persistent
             .db
