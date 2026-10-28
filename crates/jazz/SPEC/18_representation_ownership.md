@@ -116,12 +116,21 @@ The v1 relation snapshot field order is `root_count, rows`; each row batch is
 `table, descriptor, rows`; and each row is `row_id, deleted, raw`. The v1
 subscription delta field order is `added, updated, removed,
 added_occurrence_keys, updated_occurrence_keys, removed_occurrence_keys,
-added_indices, updated_previous_indices, updated_indices, removed_indices`.
+added_indices, updated_previous_indices, updated_indices, removed_indices,
+updated_splices`.
 Every occurrence-key and index sidecar is aligned with its corresponding row
-sequence. `removed` entries are `table, row_id`. These positions, postcard
-enum discriminants in nested descriptors, and raw Groove record bytes are
-frozen once emitted: future ABI evolution requires a new explicitly versioned
-envelope, never a reordered field, permissive fallback, or in-place migration.
+sequence. `removed` entries are `table, row_id`. `updated_splices` holds, for
+each updated row, its opted-in columns' splices as `column, splices` pairs,
+each splice `at, delete, insert, at_utf16, delete_utf16` (SPEC 19.12); a row
+with no splices has an empty list. These positions, postcard enum
+discriminants in nested descriptors, and raw record bytes are frozen once
+emitted, and binding payloads are first emitted by alpha.60: future ABI
+evolution requires a new explicitly versioned envelope, never a reordered
+field, permissive fallback, or in-place migration. A host and its JavaScript
+come from one build: NAPI and WASM artifacts carry an ABI fingerprint the
+TypeScript loader checks, and React Native's native relay ABI version
+(`NATIVE_RELAY_ABI_V1`, 4 since `updated_splices`) must match the bundle's,
+so a mismatched pair refuses to open rather than misreading a delta.
 
 Named-cell input has the explicit v1 postcard field order `descriptor, raw`.
 Its descriptor is an ordered vector of `name: Option<String>, value_type`;

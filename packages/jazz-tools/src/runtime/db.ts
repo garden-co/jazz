@@ -283,9 +283,10 @@ export interface DbSubscriptionUpdate {
    * and apply in order: each splice's offsets are in the value the earlier ones
    * produced. TEXT splices count UTF-16 code units and insert a string; BYTEA
    * splices count bytes and insert a `Uint8Array`. On a range select they are
-   * relative to the selected window. A row or column without an entry changed
-   * in a way that could not be expressed as splices (or not at all): read its
-   * new value from the rows instead.
+   * relative to the selected window. A column the update left unchanged has
+   * an empty list. A row or column without an entry has splices that could
+   * not be computed on this device (its previous version is no longer held,
+   * say): read its new value from the rows instead.
    */
   splices: ReadonlyMap<string, ValueSplices>;
 }
@@ -640,6 +641,28 @@ function assertSpliceableColumns(
         `splices: column "${column}" has a column transform; splices are not supported yet for transformed columns.`,
       );
     }
+  }
+}
+
+/**
+ * A range-selected splice column must be read in part: a computed or
+ * transformed column that depends on it makes the engine read it whole and
+ * TypeScript cut the window, so the engine's splices would be in whole-value
+ * coordinates while the rows show the window.
+ */
+function assertSplicesReadInPart(
+  built: NormalizedBuiltQuery,
+  physical: NormalizedBuiltQuery,
+  columns: readonly string[],
+): void {
+  for (const column of columns) {
+    if (
+      Object.hasOwn(built.partialSelect, column) &&
+      !Object.hasOwn(physical.partialSelect, column)
+    )
+      throw new Error(
+        `splices: column "${column}" is selected in part, but a computed or transformed column depends on it, so it is read whole; splices are not supported yet for such columns.`,
+      );
   }
 }
 
@@ -3427,6 +3450,7 @@ export class Db {
     const queryOptions = normalizeQueryOptions(query._schema, builtQuery.table, options);
     if (queryOptions.splices) {
       assertSpliceableColumns(planningSchema, outputTable, query, queryOptions.splices);
+      assertSplicesReadInPart(builtQuery, prepared.physical, queryOptions.splices);
     }
     const readSession = this.getAccessContext()?.readSession ?? session;
     type NativeSubscription = {
@@ -3536,6 +3560,9 @@ export class Db {
         )
           throw error;
         prepared = prepareTransformRead(query, builtQuery, outputTable, prepared.computedState);
+        // A dependency found only now may make a splice column read whole.
+        if (queryOptions.splices)
+          assertSplicesReadInPart(builtQuery, prepared.physical, queryOptions.splices);
         wasmQuery = translateQuery(builderJson, planningSchema, prepared.physical);
         retireNativeSubscription(activeSubscription);
         const replacement = createSubscriptionGeneration();

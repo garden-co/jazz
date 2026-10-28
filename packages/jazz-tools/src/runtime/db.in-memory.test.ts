@@ -358,6 +358,79 @@ describe("createDb in-memory driver", () => {
     ).toThrow(/not supported yet/);
   });
 
+  it("refuses splices on a range-selected column that a computed column makes it read whole", async () => {
+    const computedApp = s.defineApp({
+      documents: s.table(
+        { body: s.string() },
+        { preview: s.computed((row: { body: string }) => row.body.slice(0, 3)) },
+      ),
+    });
+    db = await createDb({
+      ...(await localAccountConfig("in-memory-splices-whole-read-test")),
+      driver: { type: "memory" },
+    });
+    const { value: inserted } = db.insert(computedApp.documents, { body: "abcdefgh" });
+    await Promise.resolve();
+    const errors: unknown[] = [];
+    let threw: unknown;
+    try {
+      const stop = db.subscribe(
+        computedApp.documents
+          .where({ id: inserted.id })
+          .select({ body: { from: 2, to: 5 } }, "preview"),
+        { onUpdate: () => {}, onError: (error) => errors.push(error) },
+        { splices: ["body"] },
+      );
+      await expect.poll(() => errors.length).toBeGreaterThan(0);
+      stop();
+    } catch (error) {
+      threw = error;
+    }
+    expect(String(threw ?? errors[0])).toMatch(/read whole; splices are not supported yet/);
+  });
+
+  it("delivers splices for a hopped query's output rows", async () => {
+    const hopApp = s.defineApp({
+      documents: s.table({ body: s.string() }, {}),
+      links: s.table({ documentId: s.uuid() }, { document: s.rel("documents", "documentId") }),
+    });
+    db = await createDb({
+      ...(await localAccountConfig("in-memory-splices-hop-test")),
+      driver: { type: "memory" },
+    });
+    const prefix = "a".repeat(70_000);
+    const { value: doc } = db.insert(hopApp.documents, { body: `${prefix}hello` });
+    const { value: link } = db.insert(hopApp.links, { documentId: doc.id });
+    await Promise.resolve();
+    const updates: DbSubscriptionUpdate[] = [];
+    const stop = db.subscribe(
+      hopApp.links.where({ id: link.id }).hopTo("document"),
+      { onUpdate: (_rows, update) => updates.push(update) },
+      { splices: ["body"] },
+    );
+    await expect.poll(() => updates.length).toBeGreaterThan(0);
+    await db
+      .update(
+        hopApp.documents,
+        doc.id,
+        {},
+        {
+          applyDiffs: {
+            body: {
+              within: { from: prefix.length, to: prefix.length + 5 },
+              splices: [{ at: 0, delete: 5, insert: "world" }],
+            },
+          },
+        },
+      )
+      .wait({ tier: "local" });
+    await expect.poll(() => updates.at(-1)?.splices.get(doc.id)).toBeDefined();
+    expect(updates.at(-1)!.splices.get(doc.id)).toEqual({
+      body: [{ at: prefix.length, delete: 5, insert: "world" }],
+    });
+    stop();
+  });
+
   it("keeps descriptor-shaped JSON values ordinary for direct and transactional upserts", async () => {
     db = await createDb({
       ...(await localAccountConfig("in-memory-large-value-json-upsert-shape-test")),

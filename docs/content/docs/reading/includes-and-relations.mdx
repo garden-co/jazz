@@ -131,7 +131,18 @@ evaluation ([#2090](https://github.com/garden-co/jazz/issues/2090)).
 Jazz reads only the part you select. A range or pointer select loads, and
 syncs from the server, just the chunks that part covers, so reading the last
 page of a 100 MB value costs about as much as reading a small one. Edits
-elsewhere in the value don't make a range select fetch anything new.
+elsewhere in the value don't make a range select fetch anything new. A few
+selections read more than their part:
+
+- A text range counts UTF-16 code units, which don't map to byte offsets
+  without reading the text, so `{ from, to }` reads up to the first `3 * to`
+  bytes.
+- A JSON pointer reads the document up to where the pointer points, and the
+  work grows with the square of that distance. Only an index into a top-level
+  array is read in part; a pointer into a nested array reads the document to
+  its end.
+- A field that a computed field or a field transform depends on is read whole,
+  and your selection is cut from the whole value.
 
 ### Live changes as splices
 
@@ -173,9 +184,12 @@ shifts its contents, and the splices describe that shift too.
 
 A column that didn't change has an empty list. When a row has no entry for a
 column, read its new value from `rows`: Jazz couldn't compute splices locally,
-for example because the old version isn't stored on this device anymore. Splices are only supported for `string` and `bytes` columns without a
-column transform. Other columns, including `json`, are rejected with a "not
-supported yet" error when you subscribe. One-shot reads ignore the option.
+for example because the old version isn't stored on this device anymore.
+Splices are only supported for `string` and `bytes` columns without a column
+transform. Other columns, including `json`, are rejected with a "not supported
+yet" error when you subscribe, and so is a range-selected column that a
+computed field or field transform depends on, since that column is read whole.
+One-shot reads ignore the option.
 
 ## Missing references
 

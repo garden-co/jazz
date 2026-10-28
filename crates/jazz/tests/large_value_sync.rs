@@ -2248,6 +2248,30 @@ fn value_delta_turns_one_version_into_another() {
     assert_eq!(apply_delta_utf16(&v4_text, &to_inline), "short");
     let from_inline = block_on(db.value_delta("docs", row(1), "body", v5, v1)).unwrap();
     assert_eq!(apply_delta_utf16("short", &from_inline), v1_text);
+    // Between inline values: nothing when they are equal, else only the
+    // characters that differ.
+    let inline = |value: &str| {
+        block_on(db.update(
+            "docs",
+            row(1),
+            [("body".to_owned(), Value::String(value.into()))].into(),
+            Default::default(),
+        ))
+        .unwrap()
+        .mergeable_tx_id()
+    };
+    let (v6, v7) = (inline("short é text"), inline("short é text"));
+    assert_eq!(
+        block_on(db.value_delta("docs", row(1), "body", v6, v7)).unwrap(),
+        []
+    );
+    let v8 = inline("short ü text");
+    let narrow = block_on(db.value_delta("docs", row(1), "body", v7, v8)).unwrap();
+    assert_eq!(apply_delta_utf16("short é text", &narrow), "short ü text");
+    assert_eq!(
+        (narrow.len(), narrow[0].at_utf16, narrow[0].delete_utf16),
+        (1, 6, 1)
+    );
 }
 
 #[test]

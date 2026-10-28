@@ -1512,45 +1512,13 @@ fn cell_of<'a>(row: &'a CurrentRow, column: &str) -> Option<&'a Value> {
 /// they differ (on code point boundaries for text). `None` for a value that
 /// is not a page of bytes or text.
 fn page_splices(old: &Value, new: &Value) -> Option<Vec<crate::db::LargeValueDeltaSplice>> {
-    let (a, b, text) = match (old, new) {
-        (Value::Bytes(a), Value::Bytes(b)) => (a.as_slice(), b.as_slice(), false),
-        (Value::String(a), Value::String(b)) => (a.as_bytes(), b.as_bytes(), true),
-        _ => return None,
-    };
-    let boundary = |bytes: &[u8], at: usize| at == bytes.len() || bytes[at] & 0xc0 != 0x80;
-    let mut prefix = a.iter().zip(b).take_while(|(x, y)| x == y).count();
-    let mut suffix = a[prefix..]
-        .iter()
-        .rev()
-        .zip(b[prefix..].iter().rev())
-        .take_while(|(x, y)| x == y)
-        .count();
-    if text {
-        while prefix > 0 && !boundary(a, prefix) {
-            prefix -= 1;
+    match (old, new) {
+        (Value::Bytes(a), Value::Bytes(b)) => Some(crate::db::byte_splices(a, b, false)),
+        (Value::String(a), Value::String(b)) => {
+            Some(crate::db::byte_splices(a.as_bytes(), b.as_bytes(), true))
         }
-        while suffix > 0 && !boundary(a, a.len() - suffix) {
-            suffix -= 1;
-        }
+        _ => None,
     }
-    let (deleted, inserted) = (&a[prefix..a.len() - suffix], &b[prefix..b.len() - suffix]);
-    if deleted.is_empty() && inserted.is_empty() {
-        return Some(Vec::new());
-    }
-    let units = |bytes: &[u8]| {
-        if text {
-            std::str::from_utf8(bytes).map_or(0, |s| s.encode_utf16().count() as u64)
-        } else {
-            0
-        }
-    };
-    Some(vec![crate::db::LargeValueDeltaSplice {
-        at: prefix as u64,
-        delete: deleted.len() as u64,
-        insert: inserted.to_vec(),
-        at_utf16: units(&a[..prefix]),
-        delete_utf16: units(deleted),
-    }])
 }
 
 fn new_version(prior: &CurrentRow, row: &CurrentRow) -> bool {
