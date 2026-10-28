@@ -1088,7 +1088,9 @@ pub(crate) struct Client {
     /// As a relay: sessions' one-shot reads asked of the upstream, served
     /// from this store once it answers.
     relayed_fetches: Vec<RelayedFetch>,
-    /// A relayed fate or read became ready: the serving half runs again.
+    /// A relayed fate or read became ready, or the upstream sent rows or a
+    /// settlement: the serving half runs again in the same tick, so a
+    /// relay's subscribers see it without waiting for another tick.
     relay_ready: bool,
     /// The server said it has not admitted this client's schema version.
     unadmitted: bool,
@@ -4471,6 +4473,19 @@ impl Db {
                     }
                     other => queue.push_back(other),
                 }
+            }
+            // What the upstream sent about rows reaches this store's own
+            // subscribers on the serving pass that follows.
+            if queue.iter().any(|message| {
+                matches!(
+                    message,
+                    SyncMessage::Rows { .. }
+                        | SyncMessage::Evict { .. }
+                        | SyncMessage::Settled { .. }
+                )
+            }) && !inner.sessions.is_empty()
+            {
+                inner.client.as_mut().expect("client").relay_ready = true;
             }
             // Rows install without their chunks: a chunked cell carries the
             // sort key its indexes need.
