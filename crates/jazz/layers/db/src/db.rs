@@ -2282,6 +2282,19 @@ impl Db {
             if make_current {
                 inner.owner_version = target.jazz.version_id();
                 inner.owner = Rc::new(target);
+                // Read policies that changed may read differently from
+                // here: a subscription resuming from before opens fresh.
+                let mut digest = blake3::Hasher::new();
+                for table in &inner.owner.jazz.runtime().tables {
+                    digest.update(format!("{}{:?}", table.name, table.read_policy).as_bytes());
+                }
+                let digest =
+                    u64::from_le_bytes(digest.finalize().as_bytes()[..8].try_into().unwrap());
+                if inner.meta(sync::POLICIES_META)? != Some(digest) {
+                    let seq = inner.seq;
+                    inner.persist_meta(sync::POLICIES_META, digest)?;
+                    inner.persist_meta(sync::ACTIVATED_META, seq)?;
+                }
             }
             if !inner
                 .admitted
@@ -2293,11 +2306,314 @@ impl Db {
         }
         let mut inner = self.inner();
         inner.reset_everything();
+        // Clients store rows by these names: they learn the new version
+        // before its rows.
+        for session in &mut inner.sessions {
+            session.owe_catalogue();
+        }
         Ok(())
     }
 }
 
 impl Inner {
+    /// Admit an upstream's versions under the names it stores them by
+    /// (see `SyncMessage::Catalogue`), so this replica stores rows as it
+    /// does. A version this store named otherwise while it did not know
+    /// the upstream's names (opened under it offline) has its columns
+    /// renamed to the upstream's; where the upstream's column is already
+    /// stored here (a renamed column), the one this store added stays
+    /// unused, and the rebase that follows replays pending writes into
+    /// the upstream's. A table named otherwise is not supported yet.
+    pub(crate) fn mirror_catalogue(
+        &mut self,
+        versions: Vec<sync::CatalogueVersion>,
+        cells: Vec<sync::CatalogueCell>,
+    ) -> Result<(), Error> {
+        use crate::names::{LensCell, LensCellRule};
+        let cells: Vec<LensCell> = cells
+            .into_iter()
+            .map(|cell| LensCell {
+                table: cell.table,
+                column: cell.column,
+                since: crate::ids::SchemaVersionId::from_bytes(cell.since),
+                rule: match cell.source {
+                    Some(source) => LensCellRule::Copy(source),
+                    None => LensCellRule::Dropped(Sql::from(&cell.default)),
+                },
+            })
+            .collect();
+        let entries: Vec<(
+            crate::ids::SchemaVersionId,
+            crate::values::StoredNames,
+            JazzSchema,
+        )> = versions
+            .into_iter()
+            .map(|entry| {
+                let names = crate::values::StoredNames {
+                    tables: entry
+                        .names
+                        .into_iter()
+                        .map(|(table, stored, columns)| {
+                            (table, (stored, columns.into_iter().collect()))
+                        })
+                        .collect(),
+                };
+                (entry.schema.id, names, entry.schema.schema)
+            })
+            .collect();
+        // What this store named otherwise takes the upstream's names
+        // first, before a version it lacks stores a table under one of
+        // them.
+        let mut fresh = std::collections::HashSet::new();
+        for (version, names, _) in &entries {
+            match self.names.get(version).cloned() {
+                Some(local) if local == *names => {}
+                Some(local) => {
+                    // Whole or not at all, in the file and in memory.
+                    let (physical, kept) = (self.physical.clone(), self.names.clone());
+                    let mut moved = Vec::new();
+                    begin_savepoint(&self.conn, "jazz_mirror")?;
+                    let renamed = self
+                        .rename_stored(&local, names, &mut moved)
+                        .and_then(|()| {
+                            let conn = &self.conn;
+                            self.names.rename(conn, *version, names.clone())
+                        });
+                    let ended = end_savepoint(&self.conn, "jazz_mirror", renamed.is_ok());
+                    if let Err(error) = renamed.and(ended) {
+                        self.physical = physical;
+                        self.names = kept;
+                        return Err(error);
+                    }
+                    if let Some(client) = self.client.as_mut() {
+                        for (ours, theirs) in &moved {
+                            client.moved_table(ours, theirs);
+                        }
+                    }
+                }
+                None => {
+                    fresh.insert(*version);
+                }
+            }
+        }
+        for (version, names, schema) in entries {
+            let jazz = if version == self.owner_version {
+                self.owner.jazz.clone()
+            } else {
+                schema
+            };
+            let target = Schema::stored_as(&jazz, &names);
+            // A copy is filled once, when its version is first admitted.
+            let fills = if fresh.contains(&version) {
+                cells
+                    .iter()
+                    .filter(|cell| cell.since == version)
+                    .cloned()
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            self.write_admission(&target, fills)?;
+            if !self.admitted.iter().any(|(id, _)| *id == version) {
+                self.admitted.push((version, jazz));
+            }
+        }
+        let conn = &self.conn;
+        self.names.record_lens_cells(conn, cells)?;
+        let owner = Rc::new(self.named(&self.owner.jazz));
+        self.schema = owner.clone();
+        self.owner = owner;
+        self.reset_everything();
+        // This store's own sessions (a worker's tabs) store rows by its
+        // names, which may have just changed: each is sent the versions
+        // it now names otherwise.
+        for session in &mut self.sessions {
+            session.owe_catalogue();
+        }
+        Ok(())
+    }
+
+    /// Rename the stored columns `local` names otherwise than `upstream`
+    /// does, where the upstream's is not stored here yet.
+    /// Tables it stores under another name are pushed to `moved`, as
+    /// (ours, theirs), for the pending queue to follow once it all holds.
+    fn rename_stored(
+        &mut self,
+        local: &crate::values::StoredNames,
+        upstream: &crate::values::StoredNames,
+        moved: &mut Vec<(String, String)>,
+    ) -> Result<(), Error> {
+        for (name, (stored, columns)) in &upstream.tables {
+            let Some((ours, our_columns)) = local.tables.get(name) else {
+                continue;
+            };
+            if ours != stored {
+                self.rename_stored_table(name, ours, stored)?;
+                moved.push((ours.clone(), stored.clone()));
+            }
+            for (column, theirs) in columns {
+                let Some(mine) = our_columns.get(column).filter(|mine| *mine != theirs) else {
+                    continue;
+                };
+                let Some(table) = self.physical.tables.get_mut(stored) else {
+                    continue;
+                };
+                if table.by_stored(theirs).is_some() {
+                    continue;
+                }
+                for on in [stored.clone(), format!("{stored}__h")] {
+                    self.conn
+                        .execute_batch(&format!(
+                            "ALTER TABLE {} RENAME COLUMN {} TO {}",
+                            quote(&on),
+                            quote(mine),
+                            quote(theirs)
+                        ))
+                        .map_err(storage)?;
+                }
+                for physical in table.columns.iter_mut().filter(|c| c.stored == *mine) {
+                    physical.name = theirs.clone();
+                    physical.stored = theirs.clone();
+                }
+                let conn = &self.conn;
+                self.names
+                    .moved(conn, stored, stored, Some((mine, theirs)))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `ops`, which name tables and columns as admitted `version` does,
+    /// named as the current schema does instead: by where each is stored.
+    /// What the current schema does not name (a table or column it
+    /// dropped) is left out, as is a write to a table it lacks; the
+    /// commit itself still uploads under `version`, whole.
+    pub(crate) fn by_current_names(
+        &self,
+        version: crate::ids::SchemaVersionId,
+        ops: Vec<StagedOp>,
+    ) -> Vec<StagedOp> {
+        let Some(from) = self.names.get(&version) else {
+            return ops;
+        };
+        let rename = |table: &str| -> Option<(String, BTreeMap<String, String>)> {
+            let (stored, columns) = from.tables.get(table)?;
+            let current = self.owner.by_stored(stored)?;
+            let columns = columns
+                .iter()
+                .filter_map(|(column, stored)| {
+                    let now = current.by_stored(stored)?;
+                    Some((column.clone(), now.name.clone()))
+                })
+                .collect();
+            Some((current.name.clone(), columns))
+        };
+        let cells = |columns: &BTreeMap<String, String>, cells: BTreeMap<String, Value>| {
+            cells
+                .into_iter()
+                .filter_map(|(column, value)| {
+                    if column.starts_with('$') {
+                        return Some((column, value));
+                    }
+                    columns.get(&column).map(|now| (now.clone(), value))
+                })
+                .collect()
+        };
+        ops.into_iter()
+            .filter_map(|op| {
+                let (table, columns) = rename(op.table())?;
+                Some(match op {
+                    StagedOp::Insert(_, c, o) => StagedOp::Insert(table, cells(&columns, c), o),
+                    StagedOp::Update(_, r, c, o) => {
+                        StagedOp::Update(table, r, cells(&columns, c), o)
+                    }
+                    StagedOp::Upsert(_, r, c, o) => {
+                        StagedOp::Upsert(table, r, cells(&columns, c), o)
+                    }
+                    StagedOp::Delete(_, r, o) => StagedOp::Delete(table, r, o),
+                    StagedOp::Restore(_, r, c, o) => {
+                        StagedOp::Restore(table, r, c.map(|c| cells(&columns, c)), o)
+                    }
+                    StagedOp::Move(_, from, to, r) => StagedOp::Move(table, from, to, r),
+                })
+            })
+            .collect()
+    }
+
+    /// Store table `ours` (with its history, indexes and triggers) as
+    /// `theirs`, the upstream's name for it. Both stored here is not
+    /// supported yet: their rows would have to merge.
+    fn rename_stored_table(&mut self, name: &str, ours: &str, theirs: &str) -> Result<(), Error> {
+        if self.physical.tables.contains_key(theirs) {
+            return Err(unsupported(format!(
+                "table `{name}`, stored here as `{ours}` beside the upstream's `{theirs}`"
+            )));
+        }
+        let Some(mut table) = self.physical.tables.remove(ours) else {
+            return Ok(());
+        };
+        for (from, to) in [
+            (ours.to_owned(), theirs.to_owned()),
+            (format!("{ours}__h"), format!("{theirs}__h")),
+        ] {
+            self.conn
+                .execute_batch(&format!(
+                    "ALTER TABLE {} RENAME TO {}",
+                    quote(&from),
+                    quote(&to)
+                ))
+                .map_err(storage)?;
+        }
+        // Indexes and triggers are named after their table: renamed along,
+        // so the upstream's DDL finds them under its names.
+        let objects: Vec<(String, String, String)> = self
+            .conn
+            .prepare(
+                "SELECT type, name, sql FROM sqlite_master \
+                 WHERE tbl_name IN (?1, ?2) AND type IN ('index', 'trigger') AND sql IS NOT NULL",
+            )
+            .and_then(|mut statement| {
+                statement
+                    .query_map([theirs.to_owned(), format!("{theirs}__h")], |r| {
+                        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                    })?
+                    .collect::<Result<_, _>>()
+            })
+            .map_err(storage)?;
+        for (kind, object, sql) in objects {
+            let Some(rest) = object.strip_prefix(ours) else {
+                continue;
+            };
+            let renamed = format!("{theirs}{rest}");
+            let sql = sql.replacen(&quote(&object), &quote(&renamed), 1);
+            let drop = if kind == "index" { "INDEX" } else { "TRIGGER" };
+            self.conn
+                .execute_batch(&format!("DROP {drop} {}; {sql};", quote(&object)))
+                .map_err(storage)?;
+        }
+        table.name = theirs.to_owned();
+        table.stored = theirs.to_owned();
+        self.physical.tables.insert(theirs.to_owned(), table);
+        let conn = &self.conn;
+        self.names.moved(conn, ours, theirs, None)?;
+        self.rename_pending_rows(ours, theirs)
+    }
+
+    /// An upstream image as this store keeps it: `None` for a table it
+    /// does not store, without columns it does not (an upstream's that no
+    /// version this replica knows names).
+    pub(crate) fn stored_image(&self, mut image: sync::Image) -> Option<sync::Image> {
+        let table = self.physical.by_stored(&image.table)?;
+        // A large value's key column travels named after the column it keys.
+        image.cells.retain(|(name, _)| {
+            name.starts_with('$')
+                || table
+                    .by_stored(crate::large::keyed_by(name).unwrap_or(name))
+                    .is_some()
+        });
+        Some(image)
+    }
+
     /// Write an admitted version's stored tables and columns, its lens
     /// copies, names and lens cells: whole or not at all, in the file and
     /// in memory.
@@ -3351,76 +3667,6 @@ impl Inner {
         self.holds_as_of(table, row, key, Cut::at(seq), |ctx| {
             ctx.operation_policy(table, operation, "a", &session)
         })
-    }
-
-    /// The current version of each of `ids`' rows in `table`: (id, branch
-    /// key, seq, deleted, readable by `author`), in one query per chunk
-    /// instead of one policy check per row.
-    pub(crate) fn versions_readable(
-        &self,
-        table: &Table,
-        author: Option<AuthorSubject>,
-        ids: &[[u8; 16]],
-    ) -> Result<Vec<([u8; 16], Vec<u8>, u64, bool, bool)>, Error> {
-        let binding = BTreeMap::new();
-        let claims = Session::default();
-        let mut ctx = Ctx::new(&self.schema, None, &claims, &binding);
-        let condition = match author {
-            Some(author) => {
-                let session = self.session(author);
-                ctx.operation_policy(table, Operation::Select, "a", &session)?
-            }
-            None => "1".to_owned(),
-        };
-        let preps = std::mem::take(&mut ctx.preps);
-        let base = ctx.params;
-        self.with_preps(&preps, |_| self.versions_in(table, &condition, &base, ids))
-    }
-
-    fn versions_in(
-        &self,
-        table: &Table,
-        condition: &str,
-        base: &[Sql],
-        ids: &[[u8; 16]],
-    ) -> Result<Vec<([u8; 16], Vec<u8>, u64, bool, bool)>, Error> {
-        let mut out = Vec::new();
-        for chunk in ids.chunks(500) {
-            let mut params = base.to_vec();
-            params.push(crate::compile::json_ids(
-                chunk.iter().map(|id| id.as_slice()),
-            ));
-            let sql = format!(
-                "SELECT a.id, a._b, a._seq, a._del, COALESCE({condition}, 0) FROM {} AS a \
-                 WHERE a.id IN (SELECT unhex(value) FROM json_each(?{}))",
-                quote(&table.stored),
-                params.len()
-            );
-            let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
-            let rows = statement
-                .query_map(params_from_iter(params.iter()), |r| {
-                    let id: Vec<u8> = r.get(0)?;
-                    let seq: i64 = r.get(2)?;
-                    let deleted: i64 = r.get(3)?;
-                    let can: i64 = r.get(4)?;
-                    Ok((
-                        id,
-                        r.get::<_, Vec<u8>>(1)?,
-                        seq as u64,
-                        deleted != 0,
-                        can != 0,
-                    ))
-                })
-                .map_err(storage)?;
-            for row in rows {
-                let (id, key, seq, deleted, can) = row.map_err(storage)?;
-                let Ok(id) = <[u8; 16]>::try_from(id.as_slice()) else {
-                    continue;
-                };
-                out.push((id, key, seq, deleted, can));
-            }
-        }
-        Ok(out)
     }
 
     pub(crate) fn check(

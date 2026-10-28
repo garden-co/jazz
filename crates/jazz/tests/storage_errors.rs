@@ -1,10 +1,11 @@
 //! A storage error while recording sync state fails the operation that
 //! needed it instead of being swallowed: a write whose upload record cannot
 //! be stored is rolled back whole, a transaction whose rollback finds its
-//! savepoint gone still forgets its changes, and a new upstream session
-//! whose held rows cannot be read reports it and declares them on the next
-//! send. The errors are injected by hiding one of the store's own tables
-//! through a second connection.
+//! savepoint gone still forgets its changes, and an authority does not
+//! validate a serializable commit against an unreadable store. The errors are injected by hiding
+//! one of the store's own tables through a second connection. A reopened
+//! replica also resumes its subscriptions from the watermarks its file
+//! keeps.
 
 use crate::common;
 
@@ -267,22 +268,35 @@ impl Transport for Recording {
     }
 }
 
+/// A reopened replica resumes each subscription from the seq its result
+/// was last settled through, which it keeps in its file: a reconnect
+/// declares no held rows.
 #[test]
-fn held_rows_that_cannot_be_read_fail_the_send_and_are_declared_on_the_next() {
-    let path = scratch("hold");
+fn a_reopened_replica_resumes_its_subscription_from_its_stored_watermark() {
+    let path = scratch("watermark");
     let server = block_on(Db::open_history_complete(config(0xee))).unwrap();
     let client = open_file(&path, 3);
     let tx = insert(&client, 1, "held").unwrap();
     let (client_side, server_side) = duplex();
     let upstream = block_on(client.connect_upstream(client_side));
     server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+    let prepared = client.prepare_query(&Query::from("items")).unwrap();
+    let stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
     drive(
         &[&client, &server, &client],
         client.wait_for_transaction(tx, DurabilityTier::Global),
     )
     .unwrap();
+    for _ in 0..3 {
+        block_on(client.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+    }
+    block_on(client.tick()).unwrap();
     assert!(client.detach_connection(&upstream));
+    drop(stream);
+    drop(client);
 
+    let client = open_file(&path, 3);
     let (client_side, server_side) = duplex();
     let sent = Rc::new(RefCell::new(VecDeque::new()));
     let _upstream = block_on(client.connect_upstream(Box::new(Recording {
@@ -290,33 +304,23 @@ fn held_rows_that_cannot_be_read_fail_the_send_and_are_declared_on_the_next() {
         sent: Rc::clone(&sent),
     })));
     server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
-
-    hide(&path, "items");
-    let failed = block_on(client.tick());
-    restore(&path, "items");
-    assert!(failed.is_err(), "the send reports the storage error");
-    assert!(
-        sent.borrow().is_empty(),
-        "and sends nothing without the hold"
-    );
-
+    let prepared = client.prepare_query(&Query::from("items")).unwrap();
+    let _stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
     block_on(client.tick()).unwrap();
     let sent: Vec<SyncMessage> = sent.borrow_mut().drain(..).collect();
-    let kinds: Vec<&str> = sent
-        .iter()
-        .map(|message| match message {
-            SyncMessage::Schema { .. } => "schema",
-            SyncMessage::Hold { .. } => "hold",
-            _ => "other",
-        })
-        .collect();
-    assert_eq!(kinds.first(), Some(&"schema"), "{kinds:?}");
-    assert_eq!(kinds.get(1), Some(&"hold"), "the hold follows the schema");
-    let SyncMessage::Hold { rows } = &sent[1] else {
-        unreachable!()
-    };
-    assert_eq!(rows.len(), 1, "the settled row is declared: {rows:?}");
-    assert_eq!(rows[0].1, *row(1).0.as_bytes());
+    assert!(
+        !sent.iter().any(|m| matches!(m, SyncMessage::Hold { .. })),
+        "no held rows are declared: {sent:?}"
+    );
+    let since = sent.iter().find_map(|m| match m {
+        SyncMessage::Subscribe { since, .. } => Some(*since),
+        _ => None,
+    });
+    assert!(
+        matches!(since, Some(Some(seq)) if seq > 0),
+        "the subscription resumes from its stored watermark: {since:?}"
+    );
+    assert_eq!(labels(&client), ["held"]);
 }
 
 /// #3070: an authority that cannot read the rows a serializable commit read

@@ -145,6 +145,28 @@ impl LensEffects {
     }
 }
 
+/// A digest of where a version stores its tables and columns: equal on
+/// two stores that name it alike.
+pub(crate) fn names_digest(names: &StoredNames) -> [u8; 16] {
+    let mut hasher = blake3::Hasher::new();
+    for (table, (stored, columns)) in &names.tables {
+        for part in [table, stored] {
+            hasher.update(&(part.len() as u64).to_le_bytes());
+            hasher.update(part.as_bytes());
+        }
+        for (column, stored) in columns {
+            for part in [column, stored] {
+                hasher.update(&(part.len() as u64).to_le_bytes());
+                hasher.update(part.as_bytes());
+            }
+        }
+        hasher.update(&[0xff]);
+    }
+    hasher.finalize().as_bytes()[..16]
+        .try_into()
+        .expect("16 bytes")
+}
+
 /// The admitted versions' stored names, by version.
 #[derive(Clone, Default)]
 pub(crate) struct Names {
@@ -357,6 +379,181 @@ impl Names {
 
     pub(crate) fn get(&self, version: &SchemaVersionId) -> Option<&StoredNames> {
         self.versions.get(version).map(|(_, names)| names)
+    }
+
+    /// Every admitted version with its names, in admission order.
+    pub(crate) fn in_order(&self) -> Vec<(SchemaVersionId, &StoredNames)> {
+        let mut versions: Vec<(i64, SchemaVersionId, &StoredNames)> = self
+            .versions
+            .iter()
+            .map(|(version, (n, names))| (*n, *version, names))
+            .collect();
+        versions.sort_by_key(|(n, ..)| *n);
+        versions
+            .into_iter()
+            .map(|(_, version, names)| (version, names))
+            .collect()
+    }
+
+    /// The lens cells recorded, as an upstream sends them.
+    pub(crate) fn cells(&self) -> &[LensCell] {
+        &self.lens_cells
+    }
+
+    /// Stored table `from` (or, with `column`, its stored column
+    /// `column.0`) is stored as `to` (`column.1`) now: every version that
+    /// names it, and the lens cells and branch columns kept for it, follow.
+    pub(crate) fn moved(
+        &mut self,
+        conn: &Connection,
+        from: &str,
+        to: &str,
+        column: Option<(&str, &str)>,
+    ) -> Result<(), Error> {
+        in_savepoint(conn, "jazz_names", || {
+            match column {
+                None => {
+                    conn.execute(
+                        "UPDATE _jazz_names SET stored_tbl = ?2 WHERE stored_tbl = ?1",
+                        [from, to],
+                    )
+                    .map_err(storage)?;
+                }
+                Some((old, new)) => {
+                    conn.execute(
+                        "UPDATE _jazz_names SET stored_col = ?3 WHERE stored_tbl = ?1 AND stored_col = ?2",
+                        [from, old, new],
+                    )
+                    .map_err(storage)?;
+                }
+            }
+            for (ddl_table, columns) in [
+                ("_jazz_lens_cells", ["col", "src"].as_slice()),
+                ("_jazz_branch_columns", ["col"].as_slice()),
+            ] {
+                let exists: bool = conn
+                    .query_row(
+                        "SELECT count(*) > 0 FROM sqlite_master WHERE name = ?1",
+                        [ddl_table],
+                        |r| r.get(0),
+                    )
+                    .map_err(storage)?;
+                if !exists {
+                    continue;
+                }
+                match column {
+                    None => {
+                        conn.execute(
+                            &format!("UPDATE {ddl_table} SET tbl = ?2 WHERE tbl = ?1"),
+                            [from, to],
+                        )
+                        .map_err(storage)?;
+                    }
+                    Some((old, new)) => {
+                        for col in columns {
+                            conn.execute(
+                                &format!("UPDATE {ddl_table} SET {col} = ?3 WHERE tbl = ?1 AND {col} = ?2"),
+                                [from, old, new],
+                            )
+                            .map_err(storage)?;
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })?;
+        let table_to = if column.is_none() { to } else { from };
+        for (_, names) in self.versions.values_mut() {
+            for (stored, columns) in names.tables.values_mut() {
+                if stored != from {
+                    continue;
+                }
+                match column {
+                    None => *stored = to.to_owned(),
+                    Some((old, new)) => {
+                        for stored_column in columns.values_mut().filter(|c| *c == old) {
+                            *stored_column = new.to_owned();
+                        }
+                    }
+                }
+            }
+        }
+        for cell in &mut self.lens_cells {
+            if cell.table != from {
+                continue;
+            }
+            cell.table = table_to.to_owned();
+            if let Some((old, new)) = column {
+                if cell.column == old {
+                    cell.column = new.to_owned();
+                }
+                if let LensCellRule::Copy(source) = &mut cell.rule
+                    && source == old
+                {
+                    *source = new.to_owned();
+                }
+            }
+        }
+        match column {
+            None => {
+                if let Some(branches) = self.branches.remove(from) {
+                    self.branches.insert(to.to_owned(), branches);
+                }
+            }
+            Some((old, new)) => {
+                if let Some(branches) = self.branches.get_mut(from)
+                    && let Some(default) = branches.remove(old)
+                {
+                    branches.insert(new.to_owned(), default);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Store `version` under `names` instead of what this file named it
+    /// (an upstream's, which a replica mirrors), keeping its place in
+    /// admission order.
+    pub(crate) fn rename(
+        &mut self,
+        conn: &Connection,
+        version: SchemaVersionId,
+        names: StoredNames,
+    ) -> Result<(), Error> {
+        let Some((n, _)) = self.versions.get(&version).cloned() else {
+            return Ok(());
+        };
+        in_savepoint(conn, "jazz_names", || {
+            let id = version.as_bytes().to_vec();
+            conn.execute("DELETE FROM _jazz_names WHERE version = ?1", [&id])
+                .map_err(storage)?;
+            let mut insert = conn
+                .prepare_cached(
+                    "INSERT INTO _jazz_names (version, tbl, col, n, stored_tbl, stored_col) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                )
+                .map_err(storage)?;
+            for (table, (stored, columns)) in &names.tables {
+                insert
+                    .execute(rusqlite::params![id, table, "", n, stored, ""])
+                    .map_err(storage)?;
+                for (column, stored_column) in columns {
+                    insert
+                        .execute(rusqlite::params![
+                            id,
+                            table,
+                            column,
+                            n,
+                            stored,
+                            stored_column
+                        ])
+                        .map_err(storage)?;
+                }
+            }
+            Ok(())
+        })?;
+        self.versions.insert(version, (n, names));
+        Ok(())
     }
 
     /// Record `schema`'s names and branch columns (once per version), in
