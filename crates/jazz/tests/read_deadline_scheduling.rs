@@ -223,6 +223,32 @@ fn scheduler_installation_and_replacement_arm_live_deadlines() {
     assert!(second.after.borrow().is_empty());
 }
 
+/// Alice's deadline expires before her host installs a scheduler. Installing
+/// the hook must request a drive turn so her read can fall back without another
+/// event from Bob. Replacing the hook must preserve that pending wake too.
+#[test]
+fn scheduler_installation_wakes_reads_whose_deadline_already_expired() {
+    let (alice, _, _) = fixture();
+    let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
+    let mut read = Box::pin(alice.all_serialized_query(&query, waiting(100), None, None, None));
+    assert!(poll(read.as_mut()).is_pending());
+    std::thread::sleep(std::time::Duration::from_millis(120));
+
+    let first = Rc::new(Scheduler::default());
+    alice.set_tick_scheduler(Some(first.clone()));
+    assert_eq!(first.immediate.get(), 1);
+    let replacement = Rc::new(Scheduler::default());
+    alice.set_tick_scheduler(Some(replacement.clone()));
+    assert_eq!(replacement.immediate.get(), 1);
+
+    block_on(alice.tick()).unwrap();
+    assert!(matches!(poll(read.as_mut()), Poll::Ready(Ok(_))));
+    let completed = Rc::new(Scheduler::default());
+    alice.set_tick_scheduler(Some(completed.clone()));
+    assert_eq!(completed.immediate.get(), 0);
+    assert!(completed.after.borrow().is_empty());
+}
+
 /// Alice waits while her host attempts to reconnect to Bob. Its five-second
 /// attempt window wakes earlier than the read's longer first-load budget.
 /// Reporting failure schedules immediate progress so the read can fall back.
