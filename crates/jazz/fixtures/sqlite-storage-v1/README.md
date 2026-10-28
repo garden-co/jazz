@@ -7,13 +7,12 @@ not read bumps `STORAGE_FORMAT` and adds a new corpus beside this one, and
 never rewrites these. Until then format 1 is still moving, so such a change
 re-runs the producer and re-pins the hashes here and in the test instead
 (for example: per-write timestamps on the wire changed how pending uploads
-are stored, a rejection's reason name changed how fates are recorded, and
-large values moved to epochs with integer cells, BLOB bytes and key columns, and pending commits gained their large-value deltas).
+are stored, and a rejection's reason name changed how fates are recorded).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `6dac9d1eec4cceffc3985337a4a86a49c88878404efd2dd8d15fda08b0078820`.
+  the SQLite file `a7b2f33fa3b2a6c97785ed60e99b6e1b109e553f7d4f32e8081ed669b75cd8c3`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `9aeaf511c5f7ae747dd85a828f9ec52bc1a4847a26cbc9954fe60e87894d47ac`.
+  `b4ef918dd0d3c904ac6e209ba0402e129f5ec35c5c316d11e55694694f082fc7`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
@@ -32,3 +31,9 @@ nodes and write times:
   `documents.title` to `heading` (a stored-names lens) and wrote under it.
 
 The receipts that read it back run by exact name in `dev/gates/storage-compat.sh`.
+
+The greenfield removal of `_jazz_shadow` regenerates this format-1 corpus
+in place, without a migration or format bump. Pending writes recover their
+upstream baseline from the current row or the newest history version below
+the replica's local sequence range. Eviction removes current and historical
+versions so reopening cannot restore an evicted baseline.

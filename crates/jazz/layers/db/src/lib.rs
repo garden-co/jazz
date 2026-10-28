@@ -41,6 +41,7 @@ mod durable_object_limits;
 pub mod format;
 pub mod host;
 pub(crate) mod large;
+pub mod link;
 pub(crate) mod merge;
 pub mod names;
 pub mod options;
