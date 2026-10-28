@@ -820,3 +820,145 @@ fn a_serializable_transaction_keeps_its_pinned_snapshot() {
     assert_eq!(fixture.rows(foreground).len(), 2);
     assert_eq!(read(), before, "the pinned snapshot does not advance");
 }
+
+#[test]
+fn pending_upload_count_has_pinned_bytes_and_answers() {
+    // Appended command and answer: existing ordinals stay fixed.
+    assert_eq!(
+        postcard::to_allocvec(&ForegroundDbCommandRequest::PendingUploadCount).unwrap(),
+        vec![38]
+    );
+    assert_eq!(
+        postcard::to_allocvec(&ForegroundDbCommandResponse::PendingUploadCount { count: 300 })
+            .unwrap(),
+        vec![29, 172, 2]
+    );
+
+    let directory = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new();
+    let capability = fixture.admit(&directory.path().join("alice.sqlite"), "alice", 0x11);
+    let foreground = fixture.open(&capability);
+    // Without a server nothing is ever uploaded.
+    fixture.insert_todo(foreground, [0xa1; 16], "local only");
+    fixture.tick(foreground);
+    assert_eq!(
+        fixture.execute(foreground, ForegroundDbCommandRequest::PendingUploadCount),
+        ForegroundDbCommandResponse::PendingUploadCount { count: 0 }
+    );
+    fixture.close(foreground);
+}
+
+/// Writes made while the app is offline count as pending until Core
+/// accepts them after the reconnect.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pending_upload_count_follows_writes_to_core() {
+    let issuer = TestJwtIssuer::start().await;
+    let core = JazzServer::builder()
+        .with_schema(schema().public_schema().clone())
+        .with_jwks_url(issuer.endpoint())
+        .start()
+        .await
+        .expect("start test server");
+    let bearer = TestJwtIssuer::jwt_for_user("native-pending-alice");
+    let storage = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new();
+    let admitted = fixture
+        .begin_account_session(
+            &core.base_url(),
+            &core.app_id().to_string(),
+            &bearer,
+            storage.path(),
+        )
+        .await;
+    let foreground = fixture.open(&admitted);
+    let count = || match fixture.execute(foreground, ForegroundDbCommandRequest::PendingUploadCount)
+    {
+        ForegroundDbCommandResponse::PendingUploadCount { count } => count,
+        response => panic!("pending upload count: {response:?}"),
+    };
+    assert_eq!(count(), 0);
+
+    fixture.execute(
+        foreground,
+        ForegroundDbCommandRequest::DisconnectNativeUpstream,
+    );
+    fixture.insert_todo(foreground, [0xb1; 16], "offline one");
+    fixture.insert_todo(foreground, [0xb2; 16], "offline two");
+    fixture.tick(foreground);
+    assert_eq!(count(), 2, "both commits wait for the server");
+
+    fixture.execute(
+        foreground,
+        ForegroundDbCommandRequest::ReconnectNativeUpstream,
+    );
+    jazz_testkit::wait_for(Duration::from_secs(15), "Core accepts both", || {
+        fixture.tick(foreground);
+        let uploaded = count() == 0;
+        async move { uploaded.then_some(()) }
+    })
+    .await;
+
+    fixture.close(foreground);
+    fixture.revoke(&admitted);
+    core.shutdown().await;
+}
+
+#[test]
+fn slow_query_commands_have_pinned_bytes_and_answer() {
+    // Appended commands and answers: existing ordinals stay fixed.
+    assert_eq!(
+        postcard::to_allocvec(&ForegroundDbCommandRequest::TakeSlowQueryReport { app: None })
+            .unwrap(),
+        vec![36, 0]
+    );
+    assert_eq!(
+        postcard::to_allocvec(&ForegroundDbCommandRequest::TakeSlowQueryReport {
+            app: Some("a".to_owned())
+        })
+        .unwrap(),
+        vec![36, 1, 1, b'a']
+    );
+    assert_eq!(
+        postcard::to_allocvec(&ForegroundDbCommandRequest::SetSlowQueryThresholdMs { ms: 200 })
+            .unwrap(),
+        vec![37, 200, 1]
+    );
+    assert_eq!(
+        postcard::to_allocvec(&ForegroundDbCommandResponse::SlowQueryReport {
+            lines_json: "[]".to_owned()
+        })
+        .unwrap(),
+        vec![27, 2, b'[', b']']
+    );
+    assert_eq!(
+        postcard::to_allocvec(&ForegroundDbCommandResponse::SlowQueryThresholdSet).unwrap(),
+        vec![28]
+    );
+
+    let directory = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new();
+    let capability = fixture.admit(&directory.path().join("alice.sqlite"), "alice", 0x11);
+    let foreground = fixture.open(&capability);
+    assert_eq!(
+        fixture.execute(
+            foreground,
+            ForegroundDbCommandRequest::SetSlowQueryThresholdMs { ms: 3_600_000 }
+        ),
+        ForegroundDbCommandResponse::SlowQueryThresholdSet
+    );
+    fixture.insert_todo(foreground, [0xa1; 16], "quick");
+    fixture.tick(foreground);
+    assert_eq!(
+        fixture.execute(
+            foreground,
+            ForegroundDbCommandRequest::TakeSlowQueryReport {
+                app: Some("my-app".to_owned())
+            }
+        ),
+        ForegroundDbCommandResponse::SlowQueryReport {
+            lines_json: "[]".to_owned()
+        },
+        "nothing ran for an hour"
+    );
+    fixture.close(foreground);
+}

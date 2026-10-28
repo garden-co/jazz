@@ -34,6 +34,12 @@ const DIRECT_AUTH_MODE_CLAIM: &str = "authMode";
 const PUBLIC_AUTH_MODE_SESSION_PATHS: &[&str] = &["authMode", "auth_mode"];
 const RESERVED_AGGREGATE_OUTPUT_PREFIX: &str = "__jazz_aggregate_";
 
+/// The columns every stored row table keeps beside the app's: its row key,
+/// branch, seq, deletion and content flags, and what the authority keeps of
+/// an accepted upload (SPEC 4 §4.6). An app column cannot take their names.
+pub const RESERVED_ROW_COLUMNS: [&str; 8] =
+    ["id", "rid", "_b", "_seq", "_del", "_c", "_base", "_cols"];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Error produced while compiling a developer-authored schema for the runtime.
 pub struct SchemaConversionError {
@@ -537,6 +543,12 @@ fn convert_table(
                 "column name \"id\" is reserved for the automatically generated UUID row ID",
             ));
         }
+        if column.name.as_str() != "id" && RESERVED_ROW_COLUMNS.contains(&column.name.as_str()) {
+            return Err(err(
+                format!("$.{}.columns.{}", name.as_str(), column.name.as_str()),
+                "column name is reserved for the store's own row columns",
+            ));
+        }
         if column
             .name
             .as_str()
@@ -986,6 +998,9 @@ fn convert_merge_strategy(
     match strategy {
         ColumnMergeStrategy::Counter => Ok(MergeStrategy::Counter),
         ColumnMergeStrategy::GSet => Ok(MergeStrategy::GSet),
+        ColumnMergeStrategy::Text => Ok(MergeStrategy::Text),
+        ColumnMergeStrategy::Markdown => Ok(MergeStrategy::Markdown),
+        ColumnMergeStrategy::Html => Ok(MergeStrategy::Html),
     }
 }
 

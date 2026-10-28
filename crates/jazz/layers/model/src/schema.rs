@@ -445,6 +445,14 @@ impl RuntimeSchema {
                             column.name
                         );
                     }
+                    MergeStrategy::Text | MergeStrategy::Markdown | MergeStrategy::Html => {
+                        assert!(
+                            matches!(column.column_type, StorageColumnType::String),
+                            "text merge strategies require a non-nullable string column: {}.{}",
+                            table.name,
+                            column.name
+                        );
+                    }
                     MergeStrategy::GSet => {
                         assert!(
                             is_gset_column_type(&column.column_type),
@@ -502,6 +510,37 @@ pub enum MergeStrategy {
     Counter,
     /// Array elements grow monotonically by union over the version DAG.
     GSet,
+    /// Concurrent edits to a string are merged three-way against the base
+    /// each write was made over (plain text).
+    Text,
+    /// As [`Self::Text`], with markdown syntax kept whole.
+    Markdown,
+    /// As [`Self::Text`], with HTML tags and entities kept whole.
+    Html,
+}
+
+impl MergeStrategy {
+    /// The text format a text-merging column declares, if any.
+    pub fn text_format(self) -> Option<TextFormat> {
+        match self {
+            Self::Text => Some(TextFormat::Plain),
+            Self::Markdown => Some(TextFormat::Markdown),
+            Self::Html => Some(TextFormat::Html),
+            Self::Lww | Self::Counter | Self::GSet => None,
+        }
+    }
+}
+
+/// How a text-merging column's values are cut into the units a merge never
+/// splits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextFormat {
+    /// Words, whitespace and other characters.
+    Plain,
+    /// Plain units, plus delimiter runs, list markers and link targets.
+    Markdown,
+    /// Plain units, plus tags and entities.
+    Html,
 }
 
 #[cfg(any(test, feature = "testing"))]
@@ -1550,6 +1589,9 @@ fn put_merge_strategy(bytes: &mut Vec<u8>, strategy: MergeStrategy) {
         MergeStrategy::Lww => 0,
         MergeStrategy::Counter => 1,
         MergeStrategy::GSet => 2,
+        MergeStrategy::Text => 3,
+        MergeStrategy::Markdown => 4,
+        MergeStrategy::Html => 5,
     });
 }
 
