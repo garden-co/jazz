@@ -39,6 +39,9 @@ pub use large_ops::{
     JsonSetEdit, LargeValueDeltaSplice, LargeValueStagingPolicy, LargeValueUpdate,
     LargeValueUpdatePage, LargeValueUpdateSplice, StreamingMutationKind, StreamingValueUpload,
 };
+#[path = "initial_bundle.rs"]
+mod initial_bundle;
+pub use initial_bundle::InitialBundle;
 #[path = "sync.rs"]
 pub(crate) mod sync;
 pub use crate::names::LensEffects;

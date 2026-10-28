@@ -1121,6 +1121,9 @@ pub(crate) struct Client {
     pub(crate) known: u64,
     /// The `known` cut last written to `_jazz_meta`.
     persisted_known: u64,
+    /// Queries an initial bundle settled, by [`bundle_key`], and the server
+    /// seq it holds them through: their first subscribe resumes from it.
+    bundled: HashMap<String, u64>,
     answers: HashMap<u64, Option<Result<(u64, Vec<[u8; 16]>), Error>>>,
     /// Permission preflights asked for; `None` until answered.
     advice: HashMap<u64, Option<PermissionAdvice>>,
@@ -1196,6 +1199,12 @@ struct RelayedFetch {
     session: usize,
     /// The session's `Fetch`, served locally once the upstream answered.
     message: SyncMessage,
+}
+
+/// How an initial bundle names a query it settled: its remote form
+/// ([`remote_query`]) and binding, as [`remote_key`] does.
+pub(crate) fn bundle_key(remote: &Query, binding: &BTreeMap<String, Value>) -> String {
+    format!("{remote:?}{binding:?}")
 }
 
 fn remote_key(
@@ -3423,6 +3432,23 @@ impl Inner {
         Ok(())
     }
 
+    /// The queries an initial bundle settled ([`Db::export_initial_bundle`]).
+    fn bundled_queries(&self) -> Result<HashMap<String, u64>, Error> {
+        match self
+            .conn
+            .cached_row("SELECT v FROM _jazz_meta WHERE k = 'bundle'", [], |r| {
+                r.get::<_, Vec<u8>>(0)
+            }) {
+            Ok(bytes) => {
+                let (through, keys): (u64, Vec<String>) = postcard::from_bytes(&bytes)
+                    .map_err(|error| Error::new(ErrorCode::Storage, error.to_string()))?;
+                Ok(keys.into_iter().map(|key| (key, through)).collect())
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(HashMap::new()),
+            Err(error) => Err(storage(error)),
+        }
+    }
+
     fn meta(&self, key: &str) -> Result<Option<u64>, Error> {
         match self
             .conn
@@ -3725,6 +3751,7 @@ impl Inner {
         let mut client = Client::new(me);
         client.known = self.meta("known")?.unwrap_or(0);
         client.persisted_known = client.known;
+        client.bundled = self.bundled_queries()?;
         let mut statement = self
             .conn
             .prepare("SELECT tx, commit_msg, rows FROM _jazz_pending ORDER BY tx")
@@ -3827,6 +3854,7 @@ impl Client {
             baselines: HashMap::new(),
             known: 0,
             persisted_known: 0,
+            bundled: HashMap::new(),
             answers: HashMap::new(),
             advice: HashMap::new(),
             requested: BTreeSet::new(),
@@ -4318,11 +4346,19 @@ impl Db {
         let answered = Rc::new(StdCell::new(false));
         let refused = Rc::new(RefCell::new(None));
         let global = Rc::new(StdCell::new(false));
+        // A query an initial bundle settled resumes from the bundle, once.
+        let since = (!include_deleted)
+            .then(|| {
+                client
+                    .bundled
+                    .remove(&bundle_key(&query, &prepared.binding))
+            })
+            .flatten();
         client.outbox.push(SyncMessage::Subscribe {
             id,
             query: query.clone().into_owned(),
             binding: prepared.binding.clone(),
-            since: None,
+            since,
             include_deleted,
             tier: reach.tier,
             wait: reach.wait,
@@ -4339,8 +4375,8 @@ impl Db {
                 answered: answered.clone(),
                 refused: refused.clone(),
                 global: global.clone(),
-                through: None,
-                resumed: false,
+                through: since,
+                resumed: since.is_some(),
             },
         );
         client.remote_ids.insert(id, key);

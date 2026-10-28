@@ -61,6 +61,7 @@ test("denominators distinguish transaction count, batch rows, queries and load c
   assert.equal(getBenchmarkMetadata("first_sync_local_relay_27518_rocksdb")?.work.count, 27518);
   assert.equal(getBenchmarkMetadata("first_sync_direct_27518_file")?.work.count, 27518);
   assert.equal(getBenchmarkMetadata("first_sync_local_relay_27518_file")?.work.count, 27518);
+  assert.equal(getBenchmarkMetadata("first_sync_bundle_27518_file")?.work.count, 27518);
   assert.match(
     getBenchmarkMetadata("first_sync_local_relay_27518_rocksdb")!.description,
     /Member identity \(not anonymous\)/,

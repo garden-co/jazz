@@ -1277,6 +1277,195 @@ fn run_cold_via_relay(
     }
 }
 
+/// Phases of a bundled first sync, for the profile driver.
+#[derive(Debug, Default)]
+pub struct BundlePhases {
+    pub build_ms: u128,
+    pub compress_ms: u128,
+    pub unpack_ms: u128,
+    pub open_ms: u128,
+    /// Ticks of the bundled client and of Core until settled.
+    pub resume_client_ms: u128,
+    pub resume_server_ms: u128,
+    pub bundle_bytes: usize,
+    /// What the bundled client sent Core (its `Hold` lists every held row).
+    pub upload_bytes: usize,
+    pub bundle_rows: u64,
+}
+
+/// Like [`run_cold`], but Core first writes the client's store as a
+/// ready-made SQLite bundle for the reader and its subscriptions. The bundle
+/// takes a zstd roundtrip, the client opens it, connects, subscribes, and
+/// settles once every subscription holds its rows and Core has answered it.
+fn run_cold_via_bundle(
+    schema: &JazzSchema,
+    seeded: &Seeded,
+    expected: &BTreeMap<String, usize>,
+    config: &Config,
+) -> (RunSummary, BundlePhases) {
+    let start = Instant::now();
+    let author = config.client_author(seeded);
+    let client_identity = DbIdentity {
+        node: node(3),
+        author,
+    };
+    let mut phases = BundlePhases::default();
+
+    let server_dir = tempfile::tempdir().expect("create bundle directory");
+    let bundle_path = server_dir.path().join("bundle.sqlite");
+    let queries = subscription_tables()
+        .iter()
+        .map(|table| {
+            seeded
+                .core
+                .prepare_query(&Query::from(table.as_str()))
+                .unwrap_or_else(|error| panic!("prepare {table} on core failed: {error}"))
+        })
+        .collect::<Vec<_>>();
+    let built = block_on(seeded.core.export_initial_bundle(
+        &queries,
+        author,
+        client_identity,
+        &bundle_path,
+    ))
+    .expect("build initial bundle");
+    phases.bundle_rows = built.rows;
+    phases.build_ms = start.elapsed().as_millis();
+
+    let compress_start = Instant::now();
+    let raw = std::fs::read(&bundle_path).expect("read bundle");
+    let compressed = zstd::bulk::compress(&raw, 3).expect("compress bundle");
+    phases.bundle_bytes = compressed.len();
+    phases.compress_ms = compress_start.elapsed().as_millis();
+
+    let unpack_start = Instant::now();
+    let dir = tempfile::tempdir().expect("create client directory");
+    let client_path = dir.path().join("client.sqlite");
+    let unpacked = zstd::bulk::decompress(&compressed, raw.len()).expect("decompress bundle");
+    std::fs::write(&client_path, unpacked).expect("write bundle");
+    phases.unpack_ms = unpack_start.elapsed().as_millis();
+
+    let open_start = Instant::now();
+    let client = block_on(Db::open_at(
+        DbConfig::new(schema.clone(), client_identity),
+        &client_path,
+        FileOptions::default(),
+    ))
+    .expect("open bundled client");
+    phases.open_ms = open_start.elapsed().as_millis();
+    let up = Rc::new(RefCell::new(VecDeque::new()));
+    let down = Rc::new(RefCell::new(VecDeque::new()));
+    let bytes = Rc::new(RefCell::new(0));
+    let uploaded = Rc::new(RefCell::new(0));
+    let upstream = block_on(
+        client.connect_upstream(Box::new(WireTransportAdapter::current(ZstdFrames {
+            outbound: Rc::clone(&up),
+            inbound: Rc::clone(&down),
+            bytes: Rc::clone(&uploaded),
+        }))),
+    );
+    let subscriber = seeded.core.accept_subscriber(
+        Box::new(WireTransportAdapter::current(ZstdFrames {
+            outbound: down,
+            inbound: up,
+            bytes: Rc::clone(&bytes),
+        })),
+        author,
+    );
+    let connect_ms = start.elapsed().as_millis();
+
+    let subscribe_start = Instant::now();
+    let mut subscriptions = Vec::new();
+    for table in subscription_tables() {
+        let prepared = client
+            .prepare_query(&Query::from(table.as_str()))
+            .unwrap_or_else(|error| panic!("prepare {table} failed: {error}"));
+        let stream = block_on(client.subscribe(&prepared, ReadOpts::default()))
+            .unwrap_or_else(|error| panic!("subscribe {table} failed: {error}"));
+        subscriptions.push((
+            OpenSubscription {
+                expected: *expected
+                    .get(&table)
+                    .unwrap_or_else(|| panic!("missing expected count for {table}")),
+                name: table,
+                stream,
+                rows: BTreeSet::new(),
+            },
+            false,
+        ));
+    }
+    let subscribe_ms = subscribe_start.elapsed().as_millis();
+
+    let settle_start = Instant::now();
+    let mut ticks = 0;
+    loop {
+        for (sub, settled) in &mut subscriptions {
+            while let Some(event) = sub.stream.try_next_event() {
+                if let SubscriptionEvent::Delta { settled: true, .. } = &event {
+                    *settled = true;
+                }
+                apply_event(&mut sub.rows, event);
+            }
+        }
+        if subscriptions
+            .iter()
+            .all(|(sub, settled)| *settled && sub.rows.len() == sub.expected)
+        {
+            break;
+        }
+        assert!(
+            ticks < config.max_ticks,
+            "timed out settling bundled subscriptions; {}",
+            subscriptions
+                .iter()
+                .filter(|(sub, settled)| !*settled || sub.rows.len() != sub.expected)
+                .map(|(sub, settled)| format!(
+                    "{}={}/{} settled={settled}",
+                    sub.name,
+                    sub.rows.len(),
+                    sub.expected
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let client_start = Instant::now();
+        block_on(client.tick()).expect("client tick");
+        phases.resume_client_ms += client_start.elapsed().as_millis();
+        let server_start = Instant::now();
+        block_on(seeded.core.tick()).expect("core tick");
+        phases.resume_server_ms += server_start.elapsed().as_millis();
+        ticks += 1;
+    }
+    let settle_ms = settle_start.elapsed().as_millis();
+    let wall_ms = start.elapsed().as_millis();
+
+    seeded.core.disconnect_subscriber(subscriber);
+    client.detach_connection(&upstream);
+    let actual_rows = subscriptions
+        .into_iter()
+        .map(|(sub, _)| (sub.name, sub.rows))
+        .collect::<VisibleRows>();
+    phases.upload_bytes = *uploaded.borrow();
+    let bytes_to_client = phases.bundle_bytes + *bytes.borrow();
+    (
+        RunSummary {
+            rows_materialized: actual_rows.values().map(BTreeSet::len).sum(),
+            subscriptions: actual_rows.len(),
+            actual_rows,
+            expected_rows_by_table: None,
+            expected_rows: expected.values().sum(),
+            connect_ms,
+            subscribe_ms,
+            settle_ms,
+            wall_ms,
+            ticks,
+            bytes_to_client,
+            _relay: None,
+        },
+        phases,
+    )
+}
+
 fn pending_description(subscriptions: &[OpenSubscription]) -> String {
     subscriptions
         .iter()
@@ -1294,7 +1483,7 @@ fn env_or<T: std::str::FromStr>(name: &str, default: T) -> T {
 }
 
 /// Local profile driver: `JAZZ_CUSTOMER_IDENTITY` (member, spy, admin),
-/// `JAZZ_CUSTOMER_TOPOLOGY` (direct, relay), `JAZZ_CUSTOMER_SCALE` and
+/// `JAZZ_CUSTOMER_TOPOLOGY` (direct, relay, bundle), `JAZZ_CUSTOMER_SCALE` and
 /// `JAZZ_CUSTOMER_REPEATS`; prints one receipt per run.
 pub fn profile_main() {
     let identity = match std::env::var("JAZZ_CUSTOMER_IDENTITY")
@@ -1308,20 +1497,31 @@ pub fn profile_main() {
             panic!("unsupported JAZZ_CUSTOMER_IDENTITY {other:?}; supported: member, spy, admin")
         }
     };
-    let via_relay = match std::env::var("JAZZ_CUSTOMER_TOPOLOGY")
-        .unwrap_or_else(|_| "direct".to_owned())
-        .as_str()
-    {
-        "direct" => false,
-        "relay" => true,
-        other => panic!("unsupported JAZZ_CUSTOMER_TOPOLOGY {other:?}; supported: direct, relay"),
-    };
+    let topology = std::env::var("JAZZ_CUSTOMER_TOPOLOGY").unwrap_or_else(|_| "direct".to_owned());
+    if !["direct", "relay", "bundle"].contains(&topology.as_str()) {
+        panic!("unsupported JAZZ_CUSTOMER_TOPOLOGY {topology:?}; supported: direct, relay, bundle");
+    }
     let mut fixture = Fixture::with_identity(env_or("JAZZ_CUSTOMER_SCALE", 1.0), identity);
     for run in 0..env_or("JAZZ_CUSTOMER_REPEATS", 3_usize) {
-        let result = if via_relay {
-            fixture.first_sync_via_relay()
-        } else {
-            fixture.first_sync()
+        let result = match topology.as_str() {
+            "relay" => fixture.first_sync_via_relay(),
+            "bundle" => {
+                let (result, phases) = fixture.first_sync_via_bundle_with_phases();
+                println!(
+                    "run={run} bundle build_ms={} compress_ms={} unpack_ms={} open_ms={} resume_client_ms={} resume_server_ms={} bytes={} upload_bytes={} rows={}",
+                    phases.build_ms,
+                    phases.compress_ms,
+                    phases.unpack_ms,
+                    phases.open_ms,
+                    phases.resume_client_ms,
+                    phases.resume_server_ms,
+                    phases.bundle_bytes,
+                    phases.upload_bytes,
+                    phases.bundle_rows
+                );
+                result
+            }
+            _ => fixture.first_sync(),
         };
         println!(
             "run={run} rows={} wall_ms={} connect_ms={} subscribe_ms={} settle_ms={} ticks={} bytes_to_client={}",
@@ -1392,6 +1592,20 @@ impl Fixture {
         result.expected_rows_by_table = Some(Rc::clone(&self.expected_rows_by_table));
         CompletedSync(result)
     }
+
+    /// The same first sync, starting from a bundle Core builds for the
+    /// reader.
+    #[inline(never)]
+    pub fn first_sync_via_bundle(&mut self) -> CompletedSync {
+        self.first_sync_via_bundle_with_phases().0
+    }
+
+    pub fn first_sync_via_bundle_with_phases(&mut self) -> (CompletedSync, BundlePhases) {
+        let (mut result, phases) =
+            run_cold_via_bundle(&self.schema, &self.seeded, &self.expected, &self.config);
+        result.expected_rows_by_table = Some(Rc::clone(&self.expected_rows_by_table));
+        (CompletedSync(result), phases)
+    }
 }
 
 impl RunSummary {
@@ -1458,6 +1672,17 @@ mod tests {
         relayed.verify();
         assert_eq!(relayed.actual_rows, direct.actual_rows);
         fixture.first_sync_via_relay().verify();
+    }
+
+    #[test]
+    fn first_sync_from_an_initial_bundle_matches_direct() {
+        let mut fixture = Fixture::new(0.01);
+        let direct = fixture.first_sync();
+        direct.verify();
+        let (bundled, phases) = fixture.first_sync_via_bundle_with_phases();
+        bundled.verify();
+        assert_eq!(bundled.actual_rows, direct.actual_rows);
+        assert_eq!(phases.bundle_rows as usize, direct.rows());
     }
 
     #[test]
