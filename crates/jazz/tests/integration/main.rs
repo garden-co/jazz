@@ -45,6 +45,8 @@ mod flat_joins;
 mod gather_policy_double_ref;
 #[path = "../history_reads.rs"]
 mod history_reads;
+#[path = "../host_tables.rs"]
+mod host_tables;
 #[path = "../include_live.rs"]
 mod include_live;
 #[path = "../large_value_append.rs"]
@@ -65,6 +67,8 @@ mod large_values;
 mod local_first_first_load_gate;
 #[path = "../local_first_server_wait.rs"]
 mod local_first_server_wait;
+#[path = "../maybe_conflicting.rs"]
+mod maybe_conflicting;
 #[path = "../order_by_unselected_column.rs"]
 mod order_by_unselected_column;
 #[path = "../parameterized_subscription_routing.rs"]
@@ -77,12 +81,22 @@ mod policy_activation;
 mod prepared_claim_routing;
 #[path = "../provenance.rs"]
 mod provenance;
+#[path = "../recheck_policies.rs"]
+mod recheck_policies;
+#[path = "../recheck_queries.rs"]
+mod recheck_queries;
+#[path = "../recheck_sync.rs"]
+mod recheck_sync;
 #[path = "../relation_policies.rs"]
 mod relation_policies;
 #[path = "../relation_queries.rs"]
 mod relation_queries;
 #[path = "../relation_results.rs"]
 mod relation_results;
+#[path = "../relational_delete_retraction.rs"]
+mod relational_delete_retraction;
+#[path = "../relay_local_seqs.rs"]
+mod relay_local_seqs;
 #[path = "../relay_policy_subscriptions.rs"]
 mod relay_policy_subscriptions;
 #[path = "../schema_activation.rs"]
@@ -99,6 +113,8 @@ mod serializable_sync;
 mod session_policy_values;
 #[path = "../session_write_checks.rs"]
 mod session_write_checks;
+#[path = "../slow_queries.rs"]
+mod slow_queries;
 #[path = "../snapshots.rs"]
 mod snapshots;
 #[path = "../storage_corpus.rs"]
@@ -127,6 +143,8 @@ mod sync_support_access;
 mod sync_untrusted_clients;
 #[path = "../sync_wire_corpus.rs"]
 mod sync_wire_corpus;
+#[path = "../text_merge.rs"]
+mod text_merge;
 #[path = "../transaction_commit_kind.rs"]
 mod transaction_commit_kind;
 #[path = "../transaction_handles.rs"]

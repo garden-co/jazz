@@ -559,7 +559,9 @@ as engine-private provenance; nothing is visible outside the transaction until
 it commits, and the commit publishes one ordinary row version per row. The row
 read counts as a transaction point read, so a serializable transaction conflicts
 if the row changes before commit. In a mergeable transaction the diffed column
-is authored like any patched column and resolves last-writer-wins at commit.
+is authored like any patched column: last-writer-wins at commit, or merged
+with concurrent edits when the column is text-merging (ch. 4 §4.3,
+`INV-HIST-24`).
 The diff is authored by the transaction's bound identity, so session and
 attributed transactions need no separate path. A staged root that outlives the
 staging TTL before commit fails the commit with a staging-expired error rather

@@ -12,3 +12,9 @@ slow-timeout = { period = "60s", terminate-after = 1 }
 [profile.jazz-ci]
 fail-fast = false
 slow-timeout = { period = "180s", terminate-after = 1 }
+
+# Load measurements need the machine to themselves: they saturate a durable
+# store, which starves timing-sensitive tests running beside them.
+[[profile.default.overrides]]
+filter = 'test(host_work_waits_at_most_one_tick_under_write_load)'
+threads-required = 'num-test-threads'

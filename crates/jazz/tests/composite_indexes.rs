@@ -678,3 +678,66 @@ fn composite_indexes_subsume_their_prefixes_and_id_reads_seek_by_id() {
     let rows = block_on(db.all(&point, ReadOpts::default())).unwrap();
     assert_eq!(rows.len(), 1);
 }
+
+/// #3399: reopening an existing store under a schema that adds a column to
+/// `index_only` builds that column's index over the rows already stored.
+/// The index set is not part of the schema version: a deployment may
+/// refresh it without a new version.
+#[test]
+fn adding_an_index_only_column_to_an_existing_store_backfills_its_index() {
+    let narrow = JazzSchema::new(
+        &SchemaBuilder::new()
+            .table(tasks_table().index_only(["owner"]))
+            .build(),
+    )
+    .expect("narrow schema compiles");
+    let wider = JazzSchema::new(
+        &SchemaBuilder::new()
+            .table(tasks_table().index_only(["owner", "title"]))
+            .build(),
+    )
+    .expect("wider schema compiles");
+    assert_eq!(narrow.version_id(), wider.version_id());
+
+    let directory = tempfile::tempdir().unwrap();
+    {
+        let db = open_file_db(directory.path(), &narrow);
+        insert_task(&db, row(1), "alice", 2, "plan");
+        insert_task(&db, row(2), "bob", 1, "review");
+    }
+    // The value index on a column (not its large-value marker index).
+    let index_on = |column: &str| {
+        stored_task_indexes(directory.path())
+            .into_iter()
+            .find(|(name, _)| *name == format!("tasks__ix({column})"))
+    };
+    assert!(index_on("owner").is_some());
+    assert_eq!(
+        index_on("title"),
+        None,
+        "the narrow schema indexes no title"
+    );
+    {
+        let db = open_file_db(directory.path(), &wider);
+        let titles = |title: &str| {
+            let query = db
+                .prepare_query(
+                    &Query::from("tasks")
+                        .filter(eq(col("title"), lit(Value::String(title.into())))),
+                )
+                .unwrap();
+            block_on(db.all(&query, ReadOpts::default())).unwrap().len()
+        };
+        assert_eq!((titles("plan"), titles("review")), (1, 1));
+    }
+    let (name, _) = index_on("title").expect("reopening builds the title index");
+    let conn = rusqlite::Connection::open(store_path(directory.path())).unwrap();
+    let entries: i64 = conn
+        .query_row(
+            &format!("SELECT count(*) FROM tasks INDEXED BY \"{name}\""),
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(entries, 2, "the index holds the rows stored before it");
+}

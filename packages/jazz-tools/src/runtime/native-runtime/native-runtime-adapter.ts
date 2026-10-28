@@ -262,6 +262,8 @@ type NativeDb = {
     configured: boolean;
     explicitlyOffline: boolean;
     connected: boolean;
+    /** The upstream refused the scope's credential, with its reason. */
+    authRejected?: string | null;
   };
   registerSchema(schema: Uint8Array): NativeDb;
   beginTransaction(
@@ -380,6 +382,15 @@ type NativeDb = {
       | ((error: Error | null, urgency: string) => void),
   ): void;
   onMutationError(callback: (event: MutationErrorEvent) => void): void;
+  /** A native host's upstream refused the credential; ticks keep running. */
+  onAuthRejected?(callback: (reason: string) => void): void;
+  /**
+   * A native host's upstream connection failed for another reason, or
+   * recovered (`null`); ticks keep running.
+   */
+  onUpstreamFailure?(
+    callback: (failure: { reason: string; retrying: boolean } | null) => void,
+  ): void;
   setNonDurableClient?(): void;
   /** Exact wire features compiled into the native artifact backing this DB. */
   wireFeatures?(): number;
@@ -426,6 +437,10 @@ type NativeDb = {
     localEpoch?: bigint,
   ): Transport | Promise<Transport>;
   tick(): void | Promise<void>;
+  /** The slow-query report due now: one line per slow query shape. */
+  takeSlowQueryReport?(app?: string): string[];
+  /** Report query runs of at least `ms` milliseconds; 0 turns the log off. */
+  setSlowQueryThresholdMs?(ms: number): void;
   close?(): void;
   free?(): void;
 };
@@ -730,6 +745,16 @@ function openMemoryDb(
   );
 }
 
+/**
+ * The slow-query log: queries whose runs take at least `thresholdMs`
+ * (default 50; 0 turns the log off) are reported with `console.warn`, one
+ * line per query shape, naming `appId`.
+ */
+export type SlowQueryLogOptions = {
+  appId?: string;
+  thresholdMs?: number;
+};
+
 export class NativeRuntimeAdapter implements Runtime {
   private readonly auxiliaryReceiveDeadlines = new Map<Transport, AuxiliaryReceiveDeadline>();
   private readonly pendingNativeAdmissionCancels = new Set<() => void>();
@@ -759,6 +784,8 @@ export class NativeRuntimeAdapter implements Runtime {
   // publication boundary FIFO; ordinary writes and source reads stay parallel.
   private streamingFinalization: Promise<void> = Promise.resolve();
   private readonly ownerRuntime: NativeRuntimeAdapter;
+  /** The app named in slow-query reports (owner runtime only). */
+  private slowQueryApp: string | undefined;
   get preparationOwner(): object {
     return this.ownerRuntime;
   }
@@ -804,7 +831,6 @@ export class NativeRuntimeAdapter implements Runtime {
   private nativeLinkPoll: ReturnType<typeof setInterval> | null = null;
   private firstLoadWaitSeen = false;
   private readonly remoteLink = new RemoteLinkStatePublisher(() => this.readRemoteLinkState());
-  private readonly queuedServerFrames: Uint8Array[] = [];
   private readonly pendingInboundServerFrames: Uint8Array[] = [];
   private serverInboundRouting: Promise<void> = Promise.resolve();
   private serverInboundProcessed = false;
@@ -860,13 +886,14 @@ export class NativeRuntimeAdapter implements Runtime {
     historyComplete: boolean,
     opts?: Pick<
       NonNullable<ConstructorParameters<typeof NativeRuntimeAdapter>[6]>,
-      "selfSignedClientProof" | "scopeIsolatedRelay"
+      "selfSignedClientProof" | "scopeIsolatedRelay" | "slowQueryLog"
     >,
   ): NativeRuntimeAdapter {
     return new NativeRuntimeAdapter(null, schema, node, author, sourceId, historyComplete, {
       db,
       selfSignedClientProof: opts?.selfSignedClientProof,
       scopeIsolatedRelay: opts?.scopeIsolatedRelay,
+      slowQueryLog: opts?.slowQueryLog,
     });
   }
 
@@ -898,6 +925,8 @@ export class NativeRuntimeAdapter implements Runtime {
       readAuthorizationHost?: ReadAuthorizationHost;
       backendMode?: boolean;
       owner?: NativeRuntimeAdapter;
+      /** Where slow queries are reported (`console.warn`): see {@link SlowQueryLogOptions}. */
+      slowQueryLog?: SlowQueryLogOptions;
     },
   ) {
     this.ownerRuntime = opts?.owner?.ownerRuntime ?? this;
@@ -952,6 +981,14 @@ export class NativeRuntimeAdapter implements Runtime {
       );
     }
     if (opts?.owner) return;
+    this.slowQueryApp = opts?.slowQueryLog?.appId;
+    const threshold = opts?.slowQueryLog?.thresholdMs;
+    if (threshold !== undefined) {
+      if (!Number.isFinite(threshold) || threshold < 0) {
+        throw new Error("slowQueryThresholdMs must be a non-negative number of milliseconds");
+      }
+      this.db.setSlowQueryThresholdMs?.(threshold);
+    }
     if (typeof this.db.setTickScheduler !== "function") {
       throw new Error("Native runtime requires db.setTickScheduler");
     }
@@ -966,6 +1003,18 @@ export class NativeRuntimeAdapter implements Runtime {
         this.scheduleCoreWake(urgency as CoreTickWake);
       }
     }) as (error: Error | null, urgency: string) => void);
+    // A native host's socket reports a failed upstream connection as
+    // connection state, as the web socket path does: the remote link is
+    // unavailable and remote subscriptions fail once it stops retrying,
+    // while local work keeps running (#4337).
+    this.db.onUpstreamFailure?.((failure) => {
+      if (!failure) return this.clearRemoteServerTransportError();
+      this.handleServerTransportError(
+        new Error(failure.reason),
+        this.serverConnectionGeneration,
+        failure.retrying,
+      );
+    });
   }
 
   createPeerAuthority(): { node: Uint8Array; epoch: bigint; features: number } {
@@ -1305,10 +1354,14 @@ export class NativeRuntimeAdapter implements Runtime {
     if (nativeStatus) {
       if (!nativeStatus.configured) return "none";
       if (nativeStatus.explicitlyOffline) return "unavailable";
+      // A refused credential stops the socket until the app renews it.
+      if (nativeStatus.authRejected) return "unavailable";
       if (nativeStatus.connected) {
         this.nativeLinkEverConnected = true;
         return "connected";
       }
+      // The socket reported a failed connection it may still be retrying.
+      if (this.serverTransportError) return "unavailable";
       // A native socket reports only whether it is connected. Before its
       // first connection that means "still connecting"; afterwards it is
       // reconnecting after a drop.
@@ -1434,7 +1487,6 @@ export class NativeRuntimeAdapter implements Runtime {
     this.resolveServerTransportWorkWaiters();
     this.peerTransportWorkListeners.clear();
     this.localSettlementListeners.clear();
-    this.queuedServerFrames.length = 0;
     this.pendingInboundServerFrames.length = 0;
     const serverTransport = this.serverTransport;
     this.serverTransport = null;
@@ -2496,7 +2548,6 @@ export class NativeRuntimeAdapter implements Runtime {
         this.watchAuxiliaryOutbound(transport, carrier, generation).catch((error) =>
           this.handleServerTransportError(error, generation),
         );
-        this.flushQueuedServerFrames(carrier);
         this.pumpServerTransport().catch((error) =>
           this.handleServerTransportError(error, generation),
         );
@@ -2605,7 +2656,6 @@ export class NativeRuntimeAdapter implements Runtime {
     this.serverTransport = null;
     this.serverEndpointUrl = null;
     this.serverAuthJson = null;
-    this.queuedServerFrames.length = 0;
     this.pendingInboundServerFrames.length = 0;
     this.serverPumpScheduled = false;
     this.serverPumpAgain = false;
@@ -2669,6 +2719,9 @@ export class NativeRuntimeAdapter implements Runtime {
   onAuthFailure(callback: (reason: string) => void): void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.onAuthFailure(callback);
     this.authFailureCallback = callback;
+    // A native host's socket reports a refused credential as auth state, as
+    // the web socket path does, so the app renews from it (#4248, #4296).
+    this.db.onAuthRejected?.((reason) => this.authFailureCallback?.(reason));
   }
 
   onMutationError(callback: (event: MutationErrorEvent) => void): void {
@@ -3426,12 +3479,24 @@ export class NativeRuntimeAdapter implements Runtime {
     return completion;
   }
 
+  /**
+   * Write the slow-query report due now with `console.warn`: each line is a
+   * query shape that held the database for at least the threshold, with its
+   * plan and the index that would likely make it fast.
+   */
+  private reportSlowQueries(): void {
+    for (const line of this.db.takeSlowQueryReport?.(this.ownerRuntime.slowQueryApp) ?? []) {
+      console.warn(`[jazz] ${line}`);
+    }
+  }
+
   private async driveCoreTicks(): Promise<void> {
     let yielded = false;
     try {
       for (let round = 0; ; round += 1) {
         this.coreTickAgain = false;
         await this.db.tick();
+        this.reportSlowQueries();
         this.pumpSubscriptions();
         this.scheduleServerPump();
         this.notifyPeerTransportWork();
@@ -3783,33 +3848,22 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private sendServerFrames(
     frames: Uint8Array[],
-    carrier = this.serverCarrier,
-    generation = this.serverConnectionGeneration,
+    carrier: WebSocketCarrier,
+    generation: number,
   ): void {
-    if (
-      !carrier ||
-      generation !== this.serverConnectionGeneration ||
-      carrier !== this.serverCarrier
-    ) {
-      this.queuedServerFrames.push(...frames);
-      return;
-    }
+    // A retired connection's frames belong to its channel state; the next
+    // connection must never carry them. Every carrier change starts a new
+    // generation, so frames are only ever sent on the carrier they were made for.
+    if (generation !== this.serverConnectionGeneration || carrier !== this.serverCarrier) return;
     void carrier.sendBatch(frames).catch((error) => {
       this.handleServerTransportError(error, generation);
-    });
-  }
-
-  private flushQueuedServerFrames(carrier: WebSocketCarrier): void {
-    if (this.queuedServerFrames.length === 0 || carrier !== this.serverCarrier) return;
-    const frames = this.queuedServerFrames.splice(0);
-    void carrier.sendBatch(frames).catch((error) => {
-      this.handleServerTransportError(error);
     });
   }
 
   private handleServerTransportError(
     error: unknown,
     generation = this.serverConnectionGeneration,
+    reconnecting = false,
   ): void {
     if (generation !== this.serverConnectionGeneration) return;
     const message = errorMessage(error);
@@ -3817,7 +3871,9 @@ export class NativeRuntimeAdapter implements Runtime {
     const isFirstTerminalError = this.serverTransportError === null;
     this.serverTransportError = error instanceof Error ? error : new Error(message);
     this.remoteLink.changed();
-    this.failRemoteSubscriptions(this.serverTransportError);
+    // An outage the client keeps reconnecting through leaves remote
+    // subscriptions open: their native sources resume on the next connection.
+    if (!reconnecting) this.failRemoteSubscriptions(this.serverTransportError);
     this.resolveServerTransportErrorWaiters(this.serverTransportError);
     if (isFirstTerminalError) this.serverTransportErrorCallback?.(this.serverTransportError);
   }
@@ -3898,7 +3954,7 @@ export class NativeRuntimeAdapter implements Runtime {
     void recovery.catch(() => undefined);
     if (publishOutage) {
       this.serverOutageReported = true;
-      this.handleServerTransportError(new Error(error.message));
+      this.handleServerTransportError(new Error(error.message), generation, true);
     }
     return recovery;
   }
@@ -5101,6 +5157,7 @@ const REJECTION_CODES_BY_REASON: Readonly<Record<NativeCoreErrorReason, string>>
   branch_move: "write_rejected",
   missing_chunks: "write_rejected",
   permissions_head_missing: "write_rejected",
+  predecessor_rejected: "write_rejected",
 };
 
 /** A rejected wait's code, from the core reason every binding carries on it. */
