@@ -13,6 +13,8 @@ type NativeForegroundCommand =
   | "close"
   | { type: "captureSnapshot" }
   | { type: "drainTickEvents" }
+  | { type: "takeSlowQueryReport"; app?: string }
+  | { type: "setSlowQueryThresholdMs"; ms: number }
   | {
       type: "all";
       query: Uint8Array;
@@ -671,9 +673,9 @@ it("decodes terminal-operation JSON exactly on the ASCII fast path and strictly 
 it("encodes and decodes the slow-query log commands with the native relay's pinned bytes", () => {
   const relay = loadRelay(null);
   const ascii = (text: string) => Array.from(text, (char) => char.charCodeAt(0));
-  expect(Array.from(relay.encodeNativeForegroundCommand({ type: "takeSlowQueryReport" }))).toEqual(
-    [36, 0],
-  );
+  expect(Array.from(relay.encodeNativeForegroundCommand({ type: "takeSlowQueryReport" }))).toEqual([
+    36, 0,
+  ]);
   expect(
     Array.from(relay.encodeNativeForegroundCommand({ type: "takeSlowQueryReport", app: "a" })),
   ).toEqual([36, 1, 1, ...ascii("a")]);
