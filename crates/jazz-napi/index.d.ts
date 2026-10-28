@@ -121,6 +121,8 @@ export declare class NapiDb {
   setLargeValueStagingPolicy(incomingBytesPerWindow: number, windowMs: number, maxAgeMs?: number | undefined | null): void
   /** Run one idempotent expiry pass; native hosts normally call this on a timer. */
   evictExpiredStagedLargeValues(): number
+  /** How many local commits still wait for the server's verdict. */
+  pendingUploadCount(): number
   /**
    * The optimistic in-memory side of a client/worker pair: its
    * subscriptions open with the worker's answer.
@@ -133,6 +135,11 @@ export declare class NapiDb {
    * Drives only local-first reads that wait for the server on first load.
    */
   setRemoteLinkHint(state: string): void
+  /**
+   * A fresh upstream link machine for this runtime's server connection;
+   * `seed` drives its retry jitter.
+   */
+  createUpstreamLink(seed: number): UpstreamLink
   /**
    * The slow-query report due now: one line per slow query shape,
    * naming `app`: the first at once, then at most every 10 seconds. The caller
@@ -249,6 +256,22 @@ export declare class Transport {
   tick(): number
   close(): boolean
 }
+
+/**
+ * The shared upstream link machine (`jazz::link`), which decides when the
+ * runtime's WebSocket connects, backs off and reports an outage. The runtime
+ * owns the socket and the timer and steps the machine with JSON documents.
+ */
+export declare class UpstreamLink {
+  /** `seed` drives the retry jitter. */
+  constructor(seed: number)
+  /**
+   * Apply one input observed at `now_ms`; returns the actions, events and
+   * status as JSON.
+   */
+  handle(nowMs: number, input: string): string
+}
+export type NapiUpstreamLink = UpstreamLink
 
 export declare class Write {
   get txId(): string

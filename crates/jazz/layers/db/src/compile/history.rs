@@ -120,10 +120,12 @@ impl Ctx<'_> {
             projection,
             tables: self.tables,
             aggregate: false,
+            large_group: false,
             joined: 0,
             versioned: true,
             union: false,
             preps: self.preps,
+            partial: Vec::new(),
         })
     }
     /// The versions of the rows of `source` that `bound` names, as a SQL

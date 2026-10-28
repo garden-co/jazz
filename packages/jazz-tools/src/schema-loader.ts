@@ -381,8 +381,7 @@ function schemaFromLoadedModule(
   return null;
 }
 
-async function loadSchemaInput(filePath: string): Promise<LoadedSchemaInput> {
-  const loaded = await loadTsModule(filePath);
+function schemaInputFromLoadedModule(filePath: string, loaded: LoadedTsModule): LoadedSchemaInput {
   const directSchema = schemaFromLoadedModule(loaded.module, loaded.collectedSchema);
   if (directSchema) {
     return directSchema;
@@ -443,10 +442,10 @@ async function loadPermissionsModule(filePath: string): Promise<Record<string, T
   return candidate;
 }
 
-async function tryLoadPermissionsFromSchemaModule(
+function permissionsFromSchemaModule(
   filePath: string,
-): Promise<Record<string, TablePolicies> | undefined> {
-  const { module } = await loadTsModule(filePath);
+  module: Record<string, unknown>,
+): Record<string, TablePolicies> | undefined {
   const candidate = module.permissions ?? null;
   if (!candidate) {
     return undefined;
@@ -525,7 +524,8 @@ export async function loadCompiledSchema(schemaDir: string): Promise<LoadedSchem
     );
   }
 
-  const loadedSchema = await loadSchemaInput(resolved.schemaFile);
+  const loadedModule = await loadTsModule(resolved.schemaFile);
+  const loadedSchema = schemaInputFromLoadedModule(resolved.schemaFile, loadedModule);
   let schema = loadedSchema.schema;
   const tablesWithInlinePolicies = findInlinePolicyTables(schema);
   if (tablesWithInlinePolicies.length > 0 && !loadedSchema.wasmSchema) {
@@ -547,7 +547,10 @@ export async function loadCompiledSchema(schemaDir: string): Promise<LoadedSchem
       permissions,
     );
   } else {
-    const schemaModulePermissions = await tryLoadPermissionsFromSchemaModule(resolved.schemaFile);
+    const schemaModulePermissions = permissionsFromSchemaModule(
+      resolved.schemaFile,
+      loadedModule.module,
+    );
     if (schemaModulePermissions) {
       resolvedPermissionsFile = resolved.schemaFile;
       permissions = schemaModulePermissions;
