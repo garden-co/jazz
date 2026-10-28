@@ -6999,6 +6999,7 @@ impl Db {
                         added,
                         updated,
                         removed,
+                        reset,
                         ..
                     } = event
                     else {
@@ -7019,7 +7020,8 @@ impl Db {
                         // result without changing: its seq alone cannot say,
                         // so the result as of `since` does.
                         let unchanged = resume.as_ref().is_some_and(|resume| {
-                            history.is_none()
+                            reset
+                                && history.is_none()
                                 && row.seq <= resume.since
                                 && resume
                                     .prior
