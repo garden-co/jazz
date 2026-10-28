@@ -24,12 +24,13 @@ pub use relay::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::c_void;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use jazz::binding_host;
 use jazz::db::{DbIdentity, RemoteLinkHint};
 use jazz::ids::NodeUuid;
+use jazz::link::{LinkEvent, LinkPhase, LinkStatus};
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::AppId;
@@ -527,7 +528,8 @@ pub struct NativeAuthRejection {
 /// rejected session) or a lost link the worker gave up on. It is connection
 /// state, not a failed tick: local work keeps running, as on the web and Node
 /// transports (#4337). `retrying` is whether the worker is still trying to
-/// connect. Every failure gets a new `sequence`, as a refusal does.
+/// connect. A new `sequence` is issued whenever the reason or `retrying`
+/// changes, so a link failing the same way on every retry reports once.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct NativeUpstreamFailure {
     pub sequence: u64,
@@ -815,48 +817,89 @@ struct OpenedRelay {
 struct PrivateScopeSocketWorker {
     admitted_scope: AdmissionCapability,
     _worker: NativeRelaySocketWorker,
-    connected: Arc<AtomicBool>,
-    /// The upstream refused this session's connection, or the worker gave
-    /// up after a failure, with the failure's sequence. It is held until a
-    /// new connection succeeds and reported to the host as connection state
-    /// (`TickEvents`), so an upstream failure never silently becomes an
-    /// indefinite query timeout, and never fails local ticks (#4337).
-    ///
-    /// Losing an already-authenticated link is not held here while the
-    /// worker retries it: that is a plain reconnect (#3630). A reconnect that
-    /// the upstream then refuses is held as usual.
-    terminal_error: Arc<Mutex<Option<(u64, String)>>>,
-    /// The upstream refused this worker's credential. The worker stops on
-    /// it, so only a replacement built with a refreshed credential (or an
-    /// explicit reconnect) can connect again. This is auth state, not a
-    /// failed session: it is not latched in `terminal_error`, so local ticks
-    /// keep running while the host renews the credential, as on the web and
-    /// Node transports (#4296).
-    auth_rejected: Arc<Mutex<Option<NativeAuthRejection>>>,
-    /// The worker's socket loop has exited and will never reconnect on its
-    /// own. An explicit reconnect replaces such a worker.
-    stopped: Arc<AtomicBool>,
+    /// The worker's link as its [`jazz::link::UpstreamLink`] last reported it.
+    link: Arc<Mutex<WorkerLink>>,
 }
 
 impl PrivateScopeSocketWorker {
-    /// The worker gave up after a terminal failure or a refused credential:
-    /// it is no longer an upstream and nothing but a replacement can clear
-    /// its failure.
-    fn terminally_stopped(&self) -> bool {
-        self.stopped.load(Ordering::Acquire)
-            && (self
-                .terminal_error
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .is_some()
-                || self.is_auth_rejected())
-    }
-
-    fn is_auth_rejected(&self) -> bool {
-        self.auth_rejected
+    fn link(&self) -> MutexGuard<'_, WorkerLink> {
+        self.link
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .is_some()
+    }
+
+    fn connected(&self) -> bool {
+        self.link().phase() == Some(&LinkPhase::Live)
+    }
+
+    /// The worker stopped trying on its own: it waits for a credential or
+    /// has stopped. Only a replacement can connect again.
+    fn terminally_stopped(&self) -> bool {
+        matches!(
+            self.link().phase(),
+            Some(LinkPhase::Stopped | LinkPhase::AwaitingCredential(_))
+        )
+    }
+}
+
+/// A worker's link as the host reports it: the machine's status plus the
+/// sequenced refusal and failure that `TickEvents` carries.
+#[derive(Default)]
+struct WorkerLink {
+    status: Option<LinkStatus>,
+    /// The upstream refused this worker's credential. Auth state, not a
+    /// failed session: local ticks keep running while the host renews the
+    /// credential, as on the web and Node transports (#4296).
+    auth_rejected: Option<NativeAuthRejection>,
+    /// The upstream refused a connection for another reason, an outage was
+    /// published, or the worker stopped. Connection state, never a failed
+    /// tick (#4337).
+    failure: Option<NativeUpstreamFailure>,
+}
+
+impl WorkerLink {
+    fn phase(&self) -> Option<&LinkPhase> {
+        self.status.as_ref().map(|status| &status.phase)
+    }
+
+    fn hint(&self) -> RemoteLinkHint {
+        self.phase()
+            .map_or(RemoteLinkHint::Attempting, LinkPhase::remote_link_hint)
+    }
+
+    fn on_event(&mut self, event: LinkEvent) {
+        match event {
+            LinkEvent::AuthFailed { message, .. } => {
+                self.auth_rejected = Some(NativeAuthRejection {
+                    sequence: next_upstream_event(),
+                    reason: message,
+                });
+            }
+            LinkEvent::AuthRestored => {}
+            LinkEvent::Status(status) => {
+                let reason = status.reason.clone().unwrap_or_default();
+                let failure = match status.phase {
+                    LinkPhase::Live => {
+                        self.auth_rejected = None;
+                        None
+                    }
+                    LinkPhase::Stopped => Some(false),
+                    LinkPhase::Backoff | LinkPhase::Connecting if status.outage_published => {
+                        Some(true)
+                    }
+                    _ => None,
+                };
+                self.failure = failure.map(|retrying| match self.failure.take() {
+                    Some(same) if same.reason == reason && same.retrying == retrying => same,
+                    _ => NativeUpstreamFailure {
+                        sequence: next_upstream_event(),
+                        reason,
+                        retrying,
+                    },
+                });
+                self.status = Some(status);
+            }
+        }
     }
 }
 
@@ -866,9 +909,6 @@ struct OpenedForeground {
     client: u64,
     /// Last native-socket reachability reported to this foreground's `Db`.
     remote_link_hint: Option<RemoteLinkHint>,
-    /// This foreground was reported `Live` since it opened or last went
-    /// explicitly offline; a disconnected worker is then backing off.
-    link_was_live: bool,
     runtime_token: u64,
     wake: Option<Arc<ForegroundWakeState>>,
     lease: ForegroundNodeLease,
@@ -1105,17 +1145,8 @@ impl NativeRelayHost {
         session: PrivateRelaySocketSession,
         connector: Arc<dyn NativeTransportConnector>,
     ) -> Result<PrivateScopeSocketWorker, JazzNativeRelayStatus> {
-        let terminal_error = Arc::new(Mutex::new(None));
-        let terminal_for_event = Arc::clone(&terminal_error);
-        let connected = Arc::new(AtomicBool::new(false));
-        let connected_for_event = Arc::clone(&connected);
-        let stopped = Arc::new(AtomicBool::new(false));
-        let stopped_for_event = Arc::clone(&stopped);
-        let auth_rejected = Arc::new(Mutex::new(None::<NativeAuthRejection>));
-        let auth_rejected_for_event = Arc::clone(&auth_rejected);
-        // A failure of an established link, held until the worker either
-        // retries it (connection state) or stops on it (terminal).
-        let link_failure = Mutex::new(None::<String>);
+        let link = Arc::new(Mutex::new(WorkerLink::default()));
+        let link_for_event = Arc::clone(&link);
         let worker = NativeRelaySocketWorker::prepare_with_connector(
             relay,
             NativeRelaySocketConfig {
@@ -1127,58 +1158,11 @@ impl NativeRelayHost {
                     jwt_token: Some(session.bearer),
                     ..AuthConfig::default()
                 },
-                reconnect_delay: std::time::Duration::from_secs(1),
                 on_event: Arc::new(move |event| {
-                    let set_terminal = |error: Option<String>| {
-                        *terminal_for_event
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-                            error.map(|error| (next_upstream_event(), error));
-                    };
-                    let mut link_failure = link_failure
+                    link_for_event
                         .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    match event {
-                        NativeRelaySocketEvent::Connected => {
-                            connected_for_event.store(true, Ordering::Release);
-                            *link_failure = None;
-                            *auth_rejected_for_event
-                                .lock()
-                                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
-                            set_terminal(None);
-                        }
-                        // A refused credential is auth state, not a failed
-                        // session: the worker stops on it, but local ticks
-                        // continue while the host renews the credential.
-                        NativeRelaySocketEvent::AuthRejected(error) => {
-                            connected_for_event.store(false, Ordering::Release);
-                            *auth_rejected_for_event
-                                .lock()
-                                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-                                Some(NativeAuthRejection {
-                                    sequence: next_upstream_event(),
-                                    reason: error,
-                                });
-                        }
-                        NativeRelaySocketEvent::TerminalError(error) => {
-                            if connected_for_event.swap(false, Ordering::AcqRel) {
-                                *link_failure = Some(error);
-                            } else {
-                                set_terminal(Some(error));
-                            }
-                        }
-                        NativeRelaySocketEvent::Reconnecting => {
-                            connected_for_event.store(false, Ordering::Release);
-                            *link_failure = None;
-                        }
-                        NativeRelaySocketEvent::Stopped => {
-                            connected_for_event.store(false, Ordering::Release);
-                            if let Some(error) = link_failure.take() {
-                                set_terminal(Some(error));
-                            }
-                            stopped_for_event.store(true, Ordering::Release);
-                        }
-                    }
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .on_event(event);
                 }),
             },
             connector,
@@ -1187,10 +1171,7 @@ impl NativeRelayHost {
         Ok(PrivateScopeSocketWorker {
             admitted_scope,
             _worker: worker,
-            connected,
-            terminal_error,
-            auth_rejected,
-            stopped,
+            link,
         })
     }
 
@@ -1230,11 +1211,12 @@ impl NativeRelayHost {
                     .identity
                     .author;
                 let was_offline = self.explicitly_offline_scopes.remove(&scope);
-                // A worker that gave up after a terminal failure is no longer
-                // an upstream. Explicit reconnect replaces it (dropping it
-                // only joins an already-exited thread) so its latched failure
-                // cannot outlive the caller's request to try again. A worker
-                // that is still connected or retrying is left untouched.
+                // A worker that stopped after a terminal failure, or that is
+                // parked waiting for a new credential, is no longer an
+                // upstream. Explicit reconnect replaces it so its latched
+                // failure cannot outlive the caller's request to try again.
+                // A worker that is still connected or retrying is left
+                // untouched.
                 if self
                     .private_scope_workers
                     .get(&scope)
@@ -1259,7 +1241,7 @@ impl NativeRelayHost {
             connected: self
                 .private_scope_workers
                 .get(&scope)
-                .is_some_and(|worker| worker.connected.load(Ordering::Acquire)),
+                .is_some_and(PrivateScopeSocketWorker::connected),
             auth_rejected: self
                 .private_scope_auth_rejection(&scope)
                 .map(|rejection| rejection.reason),
@@ -1267,32 +1249,21 @@ impl NativeRelayHost {
     }
 
     fn private_scope_auth_rejection(&self, scope: &RelayScope) -> Option<NativeAuthRejection> {
-        self.private_scope_workers.get(scope).and_then(|worker| {
-            worker
-                .auth_rejected
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clone()
-        })
+        self.private_scope_workers
+            .get(scope)
+            .and_then(|worker| worker.link().auth_rejected.clone())
     }
 
+    #[cfg(test)]
     fn private_scope_terminal_error(&self, scope: &RelayScope) -> Option<String> {
         self.private_scope_upstream_failure(scope)
             .map(|failure| failure.reason)
     }
 
     fn private_scope_upstream_failure(&self, scope: &RelayScope) -> Option<NativeUpstreamFailure> {
-        let worker = self.private_scope_workers.get(scope)?;
-        let (sequence, reason) = worker
-            .terminal_error
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()?;
-        Some(NativeUpstreamFailure {
-            sequence,
-            reason,
-            retrying: !worker.stopped.load(Ordering::Acquire),
-        })
+        self.private_scope_workers
+            .get(scope)
+            .and_then(|worker| worker.link().failure.clone())
     }
 
     fn execute(
@@ -1581,7 +1552,6 @@ impl NativeRelayHost {
                 relay: relay_handle,
                 client: client_handle,
                 remote_link_hint: None,
-                link_was_live: false,
                 runtime_token,
                 wake: None,
                 lease,
@@ -1613,37 +1583,15 @@ impl NativeRelayHost {
         }
         let scope = opened.scope.clone();
         let previous = opened.remote_link_hint;
-        let explicitly_offline = self.explicitly_offline_scopes.contains(&scope);
-        if explicitly_offline
-            && opened.link_was_live
-            && let Some(opened) = self.foregrounds.get_mut(&foreground)
-        {
-            // Going back online after an explicit offline period is a fresh
-            // attempt.
-            opened.link_was_live = false;
-        }
-        let Some(opened) = self.foregrounds.get(&foreground) else {
-            return;
-        };
-        // A worker that is not connected after this foreground saw it live
-        // is backing off between retries: nothing waits on that, as on the
-        // TS and native-facade hosts. Only a first connection, or one after
-        // an explicit offline period, is an attempt.
-        let hint = if explicitly_offline {
+        // The worker's machine decides, as on every other host: a link that
+        // is backing off or waiting for a credential is Failed, and nothing
+        // waits on it.
+        let hint = if self.explicitly_offline_scopes.contains(&scope) {
             RemoteLinkHint::Failed
         } else {
-            match self.private_scope_workers.get(&scope) {
-                Some(worker) if worker.connected.load(Ordering::Acquire) => RemoteLinkHint::Live,
-                Some(worker)
-                    if worker.is_auth_rejected()
-                        || self.private_scope_terminal_error(&scope).is_some() =>
-                {
-                    RemoteLinkHint::Failed
-                }
-                Some(_) if opened.link_was_live => RemoteLinkHint::Failed,
-                Some(_) => RemoteLinkHint::Attempting,
-                None => RemoteLinkHint::Failed,
-            }
+            self.private_scope_workers
+                .get(&scope)
+                .map_or(RemoteLinkHint::Failed, |worker| worker.link().hint())
         };
         if previous == Some(hint) {
             return;
@@ -1669,7 +1617,6 @@ impl NativeRelayHost {
             .is_some_and(|opened| opened.relay.set_remote_link_hint(hint).is_ok());
         if reported && let Some(opened) = self.foregrounds.get_mut(&foreground) {
             opened.remote_link_hint = Some(hint);
-            opened.link_was_live |= hint == RemoteLinkHint::Live;
         }
     }
 

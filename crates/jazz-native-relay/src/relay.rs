@@ -37,6 +37,9 @@ use jazz::db::{
     block_on,
 };
 use jazz::ids::{AuthorSubject, RowUuid};
+use jazz::link::{
+    AuthFailureReason, LinkAction, LinkEvent, LinkFailure, LinkInput, LinkPolicy, UpstreamLink,
+};
 use jazz::protocol_limits::validate_logical_message_len;
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
@@ -1858,8 +1861,8 @@ pub struct NativeRelaySocketConfig {
     pub app_id: AppId,
     pub peer_identity: AuthorSubject,
     pub auth: AuthConfig,
-    pub reconnect_delay: Duration,
-    pub on_event: Arc<dyn Fn(NativeRelaySocketEvent) + Send + Sync>,
+    /// Every event of the worker's [`UpstreamLink`], in order.
+    pub on_event: Arc<dyn Fn(LinkEvent) + Send + Sync>,
 }
 
 impl std::fmt::Debug for NativeRelaySocketConfig {
@@ -1870,24 +1873,8 @@ impl std::fmt::Debug for NativeRelaySocketConfig {
             .field("app_id", &self.app_id)
             .field("peer_identity", &self.peer_identity)
             .field("auth", &"<redacted>")
-            .field("reconnect_delay", &self.reconnect_delay)
             .finish_non_exhaustive()
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum NativeRelaySocketEvent {
-    Connected,
-    Reconnecting,
-    /// A connection or transport failed non-retryably; the worker retries
-    /// unless `Stopped` follows. The scope-owned host surfaces a failure
-    /// before `Connected` (the upstream rejected the session), or one the
-    /// worker stops on, to foreground ticks until a later `Connected`.
-    TerminalError(String),
-    /// The upstream refused the worker's credential. `Stopped` follows: only
-    /// a worker built with a refreshed credential can connect.
-    AuthRejected(String),
-    Stopped,
 }
 
 impl NativeRelaySocketWorker {
@@ -2017,12 +2004,15 @@ impl Drop for SocketUpstreamLease {
 enum LinkEnd {
     /// The worker was cancelled.
     Cancelled,
-    /// The link ended; the worker reconnects.
-    Reconnect,
-    /// The relay is gone or failed: the worker stops.
-    Stop,
+    /// The link ended and can be retried.
+    Lost(LinkFailure),
+    /// The relay is gone or failed: nothing can connect again.
+    Stop(String),
 }
 
+/// Drives the shared [`UpstreamLink`] machine: this worker owns the socket
+/// and the timer, the machine decides when to connect, back off, wait for a
+/// new credential or stop. A renewed credential replaces the whole worker.
 async fn run_socket_worker(
     relay: NativeRelay,
     config: NativeRelaySocketConfig,
@@ -2030,100 +2020,165 @@ async fn run_socket_worker(
     cancelled: Arc<AtomicBool>,
     wake: Arc<tokio::sync::Notify>,
 ) {
-    while !cancelled.load(Ordering::Acquire) {
-        let inbound_wake = Arc::clone(&wake);
-        let request = NativeTransportRequest {
-            requested_link: NativeTransportLink::OrdinarySession,
-            server_url: config.server_url.clone(),
-            app_id: config.app_id,
-            peer_identity: config.peer_identity,
-            auth: config.auth.clone(),
-            wake: Arc::new(move || inbound_wake.notify_one()),
-        };
-        let connected = tokio::select! {
-            result = connector.connect(request) => result,
-            _ = wake.notified() => {
+    let started = Instant::now();
+    // A fresh random seed per worker, so a fleet of devices does not retry
+    // in lockstep after a server restart.
+    let seed = {
+        use std::hash::BuildHasher;
+        std::collections::hash_map::RandomState::new().hash_one(std::process::id())
+    };
+    let mut link = UpstreamLink::new(LinkPolicy::default(), seed);
+    let mut actions = link.handle(0, LinkInput::ServerConfigured(true));
+    loop {
+        for event in link.drain_events() {
+            (config.on_event)(event);
+        }
+        let mut next = None;
+        for action in actions.drain(..) {
+            match action {
+                LinkAction::Connect { attempt, .. } => next = Some(Err(attempt)),
+                LinkAction::ArmTimer { token, after_ms } => next = Some(Ok((token, after_ms))),
+                // One attempt and one timer at a time: each ends before the
+                // worker asks the machine for the next step.
+                LinkAction::Close(_) | LinkAction::CancelTimer(_) => {}
+            }
+        }
+        let input = match next {
+            // Waiting for a credential or stopped: only cancellation (or a
+            // replacement worker) ends this.
+            None => loop {
                 if cancelled.load(Ordering::Acquire) {
-                    break;
-                }
-                continue;
-            }
-        };
-        let connected = match connected {
-            Ok(connected) => connected,
-            Err(
-                error @ (NativeTransportError::Retryable(_) | NativeTransportError::Terminal(_)),
-            ) => {
-                // Another non-retryable failure (TLS, a proxy refusing the
-                // upgrade, a rejected session) is surfaced and retried: it
-                // can clear without a new credential.
-                if !error.is_retryable() {
-                    (config.on_event)(NativeRelaySocketEvent::TerminalError(format!(
-                        "native relay socket connect failed: {error}"
-                    )));
-                }
-                (config.on_event)(NativeRelaySocketEvent::Reconnecting);
-                tokio::select! {
-                    _ = tokio::time::sleep(config.reconnect_delay) => {},
-                    _ = wake.notified() => {},
-                }
-                continue;
-            }
-            // Retrying the same request with the same credential cannot
-            // succeed: stop, so the host can replace this worker (#4248).
-            Err(NativeTransportError::AuthRejected(error)) => {
-                (config.on_event)(NativeRelaySocketEvent::AuthRejected(format!(
-                    "native relay socket connect failed: {error}"
-                )));
-                break;
-            }
-        };
-        let (generation, wire) = loop {
-            if cancelled.load(Ordering::Acquire) {
-                (config.on_event)(NativeRelaySocketEvent::Stopped);
-                return;
-            }
-            match relay.begin_socket_upstream() {
-                Ok(installed) => break installed,
-                Err(RelayError::OwnerQueueFull) => {
-                    tokio::time::sleep(Duration::from_millis(1)).await;
-                }
-                Err(error) => {
-                    (config.on_event)(NativeRelaySocketEvent::TerminalError(format!(
-                        "native relay upstream install failed: {error}"
-                    )));
-                    (config.on_event)(NativeRelaySocketEvent::Stopped);
                     return;
                 }
+                wake.notified().await;
+            },
+            Some(Ok((token, after_ms))) => {
+                let sleep = tokio::time::sleep(Duration::from_millis(after_ms));
+                tokio::pin!(sleep);
+                loop {
+                    tokio::select! {
+                        () = &mut sleep => break LinkInput::TimerFired(token),
+                        () = wake.notified() => {
+                            if cancelled.load(Ordering::Acquire) {
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+            Some(Err(attempt)) => {
+                let admitted = || {
+                    // Admission asks for nothing more: the machine only
+                    // reports the link live.
+                    let now = started.elapsed().as_millis() as u64;
+                    let _ = link.handle(now, LinkInput::Admitted(attempt));
+                    for event in link.drain_events() {
+                        (config.on_event)(event);
+                    }
+                };
+                match connect_and_bridge(&relay, &config, &*connector, &cancelled, &wake, admitted)
+                    .await
+                {
+                    LinkEnd::Cancelled => return,
+                    LinkEnd::Lost(failure) => LinkInput::Ended(attempt, failure),
+                    LinkEnd::Stop(message) => {
+                        LinkInput::Ended(attempt, LinkFailure::Fatal(message))
+                    }
+                }
             }
         };
-        let lease = SocketUpstreamLease {
-            relay: relay.clone(),
-            generation,
-            wire,
-        };
-        (config.on_event)(NativeRelaySocketEvent::Connected);
-        let end = bridge_connection(
-            &relay,
-            &lease.wire,
-            connected.transport,
-            connected.terminal,
-            &config,
-            &cancelled,
-            &wake,
-        )
-        .await;
-        drop(lease);
-        match end {
-            LinkEnd::Cancelled | LinkEnd::Stop => break,
-            LinkEnd::Reconnect => {
-                if !cancelled.load(Ordering::Acquire) {
-                    (config.on_event)(NativeRelaySocketEvent::Reconnecting);
+        if cancelled.load(Ordering::Acquire) {
+            return;
+        }
+        actions = link.handle(started.elapsed().as_millis() as u64, input);
+    }
+}
+
+/// One connection attempt and, once admitted, the life of its link.
+/// `admitted` runs once the relay has installed the connection.
+async fn connect_and_bridge(
+    relay: &NativeRelay,
+    config: &NativeRelaySocketConfig,
+    connector: &dyn NativeTransportConnector,
+    cancelled: &AtomicBool,
+    wake: &Arc<tokio::sync::Notify>,
+    admitted: impl FnOnce(),
+) -> LinkEnd {
+    let inbound_wake = Arc::clone(wake);
+    let request = NativeTransportRequest {
+        requested_link: NativeTransportLink::OrdinarySession,
+        server_url: config.server_url.clone(),
+        app_id: config.app_id,
+        peer_identity: config.peer_identity,
+        auth: config.auth.clone(),
+        wake: Arc::new(move || inbound_wake.notify_one()),
+    };
+    let connecting = connector.connect(request);
+    tokio::pin!(connecting);
+    let connected = loop {
+        tokio::select! {
+            result = &mut connecting => break result,
+            () = wake.notified() => {
+                if cancelled.load(Ordering::Acquire) {
+                    return LinkEnd::Cancelled;
                 }
             }
         }
-    }
-    (config.on_event)(NativeRelaySocketEvent::Stopped);
+    };
+    let connected = match connected {
+        Ok(connected) => connected,
+        Err(NativeTransportError::Retryable(error)) => {
+            return LinkEnd::Lost(LinkFailure::Network(format!(
+                "native relay socket connect failed: {error}"
+            )));
+        }
+        // TLS, a proxy refusing the upgrade, a rejected session: it can
+        // clear without a new credential, so it is retried.
+        Err(NativeTransportError::Terminal(error)) => {
+            return LinkEnd::Lost(LinkFailure::Refused(format!(
+                "native relay socket connect failed: {error}"
+            )));
+        }
+        // Retrying the same request with the same credential cannot
+        // succeed (#4248).
+        Err(NativeTransportError::AuthRejected(error)) => {
+            return LinkEnd::Lost(LinkFailure::AuthRejected {
+                reason: AuthFailureReason::from_message(&error),
+                message: format!("native relay socket connect failed: {error}"),
+            });
+        }
+    };
+    let (generation, wire) = loop {
+        if cancelled.load(Ordering::Acquire) {
+            return LinkEnd::Cancelled;
+        }
+        match relay.begin_socket_upstream() {
+            Ok(installed) => break installed,
+            Err(RelayError::OwnerQueueFull) => {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            Err(error) => {
+                return LinkEnd::Stop(format!("native relay upstream install failed: {error}"));
+            }
+        }
+    };
+    let lease = SocketUpstreamLease {
+        relay: relay.clone(),
+        generation,
+        wire,
+    };
+    admitted();
+    let end = bridge_connection(
+        relay,
+        &lease.wire,
+        connected.transport,
+        connected.terminal,
+        cancelled,
+        wake,
+    )
+    .await;
+    drop(lease);
+    end
 }
 
 /// Move frames between one established connection and the relay until the
@@ -2133,18 +2188,31 @@ async fn bridge_connection(
     wire: &NativeRelayWire,
     mut transport: Box<dyn WireTransport + Send>,
     mut terminal: jazz::tools::native_transport_connector::NativeTransportTerminalFuture,
-    config: &NativeRelaySocketConfig,
     cancelled: &AtomicBool,
     wake: &tokio::sync::Notify,
 ) -> LinkEnd {
+    // Losing an admitted link is an outage, whatever the transport calls it,
+    // unless the server refused the credential.
     let terminal_end = |terminal: NativeTransportTerminal| {
-        if let NativeTransportTerminal::Failed(NativeTransportError::Terminal(error)) = terminal {
-            (config.on_event)(NativeRelaySocketEvent::TerminalError(format!(
-                "native relay socket terminated: {error}"
-            )));
-        }
-        LinkEnd::Reconnect
+        LinkEnd::Lost(match terminal {
+            NativeTransportTerminal::Failed(NativeTransportError::AuthRejected(error)) => {
+                LinkFailure::AuthRejected {
+                    reason: AuthFailureReason::from_message(&error),
+                    message: format!("native relay socket terminated: {error}"),
+                }
+            }
+            NativeTransportTerminal::Failed(
+                NativeTransportError::Terminal(error) | NativeTransportError::Retryable(error),
+            )
+            | NativeTransportTerminal::PeerClosed(error) => {
+                LinkFailure::Network(format!("native relay socket terminated: {error}"))
+            }
+            NativeTransportTerminal::OwnerDropped => {
+                LinkFailure::Network("native relay socket dropped".to_owned())
+            }
+        })
     };
+    let lost = || LinkEnd::Lost(LinkFailure::Network("native relay wire closed".to_owned()));
     loop {
         if cancelled.load(Ordering::Acquire) {
             return LinkEnd::Cancelled;
@@ -2152,7 +2220,7 @@ async fn bridge_connection(
         // The relay's frames out.
         let outbound = match wire.take_outbound_encoded() {
             Ok(frames) => frames,
-            Err(_) => return LinkEnd::Reconnect,
+            Err(_) => return lost(),
         };
         let mut unsent = outbound.into_iter();
         let mut failed = false;
@@ -2173,7 +2241,7 @@ async fn bridge_connection(
             // The socket pump closed: its terminal decides what follows.
             return tokio::select! {
                 terminal = &mut terminal => terminal_end(terminal),
-                _ = tokio::time::sleep(Duration::from_secs(5)) => LinkEnd::Reconnect,
+                _ = tokio::time::sleep(Duration::from_secs(5)) => lost(),
             };
         }
         // The server's frames in, while the relay has room for them.
@@ -2183,7 +2251,7 @@ async fn bridge_connection(
                 break;
             };
             if wire.push_inbound_encoded(&frame).is_err() {
-                return LinkEnd::Reconnect;
+                return lost();
             }
             received = true;
         }
@@ -2191,12 +2259,10 @@ async fn bridge_connection(
             && let Err(error) = relay.pump()
             && !matches!(error, RelayError::OwnerQueueFull)
         {
-            if !cancelled.load(Ordering::Acquire) {
-                (config.on_event)(NativeRelaySocketEvent::TerminalError(format!(
-                    "native relay owner pump failed: {error}"
-                )));
+            if cancelled.load(Ordering::Acquire) {
+                return LinkEnd::Cancelled;
             }
-            return LinkEnd::Stop;
+            return LinkEnd::Stop(format!("native relay owner pump failed: {error}"));
         }
         tokio::select! {
             terminal = &mut terminal => return terminal_end(terminal),
