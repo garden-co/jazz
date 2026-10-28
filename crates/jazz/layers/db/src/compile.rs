@@ -254,6 +254,11 @@ pub struct Ctx<'a> {
     /// seq; `None` on a replica, which lists only versions whose
     /// transaction it knows.
     pub history_origin: Option<[u8; 16]>,
+    /// How many of a write check's grounded rows (see [`Cut::overlay`])
+    /// the compiled SQL reads, summed over every table reference.
+    pub overlaid_rows: usize,
+    /// The stored tables a write check reads through its cut's overlay.
+    pub overlay_tables: BTreeSet<String>,
     next_alias: usize,
 }
 
@@ -266,10 +271,24 @@ pub struct Cut {
     pub seq: u64,
     pub own: u64,
     pub extra: Vec<u64>,
-    /// A write check's evidence (SPEC 7, WITH CHECK): of the versions at
-    /// `own`, only the live rows grounded so far (by stored table) are
-    /// overlaid; every other row the unit wrote reads as committed.
-    pub grounded: Option<std::sync::Arc<BTreeMap<String, BTreeSet<[u8; 16]>>>>,
+    /// A write check's evidence (SPEC 7, WITH CHECK): which of the
+    /// versions at `own` are overlaid. `None` overlays them all.
+    pub overlay: Option<Overlay>,
+}
+
+/// The versions at a write check's `own` that its policy sees (SPEC 7);
+/// every other row the unit wrote reads as committed.
+#[derive(Clone, Debug)]
+pub enum Overlay {
+    /// The live rows grounded so far, by stored table.
+    Grounded(std::sync::Arc<BTreeMap<String, BTreeSet<[u8; 16]>>>),
+    /// Every live row but `row` in branch `key` of stored table `table`:
+    /// the unit's post-state, without the row under check.
+    Except {
+        table: String,
+        row: [u8; 16],
+        key: Vec<u8>,
+    },
 }
 
 impl Cut {
@@ -339,6 +358,8 @@ impl<'a> Ctx<'a> {
             settled_only: false,
             preps: Vec::new(),
             history_origin: None,
+            overlaid_rows: 0,
+            overlay_tables: BTreeSet::new(),
             next_alias: 0,
         }
     }
@@ -391,22 +412,46 @@ impl<'a> Ctx<'a> {
             .join(", ");
         // The versions at `own` that are overlaid: all of them, or for a
         // write check the unit's grounded live rows.
-        let (overlaid_here, overlaid_c) = match &cut.grounded {
+        if cut.overlay.is_some() {
+            self.overlay_tables.insert(table.stored.clone());
+        }
+        let (overlaid_here, overlaid_c) = match &cut.overlay {
             None => (format!("_seq = {own}"), format!("c._seq = {own}")),
-            Some(grounded) => match grounded.get(&table.stored).filter(|ids| !ids.is_empty()) {
-                None => ("0".to_owned(), "0".to_owned()),
-                Some(ids) => {
-                    let ids = ids
-                        .iter()
-                        .map(|id| self.bind(Sql::Blob(id.to_vec())))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    (
-                        format!("(_seq = {own} AND _del = 0 AND id IN ({ids}))"),
-                        format!("(c._seq = {own} AND c._del = 0 AND c.id IN ({ids}))"),
-                    )
+            Some(Overlay::Grounded(grounded)) => {
+                match grounded.get(&table.stored).filter(|ids| !ids.is_empty()) {
+                    None => ("0".to_owned(), "0".to_owned()),
+                    Some(ids) => {
+                        self.overlaid_rows += ids.len();
+                        let ids = ids
+                            .iter()
+                            .map(|id| self.bind(Sql::Blob(id.to_vec())))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        (
+                            format!("(_seq = {own} AND _del = 0 AND id IN ({ids}))"),
+                            format!("(c._seq = {own} AND c._del = 0 AND c.id IN ({ids}))"),
+                        )
+                    }
                 }
-            },
+            }
+            // No id list: SQLite reaches the overlaid rows through the
+            // policy's correlated keys, as it does committed ones.
+            Some(Overlay::Except {
+                table: except,
+                row,
+                key,
+            }) if *except == table.stored => {
+                let row = self.bind(Sql::Blob(row.to_vec()));
+                let key = self.bind(Sql::Blob(key.clone()));
+                (
+                    format!("(_seq = {own} AND _del = 0 AND (id <> {row} OR _b <> {key}))"),
+                    format!("(c._seq = {own} AND c._del = 0 AND (c.id <> {row} OR c._b <> {key}))"),
+                )
+            }
+            Some(Overlay::Except { .. }) => (
+                format!("(_seq = {own} AND _del = 0)"),
+                format!("(c._seq = {own} AND c._del = 0)"),
+            ),
         };
         let (visible, h_visible, newer) = if extra.is_empty() {
             (

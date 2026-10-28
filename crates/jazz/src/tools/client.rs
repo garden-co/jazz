@@ -63,6 +63,17 @@ use crate::tx::{DurabilityTier as CoreDurabilityTier, TxId};
 const FALLBACK_TICK: Duration = Duration::from_millis(50);
 const RECONNECT_BASE_DELAY: Duration = Duration::from_millis(50);
 const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(2);
+/// After a recoverable tick failure the driver retries after this delay,
+/// doubling per consecutive failure up to [`RECONNECT_MAX_DELAY`].
+const TICK_RETRY_BASE_DELAY: Duration = Duration::from_millis(10);
+/// Consecutive recoverable tick failures the driver rides out; one more
+/// stops it as if the failure were fatal (INV-API-23). With the backoff
+/// above that is about 2.5 s of failures in a row, after which the client
+/// stays stopped: every call reports the error, and recovering means
+/// opening a new client. `Db::tick` does not surface backpressure (the
+/// transport absorbs it), so in practice the retries cover protocol and
+/// transaction-conflict failures.
+const TICK_RECOVERY_ATTEMPTS: u32 = 8;
 /// The local store under `AppContext::data_dir`.
 const STORE_FILE: &str = "jazz.sqlite";
 /// The node id a persistent store's writes are uploaded under. It must
@@ -127,6 +138,52 @@ struct State {
     driven: bool,
     /// Failed upstream connect attempts so far, and the last one's error.
     connect_failures: (u64, Option<String>),
+    /// Consecutive recoverable tick failures.
+    tick_failures: u32,
+    /// The failure that stopped the tick driver. Every later call reports
+    /// it instead of waiting on sync that can no longer happen.
+    stopped: Option<CoreError>,
+}
+
+/// How the tick driver treats a failed [`Db::tick`] (INV-API-23).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TickFailure {
+    /// A passing condition (a full queue, a protocol hiccup the engine
+    /// repairs by detaching the link): retry with bounded backoff.
+    Recoverable,
+    /// The store or schema is unusable: stop and report it.
+    Fatal,
+}
+
+fn classify_tick_driver_error(error: &CoreError) -> TickFailure {
+    use crate::db::ErrorCode::*;
+    match error.code {
+        Backpressure | Protocol | TransactionConflict | NotObserved => TickFailure::Recoverable,
+        Storage
+        | UnsupportedStorageCodecs
+        | Schema
+        | Query
+        | WriteRejected
+        | HistoricalReadRequiresServer => TickFailure::Fatal,
+    }
+}
+
+/// The driver's delay before retrying after `failures` consecutive
+/// recoverable failures.
+fn tick_retry_delay(failures: u32) -> Duration {
+    TICK_RETRY_BASE_DELAY
+        .saturating_mul(1 << failures.saturating_sub(1).min(16))
+        .min(RECONNECT_MAX_DELAY)
+}
+
+/// The error a caller gets once the tick driver stopped on `error`.
+fn stopped_driver_error(error: &CoreError) -> JazzError {
+    let message = format!("the client's sync driver stopped: {error}");
+    match error.code {
+        crate::db::ErrorCode::Storage => JazzError::Storage(message),
+        crate::db::ErrorCode::UnsupportedStorageCodecs => JazzError::UnsupportedStorage(message),
+        _ => JazzError::Sync(message),
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -155,8 +212,12 @@ impl Shared {
     }
 
     fn ensure_open(&self) -> Result<()> {
-        if self.state.borrow().closed {
+        let state = self.state.borrow();
+        if state.closed {
             return Err(JazzError::Connection("client is shut down".to_owned()));
+        }
+        if let Some(error) = &state.stopped {
+            return Err(stopped_driver_error(error));
         }
         Ok(())
     }
@@ -175,7 +236,10 @@ impl Shared {
             }
             if !self.state.borrow().driven {
                 self.tick().await;
-                tokio::task::yield_now().await;
+                match self.state.borrow().tick_failures {
+                    0 => tokio::task::yield_now().await,
+                    failures => tokio::time::sleep(tick_retry_delay(failures)).await,
+                }
                 continue;
             }
             self.tick_soon();
@@ -206,14 +270,39 @@ impl Shared {
         .await
     }
 
+    /// Tick the engine once. A recoverable failure is retried by the next
+    /// tick; a fatal one, or one recoverable failure too many, stops the
+    /// driver and is reported to every caller from then on.
     async fn tick(&self) {
-        if let Err(error) = self.db.tick().await {
-            tracing::warn!(%error, "jazz client tick failed");
+        if self.state.borrow().stopped.is_some() {
+            return;
+        }
+        let result = self.db.tick().await;
+        {
+            let mut state = self.state();
+            match result {
+                Ok(()) => state.tick_failures = 0,
+                Err(error) => match classify_tick_driver_error(&error) {
+                    TickFailure::Recoverable if state.tick_failures < TICK_RECOVERY_ATTEMPTS => {
+                        state.tick_failures += 1;
+                        tracing::warn!(
+                            %error,
+                            failures = state.tick_failures,
+                            "jazz client tick failed; retrying"
+                        );
+                    }
+                    failure => {
+                        tracing::error!(%error, ?failure, "jazz client sync driver stopped");
+                        state.stopped = Some(error);
+                    }
+                },
+            }
         }
         for line in self.db.take_slow_query_report(Some(&self.app)) {
             tracing::warn!(app = %self.app, "{line}");
         }
         self.forward();
+        // Waiters re-poll and see a stopped driver as an error.
         self.progress.send_modify(|generation| *generation += 1);
     }
 
@@ -374,6 +463,17 @@ async fn drive(shared: Weak<Shared>, work: Arc<Notify>) {
                 return;
             }
             shared.tick().await;
+            let state = shared.state.borrow();
+            if state.stopped.is_some() {
+                return;
+            }
+            if state.tick_failures > 0 {
+                let delay = tick_retry_delay(state.tick_failures);
+                drop(state);
+                drop(shared);
+                tokio::time::sleep(delay).await;
+                continue;
+            }
         }
         tokio::select! {
             _ = work.notified() => {}
@@ -1432,6 +1532,12 @@ impl JazzClient {
         crate::tools::JazzClient::connect(context)
             .await
             .expect("connect local JazzClient")
+    }
+
+    /// Make the engine's next ticks fail with `codes`, in order.
+    pub fn fail_next_ticks_for_test(&self, codes: impl IntoIterator<Item = crate::db::ErrorCode>) {
+        self.shared.db.fail_next_ticks_for_test(codes);
+        self.shared.tick_soon();
     }
 
     /// The engine's sync state, for test failure messages.

@@ -1,8 +1,10 @@
 //! The rows a write's policy reads at the authority (SPEC 7, WITH CHECK):
-//! committed state overlaid with the unit's other inserts and updates. The
-//! protected row reads as committed, so a same-table EXISTS never sees the
-//! row it is deciding; the unit's deletes are not overlaid, so a row the
-//! unit both inserts and deletes is never evidence.
+//! committed state overlaid with the unit's other inserts, restores and
+//! updates. The protected row reads as committed, so a same-table EXISTS
+//! never sees the row it is deciding; the unit's deletes are not overlaid,
+//! so a row the unit both inserts and deletes is never evidence. Every
+//! write must also hold on the state the whole unit leaves behind
+//! (INV-RLS-9).
 
 use crate::common;
 
@@ -305,6 +307,465 @@ fn a_unit_s_earlier_inserts_are_evidence_and_its_deletes_are_not() {
     assert_eq!(count(&server, "tasks"), 3);
 }
 
+/// `shows` belong to their chief, who may open or close them and hand them
+/// on. A `gig` needs an open show its writer is chief of.
+fn venue_schema() -> JazzSchema {
+    let my_open_show = PolicyExpr::Exists {
+        table: "shows".to_owned(),
+        condition: Box::new(PolicyExpr::And(vec![
+            cmp("id", outer("show")),
+            cmp("chief", me()),
+            cmp(
+                "open",
+                PolicyValue::Literal(jazz::tools::Value::Boolean(true)),
+            ),
+        ])),
+    };
+    let mine = cmp("chief", me());
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("shows")
+                    .column("chief", ColumnType::Text)
+                    .column("open", ColumnType::Boolean)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(mine.clone())
+                            .with_update(Some(mine.clone()), PolicyExpr::True)
+                            .with_delete(mine),
+                    ),
+            )
+            .table(
+                TableSchemaBuilder::new("gigs")
+                    .fk_column("show", "shows")
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(my_open_show),
+                    ),
+            )
+            .build(),
+    )
+}
+
+/// An authority and alice's client on the venue schema.
+fn venue(alice: AuthorSubject) -> (Db, Db) {
+    let server = block_on(Db::open_history_complete(DbConfig::new(
+        venue_schema(),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xee; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    let client = block_on(Db::open(DbConfig::new(
+        venue_schema(),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xa1; 16]),
+            author: alice,
+        },
+    )))
+    .unwrap();
+    connect(&client, &server, alice);
+    (server, client)
+}
+
+fn show_cells(chief: AuthorSubject, open: bool) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("chief".to_owned(), subject(chief)),
+        ("open".to_owned(), Value::Bool(open)),
+    ])
+}
+
+fn under(show: RowUuid) -> BTreeMap<String, Value> {
+    BTreeMap::from([("show".to_owned(), Value::Uuid(show.0))])
+}
+
+fn opened(open: bool) -> BTreeMap<String, Value> {
+    BTreeMap::from([("open".to_owned(), Value::Bool(open))])
+}
+
+/// A unit's updates and restores are evidence for its other writes, like
+/// its inserts, whatever order the unit names them in.
+///
+/// ```text
+/// alice ──tx{ gig(closed show) }──────────────────► core ──► Rejected
+/// alice ──tx{ gig(show), open show }──────────────► core ──► Accepted
+/// alice ──tx{ gig(deleted show) }─────────────────► core ──► Rejected
+/// alice ──tx{ gig(show), restore show }───────────► core ──► Accepted
+/// ```
+#[test]
+fn a_unit_s_updates_and_restores_are_evidence() {
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let (server, alice_db) = venue(alice);
+    let (closed, deleted) = (
+        RowUuid::from_bytes([0x31; 16]),
+        RowUuid::from_bytes([0x32; 16]),
+    );
+    commit(&alice_db, &server, |batch| {
+        let tx = alice_db.tx_ref(batch);
+        block_on(tx.insert("shows", show_cells(alice, false), options(closed))).unwrap();
+        block_on(tx.insert("shows", show_cells(alice, true), options(deleted))).unwrap();
+    })
+    .unwrap();
+    commit(&alice_db, &server, |batch| {
+        block_on(
+            alice_db
+                .tx_ref(batch)
+                .delete("shows", deleted, Default::default()),
+        )
+        .unwrap();
+    })
+    .unwrap();
+
+    // Planted negatives: neither show grounds a gig on its own.
+    for show in [closed, deleted] {
+        let alone = commit(&alice_db, &server, |batch| {
+            block_on(
+                alice_db
+                    .tx_ref(batch)
+                    .insert("gigs", under(show), Default::default()),
+            )
+            .unwrap();
+        });
+        assert!(alone.is_err(), "a closed or deleted show grounds nothing");
+    }
+
+    commit(&alice_db, &server, |batch| {
+        let tx = alice_db.tx_ref(batch);
+        block_on(tx.insert("gigs", under(closed), Default::default())).unwrap();
+        block_on(tx.update("shows", closed, opened(true), Default::default())).unwrap();
+    })
+    .expect("the unit's update opens the show for its gig");
+    commit(&alice_db, &server, |batch| {
+        let tx = alice_db.tx_ref(batch);
+        block_on(tx.insert("gigs", under(deleted), Default::default())).unwrap();
+        block_on(tx.restore("shows", deleted, None, Default::default())).unwrap();
+    })
+    .expect("the unit's restore brings the show back for its gig");
+    assert_eq!(count(&server, "gigs"), 2);
+}
+
+/// Every write must also hold on the state the whole unit leaves behind:
+/// a write whose evidence the same unit takes away is refused, although
+/// it passes against committed state before the rest of the unit lands.
+///
+/// ```text
+/// alice ──tx{ gig(show), close show }─────────────► core ──► Rejected
+/// alice ──tx{ gig(show), hand show to bob }───────► core ──► Rejected
+/// alice ──tx{ gig(show), rewrite show unchanged }─► core ──► Accepted
+/// ```
+#[test]
+fn a_write_must_hold_on_the_unit_s_post_state() {
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb0; 16]);
+    let (server, alice_db) = venue(alice);
+    let show = RowUuid::from_bytes([0x41; 16]);
+    commit(&alice_db, &server, |batch| {
+        block_on(
+            alice_db
+                .tx_ref(batch)
+                .insert("shows", show_cells(alice, true), options(show)),
+        )
+        .unwrap();
+    })
+    .unwrap();
+
+    // An update of the evidence after the gig, under a monotone policy.
+    for (taken, cells) in [
+        ("closing the show", opened(false)),
+        (
+            "handing the show on",
+            BTreeMap::from([("chief".to_owned(), subject(bob))]),
+        ),
+    ] {
+        let refused = commit(&alice_db, &server, |batch| {
+            let tx = alice_db.tx_ref(batch);
+            block_on(tx.insert("gigs", under(show), Default::default())).unwrap();
+            block_on(tx.update("shows", show, cells, Default::default())).unwrap();
+        });
+        assert!(refused.is_err(), "{taken} takes the gig's evidence away");
+    }
+    // Planted positive: rewriting the show without taking anything away.
+    commit(&alice_db, &server, |batch| {
+        let tx = alice_db.tx_ref(batch);
+        block_on(tx.insert("gigs", under(show), Default::default())).unwrap();
+        block_on(tx.update("shows", show, opened(true), Default::default())).unwrap();
+    })
+    .expect("an update that keeps the evidence passes the post-state check");
+    assert_eq!(count(&server, "gigs"), 1);
+}
+
+/// Deleting a row and writing it anew in the same unit replaces its
+/// content just as an update does: the rewrite is checked as an insert or
+/// a restore, but a write that relied on the old content is still checked
+/// against the post-state.
+///
+/// ```text
+/// alice ──tx{ gig(show), delete show, upsert show closed }────► core ──► Rejected
+/// alice ──tx{ gig(show), delete show, restore show closed }───► core ──► Rejected
+/// alice ──tx{ gig(show), delete show, upsert show open }──────► core ──► Accepted
+/// ```
+#[test]
+fn rewriting_a_deleted_row_in_the_same_unit_is_checked_against_the_post_state() {
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let (server, alice_db) = venue(alice);
+    let show = RowUuid::from_bytes([0x43; 16]);
+    commit(&alice_db, &server, |batch| {
+        block_on(
+            alice_db
+                .tx_ref(batch)
+                .insert("shows", show_cells(alice, true), options(show)),
+        )
+        .unwrap();
+    })
+    .unwrap();
+
+    let refused = commit(&alice_db, &server, |batch| {
+        let tx = alice_db.tx_ref(batch);
+        block_on(tx.insert("gigs", under(show), Default::default())).unwrap();
+        block_on(tx.delete("shows", show, Default::default())).unwrap();
+        block_on(tx.upsert("shows", show, show_cells(alice, false), Default::default())).unwrap();
+    });
+    assert!(
+        refused.is_err(),
+        "an upsert over the deleted show closes it"
+    );
+    let refused = commit(&alice_db, &server, |batch| {
+        let tx = alice_db.tx_ref(batch);
+        block_on(tx.insert("gigs", under(show), Default::default())).unwrap();
+        block_on(tx.delete("shows", show, Default::default())).unwrap();
+        block_on(tx.restore(
+            "shows",
+            show,
+            Some(show_cells(alice, false)),
+            Default::default(),
+        ))
+        .unwrap();
+    });
+    assert!(refused.is_err(), "a restore of the deleted show closes it");
+    // Planted positive: the rewrite keeps the show open.
+    commit(&alice_db, &server, |batch| {
+        let tx = alice_db.tx_ref(batch);
+        block_on(tx.insert("gigs", under(show), Default::default())).unwrap();
+        block_on(tx.delete("shows", show, Default::default())).unwrap();
+        block_on(tx.upsert("shows", show, show_cells(alice, true), Default::default())).unwrap();
+    })
+    .expect("a rewrite that keeps the evidence passes the post-state check");
+    assert_eq!(count(&server, "gigs"), 1);
+}
+
+/// `folders` nest in a folder their writer owns.
+fn folder_schema() -> JazzSchema {
+    let in_my_folder = PolicyExpr::Exists {
+        table: "folders".to_owned(),
+        condition: Box::new(PolicyExpr::And(vec![
+            cmp("id", outer("parent")),
+            cmp("owner", me()),
+        ])),
+    };
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("folders")
+                    .column("owner", ColumnType::Text)
+                    .fk_column("parent", "folders")
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(in_my_folder.clone())
+                            .with_update(Some(in_my_folder.clone()), in_my_folder),
+                    ),
+            )
+            .build(),
+    )
+}
+
+/// An authority holding alice's root folder, and alice's client.
+fn folders(alice: AuthorSubject, root: RowUuid) -> (Db, Db) {
+    let server = block_on(Db::open_history_complete(DbConfig::new(
+        folder_schema(),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xee; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    block_on(server.insert("folders", folder(alice, root), options(root))).unwrap();
+    let client = block_on(Db::open(DbConfig::new(
+        folder_schema(),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xa1; 16]),
+            author: alice,
+        },
+    )))
+    .unwrap();
+    connect(&client, &server, alice);
+    (server, client)
+}
+
+fn folder(owner: AuthorSubject, parent: RowUuid) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("owner".to_owned(), subject(owner)),
+        ("parent".to_owned(), Value::Uuid(parent.0)),
+    ])
+}
+
+fn chain_folder(index: u128) -> RowUuid {
+    RowUuid(uuid::Uuid::from_u128(0x0f00_0000 + index))
+}
+
+/// Insert `len` folders as one chain under `root`, children first: folder
+/// `i` nests in folder `i + 1`, the last in `root`. Each round of the
+/// authority's checks grounds one more level.
+fn insert_chain(db: &Db, batch: OpenTransactionId, alice: AuthorSubject, len: u128, root: RowUuid) {
+    let tx = db.tx_ref(batch);
+    for index in 0..len {
+        let parent = if index + 1 == len {
+            root
+        } else {
+            chain_folder(index + 1)
+        };
+        block_on(tx.insert(
+            "folders",
+            folder(alice, parent),
+            options(chain_folder(index)),
+        ))
+        .unwrap();
+    }
+}
+
+/// A dependent chain named children first is still accepted, one level
+/// per round; an import-sized one is rejected as not supported yet once
+/// its checks would read more than the evidence budget of its own rows,
+/// instead of being re-checked round after round.
+///
+/// ```text
+/// alice ──tx{ f0(parent: f1), …, f23(parent: root) }─────► core ──► Accepted
+/// alice ──tx{ 2000-folder chain, children first }────────► core ──► Rejected (not supported yet)
+/// ```
+#[test]
+fn a_dependent_chain_is_grounded_round_by_round_within_a_budget() {
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let root = RowUuid::from_bytes([0x50; 16]);
+    let (server, alice_db) = folders(alice, root);
+    commit(&alice_db, &server, |batch| {
+        insert_chain(&alice_db, batch, alice, 24, root)
+    })
+    .expect("a chain named children first is grounded");
+    assert_eq!(count(&server, "folders"), 25);
+
+    let root = RowUuid::from_bytes([0x51; 16]);
+    let (server, alice_db) = folders(alice, root);
+    let refused = commit(&alice_db, &server, |batch| {
+        insert_chain(&alice_db, batch, alice, 2_000, root)
+    })
+    .expect_err("an import-sized self-dependent chain is over the budget");
+    assert!(
+        refused.to_string().contains("is not supported yet"),
+        "{refused}"
+    );
+    assert_eq!(count(&server, "folders"), 1);
+}
+
+/// The common import shape: thousands of rows whose policy reads their own
+/// table, all under a committed parent. Every check passes on committed
+/// state in the first round, the policy is monotone and the unit updates
+/// nothing, so no post-state pass and no budget applies.
+///
+/// ```text
+/// alice ──tx{ 2000 folders(parent: committed root) }─────► core ──► Accepted
+/// ```
+#[test]
+fn an_import_under_committed_parents_is_accepted() {
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let root = RowUuid::from_bytes([0x52; 16]);
+    let (server, alice_db) = folders(alice, root);
+    commit(&alice_db, &server, |batch| {
+        let tx = alice_db.tx_ref(batch);
+        for index in 0..2_000 {
+            block_on(tx.insert("folders", folder(alice, root), options(chain_folder(index))))
+                .unwrap();
+        }
+    })
+    .expect("an import under a committed parent is accepted");
+    assert_eq!(count(&server, "folders"), 2_001);
+}
+
+/// A bulk update under a policy that reads its own table re-checks every
+/// write against the unit's post-state, but reaches the unit's rows
+/// through the policy's keys: a thousand updates fit, where binding the
+/// unit's ids into each re-check would cost a million rows of evidence.
+/// The post-state still refuses an update whose evidence the same unit
+/// takes away.
+///
+/// ```text
+/// alice ──tx{ update 1000 folders(parent: root) }──────────────────► core ──► Accepted
+/// alice ──tx{ f1.parent = f0, f0.owner = bob, 998 updates }────────► core ──► Rejected
+/// ```
+#[test]
+fn a_bulk_update_is_checked_against_the_post_state_without_reading_it_whole() {
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb0; 16]);
+    let root = RowUuid::from_bytes([0x53; 16]);
+    let (server, alice_db) = folders(alice, root);
+    commit(&alice_db, &server, |batch| {
+        let tx = alice_db.tx_ref(batch);
+        for index in 0..1_000 {
+            block_on(tx.insert("folders", folder(alice, root), options(chain_folder(index))))
+                .unwrap();
+        }
+    })
+    .unwrap();
+
+    commit(&alice_db, &server, |batch| {
+        let tx = alice_db.tx_ref(batch);
+        for index in 0..1_000 {
+            block_on(tx.update(
+                "folders",
+                chain_folder(index),
+                folder(alice, root),
+                Default::default(),
+            ))
+            .unwrap();
+        }
+    })
+    .expect("a thousand updates under committed evidence are accepted");
+
+    let refused = commit(&alice_db, &server, |batch| {
+        let tx = alice_db.tx_ref(batch);
+        block_on(tx.update(
+            "folders",
+            chain_folder(1),
+            folder(alice, chain_folder(0)),
+            Default::default(),
+        ))
+        .unwrap();
+        block_on(tx.update(
+            "folders",
+            chain_folder(0),
+            folder(bob, root),
+            Default::default(),
+        ))
+        .unwrap();
+        for index in 2..1_000 {
+            block_on(tx.update(
+                "folders",
+                chain_folder(index),
+                folder(alice, root),
+                Default::default(),
+            ))
+            .unwrap();
+        }
+    })
+    .expect_err("f1's parent is bob's in the unit's post-state");
+    assert!(
+        !refused.to_string().contains("is not supported yet"),
+        "{refused}"
+    );
+}
+
 /// A write check reads its policy's rows as of the unit's cut: committed
 /// rows, overlaid with the unit's grounded ones, plus the newest history
 /// image of rows changed since. Every arm of that read must let SQLite
@@ -344,4 +805,12 @@ fn write_checks_search_the_policy_table_through_the_cut() {
             "grounded {grounded:?}: {plan}"
         );
     }
+    // The post-state pass overlays the unit's rows without an id list.
+    let plan = server
+        .explain_post_state_check_plan("members", joining, alice)
+        .unwrap();
+    assert!(
+        !plan.contains("SCAN") && !plan.contains("CO-ROUTINE"),
+        "post-state: {plan}"
+    );
 }
