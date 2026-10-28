@@ -201,7 +201,7 @@ impl Transport for SimTransport {
         queue.stats.messages += 1;
         queue.stats.frames += frames.len() as u64;
         queue.stats.bytes += frames.iter().map(|frame| frame.len() as u64).sum::<u64>();
-        if let SyncMessage::Rows { images } = &message {
+        if let SyncMessage::Rows { images, .. } = &message {
             queue.stats.row_images += images.len() as u64;
         }
         *queue.stats.by_kind.entry(kind(&message)).or_default() += 1;

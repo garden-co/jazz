@@ -22,8 +22,8 @@ use std::task::{Context, Poll, Waker};
 
 use duplex_transport::duplex;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, FileOptions, InsertOptions, ReadOpts, SyncMessage, Transport,
-    block_on,
+    Db, DbConfig, DbIdentity, FileOptions, InsertOptions, ReadOpts, ReadSpan, SyncMessage,
+    Transport, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::Query;
@@ -313,7 +313,10 @@ fn a_reopened_replica_resumes_its_subscription_from_its_stored_watermark() {
         "no held rows are declared: {sent:?}"
     );
     let since = sent.iter().find_map(|m| match m {
-        SyncMessage::Subscribe { since, .. } => Some(*since),
+        SyncMessage::Read {
+            span: ReadSpan::Live { since },
+            ..
+        } => Some(*since),
         _ => None,
     });
     assert!(
