@@ -5756,6 +5756,25 @@ impl Db {
                     )?);
                 }
             }
+            // An eviction is the row's state as of now, after every event
+            // drained above: a version of it a result shipped earlier in the
+            // tick is stale. Shipped, it would also reach the writer as a
+            // held row of its commit's Fate, which goes after the evictions
+            // and would reinstate the row (INV-SYNC-14).
+            let evicted: HashSet<(&str, [u8; 16], &[u8])> = evictions
+                .iter()
+                .filter_map(|eviction| match eviction {
+                    SyncMessage::Evict { table, id, key } => {
+                        Some((table.as_str(), *id, key.as_slice()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            if !evicted.is_empty() {
+                images.retain(|image| {
+                    !evicted.contains(&(image.table.as_str(), image.id, image.key.as_slice()))
+                });
+            }
             for image in &images {
                 watch.insert(wk((
                     image.table.clone(),
@@ -6159,6 +6178,7 @@ impl Db {
                 let names = inner.schema.clone();
                 let owner = inner.owner.clone();
                 let mut watch = std::mem::take(&mut inner.sessions[index].watch);
+                let mut held = std::mem::take(&mut inner.sessions[index].held);
                 let mut touched = Vec::new();
                 let mut evict = Vec::new();
                 let mut by_table: BTreeMap<String, HashMap<([u8; 16], Vec<u8>), u64>> =
@@ -6199,6 +6219,18 @@ impl Db {
                                     watch_key(&Sql::Blob(id.to_vec())),
                                 )));
                                 watch.insert(held_key(&stored, &id));
+                                // The replica keeps it whether or not a
+                                // live query reads it: held, a commit to a
+                                // table its read policy depends on (the
+                                // client's own, say) re-checks it, so the
+                                // copy is evicted once the client loses
+                                // access. An id watch sees only writes to
+                                // the row itself.
+                                if policy.is_some() && can {
+                                    held.entry(stored.clone())
+                                        .or_default()
+                                        .insert((RowUuid::from_bytes(id), key.clone()), true);
+                                }
                                 if now != seq || !can {
                                     touched.push((stored.clone(), RowUuid::from_bytes(id), key));
                                 }
@@ -6213,6 +6245,7 @@ impl Db {
                 }
                 let session = &mut inner.sessions[index];
                 session.watch = watch;
+                session.held = held;
                 session.touched.extend(touched);
                 session.stale.extend(evict);
             }
