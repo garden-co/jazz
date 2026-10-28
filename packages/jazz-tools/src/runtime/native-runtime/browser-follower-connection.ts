@@ -422,7 +422,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       // The worker keeps reconnecting after a published outage. Once it is
       // live again, release the relayed error so Global reads work again.
       if (message.state === "connected") this.runtime.clearRemoteServerTransportError();
-      this.callbacks.onRemoteLinkChange?.(message.state);
+      this.callbacks.onRemoteLinkChange?.(message.state, message.link);
       return;
     }
     if (message.type === "mutation-error") {

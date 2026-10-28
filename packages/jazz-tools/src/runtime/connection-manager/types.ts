@@ -11,6 +11,14 @@ import { resolveTelemetryCollectorUrlFromEnv } from "../sync-telemetry.js";
 import type { AuthFailureReason } from "../auth-state.js";
 import { getTrustedReservedSession, setTrustedReservedSession } from "../db-internal-session.js";
 import type { RemoteLinkState } from "../remote-link-state.js";
+import {
+  CONNECTING,
+  LOCAL_ONLY,
+  offlineLink,
+  syncStatus,
+  type LinkStatus,
+  type SyncStatus,
+} from "../sync-status.js";
 
 function shouldBypassLocalPolicies(config: DbConfig): boolean {
   return !!config.adminSecret;
@@ -81,6 +89,8 @@ export abstract class ConnectionManager {
   private clientSchema: WasmSchema | null = null;
   private disposeRuntimeTelemetry: (() => void) | null = null;
   private remoteLinkHintBinding: AbortController | null = null;
+  private readonly syncStatusListeners = new Set<() => void>();
+  private syncStatusBinding: AbortController | null = null;
 
   /** Browser managers set this during their asynchronous bootstrap. */
   protected foregroundNodeLease: ForegroundNodeLease | undefined;
@@ -126,6 +136,7 @@ export abstract class ConnectionManager {
     this.client = client;
     this.clientSchema = runtimeSchema;
     this.bindRemoteLinkHint(client);
+    this.bindSyncStatus();
     this.onClientCreated({ schemaKey, schema: runtimeSchema, client });
     return client;
   }
@@ -233,6 +244,88 @@ export abstract class ConnectionManager {
     this.getCurrentClient()?.getRuntime().onRemoteLinkStateChange?.(listener, signal);
   }
 
+  /** Whether this Db's writes reached the server; see {@link SyncStatus}. */
+  syncStatus(): SyncStatus {
+    const link = this.linkStatus();
+    // Without a server, local commits are never uploaded, so none wait.
+    if (link.state === "local-only") return syncStatus(link, 0);
+    return syncStatus(link, this.client?.getRuntime().pendingUploadCount?.() ?? 0);
+  }
+
+  /** The upstream connection as the app sees it, including explicit disconnects. */
+  linkStatus(): LinkStatus {
+    const { config, runtimeSource } = this.host;
+    if (!config.serverUrl && runtimeSource?.nativeConnection?.configured() !== true) {
+      return LOCAL_ONLY;
+    }
+    if (this.isExplicitlyOffline()) return offlineLink("disconnected");
+    return this.transportLinkStatus();
+  }
+
+  /** The transport's own view, once a server is configured and not explicitly offline. */
+  protected transportLinkStatus(): LinkStatus {
+    const link = this.client?.getRuntime().upstreamLinkStatus?.() ?? CONNECTING;
+    // A configured server whose transport has not been requested yet is
+    // about to be connected by this manager, not absent.
+    return link.state === "local-only" ? CONNECTING : link;
+  }
+
+  /**
+   * Call `listener` when {@link syncStatus} may have changed, across client
+   * replacements. Listeners compare snapshots themselves.
+   */
+  onSyncStatusChange(listener: () => void, signal: AbortSignal): void {
+    if (signal.aborted) return;
+    this.syncStatusListeners.add(listener);
+    signal.addEventListener(
+      "abort",
+      () => {
+        this.syncStatusListeners.delete(listener);
+        if (this.syncStatusListeners.size === 0) this.unbindSyncStatus();
+      },
+      { once: true },
+    );
+    this.onExplicitOfflineChange(listener, signal);
+    this.bindSyncStatus();
+  }
+
+  protected notifySyncStatus(): void {
+    for (const listener of [...this.syncStatusListeners]) listener();
+  }
+
+  /** Follow the current client's runtime while anyone listens. */
+  private bindSyncStatus(): void {
+    if (this.syncStatusBinding || !this.client || this.syncStatusListeners.size === 0) return;
+    const binding = new AbortController();
+    this.syncStatusBinding = binding;
+    this.client.getRuntime().onSyncStatusChange?.(() => this.notifySyncStatus(), binding.signal);
+    // The client's arrival may already change the status (a recovered
+    // pending write, a transport that is now being requested).
+    this.notifySyncStatus();
+  }
+
+  private unbindSyncStatus(): void {
+    this.syncStatusBinding?.abort();
+    this.syncStatusBinding = null;
+  }
+
+  /**
+   * Wait until every write this Db committed so far is accepted or rejected
+   * by the server. Like a write's own Global wait, it stays pending through
+   * outages and credential renewal and fails only once the link stops for
+   * good (#3923). `signal` ends the wait; the writes are unaffected.
+   */
+  async waitForSync(signal?: AbortSignal): Promise<void> {
+    const runtime = this.getCurrentClient()?.getRuntime();
+    if (!runtime || this.linkStatus().state === "local-only") return;
+    if (!(runtime instanceof NativeRuntimeAdapter))
+      throw new Error("Runtime does not support waiting for sync");
+    await runtime.waitForPendingWrites("global", {
+      throughOutage: true,
+      signal,
+    });
+  }
+
   /**
    * Browser worker followers learn the namespace-wide explicit-offline state
    * during their initial handshake. Other runtimes already have a synchronous
@@ -287,8 +380,11 @@ export abstract class ConnectionManager {
   protected clearClient(): void {
     this.remoteLinkHintBinding?.abort();
     this.remoteLinkHintBinding = null;
+    this.unbindSyncStatus();
+    const hadClient = this.client !== null;
     this.client = null;
     this.clientSchema = null;
+    if (hadClient) this.notifySyncStatus();
   }
 
   protected detachClient(): JazzClient | null {

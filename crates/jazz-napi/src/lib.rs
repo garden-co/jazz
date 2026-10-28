@@ -1810,6 +1810,12 @@ impl NapiDb {
         Ok(evicted as u32)
     }
 
+    /// How many local commits still wait for the server's verdict.
+    #[napi(js_name = "pendingUploadCount")]
+    pub fn pending_upload_count(&self) -> js::Result<u32> {
+        Ok(self.binding()?.pending_upload_count() as u32)
+    }
+
     /// The optimistic in-memory side of a client/worker pair: its
     /// subscriptions open with the worker's answer.
     #[napi(js_name = "setNonDurableClient")]
