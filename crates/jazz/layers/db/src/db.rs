@@ -1308,6 +1308,24 @@ impl Db {
         self.inner.borrow().slow.borrow_mut().take()
     }
 
+    /// The slow-query report due now: one line per shape that ran slow
+    /// since the last report, naming `app`. The first slow query is
+    /// reported at once, later ones at most every
+    /// [`crate::slow::REPORT_EVERY`]; empty in between. Hosts call it after
+    /// ticking and write the lines where they report problems.
+    pub fn take_slow_query_report(&self, app: Option<&str>) -> Vec<String> {
+        self.take_due_slow_queries()
+            .map(|(shapes, dropped)| crate::slow::report_lines(&shapes, dropped, app))
+            .unwrap_or_default()
+    }
+
+    /// [`Db::take_slow_queries`] when a report is due (as
+    /// [`Db::take_slow_query_report`] times it), for a host that reports
+    /// the shapes itself; `None` in between.
+    pub fn take_due_slow_queries(&self) -> Option<(Vec<crate::slow::SlowQuery>, u64)> {
+        self.inner.borrow().slow.borrow_mut().take_due()
+    }
+
     /// Record query runs taking at least `threshold` (`None`: none).
     /// Defaults to [`crate::slow::DEFAULT_SLOW_QUERY_THRESHOLD`].
     pub fn set_slow_query_threshold(&self, threshold: Option<std::time::Duration>) {
@@ -2359,7 +2377,11 @@ impl Inner {
         let mut slow = self.slow.borrow_mut();
         if slow.is_slow(run.elapsed) {
             run.rows = rows.len() as u64;
-            slow.record(table, &compiled.sql, run, || {
+            let schema_version = self
+                .conn
+                .query_row("PRAGMA schema_version", [], |r| r.get(0))
+                .ok();
+            slow.record(table, &compiled.sql, run, schema_version, || {
                 self.query_plan(&compiled.sql, &compiled.params)
                     .unwrap_or_else(|error| format!("(no plan: {error})"))
             });

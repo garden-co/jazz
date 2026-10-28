@@ -3,14 +3,22 @@
 //! timed; one that takes at least the threshold is recorded under its
 //! shape (the compiled SQL, which binds every literal as a parameter),
 //! with what SQLite did for it and its query plan, until the host takes
-//! the log ([`crate::Db::take_slow_queries`]) to show the developer.
-//! Nothing is refused or reordered: the log only reports.
+//! the log to show the developer: every host takes it after ticking
+//! ([`crate::Db::take_slow_query_report`]), which reports the first slow
+//! query right away and then at most every [`REPORT_EVERY`], and writes one
+//! line per shape ([`SlowQuery::line`]) where that host reports problems
+//! (the server's log, the browser or React Native console, a Rust client's
+//! tracing). Nothing is refused or reordered: the log only reports.
 
 use std::collections::HashMap;
 use std::time::Duration;
 
 /// Default threshold: about ten server ticks' worth of writer time.
 pub const DEFAULT_SLOW_QUERY_THRESHOLD: Duration = Duration::from_millis(50);
+
+/// How often a host reports: each report sums a shape's slow runs since
+/// the last, so a hot slow query is one line per window.
+pub const REPORT_EVERY: Duration = Duration::from_secs(10);
 
 /// Shapes kept per window; later new shapes only count as dropped.
 const MAX_SHAPES: usize = 256;
@@ -79,6 +87,32 @@ impl SlowQuery {
         }
         (!hints.is_empty()).then(|| hints.join("; "))
     }
+
+    /// The report line for this shape, naming `app` when the host knows it.
+    pub fn line(&self, app: Option<&str>) -> String {
+        let app = app.map(|app| format!(" in app {app}")).unwrap_or_default();
+        let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+        let mut line = format!(
+            "slow query{app} on {}: {} slow run(s), slowest {:.0} ms, {:.0} ms of database time in all \
+             (slowest run: {} row(s) returned, {} row(s) scanned{})",
+            self.table,
+            self.runs,
+            ms(self.slowest),
+            ms(self.total),
+            self.rows,
+            self.scanned,
+            if self.sorted { ", sorted" } else { "" },
+        );
+        if let Some(hint) = self.hint() {
+            line.push_str(&format!(". It {hint}"));
+        }
+        line.push_str(&format!(
+            ". Plan: {}. SQL: {}",
+            self.plan.replace('\n', " | "),
+            self.sql
+        ));
+        line
+    }
 }
 
 /// What one statement run cost.
@@ -98,6 +132,12 @@ pub(crate) struct SlowLog {
     /// Plans already read, by statement: a plan does not change while the
     /// schema does not, and reading one prepares the statement again.
     plans: HashMap<String, String>,
+    /// The SQLite schema version `plans` were read under: any DDL (a new
+    /// index, a schema change) bumps it and they are read again.
+    plans_version: Option<i64>,
+    /// When the last report was taken (`None`: none yet, so the first slow
+    /// query is reported right away).
+    reported: Option<web_time::Instant>,
 }
 
 impl Default for SlowLog {
@@ -107,6 +147,8 @@ impl Default for SlowLog {
             shapes: HashMap::new(),
             dropped: 0,
             plans: HashMap::new(),
+            plans_version: None,
+            reported: None,
         }
     }
 }
@@ -121,10 +163,23 @@ impl SlowLog {
         self.threshold.is_some_and(|threshold| elapsed >= threshold)
     }
 
-    pub fn record(&mut self, table: &str, sql: &str, run: Run, plan: impl FnOnce() -> String) {
+    /// Record a slow run of `sql`. `schema_version` is SQLite's schema
+    /// version now (`None` if unknown: the plan is read afresh).
+    pub fn record(
+        &mut self,
+        table: &str,
+        sql: &str,
+        run: Run,
+        schema_version: Option<i64>,
+        plan: impl FnOnce() -> String,
+    ) {
         if !self.shapes.contains_key(sql) && self.shapes.len() >= MAX_SHAPES {
             self.dropped += 1;
             return;
+        }
+        if schema_version.is_none() || schema_version != self.plans_version {
+            self.plans.clear();
+            self.plans_version = schema_version;
         }
         if !self.plans.contains_key(sql) {
             if self.plans.len() >= MAX_SHAPES {
@@ -147,6 +202,10 @@ impl SlowLog {
                 sorted: false,
                 plan: plan.clone(),
             });
+        // A plan read after DDL in this window replaces the stale one.
+        if entry.plan != *plan {
+            entry.plan = plan.clone();
+        }
         entry.runs += 1;
         entry.total += run.elapsed;
         if run.elapsed >= entry.slowest {
@@ -164,6 +223,34 @@ impl SlowLog {
         shapes.sort_by(|a, b| b.total.cmp(&a.total));
         (shapes, std::mem::take(&mut self.dropped))
     }
+
+    /// [`SlowLog::take`] when there is something to report and
+    /// [`REPORT_EVERY`] passed since the last report, else nothing.
+    pub fn take_due(&mut self) -> Option<(Vec<SlowQuery>, u64)> {
+        if self.shapes.is_empty() && self.dropped == 0 {
+            return None;
+        }
+        if self
+            .reported
+            .is_some_and(|reported| reported.elapsed() < REPORT_EVERY)
+        {
+            return None;
+        }
+        self.reported = Some(web_time::Instant::now());
+        Some(self.take())
+    }
+}
+
+/// Report lines for a window's shapes and its dropped count.
+pub fn report_lines(shapes: &[SlowQuery], dropped: u64, app: Option<&str>) -> Vec<String> {
+    let mut lines: Vec<String> = shapes.iter().map(|shape| shape.line(app)).collect();
+    if dropped > 0 {
+        let app = app.map(|app| format!(" in app {app}")).unwrap_or_default();
+        lines.push(format!(
+            "{dropped} more slow query shape(s){app} than one report holds"
+        ));
+    }
+    lines
 }
 
 #[cfg(test)]
@@ -212,12 +299,12 @@ mod tests {
         };
         let mut plans = 0;
         for (ms, rows) in [(60, 1), (90, 2), (70, 3)] {
-            log.record("t", "SELECT a", run(ms, rows), || {
+            log.record("t", "SELECT a", run(ms, rows), Some(1), || {
                 plans += 1;
                 "SCAN t".into()
             });
         }
-        log.record("u", "SELECT b", run(55, 9), || "SCAN u".into());
+        log.record("u", "SELECT b", run(55, 9), Some(1), || "SCAN u".into());
         let (shapes, dropped) = log.take();
         assert_eq!(plans, 1, "a plan is read once per shape");
         assert_eq!(dropped, 0);
@@ -228,5 +315,57 @@ mod tests {
         assert_eq!(shapes[0].slowest, Duration::from_millis(90));
         assert_eq!(shapes[0].rows, 2);
         assert!(log.take().0.is_empty(), "taking starts a new window");
+    }
+
+    #[test]
+    fn a_schema_change_reads_the_plan_again() {
+        let mut log = SlowLog::default();
+        let run = Run {
+            elapsed: Duration::from_millis(60),
+            ..Run::default()
+        };
+        log.record("t", "SELECT a", run, Some(1), || "SCAN t".into());
+        log.record("t", "SELECT a", run, Some(1), || unreachable!("cached"));
+        // An index was created: the schema version moved.
+        log.record("t", "SELECT a", run, Some(2), || {
+            "SEARCH t USING INDEX t_by_a (a=?)".into()
+        });
+        let (shapes, _) = log.take();
+        assert_eq!(shapes[0].plan, "SEARCH t USING INDEX t_by_a (a=?)");
+        assert_eq!(shapes[0].hint(), None);
+    }
+
+    #[test]
+    fn a_line_names_the_app_hint_plan_and_sql() {
+        let mut slow = shape("SCAN t\nUSE TEMP B-TREE FOR ORDER BY", true);
+        slow.table = "tasks".into();
+        slow.slowest = Duration::from_millis(182);
+        let line = slow.line(Some("my-app"));
+        assert!(
+            line.starts_with("slow query in app my-app on tasks: 1 slow run(s), slowest 182 ms"),
+            "{line}"
+        );
+        assert!(line.contains("scans all of tasks"), "{line}");
+        assert!(
+            line.contains("Plan: SCAN t | USE TEMP B-TREE FOR ORDER BY"),
+            "{line}"
+        );
+        assert!(line.ends_with("SQL: SELECT"), "{line}");
+        assert!(!slow.line(None).contains(" in app "));
+    }
+
+    #[test]
+    fn the_first_slow_query_is_reported_at_once_then_once_per_window() {
+        let mut log = SlowLog::default();
+        assert!(log.take_due().is_none(), "nothing to report");
+        let run = Run {
+            elapsed: Duration::from_millis(60),
+            ..Run::default()
+        };
+        log.record("t", "SELECT a", run, Some(1), || "SCAN t".into());
+        assert_eq!(log.take_due().unwrap().0.len(), 1);
+        log.record("t", "SELECT a", run, Some(1), || "SCAN t".into());
+        assert!(log.take_due().is_none(), "within the window");
+        assert_eq!(log.take().0[0].runs, 1, "kept for the next report");
     }
 }
