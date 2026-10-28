@@ -147,6 +147,8 @@ mod sync_wire_corpus;
 mod text_merge;
 #[path = "../transaction_handles.rs"]
 mod transaction_handles;
+#[path = "../transaction_identity.rs"]
+mod transaction_identity;
 #[path = "../transaction_read_tiers.rs"]
 mod transaction_read_tiers;
 #[path = "../union_queries.rs"]
