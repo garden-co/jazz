@@ -1049,13 +1049,19 @@ impl Transport {
     }
 
     #[napi(js_name = "sendWireFrame")]
-    pub fn send_wire_frame(&self, frame: Uint8Array) {
-        self.link.receive([frame.to_vec()]);
+    pub fn send_wire_frame(&self, frame: Uint8Array) -> js::Result<()> {
+        self.link
+            .receive_checked([&*frame])
+            .map_err(|error| napi_core_error(&error))?;
+        Ok(())
     }
 
     #[napi(js_name = "sendWireFrames")]
-    pub fn send_wire_frames(&self, frames: Vec<Uint8Array>) {
-        self.link.receive(frames.iter().map(|frame| frame.to_vec()));
+    pub fn send_wire_frames(&self, frames: Vec<Uint8Array>) -> js::Result<()> {
+        self.link
+            .receive_checked(frames.iter().map(|frame| &**frame))
+            .map_err(|error| napi_core_error(&error))?;
+        Ok(())
     }
 
     #[napi(js_name = "recvWireFrames")]

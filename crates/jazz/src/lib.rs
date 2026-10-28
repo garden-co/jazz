@@ -33,6 +33,7 @@ pub use jazz_db::host;
 pub use jazz_db::link;
 pub use jazz_db::result_tree;
 pub use jazz_db::slow;
+pub use jazz_db::sync_codec;
 pub use jazz_model::model;
 pub use jazz_model::query;
 pub use jazz_model::row_input;

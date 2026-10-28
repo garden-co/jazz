@@ -1620,25 +1620,34 @@ impl WasmDb {
     #[wasm_bindgen(js_name = connectUpstreamWithSession)]
     pub fn connect_upstream_with_session(
         &self,
-        _protocol_version: u16,
+        protocol_version: u16,
         features: u32,
         remote_node: Vec<u8>,
         _remote_epoch: u64,
         local_node: Vec<u8>,
         _local_epoch: u64,
     ) -> Result<js_sys::Promise, JsValue> {
+        let protocol_error =
+            |message: String| core_error_to_js(&Error::new(jazz::db::ErrorCode::Protocol, message));
+        if protocol_version != jazz::wire::WIRE_PROTOCOL_VERSION {
+            return Err(protocol_error(format!(
+                "server negotiated wire protocol {protocol_version}, but this WASM binding supports only {}",
+                jazz::wire::WIRE_PROTOCOL_VERSION
+            )));
+        }
+        let features = features as u64;
+        let unsupported = features & !jazz::wire::current_wire_features();
+        if unsupported != 0 {
+            return Err(protocol_error(format!(
+                "server negotiated wire features {features:#x}, but this WASM binding was not compiled with {unsupported:#x}"
+            )));
+        }
         let _: [u8; 16] = remote_node
             .try_into()
             .map_err(|_| JsValue::from_str("server hello authority node must be 16 bytes"))?;
         let _: [u8; 16] = local_node
             .try_into()
             .map_err(|_| JsValue::from_str("local peer identity must be 16 bytes"))?;
-        let unsupported = u64::from(features) & !jazz::wire::current_wire_features();
-        if unsupported != 0 {
-            return Err(JsValue::from_str(&format!(
-                "server negotiated wire features {features:#x}, but this WASM binding was not compiled with {unsupported:#x}"
-            )));
-        }
         self.connect_upstream()
     }
 
@@ -1770,17 +1779,20 @@ impl WasmTransport {
     pub fn set_auxiliary_trace_enabled(&self, _enabled: bool) {}
 
     #[wasm_bindgen(js_name = sendWireFrame)]
-    pub fn send_wire_frame(&self, frame: Vec<u8>) {
-        self.link.receive([frame]);
+    pub fn send_wire_frame(&self, frame: Vec<u8>) -> Result<(), JsValue> {
+        self.link
+            .receive_checked([frame])
+            .map_err(|error| core_error_to_js(&error))
     }
 
     #[wasm_bindgen(js_name = sendWireFrames)]
-    pub fn send_wire_frames(&self, frames: js_sys::Array) {
-        self.link.receive(
-            frames
-                .iter()
-                .map(|frame| js_sys::Uint8Array::new(&frame).to_vec()),
-        );
+    pub fn send_wire_frames(&self, frames: js_sys::Array) -> Result<(), JsValue> {
+        let frames = frames
+            .iter()
+            .map(|frame| js_sys::Uint8Array::new(&frame).to_vec());
+        self.link
+            .receive_checked(frames)
+            .map_err(|error| core_error_to_js(&error))
     }
 
     #[wasm_bindgen(js_name = recvWireFrames)]

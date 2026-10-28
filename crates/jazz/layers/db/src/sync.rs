@@ -220,13 +220,10 @@ fn split_rows(
     split_rows(rest, parts)
 }
 
-/// One frame's [`SyncMessage`]: exactly one postcard value, so a frame
-/// with bytes after its message is malformed rather than truncated.
+/// One frame's [`SyncMessage`]: exactly one canonical postcard value.
+/// Alternate varint spellings and bytes after its message are malformed.
 pub fn decode_message(frame: &[u8]) -> Result<SyncMessage, postcard::Error> {
-    match postcard::take_from_bytes(frame)? {
-        (message, []) => Ok(message),
-        _ => Err(postcard::Error::DeserializeBadEncoding),
-    }
+    jazz_types::postcard_exact::decode_postcard_exact(frame)
 }
 
 /// Joins a `Rows` message's frames (see [`encode_frames`]) back into the
@@ -244,7 +241,11 @@ impl FrameJoiner {
     /// or a message other than `Rows` after a `RowsPart`, is the peer's
     /// error.
     pub fn push(&mut self, frame: &[u8]) -> Result<Option<SyncMessage>, TransportError> {
-        let result = self.push_checked(frame);
+        let result = self.check_frame_budget(frame.len()).and_then(|_| {
+            decode_message(frame)
+                .map_err(|error| TransportError::Failed(format!("malformed sync frame: {error}")))
+                .and_then(|message| self.push_decoded(message, frame.len()))
+        });
         if result.is_err() {
             // Drop a failed message's partial buffers immediately. The carrier
             // closes the link; no prefix of that message reaches the database.
@@ -253,15 +254,28 @@ impl FrameJoiner {
         result
     }
 
-    fn push_checked(&mut self, frame: &[u8]) -> Result<Option<SyncMessage>, TransportError> {
-        if frame.len() > MAX_MESSAGE_FRAME_BYTES {
+    /// Join a frame already canonically decoded by host admission.
+    pub(crate) fn push_decoded(
+        &mut self,
+        message: SyncMessage,
+        frame_len: usize,
+    ) -> Result<Option<SyncMessage>, TransportError> {
+        let result = self.join_decoded(message, frame_len);
+        if result.is_err() {
+            *self = Self::default();
+        }
+        result
+    }
+
+    fn check_frame_budget(&self, frame_len: usize) -> Result<usize, TransportError> {
+        if frame_len > MAX_MESSAGE_FRAME_BYTES {
             return Err(TransportError::Failed(
                 "sync frame size limit exceeded".into(),
             ));
         }
         let bytes = self
             .bytes
-            .checked_add(frame.len())
+            .checked_add(frame_len)
             .ok_or_else(|| TransportError::Failed("sync message size overflow".into()))?;
         if bytes > jazz_protocol::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES
             || self.frames >= jazz_protocol::protocol_limits::MAX_WIRE_BATCH_FRAMES
@@ -270,8 +284,15 @@ impl FrameJoiner {
                 "sync message reassembly limit exceeded".into(),
             ));
         }
-        let message = decode_message(frame)
-            .map_err(|error| TransportError::Failed(format!("malformed sync frame: {error}")))?;
+        Ok(bytes)
+    }
+
+    fn join_decoded(
+        &mut self,
+        message: SyncMessage,
+        frame_len: usize,
+    ) -> Result<Option<SyncMessage>, TransportError> {
+        let bytes = self.check_frame_budget(frame_len)?;
         match (self.parts.take(), message) {
             (parts, SyncMessage::RowsPart { images }) => {
                 self.bytes = bytes;
