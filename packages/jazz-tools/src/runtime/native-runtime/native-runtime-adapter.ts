@@ -885,10 +885,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private linkStepping = false;
   /** The attempt the link machine is waiting to hear from. */
   private linkAttemptId: number | null = null;
-  private linkTimer: {
-    token: number;
-    handle: ReturnType<typeof setTimeout>;
-  } | null = null;
+  private linkTimer: { token: number; handle: ReturnType<typeof setTimeout> } | null = null;
   /** Settles `serverCarrierPromise` while the link is not live. */
   private linkConnection: {
     resolve: (carrier: WebSocketCarrier) => void;
@@ -1498,10 +1495,7 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private readSyncStatus(): RuntimeSyncStatus {
-    return {
-      link: this.upstreamLinkStatus(),
-      pendingUploads: this.pendingUploadCount(),
-    };
+    return { link: this.upstreamLinkStatus(), pendingUploads: this.pendingUploadCount() };
   }
 
   private readRemoteLinkState(): RemoteLinkState {
@@ -2865,10 +2859,7 @@ export class NativeRuntimeAdapter implements Runtime {
         });
         attempt.admission = admission;
         const outcome = await Promise.race([
-          admission.then((transport) => ({
-            type: "admitted" as const,
-            transport,
-          })),
+          admission.then((transport) => ({ type: "admitted" as const, transport })),
           terminal.then((error) => ({ type: "terminal" as const, error })),
         ]);
         // The attempt already ended and reported why.
@@ -2903,10 +2894,7 @@ export class NativeRuntimeAdapter implements Runtime {
         // A handshake or admission that fails on this side cannot succeed by
         // retrying; a refusal from the server already ended the attempt.
         const failure = error instanceof Error ? error : new Error(errorMessage(error));
-        this.endLinkAttempt(attempt, failure, {
-          kind: "fatal",
-          message: failure.message,
-        });
+        this.endLinkAttempt(attempt, failure, { kind: "fatal", message: failure.message });
       });
   }
 
@@ -4222,9 +4210,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!reconnecting) this.failRemoteSubscriptions(this.serverTransportError);
     this.resolveServerTransportErrorWaiters(this.serverTransportError, reconnecting);
     if (report)
-      this.serverTransportErrorCallback?.(this.serverTransportError, {
-        retrying: reconnecting,
-      });
+      this.serverTransportErrorCallback?.(this.serverTransportError, { retrying: reconnecting });
   }
 
   private finishServerConnectionAttempt(

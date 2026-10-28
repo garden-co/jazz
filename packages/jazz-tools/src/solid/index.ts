@@ -18,14 +18,14 @@ export {
 export { useAll } from "./use-all.js";
 export { useOne, type UseOneResult } from "./use-one.js";
 export { useLocalFirstAuth, type UseLocalFirstAuth } from "./use-local-first-auth.js";
-export { useSyncStatus } from "./use-sync-status.js";
-export type { LinkStatus, SyncStatus } from "../runtime/sync-status.js";
 export type { DurabilityTier, QueryOptions, RuntimeSourcesConfig } from "../runtime/index.js";
 
 export {
   createAccountManager,
   type AccountManagerConfig,
 } from "../accounts/create-account-manager.js";
+export { useSyncStatus } from "./use-sync-status.js";
+export type { LinkStatus, SyncStatus } from "../runtime/sync-status.js";
 export * from "../accounts/exports.js";
 
 export { createAccountState } from "./create-account-state.js";

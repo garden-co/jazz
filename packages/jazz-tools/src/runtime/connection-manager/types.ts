@@ -345,11 +345,7 @@ export abstract class ConnectionManager {
 
   /** Renew account credentials and synchronize the client before Db publishes them. */
   refreshAccountAuth(jwtToken: string, trustedReservedSession?: Session): void {
-    const auth: AuthUpdate = {
-      mode: "bearer",
-      jwtToken,
-      trustedReservedSession,
-    };
+    const auth: AuthUpdate = { mode: "bearer", jwtToken, trustedReservedSession };
     if (this.host.runtimeSource.refreshAccountToken(jwtToken)) {
       // The account capability owns transport auth; only the JS snapshot remains.
       this.client?.acceptAuthUpdate(auth);

@@ -523,12 +523,7 @@ export class BrowserConnectionManager extends ConnectionManager {
         notifyAbandoned();
       }
     };
-    this.shutdownFailure = {
-      connection,
-      scope,
-      abandon,
-      reset: notifyAbandoned,
-    };
+    this.shutdownFailure = { connection, scope, abandon, reset: notifyAbandoned };
     if (admissionError instanceof BrowserWorkerUnresponsiveError) abandon(admissionError);
 
     try {

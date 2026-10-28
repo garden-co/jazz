@@ -56,10 +56,7 @@ export class NativeForegroundDb {
   private reportedAuthRejection = 0;
   private upstreamFailureCallback: ((failure: NativeUpstreamFailure | null) => void) | undefined;
   /** The upstream failure last reported, so each change is reported once. */
-  private reportedUpstreamFailure: {
-    sequence: number;
-    retrying: boolean;
-  } | null = null;
+  private reportedUpstreamFailure: { sequence: number; retrying: boolean } | null = null;
   private readonly transactions = new Map<string, NativeForegroundTransaction>();
   /** A native build without the (append-only) slow-query commands. */
   private slowQueryLogUnsupported = false;
@@ -197,10 +194,7 @@ export class NativeForegroundDb {
         sequence: failure.sequence,
         retrying: failure.retrying,
       };
-      const change = failure && {
-        reason: failure.reason,
-        retrying: failure.retrying,
-      };
+      const change = failure && { reason: failure.reason, retrying: failure.retrying };
       queueMicrotask(() => {
         if (!this.closed) this.upstreamFailureCallback?.(change);
       });
@@ -276,10 +270,7 @@ export class NativeForegroundDb {
     if (this.slowQueryLogUnsupported || this.closed) return;
     let response: ForegroundResponse;
     try {
-      response = this.execute({
-        type: "setSlowQueryThresholdMs",
-        ms: Math.round(ms),
-      });
+      response = this.execute({ type: "setSlowQueryThresholdMs", ms: Math.round(ms) });
     } catch {
       this.slowQueryLogUnsupported = true;
       return;
@@ -376,12 +367,7 @@ export class NativeForegroundDb {
   }
 
   requestUpdatePermissionAdvice(table: string, rowId: Uint8Array, patch: Uint8Array) {
-    return this.requestPermissionAdvice({
-      type: "update",
-      table,
-      rowId,
-      patch,
-    });
+    return this.requestPermissionAdvice({ type: "update", table, rowId, patch });
   }
 
   requestDeletePermissionAdvice(table: string, rowId: Uint8Array) {
@@ -436,12 +422,7 @@ export class NativeForegroundDb {
     if (!["local", "global"].includes(tier)) {
       throw new Error(`Unsupported write durability tier: ${tier}`);
     }
-    let response = this.execute({
-      type: "waitForTransaction",
-      txId,
-      tier,
-      observeOnly,
-    });
+    let response = this.execute({ type: "waitForTransaction", txId, tier, observeOnly });
     while (response.type === "pending") {
       const operation = response.operation;
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -458,10 +439,7 @@ export class NativeForegroundDb {
     return this.executeAllowClosed(command);
   }
 
-  private pendingRows(operation: number): {
-    poll(): Uint8Array | null;
-    cancel(): void;
-  } {
+  private pendingRows(operation: number): { poll(): Uint8Array | null; cancel(): void } {
     let completed = false;
     return {
       poll: () => {
@@ -749,10 +727,7 @@ export class NativeForegroundDb {
       },
       finish: async (): Promise<NativeForegroundWrite> => {
         assertOpen();
-        let finished = this.execute({
-          type: "finishStreamingMutation",
-          upload,
-        });
+        let finished = this.execute({ type: "finishStreamingMutation", upload });
         if (finished.type === "operationError") throw foregroundOperationError(finished);
         closed = true;
         while (finished.type === "pending") {
@@ -768,10 +743,7 @@ export class NativeForegroundDb {
       },
       abort: async (): Promise<boolean> => {
         if (closed || this.closed) return false;
-        const admitted = this.execute({
-          type: "abortStreamingMutation",
-          upload,
-        });
+        const admitted = this.execute({ type: "abortStreamingMutation", upload });
         if (admitted.type === "operationError") throw foregroundOperationError(admitted);
         closed = true;
         const aborted = await this.completeMutationOperation(admitted);

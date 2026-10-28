@@ -26,38 +26,21 @@ const cases: [string, unknown, unknown][] = [
   ],
   [
     "read advice",
-    {
-      type: "permissionAdvice",
-      action: { type: "read", table: "t", rowId: txId },
-    },
+    { type: "permissionAdvice", action: { type: "read", table: "t", rowId: txId } },
     { PermissionAdvice: { action: { Read: { table: "t", row: [...txId] } } } },
   ],
   [
     "update advice",
     {
       type: "permissionAdvice",
-      action: {
-        type: "update",
-        table: "t",
-        rowId: txId,
-        patch: Uint8Array.of(1, 2),
-      },
+      action: { type: "update", table: "t", rowId: txId, patch: Uint8Array.of(1, 2) },
     },
-    {
-      PermissionAdvice: {
-        action: { Update: { table: "t", row: [...txId], patch: [1, 2] } },
-      },
-    },
+    { PermissionAdvice: { action: { Update: { table: "t", row: [...txId], patch: [1, 2] } } } },
   ],
   [
     "delete advice",
-    {
-      type: "permissionAdvice",
-      action: { type: "delete", table: "t", rowId: txId },
-    },
-    {
-      PermissionAdvice: { action: { Delete: { table: "t", row: [...txId] } } },
-    },
+    { type: "permissionAdvice", action: { type: "delete", table: "t", rowId: txId } },
+    { PermissionAdvice: { action: { Delete: { table: "t", row: [...txId] } } } },
   ],
   [
     "relation read",
@@ -104,24 +87,12 @@ const cases: [string, unknown, unknown][] = [
   [
     "settlement",
     { type: "waitForTransaction", txId, tier: "core" },
-    {
-      WaitForTransaction: {
-        tx_id: [...txId],
-        tier: "core",
-        observe_only: false,
-      },
-    },
+    { WaitForTransaction: { tx_id: [...txId], tier: "core", observe_only: false } },
   ],
   [
     "observe-only settlement",
     { type: "waitForTransaction", txId, tier: "core", observeOnly: true },
-    {
-      WaitForTransaction: {
-        tx_id: [...txId],
-        tier: "core",
-        observe_only: true,
-      },
-    },
+    { WaitForTransaction: { tx_id: [...txId], tier: "core", observe_only: true } },
   ],
   [
     "restore",
@@ -186,11 +157,7 @@ describe("RN Rust/TypeScript foreground codec contract", () => {
       { type: "permissionAdvice", advice: "unknown" },
       { type: "pending", operation: 256 },
       { type: "operationError", reason: "codec boundary: λ" },
-      {
-        type: "operationError",
-        code: "query",
-        reason: "Query: unknown table λ",
-      },
+      { type: "operationError", code: "query", reason: "Query: unknown table λ" },
       {
         type: "operationError",
         code: "write_rejected",

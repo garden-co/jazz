@@ -126,12 +126,7 @@ function encodeBranchViewBase(base: BranchViewBase | undefined): WireBranchViewB
   return base?.kind === "current"
     ? { Current: encodeBranchSelector(base.branch) }
     : base?.kind === "snapshot"
-      ? {
-          Snapshot: {
-            branch: encodeBranchSelector(base.branch),
-            snapshot: base.snapshot,
-          },
-        }
+      ? { Snapshot: { branch: encodeBranchSelector(base.branch), snapshot: base.snapshot } }
       : undefined;
 }
 
@@ -323,9 +318,7 @@ declare const openTransactionIdBrand: unique symbol;
 declare const txIdBrand: unique symbol;
 
 /** Identity of a mutable transaction. Invalid after commit or rollback. */
-export type OpenTransactionId = string & {
-  readonly [openTransactionIdBrand]: true;
-};
+export type OpenTransactionId = string & { readonly [openTransactionIdBrand]: true };
 /** Immutable identity assigned to a successfully committed transaction. */
 export type TxId = string & { readonly [txIdBrand]: true };
 
@@ -1117,9 +1110,7 @@ export class JazzClient {
       admin_secret?: string;
       backend_secret?: string;
       backend_session?: Session;
-    } = {
-      jwt_token: this.context.backendSecret ? null : (this.context.jwtToken ?? null),
-    };
+    } = { jwt_token: this.context.backendSecret ? null : (this.context.jwtToken ?? null) };
     // A backend open is a separate trusted-serving credential. Do not send an
     // incidental admin secret alongside it: server admission gives admin
     // precedence, which would turn this runtime's SYSTEM backend authority
@@ -1190,11 +1181,7 @@ export class JazzClient {
     const prerequisite = transactionAdmission.get(this);
     if (prerequisite) {
       const context = this.writeContext(session, attribution);
-      const state: {
-        pending?: Promise<void>;
-        committing: boolean;
-        unopened?: boolean;
-      } = {
+      const state: { pending?: Promise<void>; committing: boolean; unopened?: boolean } = {
         committing: false,
         unopened: true,
       };
@@ -1294,10 +1281,7 @@ export class JazzClient {
             branch,
           ) => {
             assertActive();
-            const writeContext = this.writeContext(session, attribution, id, {
-              updatedAt,
-              branch,
-            });
+            const writeContext = this.writeContext(session, attribution, id, { updatedAt, branch });
             return this.runtime.update(table, objectId, updates, writeContext);
           },
           upsertInternal: (table, objectId, values, options, session, attribution) => {

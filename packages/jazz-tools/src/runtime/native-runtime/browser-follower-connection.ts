@@ -40,11 +40,7 @@ type BrowserFollowerPortRpcRequest =
   | { type: "prepare-storage-reset" }
   | { type: "finish-storage-reset" }
   | { type: "abort-storage-reset" }
-  | {
-      type: "reconnect";
-      authJson: string;
-      sessionClaims: Record<string, unknown>;
-    };
+  | { type: "reconnect"; authJson: string; sessionClaims: Record<string, unknown> };
 
 // Connection policy, not an operation deadline. A matching pong keeps even
 // an indefinitely pending server/durability wait alive.
@@ -54,10 +50,7 @@ const DEFAULT_PROBE_TIMING: BrowserFollowerProbeTiming = Object.freeze({
 });
 let probeTiming = DEFAULT_PROBE_TIMING;
 
-export type BrowserFollowerProbeTiming = Readonly<{
-  intervalMs: number;
-  replyMs: number;
-}>;
+export type BrowserFollowerProbeTiming = Readonly<{ intervalMs: number; replyMs: number }>;
 
 /**
  * Scale the probe policy for real-worker liveness tests in this page realm.
@@ -151,10 +144,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
         (frames) => {
           const copies = transferableFrames(frames);
           this.port.postMessage(
-            {
-              type: "frames",
-              frames: copies,
-            } satisfies BrowserFollowerPortRequest,
+            { type: "frames", frames: copies } satisfies BrowserFollowerPortRequest,
             copies.map((frame) => frame.buffer),
           );
         },
@@ -307,9 +297,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     await this.pump!.flush();
     const workerBarrier = this.request({ type: "flush-local" });
     await this.runtime.flushLocalSettlements();
-    this.port.postMessage({
-      type: "flush-local-observed",
-    } satisfies BrowserFollowerPortRequest);
+    this.port.postMessage({ type: "flush-local-observed" } satisfies BrowserFollowerPortRequest);
     await workerBarrier;
   }
 
@@ -509,9 +497,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     // Tell the worker that this endpoint is gone so it can notify the broker,
     // which will issue a fresh channel while the leadership is still valid.
     try {
-      this.port.postMessage({
-        type: "close",
-      } satisfies BrowserFollowerPortRequest);
+      this.port.postMessage({ type: "close" } satisfies BrowserFollowerPortRequest);
     } catch {
       // The port may already be unusable; disposal below is still required.
     }

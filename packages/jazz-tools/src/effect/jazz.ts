@@ -222,10 +222,7 @@ export class Jazz extends Context.Service<Jazz, JazzDb>()("jazz-tools/effect/Jaz
       Jazz,
       Effect.map(
         Effect.acquireRelease(
-          Effect.tryPromise({
-            try: () => createDb(config),
-            catch: toJazzError("open"),
-          }),
+          Effect.tryPromise({ try: () => createDb(config), catch: toJazzError("open") }),
           (db) => Effect.ignore(Effect.tryPromise(() => db.shutdown(options?.shutdown))),
         ),
         makeJazzDb,
@@ -258,10 +255,7 @@ const makeReads = (target: {
   all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]>;
 }): JazzReads => ({
   all: (query, options) =>
-    Effect.tryPromise({
-      try: () => target.all(query, options),
-      catch: toJazzError("all"),
-    }),
+    Effect.tryPromise({ try: () => target.all(query, options), catch: toJazzError("all") }),
   one: (query, options) =>
     Effect.tryPromise({
       // The same lowering as `Db.one` and `Transaction.one`, which return
@@ -316,11 +310,7 @@ function makeJazzDb(db: Db): JazzDb {
           yield* restore(
             Effect.tryPromise({
               try: () =>
-                (
-                  committed as WriteHandle<unknown, unknown> & {
-                    wait(): Promise<unknown>;
-                  }
-                ).wait(),
+                (committed as WriteHandle<unknown, unknown> & { wait(): Promise<unknown> }).wait(),
               catch: toWriteError("serializableTransaction"),
             }),
           );
@@ -397,25 +387,16 @@ function makeJazzDb(db: Db): JazzDb {
     serializableTransaction: (body) => runTransaction("serializable", body, undefined),
 
     canInsert: (table, data) =>
-      Effect.tryPromise({
-        try: () => db.canInsert(table, data),
-        catch: toJazzError("canInsert"),
-      }),
+      Effect.tryPromise({ try: () => db.canInsert(table, data), catch: toJazzError("canInsert") }),
     canRead: (table, id) =>
-      Effect.tryPromise({
-        try: () => db.canRead(table, id),
-        catch: toJazzError("canRead"),
-      }),
+      Effect.tryPromise({ try: () => db.canRead(table, id), catch: toJazzError("canRead") }),
     canUpdate: (table, id, data) =>
       Effect.tryPromise({
         try: () => db.canUpdate(table, id, data),
         catch: toJazzError("canUpdate"),
       }),
     canDelete: (table, id) =>
-      Effect.tryPromise({
-        try: () => db.canDelete(table, id),
-        catch: toJazzError("canDelete"),
-      }),
+      Effect.tryPromise({ try: () => db.canDelete(table, id), catch: toJazzError("canDelete") }),
 
     // `onAuthChanged` reports the current state as soon as it is attached.
     authState: callbackStream<AuthState>((emit) => db.onAuthChanged(emit)),
