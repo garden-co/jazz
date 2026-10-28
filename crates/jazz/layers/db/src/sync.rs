@@ -2268,6 +2268,7 @@ impl Inner {
 
     /// Ship the readable supporting rows of one shipped image, and watch
     /// their keys so later writes reach the replica.
+    #[allow(clippy::too_many_arguments)]
     fn follow_support(
         &self,
         support: &[Support],
@@ -2276,6 +2277,7 @@ impl Inner {
         out: &mut Vec<Image>,
         watch: &mut HashSet<u64>,
         held: &mut BTreeMap<String, BTreeMap<(RowUuid, Vec<u8>), bool>>,
+        followed: &mut HashSet<(usize, u64)>,
     ) -> Result<(), Error> {
         for item in support {
             let (table, column, values, nested, contains) = match item {
@@ -2323,7 +2325,7 @@ impl Inner {
             };
             for value in values {
                 self.follow_value(
-                    table, column, value, contains, nested, identity, out, watch, held,
+                    table, column, value, contains, nested, identity, out, watch, held, followed,
                 )?;
             }
         }
@@ -2345,12 +2347,23 @@ impl Inner {
         out: &mut Vec<Image>,
         watch: &mut HashSet<u64>,
         held: &mut BTreeMap<String, BTreeMap<(RowUuid, Vec<u8>), bool>>,
+        followed: &mut HashSet<(usize, u64)>,
     ) -> Result<(), Error> {
         // A watched key's rows were shipped with it, and later writes
         // to them ship as they happen. Nested support is followed
         // again: a child that joined since may have unwatched children.
-        let fresh = watch.insert(wk((table.to_owned(), column.to_owned(), watch_key(&value))));
+        let key = wk((table.to_owned(), column.to_owned(), watch_key(&value)));
+        let fresh = watch.insert(key);
         if !fresh && nested.is_empty() {
+            return Ok(());
+        }
+        // Once per traversal, though: a policy whose EXISTS consults its
+        // own table (a member reads the band's members) nests the same
+        // support at every depth, and each row reaches the same key
+        // again, so following it anew costs (rows per key)^depth. The
+        // nested support node tells depths apart, so a key reached with
+        // deeper support than before is still followed.
+        if !followed.insert((nested.as_ptr() as usize, key)) {
             return Ok(());
         }
         let filter = if column == "id" {
@@ -2393,7 +2406,7 @@ impl Inner {
             if ship {
                 out.push(found.clone());
             }
-            self.follow_support(nested, &found, identity, out, watch, held)?;
+            self.follow_support(nested, &found, identity, out, watch, held, followed)?;
         }
         Ok(())
     }
@@ -6357,6 +6370,7 @@ impl Db {
                     }
                     basis.extend(held);
                     let mut extra = Vec::new();
+                    let mut followed = HashSet::new();
                     for image in &basis {
                         inner.follow_support(
                             &support,
@@ -6365,6 +6379,7 @@ impl Db {
                             &mut extra,
                             &mut watch,
                             &mut held_rows,
+                            &mut followed,
                         )?;
                     }
                     images.extend(extra);
@@ -6424,6 +6439,25 @@ impl Db {
                         &[&id, &key, &(seq as i64)],
                     )?);
                 }
+            }
+            // An eviction is the row's state as of now, after every event
+            // drained above: a version of it a result shipped earlier in the
+            // tick is stale. Shipped, it would also reach the writer as a
+            // held row of its commit's Fate, which goes after the evictions
+            // and would reinstate the row (INV-SYNC-14).
+            let evicted: HashSet<(&str, [u8; 16], &[u8])> = evictions
+                .iter()
+                .filter_map(|eviction| match eviction {
+                    SyncMessage::Evict { table, id, key } => {
+                        Some((table.as_str(), *id, key.as_slice()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            if !evicted.is_empty() {
+                images.retain(|image| {
+                    !evicted.contains(&(image.table.as_str(), image.id, image.key.as_slice()))
+                });
             }
             for image in &images {
                 watch.insert(wk((
@@ -6846,6 +6880,7 @@ impl Db {
                 let names = inner.schema.clone();
                 let owner = inner.owner.clone();
                 let mut watch = std::mem::take(&mut inner.sessions[index].watch);
+                let mut held = std::mem::take(&mut inner.sessions[index].held);
                 let mut touched = Vec::new();
                 let mut evict = Vec::new();
                 let mut declared_held = Vec::new();
@@ -6889,6 +6924,18 @@ impl Db {
                                 watch.insert(held_key(&stored, &id));
                                 // Seq 0 asks for the row whole (SPEC 19.8).
                                 declared_held.push(((stored.clone(), id, key.clone()), seq));
+                                // The replica keeps it whether or not a
+                                // live query reads it: held, a commit to a
+                                // table its read policy depends on (the
+                                // client's own, say) re-checks it, so the
+                                // copy is evicted once the client loses
+                                // access. An id watch sees only writes to
+                                // the row itself.
+                                if policy.is_some() && can {
+                                    held.entry(stored.clone())
+                                        .or_default()
+                                        .insert((RowUuid::from_bytes(id), key.clone()), true);
+                                }
                                 if now != seq || !can {
                                     touched.push((stored.clone(), RowUuid::from_bytes(id), key));
                                 }
@@ -6913,6 +6960,7 @@ impl Db {
                     }
                 }
                 session.watch = watch;
+                session.held = held;
                 session.touched.extend(touched);
                 session.stale.extend(evict);
             }
@@ -7183,9 +7231,16 @@ impl Db {
                             .insert((RowUuid::from_bytes(image.id), image.key.clone()), true);
                     }
                 }
+                let mut followed = HashSet::new();
                 for image in &images {
                     inner.follow_support(
-                        &support, image, policy, &mut extra, &mut watch, &mut held,
+                        &support,
+                        image,
+                        policy,
+                        &mut extra,
+                        &mut watch,
+                        &mut held,
+                        &mut followed,
                     )?;
                 }
                 images.extend(extra);
