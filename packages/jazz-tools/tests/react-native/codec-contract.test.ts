@@ -139,6 +139,7 @@ const cases: [string, unknown, unknown][] = [
   ["reconnect", { type: "reconnectNativeUpstream" }, "ReconnectNativeUpstream"],
   ["status", { type: "nativeConnectionStatus" }, "NativeConnectionStatus"],
   ["metadata", { type: "nativeSessionMetadata" }, "NativeSessionMetadata"],
+  ["pending uploads", { type: "pendingUploadCount" }, "PendingUploadCount"],
 ];
 
 describe("RN Rust/TypeScript foreground codec contract", () => {
@@ -193,6 +194,16 @@ describe("RN Rust/TypeScript foreground codec contract", () => {
       ).toThrow();
       expect(() => decodeNativeForegroundResponse(Uint8Array.from([...response, 0]))).toThrow();
     }
+  });
+
+  test("the appended pending upload count answer decodes", () => {
+    // Pinned by `pending_upload_count_has_pinned_bytes_and_answers` in Rust.
+    expect(decodeNativeForegroundResponse(Uint8Array.of(29, 172, 2))).toEqual({
+      type: "pendingUploadCount",
+      count: 300,
+    });
+    expect(() => decodeNativeForegroundResponse(Uint8Array.of(29))).toThrow();
+    expect(() => decodeNativeForegroundResponse(Uint8Array.of(29, 172, 2, 0))).toThrow();
   });
 
   test("noncanonical Rust request encodings fail closed", () => {

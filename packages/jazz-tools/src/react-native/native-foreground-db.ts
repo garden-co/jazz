@@ -60,6 +60,7 @@ export class NativeForegroundDb {
   private readonly transactions = new Map<string, NativeForegroundTransaction>();
   /** A native build without the (append-only) slow-query commands. */
   private slowQueryLogUnsupported = false;
+  private pendingUploadCountUnsupported = false;
 
   constructor(
     private readonly runtime: NativeForegroundRuntime,
@@ -244,6 +245,28 @@ export class NativeForegroundDb {
     return response.lines;
   }
 
+  /**
+   * How many of this foreground's commits still wait for the server's
+   * verdict. An older native build without the command reports none.
+   */
+  pendingUploadCount(): number {
+    if (this.pendingUploadCountUnsupported || this.closed) return 0;
+    let response: ForegroundResponse;
+    try {
+      response = this.execute({ type: "pendingUploadCount" });
+    } catch (error) {
+      // An older host rejects the unknown command (InvalidCommand). A busy
+      // host or a revoked handle is transient and must not disable the count.
+      if (rejectsCommand(error)) this.pendingUploadCountUnsupported = true;
+      return 0;
+    }
+    if (response.type !== "pendingUploadCount") {
+      this.pendingUploadCountUnsupported = true;
+      return 0;
+    }
+    return response.count;
+  }
+
   /** Report query runs of at least `ms` milliseconds; 0 turns the log off. */
   setSlowQueryThresholdMs(ms: number): void {
     if (this.slowQueryLogUnsupported || this.closed) return;
@@ -383,18 +406,42 @@ export class NativeForegroundDb {
     };
   }
 
-  async waitForPendingWrites(tier: string): Promise<Uint8Array> {
+  /**
+   * Resolve once every local write so far reached `tier`. A wait that does
+   * not settle at once is a pollable read, so a caller that stops waiting
+   * cancels it.
+   */
+  waitForPendingWrites(
+    tier: string,
+  ): Uint8Array | { poll(): Uint8Array | null; cancel(): boolean } {
     let response = this.execute({ type: "waitForPendingWrites", tier });
-    while (response.type === "pending") {
-      const operation = response.operation;
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
-      this.tick();
-      response = this.execute({ type: "poll", operation });
-    }
-    if (response.type === "operationError") throw foregroundOperationError(response);
-    if (response.type !== "rows" || response.rows.length !== 0)
-      return unexpected("waitForPendingWrites", response.type);
-    return response.rows;
+    const settle = (): Uint8Array => {
+      if (response.type === "operationError") throw foregroundOperationError(response);
+      if (response.type !== "rows" || response.rows.length !== 0)
+        return unexpected("waitForPendingWrites", response.type);
+      return response.rows;
+    };
+    if (response.type !== "pending") return settle();
+    const operation = response.operation;
+    let completed = false;
+    return {
+      poll: (): Uint8Array | null => {
+        if (completed || this.closed) throw new Error("waitForPendingWrites was cancelled");
+        this.tick();
+        response = this.execute({ type: "poll", operation });
+        if (response.type === "pending") return null;
+        completed = true;
+        return settle();
+      },
+      cancel: (): boolean => {
+        if (completed || this.closed) return false;
+        completed = true;
+        const cancelled = this.execute({ type: "cancel", operation });
+        if (cancelled.type !== "cancelled")
+          return unexpected("waitForPendingWrites cancellation", cancelled.type);
+        return cancelled.cancelled;
+      },
+    };
   }
 
   async waitForTransaction(txId: Uint8Array, tier: string, observeOnly = false): Promise<void> {
@@ -938,4 +985,10 @@ function formatTransactionId(bytes: Uint8Array<ArrayBufferLike>): string {
     throw new Error("React Native native foreground returned malformed transaction id");
   const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
   return hex;
+}
+
+/** Whether the native host refused a command it does not know. */
+function rejectsCommand(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("runtime failed during execute");
 }
