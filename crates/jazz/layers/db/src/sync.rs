@@ -105,7 +105,9 @@ pub trait Transport {
     }
     /// Send what an earlier `send` accepted but could not yet hand on
     /// whole (the rest of a split message). `Backpressure` means some is
-    /// still waiting for the queue to drain.
+    /// still waiting for the queue to drain. A transport whose `send`
+    /// hands on every message whole needs nothing here; one wrapping
+    /// another must forward it, or the inner one's parts stay unsent.
     fn flush(&mut self) -> Result<(), TransportError> {
         Ok(())
     }
@@ -222,6 +224,8 @@ pub fn decode_message(frame: &[u8]) -> Result<SyncMessage, postcard::Error> {
 pub struct FrameJoiner {
     /// The bytes of the parts received since the last whole message.
     parts: Option<Vec<u8>>,
+    /// How many parts those are.
+    frames: usize,
     /// The most bytes a joined message may have.
     ceiling: usize,
 }
@@ -239,16 +243,30 @@ impl FrameJoiner {
     pub fn with_ceiling(ceiling: usize) -> Self {
         Self {
             parts: None,
+            frames: 0,
             ceiling,
         }
     }
 
-    /// The message `frame` completes, if any. A frame that does not decode,
-    /// a whole message between a split message's parts, a last part with
-    /// no leading ones, or parts beyond the logical message ceiling are the
-    /// peer's error.
+    /// The message `frame` completes, if any. A frame over the frame
+    /// limit or that does not decode, a whole message between a split
+    /// message's parts, a last part with no leading ones, and parts beyond
+    /// the joined-message ceiling or the batch frame count are the peer's
+    /// error. A refused message's parts are dropped at once: the link
+    /// closes, and none of it reaches the database.
     pub fn push(&mut self, frame: &[u8]) -> Result<Option<SyncMessage>, TransportError> {
+        let result = self.push_checked(frame);
+        if result.is_err() {
+            *self = Self::with_ceiling(self.ceiling);
+        }
+        result
+    }
+
+    fn push_checked(&mut self, frame: &[u8]) -> Result<Option<SyncMessage>, TransportError> {
         let failed = |why: String| TransportError::Failed(format!("malformed sync frame: {why}"));
+        if frame.len() > MAX_MESSAGE_FRAME_BYTES {
+            return Err(failed("a frame over the frame limit".to_owned()));
+        }
         let joined;
         let bytes = match (frame.split_first(), self.parts.take()) {
             (Some((&marker @ (PART | LAST_PART), part)), parts) => {
@@ -258,7 +276,9 @@ impl FrameJoiner {
                     }
                     (_, parts) => parts.unwrap_or_default(),
                 };
-                if parts.len() + part.len() > self.ceiling {
+                if parts.len() + part.len() > self.ceiling
+                    || self.frames >= jazz_protocol::protocol_limits::MAX_WIRE_BATCH_FRAMES
+                {
                     return Err(failed(
                         "a split message beyond the message ceiling".to_owned(),
                     ));
@@ -266,8 +286,10 @@ impl FrameJoiner {
                 parts.extend_from_slice(part);
                 if marker == PART {
                     self.parts = Some(parts);
+                    self.frames += 1;
                     return Ok(None);
                 }
+                self.frames = 0;
                 joined = parts;
                 joined.as_slice()
             }
@@ -1282,6 +1304,9 @@ pub(crate) struct Client {
     /// Accepted fates from a replica with no server: they order the
     /// commit, but it never becomes `Global`.
     local_fates: HashSet<u64>,
+    /// Fates this replica gives its own commits without sending them (one
+    /// too large to send), applied with the next messages that arrive.
+    refused: Vec<SyncMessage>,
     /// Commits the relay this non-durable replica writes through holds
     /// in its store, their fate still to come ([`SyncMessage::Stored`]).
     stored: HashSet<u64>,
@@ -4541,6 +4566,7 @@ impl Client {
             unsent: Vec::new(),
             fates: HashMap::new(),
             local_fates: HashSet::new(),
+            refused: Vec::new(),
             stored: HashSet::new(),
             baselines: HashMap::new(),
             known: 0,
@@ -5606,6 +5632,7 @@ impl Db {
                 }
                 failed = transport.take_failure().is_some();
             }
+            inbound.append(&mut client.refused);
             // An upstream that sent what this client cannot decode is
             // dropped like a lost link; what arrived before it applies.
             if failed {
@@ -5936,8 +5963,42 @@ impl Db {
         }
         let current = *inner.owner_version.as_bytes();
         let waiting = commits.split_off(pushes.len());
+        let trusted = inner.identity.author == AuthorSubject::SYSTEM;
         let client = inner.client.as_mut().expect("client");
         client.unsent = waiting;
+        // An untrusted session's server joins no message over its budget
+        // and would end the session on every resend: a commit that large is
+        // refused here, for good, as a rejected fate.
+        if !trusted {
+            let limit = jazz_protocol::protocol_limits::MAX_UNTRUSTED_MESSAGE_BYTES;
+            let mut kept = Vec::with_capacity(commits.len());
+            for (commit, push) in commits.into_iter().zip(pushes) {
+                let size = postcard::serialize_with_flavor(
+                    &commit,
+                    postcard::ser_flavors::Size::default(),
+                )
+                .unwrap_or(usize::MAX);
+                match &commit {
+                    SyncMessage::Commit { tx, .. } if size > limit => {
+                        client.refused.push(SyncMessage::Fate {
+                            tx: *tx,
+                            through: client.known,
+                            result: Err(WireError::Rejected {
+                                reason: None,
+                                message: format!(
+                                    "a commit of {size} bytes is over the {limit} bytes one \
+                                     message may carry: not supported yet"
+                                ),
+                            }),
+                            held: Vec::new(),
+                            global: false,
+                        });
+                    }
+                    _ => kept.push((commit, push)),
+                }
+            }
+            (commits, pushes) = kept.into_iter().unzip();
+        }
         let transport = client.transport.as_mut().expect("transport");
         for commit in &commits {
             if !client.sent.iter().any(|m| matches!((m, commit), (SyncMessage::Commit { tx: a, .. }, SyncMessage::Commit { tx: b, .. }) if a == b)) {
@@ -6587,6 +6648,11 @@ impl Db {
             let session = &mut inner.sessions[index];
             if !session.open {
                 return Ok(());
+            }
+            // The rest of a split message a full queue held back goes out
+            // as it drains, ahead of anything this tick sends.
+            if let Err(TransportError::Failed(error)) = session.transport.flush() {
+                return Err(Error::new(ErrorCode::Protocol, error));
             }
             let mut inbound = std::mem::take(&mut session.backlog);
             inbound.extend(std::iter::from_fn(|| session.transport.try_recv()));
@@ -8009,9 +8075,9 @@ impl Db {
                 let through = at.unwrap_or(inner.served_through());
                 let authority = inner.client.is_none();
                 let session = &mut inner.sessions[index];
-                if !images.is_empty() || !origins.is_empty() {
-                    session.outbox.push(SyncMessage::Rows { images, origins });
-                }
+                session
+                    .outbox
+                    .extend(rows_messages(images, origins, ROWS_MESSAGE_BYTES));
                 session.outbox.push(SyncMessage::Settled {
                     id,
                     through,

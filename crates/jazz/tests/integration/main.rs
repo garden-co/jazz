@@ -139,6 +139,8 @@ mod sync_aggregates;
 mod sync_differential;
 #[path = "../sync_echo.rs"]
 mod sync_echo;
+#[path = "../sync_frame_bounds.rs"]
+mod sync_frame_bounds;
 #[path = "../sync_gather.rs"]
 mod sync_gather;
 #[path = "../sync_resume.rs"]
@@ -155,6 +157,8 @@ mod sync_untrusted_clients;
 mod sync_wire_corpus;
 #[path = "../text_merge.rs"]
 mod text_merge;
+#[path = "../transaction_commit_kind.rs"]
+mod transaction_commit_kind;
 #[path = "../transaction_handles.rs"]
 mod transaction_handles;
 #[path = "../union_queries.rs"]
@@ -163,3 +167,5 @@ mod union_queries;
 mod uuid_page_probe;
 #[path = "../write_check_evidence.rs"]
 mod write_check_evidence;
+#[path = "../write_receipt_owner.rs"]
+mod write_receipt_owner;

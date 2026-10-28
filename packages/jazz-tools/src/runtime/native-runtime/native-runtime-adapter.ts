@@ -2325,6 +2325,10 @@ export class NativeRuntimeAdapter implements Runtime {
         await options.ready;
       }
     }
+    // One continuation for every pass: a pass that wakes for transport work
+    // must not leave another one behind on a settlement that may take long.
+    const settled = settlement.then(() => "settled" as const);
+    void settled.catch(() => undefined);
     // An outage the client keeps retrying delays the settlement; only a
     // terminal transport failure, closing the runtime or the caller's signal
     // ends the wait (#3923).
@@ -2339,9 +2343,7 @@ export class NativeRuntimeAdapter implements Runtime {
       const transportWork = this.waitForServerTransportWork(tier, observedServerWorkEpoch);
       let stopAbortWake: (() => void) | undefined;
       try {
-        const wakes: Array<Promise<"settled" | "work"> | Promise<never>> = [
-          settlement.then(() => "settled" as const),
-        ];
+        const wakes: Array<Promise<"settled" | "work"> | Promise<never>> = [settled];
         if (transportError) wakes.push(transportError.promise);
         if (transportWork) wakes.push(transportWork.promise.then(() => "work" as const));
         if (signal) {
@@ -4424,10 +4426,11 @@ export class NativeRuntimeAdapter implements Runtime {
     observedEpoch: number,
   ): { promise: Promise<void>; cancel: () => void } | null {
     if (tier !== "global" && tier !== "remote") return null;
-    if (
-      this.serverTransportWorkEpoch !== observedEpoch ||
-      this.pendingInboundServerFrames.length > 0
-    ) {
+    // Frames still waiting to be routed are not a reason to wake: their
+    // arrival already advanced the epoch, and the pump that routes them
+    // publishes again. Waking for them would spin in microtasks, starving the
+    // very timer that runs that pump.
+    if (this.serverTransportWorkEpoch !== observedEpoch) {
       return { promise: Promise.resolve(), cancel: () => {} };
     }
     const waiter: ServerTransportWorkWaiter = {

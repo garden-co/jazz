@@ -38,7 +38,7 @@ use jazz::protocol::{
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::public_schema::{TableName, TablePolicies};
-use jazz::wire::{WireAuthorityEndpoint, WireFeatures};
+use jazz::wire::{WireAuthorityEndpoint, WireErrorCode, WireFeatures, WireRetry};
 use tokio::sync::{mpsc as tokio_mpsc, oneshot, watch};
 
 /// Encoded frames exchanged with a host transport.
@@ -839,7 +839,8 @@ struct Edge {
     egress: Arc<AtomicUsize>,
 }
 
-type Outbound = (Result<Vec<AbiBytes>, String>, usize);
+/// A session's next frame batch, or the error frame that ends it.
+type Outbound = (Result<Vec<AbiBytes>, jazz::wire::WireError>, usize);
 
 /// Activity subscription for a server runtime.
 pub struct ServerRuntimeActivity {
@@ -856,6 +857,20 @@ impl ServerRuntimeActivity {
     }
 }
 
+/// The error frame for a session the engine closed over a message it sent.
+/// Overload and storage failures are the server's state and can pass, so the
+/// client reconnects with backoff. Anything else fails the same way when the
+/// client reconnects and resends, so asking for that would loop.
+fn session_closed_error(error: &jazz::db::Error) -> jazz::wire::WireError {
+    let (code, retry) = match error.code {
+        jazz::db::ErrorCode::Backpressure | jazz::db::ErrorCode::Storage => {
+            (WireErrorCode::Backpressure, WireRetry::Later)
+        }
+        _ => (WireErrorCode::Internal, WireRetry::Never),
+    };
+    jazz::wire::WireError::new(code, retry, format!("sync session closed: {error}"))
+}
+
 /// One session's ordered outbound frame batches.
 pub struct ServerRuntimeFrameStream {
     receiver: tokio_mpsc::UnboundedReceiver<Outbound>,
@@ -865,7 +880,7 @@ pub struct ServerRuntimeFrameStream {
 
 impl ServerRuntimeFrameStream {
     /// Receive the next batch of outbound frames.
-    pub async fn recv(&mut self) -> Option<Result<Vec<AbiBytes>, String>> {
+    pub async fn recv(&mut self) -> Option<Result<Vec<AbiBytes>, jazz::wire::WireError>> {
         let (result, bytes) = self.receiver.recv().await?;
         let before = self.egress.fetch_sub(bytes, Ordering::AcqRel);
         if before >= SESSION_QUEUE_BUDGET
@@ -1721,7 +1736,9 @@ impl Owner {
                 // An untrusted peer's split message must fit the budget
                 // its frames are admitted against (SPEC 8.1).
                 joiner: if identity != AuthorSubject::SYSTEM {
-                    jazz::db::FrameJoiner::with_ceiling(SESSION_QUEUE_BUDGET)
+                    jazz::db::FrameJoiner::with_ceiling(
+                        jazz::protocol_limits::MAX_UNTRUSTED_MESSAGE_BYTES,
+                    )
                 } else {
                     jazz::db::FrameJoiner::default()
                 },
@@ -1769,7 +1786,14 @@ impl Owner {
                 Ok(Some(message)) => inbound.push_back(message),
                 Err(error) => {
                     drop(inbound);
-                    let _ = owner_session.output.send((Err(error.to_string()), 0));
+                    let _ = owner_session.output.send((
+                        Err(jazz::wire::WireError::new(
+                            WireErrorCode::MalformedFrame,
+                            WireRetry::Never,
+                            error.to_string(),
+                        )),
+                        0,
+                    ));
                     self.close_session(session);
                     return;
                 }
@@ -1825,7 +1849,7 @@ impl Owner {
             tracing::warn!(%error, "closing sync session for a message it sent");
             let _ = self.sessions[&id]
                 .output
-                .send((Err(format!("sync session closed: {error}")), 0));
+                .send((Err(session_closed_error(&error)), 0));
             self.close_session(id);
         }
         let mut gone = Vec::new();
@@ -1853,9 +1877,14 @@ impl Owner {
             }
             if let Some(error) = failed {
                 drop(outbound);
-                let _ = session
-                    .output
-                    .send((Err(format!("sync session closed: {error}")), 0));
+                let _ = session.output.send((
+                    Err(jazz::wire::WireError::new(
+                        WireErrorCode::Internal,
+                        WireRetry::Never,
+                        format!("sync session closed: {error}"),
+                    )),
+                    0,
+                ));
                 gone.push(*id);
                 continue;
             }
@@ -1964,6 +1993,23 @@ impl Owner {
 mod tests {
     use super::*;
     use jazz::tools::public_schema::{ColumnType, SchemaBuilder, TableSchema};
+
+    #[test]
+    fn only_server_side_failures_ask_the_client_to_reconnect() {
+        let closed = |code| session_closed_error(&jazz::db::Error::new(code, "closed"));
+        assert!(closed(jazz::db::ErrorCode::Backpressure).asks_reconnect_later());
+        assert!(closed(jazz::db::ErrorCode::Storage).asks_reconnect_later());
+        for code in [
+            jazz::db::ErrorCode::Protocol,
+            jazz::db::ErrorCode::Schema,
+            jazz::db::ErrorCode::Query,
+            jazz::db::ErrorCode::WriteRejected,
+        ] {
+            let error = closed(code);
+            assert_eq!(error.retry, WireRetry::Never, "{code:?}");
+            assert!(!error.asks_reconnect_later(), "{code:?}");
+        }
+    }
 
     fn schema() -> JazzSchema {
         JazzSchema::new(

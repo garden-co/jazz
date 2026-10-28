@@ -965,7 +965,7 @@ async fn handle_ws_connection(
                     Ok(frames) => frames,
                     Err(error) => {
                         drop(permit);
-                        queue_ws_error(&writer_tx, WireError::new(WireErrorCode::Backpressure, WireRetry::Later, error));
+                        queue_ws_error(&writer_tx, error);
                         break;
                     }
                 };
@@ -2348,6 +2348,40 @@ mod tests {
         .await
         .expect("wait for pong after protocol-sized batch");
         assert_eq!(pong.as_ref(), ping.as_slice());
+    }
+
+    #[tokio::test]
+    async fn malformed_sync_frame_ends_the_link_without_asking_for_a_retry() {
+        // Resending the same bytes after a reconnect fails the same way, so a
+        // retryable error would turn one bad frame into a reconnect loop.
+        let state = make_ws_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let mut ws =
+            open_negotiated_ws(addr, &state, AuthorSubject::for_test_bytes([0x7b; 16])).await;
+        // 0x7f is no sync message's tag (0xff would begin a split
+        // message's leading part, which waits for the rest).
+        ws.send(WsMessage::Binary(ws_frame_batch(&[vec![0x7f; 8]]).into()))
+            .await
+            .expect("send malformed sync frame");
+        let error = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let message = ws
+                    .next()
+                    .await
+                    .expect("websocket ended before an error frame")
+                    .expect("websocket result");
+                for frame in decode_ws_message(&message) {
+                    if let WireFrame::Error(error) = frame {
+                        return error;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("wait for the error frame");
+        assert_eq!(error.code, WireErrorCode::MalformedFrame);
+        assert_eq!(error.retry, WireRetry::Never);
+        assert!(!error.asks_reconnect_later(), "{error:?}");
     }
 
     #[test]

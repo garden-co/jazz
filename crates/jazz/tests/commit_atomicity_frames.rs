@@ -234,3 +234,153 @@ fn a_split_commit_a_full_queue_interrupts_arrives_whole() {
     }
     panic!("the server has {} of {ROWS} rows", visible(&server));
 }
+
+/// A writer linked to a fresh server through a [`NarrowWire`] with `room`.
+struct Narrow {
+    server: Db,
+    writer: Db,
+    room: Rc<RefCell<usize>>,
+    subscriber: jazz::db::SubscriberId,
+}
+
+fn narrow(server_node: u8, writer_node: u8) -> Narrow {
+    let server = open(server_node, AuthorSubject::SYSTEM);
+    let writer_author = AuthorSubject::for_test_bytes([writer_node; 16]);
+    let writer = open(writer_node, writer_author);
+    let room = Rc::new(RefCell::new(usize::MAX));
+    let subscriber = link(&server, &writer, writer_author, &room);
+    for _ in 0..20 {
+        block_on(writer.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+    }
+    Narrow {
+        server,
+        writer,
+        room,
+        subscriber,
+    }
+}
+
+/// A new connection between `writer` and `server`: fresh queues, a fresh
+/// adapter and joiner on each side.
+fn link(
+    server: &Db,
+    writer: &Db,
+    writer_author: AuthorSubject,
+    room: &Rc<RefCell<usize>>,
+) -> jazz::db::SubscriberId {
+    let to_server: Queue = Rc::default();
+    let to_writer: Queue = Rc::default();
+    block_on(
+        writer.connect_upstream(Box::new(WireTransportAdapter::current(NarrowWire {
+            outbound: Rc::clone(&to_server),
+            inbound: Rc::clone(&to_writer),
+            room: Rc::clone(room),
+        }))),
+    );
+    server.accept_subscriber(
+        Box::new(WireTransportAdapter::current(GatedWire {
+            outbound: to_writer,
+            inbound: to_server,
+            released: Rc::new(RefCell::new(usize::MAX)),
+        })),
+        writer_author,
+    )
+}
+
+fn commit_notes(writer: &Db, rows: usize) {
+    let tx = OpenTransactionId::new();
+    block_on(writer.begin_mergeable(tx)).unwrap();
+    let body = "x".repeat(BODY);
+    for _ in 0..rows {
+        let values = BTreeMap::from([("body".to_owned(), Value::String(body.clone()))]);
+        block_on(
+            writer
+                .tx_ref(tx)
+                .insert("notes", values, Default::default()),
+        )
+        .unwrap();
+    }
+    block_on(writer.commit_mergeable_handle(tx)).unwrap();
+}
+
+/// A commit in three parts, with a second commit queued behind it: every
+/// part drains in order as the queue makes room, and the commit behind
+/// arrives after it, whole.
+#[test]
+fn a_commit_in_three_parts_drains_ahead_of_the_commit_behind_it() {
+    let link = narrow(0xc2, 0x53);
+    commit_notes(&link.writer, 160);
+    commit_notes(&link.writer, 1);
+    let mut seen = Vec::new();
+    for _ in 0..80 {
+        *link.room.borrow_mut() = 1;
+        block_on(link.writer.tick()).unwrap();
+        block_on(link.server.tick()).unwrap();
+        let count = visible(&link.server);
+        seen.push(count);
+        assert!(
+            [0, 160, 161].contains(&count),
+            "the server saw {count} rows (per tick: {seen:?})"
+        );
+        if count == 161 {
+            return;
+        }
+    }
+    panic!("the commits never arrived: {seen:?}");
+}
+
+/// A connection lost with a split commit's later parts unsent: the new
+/// connection sends the commit again, from its first part, and the server
+/// applies it once.
+#[test]
+fn a_split_commit_cut_off_by_a_disconnect_arrives_whole_on_the_next_connection() {
+    let link_ = narrow(0xc3, 0x54);
+    commit_notes(&link_.writer, ROWS);
+    *link_.room.borrow_mut() = 1;
+    block_on(link_.writer.tick()).unwrap();
+    block_on(link_.server.tick()).unwrap();
+    assert_eq!(visible(&link_.server), 0, "only the first part went out");
+    link_.server.disconnect_subscriber(link_.subscriber);
+    *link_.room.borrow_mut() = usize::MAX;
+    link(
+        &link_.server,
+        &link_.writer,
+        AuthorSubject::for_test_bytes([0x54; 16]),
+        &link_.room,
+    );
+    for _ in 0..20 {
+        block_on(link_.writer.tick()).unwrap();
+        block_on(link_.server.tick()).unwrap();
+        if visible(&link_.server) == ROWS {
+            return;
+        }
+    }
+    panic!("the server has {} of {ROWS} rows", visible(&link_.server));
+}
+
+/// An untrusted writer's commit over what its server joins is rejected for
+/// good, here, rather than ending the session on every resend: the writer
+/// rolls it back and later commits still sync.
+#[test]
+fn an_untrusted_commit_over_the_session_budget_is_rejected_without_sending() {
+    let link = narrow(0xc4, 0x55);
+    // About 9 MB: over the 8 MiB an untrusted session may send.
+    commit_notes(&link.writer, 300);
+    for _ in 0..10 {
+        block_on(link.writer.tick()).unwrap();
+        block_on(link.server.tick()).unwrap();
+    }
+    assert_eq!(
+        visible(&link.writer),
+        0,
+        "the refused commit is rolled back"
+    );
+    assert_eq!(visible(&link.server), 0);
+    commit_notes(&link.writer, 1);
+    for _ in 0..10 {
+        block_on(link.writer.tick()).unwrap();
+        block_on(link.server.tick()).unwrap();
+    }
+    assert_eq!(visible(&link.server), 1, "the session survives the refusal");
+}

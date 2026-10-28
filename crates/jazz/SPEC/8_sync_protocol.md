@@ -383,12 +383,18 @@ Limits:
 - An encoded frame is at most `MAX_WIRE_FRAME_BYTES` (2 MiB); a part carries
   at most that less the carrier's prefix room.
 - A joined message is at most `MAX_LOGICAL_MESSAGE_BYTES` (256 MiB); a
-  sender refuses a larger one ("not supported yet") rather than send it. A
-  server joins an untrusted session's split messages only up to its
-  connection's queue budget (8 MiB).
+  sender refuses a larger one ("not supported yet") rather than send it, and
+  a server whose message is refused ends the session with a never-retry
+  error. A server joins an untrusted session's split messages only up to
+  `MAX_UNTRUSTED_MESSAGE_BYTES` (8 MiB, its connection's queue budget); an
+  untrusted replica rejects its own larger commit before sending it, as a
+  rejected fate, so the session survives.
+- A split message spans at most `MAX_WIRE_BATCH_FRAMES` parts, and each frame
+  is within the frame limit. A refused message's parts are dropped at once.
 - A server ships a session's rows as `Rows` of at most a quarter of the
-  joined-message ceiling of images each, so a first result of any size
-  travels. One commit's versions (one seq) stay in one `Rows`.
+  joined-message ceiling of images each (live and one-shot answers alike), so
+  a result of any size travels. One commit's versions (one seq) stay in one
+  `Rows`.
 - A WebSocket batch carries at most `MAX_WIRE_BATCH_FRAMES` frames; senders
   split batches by bytes across binary messages.
 - `PushChunks` and `Chunks` flush at half a frame of node bytes, so each fits
