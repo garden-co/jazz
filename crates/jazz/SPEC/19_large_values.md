@@ -1,499 +1,455 @@
-# jazz — Specification · 19. Large-value capabilities
+# jazz — Specification · 19. Large values
 
 ## Overview
 
-Groove owns the logical and physical semantics and all storage lifecycle of
-large values (Groove spec chapter 9). Jazz owns high-level access/write APIs,
-sync, row/version authorization, locator disclosure, and staging acceptance or
-eviction policy. Jazz never implements chunk storage, parses nodes, maintains a
-stateful root-authorization registry, or coordinates durable collection.
+`string`, `json` and `bytes` columns hold values of any size through one API.
+A value up to `INLINE_VALUE_MAX_BYTES` (64 KiB) is stored in its cell as
+ordinary SQLite TEXT or BLOB. A larger value is a content-defined chunk tree
+plus an **epoch**: a growing list of edits on top of that tree. A row version's
+cell names an epoch and how many of its edits apply. That prefix never changes,
+so the version's value is immutable while the epoch grows.
 
-Chunks are not Jazz rows and do not form a second Jazz query or synchronization
-model. A Jazz row/version contains an ordinary Groove large-value descriptor.
-Jazz treats its root locator and hashes as opaque physical fields. Authorized
-disclosure of a locator is the read capability; there is no later operation- or
-view-specific grant check. Jazz never parses content trees, applies edit
-tails, computes UTF-16 metrics, interprets JSON, or decides which chunks an IVM
-operator needs.
+Writes to a row are linearized by its authority (serializable transactions
+trivially, mergeable ones through their merge strategy), so most edits extend
+the newest version. One edit then costs its few encoded bytes in the epoch
+plus a few-byte cell in the version. A write that does not extend the newest
+version starts a new epoch. Every store keeps its own epochs; sync carries
+values as edits extending a value the receiver was sent, or as a tree.
 
-Each runtime column also freezes an internal large-value semantic kind at
-schema lowering: bytes, text, or JSON. JSON remains the existing logical
-string-shaped Groove value, but the physical-row descriptor carries its
-schema-derived JSON context. Inline primitives and chunked descriptors do not
-duplicate that context: their ordinary Groove enum schema is parameterized by
-the column kind. Every independently addressed immutable tree node carries a
-Groove-owned kind witness, checked against the schema-derived expected kind and
-bound into the locator-independent logical hash, so a JSON root cannot be
-replayed as text (or vice versa). The witness is not client-chosen or visible to
-logical queries, policies, indices, or application results.
+Everything about a large value is authorized through the row that holds it:
+its edits travel inside the row's commits, and its nodes are served only to
+readers of a version whose tree contains them.
 
 Invariant digest:
 
-- `INV-CONTENT-1`: Jazz does not duplicate Groove's large-value semantics.
-- `INV-CONTENT-2`: readable row versions disclose their root locators;
-  authenticated traversal reveals descendants recursively.
-- `INV-CONTENT-3`: chunk knowledge and cache presence do not widen row access.
-- `INV-CONTENT-4`: staging grants no publication authority.
-- `INV-CONTENT-5`: authorized owner-row publication is the only way to publish
-  a new root in Jazz state.
-- `INV-CONTENT-6`: Groove's chunk storage is replaceable and policy blind.
-- `INV-CONTENT-7`: sync/view settlement accounts for required disclosed roots
-  without turning chunks into canonical Jazz facts.
-- `INV-CONTENT-8`: collection cannot remove chunks reachable from retained
-  readable history or live staged/publication leases.
+- `INV-CONTENT-1`: large values have one implementation, and a chunked value
+  reads, filters, orders and indexes as its logical value.
+- `INV-CONTENT-2`: a version's cell is immutable: `(epoch, n)` always names the
+  same logical value, however the epoch grows.
+- `INV-CONTENT-3`: nodes and edits are disclosed only through a readable row
+  version that reaches them; knowing a hash or holding a cached node grants
+  nothing, and the server never reveals whether it holds a node.
+- `INV-CONTENT-4`: staging nodes creates no readable state and authorizes no
+  write.
+- `INV-CONTENT-5`: only an ordinarily authorized write of the owning row adds
+  edits to an epoch or publishes a new root, and the authority validates both.
+- `INV-CONTENT-6`: tree nodes are content-addressed and policy blind; equal
+  content in one store is stored once.
+- `INV-CONTENT-7`: sync carries large values as edits extending a value that
+  crossed the same link before, or as a tree reference; epochs never cross the
+  wire.
+- `INV-CONTENT-8`: collection never removes an epoch or node that a retained
+  version, staging lease or receipt reaches.
+- `INV-CONTENT-9`: a chunk store holds only leaf bytes; metadata commits with
+  the rows, and bytes move or go only after the commit that allows it.
+- `INV-CONTENT-10`: `delta(a, b)` returns edits that turn a's value into b's,
+  at a cost that follows the change, not the value.
 
-## 19.1 Cross-layer boundary
+## 19.1 Cells
 
-The ownership split is:
+A large-capable column is declared without a type, like every stored column,
+so each cell keeps its SQLite storage class:
 
-| Groove owns                               | Jazz owns                         |
-| ----------------------------------------- | --------------------------------- |
-| inline/indirect encoding and locators     | high-level access/write APIs      |
-| chunk storage and backend composition     | row/version authorization         |
-| staging persistence and mechanics         | locator disclosure after auth     |
-| immutable format, integrity and traversal | owner-row publication semantics   |
-| edit tails and consolidation              | canonical row/version sync        |
-| byte/text/JSON interpretation             | view lifecycle and settlement     |
-| cache, leases and evaluator suspension    | policy-sensitive public errors    |
-| durable refcounts and reclamation         | ingress rate/expiry/accept policy |
+| Value                            | Cell                       |
+| -------------------------------- | -------------------------- |
+| inline string or JSON (≤ 64 KiB) | TEXT, its UTF-8 bytes      |
+| inline bytes (≤ 64 KiB)          | BLOB, its bytes            |
+| chunked (> 64 KiB)               | INTEGER `epoch * 4096 + n` |
+| null                             | NULL                       |
 
-Jazz's existing row/view authorization controls locator discovery: an authorized
-descriptor reveals its root and authenticated Groove nodes reveal descendants.
-There is no second stateful authorization registry. Groove talks directly to
-local chunk storage. Jazz orchestration MUST NOT catch a `MissingChunk`, inspect
-a request frontier, or retry a Groove evaluation closure; it may fulfill the
-still-pending Groove request through the auxiliary sync channel in §19.6.
+`typeof(cell) = 'integer'` is the chunked arm. `cell / 4096` is the epoch id
+and `cell % 4096` is `n`, the number of the epoch's edits that apply, so
+triggers and queries read both in plain SQL. There are no tag bytes, every
+TEXT cell is valid UTF-8, and no cell carries a hash, root or descriptor.
 
-`INV-CONTENT-1`: tree shape, chunking, edits, logical comparison, materialization
-and integrity validation have one implementation in Groove. Jazz MUST treat the
-descriptor and all nodes as opaque values except for the root locator/hash fields
-required to bind authorization and lifecycle.
+The inline/chunked choice is canonical: a value is chunked exactly when its
+logical length exceeds `INLINE_VALUE_MAX_BYTES`. So an inline cell never equals
+a chunked one, and a write that brings a chunked value back under the limit
+stores it inline.
 
-### Frozen V1 JSON and chunking boundary
+A column that an index names additionally has a hidden key column
+`$k:<column>` in the table and its history (`$` names are the engine's). It
+holds the value's sort prefix (its first `SORT_PREFIX_BYTES` = 256 logical
+bytes, cut on a code point for text, in the column's storage class) for
+chunked cells and NULL otherwise. The column's indexes, orderings and ranges
+are on `COALESCE("$k:<column>", <column>)`. A key column is store-local: a
+store writes it with the cell, fills it for cells stored before an index
+named the column, and an image carries it under the column's wire name, which
+the receiving store keeps for the columns it indexes. Unindexed columns have
+no key column; their orderings take each chunked value's sort key from the
+Rust prep.
 
-Jazz's JSON columns inherit Groove V1's literal-source contract. A JSON scalar
-is syntactically validated UTF-8 source; Jazz neither normalizes object key
-order, duplicate keys, numeric spelling, escape spelling, nor Unicode before
-staging or publication. Parsed reads use Groove's ordinary JSON semantics
-(including the parser's last-duplicate-key behavior), but those parse results
-do not rewrite the stored bytes. JSON mutation remains a complete replacement
-lowered to the same bounded byte-edit tail as all other large scalars; Jazz
-must not add an object-like patch, merge, or locator API at this boundary.
+## 19.2 Trees and nodes
 
-The descriptor's V1 format selector jointly governs its root, nested edit
-records, and schema-known `Chunked = 1` physical scalar arm before Groove
-interprets any of them. Groove reads only the outer enum tag and fixed version
-byte before dispatch, so a future version with malformed current-layout nested
-bytes fails `UnsupportedFormat` without being decoded as V1. The permanent V1 FastCDC/content-defined-grouping
-profile is owned by Groove and applies identically to in-memory, RocksDB,
-SQLite/OPFS/IDB, and remote byte-plane adapters. A backend cannot tune chunk
-boundaries or use locator layout to alter logical identity. The authoritative
-literal JSON, duplicate-key, numeric, Unicode, malformed, replay, tail,
-UTF-8/UTF-16, consolidation, and content-defined profile receipts live in
-Groove spec §9.2 and its named hard-coded codec tests.
+A tree's leaves are content-defined chunks of the logical bytes, with the
+frozen V1 FastCDC profile (`V1_FASTCDC_LEAF_*`: 16 KiB minimum, 64 KiB target,
+256 KiB maximum). Branches group children by the same content-defined rule.
+Chunking depends only on content, so two stores that build a tree over the
+same bytes build the same nodes, and an edit changes only the leaves around
+it and the path above them.
 
-The same boundary applies to recovery: Groove's staged receipt and pending
-upload metadata retain opaque canonical descriptor bytes and delegate their
-decode to the shared raw dispatcher. Jazz cannot observe, repair, or reinterpret
-those bytes. A future-format malformed receipt is rejected before any V1 nested
-metadata decoding and remains durable-but-unconsumed for a future explicitly
-supported format; recovery reads do not mutate it.
+A node is identified by its hash: BLAKE3 over its canonical encoding, in a
+domain fixed by the format version and the column kind (bytes, string, JSON).
+A JSON tree therefore never reads as a string tree. A leaf encodes its bytes;
+a branch encodes, per child, the child's hash, byte length and (for strings)
+UTF-16 length. A node has no locator and no second identity.
 
-Remaining lifecycle scope is intentionally unchanged: Jazz still owns
-authorization, staging expiry/admission, atomic owner-row publication,
-retention, and cross-backend durability verification; Groove still owns
-locators, node traversal, integrity, edit replay, materialization, and
-collection mechanics. This V1 decision adds no migration/backcompat decoder,
-no new backend locator format, and no cross-backend fixture corpus. Those
-physical-adapter compatibility fixtures remain tracked separately under the
-storage-freeze corpus work rather than being inferred from this codec receipt.
+Nodes live in `_jazz_lv_node (hash PRIMARY KEY, bytes)`, edges in
+`_jazz_lv_edge (child, parent)`, and the roots epochs hold in
+`_jazz_lv_root (root PRIMARY KEY, refs)`. Every node read is verified against
+the hash its parent or epoch names.
 
-## 19.2 Opaque traversal capabilities
+`INV-CONTENT-6`: nodes are immutable, content-addressed and carry no schema,
+row or policy. Storing a node that exists is a no-op.
 
-Every retrievable node has two independent identities:
-
-```text
-NodeRef {
-  object_hash,     // commits to exact encoded bytes and child locators
-  locator,         // exact random 256-bit retrieval capability
-}
-```
-
-The owner descriptor separately carries Groove's deterministic `logical_hash`.
-Logical hashes identify equal values; object hashes authenticate the precise
-locator-bearing retrieval graph. Neither hash grants retrieval authority.
-
-The authorized Jazz row/version reveals the root `NodeRef`. Fetching a branch
-reveals only the locators of its children. Fetching those children recursively
-reveals exactly that tree. Groove's authorized storage path accepts exact
-locators and does not expose
-listing, prefix scan, hash lookup, cross-tenant existence tests, or locator
-metadata.
-
-Hashes are not authorization: predictable values can have guessable hashes.
-The private blob backend may deduplicate exact objects by object/content hash, but its
-public/proxied namespace is opaque locator to internal object. Multiple locators
-may map to one physical blob without revealing that equality.
-
-Locators are exactly 256 random bits drawn by Groove from the operating-system
-CSPRNG as defense in depth, excluded from Groove logical
-identity, and omitted or irreversibly redacted from logs, traces, analytics,
-error messages and metrics labels. Unknown, expired and unauthorized locator
-lookups expose indistinguishable public failure details.
-
-The fixed 256-bit locator is a private Groove capability, not a Jazz identifier,
-wire-visible storage key, hash lookup, or authorization token that Jazz can
-mint. Its paired object hash authenticates exact encoded locator-bearing bytes;
-neither a logical hash nor an object hash alone authorizes retrieval. A backend
-may internally deduplicate exact bytes, but its atomic immutable mapping accepts
-only an identical existing `(locator, object_hash, bytes)` mapping. A different
-mapping at the same locator is a fail-closed integrity result: Jazz must not
-retry it by rewriting the locator or treat it as an alias. Groove V1's object,
-leaf-grouping, branch-grouping, and kind/format-mask hash domains are fixed in
-Groove §9.2; Jazz never computes, substitutes, or serializes a second hash
-domain.
-
-`INV-CONTENT-2`: a subject authorized to observe a concrete row version may
-receive that version's root locator and may recursively request locators learned
-from successfully fetched, Groove-verified nodes beneath it.
-
-`INV-CONTENT-3`: knowing a logical/object hash, possessing a locally cached blob, or
-having read a different row/root MUST NOT authorize a locator. Every Groove
-operation requests only locators discovered from its admitted descriptors and
-authenticated parents. Possession after authorized discovery is sufficient.
-
-## 19.3 Read and policy authorization
-
-An authority evaluates ordinary Jazz read policy for a candidate row/version.
-After success, its view may disclose the row's descriptor. A receiver installs
-that descriptor into Groove; Groove then walks its own storage directly.
-
-Write-policy candidates and their inline query sources retain each column's
-schema-derived large-scalar kind, including JSON, across runtime re-encoding.
-Owner-only predicates do not materialize unrelated large payloads. Crossing the
-inline boundary does not change insert/update authorization or turn a denied
-write into a transport failure; candidate descriptors remain runtime carriers,
-not a new history or wire format.
-
-Read policies that themselves inspect a large value execute at an authority
-whose internal capability may resolve the candidate root for policy evaluation.
-The candidate row/root is not released to the reader until policy succeeds. A
-partial client MUST NOT fetch an undisclosed root merely to decide whether it
-may read that root; authority admission remains authoritative.
-
-Chunk storage is private to Groove and receives no Jazz schema, subject, policy,
-branch, or query context. Jazz grants roots to Groove rather than issuing raw
-backend credentials or mediating individual chunk reads.
-
-Locator non-discovery does not revoke plaintext already received by an authorized
-client. The initial guarantee is non-discovery: removing authorization prevents
-future root disclosure and proxy traversal through live Jazz sessions. Stronger
-expiry or encryption/key revocation may be layered on without changing Groove's
-logical format.
-
-## 19.4 Upload, staging, and publication
-
-Groove prepares a logical write, allocates locators, and stores immutable chunks
-in its own unreachable staging generation. Jazz owns ingress rate limiting,
-expiry, acceptance,
-and eviction policy through Groove's staging API. Staging does not require or
-imply permission to mutate a Jazz row.
-
-Publication is:
+## 19.3 Epochs and the edit format
 
 ```text
-Groove prepares descriptor + chunks without visible mutation
-  -> Groove stages immutable locator/hash/blob mappings
-  -> Jazz evaluates ordinary row Insert/Update authorization
-  -> Groove validates that the staged root is complete
-  -> Jazz publishes the ordinary owner-row version
-  -> Groove's physical-record batch installs the durable root reference
+_jazz_lv_epoch (
+  id         INTEGER PRIMARY KEY,   -- local to this store
+  root       BLOB NOT NULL,         -- the tree the edits apply to
+  base       BLOB NOT NULL,         -- the tree's descriptor: lengths, kind
+  edits      BLOB NOT NULL,         -- encoded edits, appended in order
+  count      INTEGER NOT NULL,      -- how many edits `edits` holds
+  refs       INTEGER NOT NULL       -- cells referencing this epoch
+)
 ```
 
-The row mutation remains the atomic Jazz value/conflict/history operation. Blob
-staging before it is intentionally not atomic: unreachable immutable chunks are
-harmless and expire. The row MUST NOT publish unless its exact root is available
-and Groove can validate the bounded tree/descriptor. Finalization itself is
-that admission boundary: regardless of prior staging call order, it validates
-the complete authenticated reachable tree, canonically replays the edit tail
-against that immutable base (including source-derived text coordinates and
-whole-value-only JSON replacement), validates the final logical scalar, and
-atomically binds the pending upload to the exact canonical descriptor,
-publishes its one persisted receipt, and releases the pending upload retainers
-in one durable metadata transition. A retry after durable descriptor/receipt
-binding reuses that receipt; TTL is solely abandoned-staging protection, never
-a repair mechanism for a partially promoted claim.
-A completed upload-id binding remains durable for exactly the lifetime of its
-unaccepted receipt, so a lost promotion response and restart cannot turn retry
-into a new claim. Receipt consumption by an accepted row or explicit TTL
-eviction atomically removes both directions of that idempotency binding with
-the receipt; ordinary orphan reclamation may then collect nodes whose last
-retainer disappeared. Completion bindings are not independently TTL-expired.
-Every completed binding, reverse binding, receipt key, and receipt value MUST
-agree on the exact upload and receipt identities as well as descriptor and
-accounting; specifically the fixed-width suffix of each `completed-upload/` or
-`completed-receipt/` Groove key is authoritative and must equal the respective
-embedded upload or receipt ID. Recovery, staging preflight, retry lookup, and
-acceptance/eviction cleanup fail closed before mutation on any disagreement.
-A pending upload's chunk journal or accounting cannot be reused to finalize a
-different descriptor. A failed/rejected mutation publishes neither the row
-version nor root reachability.
+The value of `(epoch, n)` is the tree at `root` with the first `n` edits
+applied in order. `n = 0` is the tree itself. Appending an edit increments
+`count`; nothing else in a version's value can change. An id is local to its
+store and is reused only after the epoch was deleted, when no cell names it.
 
-Groove persists timestamped retainer claims keyed by the completed descriptor.
-After ordinary Jazz write authorization, the same Groove physical-record batch
-that inserts the owner version consumes any live matching claim and installs a
-durable root reference. Claims for the same immutable descriptor are fungible; a
-descriptor-keyed concurrent upload may reuse already-local exact nodes after
-its own pending record is bound to that descriptor. Upload-attempt identity is
-neither canonical row state nor publication authority, and it cannot authorize
-a different descriptor.
-A rejected transaction consumes nothing, and its unclaimed retainer expires by
-ordinary TTL maintenance. Acceptance is never a separate transaction before or
-after row publication.
+A write interns its value's cell: the epoch over the same tree whose edits
+start with the value's edits names it (`(E, n)` for the first `n`); else an
+epoch whose edits the value's edits extend is appended to; else a new epoch is
+created. Edits are self-delimiting and concatenated, so these are byte-prefix
+tests on `edits`.
 
-Sync is intentionally asymmetric. Upload is root-first push-before-row: the
-writer starts with the complete large-value descriptor, then sends only the
-bounded node batches the receiver reports missing. Groove authenticates the
-root and discovers branch children from authenticated nodes. Its bounded
-missing frontier is re-derived from persisted authenticated nodes after a
-restart. The upload becomes `Staged` only when every
-reachable node is locally present and the descriptor's kind, metrics, logical
-hash, depth and fan-out validate. Only then does the writer send the ordinary
-referencing `CommitUnit`. No sender `finish` assertion is trusted.
-Concurrent peers may hold the same now-stale frontier. A receiver treats an
-extra node as idempotent only when its exact locator, hash and encoded bytes
-already match local storage; a conflicting or unauthenticated node yields the
-descriptor-scoped `Rejected` result without poisoning the peer connection.
-Download remains locator-driven pull with `ChunkRequestBatch` and
-`ChunkResponseBatch`; download bytes are not upload ingress and do not consume
-the upload rate limit. Relays terminate or forward push uploads before forwarding
-the referencing row, just as missing pull requests may be relayed independently.
+`INV-CONTENT-2`: an epoch's first `count` edits are never rewritten while any
+cell references a prefix that includes them. Appending is the only way an
+epoch grows; edits are never removed from an epoch a cell names.
 
-Groove persists each retainer claim's creation time and incoming byte/node
-accounting. Jazz charges every upload against a simple incoming-byte
-rate limit, including an idempotent upload whose immutable mappings already
-exist. This bounds ingress work rather than retained physical storage. Jazz
-queries opaque receipts to evict expired roots and never enumerates locators or
-chunks. Expiry is performed only by explicit host maintenance. Ordinary chunk
-push, finalization, and row acceptance check that the journal or receipt is
-still present, but do not reject it based on wall-clock age. If maintenance has
-removed it, the operation fails safely and the client must upload again; a
-stale handle cannot recreate an evicted journal.
+### Edit encoding
 
-`RateLimited` is retryable backpressure, not rejection: the receiver retains
-the descriptor-scoped pending claim and every previously accepted node, and the
-sender retries the exact unaccepted node batch after a bounded admission delay.
-It MUST NOT discard the upload or reject the referencing transaction merely
-because one batch was rate limited. The staging maximum age is mandatory and
-finite for both incomplete uploads and completed receipts; configuration may
-tighten it but cannot disable expiry. Thus an abandoned resumable upload is
-eventually reclaimed by the ordinary host maintenance pass.
-
-The current wire result does not carry a receiver-provided retry-after. Until
-it does, every sender waits the named, bounded one-second admission delay before
-retrying the retained batch. That delay is a real host deadline, never a
-`Deferred` microtask; unrelated peer work continues while it waits.
-
-Jazz exposes the same policy setter and idempotent maintenance operation through
-Rust `Db`, server-shell, NAPI, and WASM boundaries. Native servers/NAPI runtimes
-invoke maintenance from their host timer; browser runtimes use a JavaScript
-timer or worker alarm. A timer merely requests `evictExpiredStagedLargeValues`:
-the host never receives staging ids, locators, chunks, or deletion authority.
-Maintenance is the only TTL enforcement point and bounds retention of abandoned
-uploads. Its eviction is serialized with upload continuation and receipt
-consumption, so an operation observes either a present journal/receipt or its
-absence rather than racing eviction into recreation.
-
-The persisted `staged/<id>` and `upload/<id>` records have a fixed opaque
-16-byte key suffix and duplicate that exact ID in their canonical Groove record
-value. Groove rejects a copied/mismatched, malformed, alternate, truncated, or
-trailing journal before recovery, acceptance, continuation, finalization, or
-eviction mutates anything. Receipt IDs are not row IDs or authority: a matching
-receipt is consumed only by the same atomic owner-row batch containing its exact
-descriptor. The initial descriptor upload key is a Groove-only BLAKE3
-derive-key identity over canonical descriptor bytes using the frozen context
-`"groove pending descriptor upload v1"`; it supports replay/resume of that
-descriptor only. The creation timestamp is never a synchronous admission
-deadline: while the journal exists, an otherwise authorized operation may
-continue or accept it; maintenance is the sole expiry authority. The named
-Groove reopen/corruption receipts in §9.8 prove the record remains unchanged on
-rejection.
-
-This lifecycle freeze leaves Jazz's configured TTL/rate policy, host timer
-cadence, public error mapping, and row-authorization decision unchanged. It
-also does not add a cross-backend locator compatibility protocol, a shared-DAG
-upload optimization, a resident-cache policy, migration, or backcompat reader.
-Those remain explicit follow-on storage/sync work rather than behavior inferred
-from a locator or receipt codec.
-
-The initial unconfigured policy admits 256 MiB of pushed bytes per one-second
-window and expires unaccepted completed roots after ten minutes. The byte bound
-matches the maximum logical wire-message size; deployments may configure tighter
-product-specific limits through the same API.
-
-Node/leaf uploads are immutable. Reusing a locator with different bytes is a
-hard integrity failure. The backend may deduplicate equal bytes internally.
-
-`INV-CONTENT-4`: successful staging MUST NOT create readable application state,
-authorize a Jazz mutation, or make a root reachable from Jazz history.
-
-`INV-CONTENT-5`: only a normally authorized Jazz Insert/Update that atomically
-publishes an owner-row version may introduce a root into Jazz canonical state.
-All logical write paths, including Rust `Db`, bindings, transactions, merge,
-sync ingress and repair, MUST pass through the same Groove lowering/admission
-boundary; no caller may publish an unlowered oversized value or handcrafted
-descriptor.
-
-Present nullable scalar cells use the same inline/indirect physical choice
-inside their nullable wrapper. Partial reads and edits preserve that wrapper;
-serializable and mergeable transactions share the same lowering seam before
-version publication.
-
-## 19.5 Groove storage contract
-
-Groove owns a policy-blind asynchronous chunk KV dependency. Jazz neither
-implements nor wraps it. At minimum the byte plane supports exact immutable
-operations:
+Each edit is one tag byte and a few fields. Varints are unsigned LEB128;
+zigzag varints encode a signed delta.
 
 ```text
-put_if_absent(locator, expected_hash, bytes)
-get(locator)
-delete(locator, expected_hash)
+tag = kind << 4 | small
+  kind:  0 append, 1 insert, 2 delete, 3 replace
+  small: 1..15  the inserted length (append, insert, replace) or the deleted
+                length (delete), inline
+         0      that length follows as a varint
+
+append   tag [len] bytes
+insert   tag offset [utf16_offset] [len] bytes
+delete   tag offset [utf16_offset] [len] [utf16_len]
+replace  tag offset [utf16_offset] delete [utf16_delete] [len] bytes
 ```
 
-Groove owns locator allocation, integrity verification, staging, refcounts and
-deletion scheduling. Jazz owns ingress/expiry policy, the decision that grants
-descriptor roots, and public error shaping. The storage implementation receives
-no Jazz policy context and may privately deduplicate by content hash.
+- `offset` is a zigzag varint relative to the end of the previous edit in the
+  epoch (the offset just after its inserted bytes; 0 before the first edit).
+  Ordinary typing therefore spends one byte on it.
+- Coordinates address the value as the previous edits left it.
+- An append's offset is the current logical length, known while replaying.
+- String and JSON columns carry the UTF-16 offset (also relative) and the
+  UTF-16 length of every deletion, which cannot be derived without reading the
+  deleted text. An insertion's UTF-16 length is derived from its bytes. Bytes
+  columns carry byte coordinates only.
+- No lengths are stored per edit: a version's length is the tree's length plus
+  the sum of `inserted − deleted` over its prefix.
 
-Crash-consistent metadata—child edges, durable counts, staging generations and
-the reclamation queue—must commit with Groove physical-record mutations. An
-implementation may keep this metadata in Groove's ordered transactional store
-while composing a simpler async byte KV for large blobs; exposing two unrelated
-transaction owners to Jazz is forbidden.
+A one-character append is 2 bytes; a one-character insertion is 3 (bytes) or 4
+(string).
 
-Deployments may implement the backend with memory, filesystem, RocksDB, OPFS,
-S3, R2, another blob service, or a composition of local cache and remote store.
-Backend choice and completion timing do not alter schema, query, authorization,
-history, conflict, or synchronization semantics.
+### Epoch limits
 
-`INV-CONTENT-6`: no chunk storage implementation may evaluate Jazz policy or
-understand Jazz schemas/queries. Replacing it MUST preserve exact immutable KV,
-durable metadata and availability semantics.
+An epoch's `edits` stays within `EPOCH_EDIT_BYTES` = 3,584 bytes and `count`
+within 4,095, so its row fits in one SQLite page and an append dirties only
+that page. An edit that would cross either limit, or that inserts more than
+`EPOCH_INSERT_BYTES` = 256 bytes, materializes (§19.4).
 
-## 19.6 Sync, views, and completeness
+## 19.4 Writing
 
-Canonical Jazz sync carries the authorized row/version descriptor, not every
-chunk as a row or fact. The descriptor discloses the root locator only inside
-the authority-approved view. Groove evaluation on the receiver then requests
-required descendants through its installed capability.
+A write of a large-capable column produces the new value's cell:
 
-A data subscription may publish independent results whose Groove closures are
-complete while another result is blocked on chunks. A particular result is not
-published until Groove proves all chunks required by its operators. Jazz does
-not reinterpret that pending state as row absence, predicate falsehood, or
-subscription settlement.
+1. **Inline result** (≤ 64 KiB): the cell is the TEXT or BLOB.
+2. **Edits on the newest version.** When the write's base is `(E, n)` with
+   `n = E.count`, and its edits fit the epoch limits, the edits are appended to
+   E and the cell is `(E, n + k)`.
+3. **Edits on an older version** (`n < E.count`: a concurrent plain write that
+   wins, a branch's first divergent edit, a restore): a new epoch E′ copies
+   E's root and E's first `n` edits, appends the new edits, and the cell is
+   `(E′, n + k)`. The copy is at most one epoch's edit bytes; epochs never
+   point at each other.
+4. **Materialization.** When the edits do not fit, or the value is new, the
+   writer builds the resulting value's tree, reusing every unchanged node:
+   only the regions the epoch's and the new edits touched are chunked again.
+   A new epoch with that root and no edits holds it, and the cell is
+   `(E″, 0)`.
 
-Settlement has two distinct conditions:
+Any store may materialize; trees are deterministic, so stores that
+materialize the same value agree on its nodes. Materialization is local and
+never synced.
 
-1. Jazz has received and verified its complete canonical row/view closure and
-   authority frontier under the normal sync protocol.
-2. Groove has reached quiescence for the terminal's currently demanded chunks.
+A new value, or one edit that inserts more than `INLINE_VALUE_MAX_BYTES`, is
+prepared into nodes before the write (streaming for `insert_streaming_value`
+and the binding upload APIs). Those nodes are held by an upload lease
+(`_jazz_lv_upload`) or, when pushed by a client, by a receipt
+(`_jazz_lv_receipt`) until the commit referencing them lands or the staging
+maximum age passes.
 
-Chunk cache eviction after publication does not retract settlement or logical
-data. A later operation may suspend to reload evicted bytes. Permanently missing
-or corrupt required chunks end the affected low-level terminal/query with a
-typed failure; Jazz's existing high-level recovery may reinstall only where its
-continuity rules permit.
+`INV-CONTENT-4`: staged nodes are unreachable from any row; staging needs no
+write permission and grants none, and an expired lease or receipt releases
+its nodes.
 
-`INV-CONTENT-7`: chunks MUST NOT become a second canonical sync fact format, but
-Jazz MUST NOT report a terminal/result settled while its exact Groove evaluation
-is blocked on required chunks.
+### Authority admission
 
-### 19.6.1 Auxiliary chunk-demand channel
+The authority applies a write's large-value edits only after ordinary
+row-write authorization, in the same SQLite transaction as the version. It
+validates each edit against the base value: coordinates in range, byte
+offsets on code-point boundaries and inserted bytes valid UTF-8 for strings,
+and UTF-16 coordinates consistent with the byte coordinates (found through
+the tree's UTF-16 metrics and one leaf, not by scanning). A tree reference is
+admitted only when its root and every node beneath it are present and
+verified, its lengths match, and the writer **possesses** it.
 
-When Groove misses local cache/storage, its original evaluation future remains
-pending and invokes a Jazz-installed `MissingChunkResolver`. Jazz multiplexes
-opaque batches of `(request_id, locator, expected_object_hash)` over the peer
-connection and completes that resolver future from response batches. Jazz does
-not catch/retry an evaluation error or inspect node bytes. Groove authenticates
-responses, installs valid bytes/edge metadata locally, coalesces consumers, and
-wakes dependent evaluations.
+A node held by the store proves nothing about the writer, since hashes are
+not secret: a writer possesses a tree when each node is either under the tree
+of a row version it may read that its commit names (the version a delta
+extends, or the settled version its pushes assumed, §19.8), or pushed by the
+writer itself under its own receipt with its children possessed in turn. A
+tree the writer does not possess is refused exactly as one with absent nodes,
+so a write never tells whether the store holds a tree, and never copies
+content the writer cannot read. A trusted link's writes are not checked.
+Relays check their sessions' writes the same way.
 
-A receiving peer first asks its Groove instance for an exact local chunk. On
-local miss Jazz forwards the request strictly upstream along the authority
-topology. Request ids are hop-local; mappings and responses follow the reverse
-path. Every hop coalesces identical requests, applies request/byte backpressure,
-propagates cancellation when its last consumer disappears, and decrements a hop
-limit. Intermediate transport failures are retryable; only the terminal
-authority returns definitive normalized unavailability. Shared-store deployments
-normally satisfy the first local lookup and use the same protocol unchanged.
+JSON validity is a writer's responsibility: anyone allowed to write a value is
+trusted not to produce malformed JSON, and Jazz's JSON mutation APIs and JSON
+merge strategies produce only valid JSON. The authority does not reparse JSON.
+Readers treat malformed JSON as a typed error, never a panic.
 
-Jazz performs that local check through a cloneable Groove-owned exact-read
-service, not by retaining or invoking the configured byte-KV backend. The
-service exposes neither staging nor deletion. This lets the auxiliary pump
-remain independent of the Jazz node lock without moving storage ownership back
-across the boundary.
+`INV-CONTENT-5`: an epoch grows, and a root is published, only inside an
+ordinarily authorized write of the owning row, after admission validated the
+edits or the tree and that the writer possesses the tree. A caller cannot hand
+in a cell, epoch or root.
 
-Relayed bytes create no durable reference at an intermediary that owns no row;
-they may pass through or enter Groove's bounded cache. Forwarding never proceeds
-sideways or downstream and initially never recursively searches arbitrary peers.
-These messages are auxiliary transport, not canonical Jazz facts or frontiers.
+## 19.5 Reads and queries
 
-Auxiliary transport progress is independent of Jazz semantic ticks. Each peer
-link exposes an executor-neutral I/O pump with three operations: route an
-incoming decoded auxiliary message, drain bounded outbound auxiliary batches,
-and await outbound readiness. The pump never acquires the Jazz node-state lock.
-Canonical messages bypass it and remain queued for `Node::tick`. This separation
-is required because a semantic tick may itself be suspended in Groove awaiting
-the chunk response that the pump must deliver.
+A chunked value is read by replaying its prefix over the parts of its tree the
+read needs. Partial reads (byte, UTF-8 and UTF-16 ranges, JSON pointers) map
+their range through the edits and read only the leaves it covers.
 
-Bindings retain the pump beside their socket. Browser/WASM websocket callbacks
-route inbound frames and use a microtask awakened by outbound readiness to drain
-frames. NAPI polls database work without blocking the JavaScript thread and
-routes auxiliary frames independently. A native server keeps Groove and its
-non-`Send` storage capabilities on the dedicated shell thread; that thread runs
-a local async executor whose wire-demultiplexer task continues while a semantic
-tick is suspended. The Tokio socket remains a byte carrier and wakes that local
-task when it stages inbound data. No environment busy-polls, moves Groove's
-backend across threads, or re-enters a locked `PeerConnection`. Disconnect
-completes outstanding hop-local requests safely and discards late responses.
+| Operation                                            | How it runs                                                                                        |
+| ---------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `=` against an inline-size literal                   | SQL: an inline cell compares directly; a chunked cell never matches                                |
+| `=`, `IN`, DISTINCT, GROUP BY between chunked values | equal cells are equal values; unequal cells are compared by length, then content, in the Rust prep |
+| `=` against a literal over 64 KiB                    | the Rust prep                                                                                      |
+| length                                               | the Rust prep: tree length plus the prefix's net edits                                             |
+| ORDER BY and ranges, indexed column                  | the index on `COALESCE(c__k, c)`; the Rust prep orders values sharing a prefix                     |
+| ORDER BY and ranges, unindexed column                | the Rust prep ranks the column's chunked values                                                    |
+| `contains`, LIKE, JSON pointer                       | the Rust prep reads the content                                                                    |
 
-In-process semantic transports use the same pump: upstream and subscriber
-`PeerConnection::tick` calls drain its bounded queues as part of their normal
-non-blocking service pass. A shared resolver exposes only whether local chunk
-demand is pending and a monotonic completion generation. Jazz uses those cheap
-signals to poll retained Groove query work and refresh affected subscriptions;
-quiescent semantic ticks do not scan unrelated subscriptions. Binding-owned
-socket drivers may drain the same queue concurrently because taking a batch is
-atomic, and transport backpressure restores the batch before retry.
+The prep answers before the statement runs and hands its answers to the
+statement as parameters, so every query, trigger and schema object uses only
+SQLite built-ins and runs on any SQLite, Durable Objects included.
 
-## 19.7 History, retention, and collection
+`INV-CONTENT-1`: every read, comparison, edit and sync path goes through the
+one implementation in `jazz-db`, and its answers equal those of the
+materialized logical value.
 
-Jazz has no large-value-specific durable root registry. A Jazz version is an
-ordinary Groove physical record, and Groove's persisted record mutation owns
-the descriptor reference delta described in Groove chapter 9. Jazz updates and
-logical deletes append versions and therefore do not release old roots. The
-existing explicit client-cache eviction and rejected-version cleanup paths physically
-delete or move versions; their ordinary Groove batches account for descriptors
-like every other physical-record mutation.
+## 19.6 Deltas
 
-Jazz supplies authorization-scoped retrieval capabilities but does not trace
-trees, rebuild reference counts from Jazz history, or coordinate collection.
-Groove and the content backend own immutable child-edge counts, staging
-protection, active leases, resumable zero-count cascades, and authenticated
-audit/rebuild traversal. NAPI/WASM host-owned result copies add no backend lease.
+`delta(a, b)` takes two cells of one column and returns edits, in the edit
+encoding, that turn a's value into b's:
 
-`INV-CONTENT-8`: Jazz MUST NOT bypass Groove's refcount-aware physical-record
-mutation path when inserting, deleting, moving, evicting, or recovering a row
-version containing descriptors.
+| Case                                                  | Computation                                                                                                                                                                      |
+| ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| same epoch, `n_a ≤ n_b`                               | b's edits after a's prefix: a byte range of the epoch                                                                                                                            |
+| same epoch, `n_a > n_b`, or epochs over the same root | the common edit prefix (a byte comparison), then the inverse of a's remaining edits and b's remaining edits; inverting a deletion reads the deleted bytes from the base          |
+| different roots                                       | each side as pieces (leaf spans and inserted bytes); both trees are walked together, subtrees with equal hashes are skipped, and only differing leaves are compared byte by byte |
+| both sides inline                                     | nothing when equal, else one replace between their common prefix and suffix                                                                                                      |
+| one side inline                                       | one replace of the whole value                                                                                                                                                   |
 
-## 19.8 Binding and public API consequences
+The result need not be minimal when content moves. Reading it needs only the
+leaves in changed regions. Merge strategies and the public
+delta API (§19.12) are built on it.
 
-Schemas continue to declare ordinary string, bytes and JSON columns. Small and
-large values use the same idiomatic full-value API. The TypeScript public
-surface is the typed query and mutation DSL; it MUST NOT expose imperative
-large-value read, append, or splice helpers on `Db` or `JazzClient`.
+`INV-CONTENT-10`: applying `delta(a, b)` to a's value yields b's value, and
+its cost is bounded by the changed regions plus the tree depth.
+
+## 19.7 Local replicas
+
+A client or relay keeps its own epochs, and its optimistic writes intern like
+any write. When the authority rejects a pending write, or accepts it as a
+different value, the replica restores the settled version and replays its
+other pending writes over it. A replayed edit whose base is no longer its
+epoch's newest edit starts a new epoch (§19.4 case 3), at the cost of one
+epoch copy. The abandoned edits stay in their epoch until no cell names it.
+Epochs are never truncated, so no cell can name an edit that disappeared.
+
+## 19.8 Sync
+
+A large-capable cell crosses the wire in one of three forms:
+
+| Form    | Contents                                                          |
+| ------- | ----------------------------------------------------------------- |
+| inline  | the TEXT or BLOB                                                  |
+| `Tree`  | the descriptor: root, its lengths and kind, then the edits        |
+| `Delta` | a base version's seq, its edit count, then the edits extending it |
+
+A `Delta` names a version of the same row (table, id, branch) that the
+receiver holds: its value for the same column, extended by the edits, is the
+new value. The sender sends one only when the new value's tree is the base's
+and its encoded edits start with the base's. Neither end keeps state for this
+beyond what sync already keeps, because each direction knows a version the
+other holds.
+
+**Authority to client.** A session already watches every row it shipped,
+across all its subscriptions and support rows (§8). The watch also records
+the seq of the version last shipped this session, or held for an own commit
+(`Fate.held`). A new session starts with none, so its first image of each row
+goes whole. A row version with chunked cells goes out as
+`Delta` against that seq where the stored base value allows, else as `Tree`.
+An `Evict` drops the recorded seq.
+
+**Self-healing.** A client may drop a row without telling the authority
+(INV-SYNC-14 evictions), so a `Delta` can name a version it no longer holds.
+A client that cannot place a `Delta` (no version at that seq, or an edit
+count that differs) skips that image and sends `Hold` for the row with seq 0,
+saying it holds no version. The authority then ships the row's current image
+whole, or an `Evict` if it is no longer readable. Until that arrives the
+client holds a stale version of the row, so it stores no resume point and
+forgets the ones it had (a resume from them would count the row as held), and
+it sends the `Hold` again on its next connection. A `Delta` is never applied
+to any version but the one it names.
+
+**Client to authority.** A client's settled versions all came from the
+authority, so it bases a commit's chunked values on the newest settled
+version of the row it holds: a value extending that version's value travels
+as `Delta` beside the commit's ops, anything else as `Tree`. The authority
+keeps every version (§19.11), so it holds the base. It resolves the delta only when the writer may read that version
+(`readable_version`): otherwise naming a version would copy content the
+writer cannot read into its write. A delta it cannot resolve rejects the
+commit. The rebuilt descriptor is admitted as any other (§19.4). A `Tree`
+travels with the settled version of its row as its source, and is preceded
+by every node of its tree not under that version's trees, pushed under the
+writer's receipt (§19.4). Nodes the authority holds for others are pushed
+anyway: deduplication is silent. A node the client lacks (a value copied
+from a row it holds only partly) is fetched first, and the commit waits.
+
+**Relays.** A relay resolves its sessions' deltas against its own store and
+re-encodes against what its upstream link knows, per direction, as above. A
+worker is its tabs' authority for pulls.
+
+**Lazy, range-shaped pulls.** Receiving a descriptor never pulls nodes by
+itself: a node is pulled when a read needs it. A partial read (§19.5) maps its
+range through the edits and needs only the nodes on the paths covering it, so
+reading one page of a large document pulls the root, one path of branches and
+the leaves of that page.
+
+A pull names the row version it reads through (table, row, branch, version),
+the root of the tree it reads there, the hashes of the nodes it lacks, and
+optionally a range of that tree's bytes. A read maps its logical range through
+the edit tail to the smallest base-tree range covering it; the requester holds
+everything above the nodes it lacks, so a range pull is answered with those
+nodes and every node beneath them on the paths covering the range, parents
+first, in one round trip (up to a bounded number of bytes per answer; a read
+past them pulls again). The requester accepts a node it asked for or one a
+parent it holds names. The authority answers only when the requester may read
+that version and the version holds that root, and only with nodes reachable
+from it. Anything else is answered as for an absent node. A replica records,
+for each root it receives, the version it arrived in, and pulls through it. A
+relay answers from its own store when it holds the nodes and forwards upstream
+otherwise.
+
+`INV-CONTENT-7`: epoch ids, cells and materializations never cross the wire;
+a value crosses as inline bytes, as a tree reference whose nodes are pulled
+through a readable version, or as edits extending a version of the same row
+that the receiver holds, named by its seq.
+
+## 19.9 Authorization
+
+- **Writes.** Edits are part of the row commit, so the row's write policy
+  covers them. Staged nodes are inert until such a commit references them.
+- **Reads.** A reader receives a version's edits only as part of that
+  version, and nodes only beneath roots its readable versions reach. A reader
+  allowed to see one version but not a later one never receives the later
+  version's edits. Losing read access takes effect at once.
+- **No existence oracle.** The server never tells a client it already holds a
+  node the client cannot read: an unreadable pull is answered as absent, and
+  uploads are never skipped on the server's word. Deduplication is silent.
+
+`INV-CONTENT-3`: only a readable row version discloses edits or authorizes a
+node; content hashes, cached nodes and other rows' roots authorize nothing.
+
+## 19.10 Chunk storage
+
+Node metadata (hash, edges, root references, receipts, leases, the
+reclamation queue) and all epochs live in the store's SQLite file and commit
+with the rows. Leaf bytes have one of two homes:
+
+- **The SQLite file** (default): `_jazz_lv_node.bytes`; the file is
+  self-contained.
+- **A chunk store** (`jazz::chunk_store::ChunkStore`, set with
+  `DbConfig::with_chunk_store`): an immutable, policy-blind byte KV keyed by
+  node hash, with asynchronous `put`, `get` and `delete` and an optional
+  synchronous `get_now`. A directory (`FileChunkStore`) answers at once;
+  network object stores (S3, R2 from a Durable Object) answer only
+  asynchronously. Puts are idempotent: a hash always names the same bytes.
+
+A new leaf is written to SQLite with its row. A tick moves settled leaves
+(held by no lease, receipt or unpushed mark) in three crash-safe steps: mark
+the leaf as being put in its own committed transaction; put its bytes; then
+drop its bytes from SQLite (an empty blob, which no encoded node is) and clear
+the mark, unless it was reclaimed meanwhile. Reclaiming a leaf that is in the
+chunk store, or whose put may be in flight, queues its deletion in the
+reclamation's transaction, and a tick deletes it only after that commit and
+any put the same tick started. Storing the leaf again before the deletion ran
+cancels the deletion. Branches and epochs never leave the file.
+
+Every byte a chunk store returns is verified against its hash. A leaf the
+chunk store does not hold is data loss and fails the read with a storage
+error. A read of a leaf only an asynchronous chunk store holds is demand: the
+read fails as missing chunks, the leaf is fetched, and the read runs again.
+One-shot reads and writes on `Db` await the fetch; subscriptions refresh after
+the tick that fetched; a server holds a session's messages that need such
+leaves and serves them in order once they arrive, never refusing a commit for
+it. A file that moved leaves refuses to open without its chunk store; a file
+first opened with one queues every leaf it holds.
+
+`INV-CONTENT-9`: a chunk store holds only leaf bytes. Metadata commits with
+rows. A leaf leaves the file only after its put succeeded, and leaves the
+chunk store only after its reclamation committed.
+
+## 19.11 History, retention and collection
+
+Reference counts are kept by triggers:
+
+- every cell in a table or its `__h` history holds its epoch (`refs`);
+- every epoch holds its root (`_jazz_lv_root.refs`);
+- every branch holds its children through `_jazz_lv_edge`;
+- leases and receipts hold their staged nodes.
+
+An epoch whose `refs` reaches 0 is deleted, releasing its root; a root at 0
+releases its tree; a node no edge, root, lease or receipt holds is reclaimed.
+Reclamation is queued in the transaction that released the last reference and
+runs on tick, so a version's value is retained exactly as long as the version.
+An update retains every new cell's epoch before it releases any old one, so an
+epoch that moves between columns of a row is never freed in between. An epoch
+interned for a write that then stored another cell is named by no cell; the
+next reclamation deletes it.
+
+`INV-CONTENT-8`: collection removes only epochs and nodes unreachable from
+every retained version, lease and receipt.
+
+## 19.12 Binding and public API
+
+Schemas declare ordinary string, bytes and JSON columns. Small and large values
+use the same full-value API. The TypeScript surface is the typed query and
+mutation DSL; it does not expose imperative large-value helpers on `Db` or
+`JazzClient`.
 
 A `select` object may request one partial scalar per selected field:
 
@@ -508,19 +464,30 @@ app.things.where({ id: thingId }).select({
 
 Ranges are half-open `[from, to)`. Byte ranges apply only to bytes; `{from,to}`
 on text is in UTF-16 code units; `{fromUtf8,toUtf8}` opts into UTF-8 bytes.
-`{at}` applies only to JSON and is an RFC 6901 JSON Pointer. Results remain an
+`{at}` applies only to JSON and is an RFC 6901 JSON Pointer. Results are an
 ordinary `Uint8Array`, `string`, or decoded JSON subtree. Selecting a field by
-name (or omitting `select`) materializes the complete primitive as before.
-The query IR retains the descriptor now, and the binding validates and applies
-its public coordinate/pointer contract. Until exact per-terminal demand
-propagation is completed, the binding may obtain the selected carrier column
-and slice that value at the binding boundary; it must not resolve unrelated
-columns or treat that fallback as a chunk-demand model. Issue #2090 tracks
-replacing that temporary carrier fallback with exact terminal demand into
-Groove. It does not gate the executability or correctness of this public API.
+name (or omitting `select`) materializes the complete value. Object-form
+partial selections apply to the root query only; in an include builder they
+fail explicitly rather than returning the complete value.
+
+The engine reads a partial selection only in part: the query carries each
+part (`Query.partial`, and `ArraySubquery.partial` for the Rust include API),
+and the replica reads, and pulls (§19.8), only the chunks that part's byte
+span covers, through every relay on the way. A text range in UTF-16 units
+reads at most the bytes `[from, 3 * to)`; a JSON pointer reads the document
+only as far as the pointer needs, unless the document's shape requires all
+of it. Current limits: a pointer read re-parses the prefix it has read for
+each further window, so its cost grows quadratically with how far into the
+document the pointer reaches, and only a top-level array index is read in
+part (a pointer into a nested array reads the document up to its end). Edits to the value reach the replica as deltas (§19.6) the part reads
+through, so a subscribed part follows them without fetching anything more.
+Two subscriptions over the same rows in different parts are distinct shapes.
+Partial selections in aggregate, union or joined queries fail explicitly. A
+column that a computed column or transform also depends on is read whole and
+its selection is taken from the whole value.
 
 `Db.update` accepts ordinary replacements and an `applyDiffs` option. Both are
-one atomic mutation, but the same column MUST NOT appear in both inputs:
+one atomic mutation, but the same column must not appear in both inputs:
 
 ```ts
 db.update(
@@ -538,121 +505,81 @@ db.update(
 );
 ```
 
-`within` is the same range descriptor used by the read and makes splice
-coordinates relative to its beginning. Splices are applied sequentially, so
-each later coordinate addresses the result of previous splices. A deletion
-MUST stay within the selected page; insertion at its end is allowed. Text
-defaults to UTF-16; UTF-8 splice fields opt in explicitly. Bounds, integer
-overflow, UTF-8 boundaries, and UTF-16 surrogate splits fail rather than round.
-JSON edits use RFC 6901 pointer escaping, fail for a missing path or incompatible
-schema/kind/nullability, and lower to Groove's ordinary binary edit-tail model;
-they do not create a JSON-specific storage model. All fields in one `update`
-call, including `applyDiffs`, commit atomically. There is deliberately no page staleness/CAS promise in this
-API revision.
+`within` is the range descriptor used by the read and makes splice coordinates
+relative to its start. Splices apply sequentially, so each later coordinate
+addresses the result of the previous ones. A deletion stays within the
+selected page; insertion at its end is allowed. Text defaults to UTF-16; UTF-8
+splice fields opt in. Bounds, integer overflow, UTF-8 boundaries and UTF-16
+surrogate splits fail rather than round. JSON edits use RFC 6901 pointer
+escaping and fail for a missing path or incompatible schema, kind or
+nullability. Splices and JSON edits lower to epoch edits (§19.3). All fields in
+one `update`, including `applyDiffs`, commit atomically; there is no page
+staleness check.
 
-Transactions accept the same `applyDiffs` option on `tx.update` (#2087).
-Coordinates address the value the transaction reads: its snapshot overlaid with
-its own earlier writes, including earlier diffs, so repeated appends in one
-transaction compose. Each diff stages only the Groove nodes it touches, exactly
-like the root-context update, and the open transaction retains the staged root
-as engine-private provenance; nothing is visible outside the transaction until
-it commits, and the commit publishes one ordinary row version per row. The row
-read counts as a transaction point read, so a serializable transaction conflicts
-if the row changes before commit. In a mergeable transaction the diffed column
-is authored like any patched column: last-writer-wins at commit, or merged
-with concurrent edits when the column is text-merging (ch. 4 §4.3,
-`INV-HIST-24`).
-The diff is authored by the transaction's bound identity, so session and
-attributed transactions need no separate path. A staged root that outlives the
-staging TTL before commit fails the commit with a staging-expired error rather
-than publishing a partial value. Roots superseded inside the transaction are
-evicted at commit, and rolling the transaction back evicts every root it
-staged; the staging TTL only covers evictions that fail. Branch views still reject `applyDiffs`
-explicitly, as do React Native transactions until its foreground codec carries
-the descriptor.
+Transactions accept `applyDiffs` on `tx.update`. Coordinates address the value
+the transaction reads, its snapshot overlaid with its own earlier writes, so
+repeated diffs in one transaction compose into one version. The row read counts
+as a transaction point read, so a serializable transaction conflicts if the row
+changes before commit; in a mergeable transaction the diffed column is authored
+like any patched column: last-writer-wins at commit, or merged with concurrent
+edits when the column is text-merging (ch. 4 §4.3, `INV-HIST-24`). Branch views
+reject `applyDiffs` explicitly, as do React Native transactions until its
+foreground codec carries the descriptor.
 
-Object-form partial selections apply to the root query only in this revision.
-Included relations may project complete fields by name, but object-form partial
-selections in an include builder fail explicitly until per-terminal demand
-propagation reaches structured relation outputs (#2090). They MUST NOT silently
-fall back to returning the complete primitive.
+`Db` exposes `value_delta(table, row, column, from_version, to_version)`,
+returning `delta` (§19.6) as splices for callers allowed to read both
+versions: each replaces `delete` bytes at `at` with `insert`, applied in
+order, and text splices carry the same edit in UTF-16 units (`at_utf16`,
+`delete_utf16`). It reads only the changed regions; a version the replica no
+longer holds, or one the reader may not read, fails. Subscriptions opt into
+receiving a large-capable column's changes as splices from the row's previous
+result (`ReadOpts::splices`), so an editor can apply remote changes as
+transactions: each updated row carries the column's splices from the version
+the result showed. When they cannot be computed locally (that version is no
+longer held, or chunks are still to arrive) the row carries none for the
+column, and the reader takes the value whole. A column the update left
+unchanged carries an empty list.
 
-The Rust/Jazz binding layer may retain internal primitives at its translation
-boundary, but authorization occurs before resolving a private physical cell and
-unmodified columns inherit their exact descriptor without hydration.
+On a range-partial column the splices are page-relative: they turn the page
+the result showed into the new page, computed from the two page cells, so an
+edit before the window that shifts its contents is a splice of the window
+too. Splices on a JSON-pointer-partial column are refused explicitly as not
+supported yet, and so, in TypeScript, are splices on a range-selected column
+that a computed column or transform makes the engine read whole (its rows
+show the window, its splices would be over the whole value).
 
-Native Rust additionally exposes `Db::insert_streaming_value`. The caller
-supplies the ordinary non-streamed row cells, the target column, and a
-`std::io::Read`; Jazz derives the scalar kind exclusively from that column's
-schema. A bounded producer bridge feeds the same resumable push
-constructor and persisted pending-upload lifecycle used by NAPI and WASM; there
-is no second reader-specific staging path. Jazz charges each finalized batch
-before Groove persists it. Jazz does not publish the row until EOF, complete
-text/JSON validation, staging-policy admission, and ordinary row-write
-admission have succeeded. Terminal reader, validation, admission, and
-publication failures immediately evict the pending claim; cancellation may
-leave only that expiring claim. The API validates the target column and
-physical kind before consuming the reader and preserves a present nullable
-wrapper where required.
+`JazzClient` subscriptions take the same option (`subscribe_with_opts` with
+`ReadOpts::with_splices`) and carry the splices on each `OrderedUpdated`.
+TypeScript takes `splices: [column, ...]` in the query options of
+`Db.subscribe`; the update callback's second argument maps each updated row's
+id to its columns' splices, UTF-16 with a string insert for text and bytes
+with a `Uint8Array` insert for bytes. TypeScript accepts only TEXT and BYTEA
+columns without a column transform and rejects others when subscribing, as
+not supported yet.
 
-TypeScript exposes the mutation family with ordinary payload shapes as
-`Db.insertStreaming(table, { streamedColumn: source, ...otherData })`. From the
-exact DSL column metadata, each typed table derives a separate streaming-init
-union with one Text, JSON, or Bytea column replaced by a required stream source;
-all other columns retain their ordinary insert types and required/defaulted
-status. UUID and other columns whose TypeScript values merely resemble a
-streamable scalar are therefore rejected statically. The runtime schema remains
-the final authority and determines the physical kind without a caller-supplied
-tag. Sources are `ReadableStream<Uint8Array | string>` or
-`AsyncIterable<Uint8Array | string>`; Bytea accepts only byte chunks. The
-operation returns a promise for a write handle containing the generated row id,
-not a materialized copy of the streamed value.
+Native Rust exposes `Db::insert_streaming_value`: the caller supplies the
+ordinary row cells, the target column and a `std::io::Read`; Jazz derives the
+kind from the column's schema, chunks the stream into a leased upload, and
+publishes the row only after EOF, complete text validation, staging-policy
+admission and ordinary row-write admission. TypeScript exposes
+`Db.insertStreaming`, `Db.updateStreaming` and `Db.upsertStreaming` with one
+column replaced by a `ReadableStream` or `AsyncIterable` source; NAPI and
+Browser/WASM feed the same leased upload in bounded windows without
+collecting the whole value or holding a transaction open. Explicit abort and
+terminal validation failure release the lease at once; the staging maximum
+age bounds abandoned uploads.
 
-`Db.updateStreaming(table, rowId, patch)` and
-`Db.upsertStreaming(table, rowId, values)` use a derived streaming-update union:
-one stream is required and every other field is optional, matching the ordinary
-update/upsert surface. All three mutations carry ordinary trusted identity and
-custom `updatedAt` context. Insert derives its exact branch selector from the
-non-streamed `branchBy` cells; streaming a branch column is rejected. Update and
-upsert accept the ordinary head/base branch-view options because one `RowUuid`
-may exist in several branch coordinates. Jazz resolves existence, inheritance,
-parents and authorization only after the producer finishes, so a slow upload
-cannot commit against stale pre-upload row state. Publication accepts the staged
-root in the same ordinary row-version commit.
-
-NAPI and Browser/WASM both use Groove's resumable push constructor. The adapter
-subdivides arbitrarily large host chunks into bounded windows; each awaited
-`push` advances content-defined chunking, incrementally validates UTF-8/JSON
-syntax, and asks Jazz to charge the finalized encoded-node batch against the
-ingress window before Groove persists it under the pending upload. Rejection
-evicts and closes that upload before the over-limit batch is written. Explicit
-abort and terminal validation failure also evict the persisted pending claim
-immediately, releasing its chunk retainers without waiting for TTL. `finish`
-registers the validated root without charging its already-metered nodes twice
-and performs the same ordinary Jazz mutation lifecycle. Neither binding
-collects or spools the whole logical value or holds a Jazz transaction open
-while JavaScript produces data.
-
-NAPI and WASM preserve the existing encoded-row boundary and copy completed
-results into host-owned buffers. No chunk lease crosses either binding. Complete
-string, bytes and JSON values decoded by TypeScript therefore live inside the
-host-owned row copy rather than a Rust-backed external buffer.
-
-The public API does not expose locators, integrity hashes, tree nodes, cache
-leases, retry tokens, partially materialized handles, or Groove request state.
+Bindings copy completed results into host-owned buffers. The public API does
+not expose epochs, cells, node hashes, tree nodes, leases or retry state.
 
 ## Open questions
 
-- Whether strong post-authorization expiry requires encrypted chunks and
-  root-scoped key delivery; the initial bearer-locator boundary prevents new
-  discovery but cannot revoke plaintext already received.
-- Exact retention frontier and collection cadence for each deployment tier.
-- Any future Jazz history truncation/thinning design must express removal as
-  ordinary refcount-aware Groove physical-record deletions, preserve versions
-  still required by snapshots/branches, and define crash-consistent batching
-  with its truncation frontier. Direct storage deletion is forbidden.
-- Whether direct signed blob downloads are worth adding after the proxied path
-  is measured.
-- Whether a future multipart/handle binding protocol should expose chunk-backed
-  `Blob`/bytes results. It is outside the current design and would require host
-  finalizers, external-memory accounting and lease-aware backpressure.
+- Direct leaf downloads from an object store (lower egress, higher bandwidth):
+  object names keyed by a server-only secret and revealed only after the read
+  check, with short-lived presigned URLs so revealed names expire.
+- Store-local leaf patches (a new leaf kept as its base leaf plus edits until
+  it is offloaded), as a storage optimization outside the format.
+- A lazily filled content-hash table, if exact equality between chunked values
+  in plain SQL turns out to matter.
+- Retention and history thinning: removal of old versions must be ordinary
+  refcounted row deletions, never direct node deletion.

@@ -27,6 +27,12 @@ function makeHarness() {
     getAuthState: () => ({ authMode: "local-first" as const, session: null }),
     onAuthChanged: () => () => {},
     updateAuthToken: () => {},
+    getSyncStatus: () => ({
+      link: { state: "local-only" as const },
+      pendingUploads: 0,
+      synced: true,
+    }),
+    onSyncStatusChange: () => () => {},
     subscribeDelta: (query: QueryBuilder<Todo>, callbacks: DbDeltaSubscriptionCallbacks<Todo>) => {
       subscribedQuery = query;
       callback = callbacks.onDelta;
