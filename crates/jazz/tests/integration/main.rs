@@ -17,6 +17,8 @@ mod array_columns;
 mod authorization_scope_reentry;
 #[path = "../binding_host.rs"]
 mod binding_host;
+#[path = "../branch_column_evolution.rs"]
+mod branch_column_evolution;
 #[path = "../branch_views.rs"]
 mod branch_views;
 #[path = "../claims_change.rs"]
@@ -89,6 +91,8 @@ mod recheck_policies;
 mod recheck_queries;
 #[path = "../recheck_sync.rs"]
 mod recheck_sync;
+#[path = "../rejected_retry_store.rs"]
+mod rejected_retry_store;
 #[path = "../relation_policies.rs"]
 mod relation_policies;
 #[path = "../relation_queries.rs"]
@@ -101,6 +105,8 @@ mod relational_delete_retraction;
 mod relay_local_seqs;
 #[path = "../relay_policy_subscriptions.rs"]
 mod relay_policy_subscriptions;
+#[path = "../relay_serves_on_arrival.rs"]
+mod relay_serves_on_arrival;
 #[path = "../schema_activation.rs"]
 mod schema_activation;
 #[path = "../schema_renames.rs"]

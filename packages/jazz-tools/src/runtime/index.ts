@@ -5,6 +5,8 @@ export {
   type TransactionFate,
   type PermissionAdvice,
   PersistedWriteRejectedError,
+  WriteWaitTimeoutError,
+  type WriteWaitOptions,
   type DurabilityTier,
   ReadTier,
   type Row,

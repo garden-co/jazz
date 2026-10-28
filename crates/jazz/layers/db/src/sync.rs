@@ -684,6 +684,9 @@ const CHUNK_BATCH_BYTES: usize = jazz_protocol::protocol_limits::MAX_WIRE_FRAME_
 /// The most node bytes one range pull is answered with: a read past them
 /// pulls again for the rest.
 const PULL_BYTES: usize = 4 << 20;
+/// The most node bytes one `ChunkRequests` is answered with, across all
+/// its pulls: the rest is answered once that has been sent.
+const ANSWER_PULL_BYTES: usize = 4 * PULL_BYTES;
 const _: () = assert!(
     CHUNK_BATCH_BYTES + jazz_types::large_values::MAX_ENCODED_NODE_BYTES + 64 * 1024
         <= jazz_protocol::protocol_limits::MAX_WIRE_FRAME_BYTES
@@ -1075,6 +1078,19 @@ pub(crate) struct Link {
     pub(crate) detached: bool,
 }
 
+/// A commit of this store's that the authority refused, kept with its
+/// payload so it can be retried (INV-TX-9).
+#[derive(Clone, Debug)]
+pub struct RejectedTransaction {
+    /// The commit's local seq (its transaction time).
+    pub seq: u64,
+    /// Why the authority refused it.
+    pub error: Error,
+    pub serializable: bool,
+    /// The writes it made, as it uploaded them.
+    pub ops: Vec<WireOp>,
+}
+
 /// Handle for a connected upstream.
 #[derive(Debug)]
 pub struct Upstream(u64);
@@ -1111,6 +1127,11 @@ pub(crate) struct Client {
     answers: HashMap<u64, Option<Result<(u64, Vec<[u8; 16]>), Error>>>,
     /// Permission preflights asked for; `None` until answered.
     advice: HashMap<u64, Option<PermissionAdvice>>,
+    /// The next permission preflight's id. Each client starts at a random
+    /// point, so an id held over from another instance (a reopened
+    /// database) or a late answer to one never names a request of this
+    /// one (INV-API-28).
+    next_advice: u64,
     /// Large-value nodes asked for and not yet answered.
     requested: BTreeSet<ChunkRequest>,
     /// Nodes to ask for on the next send.
@@ -1129,7 +1150,9 @@ pub(crate) struct Client {
     /// As a relay: sessions' one-shot reads asked of the upstream, served
     /// from this store once it answers.
     relayed_fetches: Vec<RelayedFetch>,
-    /// A relayed fate or read became ready: the serving half runs again.
+    /// A relayed fate or read became ready, or the upstream sent rows or a
+    /// settlement: the serving half runs again in the same tick, so a
+    /// relay's subscribers see it without waiting for another tick.
     relay_ready: bool,
     /// The server said it has not admitted this client's schema version.
     unadmitted: bool,
@@ -1423,6 +1446,9 @@ pub(crate) struct Session {
     /// A relay's pulls of nodes it is still fetching from its upstream:
     /// answered from its store once they arrive (or are unavailable).
     parked_pulls: Vec<WirePull>,
+    /// Pulls past an answer's byte budget: answered once the session's
+    /// outbox has drained (SPEC 19.8).
+    deferred_pulls: Vec<WirePull>,
     /// The client was told its declared version is not admitted.
     told_unadmitted: bool,
     /// On a relay, the upstream subscription each of the client's
@@ -1471,6 +1497,7 @@ impl Session {
             version: None,
             fetched_upstream: BTreeSet::new(),
             parked_pulls: Vec::new(),
+            deferred_pulls: Vec::new(),
             told_unadmitted: false,
             schema: None,
             relayed: BTreeMap::new(),
@@ -3085,6 +3112,12 @@ pub(crate) const SYNC_DDL: &str = "\
     CREATE INDEX IF NOT EXISTS _jazz_settled_by_seq ON _jazz_settled (seq);\
     CREATE TABLE IF NOT EXISTS _jazz_nodes (node BLOB PRIMARY KEY, author INTEGER NOT NULL) WITHOUT ROWID;";
 
+/// The retry store for refused commits. It is created by the first refusal
+/// it keeps, not on open, so that opening an existing store without writing
+/// leaves the file byte-identical.
+const REJECTED_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_rejected \
+    (tx INTEGER PRIMARY KEY, commit_msg BLOB NOT NULL, error BLOB NOT NULL, serializable INTEGER NOT NULL)";
+
 type RowKey = (String, RowUuid, Vec<u8>);
 
 fn encode<T: Serialize>(value: &T) -> Vec<u8> {
@@ -3248,17 +3281,19 @@ impl Inner {
     /// Record the version each chunked value of a received image
     /// arrived in (`table` as the wire names it): pulls of its nodes cite
     /// it.
-    fn record_vias(&self, table: &str, image: &Image) -> Result<(), Error> {
+    /// Whether the image had any.
+    fn record_vias(&self, table: &str, image: &Image) -> Result<bool, Error> {
         let via = crate::large::Via {
             table: table.to_owned(),
             id: image.id,
             key: image.key.clone(),
             seq: image.seq,
         };
-        for root in self.large_roots(&image.table, image)? {
-            crate::large::record_via(&self.conn, &root, &via)?;
+        let roots = self.large_roots(&image.table, image)?;
+        for root in &roots {
+            crate::large::record_via(&self.conn, root, &via)?;
         }
-        Ok(())
+        Ok(!roots.is_empty())
     }
 
     /// The roots of an image's chunked values.
@@ -3283,6 +3318,79 @@ impl Inner {
         )
         .map_err(storage)?;
         Ok(())
+    }
+
+    /// Move refused commit `tx`'s payload from the upload queue into the
+    /// retry store.
+    fn retain_rejected(&self, tx: u64, error: &Error, serializable: bool) -> Result<(), Error> {
+        self.exec(REJECTED_DDL, []).map_err(storage)?;
+        self.exec(
+            "INSERT OR REPLACE INTO _jazz_rejected (tx, commit_msg, error, serializable) \
+             SELECT tx, commit_msg, ?2, ?3 FROM _jazz_pending WHERE tx = ?1",
+            rusqlite::params![tx as i64, encode(&wire_error(error)), serializable],
+        )
+        .map_err(storage)?;
+        Ok(())
+    }
+
+    /// The refused commits in the retry store, oldest first.
+    pub(crate) fn rejected_transactions(&self) -> Result<Vec<RejectedTransaction>, Error> {
+        if !self.has_rejected_store()? {
+            return Ok(Vec::new());
+        }
+        let mut statement = self
+            .conn
+            .prepare_cached(
+                "SELECT tx, commit_msg, error, serializable FROM _jazz_rejected ORDER BY tx",
+            )
+            .map_err(storage)?;
+        let rows = statement
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)? as u64,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, Vec<u8>>(2)?,
+                    r.get::<_, bool>(3)?,
+                ))
+            })
+            .map_err(storage)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage)?;
+        let decode = |e: postcard::Error| Error::new(ErrorCode::Storage, e.to_string());
+        rows.into_iter()
+            .map(|(seq, commit, error, serializable)| {
+                let ops = match postcard::from_bytes::<SyncMessage>(&commit).map_err(decode)? {
+                    SyncMessage::Commit { ops, .. } => ops,
+                    _ => Vec::new(),
+                };
+                Ok(RejectedTransaction {
+                    seq,
+                    error: from_wire_error(postcard::from_bytes(&error).map_err(decode)?),
+                    serializable,
+                    ops,
+                })
+            })
+            .collect()
+    }
+
+    /// Drop refused commit `tx` from the retry store.
+    pub(crate) fn discard_rejected(&self, tx: u64) -> Result<(), Error> {
+        if !self.has_rejected_store()? {
+            return Ok(());
+        }
+        self.exec("DELETE FROM _jazz_rejected WHERE tx = ?1", [tx as i64])
+            .map_err(storage)?;
+        Ok(())
+    }
+
+    fn has_rejected_store(&self) -> Result<bool, Error> {
+        self.conn
+            .query_row(
+                "SELECT count(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = '_jazz_rejected'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(storage)
     }
 
     fn forget_pending(&self, tx: u64) -> Result<(), Error> {
@@ -3741,6 +3849,7 @@ impl Client {
                 detached: false,
             })),
             next_id: 1,
+            next_advice: fresh_advice_base(),
             remote: HashMap::new(),
             remote_ids: HashMap::new(),
             outbox: Vec::new(),
@@ -3820,6 +3929,8 @@ impl Db {
         let version = *inner.owner_version.as_bytes();
         let client = inner.client.as_mut().expect("client");
         client.outbox.insert(0, SyncMessage::Schema { version });
+        // What the old session could not answer, the new one may.
+        client.unavailable.clear();
         // Reading the held rows can fail, and connecting cannot: the send
         // that reads them reports the error, and the next one tries again.
         client.hold_owed = true;
@@ -4610,8 +4721,8 @@ impl Db {
         let Some(client) = inner.client.as_mut() else {
             return 0;
         };
-        let id = client.next_id;
-        client.next_id += 1;
+        let id = client.next_advice;
+        client.next_advice += 1;
         if client.transport.is_some() && may_wait(client.hint.get()) {
             client.advice.insert(id, None);
             let (author, session) = match session {
@@ -4655,11 +4766,17 @@ impl Db {
         .await
     }
 
-    /// Resolve an outstanding request as `Unknown`; its answer is ignored.
+    /// Resolve an outstanding request as `Unknown`: its waiter is removed,
+    /// a request not yet sent is never sent, and a late answer is ignored.
     pub fn cancel_permission_advice_request(&self, id: u64) {
         let mut inner = self.inner.borrow_mut();
-        if let Some(slot) = inner.client.as_mut().and_then(|c| c.advice.get_mut(&id)) {
-            slot.get_or_insert(PermissionAdvice::Unknown);
+        let Some(client) = inner.client.as_mut() else {
+            return;
+        };
+        if client.advice.remove(&id).is_some() {
+            client
+                .outbox
+                .retain(|m| !matches!(m, SyncMessage::Advise { id: asked, .. } if *asked == id));
         }
     }
 
@@ -4788,6 +4905,19 @@ impl Db {
                     other => queue.push_back(other),
                 }
             }
+            // What the upstream sent about rows reaches this store's own
+            // subscribers on the serving pass that follows.
+            if queue.iter().any(|message| {
+                matches!(
+                    message,
+                    SyncMessage::Rows { .. }
+                        | SyncMessage::Evict { .. }
+                        | SyncMessage::Settled { .. }
+                )
+            }) && !inner.sessions.is_empty()
+            {
+                inner.client.as_mut().expect("client").relay_ready = true;
+            }
             // Rows install without their chunks: a chunked cell carries the
             // sort key its indexes need.
             while let Some(message) = queue.pop_front() {
@@ -4803,7 +4933,11 @@ impl Db {
                                 inner.ask_whole(named);
                                 continue;
                             }
-                            inner.record_vias(&named.0, &image)?;
+                            if inner.record_vias(&named.0, &image)? {
+                                // A node no version held may be held by
+                                // this one: missing answers are transient.
+                                inner.client.as_mut().expect("client").unavailable.clear();
+                            }
                             let shadowed = inner.receive_image(image)?;
                             rebase |= shadowed;
                             shadow_changed |= shadowed;
@@ -4915,6 +5049,14 @@ impl Db {
                         let relayed = client.relayed_fates.contains_key(&tx);
                         if let Err(error) = &result {
                             let origins = inner.relayed_origins(tx)?;
+                            // The originating store keeps its own refused
+                            // payload, for a host that reports refusals,
+                            // until the host has (INV-TX-9). A relay keeps
+                            // none of its sessions'.
+                            if inner.upstream_rejections.is_some() && !relayed && origins.is_empty()
+                            {
+                                inner.retain_rejected(tx, error, serializable)?;
+                            }
                             for &(node, session_tx) in &origins {
                                 let refused = Err(wire_error(error));
                                 inner.record_fate(node, session_tx, &refused)?;
@@ -5700,6 +5842,15 @@ impl Db {
         }
         if let Some(pulls) = self.inner.borrow_mut().parked_pulls_ready(index)? {
             inbound.push_front(SyncMessage::ChunkRequests { pulls });
+        }
+        // Pulls an earlier answer deferred, once what it sent has drained.
+        {
+            let mut inner = self.inner.borrow_mut();
+            let session = &mut inner.sessions[index];
+            if session.outbox.is_empty() && !session.deferred_pulls.is_empty() {
+                let pulls = std::mem::take(&mut session.deferred_pulls);
+                inbound.push_front(SyncMessage::ChunkRequests { pulls });
+            }
         }
         // Writes held back by the ingress limit, and what the session sent
         // after them, in order. A read is never answered ahead of a commit
@@ -7125,6 +7276,7 @@ impl Db {
                                 author: receipt_author(&identity),
                                 checked: policy.is_some(),
                                 roots,
+                                settle: Default::default(),
                             };
                             let vouched = vouched(policy, who, session);
                             self.with_claims(vouched, || {
@@ -7227,11 +7379,12 @@ impl Db {
                 }
             }
             SyncMessage::ChunkRequests { pulls } => {
-                let (replies, parked) = db.answer_pulls(policy, pulls)?;
+                let (replies, parked, deferred) = db.answer_pulls(policy, pulls)?;
                 let mut inner = self.inner.borrow_mut();
                 let session = &mut inner.sessions[index];
                 session.outbox.extend(replies);
                 session.parked_pulls.extend(parked);
+                session.deferred_pulls.extend(deferred);
             }
             SyncMessage::PushChunks { nodes } => {
                 let inner = self.inner.borrow();
@@ -7307,7 +7460,7 @@ impl Db {
                 _ => return Err(unresolved()),
             };
             let seq = delta.delta.seq;
-            if !readable_version(&inner, &table.stored, row, &delta.key, seq, identity)? {
+            if !still_readable_version(&inner, &table.stored, row, &delta.key, seq, identity)? {
                 return Err(unresolved());
             }
             let base = inner
@@ -7335,23 +7488,36 @@ impl Db {
     /// a hash never reads another row's content. A node only in an
     /// asynchronous chunk store fails the whole batch as missing before
     /// anything is sent: it is answered again once its nodes are fetched.
+    ///
+    /// One answer carries at most about [`ANSWER_PULL_BYTES`], each node
+    /// once: the pulls (and wanted nodes) past it come back deferred, to
+    /// be answered once the session's outbox has drained.
     fn answer_pulls(
         &self,
         identity: Option<AuthorSubject>,
         pulls: Vec<WirePull>,
-    ) -> Result<(Vec<SyncMessage>, Vec<WirePull>), Error> {
+    ) -> Result<(Vec<SyncMessage>, Vec<WirePull>, Vec<WirePull>), Error> {
         let inner = self.inner();
         let mut replies = Vec::new();
         let mut parked = Vec::new();
+        let mut deferred = Vec::new();
         let mut nodes = Vec::new();
         let mut missing = Vec::new();
         let mut size = 0;
+        let mut answered = 0;
+        let mut sent = std::collections::HashSet::new();
         let mut fetching = false;
         for pull in pulls {
+            if answered >= ANSWER_PULL_BYTES {
+                deferred.push(pull);
+                continue;
+            }
             let row = RowUuid::from_bytes(pull.id);
             let image = match inner.schema.stored_table(&pull.table) {
                 Ok(table)
-                    if readable_version(&inner, table, row, &pull.key, pull.seq, identity)? =>
+                    if still_readable_version(
+                        &inner, table, row, &pull.key, pull.seq, identity,
+                    )? =>
                 {
                     inner
                         .version_image(table, row, &pull.key, pull.seq)?
@@ -7374,9 +7540,10 @@ impl Db {
                 &pull.root,
                 &pull.nodes,
                 span.clone(),
-                PULL_BYTES,
+                PULL_BYTES.min(ANSWER_PULL_BYTES - answered),
+                &mut sent,
             );
-            let (found, foreign, absent) = match found {
+            let (found, foreign, absent, rest) = match found {
                 Err(error) if crate::large::is_missing(&error) => {
                     fetching = true;
                     continue;
@@ -7384,6 +7551,13 @@ impl Db {
                 found => found?,
             };
             missing.extend(foreign.into_iter().map(|hash| WireChunkRef { hash }));
+            if !rest.is_empty() {
+                deferred.push(WirePull {
+                    nodes: rest,
+                    span: None,
+                    ..pull.clone()
+                });
+            }
             // A relay fetches what it lacks from its upstream, through the
             // version it received, and answers once it arrives; what its
             // upstream cannot answer is missing here too.
@@ -7410,6 +7584,7 @@ impl Db {
             }
             for (hash, bytes) in found {
                 size += bytes.len();
+                answered += bytes.len();
                 nodes.push(WireChunk { hash, bytes });
                 if size >= CHUNK_BATCH_BYTES {
                     replies.push(SyncMessage::Chunks {
@@ -7424,7 +7599,7 @@ impl Db {
             return Err(crate::large::missing());
         }
         replies.push(SyncMessage::Chunks { nodes, missing });
-        Ok((replies, parked))
+        Ok((replies, parked, deferred))
     }
 
     /// The roots of the chunked values of the settled versions a commit
@@ -7447,7 +7622,7 @@ impl Db {
             else {
                 continue;
             };
-            if !readable_version(&inner, table, row, &source.key, source.seq, identity)? {
+            if !still_readable_version(&inner, table, row, &source.key, source.seq, identity)? {
                 continue;
             }
             if let Some(image) = inner.version_image(table, row, &source.key, source.seq)? {
@@ -7613,7 +7788,8 @@ impl Db {
             let applied = ops
                 .iter()
                 .try_for_each(|op| inner.apply_as(op, who, seq).map(drop))
-                .and_then(|()| inner.finish_checks(seq));
+                .and_then(|()| inner.finish_checks(seq))
+                .and_then(|()| inner.settle_possession());
             inner.possession = None;
             inner.merging = false;
             built = std::mem::take(&mut inner.merge_bases);
@@ -7748,6 +7924,14 @@ fn commit_who(
     }
 }
 
+/// Where a client's permission advice ids start: random, below 2^51 so the
+/// ids stay exact as JavaScript numbers, and never 0 (the id of advice
+/// asked without a client).
+fn fresh_advice_base() -> u64 {
+    let (high, _) = uuid::Uuid::new_v4().as_u64_pair();
+    (high >> 13) | 1
+}
+
 /// [`readable`] for the version of the row at `seq`.
 fn readable_version(
     inner: &Inner,
@@ -7763,6 +7947,21 @@ fn readable_version(
     let schema = inner.owner.clone();
     let table = owned_table(&schema, table)?;
     inner.check_version(table, row, key, seq, author, Operation::Select)
+}
+
+/// Whether `identity` may read the version of `row` at `seq` and, still,
+/// the row as it stands: losing read access takes effect at once for the
+/// content of every earlier version too (SPEC 19.9, INV-RLS-13).
+fn still_readable_version(
+    inner: &Inner,
+    table: &str,
+    row: RowUuid,
+    key: &[u8],
+    seq: u64,
+    identity: Option<AuthorSubject>,
+) -> Result<bool, Error> {
+    Ok(readable_version(inner, table, row, key, seq, identity)?
+        && readable(inner, table, row, key, identity)?)
 }
 
 /// Whether `identity` may read a row of stored table `table`.

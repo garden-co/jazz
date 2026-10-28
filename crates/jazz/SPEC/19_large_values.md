@@ -471,7 +471,10 @@ and the replica reads, and pulls (§19.8), only the chunks that part's byte
 span covers, through every relay on the way. A text range in UTF-16 units
 reads at most the bytes `[from, 3 * to)`; a JSON pointer reads the document
 only as far as the pointer needs, unless the document's shape requires all
-of it. Edits to the value reach the replica as deltas (§19.6) the part reads
+of it. Current limits: a pointer read re-parses the prefix it has read for
+each further window, so its cost grows quadratically with how far into the
+document the pointer reaches, and only a top-level array index is read in
+part (a pointer into a nested array reads the document up to its end). Edits to the value reach the replica as deltas (§19.6) the part reads
 through, so a subscribed part follows them without fetching anything more.
 Two subscriptions over the same rows in different parts are distinct shapes.
 Partial selections in aggregate, union or joined queries fail explicitly. A

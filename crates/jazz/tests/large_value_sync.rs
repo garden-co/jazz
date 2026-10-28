@@ -203,6 +203,41 @@ fn insert(db: &Db, table: &str, n: u8, cells: Vec<(&str, Value)>) {
     .unwrap();
 }
 
+/// One commit holding the same large value in two rows proves the pushed
+/// tree for both: the receipts settle only once the whole commit applies.
+#[test]
+fn one_commit_may_hold_the_same_large_value_twice() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let alice = open(1, user(1));
+    connect(&server, &alice, user(1));
+    let body = text(41, LARGE);
+    block_on(alice.transaction(async |tx| {
+        for n in [1, 2] {
+            tx.insert(
+                "docs",
+                BTreeMap::from([
+                    ("body".to_owned(), Value::String(body.clone())),
+                    ("blob".to_owned(), Value::Bytes(Vec::new())),
+                ]),
+                InsertOptions {
+                    row_id: Some(row(n)),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        }
+        Ok(())
+    }))
+    .unwrap();
+    pump(&server, &[&alice]);
+    for n in [1, 2] {
+        assert_eq!(
+            local_cell(&server, "docs", n, "body").unwrap(),
+            Some(Value::String(body.clone()))
+        );
+    }
+}
+
 #[test]
 fn a_replica_pulls_the_chunks_its_results_need() {
     let server = open(0, AuthorSubject::SYSTEM);
@@ -842,6 +877,177 @@ fn a_delta_over_a_version_the_writer_cannot_read_is_rejected() {
         })
         .collect();
     assert_eq!(fates, vec![(1, true), (2, true), (3, true), (4, true)]);
+}
+
+/// A pull that cites a version the reader could read then, after the reader
+/// lost access to the row, is answered with nothing (SPEC 19.9, INV-RLS-13).
+#[test]
+fn pulls_after_read_access_is_lost_are_answered_with_nothing() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let mallory = open(9, user(9));
+    let (_, up, down) = connect_wires(&server, &mallory, user(9));
+    insert(
+        &server,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String("x".to_owned())),
+            ("blob", Value::Bytes(Vec::new())),
+        ],
+    );
+    let _stream = subscribe(&mallory, Query::from("notes"));
+    pump(&server, &[&mallory]);
+    insert(
+        &server,
+        "notes",
+        5,
+        vec![("text", Value::String(text(3, LARGE)))],
+    );
+    for _ in 0..4 {
+        block_on(server.tick()).unwrap();
+    }
+    let (seq, key, root) = down
+        .borrow()
+        .iter()
+        .find_map(|message| match message {
+            SyncMessage::Rows { images } => images.iter().find_map(|image| {
+                let cell = image.cells.iter().find_map(|(name, cell)| match cell {
+                    SyncCell::Large(descriptor) if name.ends_with("text") => Some(descriptor),
+                    _ => None,
+                })?;
+                let value = jazz::large_values::decode_large_value_ref(cell).ok()?;
+                Some((image.seq, image.key.clone(), value.root.object_hash.0))
+            }),
+            _ => None,
+        })
+        .expect("the note's image");
+    // Access goes: no doc exists any more.
+    block_on(server.delete("docs", row(1), Default::default())).unwrap();
+    for _ in 0..4 {
+        block_on(server.tick()).unwrap();
+    }
+    let evicted = down
+        .borrow()
+        .iter()
+        .any(|message| matches!(message, SyncMessage::Evict { .. }));
+    down.borrow_mut().clear();
+    up.borrow_mut().push_back(SyncMessage::ChunkRequests {
+        pulls: vec![WirePull {
+            table: "notes".to_owned(),
+            id: *row(5).0.as_bytes(),
+            key,
+            seq,
+            root,
+            nodes: vec![root],
+            span: Some((0, LARGE as u64)),
+        }],
+    });
+    block_on(server.tick()).unwrap();
+    let mut sent = BTreeSet::new();
+    for message in down.borrow().iter() {
+        if let SyncMessage::Chunks { nodes, .. } = message {
+            sent.extend(nodes.iter().map(|node| node.hash));
+        }
+    }
+    eprintln!("REVIEW PROBE: evicted={evicted} sent_nodes={}", sent.len());
+    assert!(
+        sent.is_empty(),
+        "nodes of a row the reader can no longer read were sent ({} nodes, evicted={evicted})",
+        sent.len()
+    );
+}
+
+/// One `ChunkRequests` is answered with a bounded number of bytes, each
+/// node once; the pulls past the budget are answered once that has been
+/// sent, so a frame of many pulls cannot grow the outbox without bound.
+#[test]
+fn an_answer_to_many_pulls_is_bounded_and_the_rest_follows() {
+    const MB: u64 = 1 << 20;
+    let server = open(0, AuthorSubject::SYSTEM);
+    let alice = open(1, user(1));
+    let (_, up, down) = connect_wires(&server, &alice, user(1));
+    let _stream = subscribe(&alice, Query::from("docs"));
+    pump(&server, &[&alice]);
+    let blob: Vec<u8> = text(9, 32 * MB as usize).into_bytes();
+    insert(
+        &server,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String("x".to_owned())),
+            ("blob", Value::Bytes(blob)),
+        ],
+    );
+    for _ in 0..4 {
+        block_on(server.tick()).unwrap();
+    }
+    let (seq, key, root) = down
+        .borrow()
+        .iter()
+        .find_map(|message| match message {
+            SyncMessage::Rows { images } => images.iter().find_map(|image| {
+                let cell = image.cells.iter().find_map(|(name, cell)| match cell {
+                    SyncCell::Large(descriptor) if name.ends_with("blob") => Some(descriptor),
+                    _ => None,
+                })?;
+                let value = jazz::large_values::decode_large_value_ref(cell).ok()?;
+                Some((image.seq, image.key.clone(), value.root.object_hash.0))
+            }),
+            _ => None,
+        })
+        .expect("the doc's image");
+    down.borrow_mut().clear();
+    // Eight 4 MiB spans, each named twice.
+    let pull = |at: u64| WirePull {
+        table: "docs".to_owned(),
+        id: *row(1).0.as_bytes(),
+        key: key.clone(),
+        seq,
+        root,
+        nodes: vec![root],
+        span: Some((at * 4 * MB, (at + 1) * 4 * MB)),
+    };
+    up.borrow_mut().push_back(SyncMessage::ChunkRequests {
+        pulls: (0..8).chain(0..8).map(pull).collect(),
+    });
+    let answered = |down: &Wire| {
+        let mut bytes = 0;
+        let mut hashes = Vec::new();
+        for message in down.borrow_mut().drain(..) {
+            if let SyncMessage::Chunks { nodes, .. } = message {
+                for node in nodes {
+                    bytes += node.bytes.len() as u64;
+                    hashes.push(node.hash);
+                }
+            }
+        }
+        (bytes, hashes)
+    };
+    block_on(server.tick()).unwrap();
+    let (first, hashes) = answered(&down);
+    assert!(
+        first > 0 && first <= 17 * MB,
+        "the first answer carries {first} bytes"
+    );
+    let once: BTreeSet<_> = hashes.iter().collect();
+    assert_eq!(once.len(), hashes.len(), "an answer sends each node once");
+    // The deferred pulls are answered over the next ticks: every span's
+    // nodes arrive.
+    let mut all: BTreeSet<[u8; 32]> = hashes.into_iter().collect();
+    for _ in 0..8 {
+        block_on(server.tick()).unwrap();
+        all.extend(answered(&down).1);
+    }
+    let mut whole = BTreeSet::new();
+    up.borrow_mut().push_back(SyncMessage::ChunkRequests {
+        pulls: vec![pull(0)],
+    });
+    for _ in 0..8 {
+        block_on(server.tick()).unwrap();
+        whole.extend(answered(&down).1);
+    }
+    assert!(whole.is_subset(&all));
+    assert!(all.len() > 4 * whole.len(), "all eight spans were answered");
 }
 
 #[test]

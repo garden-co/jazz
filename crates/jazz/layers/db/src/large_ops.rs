@@ -237,6 +237,15 @@ impl Inner {
             .filter(|c| crate::large::large_capable(c))
             .ok_or_else(|| not_large(table, column))?;
         let text = crate::large::kind(col) != lv::LargeValueKind::Bytes;
+        // Losing read access takes effect at once, for earlier versions too.
+        if let Some(author) = reader
+            && !self.check(t, row, &[], author, Operation::Select)?
+        {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                "the row is not readable".to_owned(),
+            ));
+        }
         let mut cells = Vec::with_capacity(2);
         for seq in [from, to] {
             if let Some(author) = reader
