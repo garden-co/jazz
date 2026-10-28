@@ -160,7 +160,7 @@
     "tag": "alpha"
   },
   "scripts": {
-    "build": "pnpm build:runtime && pnpm build:test && pnpm build:svelte && pnpm build:solid",
+    "build": "pnpm build:runtime && pnpm build:test && pnpm typecheck:react-native && pnpm build:svelte && pnpm build:solid",
     "build:react-native": "tsc --project tsconfig.json",
     "build:runtime": "node scripts/clean-dist.mjs && tsc && node scripts/bundle-broker-worker.mjs && node scripts/bundle-e2ee-crypto.mjs && node scripts/verify-runtime-sourcemaps.mjs",
     "build:svelte": "svelte-package -i src/svelte -o dist/svelte --tsconfig tsconfig.svelte.json && node scripts/cleanup-generated-src-types.mjs",
