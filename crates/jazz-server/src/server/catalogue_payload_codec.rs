@@ -407,6 +407,9 @@ wire_enum! {
     MergeStrategyWire: ColumnMergeStrategy, "column_merge_strategy" {
         1 => Counter,
         2 => GSet,
+        3 => Text,
+        4 => Markdown,
+        5 => Html,
     }
 }
 

@@ -112,7 +112,7 @@ export type ColumnType =
   | { type: "Array"; element: ColumnType }
   | { type: "Row"; columns: ColumnDescriptor[] };
 
-export type ColumnMergeStrategy = "Counter" | "GSet";
+export type ColumnMergeStrategy = "Counter" | "GSet" | "Text" | "Markdown" | "Html";
 
 export interface ColumnDescriptor {
   name: string;

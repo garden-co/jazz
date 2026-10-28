@@ -215,8 +215,8 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
           return Uint8Array.of(16, 1, 0, 1, 0);
         case 22:
           return encodeNativeSession("reader");
-        case 24:
-          return Uint8Array.of(19, 2, 91, 93); // mutationErrors: "[]"
+        case 35:
+          return Uint8Array.of(26, 2, 91, 93, 0, 0); // tickEvents: "[]", no failures
         case 17:
           return Uint8Array.from([15, ...command.subarray(1, 17)]);
         default:
@@ -255,7 +255,7 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
       { title: "Native note" },
     ]);
     expect(readOptions).toContainEqual(expect.objectContaining({ tier: "remote" }));
-    expect(commandTags).toEqual(expect.arrayContaining([2, 3, 4, 5, 6, 17, 21, 22, 24, 31]));
+    expect(commandTags).toEqual(expect.arrayContaining([2, 3, 4, 5, 6, 17, 21, 22, 31, 35]));
     // #3273: reads and subscriptions no longer tick (pump) the native relay
     // before their command; unsubscribe still drives its cleanup turn.
     expect(nativeForegroundTest.tick.mock.calls.length).toBeGreaterThanOrEqual(1);
@@ -293,7 +293,7 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
       if (command[0] === 2) return encodeBytesResponse(2, rows);
       if (command[0] === 21) return Uint8Array.of(16, 1, 0, 1, 0);
       if (command[0] === 22) return encodeNativeSession("old-reader");
-      if (command[0] === 24) return Uint8Array.of(19, 2, 91, 93);
+      if (command[0] === 35) return Uint8Array.of(26, 2, 91, 93, 0, 0);
       if (command[0] === 6) return Uint8Array.of(6, 1);
       if (command[0] === 7) return Uint8Array.of(7, 1);
       throw new Error(`unexpected foreground command ${command[0]}`);

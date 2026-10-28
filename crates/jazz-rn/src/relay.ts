@@ -164,6 +164,12 @@ export type NativeForegroundCommand =
   | { type: "nativeSessionMetadata" }
   | { type: "writeState"; txId: Uint8Array }
   | { type: "drainMutationErrors" }
+  /** Mutation errors and the current credential refusal, drained after a tick. */
+  | { type: "drainTickEvents" }
+  /** The slow-query report due now, naming the app (append-only command). */
+  | { type: "takeSlowQueryReport"; app?: string }
+  /** Report query runs of at least `ms` milliseconds; 0 turns the log off. */
+  | { type: "setSlowQueryThresholdMs"; ms: number }
   | {
       type: "beginStreamingMutation";
       mutation: "insert" | "update" | "upsert";
@@ -228,11 +234,29 @@ export type NativeForegroundResponse =
   | { type: "transactionSettled"; txId: Uint8Array }
   | { type: "writeState"; stateJson: string }
   | { type: "mutationErrors"; eventsJson: string }
+  | {
+      type: "tickEvents";
+      eventsJson: string;
+      /**
+       * The upstream's current refusal of the scope's credential. Each refusal
+       * has a new `sequence`, even when its reason repeats.
+       */
+      authRejection: { sequence: number; reason: string } | null;
+      /**
+       * The upstream's current connection failure other than a refused
+       * credential, and whether the native socket is still retrying it. Each
+       * failure has a new `sequence`.
+       */
+      upstreamFailure: { sequence: number; reason: string; retrying: boolean } | null;
+    }
   | { type: "streamingMutationOpened"; upload: number }
   | { type: "streamingMutationPushed" }
   | { type: "streamingMutationAborted"; aborted: boolean }
   | { type: "mutationCommitted"; txId: Uint8Array; rowId: Uint8Array }
-  | { type: "permissionAdvice"; advice: "allowed" | "denied" | "unknown" };
+  | { type: "permissionAdvice"; advice: "allowed" | "denied" | "unknown" }
+  /** One line per slow query shape; empty between reports. */
+  | { type: "slowQueryReport"; lines: string[] }
+  | { type: "slowQueryThresholdSet" };
 
 export type NativeForegroundSubscriptionEvent =
   | {
@@ -378,6 +402,18 @@ export function encodeNativeForegroundCommand(command: NativeForegroundCommand):
   if (command.type === "nativeSessionMetadata") return Uint8Array.of(22);
   if (command.type === "drainMutationErrors") return Uint8Array.of(24);
   if (command.type === "captureSnapshot") return Uint8Array.of(34);
+  if (command.type === "drainTickEvents") return Uint8Array.of(35);
+  if (command.type === "takeSlowQueryReport") {
+    return concatForegroundBytes(
+      Uint8Array.of(36),
+      command.app === undefined
+        ? Uint8Array.of(0)
+        : concatForegroundBytes(Uint8Array.of(1), encodeForegroundString(command.app)),
+    );
+  }
+  if (command.type === "setSlowQueryThresholdMs") {
+    return concatForegroundBytes(Uint8Array.of(37), encodeForegroundU64(command.ms));
+  }
   if (command.type === "waitForPendingWrites") {
     return concatForegroundBytes(Uint8Array.of(33), encodeForegroundString(command.tier));
   }
@@ -709,6 +745,47 @@ export function decodeNativeForegroundResponse(bytes: Uint8Array): NativeForegro
       ? { type: "operationError", code, reason }
       : { type: "operationError", code, reasonName, reason };
   }
+  if (tag === 26) {
+    // TickEvents: postcard events string, then `Option<NativeAuthRejection>`
+    // (0, or 1, the sequence varint and the reason string), then
+    // `Option<NativeUpstreamFailure>` (the same, then a retrying bool).
+    const [eventsJson, afterEvents] = decodeForegroundPrefixedString(bytes, 1, "tick events");
+    const readSequenced = (offset: number, label: string): [number, string, number] | null => {
+      const option = bytes[offset];
+      if (option === 0) return null;
+      if (option !== 1) throw new Error(`Malformed native operation ${label}`);
+      let sequenceEnd = offset + 1;
+      while (sequenceEnd < bytes.length && (bytes[sequenceEnd]! & 0x80) !== 0) sequenceEnd++;
+      const sequence = decodeForegroundU64(
+        bytes.subarray(offset + 1, sequenceEnd + 1),
+        `${label} sequence`,
+      );
+      const [reason, next] = decodeForegroundPrefixedString(bytes, sequenceEnd + 1, label);
+      return [sequence, reason, next];
+    };
+    const rejection = readSequenced(afterEvents, "auth rejection");
+    const afterRejection = rejection ? rejection[2] : afterEvents + 1;
+    const failure = readSequenced(afterRejection, "upstream failure");
+    const retrying = failure ? bytes[failure[2]] : undefined;
+    const end = failure ? failure[2] + 1 : afterRejection + 1;
+    if (end !== bytes.length || (failure && retrying !== 0 && retrying !== 1))
+      throw new Error("Malformed native operation tick events");
+    return {
+      type: "tickEvents",
+      eventsJson,
+      authRejection: rejection ? { sequence: rejection[0], reason: rejection[1] } : null,
+      upstreamFailure: failure
+        ? { sequence: failure[0], reason: failure[1], retrying: retrying === 1 }
+        : null,
+    };
+  }
+  if (tag === 27) {
+    const lines = JSON.parse(decodeForegroundString(bytes.subarray(1), "slow query report"));
+    if (!Array.isArray(lines) || !lines.every((line) => typeof line === "string"))
+      throw new Error("Malformed native slow query report");
+    return { type: "slowQueryReport", lines };
+  }
+  if (tag === 28 && bytes.length === 1) return { type: "slowQueryThresholdSet" };
   if (
     tag === 16 &&
     bytes.length >= 5 &&

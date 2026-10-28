@@ -396,10 +396,14 @@ async fn missing_operation_policies_deny_reads_and_writes() {
                         settled.unwrap();
                     } else {
                         let error = settled.expect_err("missing grant must deny").to_string();
+                        // The delete is made over the denied update, so it is
+                        // rejected with it (INV-HIST-20).
                         assert!(
                             error.contains("authorization_denied")
                                 || error.contains("read policy denied")
-                                || error.contains("not loaded locally"),
+                                || error.contains("not loaded locally")
+                                || operation == "DELETE"
+                                    && error.contains("built on a write the authority rejected"),
                             "{case}: {operation}: {error}"
                         );
                     }

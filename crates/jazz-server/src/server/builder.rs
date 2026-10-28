@@ -161,6 +161,7 @@ impl ServerBuilder {
         // One store per app: the catalogue and the account journal are host
         // tables in the file the runtime's rows live in, all on its thread.
         let store = AppStore::open(&self.build_core_server_shell_storage_config()?)?;
+        store.set_app(self.app_id.to_string());
         let (catalogue_store, latest_catalogue_schema) = self.build_catalogue_store(&store)?;
         let core_server_shell = self.build_core_server_shell(latest_catalogue_schema, &store)?;
 

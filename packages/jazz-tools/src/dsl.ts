@@ -102,6 +102,9 @@ interface ColumnBuilder {
 type MergeStrategyColumnType = {
   counter: "INTEGER" | "BIGINT";
   "g-set": { kind: "ARRAY" };
+  text: "TEXT";
+  markdown: "TEXT";
+  html: "TEXT";
 };
 
 type AllowedColumnMergeStrategy<
@@ -467,6 +470,12 @@ function normalizeColumnMergeStrategy(
   if (strategy === "lww") {
     return undefined;
   }
+  if (strategy === "text" || strategy === "markdown" || strategy === "html") {
+    if (nullable || sqlType !== "TEXT") {
+      throw new Error(`${strategy} merge strategy is only supported on non-nullable TEXT columns.`);
+    }
+    return strategy;
+  }
   if (strategy === "g-set") {
     if (nullable || typeof sqlType !== "object" || sqlType.kind !== "ARRAY") {
       throw new Error("g-set merge strategy is only supported on non-nullable ARRAY columns.");
@@ -490,7 +499,7 @@ abstract class BaseColumnBuilder implements ColumnBuilder {
 
   optional(): this {
     if (this._mergeStrategy !== undefined) {
-      // Counter and g-set both require non-nullable columns; re-validate as
+      // Every merge strategy requires a non-nullable column; re-validate as
       // nullable so the strategy's own error is thrown.
       normalizeColumnMergeStrategy(this._mergeStrategy, this._sqlType, true);
     }

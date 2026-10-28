@@ -154,13 +154,23 @@ struct LargeColumn {
     table: String,
     column: String,
     kind: jazz_types::large_values::LargeValueKind,
+    /// The key column, as SQL, when an index names the column.
+    key: Option<String>,
+}
+
+impl LargeColumn {
+    /// The stored name of the key column, when there is one.
+    fn key_column(&self) -> Option<String> {
+        self.key
+            .as_ref()
+            .map(|_| crate::large::key_column(&self.column))
+    }
 }
 
 /// A question about chunked cells that their sort key cannot answer,
-/// answered in Rust before the statement runs. Its answers are bound to
-/// the statement as one JSON parameter, the prep's `slot` (a parameter
-/// index), so a read never writes: the statement reads them with
-/// `json_each` / `json_extract`, keyed by each cell's descriptor.
+/// answered in Rust before the statement runs. Each writes its answers to
+/// `_jazz_lv_scratch` under its slot, which the statement reads. The slot
+/// is a hash of the question, so the same query compiles to the same SQL.
 #[derive(Clone, Debug)]
 pub enum Prep {
     /// The chunked cells of `table.column` that pass `test`.
@@ -170,12 +180,14 @@ pub enum Prep {
         column: String,
         test: MatchTest,
     },
-    /// Ranks for the chunked cells of `table.column` that share a sort key
-    /// with another: their order by full logical value.
+    /// The sort key of every chunked cell of `table.column` (read from its
+    /// key column `key`, or its first chunks), and ranks for those that
+    /// share a sort key with another: their order by full logical value.
     Rank {
         slot: i64,
         table: String,
         column: String,
+        key: Option<String>,
     },
     /// A content id for every chunked cell of these columns, so cells of
     /// one logical value (built differently) compare equal.
@@ -185,7 +197,7 @@ pub enum Prep {
     },
 }
 
-/// What a chunked cell is matched against: an inline-form cell.
+/// What a chunked cell is matched against: logical bytes.
 #[derive(Clone, Debug)]
 pub enum MatchTest {
     Contains(Vec<u8>),
@@ -204,6 +216,14 @@ impl MatchTest {
 }
 
 impl Prep {
+    fn new(make: impl FnOnce(i64) -> Prep, question: &str) -> Prep {
+        let hash = blake3::hash(question.as_bytes());
+        // 52 bits: exact as a JS number (Durable Objects).
+        let slot =
+            i64::from_le_bytes(hash.as_bytes()[..8].try_into().expect("8 bytes")) & ((1 << 52) - 1);
+        make(slot)
+    }
+
     pub fn slot(&self) -> i64 {
         match self {
             Prep::Match { slot, .. } | Prep::Rank { slot, .. } | Prep::Class { slot, .. } => *slot,
@@ -211,21 +231,19 @@ impl Prep {
     }
 }
 
-/// SQL: whether `cell` (a chunked cell) is among a prep's answers.
+/// SQL: whether `cell` is among a prep's answers.
 fn scratch_has(slot: i64, cell: &str) -> String {
-    format!(
-        "({} IN (SELECT value FROM json_each(?{slot})))",
-        crate::large::answer_key_sql(cell)
-    )
+    format!("EXISTS (SELECT 1 FROM _jazz_lv_scratch WHERE slot = {slot} AND cell = {cell})")
 }
 
-/// SQL: a prep's answer value for `cell` (a chunked cell), NULL when it
-/// has none.
+/// SQL: a prep's answer value for `cell`.
 fn scratch_value(slot: i64, cell: &str) -> String {
-    format!(
-        "json_extract(?{slot}, '$.\"' || {} || '\"')",
-        crate::large::answer_key_sql(cell)
-    )
+    format!("(SELECT v FROM _jazz_lv_scratch WHERE slot = {slot} AND cell = {cell})")
+}
+
+/// SQL: a rank prep's sort key for `cell`.
+fn scratch_key(slot: i64, cell: &str) -> String {
+    format!("(SELECT k FROM _jazz_lv_scratch WHERE slot = {slot} AND cell = {cell})")
 }
 
 /// SQL text plus its positional parameters.
@@ -248,13 +266,15 @@ pub struct Ctx<'a> {
     pub settled_only: bool,
     /// Questions the statement needs answered first.
     pub preps: Vec<Prep>,
-    /// Each prep's question, parallel to `preps`: one question is asked
-    /// (and bound) once.
-    questions: Vec<String>,
     /// The authority's node, whose own commits history reads name by their
     /// seq; `None` on a replica, which lists only versions whose
     /// transaction it knows.
     pub history_origin: Option<[u8; 16]>,
+    /// How many of a write check's grounded rows (see [`Cut::overlay`])
+    /// the compiled SQL reads, summed over every table reference.
+    pub overlaid_rows: usize,
+    /// The stored tables a write check reads through its cut's overlay.
+    pub overlay_tables: BTreeSet<String>,
     next_alias: usize,
 }
 
@@ -267,10 +287,24 @@ pub struct Cut {
     pub seq: u64,
     pub own: u64,
     pub extra: Vec<u64>,
-    /// A write check's evidence (SPEC 7, WITH CHECK): of the versions at
-    /// `own`, only the live rows grounded so far (by stored table) are
-    /// overlaid; every other row the unit wrote reads as committed.
-    pub grounded: Option<std::sync::Arc<BTreeMap<String, BTreeSet<[u8; 16]>>>>,
+    /// A write check's evidence (SPEC 7, WITH CHECK): which of the
+    /// versions at `own` are overlaid. `None` overlays them all.
+    pub overlay: Option<Overlay>,
+}
+
+/// The versions at a write check's `own` that its policy sees (SPEC 7);
+/// every other row the unit wrote reads as committed.
+#[derive(Clone, Debug)]
+pub enum Overlay {
+    /// The live rows grounded so far, by stored table.
+    Grounded(std::sync::Arc<BTreeMap<String, BTreeSet<[u8; 16]>>>),
+    /// Every live row but `row` in branch `key` of stored table `table`:
+    /// the unit's post-state, without the row under check.
+    Except {
+        table: String,
+        row: [u8; 16],
+        key: Vec<u8>,
+    },
 }
 
 impl Cut {
@@ -305,6 +339,9 @@ pub struct Compiled {
     pub tables: BTreeSet<String>,
     /// Rows are aggregate groups: column 0 is the group key, hashed to an id.
     pub aggregate: bool,
+    /// The group key is a large-capable cell: a chunked one is hashed by its
+    /// value.
+    pub large_group: bool,
     /// Joined source row ids each row carries after its root's id, seq and
     /// deletion flag (a flat join's occurrence; 0 otherwise).
     pub joined: usize,
@@ -319,6 +356,9 @@ pub struct Compiled {
     /// The statement with prefix-tie ranks in its order, used instead when
     /// a rank prep finds chunked values sharing a sort key.
     pub ranked_sql: Option<String>,
+    /// The part each projected column is read in, if only a part
+    /// (SPEC 19.12); empty when none is.
+    pub partial: Vec<Option<crate::query::Part>>,
 }
 
 impl<'a> Ctx<'a> {
@@ -339,8 +379,9 @@ impl<'a> Ctx<'a> {
             cut: None,
             settled_only: false,
             preps: Vec::new(),
-            questions: Vec::new(),
             history_origin: None,
+            overlaid_rows: 0,
+            overlay_tables: BTreeSet::new(),
             next_alias: 0,
         }
     }
@@ -393,22 +434,46 @@ impl<'a> Ctx<'a> {
             .join(", ");
         // The versions at `own` that are overlaid: all of them, or for a
         // write check the unit's grounded live rows.
-        let (overlaid_here, overlaid_c) = match &cut.grounded {
+        if cut.overlay.is_some() {
+            self.overlay_tables.insert(table.stored.clone());
+        }
+        let (overlaid_here, overlaid_c) = match &cut.overlay {
             None => (format!("_seq = {own}"), format!("c._seq = {own}")),
-            Some(grounded) => match grounded.get(&table.stored).filter(|ids| !ids.is_empty()) {
-                None => ("0".to_owned(), "0".to_owned()),
-                Some(ids) => {
-                    let ids = ids
-                        .iter()
-                        .map(|id| self.bind(Sql::Blob(id.to_vec())))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    (
-                        format!("(_seq = {own} AND _del = 0 AND id IN ({ids}))"),
-                        format!("(c._seq = {own} AND c._del = 0 AND c.id IN ({ids}))"),
-                    )
+            Some(Overlay::Grounded(grounded)) => {
+                match grounded.get(&table.stored).filter(|ids| !ids.is_empty()) {
+                    None => ("0".to_owned(), "0".to_owned()),
+                    Some(ids) => {
+                        self.overlaid_rows += ids.len();
+                        let ids = ids
+                            .iter()
+                            .map(|id| self.bind(Sql::Blob(id.to_vec())))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        (
+                            format!("(_seq = {own} AND _del = 0 AND id IN ({ids}))"),
+                            format!("(c._seq = {own} AND c._del = 0 AND c.id IN ({ids}))"),
+                        )
+                    }
                 }
-            },
+            }
+            // No id list: SQLite reaches the overlaid rows through the
+            // policy's correlated keys, as it does committed ones.
+            Some(Overlay::Except {
+                table: except,
+                row,
+                key,
+            }) if *except == table.stored => {
+                let row = self.bind(Sql::Blob(row.to_vec()));
+                let key = self.bind(Sql::Blob(key.clone()));
+                (
+                    format!("(_seq = {own} AND _del = 0 AND (id <> {row} OR _b <> {key}))"),
+                    format!("(c._seq = {own} AND c._del = 0 AND (c.id <> {row} OR c._b <> {key}))"),
+                )
+            }
+            Some(Overlay::Except { .. }) => (
+                format!("(_seq = {own} AND _del = 0)"),
+                format!("(c._seq = {own} AND c._del = 0)"),
+            ),
         };
         let (visible, h_visible, newer) = if extra.is_empty() {
             (
@@ -552,6 +617,7 @@ impl<'a> Ctx<'a> {
         let mut projection = Vec::new();
         let mut outputs = Vec::new();
         // (the group's cell, what rows group by, what groups order by)
+        let mut large_group = false;
         let group = match &aggregate.group_by {
             Some(column) => {
                 let sql = column_sql(table, alias, column)?;
@@ -562,16 +628,17 @@ impl<'a> Ctx<'a> {
                     // Cells of one logical value group together even when
                     // their chunk trees differ.
                     Term::Large(large) => {
+                        large_group = true;
                         let columns = vec![(large.table.clone(), large.column.clone())];
                         let question = format!("class {columns:?}");
                         let slot = self.prep(|slot| Prep::Class { slot, columns }, question);
-                        // A class id is a blob: it never equals an inline cell.
                         let by = format!(
-                            "(CASE WHEN COALESCE({}, 0) THEN unhex({}) ELSE {sql} END)",
+                            "(CASE WHEN {} THEN {} ELSE {sql} END)",
                             crate::large::chunked_sql(&sql),
                             scratch_value(slot, &sql)
                         );
-                        (sql.clone(), by, crate::large::key_sql(&sql))
+                        let (key, _) = self.order_key(&large);
+                        (sql.clone(), by, key)
                     }
                     _ => (sql.clone(), sql.clone(), sql),
                 })
@@ -678,10 +745,12 @@ impl<'a> Ctx<'a> {
         Ok(Compiled {
             sql,
             ranked_sql: None,
+            partial: Vec::new(),
             params: self.params,
             projection,
             tables: self.tables,
             aggregate: true,
+            large_group,
             joined: 0,
             versioned: false,
             union: false,
@@ -689,11 +758,16 @@ impl<'a> Ctx<'a> {
         })
     }
 
-    pub fn compile_query(
-        mut self,
-        query: &Query,
-        include_deleted: bool,
-    ) -> Result<Compiled, Error> {
+    pub fn compile_query(self, query: &Query, include_deleted: bool) -> Result<Compiled, Error> {
+        let schema = self.schema;
+        let mut compiled = self.compile_shape(query, include_deleted)?;
+        if !query.partial.is_empty() {
+            compiled.partial = partial_projection(schema, &query.table, &query.partial, &compiled)?;
+        }
+        Ok(compiled)
+    }
+
+    fn compile_shape(mut self, query: &Query, include_deleted: bool) -> Result<Compiled, Error> {
         if let Some(column) = deletion_column(query) {
             if !include_deleted {
                 return Err(query_error(format!(
@@ -764,10 +838,12 @@ impl<'a> Ctx<'a> {
             projection,
             tables: self.tables,
             aggregate: false,
+            large_group: false,
             joined: 0,
             versioned: false,
             union: false,
             preps: self.preps,
+            partial: Vec::new(),
         })
     }
 
@@ -946,10 +1022,12 @@ impl<'a> Ctx<'a> {
             projection,
             tables: self.tables,
             aggregate: false,
+            large_group: false,
             joined: 0,
             versioned: false,
             union: true,
             preps: self.preps,
+            partial: Vec::new(),
         })
     }
 
@@ -1197,10 +1275,12 @@ impl<'a> Ctx<'a> {
         Ok(Compiled {
             sql,
             ranked_sql: None,
+            partial: Vec::new(),
             params: self.params,
             projection,
             tables: self.tables,
             aggregate: false,
+            large_group: false,
             joined: sources.len() - 1,
             versioned: true,
             union: false,
@@ -1372,18 +1452,25 @@ impl<'a> Ctx<'a> {
                 and(&wheres),
             )
         };
-        Ok(Compiled {
+        let schema = self.schema;
+        let mut compiled = Compiled {
             sql: statement(&order),
             ranked_sql: ranked_order.as_deref().map(statement),
             params: self.params,
             projection,
             tables: self.tables,
             aggregate: false,
+            large_group: false,
             joined: 0,
             versioned: false,
             union: false,
             preps: self.preps,
-        })
+            partial: Vec::new(),
+        };
+        if !array.partial.is_empty() {
+            compiled.partial = partial_projection(schema, &array.table, &array.partial, &compiled)?;
+        }
+        Ok(compiled)
     }
 
     /// One cell of row `id` of `table`, read through the same view and cut
@@ -2940,11 +3027,11 @@ fn flip(op: &CmpOp) -> CmpOp {
     }
 }
 
-/// The logical bytes of an inline-form cell.
-fn logical_of(cell: &[u8]) -> &[u8] {
-    match cell.first() {
-        Some(&crate::large::BYTES) => &cell[1..],
-        _ => cell,
+/// The logical bytes of a bound string or bytes literal.
+fn literal_of(value: &Sql) -> Option<&[u8]> {
+    match value {
+        Sql::Text(bytes) | Sql::Blob(bytes) => Some(bytes),
+        _ => None,
     }
 }
 
@@ -2964,28 +3051,29 @@ impl Ctx<'_> {
                     && crate::values::author_record(column).is_none()
                     && crate::large::large_capable(col) =>
             {
+                let key = table.key_of(&col.stored).and_then(|key| {
+                    sql.strip_suffix(&quote(&col.stored))
+                        .map(|alias| format!("{alias}{}", quote(&key.stored)))
+                });
                 Term::Large(LargeColumn {
                     cell: sql,
                     table: table.stored.clone(),
                     column: col.stored.clone(),
                     kind: crate::large::kind(col),
+                    key,
                 })
             }
             _ => Term::Sql(sql),
         }
     }
 
-    /// The parameter a prep's answers are bound to: one per question, a
-    /// placeholder until the statement runs.
     fn prep(&mut self, make: impl FnOnce(i64) -> Prep, question: String) -> i64 {
-        if let Some(at) = self.questions.iter().position(|q| *q == question) {
-            return self.preps[at].slot();
+        let prep = Prep::new(make, &question);
+        let slot = prep.slot();
+        if !self.preps.iter().any(|p| p.slot() == slot) {
+            self.preps.push(prep);
         }
-        self.bind(Sql::Null);
-        let prep = make(self.params.len() as i64);
-        self.questions.push(question);
-        self.preps.push(prep);
-        self.preps.last().expect("pushed").slot()
+        slot
     }
 
     /// An author record (`$createdBy`, `$updatedBy.identity`, ...) against
@@ -3079,41 +3167,45 @@ impl Ctx<'_> {
     /// A large-capable cell against a bound value.
     fn cmp_large(&mut self, op: &CmpOp, column: &LargeColumn, p: &str, value: &Sql) -> String {
         let c = &column.cell;
-        let Sql::Text(literal) = value else {
+        let Some(logical) = literal_of(value) else {
             return cmp_plain(op, c, p);
         };
-        let key = crate::large::key_sql(c);
-        let logical = logical_of(literal);
-        let chunked = format!("COALESCE({}, 0)", crate::large::chunked_sql(c));
-        match op {
+        let chunked = crate::large::chunked_sql(c);
+        let key = column.key.as_ref().map(|key| crate::large::key_sql(c, key));
+        let negate = |eq: String| {
+            if *op == CmpOp::Eq {
+                eq
+            } else {
+                format!("(NOT {eq})")
+            }
+        };
+        match (op, &key) {
             // Every value up to the inline threshold has one inline cell, so
             // a chunked cell never equals such a literal. The key term lets
             // SQLite use an index on it.
-            CmpOp::Eq | CmpOp::Ne
+            (CmpOp::Eq | CmpOp::Ne, _)
                 if logical.len() <= jazz_types::large_values::INLINE_VALUE_MAX_BYTES =>
             {
-                let eq = format!("({key} IS {p} AND {c} IS {p})");
-                if *op == CmpOp::Eq {
-                    eq
-                } else {
-                    format!("(NOT {eq})")
-                }
+                negate(match &key {
+                    Some(key) => format!("({key} IS {p} AND {c} IS {p})"),
+                    None => format!("({c} IS {p})"),
+                })
             }
-            CmpOp::Eq | CmpOp::Ne => {
-                let slot = self.prep_match(column, MatchTest::Cmp(CmpOp::Eq, literal.clone()));
-                let prefix = crate::large::sort_prefix(column.kind, logical);
-                let k = self.bind(Sql::Text(prefix));
-                let eq = format!("({key} IS {k} AND {chunked} AND {})", scratch_has(slot, c));
-                if *op == CmpOp::Eq {
-                    eq
-                } else {
-                    format!("(NOT {eq})")
-                }
+            (CmpOp::Eq | CmpOp::Ne, _) => {
+                let slot = self.prep_match(column, MatchTest::Cmp(CmpOp::Eq, logical.to_vec()));
+                negate(match &key {
+                    Some(key) => {
+                        let prefix = crate::large::sort_prefix(column.kind, logical);
+                        let k = self.bind(prefix);
+                        format!("({key} IS {k} AND {chunked} AND {})", scratch_has(slot, c))
+                    }
+                    None => format!("({chunked} AND {})", scratch_has(slot, c)),
+                })
             }
             // A chunked value's key is a prefix of it at least as long as
             // the literal: it orders against the literal as the value does,
             // except that a key equal to the literal is the longer value.
-            _ if logical.len() <= crate::large::EXACT_RANGE_BYTES => match op {
+            (_, Some(key)) if logical.len() <= crate::large::EXACT_RANGE_BYTES => match op {
                 CmpOp::Lt => format!("({key} < {p})"),
                 CmpOp::Ge => format!("({key} >= {p})"),
                 CmpOp::Le => format!("({key} < {p} OR {c} = {p})"),
@@ -3121,7 +3213,7 @@ impl Ctx<'_> {
                 CmpOp::Eq | CmpOp::Ne => unreachable!("handled above"),
             },
             _ => {
-                let slot = self.prep_match(column, MatchTest::Cmp(op.clone(), literal.clone()));
+                let slot = self.prep_match(column, MatchTest::Cmp(op.clone(), logical.to_vec()));
                 format!(
                     "(CASE WHEN {chunked} THEN {} ELSE {} END)",
                     scratch_has(slot, c),
@@ -3129,6 +3221,33 @@ impl Ctx<'_> {
                 )
             }
         }
+    }
+
+    /// A large-capable column's order: its sort key (the key column, or
+    /// for an unindexed column the key a rank prep read), and the rank of
+    /// values sharing a key.
+    fn order_key(&mut self, column: &LargeColumn) -> (String, String) {
+        let key = column.key_column();
+        let question = format!("rank {} {} {key:?}", column.table, column.column);
+        let slot = self.prep(
+            |slot| Prep::Rank {
+                slot,
+                table: column.table.clone(),
+                column: column.column.clone(),
+                key,
+            },
+            question,
+        );
+        let c = &column.cell;
+        let sql = match &column.key {
+            Some(key) => crate::large::key_sql(c, key),
+            None => format!(
+                "(CASE WHEN {} THEN {} ELSE {c} END)",
+                crate::large::chunked_sql(c),
+                scratch_key(slot, c)
+            ),
+        };
+        (sql, scratch_value(slot, c))
     }
 
     fn prep_match(&mut self, column: &LargeColumn, test: MatchTest) -> i64 {
@@ -3199,10 +3318,9 @@ impl Ctx<'_> {
         let list = self.bound_list(&options);
         if let Term::Large(column) = &left {
             let small = |option: &Term| match option {
-                Term::Bound(_, Sql::Text(cell)) => {
-                    logical_of(cell).len() <= jazz_types::large_values::INLINE_VALUE_MAX_BYTES
-                }
-                Term::Bound(_, _) => true,
+                Term::Bound(_, value) => literal_of(value).is_none_or(|literal| {
+                    literal.len() <= jazz_types::large_values::INLINE_VALUE_MAX_BYTES
+                }),
                 _ => false,
             };
             if !options.iter().all(small) {
@@ -3216,11 +3334,14 @@ impl Ctx<'_> {
                 let list: Vec<&str> = options.iter().filter_map(Term::sql).collect();
                 list.join(", ")
             });
-            return Ok(format!(
-                "({} IN ({list}) AND {} IN ({list}))",
-                crate::large::key_sql(&column.cell),
-                column.cell
-            ));
+            return Ok(match &column.key {
+                Some(key) => format!(
+                    "({} IN ({list}) AND {} IN ({list}))",
+                    crate::large::key_sql(&column.cell, key),
+                    column.cell
+                ),
+                None => format!("({} IN ({list}))", column.cell),
+            });
         }
         let list = list.unwrap_or_else(|| {
             let list: Vec<&str> = options.iter().filter_map(Term::sql).collect();
@@ -3272,26 +3393,22 @@ impl Ctx<'_> {
         let (Some(l), Some(r)) = (left.sql(), right.sql()) else {
             return "0".to_owned();
         };
-        // Bytewise: TEXT `instr` steps by code point, and cells may hold
-        // tagged bytes.
+        // Bytewise: TEXT `instr` steps by code point.
         let instr = |l: &str, r: &str| {
             format!("COALESCE(instr(CAST({l} AS BLOB), CAST({r} AS BLOB)) > 0, 0)")
         };
-        let (Term::Large(column), Term::Bound(_, Sql::Text(needle))) = (&left, &right) else {
+        let (Term::Large(column), Term::Bound(_, value)) = (&left, &right) else {
             return instr(l, r);
         };
-        let inline = match column.kind {
-            jazz_types::large_values::LargeValueKind::Bytes => instr(
-                &format!("substr(CAST({l} AS BLOB), 2)"),
-                &format!("substr(CAST({r} AS BLOB), 2)"),
-            ),
-            _ => instr(l, r),
+        let Some(needle) = literal_of(value) else {
+            return instr(l, r);
         };
-        let slot = self.prep_match(column, MatchTest::Contains(needle.clone()));
+        let slot = self.prep_match(column, MatchTest::Contains(needle.to_vec()));
         format!(
-            "(CASE WHEN COALESCE({}, 0) THEN {} ELSE {inline} END)",
+            "(CASE WHEN {} THEN {} ELSE {} END)",
             crate::large::chunked_sql(l),
-            scratch_has(slot, l)
+            scratch_has(slot, l),
+            instr(l, r)
         )
     }
 
@@ -3352,18 +3469,10 @@ impl Ctx<'_> {
             }
             terms.push(match self.column_term(table, alias, &key.column)? {
                 Term::Large(column) => {
-                    let question = format!("rank {} {}", column.table, column.column);
-                    let slot = self.prep(
-                        |slot| Prep::Rank {
-                            slot,
-                            table: column.table.clone(),
-                            column: column.column.clone(),
-                        },
-                        question,
-                    );
+                    let (sql, rank) = self.order_key(&column);
                     OrderTerm {
-                        sql: crate::large::key_sql(&column.cell),
-                        rank: Some(scratch_value(slot, &column.cell)),
+                        sql,
+                        rank: Some(rank),
                         direction,
                     }
                 }
@@ -3553,4 +3662,68 @@ fn inherits(policy: &PolicyExpr) -> bool {
         PolicyExpr::Exists { condition, .. } => inherits(condition),
         _ => false,
     }
+}
+
+/// The part each of `compiled`'s projected columns is read in: a partial
+/// selection names a large-capable column of the root table of a plain row
+/// query, read in a part its kind has.
+fn partial_projection(
+    schema: &Schema,
+    table: &str,
+    partial: &[crate::query::PartialSelect],
+    compiled: &Compiled,
+) -> Result<Vec<Option<crate::query::Part>>, Error> {
+    use crate::query::Part;
+    use jazz_types::large_values::LargeValueKind as Kind;
+    if compiled.aggregate || compiled.union || compiled.joined > 0 {
+        return Err(unsupported(
+            "partial large-value selections in aggregate, union or joined queries",
+        ));
+    }
+    let table = schema.table(table)?;
+    let mut out = vec![None; compiled.projection.len()];
+    for selected in partial {
+        let column = table
+            .column(&selected.column)
+            .filter(|column| crate::large::large_capable(column))
+            .ok_or_else(|| {
+                query_error(format!(
+                    "partial selection of {:?} needs a text, bytes or JSON column",
+                    selected.column
+                ))
+            })?;
+        let kind = crate::large::kind(column);
+        let fits = matches!(
+            (&selected.part, kind),
+            (Part::Bytes { .. }, Kind::Bytes)
+                | (Part::TextUtf16 { .. } | Part::TextUtf8 { .. }, Kind::String)
+                | (Part::JsonPointer(_), Kind::Json)
+        );
+        if !fits {
+            return Err(query_error(format!(
+                "partial selection of {:?} does not fit its column's kind",
+                selected.column
+            )));
+        }
+        if let Part::Bytes { from, to } | Part::TextUtf16 { from, to } | Part::TextUtf8 { from, to } =
+            &selected.part
+            && from > to
+        {
+            return Err(query_error(format!(
+                "partial selection of {:?} ends before it starts",
+                selected.column
+            )));
+        }
+        // A compilation that projects no such column (one reading only the
+        // rows' ids) reads none of it.
+        let Some(index) = compiled
+            .projection
+            .iter()
+            .position(|(name, _)| *name == column.name)
+        else {
+            continue;
+        };
+        out[index] = Some(selected.part.clone());
+    }
+    Ok(out)
 }

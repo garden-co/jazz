@@ -8,7 +8,7 @@
 //! ordinary row update, so policies, history and sync see a new version.
 
 use super::*;
-use crate::large::{Logical, logical};
+use crate::large::Logical;
 use jazz_types::large_values as lv;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
@@ -49,6 +49,36 @@ pub struct LargeValueUpdateSplice {
     pub delete: u64,
     /// Replacement bytes, UTF-8 for text pages.
     pub insert: Vec<u8>,
+}
+
+/// One edit of a [`Db::value_delta`]: replace `delete` bytes at `at` with
+/// `insert`. Edits apply in order, each in the coordinates of the value the
+/// earlier ones made. Text edits also carry the same edit in UTF-16 code
+/// units; they are zero for bytes columns.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct LargeValueDeltaSplice {
+    /// Byte offset.
+    pub at: u64,
+    /// Bytes removed.
+    pub delete: u64,
+    /// Bytes inserted, UTF-8 for text.
+    pub insert: Vec<u8>,
+    /// UTF-16 offset (text only).
+    pub at_utf16: u64,
+    /// UTF-16 code units removed (text only).
+    pub delete_utf16: u64,
+}
+
+impl From<lv::ReplaceEdit> for LargeValueDeltaSplice {
+    fn from(edit: lv::ReplaceEdit) -> Self {
+        LargeValueDeltaSplice {
+            at: edit.offset,
+            delete: edit.delete_length,
+            insert: edit.insert_bytes,
+            at_utf16: edit.utf16_offset,
+            delete_utf16: edit.delete_utf16_length,
+        }
+    }
 }
 
 /// An RFC 6901 JSON replacement of an existing member or array element.
@@ -184,14 +214,13 @@ impl Inner {
             schema: None,
         };
         let compiled = self.compile(&prepared, identity, &ReadSpec::default())?;
-        let cell: Option<Sql> =
-            self.with_preps(&compiled.preps, &compiled.params, |_, params| {
-                let mut statement = self.conn.prepare_cached(&compiled.sql).map_err(storage)?;
-                statement
-                    .query_row(params_from_iter(params.iter()), |r| r.get(3))
-                    .optional()
-                    .map_err(storage)
-            })?;
+        let cell: Option<Sql> = self.with_preps(&compiled.preps, |_| {
+            let mut statement = self.conn.prepare_cached(&compiled.sql).map_err(storage)?;
+            statement
+                .query_row(params_from_iter(compiled.params.iter()), |r| r.get(3))
+                .optional()
+                .map_err(storage)
+        })?;
         let cell = cell.ok_or_else(|| {
             Error::new(ErrorCode::NotObserved, "large-value cell is not observed")
         })?;
@@ -207,13 +236,128 @@ impl Inner {
         utf16: bool,
     ) -> Result<Vec<u8>, Error> {
         let (col, cell) = self.physical_cell(table, row, column, self.reader())?;
-        let Sql::Text(cell) = cell else {
+        if !large_cell(&cell) {
             return Err(not_large(table, column));
-        };
+        }
         if utf16 && crate::large::kind(&col) == lv::LargeValueKind::Bytes {
             return Err(not_large(table, column));
         }
-        match logical(&cell)? {
+        self.cell_range(cell.as_ref(), range, utf16)
+    }
+
+    /// `delta(a, b)` (SPEC 19.6) between the values `column` of `row` holds
+    /// in its versions `from` and `to`, for a reader allowed to read both.
+    /// Only the chunks in changed regions are read.
+    pub(crate) fn value_delta(
+        &self,
+        table: &str,
+        row: RowUuid,
+        column: &str,
+        (from, to): (u64, u64),
+        reader: Option<AuthorSubject>,
+    ) -> Result<Vec<LargeValueDeltaSplice>, Error> {
+        let t = self.schema.table(table)?;
+        if !t.branch_by.is_empty() {
+            return Err(unsupported("large-value deltas on branched tables"));
+        }
+        let col = t
+            .column(column)
+            .filter(|c| crate::large::large_capable(c))
+            .ok_or_else(|| not_large(table, column))?;
+        let text = crate::large::kind(col) != lv::LargeValueKind::Bytes;
+        // Losing read access takes effect at once, for earlier versions too.
+        if let Some(author) = reader
+            && !self.check(t, row, &[], author, Operation::Select)?
+        {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                "the row is not readable".to_owned(),
+            ));
+        }
+        let mut cells = Vec::with_capacity(2);
+        for seq in [from, to] {
+            if let Some(author) = reader
+                && !self.check_version(t, row, &[], seq, author, Operation::Select)?
+            {
+                return Err(Error::new(
+                    ErrorCode::NotObserved,
+                    format!("version {seq} of the row is not readable"),
+                ));
+            }
+            cells.push(self.version_cell(t, row, &col.stored, seq)?);
+        }
+        fn logical<'a>(chunks: &crate::large::Chunks, cell: &'a Sql) -> Result<Logical<'a>, Error> {
+            match cell {
+                Sql::Null => Ok(Logical::Inline(&[][..])),
+                cell => chunks.logical(cell.as_ref()),
+            }
+        }
+        let (a, b) = (
+            logical(&self.chunks, &cells[0])?,
+            logical(&self.chunks, &cells[1])?,
+        );
+        if let (Logical::Chunked(a), Logical::Chunked(b)) = (&a, &b) {
+            let edits = self.chunks.run(|inputs| lv::delta_attempt(a, b, inputs))?;
+            return Ok(edits.into_iter().map(Into::into).collect());
+        }
+        // An inline side: one replace of the whole value.
+        let (delete, delete_utf16) = match &a {
+            Logical::Inline(bytes) => (bytes.len() as u64, utf16_len(bytes, text)?),
+            Logical::Chunked(value) => (value.byte_length, value.utf16_length.unwrap_or(0)),
+        };
+        let insert = match b {
+            Logical::Inline(bytes) => bytes.to_vec(),
+            Logical::Chunked(value) => self.chunks.value_bytes(&value)?,
+        };
+        if delete == 0 && insert.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(vec![LargeValueDeltaSplice {
+            at: 0,
+            delete,
+            insert,
+            at_utf16: 0,
+            delete_utf16,
+        }])
+    }
+
+    /// The stored cell `stored` of `row`'s version `seq`, current or in
+    /// history.
+    fn version_cell(&self, t: &Table, row: RowUuid, stored: &str, seq: u64) -> Result<Sql, Error> {
+        for table in [t.stored.clone(), format!("{}__h", t.stored)] {
+            let sql = format!(
+                "SELECT {} FROM {} WHERE id = ?1 AND _b = ?2 AND _seq = ?3",
+                quote(stored),
+                quote(&table)
+            );
+            let cell: Option<Sql> = self
+                .conn
+                .cached_row(
+                    &sql,
+                    rusqlite::params![row.0.as_bytes().to_vec(), Vec::<u8>::new(), seq as i64],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(storage)?;
+            if let Some(cell) = cell {
+                return Ok(cell);
+            }
+        }
+        Err(Error::new(
+            ErrorCode::NotObserved,
+            format!("version {seq} of the row is not held"),
+        ))
+    }
+
+    /// `range` of a cell's logical value (UTF-16 code units when `utf16`,
+    /// else bytes), reading only the chunks it covers.
+    pub(crate) fn cell_range(
+        &self,
+        cell: ValueRef<'_>,
+        range: std::ops::Range<u64>,
+        utf16: bool,
+    ) -> Result<Vec<u8>, Error> {
+        match self.chunks.logical(cell)? {
             Logical::Inline(bytes) if utf16 => {
                 let text = std::str::from_utf8(bytes).map_err(|_| query("cell is not text"))?;
                 let len = text.encode_utf16().count() as u64;
@@ -236,15 +380,104 @@ impl Inner {
                     value.byte_length
                 };
                 check_range(&range, len)?;
-                self.chunks.run(|inputs| {
-                    if utf16 {
+                if utf16 {
+                    // A UTF-16 code unit is one to three UTF-8 bytes, so
+                    // these bytes hold the range: the pull asks for them.
+                    let bytes = range.start.min(value.byte_length)
+                        ..range.end.saturating_mul(3).min(value.byte_length);
+                    self.chunks.run_range(&value, bytes, |inputs| {
                         lv::utf16_range_attempt(&value, range.clone(), inputs)
-                    } else {
+                    })
+                } else {
+                    self.chunks.run_range(&value, range.clone(), |inputs| {
                         lv::byte_range_attempt(&value, range.clone(), inputs)
-                    }
-                })
+                    })
+                }
             }
         }
+    }
+
+    /// A selected cell read only in `part` (SPEC 19.12): only the chunks
+    /// the part covers are read.
+    pub(crate) fn partial_cell(
+        &self,
+        ty: &ValueType,
+        cell: ValueRef<'_>,
+        part: &crate::query::Part,
+    ) -> Result<Option<Value>, Error> {
+        use crate::query::Part;
+        if let ValueType::Nullable(inner) = ty {
+            return Ok(Some(match cell {
+                ValueRef::Null => Value::Nullable(None),
+                cell => Value::Nullable(self.partial_cell(inner, cell, part)?.map(Box::new)),
+            }));
+        }
+        let text = |bytes: Vec<u8>, split: &str| {
+            String::from_utf8(bytes)
+                .map(Value::String)
+                .map_err(|_| query(split))
+        };
+        Ok(Some(match part {
+            Part::Bytes { from, to } => Value::Bytes(self.cell_range(cell, *from..*to, false)?),
+            Part::TextUtf16 { from, to } => text(
+                self.cell_range(cell, *from..*to, true)?,
+                "UTF-16 range splits a surrogate pair",
+            )?,
+            Part::TextUtf8 { from, to } => text(
+                self.cell_range(cell, *from..*to, false)?,
+                "UTF-8 range splits a code point",
+            )?,
+            Part::JsonPointer(pointer) => {
+                let found = self
+                    .cell_pointer(cell, pointer)?
+                    .ok_or_else(|| query("JSON pointer path does not exist"))?;
+                Value::String(found.to_string())
+            }
+        }))
+    }
+
+    /// The subtree at JSON pointer `pointer` of a JSON cell, reading the
+    /// document only as far as the pointer needs when it can.
+    pub(crate) fn cell_pointer(
+        &self,
+        cell: ValueRef<'_>,
+        pointer: &str,
+    ) -> Result<Option<serde_json::Value>, Error> {
+        let source = match self.chunks.logical(cell)? {
+            Logical::Inline(bytes) => bytes.to_vec(),
+            Logical::Chunked(value) => {
+                let mut source = Vec::new();
+                let mut offset = 0;
+                while offset < value.byte_length {
+                    let end = (offset + lv::LEAF_MIN_BYTES as u64).min(value.byte_length);
+                    source.extend(self.chunks.run_range(&value, offset..end, |inputs| {
+                        lv::byte_range_attempt(&value, offset..end, inputs)
+                    })?);
+                    offset = end;
+                    match lv::json_pointer_prefix(&source, pointer)
+                        .map_err(|e| query(e.to_string()))?
+                    {
+                        lv::JsonPointerPrefix::Found(found) => return Ok(found),
+                        lv::JsonPointerPrefix::NeedMore => {}
+                        lv::JsonPointerPrefix::RequiresFullDocument => {
+                            if offset < value.byte_length {
+                                let rest = offset..value.byte_length;
+                                source.extend(self.chunks.run_range(
+                                    &value,
+                                    rest.clone(),
+                                    |inputs| lv::byte_range_attempt(&value, rest.clone(), inputs),
+                                )?);
+                            }
+                            break;
+                        }
+                    }
+                }
+                source
+            }
+        };
+        let json: serde_json::Value =
+            serde_json::from_slice(&source).map_err(|e| query(format!("stored JSON: {e}")))?;
+        Ok(json.pointer(pointer).cloned())
     }
 
     /// The value `edit` makes of the current cell. A chunked value gains a
@@ -258,10 +491,10 @@ impl Inner {
         edit: Edit,
     ) -> Result<Value, Error> {
         let kind = crate::large::kind(column);
-        let Sql::Text(cell) = cell else {
+        if !large_cell(&cell) {
             return Err(not_large(table, &column.name));
-        };
-        let value = match logical(&cell)? {
+        }
+        let value = match self.chunks.logical(cell.as_ref())? {
             Logical::Inline(bytes) => {
                 let mut bytes = bytes.to_vec();
                 match edit {
@@ -290,7 +523,7 @@ impl Inner {
                 offset,
                 delete,
                 insert,
-            } => self.chunks.run(|inputs| {
+            } => self.chunks.run_write(|inputs| {
                 lv::replace_tail_attempt(&value, offset, delete, insert.clone(), inputs)
             })?,
         };
@@ -364,7 +597,29 @@ impl Db {
         column: &str,
         range: std::ops::Range<u64>,
     ) -> Result<Vec<u8>, Error> {
-        self.inner().read_range(table, row, column, range, false)
+        self.fetching(|| {
+            self.inner()
+                .read_range(table, row, column, range.clone(), false)
+        })
+        .await
+    }
+
+    /// `delta(a, b)` (SPEC 19.6): the edits that turn the value `column` of
+    /// `row` holds in version `from` into its value in version `to`, for a
+    /// reader allowed to read both versions. Only changed regions are read.
+    pub async fn value_delta(
+        &self,
+        table: &str,
+        row: RowUuid,
+        column: &str,
+        from: u64,
+        to: u64,
+    ) -> Result<Vec<LargeValueDeltaSplice>, Error> {
+        self.fetching(|| {
+            let inner = self.inner();
+            inner.value_delta(table, row, column, (from, to), inner.reader())
+        })
+        .await
     }
 
     /// A UTF-16 code-unit range of a string cell. A boundary inside a
@@ -376,13 +631,29 @@ impl Db {
         column: &str,
         range: std::ops::Range<u64>,
     ) -> Result<String, Error> {
-        let bytes = self.inner().read_range(table, row, column, range, true)?;
+        let bytes = self
+            .fetching(|| {
+                self.inner()
+                    .read_range(table, row, column, range.clone(), true)
+            })
+            .await?;
         String::from_utf8(bytes).map_err(|_| query("UTF-16 range splits a surrogate pair"))
     }
 
     /// The value at a JSON pointer of a JSON cell, reading the document
     /// only as far as the pointer needs when it starts with an array index.
     pub async fn read_json_pointer(
+        &self,
+        table: &str,
+        row: RowUuid,
+        column: &str,
+        pointer: &str,
+    ) -> Result<Option<serde_json::Value>, Error> {
+        self.fetching(|| self.json_pointer(table, row, column, pointer))
+            .await
+    }
+
+    fn json_pointer(
         &self,
         table: &str,
         row: RowUuid,
@@ -398,47 +669,10 @@ impl Db {
                 "JSON pointer selection requires a JSON column",
             ));
         }
-        let Sql::Text(cell) = cell else {
+        if !large_cell(&cell) {
             return Ok(None);
-        };
-        let source = match logical(&cell)? {
-            Logical::Inline(bytes) => bytes.to_vec(),
-            Logical::Chunked(value) => {
-                let mut source = Vec::new();
-                let mut offset = 0;
-                while offset < value.byte_length {
-                    let end = (offset + lv::LEAF_MIN_BYTES as u64).min(value.byte_length);
-                    source.extend(
-                        inner
-                            .chunks
-                            .run(|inputs| lv::byte_range_attempt(&value, offset..end, inputs))?,
-                    );
-                    offset = end;
-                    match lv::json_pointer_prefix(&source, pointer)
-                        .map_err(|e| query(e.to_string()))?
-                    {
-                        lv::JsonPointerPrefix::Found(found) => return Ok(found),
-                        lv::JsonPointerPrefix::NeedMore => {}
-                        lv::JsonPointerPrefix::RequiresFullDocument => {
-                            if offset < value.byte_length {
-                                source.extend(inner.chunks.run(|inputs| {
-                                    lv::byte_range_attempt(
-                                        &value,
-                                        offset..value.byte_length,
-                                        inputs,
-                                    )
-                                })?);
-                            }
-                            break;
-                        }
-                    }
-                }
-                source
-            }
-        };
-        let json: serde_json::Value =
-            serde_json::from_slice(&source).map_err(|e| query(format!("stored JSON: {e}")))?;
-        Ok(json.pointer(pointer).cloned())
+        }
+        inner.cell_pointer(cell.as_ref(), pointer)
     }
 
     /// Append bytes (UTF-8 for a string) to a cell, as one row update.
@@ -462,7 +696,10 @@ impl Db {
         bytes: Vec<u8>,
         opts: UpdateOptions,
     ) -> Result<WriteHandle, Error> {
-        self.edit_cell(table, row, column, Edit::Append(bytes), opts)
+        self.fetching_with((Edit::Append(bytes), opts), |(edit, opts)| {
+            self.edit_cell(table, row, column, edit, opts)
+        })
+        .await
     }
 
     /// Replace `splice.delete` bytes at byte offset `splice.at` of a cell
@@ -480,7 +717,10 @@ impl Db {
             delete: splice.delete,
             insert: splice.insert,
         };
-        self.edit_cell(table, row, column, edit, opts)
+        self.fetching_with((edit, opts), |(edit, opts)| {
+            self.edit_cell(table, row, column, edit, opts)
+        })
+        .await
     }
 
     fn edit_cell(
@@ -493,10 +733,18 @@ impl Db {
     ) -> Result<WriteHandle, Error> {
         let value = {
             let mut inner = self.inner();
-            let (col, cell) =
-                inner.physical_cell(table, row, column, identity_of(opts.identity))?;
-            let value = inner.edited(table, &col, cell, edit)?;
-            nullable(&col, value)
+            let edited = inner
+                .physical_cell(table, row, column, identity_of(opts.identity))
+                .and_then(|(col, cell)| Ok(nullable(&col, inner.edited(table, &col, cell, edit)?)));
+            match edited {
+                Ok(value) => value,
+                Err(error) => {
+                    // Nothing derived survives a failed edit (which may be
+                    // retried once its chunks are fetched).
+                    inner.clear_derived();
+                    return Err(error);
+                }
+            }
         };
         let cells = BTreeMap::from([(column.to_owned(), value)]);
         let result = self.write_op(
@@ -510,6 +758,20 @@ impl Db {
     /// Apply partial large-value updates together with an ordinary patch,
     /// as one row update. A failing update leaves the row unchanged.
     pub async fn update_with_large_value_mutations(
+        &self,
+        table: &str,
+        row: RowUuid,
+        patch: BTreeMap<String, Value>,
+        mutations: Vec<LargeValueUpdate>,
+        opts: UpdateOptions,
+    ) -> Result<WriteHandle, Error> {
+        self.fetching_with((patch, mutations, opts), |(patch, mutations, opts)| {
+            self.update_with_mutations(table, row, patch, mutations, opts)
+        })
+        .await
+    }
+
+    fn update_with_mutations(
         &self,
         table: &str,
         row: RowUuid,
@@ -644,7 +906,7 @@ impl Db {
         let emitted = Rc::new(RefCell::new(Vec::new()));
         let stage = Rc::clone(&emitted);
         Ok(StreamingValueUpload {
-            id: *lv::Locator::random().as_bytes(),
+            id: upload_id(),
             kind,
             initialized: false,
             preparation: Some(lv::PushStreamingPreparation::new(
@@ -886,13 +1148,21 @@ impl Default for LargeValueStagingPolicy {
 
 type Stage = Box<dyn FnMut(lv::StagedChunk) -> Result<(), lv::Error>>;
 
+/// A fresh upload lease id: random, so leases never collide.
+fn upload_id() -> [u8; 32] {
+    let mut id = [0; 32];
+    id[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    id[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+    id
+}
+
 /// A resumable upload of one large value: the tree under construction and
 /// the lease that holds its stored nodes.
 pub struct StreamingValueUpload {
     id: [u8; 32],
     kind: lv::LargeValueKind,
     initialized: bool,
-    preparation: Option<lv::PushStreamingPreparation<fn(lv::ContentHash) -> lv::Locator, Stage>>,
+    preparation: Option<lv::PushStreamingPreparation<Stage>>,
     emitted: Rc<RefCell<Vec<lv::StagedChunk>>>,
 }
 
@@ -970,9 +1240,10 @@ fn lower_splices(
     splices: Vec<LargeValueUpdateSplice>,
 ) -> Result<Vec<Edit>, Error> {
     let kind = crate::large::kind(column);
-    let Sql::Text(raw) = cell else {
+    if !large_cell(cell) {
         return Err(query("partial splice requires a bytes or string cell"));
-    };
+    }
+    let raw = cell.as_ref();
     let (from, to, utf16) = match *within {
         LargeValueUpdatePage::Bytes { from, to } if kind == lv::LargeValueKind::Bytes => {
             (from, to, false)
@@ -985,7 +1256,7 @@ fn lower_splices(
         }
         _ => return Err(query("splice page does not match the column's kind")),
     };
-    let current = logical(raw)?;
+    let current = inner.chunks.logical(raw)?;
     let len = match (&current, utf16) {
         (Logical::Chunked(value), true) => value.utf16_length.unwrap_or(0),
         (Logical::Inline(bytes), true) => std::str::from_utf8(bytes)
@@ -1097,11 +1368,11 @@ impl Inner {
                             format!("{table}.{column} is not a JSON column"),
                         ));
                     }
-                    let Sql::Text(raw) = &cell else {
+                    if !large_cell(&cell) {
                         return Err(query(format!("{table}.{column} is null")));
-                    };
+                    }
                     let mut json: serde_json::Value =
-                        serde_json::from_slice(&self.chunks.materialize(raw)?)
+                        serde_json::from_slice(&self.chunks.materialize(cell.as_ref())?)
                             .map_err(|e| query(format!("stored JSON: {e}")))?;
                     for edit in edits {
                         let slot = json.pointer_mut(&edit.at).ok_or_else(|| {
@@ -1148,4 +1419,18 @@ impl TxRef<'_> {
         )?;
         Ok(WriteHandle { row, seq: 0 })
     }
+}
+
+/// Whether `cell` holds a string, JSON or bytes value: inline or chunked.
+fn large_cell(cell: &Sql) -> bool {
+    matches!(cell, Sql::Text(_) | Sql::Blob(_) | Sql::Integer(_))
+}
+
+/// The UTF-16 length of inline text `bytes`; zero for bytes columns.
+fn utf16_len(bytes: &[u8], text: bool) -> Result<u64, Error> {
+    if !text {
+        return Ok(0);
+    }
+    let text = std::str::from_utf8(bytes).map_err(|_| query("cell is not text"))?;
+    Ok(text.encode_utf16().count() as u64)
 }

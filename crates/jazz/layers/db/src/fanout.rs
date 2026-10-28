@@ -38,6 +38,11 @@ struct GroupKey {
     /// The array relations nested in each row: queries that differ only
     /// in them compile to the same root SQL.
     relations: String,
+    /// The parts of large values each row is read in: queries that differ
+    /// only in them compile to the same SQL too.
+    partial: String,
+    /// The columns whose changes updated rows carry as splices.
+    splices: Vec<String>,
 }
 
 struct Member {
@@ -270,6 +275,7 @@ impl Inner {
         read: ReadSpec,
         settled: sync::SettledBy,
     ) -> Result<(Queue, Weak<RefCell<Group>>), Error> {
+        self.check_splices(&prepared.query.table, &read.splices)?;
         let (compiled, session_used) = self.compile_tracked(prepared, identity, &read)?;
         let key = GroupKey {
             renames: renames(prepared.schema.as_ref().unwrap_or(&self.owner)),
@@ -278,6 +284,8 @@ impl Inner {
             identity: (session_used || !prepared.query.array_subqueries.is_empty())
                 .then(|| format!("{identity:?}")),
             relations: format!("{:?}", prepared.query.array_subqueries),
+            partial: format!("{:?}", compiled.partial),
+            splices: read.splices.clone(),
         };
         let now = settled.get();
         let member = |queue: &Queue| Member {
@@ -930,6 +938,7 @@ impl Inner {
                     row: row.clone(),
                     previous_index: None,
                     index,
+                    splices: Vec::new(),
                 }),
                 // A row whose order key moved, or that a same-value write
                 // gave a newer version, is reported even when its shown
@@ -944,6 +953,7 @@ impl Inner {
                         row: row.clone(),
                         previous_index: Some(*previous),
                         index,
+                        splices: Vec::new(),
                     })
                 }
                 Some(_) => {}
@@ -1020,7 +1030,7 @@ impl Inner {
                             .as_ref()
                         {
                             None => Sql::Null,
-                            Some(value) => match self.logical_key(to_sql(value).ok()??) {
+                            Some(value) => match self.logical_key(to_sql(value).ok()??, None) {
                                 Ok(value) => value,
                                 Err(error) => return Some(Err(error)),
                             },
@@ -1079,7 +1089,11 @@ impl Inner {
             let values = found.remove(row.id.0.as_bytes().as_slice())?;
             let mut key: SortKey = Vec::with_capacity(order.len() + 1);
             for (value, by) in values.into_iter().zip(order) {
-                let value = match self.logical_key(value) {
+                let kind = table
+                    .column(&by.column)
+                    .filter(|column| crate::large::large_capable(column))
+                    .map(crate::large::kind);
+                let value = match self.logical_key(value, kind) {
                     Ok(value) => value,
                     Err(error) if crate::large::is_missing(&error) => {
                         blocked = true;
@@ -1101,12 +1115,20 @@ impl Inner {
         Some(Ok(keys))
     }
 
-    /// A sort-key cell as its logical bytes, so keys compare as the `jazz`
-    /// collation orders them: a chunked or tagged cell is read as its value.
-    fn logical_key(&self, value: Sql) -> Result<Sql, Error> {
-        Ok(match value {
-            Sql::Text(cell) => Sql::Text(self.chunks.materialize(&cell)?),
-            value => value,
+    /// A sort-key cell as its logical value, so keys compare as the values
+    /// do: a chunked cell of a large-capable column of `kind` is read whole.
+    fn logical_key(
+        &self,
+        value: Sql,
+        kind: Option<jazz_types::large_values::LargeValueKind>,
+    ) -> Result<Sql, Error> {
+        Ok(match (value, kind) {
+            (Sql::Integer(cell), Some(kind)) => crate::large::inline_cell(
+                kind,
+                self.chunks
+                    .materialize(rusqlite::types::ValueRef::Integer(cell))?,
+            ),
+            (value, _) => value,
         })
     }
 
@@ -1172,11 +1194,69 @@ impl Inner {
         }
     }
 
+    /// Refuse splices of a column that is not a large-capable column of
+    /// `table`.
+    fn check_splices(&self, table: &str, columns: &[String]) -> Result<(), Error> {
+        if columns.is_empty() {
+            return Ok(());
+        }
+        let t = self.schema.table(table)?;
+        for column in columns {
+            if !t.column(column).is_some_and(crate::large::large_capable) {
+                return Err(crate::values::query_error(format!(
+                    "splices of {column:?} need a text, bytes or JSON column of {table:?}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Give each updated row of `event` its splice columns' changes from
+    /// the version the result showed (`prior`). A change that cannot be
+    /// computed here (a version no longer held, chunks still to arrive) is
+    /// left out, and the reader takes the column whole.
+    fn add_splices(
+        &self,
+        group: &Group,
+        prior: &HashMap<RowUuid, u64>,
+        event: &mut SubscriptionEvent,
+    ) {
+        let SubscriptionEvent::Delta { updated, .. } = event else {
+            return;
+        };
+        for out in updated {
+            let Some(&from) = prior.get(&out.row.id) else {
+                continue;
+            };
+            if from == out.row.seq {
+                continue;
+            }
+            for column in &group.key.splices {
+                if let Ok(splices) = self.value_delta(
+                    &group.prepared.query.table,
+                    out.row.id,
+                    column,
+                    (from, out.row.seq),
+                    group.identity,
+                ) {
+                    out.splices.push((column.clone(), splices));
+                }
+            }
+        }
+    }
+
     /// Bring a group's result up to date; true when it re-ran the query.
     fn refresh_group(&self, group: &mut Group, ids: Option<&BTreeSet<RowUuid>>) -> bool {
+        // The versions the result showed, which splices start from.
+        let prior: HashMap<RowUuid, u64> = if group.key.splices.is_empty() {
+            HashMap::new()
+        } else {
+            group.rows.iter().map(|row| (row.id, row.seq)).collect()
+        };
         if let Some(ids) = ids.filter(|_| group.recheck) {
             match self.recheck_rows(group, ids) {
-                Some(Ok(Some(event))) => {
+                Some(Ok(Some(mut event))) => {
+                    self.add_splices(group, &prior, &mut event);
                     group.push(event);
                     return false;
                 }
@@ -1207,7 +1287,8 @@ impl Inner {
             }
         };
         let was_awaiting = std::mem::take(&mut group.awaiting);
-        if let Some(event) = diff(&group.rows, &rows) {
+        if let Some(mut event) = diff(&group.rows, &rows) {
+            self.add_splices(group, &prior, &mut event);
             group.push(event);
         } else if was_awaiting {
             // Settlement withheld while waiting is published now.
@@ -1252,6 +1333,7 @@ fn refresh_includes(group: &mut Group, changed: &BTreeSet<(String, RowUuid)>) {
             row: row.clone(),
             previous_index: Some(index),
             index,
+            splices: Vec::new(),
         })
         .collect();
     if !updated.is_empty() {
@@ -1353,6 +1435,7 @@ pub(super) fn opening(rows: &[CurrentRow]) -> SubscriptionEvent {
             row: row.clone(),
             previous_index: None,
             index,
+            splices: Vec::new(),
         })
         .collect();
     delta(true, added, Vec::new(), Vec::new())
@@ -1401,6 +1484,7 @@ fn diff(before: &[CurrentRow], after: &[CurrentRow]) -> Option<SubscriptionEvent
                 row: row.clone(),
                 previous_index: None,
                 index,
+                splices: Vec::new(),
             }),
             Some((previous, prior))
                 if prior.cells != row.cells
@@ -1412,6 +1496,7 @@ fn diff(before: &[CurrentRow], after: &[CurrentRow]) -> Option<SubscriptionEvent
                     row: row.clone(),
                     previous_index: Some(*previous),
                     index,
+                    splices: Vec::new(),
                 })
             }
             Some(_) => {}

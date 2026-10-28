@@ -361,6 +361,8 @@ export interface BrowserWorkerInitOptions {
   selfSignedClientProof?: NativeSelfSignedClientProof;
   initialSyncFlushEvery: number;
   appId: string;
+  /** Slow-query log threshold for the worker's store; 0 turns the log off. */
+  slowQueryThresholdMs?: number;
   /** Non-secret logical owner pinned to an explicitly selected physical IDB root. */
   storageOwner: string;
   authSessionKey: string;
@@ -656,11 +658,20 @@ export type BrowserFollowerPortEvent =
   | { type: "auth-restored" }
   | { type: "mutation-error"; event: MutationErrorEvent }
   /**
-   * A terminal failure of the worker-owned upstream server transport. This is
+   * A failure of the worker-owned upstream server transport. This is
    * deliberately not a mutation rejection: the follower records it only to
-   * reject its active remote waits and subscriptions.
+   * reject its active remote waits and subscriptions, or, while the worker
+   * keeps reconnecting, its remote reads.
    */
-  | { type: "transport-error"; error: BrowserRelayError }
+  | {
+      type: "transport-error";
+      error: BrowserRelayError;
+      /**
+       * The worker keeps reconnecting through the error, so writes' Global
+       * waits and remote subscriptions wait for it (#3923).
+       */
+      retrying?: boolean;
+    }
   | { type: "storage-reset"; resetId: number }
   | { type: "storage-invalidated" }
   | { type: "relay-trace"; entries: BrowserRelayTrace[] }

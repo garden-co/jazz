@@ -820,3 +820,63 @@ fn a_serializable_transaction_keeps_its_pinned_snapshot() {
     assert_eq!(fixture.rows(foreground).len(), 2);
     assert_eq!(read(), before, "the pinned snapshot does not advance");
 }
+
+#[test]
+fn slow_query_commands_have_pinned_bytes_and_answer() {
+    // Appended commands and answers: existing ordinals stay fixed.
+    assert_eq!(
+        postcard::to_allocvec(&ForegroundDbCommandRequest::TakeSlowQueryReport { app: None })
+            .unwrap(),
+        vec![36, 0]
+    );
+    assert_eq!(
+        postcard::to_allocvec(&ForegroundDbCommandRequest::TakeSlowQueryReport {
+            app: Some("a".to_owned())
+        })
+        .unwrap(),
+        vec![36, 1, 1, b'a']
+    );
+    assert_eq!(
+        postcard::to_allocvec(&ForegroundDbCommandRequest::SetSlowQueryThresholdMs { ms: 200 })
+            .unwrap(),
+        vec![37, 200, 1]
+    );
+    assert_eq!(
+        postcard::to_allocvec(&ForegroundDbCommandResponse::SlowQueryReport {
+            lines_json: "[]".to_owned()
+        })
+        .unwrap(),
+        vec![27, 2, b'[', b']']
+    );
+    assert_eq!(
+        postcard::to_allocvec(&ForegroundDbCommandResponse::SlowQueryThresholdSet).unwrap(),
+        vec![28]
+    );
+
+    let directory = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new();
+    let capability = fixture.admit(&directory.path().join("alice.sqlite"), "alice", 0x11);
+    let foreground = fixture.open(&capability);
+    assert_eq!(
+        fixture.execute(
+            foreground,
+            ForegroundDbCommandRequest::SetSlowQueryThresholdMs { ms: 3_600_000 }
+        ),
+        ForegroundDbCommandResponse::SlowQueryThresholdSet
+    );
+    fixture.insert_todo(foreground, [0xa1; 16], "quick");
+    fixture.tick(foreground);
+    assert_eq!(
+        fixture.execute(
+            foreground,
+            ForegroundDbCommandRequest::TakeSlowQueryReport {
+                app: Some("my-app".to_owned())
+            }
+        ),
+        ForegroundDbCommandResponse::SlowQueryReport {
+            lines_json: "[]".to_owned()
+        },
+        "nothing ran for an hour"
+    );
+    fixture.close(foreground);
+}

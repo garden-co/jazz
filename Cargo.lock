@@ -2088,6 +2088,7 @@ dependencies = [
  "codspeed-divan-compat",
  "jazz",
  "jazz-benchmark-guard",
+ "jazz-native-relay",
  "tempfile",
  "zstd",
 ]

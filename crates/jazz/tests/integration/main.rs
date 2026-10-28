@@ -17,6 +17,8 @@ mod array_columns;
 mod authorization_scope_reentry;
 #[path = "../binding_host.rs"]
 mod binding_host;
+#[path = "../branch_column_evolution.rs"]
+mod branch_column_evolution;
 #[path = "../branch_views.rs"]
 mod branch_views;
 #[path = "../claims_change.rs"]
@@ -51,6 +53,8 @@ mod host_tables;
 mod include_live;
 #[path = "../large_value_append.rs"]
 mod large_value_append;
+#[path = "../large_value_chunk_store.rs"]
+mod large_value_chunk_store;
 #[path = "../large_value_read_scaling.rs"]
 mod large_value_read_scaling;
 #[path = "../large_value_streaming_create.rs"]
@@ -67,6 +71,8 @@ mod large_values;
 mod local_first_first_load_gate;
 #[path = "../local_first_server_wait.rs"]
 mod local_first_server_wait;
+#[path = "../maybe_conflicting.rs"]
+mod maybe_conflicting;
 #[path = "../order_by_unselected_column.rs"]
 mod order_by_unselected_column;
 #[path = "../parameterized_subscription_routing.rs"]
@@ -79,6 +85,14 @@ mod policy_activation;
 mod prepared_claim_routing;
 #[path = "../provenance.rs"]
 mod provenance;
+#[path = "../recheck_policies.rs"]
+mod recheck_policies;
+#[path = "../recheck_queries.rs"]
+mod recheck_queries;
+#[path = "../recheck_sync.rs"]
+mod recheck_sync;
+#[path = "../rejected_retry_store.rs"]
+mod rejected_retry_store;
 #[path = "../relation_policies.rs"]
 mod relation_policies;
 #[path = "../relation_queries.rs"]
@@ -91,6 +105,8 @@ mod relational_delete_retraction;
 mod relay_local_seqs;
 #[path = "../relay_policy_subscriptions.rs"]
 mod relay_policy_subscriptions;
+#[path = "../relay_serves_on_arrival.rs"]
+mod relay_serves_on_arrival;
 #[path = "../schema_activation.rs"]
 mod schema_activation;
 #[path = "../schema_renames.rs"]
@@ -105,6 +121,8 @@ mod serializable_sync;
 mod session_policy_values;
 #[path = "../session_write_checks.rs"]
 mod session_write_checks;
+#[path = "../slow_queries.rs"]
+mod slow_queries;
 #[path = "../snapshots.rs"]
 mod snapshots;
 #[path = "../storage_corpus.rs"]
@@ -113,6 +131,8 @@ mod storage_corpus;
 mod storage_errors;
 #[path = "../structured_result_tree.rs"]
 mod structured_result_tree;
+#[path = "../sync_access_loss.rs"]
+mod sync_access_loss;
 #[path = "../sync_aggregates.rs"]
 mod sync_aggregates;
 #[path = "../sync_differential.rs"]
@@ -133,6 +153,8 @@ mod sync_support_access;
 mod sync_untrusted_clients;
 #[path = "../sync_wire_corpus.rs"]
 mod sync_wire_corpus;
+#[path = "../text_merge.rs"]
+mod text_merge;
 #[path = "../transaction_handles.rs"]
 mod transaction_handles;
 #[path = "../union_queries.rs"]

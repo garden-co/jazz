@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createDb, schema } from "../index.js";
 import { getDbInternalSession } from "../runtime/db-internal-session.js";
-import type { AuthFailureReason } from "../runtime/auth-state.js";
+import { mapAuthReason, type AuthFailureReason } from "../runtime/auth-state.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 
 function failAuth(db: object, reason: AuthFailureReason): void {
@@ -165,6 +165,21 @@ describe("account context authority", () => {
       // gets an already-expired token back: that renews again too.
       await vi.waitFor(() => expect(refresh).toHaveBeenCalledTimes(3), { timeout: 6_000 });
       await vi.waitFor(() => expect(db.getAuthState().error).toBeUndefined());
+    } finally {
+      await db.shutdown();
+    }
+  });
+
+  it("does not renew a revoked account identity", async () => {
+    const config = await localAccountConfig("local-first-revoked-no-renewal");
+    const db = await createDb(config);
+    try {
+      const refresh = vi.spyOn(db, "refreshAccountAuth");
+      // The server's words for a reassigned or revoked principal.
+      failAuth(db, mapAuthReason("account identity revoked"));
+      expect(db.getAuthState().error).toBe("revoked");
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(refresh).not.toHaveBeenCalled();
     } finally {
       await db.shutdown();
     }

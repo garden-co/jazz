@@ -318,3 +318,70 @@ fn held_rows_that_cannot_be_read_fail_the_send_and_are_declared_on_the_next() {
     assert_eq!(rows.len(), 1, "the settled row is declared: {rows:?}");
     assert_eq!(rows[0].1, *row(1).0.as_bytes());
 }
+
+/// #3070: an authority that cannot read the rows a serializable commit read
+/// does not accept the commit as if they were absent. Here the commit read
+/// that no item exists, and one was added since: it is refused with the
+/// storage error, never accepted.
+#[test]
+fn a_serializable_commit_is_not_validated_against_an_unreadable_store() {
+    let path = scratch("serializable-validation");
+    let server = block_on(Db::open_at(config(0xee), &path, FileOptions::default())).unwrap();
+    server.set_authority();
+    let client = block_on(Db::open(config(0x11))).unwrap();
+    let (client_side, server_side) = duplex();
+    let _upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+
+    let open = jazz::tools::OpenTransactionId::new();
+    block_on(client.begin_serializable(open)).unwrap();
+    let prepared = client.prepare_query(&Query::from("items")).unwrap();
+    let read = drive(
+        &[&client, &server, &client],
+        client.tx_ref(open).all_prepared(&prepared),
+    );
+    assert_eq!(read.unwrap().len(), 0);
+    block_on(client.tx_ref(open).insert(
+        "items",
+        item("guarded"),
+        InsertOptions {
+            row_id: Some(row(2)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    // Someone else adds an item; the commit's read no longer holds.
+    block_on(server.insert(
+        "items",
+        item("guard"),
+        InsertOptions {
+            row_id: Some(row(1)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    let receipt = block_on(client.commit_serializable_handle(open)).unwrap();
+
+    let stored: String = rusqlite::Connection::open(&path)
+        .unwrap()
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE '%items%' \
+             ORDER BY length(name) LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    hide(&path, &stored);
+    for _ in 0..6 {
+        let _ = block_on(client.tick());
+        let _ = block_on(server.tick());
+    }
+    restore(&path, &stored);
+    let outcome = drive(
+        &[&client, &server, &client],
+        client.wait_for_transaction(receipt.0, DurabilityTier::Global),
+    );
+    let error = outcome.expect_err("an unreadable read set is not accepted");
+    assert!(error.message.contains("Storage"), "{error:?}");
+    assert_eq!(labels(&server), ["guard"]);
+}

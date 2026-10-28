@@ -22,7 +22,7 @@ import {
   trustedReservedSessionToken,
 } from "./client-session.js";
 import { getTrustedReservedSession, setTrustedReservedSession } from "./db-internal-session.js";
-import { mapAuthReason } from "./auth-state.js";
+import { isRenewableAuthFailure, mapAuthReason } from "./auth-state.js";
 import { httpUrlToWs } from "./url.js";
 import type { RemoteLinkState } from "./remote-link-state.js";
 import { toError } from "./util.js";
@@ -283,6 +283,8 @@ export interface Runtime {
   nativeUpstreamConfigured?(): boolean;
   /** Push updated auth credentials into the live Rust transport. */
   updateAuth(auth_json: string): void;
+  /** End waits held for a refused credential that nothing will renew. */
+  endCredentialWait?(): void;
   /** Register a callback invoked when the Rust transport rejects the JWT. */
   onAuthFailure(callback: (reason: string) => void): void;
 }
@@ -809,10 +811,63 @@ export class PersistedWriteRejectedError extends Error {
   }
 }
 
+/**
+ * Error returned when waiting for a write reaches the `timeoutMs` its caller
+ * set. The write itself is not rejected: it stays queued and may still be
+ * persisted, so retrying it can duplicate it.
+ */
+export class WriteWaitTimeoutError extends Error {
+  readonly name = "WriteWaitTimeoutError";
+  readonly code = "timeout";
+
+  constructor(
+    readonly tier: DurabilityTier,
+    readonly timeoutMs: number,
+  ) {
+    super(
+      `Waiting for the write to reach the ${tier} tier timed out after ${timeoutMs} ms; ` +
+        "it is still queued and may yet be persisted",
+    );
+  }
+}
+
+/** Options for waiting on a write. */
+export interface WriteWaitOptions {
+  tier: DurabilityTier;
+  /**
+   * Stop waiting after this many milliseconds with a
+   * {@link WriteWaitTimeoutError}. Without it, a wait lasts until the write
+   * is persisted or rejected, through any network outage and reconnect.
+   */
+  timeoutMs?: number;
+}
+
+/** Longest delay `setTimeout` honours; longer ones fire at once. */
+const MAX_WRITE_WAIT_TIMEOUT_MS = 2_147_483_647;
+
+/** Validate a caller's `timeoutMs` before any wait work starts. */
+function validateWriteWaitTimeout(timeoutMs: unknown): void {
+  if (timeoutMs === undefined) return;
+  if (
+    typeof timeoutMs !== "number" ||
+    !Number.isFinite(timeoutMs) ||
+    timeoutMs < 0 ||
+    timeoutMs > MAX_WRITE_WAIT_TIMEOUT_MS
+  ) {
+    // Like an unknown tier, a bad timeout must not read as a rejected write.
+    throw new TypeError(
+      `wait timeoutMs must be a number of milliseconds from 0 to ${MAX_WRITE_WAIT_TIMEOUT_MS}. ` +
+        "The write was already applied: do not retry it.",
+    );
+  }
+}
+
 /** Internal wait controls; not part of the public WriteHandle.wait options. */
 export interface RuntimeWriteWaitOptions {
   ready?: Promise<void>;
   observeOnly?: boolean;
+  /** Ends the wait with `signal.reason`; the write itself is unaffected. */
+  signal?: AbortSignal;
 }
 
 const writeWaitReadiness = new WeakMap<object, (tier: DurabilityTier) => Promise<void>>();
@@ -868,12 +923,20 @@ export class WriteHandle<T = void, WaitResult = void> {
   /**
    * Wait for the write to be persisted at a given durability tier.
    *
-   * Rejects with a {@link PersistedWriteRejectedError} if the write is rejected.
+   * Rejects with a {@link PersistedWriteRejectedError} if the write is rejected,
+   * or a {@link WriteWaitTimeoutError} once `timeoutMs` passes. Without
+   * `timeoutMs`, a Global wait lasts through network outages and reconnects.
    */
-  async wait(options: { tier: DurabilityTier }): Promise<WaitResult> {
+  async wait(options: WriteWaitOptions): Promise<WaitResult> {
     const tier = resolveWriteWaitTier(options.tier);
+    validateWriteWaitTimeout(options.timeoutMs);
     const ready = writeWaitReadiness.get(this)?.(tier);
-    return this.#client.waitForTransaction(this.txId, tier, ready) as Promise<WaitResult>;
+    return (await this.#client.waitForTransaction(
+      this.txId,
+      tier,
+      ready,
+      options.timeoutMs,
+    )) as WaitResult;
   }
 
   protected client(): JazzClient {
@@ -894,10 +957,11 @@ export class WriteResult<T> extends WriteHandle<T, T> {
   /**
    * Wait for the write to be persisted at a given durability tier.
    *
-   * Rejects with a {@link PersistedWriteRejectedError} if the write is rejected.
+   * Rejects with a {@link PersistedWriteRejectedError} if the write is rejected,
+   * or a {@link WriteWaitTimeoutError} once `timeoutMs` passes.
    * @returns the inserted row.
    */
-  override async wait(options: { tier: DurabilityTier }): Promise<T> {
+  override async wait(options: WriteWaitOptions): Promise<T> {
     await super.wait(options);
     return this.value;
   }
@@ -920,10 +984,13 @@ export class SerializableWriteHandle extends WriteHandle<void> {
   /**
    * Wait for the serializable transaction to be accepted or rejected by the authority.
    *
-   * Rejects with a {@link PersistedWriteRejectedError} if the transaction is rejected.
+   * Rejects with a {@link PersistedWriteRejectedError} if the transaction is rejected,
+   * or a {@link WriteWaitTimeoutError} once `timeoutMs` passes. Without
+   * `timeoutMs`, the wait lasts through network outages and reconnects.
    */
-  override async wait(): Promise<void> {
-    await this.client().waitForSerializableTransaction(await this.txId);
+  override async wait(options: { timeoutMs?: number } = {}): Promise<void> {
+    validateWriteWaitTimeout(options.timeoutMs);
+    await this.client().waitForSerializableTransaction(this.txId, options.timeoutMs);
   }
 }
 
@@ -934,11 +1001,13 @@ export class SerializableWriteResult<T> extends WriteResult<T> {
   /**
    * Wait for the serializable transaction to be accepted or rejected by the authority.
    *
-   * Rejects with a {@link PersistedWriteRejectedError} if the transaction is rejected.
+   * Rejects with a {@link PersistedWriteRejectedError} if the transaction is rejected,
+   * or a {@link WriteWaitTimeoutError} once `timeoutMs` passes.
    * @returns the callback result.
    */
-  override async wait(): Promise<T> {
-    await this.client().waitForSerializableTransaction(await this.txId);
+  override async wait(options: { timeoutMs?: number } = {}): Promise<T> {
+    validateWriteWaitTimeout(options.timeoutMs);
+    await this.client().waitForSerializableTransaction(this.txId, options.timeoutMs);
     return this.value;
   }
 
@@ -951,6 +1020,24 @@ export class SerializableWriteResult<T> extends WriteResult<T> {
 }
 
 const transactionAdmission = new WeakMap<JazzClient, () => Promise<void>>();
+
+const credentialRenewal = new WeakMap<object, (reason: AuthFailureReason) => boolean>();
+
+/**
+ * @internal Tell a client whether something renews its credential after a
+ * refusal. Without it, a refusal ends the client's Global waits (#3923).
+ */
+export function setCredentialRenewal(
+  client: object,
+  renews: (reason: AuthFailureReason) => boolean,
+): void {
+  credentialRenewal.set(client, renews);
+}
+
+/** @internal Report a refusal that reached the host rather than the client's runtime. */
+export function reportCredentialRefusal(client: object, reason: AuthFailureReason): void {
+  if (client instanceof JazzClient) client.handleCredentialRefusal(reason);
+}
 
 /** @internal Scope an opening prerequisite without adding a public client method. */
 export function withTransactionAdmission<T>(
@@ -1043,12 +1130,12 @@ export class JazzClient {
     this.context = context;
     this.resolvedSession = this.resolveSessionFromContext();
 
-    if (runtimeOptions?.onAuthFailure) {
-      const handler = runtimeOptions.onAuthFailure;
-      this.runtime.onAuthFailure((reason: string) => {
-        handler(mapAuthReason(reason));
-      });
-    }
+    const onAuthFailure = runtimeOptions?.onAuthFailure;
+    this.runtime.onAuthFailure((rawReason: string) => {
+      const reason = mapAuthReason(rawReason);
+      this.handleCredentialRefusal(reason);
+      onAuthFailure?.(reason);
+    });
 
     this.runtime.onMutationError((event) => {
       console.error("Unhandled Jazz mutation error", event);
@@ -1293,6 +1380,17 @@ export class JazzClient {
       throw new Error("serverUrl required for backend mode");
     }
     return this;
+  }
+
+  /**
+   * @internal The server refused this client's credential. A refusal the app
+   * renews holds Global waits until the new credential reconnects, as an
+   * outage does; with nothing to renew it, the runtime ends them and its
+   * remote subscriptions as a terminal failure (#3923).
+   */
+  handleCredentialRefusal(reason: AuthFailureReason): void {
+    if (isRenewableAuthFailure(reason) && credentialRenewal.get(this)?.(reason) === true) return;
+    this.runtime.endCredentialWait?.();
   }
 
   private updateAuthSnapshot(update: AuthUpdate, updateRuntime = true): void {
@@ -2064,24 +2162,52 @@ export class JazzClient {
     txId: TxId | Promise<TxId>,
     tier: DurabilityTier,
     ready?: Promise<void>,
+    timeoutMs?: number,
   ): Promise<void> {
+    validateWriteWaitTimeout(timeoutMs);
+    // A timeout ends the wait here and in the runtime, so an abandoned wait
+    // leaves no runtime work behind.
+    const control = new AbortController();
+    const ended = new Promise<never>((_, reject) => {
+      control.signal.addEventListener("abort", () => reject(control.signal.reason), {
+        once: true,
+      });
+    });
+    ended.catch(() => undefined);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    if (timeoutMs !== undefined) {
+      timer = setTimeout(
+        () => control.abort(new WriteWaitTimeoutError(tier, timeoutMs)),
+        timeoutMs,
+      );
+    }
     try {
       // Register before awaiting host readiness. Readiness still gates completion,
       // including runtimes that do not themselves need to defer transport progress.
-      const completion = ready
-        ? this.runtime.waitForTransaction(txId, tier, { ready })
-        : this.runtime.waitForTransaction(txId, tier);
-      await Promise.all([ready, completion]);
+      const completion = this.runtime.waitForTransaction(txId, tier, {
+        ...(ready ? { ready } : {}),
+        signal: control.signal,
+      });
+      completion.catch(() => undefined);
+      await Promise.race([Promise.all([ready, completion]), ended]);
     } catch (error) {
+      if (control.signal.aborted && error === control.signal.reason) throw error;
       throw this.normalizeTransactionWaitError(error);
+    } finally {
+      clearTimeout(timer);
+      if (!control.signal.aborted) control.abort(new Error("write wait ended"));
     }
   }
 
   /** @internal */
-  async waitForSerializableTransaction(txId: TxId): Promise<void> {
+  async waitForSerializableTransaction(
+    txId: TxId | Promise<TxId>,
+    timeoutMs?: number,
+  ): Promise<void> {
+    txId = await txId;
     const hasAuthority =
       Boolean(this.context.serverUrl) || this.runtime.nativeUpstreamConfigured?.() === true;
-    await this.waitForTransaction(txId, hasAuthority ? "global" : "local");
+    await this.waitForTransaction(txId, hasAuthority ? "global" : "local", undefined, timeoutMs);
   }
 
   private normalizeTransactionWaitError(error: unknown): Error {
