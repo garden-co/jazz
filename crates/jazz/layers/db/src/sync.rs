@@ -3703,6 +3703,9 @@ impl Db {
             reported: true,
             ..link
         });
+        drop(inner);
+        self.schedule_read_deadlines();
+        self.schedule_pending_tick();
     }
 
     pub(crate) fn is_client(&self) -> bool {
@@ -4052,6 +4055,8 @@ impl Db {
         strict: bool,
         view: &ReadViewSourceSpec,
     ) -> Result<Option<u64>, Error> {
+        let _deadline = self.read_deadline(deadline);
+        let _attempt = self.read_attempt_deadline();
         let tier = reach.tier;
         // Held on a live link: leaving it (even for a new attempt) releases
         // the read, as it releases a gated opening.
@@ -4142,6 +4147,10 @@ impl Db {
                         "Timed out waiting for query coverage",
                     )));
                 }
+            }
+            drop(inner);
+            if ask {
+                self.schedule_pending_tick();
             }
             Poll::Pending
         })
@@ -7313,5 +7322,78 @@ impl Db {
                 .collect::<BTreeMap<_, _>>(),
             client.transport.is_some(),
         )
+    }
+}
+
+impl Db {
+    /// Install the host hook for one-shot read progress and deadlines. The
+    /// host schedules a later tick and re-polls waiting operations afterwards.
+    /// Existing live deadlines are armed when a hook is installed or replaced.
+    /// This does not install a timer or executor by itself.
+    pub fn set_tick_scheduler(&self, scheduler: Option<Rc<dyn TickScheduler>>) {
+        self.inner.borrow_mut().scheduler = scheduler;
+        self.schedule_read_deadlines();
+    }
+
+    pub(crate) fn read_deadline(&self, at: Option<Instant>) -> Option<Rc<Instant>> {
+        let deadline = at.map(Rc::new)?;
+        self.inner
+            .borrow_mut()
+            .read_deadlines
+            .push(Rc::downgrade(&deadline));
+        self.schedule_read_deadlines();
+        Some(deadline)
+    }
+
+    pub(crate) fn read_attempt_deadline(&self) -> Option<Rc<Instant>> {
+        let link = self.link_hint()?.get();
+        self.read_deadline(
+            (link.hint == RemoteLinkHint::Attempting)
+                .then_some(link.since + crate::options::REMOTE_LINK_ATTEMPT_WINDOW),
+        )
+    }
+
+    pub(crate) fn schedule_pending_tick(&self) {
+        let scheduler = self.inner.borrow().scheduler.clone();
+        if let Some(scheduler) = scheduler {
+            scheduler.schedule_tick(TickUrgency::Immediate);
+        }
+    }
+
+    /// Hosts may keep only their earliest timer. Every tick re-arms the next
+    /// outstanding deadline, even if the read whose timer fired was cancelled.
+    pub(crate) fn schedule_read_deadlines(&self) {
+        let (scheduler, next) = {
+            let mut inner = self.inner.borrow_mut();
+            let now = Instant::now();
+            let mut next = None;
+            inner.read_deadlines.retain(|weak| {
+                let Some(deadline) = weak.upgrade() else {
+                    return false;
+                };
+                if *deadline > now {
+                    next = Some(next.map_or(*deadline, |at: Instant| at.min(*deadline)));
+                }
+                // Keep live guards even after their original wake expires:
+                // the host may restart a connection attempt while they wait.
+                true
+            });
+            if !inner.read_deadlines.is_empty()
+                && let Some(client) = &inner.client
+            {
+                let link = client.hint.get();
+                let at = link.since + crate::options::REMOTE_LINK_ATTEMPT_WINDOW;
+                if link.hint == RemoteLinkHint::Attempting && at > now {
+                    next = Some(next.map_or(at, |pending| pending.min(at)));
+                }
+            }
+            (inner.scheduler.clone(), next)
+        };
+        if let (Some(scheduler), Some(next)) = (scheduler, next) {
+            // Round up: an early timer must not consume the final sub-ms wait.
+            let nanos = next.saturating_duration_since(Instant::now()).as_nanos();
+            let millis = nanos.div_ceil(1_000_000).max(1).min(u128::from(u64::MAX)) as u64;
+            scheduler.schedule_tick_after(millis);
+        }
     }
 }
