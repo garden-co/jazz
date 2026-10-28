@@ -55,6 +55,54 @@ async function persistedBlocks(path: string) {
 }
 
 describe.skipIf(!hasJazzWasmBuild())("SQLite browser durability", () => {
+  it("publishes an already-flushed worker batch without another asynchronous barrier", async () => {
+    const wasm = await loadWasmModuleForTest();
+    const author = testAuthorBytes("alice-clean-publication");
+    const schema = { notes: { ...app.wasmSchema.notes!, policies: allowAll(app).notes } };
+    const storage = { backend: "indexeddb", path: "/alice-clean-publication.sqlite" };
+    const workerDb = await wasm.WasmDb.openBrowser(
+      storage,
+      encodeSchema(schema),
+      openConfig(new Uint8Array(16).fill(91), author),
+      "alice-clean",
+    );
+    const worker = NativeRuntimeAdapter.fromDb(
+      workerDb,
+      schema,
+      new Uint8Array(16).fill(91),
+      author,
+      1,
+      false,
+    );
+    const tabDb = wasm.WasmDb.openMemory(
+      encodeSchema(schema),
+      openConfig(new Uint8Array(16).fill(92), author),
+    );
+    const downstream = await worker.acceptPeer();
+    const upstream = await tabDb.connectUpstream();
+    const write = tabDb.insert(
+      "notes",
+      encodeCellsForRow(schema.notes, {
+        text: { type: "Text", value: "already committed before publication" },
+      }),
+    );
+    try {
+      await tabDb.tick();
+      downstream.sendWireFrames(upstream.recvWireFrames());
+      await workerDb.tick();
+      await workerDb.flush();
+      // Receiving this batch must be synchronous: no storage work remains.
+      expect(downstream.recvWireFrames().length).toBeGreaterThan(0);
+    } finally {
+      write.close();
+      downstream.close();
+      upstream.close();
+      await tabDb.close();
+      await worker.close();
+      await wasm.WasmDb.destroyBrowserStorage(storage, "alice-clean");
+    }
+  });
+
   it.each([
     { upstream: false, fail: false },
     { upstream: true, fail: false },

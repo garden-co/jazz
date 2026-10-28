@@ -37,3 +37,10 @@ and `Fate` acknowledgements. A failed barrier reports a terminal peer error;
 the follower rejects its Local waits without manufacturing an authority
 rejection. Upstream traffic stays independent so it can continue supplying
 chunks to a pending core read. Wire bytes and message order are unchanged.
+
+The downstream carrier checks `is_flushed` before creating an asynchronous
+barrier. A clean file with no queued or in-flight VFS operations publishes
+immediately. A pending operation conservatively requires the FIFO barrier;
+sticky errors are checked even on the clean path. This avoids one queue turn
+per read-only batch without classifying sync message tags as writes. It makes
+no end-to-end throughput claim.

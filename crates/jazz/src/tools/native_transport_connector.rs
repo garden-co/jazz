@@ -102,6 +102,11 @@ pub enum NativeTransportError {
     /// Admission, protocol, or an unclassified adapter failure must fail closed.
     #[error("{0}")]
     Terminal(String),
+    /// The upstream refused the request's credential. Retrying with the same
+    /// credential cannot succeed; a refreshed one can. Fails closed like
+    /// [`Self::Terminal`] until the caller supplies a new credential.
+    #[error("{0}")]
+    AuthRejected(String),
 }
 
 impl NativeTransportError {
