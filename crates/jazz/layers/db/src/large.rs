@@ -2005,6 +2005,10 @@ pub(crate) struct Possession {
     pub(crate) checked: bool,
     /// The roots of those readable versions' chunked values.
     pub(crate) roots: BTreeSet<[u8; 32]>,
+    /// Roots this commit's cells proved through receipts. Their receipts
+    /// settle once the whole commit applies, so a later cell of the same
+    /// commit sharing nodes with an earlier one is proved by them too.
+    pub(crate) settle: std::cell::RefCell<Vec<lv::ContentHash>>,
 }
 
 /// Whether `possession` covers `value`'s tree: every node is in a named

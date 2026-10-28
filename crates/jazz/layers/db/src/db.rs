@@ -3669,9 +3669,21 @@ impl Inner {
             json.check_text(text, &column.name).map_err(rejected)?;
         }
         if let Some(possession) = &self.possession {
-            crate::large::settle_receipts(&self.conn, &large.root.object_hash, &possession.author)?;
+            possession.settle.borrow_mut().push(large.root.object_hash);
         }
         self.large_cell(large)
+    }
+
+    /// Settle the receipts of the trees the applied commit's cells proved
+    /// (SPEC 19.4): only after all its cells, which may share nodes.
+    pub(crate) fn settle_possession(&self) -> Result<(), Error> {
+        let Some(possession) = &self.possession else {
+            return Ok(());
+        };
+        for root in possession.settle.take() {
+            crate::large::settle_receipts(&self.conn, &root, &possession.author)?;
+        }
+        Ok(())
     }
 
     /// The cell of a chunked value this store holds the chunks for. A value

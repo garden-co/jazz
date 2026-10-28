@@ -203,6 +203,41 @@ fn insert(db: &Db, table: &str, n: u8, cells: Vec<(&str, Value)>) {
     .unwrap();
 }
 
+/// One commit holding the same large value in two rows proves the pushed
+/// tree for both: the receipts settle only once the whole commit applies.
+#[test]
+fn one_commit_may_hold_the_same_large_value_twice() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let alice = open(1, user(1));
+    connect(&server, &alice, user(1));
+    let body = text(41, LARGE);
+    block_on(alice.transaction(async |tx| {
+        for n in [1, 2] {
+            tx.insert(
+                "docs",
+                BTreeMap::from([
+                    ("body".to_owned(), Value::String(body.clone())),
+                    ("blob".to_owned(), Value::Bytes(Vec::new())),
+                ]),
+                InsertOptions {
+                    row_id: Some(row(n)),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        }
+        Ok(())
+    }))
+    .unwrap();
+    pump(&server, &[&alice]);
+    for n in [1, 2] {
+        assert_eq!(
+            local_cell(&server, "docs", n, "body").unwrap(),
+            Some(Value::String(body.clone()))
+        );
+    }
+}
+
 #[test]
 fn a_replica_pulls_the_chunks_its_results_need() {
     let server = open(0, AuthorSubject::SYSTEM);

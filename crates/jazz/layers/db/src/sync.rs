@@ -7125,6 +7125,7 @@ impl Db {
                                 author: receipt_author(&identity),
                                 checked: policy.is_some(),
                                 roots,
+                                settle: Default::default(),
                             };
                             let vouched = vouched(policy, who, session);
                             self.with_claims(vouched, || {
@@ -7613,7 +7614,8 @@ impl Db {
             let applied = ops
                 .iter()
                 .try_for_each(|op| inner.apply_as(op, who, seq).map(drop))
-                .and_then(|()| inner.finish_checks(seq));
+                .and_then(|()| inner.finish_checks(seq))
+                .and_then(|()| inner.settle_possession());
             inner.possession = None;
             inner.merging = false;
             built = std::mem::take(&mut inner.merge_bases);
