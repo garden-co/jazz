@@ -58,7 +58,7 @@ describe("wire frame artifact corpus", () => {
     async () => {
       const corpus = syncWireCorpus();
       expect(corpus.format).toBe("jazz-sqlite-sync-wire-corpus-v1");
-      expect(corpus.messages.map((message) => message.variant)).toHaveLength(20);
+      expect(corpus.messages.map((message) => message.variant)).toHaveLength(22);
       expect(corpus.fates.map((fate) => fate.reason)).toEqual(["client_clock_too_far_ahead", null]);
       const accepted = [
         ...corpus.messages.map((message) => ({

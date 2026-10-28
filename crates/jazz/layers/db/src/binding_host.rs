@@ -326,7 +326,7 @@ fn restore_options_as<O: HostObject>(
     })
 }
 
-/// `{ read_view? | readView?, tier?, include_deleted?, first_load_remote_wait_ms? }`.
+/// `{ read_view? | readView?, tier?, include_deleted?, first_load_remote_wait_ms?, splices? }`.
 pub fn read_opts<O: HostObject>(options: &O) -> HostResult<ReadOpts> {
     let mut opts = ReadOpts::default();
     for name in ["read_view", "readView"] {
@@ -357,6 +357,10 @@ pub fn read_opts<O: HostObject>(options: &O) -> HostResult<ReadOpts> {
         if opts.tier == ReadTier::LocalFirst {
             opts.first_load = FirstLoad::WaitForRemote { timeout_ms };
         }
+    }
+    if let Some(splices) = options.get("splices")? {
+        opts.splices = O::decode::<Vec<String>>(splices)
+            .map_err(|_| HostError::Argument("splices must be an array of column names".into()))?;
     }
     Ok(opts)
 }
@@ -617,7 +621,9 @@ impl<F: Future> Future for Parked<F> {
 pub type HostFuture<T> = Pin<Box<dyn Future<Output = HostResult<T>>>>;
 
 /// See [`Hooks::rejected`].
-pub type RejectedHook = Box<dyn Fn(&TransactionId, &Error, bool, Option<Rc<Cell<bool>>>)>;
+/// Told of a refused upload no wait claimed; returns whether the refusal
+/// reached the application (a listener was there to take it).
+pub type RejectedHook = Box<dyn Fn(&TransactionId, &Error, bool, Option<Rc<Cell<bool>>>) -> bool>;
 
 /// Hooks a host gives the database it binds.
 #[derive(Default)]
@@ -669,7 +675,10 @@ impl Hooks {
 
     /// Tell [`Hooks::rejected`] of each refused upload no wait claimed.
     /// A relayed session's refused commit is reported under its own id.
-    fn report(&self, node: NodeUuid, rejections: Vec<crate::db::UpstreamRejection>) {
+    /// Returns the seqs of `node`'s own refusals that reached the
+    /// application, through a wait or the hook.
+    fn report(&self, node: NodeUuid, rejections: Vec<crate::db::UpstreamRejection>) -> Vec<u64> {
+        let mut delivered = Vec::new();
         for rejection in rejections {
             let (seq, error) = (rejection.seq, &rejection.error);
             let writer = NodeUuid::from_bytes(rejection.writer);
@@ -677,14 +686,19 @@ impl Hooks {
                 .then(|| self.claims.borrow_mut().remove(&seq))
                 .flatten()
                 .and_then(|claim| claim.upgrade());
-            if claim.as_ref().is_some_and(|claim| claim.get()) {
-                continue;
-            }
-            if let Some(rejected) = self.rejected.borrow().as_ref() {
+            let reached = if claim.as_ref().is_some_and(|claim| claim.get()) {
+                true
+            } else if let Some(rejected) = self.rejected.borrow().as_ref() {
                 let tx_id = TransactionId::from_committed_tx(TxId::new(TxTime(seq), writer));
-                rejected(&tx_id, error, rejection.serializable, claim);
+                rejected(&tx_id, error, rejection.serializable, claim)
+            } else {
+                false
+            };
+            if reached && writer == node {
+                delivered.push(seq);
             }
         }
+        delivered
     }
 }
 
@@ -721,6 +735,7 @@ struct WriteResultPayload {
 /// A committed write as a binding returns it.
 #[derive(Clone, Debug)]
 pub struct Write {
+    node: NodeUuid,
     /// postcard `{ row_id, tx_id }`.
     pub payload: Vec<u8>,
     /// The written row (zero for a transaction commit).
@@ -757,6 +772,8 @@ pub struct Binding {
     /// Local-first accounts a backend admitted (see
     /// [`Binding::admit_local_first_session`]), by canonical author.
     admitted: Rc<RefCell<BTreeMap<String, SelfSignedProof>>>,
+    /// Whether the next tick reports the retry store's refusals again.
+    requeue: Rc<Cell<bool>>,
 }
 
 /// A Jazz self-signed proof of a local-first account.
@@ -784,6 +801,7 @@ impl Binding {
             refused: Rc::default(),
             bound: Rc::default(),
             admitted: Rc::default(),
+            requeue: Rc::new(Cell::new(true)),
         }
     }
 
@@ -910,6 +928,7 @@ impl Binding {
     fn receipt(&self, row_id: RowUuid, seq: u64) -> HostResult<Write> {
         let tx_id = TxId::new(TxTime(seq), self.node);
         Ok(Write {
+            node: self.node,
             payload: postcard::to_allocvec(&WriteResultPayload { row_id, tx_id })
                 .map_err(|error| HostError::Argument(error.to_string()))?,
             row_id,
@@ -1455,6 +1474,9 @@ impl Binding {
     /// Resolve once `write` reached `tier`; fail at once with its
     /// rejection, if it was rejected.
     pub fn wait_for_write(&self, write: &Write, tier: &str) -> HostResult<HostFuture<()>> {
+        if self.node != write.node {
+            return Err("write belongs to a different database node".into());
+        }
         if let Some(error) = &write.rejected {
             binding_args::durability_tier(tier)?;
             let error = error.clone();
@@ -1473,13 +1495,60 @@ impl Binding {
         }))
     }
 
+    /// How many local commits still wait for the server's verdict.
+    pub fn pending_upload_count(&self) -> usize {
+        self.db.pending_upload_count()
+    }
+
     /// Apply received frames and send what is due; waits wake.
     pub async fn tick(&self) -> HostResult<()> {
         let result = self.db.tick().await;
-        self.hooks
-            .report(self.node, self.db.take_upstream_rejections());
+        // Refusals kept from before (a reopened store's, or ones no
+        // listener took) go out again first.
+        let requeued = if self.requeue.replace(false) {
+            self.db.requeue_rejected_transactions()
+        } else {
+            Ok(())
+        };
+        let rejections = self.db.take_upstream_rejections();
+        let delivered = self.hooks.report(self.node, rejections);
+        // Delivered: the retry store lets go of their payloads. One no
+        // listener took stays, for the next listener or the next open.
+        let discarded = delivered
+            .into_iter()
+            .try_for_each(|seq| self.db.discard_rejected_transaction(seq));
         self.hooks.progress.wake_all();
-        Ok(result?)
+        result?;
+        requeued?;
+        Ok(discarded?)
+    }
+
+    /// Report the refusals the retry store still holds again on the next
+    /// tick: the host now has a listener for them.
+    pub fn redeliver_rejections(&self) {
+        self.requeue.set(true);
+        self.hooks.schedule_tick();
+    }
+
+    /// The slow-query report due now: one line per slow query shape,
+    /// naming `app`: the first at once, then at most every 10 seconds. The host
+    /// writes the lines where it reports problems (`console.warn`).
+    pub fn take_slow_query_report(&self, app: Option<&str>) -> Vec<String> {
+        self.db.take_slow_query_report(app)
+    }
+
+    /// Report query runs of at least `ms` milliseconds; 0 turns the log
+    /// off.
+    pub fn set_slow_query_threshold_ms(&self, ms: f64) -> HostResult<()> {
+        if !ms.is_finite() || ms < 0.0 {
+            return Err(HostError::Argument(format!(
+                "slow query threshold must be a non-negative number of milliseconds, not {ms}"
+            )));
+        }
+        self.db.set_slow_query_threshold(
+            (ms > 0.0).then(|| std::time::Duration::from_secs_f64(ms / 1000.0)),
+        );
+        Ok(())
     }
 
     /// Make this store the optimistic, non-durable foreground of a durable

@@ -459,6 +459,13 @@ pub fn foreground_response_corpus() -> Result<String> {
             configured: true,
             explicitly_offline: false,
             connected: true,
+            auth_rejected: None,
+        },
+        ForegroundDbCommandResponse::NativeConnectionStatus {
+            configured: true,
+            explicitly_offline: false,
+            connected: false,
+            auth_rejected: Some("bearer expired: λ".into()),
         },
         ForegroundDbCommandResponse::NativeSessionMetadata {
             node: [9; 16],

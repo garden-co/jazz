@@ -52,3 +52,9 @@ write IndexedDB or change the durable format.
 and deletes persisted blocks between real WASM opens. Reopening must read a valid
 replacement and reject corruption without altering its bytes. A required file
 that disappeared must stay absent. Explicit creation remains available.
+The downstream carrier checks `is_flushed` before creating an asynchronous
+barrier. A clean file with no queued or in-flight VFS operations publishes
+immediately. A pending operation conservatively requires the FIFO barrier;
+sticky errors are checked even on the clean path. This avoids one queue turn
+per read-only batch without classifying sync message tags as writes. It makes
+no end-to-end throughput claim.

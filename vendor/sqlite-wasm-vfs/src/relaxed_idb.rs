@@ -330,6 +330,7 @@ struct RelaxedIdb {
     // failure until an explicit, successful deletion resets the file.
     failed_files: RefCell<HashMap<String, String>>,
     tx: UnboundedSender<IdbCommit>,
+    pending_commits: std::cell::Cell<usize>,
 }
 
 impl RelaxedIdb {
@@ -353,12 +354,15 @@ impl RelaxedIdb {
             idb: indexed_db,
             name2file: RefCell::new(name2file),
             failed_files: RefCell::new(HashMap::new()),
+            pending_commits: std::cell::Cell::new(0),
             tx,
         })
     }
 
     fn send_task(&self, op: IdbCommitOp) -> Result<()> {
+        self.pending_commits.set(self.pending_commits.get() + 1);
         if self.tx.send(IdbCommit { op, notify: None }).is_err() {
+            self.pending_commits.set(self.pending_commits.get() - 1);
             return Err(RelaxedIdbError::Generic(
                 "failed to send commit task".into(),
             ));
@@ -372,7 +376,9 @@ impl RelaxedIdb {
             op,
             notify: Some(tx),
         };
+        self.pending_commits.set(self.pending_commits.get() + 1);
         if self.tx.send(commit).is_err() {
+            self.pending_commits.set(self.pending_commits.get() - 1);
             return Err(RelaxedIdbError::Generic(
                 "failed to send commit task".into(),
             ));
@@ -606,6 +612,7 @@ impl RelaxedIdb {
                     ret
                 }
             };
+            self.pending_commits.set(self.pending_commits.get() - 1);
             if let Some(notify) = notify {
                 // An unsuccessful send would be one where the corresponding receiver
                 // has already been deallocated.
@@ -904,6 +911,21 @@ pub struct RelaxedIdbUtil {
 }
 
 impl RelaxedIdbUtil {
+    /// Whether this file is already durable without enqueueing a barrier.
+    /// Pending operations anywhere in this VFS conservatively require waiting;
+    /// in-flight writes count until their transaction has completed.
+    pub fn is_flushed(&self, filename: &str) -> Result<bool> {
+        self.pool.check_file(filename)?;
+        if self.pool.pending_commits.get() != 0 {
+            return Ok(false);
+        }
+        let files = self.pool.name2file.borrow();
+        Ok(match files.get(filename) {
+            Some(IdbFile::Main(file)) => file.tx_blocks.is_empty() && !file.sync_notified,
+            _ => true,
+        })
+    }
+
     /// Wait for queued commits and report any earlier persistence failure of
     /// this file. Failure is sticky until the file is explicitly deleted.
     pub fn flush_db(&self, filename: &str) -> Result<WaitCommit> {

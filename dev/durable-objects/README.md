@@ -81,8 +81,9 @@ too).
   `sqlite3_complete` boundaries so trigger bodies stay whole.
 - **AND/OR chains nest in halves past 32 terms**, so depth grows with
   log n. SQLite splits nested AND/OR terms the same as a flat chain.
-- **Engine integers stay below 2^53**: `LOCAL_BASE` is 2^52, scratch slots
-  are 52 bits.
+- **Engine integers stay below 2^53**: `LOCAL_BASE` is 2^52,
+  `NON_DURABLE_BASE` (a worker's tabs) is 1.5 · 2^52, scratch slots are 52
+  bits.
 - **The fresh-store check ignores `_cf_*` tables** and escapes `_` in its
   LIKE pattern.
 

@@ -111,6 +111,14 @@ pub(crate) enum Store {
 }
 
 impl Store {
+    /// Avoid an asynchronous barrier when no writes remain pending.
+    pub(crate) fn is_flushed(&self) -> Result<bool, JsValue> {
+        match self {
+            Store::IndexedDb { util, path } => util.is_flushed(path).map_err(vfs_error),
+            Store::Opfs => Ok(true),
+        }
+    }
+
     /// Resolves once every commit so far is in the backing storage.
     pub(crate) async fn flush(&self) -> Result<(), JsValue> {
         match self {

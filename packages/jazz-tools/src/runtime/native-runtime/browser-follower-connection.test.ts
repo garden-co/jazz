@@ -642,10 +642,22 @@ describe("MessagePortBrowserFollowerConnection", () => {
           stack: cause.stack,
         }),
       }),
+      false,
     );
     expect(runtime.reportRemoteMutationError).not.toHaveBeenCalled();
     expect(onFailure).not.toHaveBeenCalled();
     expect(port.close).not.toHaveBeenCalled();
+
+    // An outage the worker keeps retrying reaches the tab as one (#3923).
+    port.emit({
+      type: "transport-error",
+      error: serializeBrowserRelayError(new Error("websocket closed")),
+      retrying: true,
+    });
+    expect(runtime.reportRemoteServerTransportError).toHaveBeenLastCalledWith(
+      expect.objectContaining({ message: "websocket closed" }),
+      true,
+    );
 
     connection.detachForReconnect();
   });
