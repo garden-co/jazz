@@ -43,6 +43,7 @@ pub(crate) mod large;
 pub(crate) mod merge;
 pub mod names;
 pub mod options;
+pub mod slow;
 #[cfg(feature = "sql-trace")]
 mod sql_trace;
 pub(crate) mod text_merge;

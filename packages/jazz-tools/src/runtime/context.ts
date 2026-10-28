@@ -148,4 +148,12 @@ export interface AppContext {
    * On `/ws`, a valid admin secret authenticates this client as the backend.
    */
   adminSecret?: string;
+
+  /**
+   * Slow-query log: queries whose runs take at least this many milliseconds
+   * are reported with `console.warn`, one line per query shape with its plan
+   * and the index that would likely make it fast (default 50; 0 turns the
+   * log off).
+   */
+  slowQueryThresholdMs?: number;
 }
