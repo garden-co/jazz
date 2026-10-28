@@ -2066,6 +2066,19 @@ impl Db {
             if make_current {
                 inner.owner_version = target.jazz.version_id();
                 inner.owner = Rc::new(target);
+                // Read policies that changed may read differently from
+                // here: a subscription resuming from before opens fresh.
+                let mut digest = blake3::Hasher::new();
+                for table in &inner.owner.jazz.runtime().tables {
+                    digest.update(format!("{}{:?}", table.name, table.read_policy).as_bytes());
+                }
+                let digest =
+                    u64::from_le_bytes(digest.finalize().as_bytes()[..8].try_into().unwrap());
+                if inner.meta(sync::POLICIES_META)? != Some(digest) {
+                    let seq = inner.seq;
+                    inner.persist_meta(sync::POLICIES_META, digest)?;
+                    inner.persist_meta(sync::ACTIVATED_META, seq)?;
+                }
             }
             if !inner
                 .admitted
@@ -3123,76 +3136,6 @@ impl Inner {
         self.holds_as_of(table, row, key, Cut::at(seq), |ctx| {
             ctx.operation_policy(table, operation, "a", &session)
         })
-    }
-
-    /// The current version of each of `ids`' rows in `table`: (id, branch
-    /// key, seq, deleted, readable by `author`), in one query per chunk
-    /// instead of one policy check per row.
-    pub(crate) fn versions_readable(
-        &self,
-        table: &Table,
-        author: Option<AuthorSubject>,
-        ids: &[[u8; 16]],
-    ) -> Result<Vec<([u8; 16], Vec<u8>, u64, bool, bool)>, Error> {
-        let binding = BTreeMap::new();
-        let claims = Session::default();
-        let mut ctx = Ctx::new(&self.schema, None, &claims, &binding);
-        let condition = match author {
-            Some(author) => {
-                let session = self.session(author);
-                ctx.operation_policy(table, Operation::Select, "a", &session)?
-            }
-            None => "1".to_owned(),
-        };
-        let preps = std::mem::take(&mut ctx.preps);
-        let base = ctx.params;
-        self.with_preps(&preps, |_| self.versions_in(table, &condition, &base, ids))
-    }
-
-    fn versions_in(
-        &self,
-        table: &Table,
-        condition: &str,
-        base: &[Sql],
-        ids: &[[u8; 16]],
-    ) -> Result<Vec<([u8; 16], Vec<u8>, u64, bool, bool)>, Error> {
-        let mut out = Vec::new();
-        for chunk in ids.chunks(500) {
-            let mut params = base.to_vec();
-            params.push(crate::compile::json_ids(
-                chunk.iter().map(|id| id.as_slice()),
-            ));
-            let sql = format!(
-                "SELECT a.id, a._b, a._seq, a._del, COALESCE({condition}, 0) FROM {} AS a \
-                 WHERE a.id IN (SELECT unhex(value) FROM json_each(?{}))",
-                quote(&table.stored),
-                params.len()
-            );
-            let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
-            let rows = statement
-                .query_map(params_from_iter(params.iter()), |r| {
-                    let id: Vec<u8> = r.get(0)?;
-                    let seq: i64 = r.get(2)?;
-                    let deleted: i64 = r.get(3)?;
-                    let can: i64 = r.get(4)?;
-                    Ok((
-                        id,
-                        r.get::<_, Vec<u8>>(1)?,
-                        seq as u64,
-                        deleted != 0,
-                        can != 0,
-                    ))
-                })
-                .map_err(storage)?;
-            for row in rows {
-                let (id, key, seq, deleted, can) = row.map_err(storage)?;
-                let Ok(id) = <[u8; 16]>::try_from(id.as_slice()) else {
-                    continue;
-                };
-                out.push((id, key, seq, deleted, can));
-            }
-        }
-        Ok(out)
     }
 
     fn check(
