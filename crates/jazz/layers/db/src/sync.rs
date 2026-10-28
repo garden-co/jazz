@@ -146,6 +146,9 @@ pub use crate::wire::WireTransport;
 pub struct WireTransportAdapter<W> {
     wire: W,
     joiner: FrameJoiner,
+    /// A partially sent logical message resumes at its first unsent frame.
+    /// The caller retries that same message after Backpressure.
+    pending: Option<([u8; 32], VecDeque<Vec<u8>>)>,
     /// A frame failed to decode: nothing more is read, and
     /// [`Transport::take_failure`] reports it once.
     failed: Option<Option<TransportError>>,
@@ -300,6 +303,7 @@ impl<W> WireTransportAdapter<W> {
         Self {
             wire,
             joiner: FrameJoiner::default(),
+            pending: None,
             failed: None,
         }
     }
@@ -307,9 +311,51 @@ impl<W> WireTransportAdapter<W> {
 
 impl<W: WireTransport> Transport for WireTransportAdapter<W> {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
-        for frame in encode_frames(message).map_err(|e| TransportError::Failed(e.to_string()))? {
-            self.wire.send_frame(frame)?;
+        if self.failed.is_some() {
+            return Err(TransportError::Failed(
+                "SQLite wire transport is closed".into(),
+            ));
         }
+        let frames = encode_frames(message).map_err(|e| TransportError::Failed(e.to_string()))?;
+        let mut hash = blake3::Hasher::new();
+        for frame in &frames {
+            hash.update(&(frame.len() as u64).to_le_bytes());
+            hash.update(frame);
+        }
+        let fingerprint = *hash.finalize().as_bytes();
+        // A prior pending publication has already sent a prefix. A new
+        // publication only owns the retry slot after its first frame lands.
+        let mut progressed = self.pending.is_some();
+        if let Some((pending, _)) = &self.pending {
+            if *pending != fingerprint {
+                // Interleaving a new message would invalidate the receiver's
+                // atomic RowsPart publication. Preserve the original retry.
+                return Err(TransportError::Backpressure);
+            }
+        } else {
+            self.pending = Some((fingerprint, frames.into()));
+        }
+        let (_, pending) = self.pending.as_mut().expect("pending frames");
+        while let Some(frame) = pending.front() {
+            match self.wire.send_frame(frame.clone()) {
+                Ok(()) => {
+                    pending.pop_front();
+                    progressed = true;
+                }
+                Err(TransportError::Backpressure) => {
+                    if !progressed {
+                        self.pending = None;
+                    }
+                    return Err(TransportError::Backpressure);
+                }
+                Err(error) => {
+                    self.failed = Some(Some(error.clone()));
+                    self.pending = None;
+                    return Err(error);
+                }
+            }
+        }
+        self.pending = None;
         Ok(())
     }
 
