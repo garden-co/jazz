@@ -6098,9 +6098,9 @@ enum BatchKind {
     Mergeable,
     /// Serializable: reads see the store as of `snapshot` plus the batch's
     /// own writes; each read's snapshot result is kept for validation.
-    /// On a client the snapshot is pinned by the first read that reaches
-    /// the authority (the authority's state then), or stays the replica's
-    /// known cut when the first read answers offline.
+    /// On a client the first successful read pins the snapshot: the
+    /// authority's state for an answered remote read, or the replica's
+    /// known cut for a LocalOnly read or a LocalFirst offline fallback.
     Serializable {
         snapshot: u64,
         reads: Vec<ReadRecord>,

@@ -334,7 +334,8 @@ To wait until everything written so far has reached the server, for example befo
 sign out, use `db.waitForSync()`. Like a `global` write wait, it lasts through outages and
 reconnects, and fails only if the server rejects one of those writes or the client stops trying.
 Pass `timeoutMs` to bound it; it then rejects with a `WriteWaitTimeoutError` and the writes stay
-queued:
+queued. In the browser it waits only for the current tab's own writes, as described above, so a
+write recovered after a reload or made in another tab may still be waiting when it resolves:
 
 ```ts
 await db.waitForSync({ timeoutMs: 10_000 });
