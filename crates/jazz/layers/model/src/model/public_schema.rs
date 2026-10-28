@@ -36,17 +36,8 @@ pub fn validate_json_value(
             let Some(schema) = schema else {
                 return Ok(());
             };
-            json_schema::validate(schema, &instance).map_err(|error| match error {
-                JsonSchemaError::Mismatch(error) => {
-                    format!("JSON schema validation failed for column `{path}`: {error}")
-                }
-                JsonSchemaError::InvalidSchema(error) => format!(
-                    "JSON schema validation failed for column `{path}`: invalid declared schema: {error}"
-                ),
-                JsonSchemaError::Unavailable(error) => {
-                    format!("JSON schema validation unavailable for column `{path}`: {error}")
-                }
-            })
+            json_schema::validate(schema, &instance)
+                .map_err(|error| json_schema_failure(error, path))
         }
         (Value::Array(values), ColumnType::Array { element }) => {
             values.iter().enumerate().try_for_each(|(index, value)| {
@@ -73,6 +64,22 @@ pub fn validate_json_value(
                 })
         }
         _ => Ok(()),
+    }
+}
+
+/// Why a JSON value of column `path` failed its declared schema, worded as
+/// [`validate_json_value`] words it.
+pub fn json_schema_failure(error: JsonSchemaError, path: &str) -> String {
+    match error {
+        JsonSchemaError::Mismatch(error) => {
+            format!("JSON schema validation failed for column `{path}`: {error}")
+        }
+        JsonSchemaError::InvalidSchema(error) => format!(
+            "JSON schema validation failed for column `{path}`: invalid declared schema: {error}"
+        ),
+        JsonSchemaError::Unavailable(error) => {
+            format!("JSON schema validation unavailable for column `{path}`: {error}")
+        }
     }
 }
 

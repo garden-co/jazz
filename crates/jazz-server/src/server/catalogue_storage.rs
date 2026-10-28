@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
-use crate::kv::SqliteKv;
+use crate::kv::HostKv;
 use crate::server::catalogue_entry::CatalogueEntry;
 use jazz::tools::ObjectId;
 
@@ -91,9 +90,9 @@ impl CatalogueStorage for CatalogueMemoryStorage {
     }
 }
 
-/// The durable catalogue: one SQLite key-value file.
+/// The durable catalogue: a host table in the app's store file.
 pub(crate) struct CatalogueKvStorage {
-    kv: SqliteKv,
+    kv: HostKv,
 }
 
 impl CatalogueKvStorage {
@@ -104,10 +103,8 @@ impl CatalogueKvStorage {
     const SCAN_PREFIX: &'static [u8] = b"cat:";
     const ENTRY_PREFIX: &'static [u8] = b"cat:v1:";
 
-    pub(crate) fn open(path: PathBuf) -> CatalogueStorageResult<Self> {
-        Ok(Self {
-            kv: SqliteKv::open(&path).map_err(CatalogueStorageError::IoError)?,
-        })
+    pub(crate) fn new(kv: HostKv) -> Self {
+        Self { kv }
     }
 
     pub(crate) fn entry_key(object_id: ObjectId) -> Vec<u8> {
@@ -234,13 +231,21 @@ mod tests {
     #[test]
     fn persistent_catalogue_batch_rejects_invalid_entries_and_reopens_complete() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("catalogue.sqlite");
-        let mut storage = CatalogueKvStorage::open(path.clone()).unwrap();
+        let storage_config = crate::runtime::StorageConfig::data_dir(directory.path());
+        let open = || {
+            let store = crate::runtime::AppStore::open(&storage_config).unwrap();
+            (
+                CatalogueKvStorage::new(store.kv(crate::kv::CATALOGUE).unwrap()),
+                store,
+            )
+        };
+        let (mut storage, store) = open();
         let expected = check_batch_rejection_is_atomic(&mut storage);
         storage.flush().unwrap();
         storage.close().unwrap();
         drop(storage);
-        let reopened = CatalogueKvStorage::open(path).unwrap();
+        store.close().unwrap();
+        let (reopened, _store) = open();
         assert_eq!(reopened.scan_catalogue_entries().unwrap(), expected);
         reopened.close().unwrap();
     }
@@ -274,8 +279,11 @@ mod tests {
             metadata: std::collections::HashMap::from([("type".to_owned(), "table".to_owned())]),
             content: b"catalogue-row".to_vec(),
         };
-        let mut catalogue =
-            CatalogueKvStorage::open(directory.path().join("catalogue.sqlite")).unwrap();
+        let store = crate::runtime::AppStore::open(&crate::runtime::StorageConfig::data_dir(
+            directory.path(),
+        ))
+        .unwrap();
+        let mut catalogue = CatalogueKvStorage::new(store.kv(crate::kv::CATALOGUE).unwrap());
         catalogue.upsert_catalogue_entry(&valid).unwrap();
         catalogue.put_raw(
             CatalogueKvStorage::entry_key(malformed_id),

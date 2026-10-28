@@ -821,16 +821,158 @@ fn a_serializable_transaction_keeps_its_pinned_snapshot() {
     assert_eq!(read(), before, "the pinned snapshot does not advance");
 }
 
+#[test]
+fn pending_upload_count_has_pinned_bytes_and_answers() {
+    // Appended command and answer: existing ordinals stay fixed.
+    assert_eq!(
+        postcard::to_allocvec(&ForegroundDbCommandRequest::PendingUploadCount).unwrap(),
+        vec![38]
+    );
+    assert_eq!(
+        postcard::to_allocvec(&ForegroundDbCommandResponse::PendingUploadCount { count: 300 })
+            .unwrap(),
+        vec![29, 172, 2]
+    );
+
+    let directory = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new();
+    let capability = fixture.admit(&directory.path().join("alice.sqlite"), "alice", 0x11);
+    let foreground = fixture.open(&capability);
+    // Without a server nothing is ever uploaded.
+    fixture.insert_todo(foreground, [0xa1; 16], "local only");
+    fixture.tick(foreground);
+    assert_eq!(
+        fixture.execute(foreground, ForegroundDbCommandRequest::PendingUploadCount),
+        ForegroundDbCommandResponse::PendingUploadCount { count: 0 }
+    );
+    fixture.close(foreground);
+}
+
+/// Writes made while the app is offline count as pending until Core
+/// accepts them after the reconnect.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-/// The V2 lease tick exposes a safe category while keeping upstream details private.
+async fn pending_upload_count_follows_writes_to_core() {
+    let issuer = TestJwtIssuer::start().await;
+    let core = JazzServer::builder()
+        .with_schema(schema().public_schema().clone())
+        .with_jwks_url(issuer.endpoint())
+        .start()
+        .await
+        .expect("start test server");
+    let bearer = TestJwtIssuer::jwt_for_user("native-pending-alice");
+    let storage = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new();
+    let admitted = fixture
+        .begin_account_session(
+            &core.base_url(),
+            &core.app_id().to_string(),
+            &bearer,
+            storage.path(),
+        )
+        .await;
+    let foreground = fixture.open(&admitted);
+    let count = || match fixture.execute(foreground, ForegroundDbCommandRequest::PendingUploadCount)
+    {
+        ForegroundDbCommandResponse::PendingUploadCount { count } => count,
+        response => panic!("pending upload count: {response:?}"),
+    };
+    assert_eq!(count(), 0);
+
+    fixture.execute(
+        foreground,
+        ForegroundDbCommandRequest::DisconnectNativeUpstream,
+    );
+    fixture.insert_todo(foreground, [0xb1; 16], "offline one");
+    fixture.insert_todo(foreground, [0xb2; 16], "offline two");
+    fixture.tick(foreground);
+    assert_eq!(count(), 2, "both commits wait for the server");
+
+    fixture.execute(
+        foreground,
+        ForegroundDbCommandRequest::ReconnectNativeUpstream,
+    );
+    jazz_testkit::wait_for(Duration::from_secs(15), "Core accepts both", || {
+        fixture.tick(foreground);
+        let uploaded = count() == 0;
+        async move { uploaded.then_some(()) }
+    })
+    .await;
+
+    fixture.close(foreground);
+    fixture.revoke(&admitted);
+    core.shutdown().await;
+}
+
+#[test]
+fn slow_query_commands_have_pinned_bytes_and_answer() {
+    // Appended commands and answers: existing ordinals stay fixed.
+    assert_eq!(
+        postcard::to_allocvec(&ForegroundDbCommandRequest::TakeSlowQueryReport { app: None })
+            .unwrap(),
+        vec![36, 0]
+    );
+    assert_eq!(
+        postcard::to_allocvec(&ForegroundDbCommandRequest::TakeSlowQueryReport {
+            app: Some("a".to_owned())
+        })
+        .unwrap(),
+        vec![36, 1, 1, b'a']
+    );
+    assert_eq!(
+        postcard::to_allocvec(&ForegroundDbCommandRequest::SetSlowQueryThresholdMs { ms: 200 })
+            .unwrap(),
+        vec![37, 200, 1]
+    );
+    assert_eq!(
+        postcard::to_allocvec(&ForegroundDbCommandResponse::SlowQueryReport {
+            lines_json: "[]".to_owned()
+        })
+        .unwrap(),
+        vec![27, 2, b'[', b']']
+    );
+    assert_eq!(
+        postcard::to_allocvec(&ForegroundDbCommandResponse::SlowQueryThresholdSet).unwrap(),
+        vec![28]
+    );
+
+    let directory = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new();
+    let capability = fixture.admit(&directory.path().join("alice.sqlite"), "alice", 0x11);
+    let foreground = fixture.open(&capability);
+    assert_eq!(
+        fixture.execute(
+            foreground,
+            ForegroundDbCommandRequest::SetSlowQueryThresholdMs { ms: 3_600_000 }
+        ),
+        ForegroundDbCommandResponse::SlowQueryThresholdSet
+    );
+    fixture.insert_todo(foreground, [0xa1; 16], "quick");
+    fixture.tick(foreground);
+    assert_eq!(
+        fixture.execute(
+            foreground,
+            ForegroundDbCommandRequest::TakeSlowQueryReport {
+                app: Some("my-app".to_owned())
+            }
+        ),
+        ForegroundDbCommandResponse::SlowQueryReport {
+            lines_json: "[]".to_owned()
+        },
+        "nothing ran for an hour"
+    );
+    fixture.close(foreground);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+/// Alice keeps using the V2 local tick after an upstream terminal failure.
 ///
 /// ```text
-/// alice's relay owner ──terminal error──► foreground tick ──safe category──► JSI
+/// alice's upstream ──terminal error──► connection state; local tick ──OK──► JSI
 /// ```
 ///
 /// The terminal cause is injected into the private worker state because this
 /// C ABI intentionally offers no way to set or read raw transport errors.
-async fn lease_tick_v2_reports_safe_diagnostic_for_terminal_failure() {
+async fn lease_tick_v2_keeps_upstream_failure_in_connection_state() {
     let issuer = TestJwtIssuer::start().await;
     let edge = JazzServer::builder()
         .with_schema(schema().public_schema().clone())
@@ -864,32 +1006,29 @@ async fn lease_tick_v2_reports_safe_diagnostic_for_terminal_failure() {
     );
     assert_eq!(diagnostic, 0, "successful ticks have no diagnostic");
 
-    let (connected, terminal_error) = unsafe {
+    let link = unsafe {
         let host = &*fixture.host;
         let host = host.inner.lock().unwrap();
         let scope = host.foregrounds.get(&foreground).unwrap().scope.clone();
         let worker = host.private_scope_workers.get(&scope).unwrap();
-        (
-            Arc::clone(&worker.connected),
-            Arc::clone(&worker.terminal_error),
-        )
+        Arc::clone(&worker.link)
     };
     jazz_testkit::wait_for(
         Duration::from_secs(5),
         "native tick test worker connected",
         || {
-            let connected = Arc::clone(&connected);
-            async move {
-                connected
-                    .load(std::sync::atomic::Ordering::Acquire)
-                    .then_some(())
-            }
+            let link = Arc::clone(&link);
+            async move { (link.lock().unwrap().phase() == Some(&LinkPhase::Live)).then_some(()) }
         },
     )
     .await;
 
     let sentinel = "UPSTREAM_SECRET_SENTINEL_do_not_expose";
-    *terminal_error.lock().unwrap() = Some(sentinel.to_owned());
+    link.lock().unwrap().failure = Some(NativeUpstreamFailure {
+        sequence: next_upstream_event(),
+        reason: sentinel.to_owned(),
+        retrying: false,
+    });
 
     diagnostic = u32::MAX;
     assert_eq!(
@@ -900,14 +1039,18 @@ async fn lease_tick_v2_reports_safe_diagnostic_for_terminal_failure() {
                 &mut diagnostic,
             )
         },
-        JazzNativeRelayStatus::LifecycleFailure,
+        JazzNativeRelayStatus::Ok,
     );
     assert_eq!(
-        diagnostic, 1,
-        "a retained terminal error gets the fixed upstream-terminal code"
+        diagnostic, 0,
+        "an upstream failure must not fail the local tick"
     );
     assert_eq!(
-        terminal_error.lock().unwrap().as_deref(),
+        link.lock()
+            .unwrap()
+            .failure
+            .as_ref()
+            .map(|failure| failure.reason.as_str()),
         Some(sentinel),
         "diagnostic reporting does not consume the retained terminal cause"
     );

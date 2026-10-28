@@ -65,8 +65,7 @@ pub(crate) async fn publish_permissions_and_runtime(
     state.run_runtime_catalogue_before_publication_hook_for_test();
     let _publication = state.runtime_catalogue_publication.lock().await;
 
-    let runtime_enabled =
-        state.runtime().is_some() || state.core_server_shell_storage_config.is_some();
+    let runtime_enabled = state.runtime().is_some() || state.store.is_some();
     let mut shell = state.runtime();
     if runtime_enabled {
         ensure_structural_lineage_locked(state, schema_hash, &HashMap::new(), &[], &mut shell)
@@ -155,7 +154,7 @@ pub(crate) async fn publish_runtime_catalogue_locked(
     schemas: &[Schema],
     lenses: &[Lens],
 ) -> Result<(), String> {
-    if state.runtime().is_none() && state.core_server_shell_storage_config.is_none() {
+    if state.runtime().is_none() && state.store.is_none() {
         return Ok(());
     }
 

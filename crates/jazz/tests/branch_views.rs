@@ -3566,3 +3566,65 @@ fn a_remote_branch_read_keeps_the_rows_of_other_branches() {
         "the draft row stays cached"
     );
 }
+
+/// A branch move carries the row's stored cells: they are not re-checked
+/// against a JSON Schema tightened since they were written. Values a write
+/// authors still are.
+#[test]
+fn a_branch_move_carries_json_stored_under_an_earlier_schema() {
+    let schema = |json: Option<serde_json::Value>| {
+        compile_schema(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("todos")
+                        .column("branch_id", ColumnType::Uuid)
+                        .column("payload", ColumnType::Json { schema: json })
+                        .branch_by("branch_id"),
+                )
+                .build(),
+        )
+    };
+    let strict = schema(Some(serde_json::json!({
+        "type": "object",
+        "required": ["state"],
+    })));
+    let directory = tempfile::tempdir().unwrap();
+    let source = selector(0xc1);
+    let target = selector(0xc2);
+    let row = RowUuid::from_bytes([0xc3; 16]);
+    let payload = Value::String(r#"{"written":"before the schema required a state"}"#.to_owned());
+    {
+        let db = open_file_db(directory.path(), &schema(None));
+        db.insert(
+            "todos",
+            BTreeMap::from([("payload".to_owned(), payload.clone())]),
+            jazz::db::InsertOptions {
+                row_id: Some(row),
+                target: jazz::db::ExactWriteTarget::Branch(source.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    let db = open_file_db(directory.path(), &strict);
+    let refused = block_on(db.insert(
+        "todos",
+        BTreeMap::from([("payload".to_owned(), payload.clone())]),
+        jazz::db::InsertOptions {
+            row_id: Some(RowUuid::from_bytes([0xc4; 16])),
+            target: jazz::db::ExactWriteTarget::Branch(source.clone()),
+            ..Default::default()
+        },
+    ));
+    assert!(refused.is_err(), "a new write must meet the current schema");
+
+    let tx = db.mergeable_tx().unwrap();
+    tx.move_between_branches("todos", source.clone(), target.clone(), row)
+        .unwrap();
+    tx.commit().unwrap();
+
+    let query = db.prepare_query(&db.table("todos")).unwrap();
+    let moved = block_on(db.all(&query, ReadOpts::default().branch_view(target, None))).unwrap();
+    assert_eq!(moved.len(), 1);
+    assert_eq!(moved[0].cell("payload"), Some(payload));
+}

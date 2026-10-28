@@ -10,8 +10,8 @@ A native host owns one **process-local relay** per explicit `{ app namespace,
 storage namespace, auth scope }`. The relay contains a durable ordinary client
 `Db` over a portable ordered-KV backend (SQLite in the first native host). Each
 UI runtime gets a separate, in-memory ordinary client `Db`; it attaches to the
-relay through the normal peer protocol. The relay may itself attach to an
-upstream server through that same protocol.
+relay through the normal peer protocol. The relay may itself attach to Core
+through that same protocol; it never attaches to another relay (ch. 9 §9.5).
 
 This chapter defines the host boundary only. Chapters 3–8, 13, and 16 continue
 to own transactions, permissions, sync, client API, and subscriptions.
@@ -220,7 +220,8 @@ capabilities and trusted revocation; no earlier implementation number or
 compatibility path is part of the released contract. ABI 2 (alpha.58) adds
 coded operation errors (response 25) as answers to existing commands, and
 ABI 3 (alpha.60) adds their optional reason name; see §19.6 ("Coded operation
-errors"). The exported constant keeps its `NATIVE_RELAY_ABI_V1` name and carries
+errors"). ABI 4 (alpha.60) ends each subscription delta with its updated rows'
+splices (`updated_splices`, SPEC 18). The exported constant keeps its `NATIVE_RELAY_ABI_V1` name and carries
 the current version.
 
 The ABI stays coarse and binary:
@@ -564,12 +565,14 @@ local-first query lifecycle `All`, `Subscribe`, `DrainSubscription`,
 `Unsubscribe`. Query inputs are exactly canonical postcard `Query` bytes; read
 output is the existing `binding_codec::encode_rows` payload and subscription
 deltas are the existing `binding_codec::encode_subscription_delta` payload.
-The current native artifact C ABI is V2; the byte-oriented postcard protocol
-described here remains V1. V2 adds a fixed-width diagnostic category only to
+The current native artifact C ABI is V2 (version 5); the byte-oriented postcard
+protocol described here remains V1 (version 4). V2 adds a fixed-width diagnostic category only to
 the lease-scoped direct JSI tick call. The category preserves the existing
 status and exposes neither the retained transport error string nor arbitrary
 server data. The postcard `execute(Tick)` operation remains unchanged and does
-not report this diagnostic.
+not report this diagnostic. Only local foreground processing failures carry
+`LocalTickFailure` (code 2); code 1 is reserved. Upstream failures stay in
+connection state and never acquire a tick-failure category.
 
 Subscription identifiers are owner-thread-local opaque u64 handles allocated
 once across every foreground attached to that relay, so a value copied from a

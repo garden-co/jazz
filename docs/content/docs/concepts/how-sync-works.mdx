@@ -119,6 +119,37 @@ after seeing a value always replaces it, even if the device's clock is behind.
 
 Every replica receives Core's result, so all replicas converge on the same row.
 
+Columns with a merge strategy combine concurrent edits instead of picking one: counters add up,
+grow-only sets union, and [text merge columns](/docs/schemas/column-types#mergeable-text-columns)
+merge the edits inside the string.
+
+</Accordion>
+<Accordion id="text-merges" title="How are concurrent edits to a text column merged?">
+A string column declared with `.merge("text")`, `.merge("markdown")` or `.merge("html")` still
+stores a plain string. Only Core merges. Your app writes the value it has, as usual. Until Core's
+result arrives, a client shows its own edit, then switches to the merged value.
+
+When Core receives an edit to such a column, it checks whether someone else changed that column
+since the version the writer saw. If not (the usual case), the edit is applied as is, with no
+extra work. If so, Core compares both edits with the version the writer started from, and applies
+both wherever they touch different parts of the text. An edit both people made applies once. Two
+insertions at the same spot both stay, the earlier one first. A long offline session merges the
+same way: each edit is compared with what that device had seen, including its own earlier edits.
+
+Where both people **replaced the same words**, Core cannot keep both. The edit it receives later wins
+that part of the text. Note that this is the opposite of an ordinary field, where the first edit
+Core receives wins. The rest of the text still merges, and the other person's version stays in the
+row's history.
+
+A merge has a fixed amount of work it may spend. A very large value that both sides rewrote
+heavily (for example a pasted replacement for a whole long document while someone else edits it)
+can exceed it. Then Core does not merge: the later edit's whole value wins, as for overlapping
+replacements. The limit is generous: a 1 MB document with thousands of scattered edits on each
+side merges well within it.
+
+An edit made on top of an edit Core rejected is rejected too, so a merge never brings back a rejected
+change.
+
 </Accordion>
 </Accordions>
 

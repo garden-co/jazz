@@ -10,13 +10,13 @@ extern "C" {
 #endif
 
 /* The current native artifact ABI (Rust `NATIVE_RELAY_ABI_V2`). */
-#define JAZZ_NATIVE_RELAY_ABI_VERSION 4
+#define JAZZ_NATIVE_RELAY_ABI_VERSION 5
 
 /*
  * Current native artifact ABI. The postcard command codec remains protocol
- * ABI V1 (currently 3); artifact ABI V2 adds the lease-scoped diagnostic tick.
+ * ABI V1 (currently 4); artifact ABI V2 adds the lease-scoped diagnostic tick.
  */
-#define JAZZ_NATIVE_RELAY_ABI_V2 4
+#define JAZZ_NATIVE_RELAY_ABI_V2 5
 uint16_t jazz_native_relay_abi_version(void);
 
 /* Optional foreground capture support, a feature query outside the command layout. */
@@ -46,7 +46,6 @@ typedef enum jazz_native_relay_status {
 
 typedef enum jazz_native_relay_tick_diagnostic {
   JAZZ_NATIVE_RELAY_TICK_DIAGNOSTIC_NONE = 0,
-  JAZZ_NATIVE_RELAY_TICK_DIAGNOSTIC_UPSTREAM_TERMINAL = 1,
   JAZZ_NATIVE_RELAY_TICK_DIAGNOSTIC_LOCAL_TICK_FAILURE = 2,
 } jazz_native_relay_tick_diagnostic;
 

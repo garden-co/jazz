@@ -57,14 +57,18 @@ route through the obsolete UniFFI library. The remaining Android runner gate is
 a real Gradle/NDK AAR build and emulator installation against that linked
 artifact.
 
-The JavaScript wrapper requires native artifact ABI V2. V2 adds a
+The JavaScript wrapper requires native artifact ABI V2 (version 5). V2 adds a
 lease-scoped direct-tick diagnostic code while preserving the V1 tick C symbol;
 Rust returns only a fixed category, and the JSI adapter maps it to reviewed
 static wording without exposing transport or server error text. The postcard
-command codec remains protocol ABI V1: its `execute(Tick)` path and response
+command codec remains protocol ABI V1 (version 4): its `execute(Tick)` path and response
 are unchanged and do not carry this diagnostic. The native artifact bump is
 internal to the package contract; it adds no public TypeScript tick method,
 wire format, or storage behavior.
+Only local foreground processing failures receive `LocalTickFailure`; upstream
+failures remain connection state and do not fail a local tick. The separate
+artifact version prevents an ABI-4 native build without the V2 symbol from
+being accepted by this wrapper.
 
 An admitted native foreground is bound to the session used for admission.
 `db.updateCookieSession(...)` therefore rejects atomically on this path: it

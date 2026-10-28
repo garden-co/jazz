@@ -1606,6 +1606,8 @@ function encodeSubscriptionDelta({
   writer.vec((indexWriter, index) => indexWriter.u64(index), updated.length);
   writer.vec((indexWriter, index) => indexWriter.u64(index), updated.length);
   writer.vec(() => undefined, 0);
+  // No opted-in splices on any updated row.
+  writer.vec((row) => row.vec(() => undefined, 0), updated.length);
   return writer.finish();
 }
 

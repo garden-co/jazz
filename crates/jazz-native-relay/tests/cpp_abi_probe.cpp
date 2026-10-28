@@ -6,13 +6,6 @@
 
 int main() {
   if (jazz_native_relay_abi_version() != JAZZ_NATIVE_RELAY_ABI_V2) return 1;
-  const char *upstream = jazz::rn::foregroundTickFailureMessage(
-      JAZZ_NATIVE_RELAY_LIFECYCLE_FAILURE,
-      JAZZ_NATIVE_RELAY_TICK_DIAGNOSTIC_UPSTREAM_TERMINAL);
-  if (upstream == nullptr ||
-      std::strcmp(upstream,
-                  "Jazz native foreground runtime failed during tick: upstream relay connection terminated; check the network and server logs for the underlying cause") !=
-          0) return 2;
   const char *local = jazz::rn::foregroundTickFailureMessage(
       JAZZ_NATIVE_RELAY_LIFECYCLE_FAILURE,
       JAZZ_NATIVE_RELAY_TICK_DIAGNOSTIC_LOCAL_TICK_FAILURE);
@@ -22,7 +15,7 @@ int main() {
           0) return 2;
   if (jazz::rn::foregroundTickFailureMessage(
           JAZZ_NATIVE_RELAY_BACKPRESSURE,
-          JAZZ_NATIVE_RELAY_TICK_DIAGNOSTIC_UPSTREAM_TERMINAL) != nullptr ||
+          JAZZ_NATIVE_RELAY_TICK_DIAGNOSTIC_LOCAL_TICK_FAILURE) != nullptr ||
       jazz::rn::foregroundTickFailureMessage(
           JAZZ_NATIVE_RELAY_LIFECYCLE_FAILURE,
           JAZZ_NATIVE_RELAY_TICK_DIAGNOSTIC_NONE) != nullptr ||
