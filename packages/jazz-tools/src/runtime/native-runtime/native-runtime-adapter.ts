@@ -86,7 +86,6 @@ import {
   WebSocketCarrier,
   WIRE_PROTOCOL_VERSION,
   isReconnectLaterWireError,
-  isRetryablePreHelloWireError,
   normalizeBackendWebSocketAuth,
   peerIdentityForWebSocketAuth,
   policyClaimsForAdmittedWebSocket,
@@ -121,25 +120,6 @@ const MAX_CANONICAL_SIGNED_I64_LENGTH = 20;
 const CANONICAL_SIGNED_I64_DECIMAL = /^(?:0|[1-9][0-9]*|-[1-9][0-9]*)$/;
 
 const SERVER_PUMP_DEBOUNCE_MS = 16;
-// An established upstream is retried until it reconnects or the runtime is
-// explicitly disconnected/closed: a local-first client must survive an outage
-// of any length. Backoff doubles to a cap and is jittered so a fleet of
-// clients does not reconnect in lockstep after a server restart.
-const NETWORK_RETRY_INITIAL_DELAY_MS = 100;
-const NETWORK_RETRY_MAX_DELAY_MS = 5_000;
-// Until an outage is published, retry at least once a second (the pre-#3565
-// cadence). A server that returns within the reporting window is then found
-// before the report fires, so no Global wait inherits a stale outage.
-const NETWORK_RETRY_UNREPORTED_MAX_DELAY_MS = 1_000;
-// Once an established link has been down this long, the next failed reconnect
-// attempt publishes the outage like a transport error so Global reads and
-// waits reject instead of hanging. Publication is failure-triggered, never a
-// timer: a wall-clock report could fire after the server is back but before
-// the pending retry reconnects, rejecting a Global wait whose write then syncs.
-// Retries continue, and a reconnect clears the published outage.
-const NETWORK_OUTAGE_REPORT_MS = 7_500;
-const PRE_HELLO_RETRY_INITIAL_DELAY_MS = 25;
-const PRE_HELLO_RETRY_MAX_DELAY_MS = 1_000;
 const REMOTE_LINK_HINTS: Record<RemoteLinkState, string> = {
   none: "none",
   connecting: "attempting",
@@ -148,11 +128,6 @@ const REMOTE_LINK_HINTS: Record<RemoteLinkState, string> = {
 };
 const NATIVE_LINK_POLL_MS = 250;
 
-/** Capped exponential backoff with equal jitter: [cap/2, cap] of each step. */
-function networkRetryDelay(retry: number, maxDelayMs: number): number {
-  const ceiling = Math.min(NETWORK_RETRY_INITIAL_DELAY_MS * 2 ** Math.min(retry, 16), maxDelayMs);
-  return Math.round(ceiling / 2 + Math.random() * (ceiling / 2));
-}
 // Amortize scheduler overhead without allowing a ready evaluator to monopolize
 // the browser task queue. Transport pumps never add a second inner tick loop.
 const MAX_CORE_TICKS_PER_TURN = 4;
@@ -258,6 +233,8 @@ type NativeDb = {
   reconnectNativeUpstream?(): void;
   /** Tell the core Db what the host knows about its path to the server. */
   setRemoteLinkHint?(state: string): void;
+  /** A fresh upstream link machine for this runtime's server WebSocket. */
+  createUpstreamLink?(seed: number): NativeUpstreamLink;
   nativeConnectionStatus?(): {
     configured: boolean;
     explicitlyOffline: boolean;
@@ -524,6 +501,8 @@ type ServerTransportWorkWaiter = {
 };
 
 type ServerConnectionAttempt = {
+  /** The link machine's id for this attempt. */
+  id: number;
   generation: number;
   carrier: WebSocketCarrier;
   terminal: Promise<Error>;
@@ -533,14 +512,76 @@ type ServerConnectionAttempt = {
   transport: Transport | null;
   retirement: Promise<void> | null;
   admission: Promise<Transport> | null;
-  recovery?: Promise<WebSocketCarrier>;
 };
-type ServerReplacementIntent = {
-  generation: number;
-  url: string;
-  authJson: string;
-  features: number;
+
+/**
+ * The shared upstream link machine (`jazz::link` in the core). It decides when
+ * the server WebSocket connects, how long it backs off, when an outage is
+ * published and what a refused credential does; this adapter owns the socket
+ * and the timer and steps the machine with one JSON document per input.
+ */
+type NativeUpstreamLink = { handle(nowMs: number, input: string): string };
+type UpstreamLinkFailure = {
+  kind: "network" | "refused" | "serverNotReady" | "authRejected" | "fatal";
+  message: string;
 };
+type UpstreamLinkInput =
+  | { type: "serverConfigured"; configured: boolean }
+  | { type: "setOffline"; offline: boolean }
+  | { type: "admitted"; attempt: number }
+  | { type: "ended"; attempt: number; failure: UpstreamLinkFailure }
+  | { type: "credentialUpdated" }
+  | { type: "timerFired"; token: number };
+type UpstreamLinkStatus = {
+  phase:
+    | "noServer"
+    | "offline"
+    | "connecting"
+    | "live"
+    | "backoff"
+    | "awaitingCredential"
+    | "stopped";
+  reason: string | null;
+  consecutiveFailures: number;
+  outagePublished: boolean;
+};
+type UpstreamLinkStep = {
+  actions: Array<
+    | { type: "connect"; attempt: number }
+    | { type: "close"; attempt: number }
+    | { type: "armTimer"; token: number; afterMs: number }
+    | { type: "cancelTimer"; token: number }
+  >;
+  events: Array<
+    | { type: "status" }
+    | { type: "authFailed"; reason: string; message: string }
+    | { type: "authRestored" }
+  >;
+  status: UpstreamLinkStatus;
+};
+
+/** How the link machine should treat a server connection that ended with `error`. */
+function upstreamLinkFailure(error: WireError, negotiated: boolean): UpstreamLinkFailure {
+  const message = error.message;
+  if (wireAuthFailureReason(error)) return { kind: "authRejected", message };
+  // The server's bootstrap and overload signals. Before its hello the server
+  // is still starting; afterwards they end a link like an outage.
+  if (isReconnectLaterWireError(error)) {
+    return { kind: negotiated ? "network" : "serverNotReady", message };
+  }
+  // The network or the server dropped the socket. A local-first client must
+  // survive an outage of any length, including one it was opened in.
+  if (
+    error.retry === "later" &&
+    (error.code === "websocket_closed" || error.code === "websocket_error")
+  ) {
+    return { kind: "network", message };
+  }
+  // Anything else (a protocol error, an incompatible server) cannot succeed
+  // by retrying.
+  return { kind: "fatal", message };
+}
+
 function joinServerTransportRetirements(
   previous: Promise<void> | null,
   next: Promise<void>,
@@ -795,22 +836,27 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverCarrierPromise: Promise<WebSocketCarrier> | null = null;
   private serverConnectionAttempt: ServerConnectionAttempt | null = null;
   private serverReplacementRetirement: Promise<void> | null = null;
-  private serverReplacementIntent: ServerReplacementIntent | null = null;
-  private serverReplacementPromise: Promise<WebSocketCarrier> | null = null;
   private serverTransportError: Error | null = null;
   private serverTransportErrorWaiters: ServerTransportErrorWaiter[] = [];
   private serverTransportWorkEpoch = 0;
   private serverTransportWorkWaiters: ServerTransportWorkWaiter[] = [];
   private serverEndpointUrl: string | null = null;
   private serverAuthJson: string | null = null;
-  private serverReconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  private serverReconnectReject: ((error: Error) => void) | null = null;
-  private preHelloRetryCount = 0;
-  private networkRetryCount = 0;
-  /** The current `serverTransportError` is a published outage, not a terminal failure. */
-  private serverOutageReported = false;
-  private serverOutageStartedAt: number | null = null;
-  private serverLinkRequested = false;
+  private link: NativeUpstreamLink | null = null;
+  private linkStatus: UpstreamLinkStatus | null = null;
+  private readonly linkInputs: UpstreamLinkInput[] = [];
+  private linkStepping = false;
+  /** The attempt the link machine is waiting to hear from. */
+  private linkAttemptId: number | null = null;
+  private linkTimer: { token: number; handle: ReturnType<typeof setTimeout> } | null = null;
+  /** Settles `serverCarrierPromise` while the link is not live. */
+  private linkConnection: {
+    resolve: (carrier: WebSocketCarrier) => void;
+    reject: (error: Error) => void;
+  } | null = null;
+  /** The error that ended the attempt the machine is deciding about. */
+  private linkFailure: Error | null = null;
+  private linkCloseReason = "server transport replaced";
   private nativeLinkEverConnected = false;
   private nativeLinkPoll: ReturnType<typeof setInterval> | null = null;
   private firstLoadWaitSeen = false;
@@ -1340,22 +1386,18 @@ export class NativeRuntimeAdapter implements Runtime {
       // reconnecting after a drop.
       return this.nativeLinkEverConnected ? "unavailable" : "connecting";
     }
-    if (!this.serverLinkRequested) return "none";
-    if (this.serverTransport) return "connected";
-    if (this.serverTransportError) return "unavailable";
-    // A dropped established link retries with backoff. Readers must not
-    // wait on that recovery; a bootstrapping server's pre-hello retry is
-    // still the first connection attempt.
-    if (this.networkRetryCount > 0) return "unavailable";
-    if (
-      this.serverConnectionAttempt ||
-      this.serverReplacementPromise ||
-      this.serverCarrierPromise ||
-      this.serverReconnectTimer
-    ) {
-      return "connecting";
+    // Readers may wait on a first attempt (including a bootstrapping
+    // server's not-ready retries), never on the recovery of a dropped link.
+    switch (this.linkStatus?.phase ?? "noServer") {
+      case "noServer":
+        return "none";
+      case "live":
+        return "connected";
+      case "connecting":
+        return this.serverTransportError ? "unavailable" : "connecting";
+      default:
+        return "unavailable";
     }
-    return "unavailable";
   }
 
   async waitForUpstreamServerConnection(): Promise<void> {
@@ -1368,8 +1410,12 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     // Reconnects continue through an outage; once it is published, callers
     // waiting for the link reject instead of waiting for the recovery.
-    if (this.serverOutageReported && this.serverTransportError) throw this.serverTransportError;
-    const outage = this.networkRetryCount > 0 ? this.waitForServerTransportError("global") : null;
+    if (this.linkStatus?.outagePublished && this.serverTransportError) {
+      throw this.serverTransportError;
+    }
+    const outage = this.linkStatus?.consecutiveFailures
+      ? this.waitForServerTransportError("global")
+      : null;
     try {
       await (outage
         ? Promise.race([this.serverCarrierPromise, outage.promise])
@@ -1447,7 +1493,9 @@ export class NativeRuntimeAdapter implements Runtime {
     this.completedTxs.clear();
     this.writes.clear();
     this.serverConnectionGeneration += 1;
-    this.clearServerReconnectTimer();
+    this.clearLinkTimer();
+    this.linkAttemptId = null;
+    this.settleLinkConnection(new Error("server transport disconnected"));
     this.stopNativeLinkPoll();
     this.remoteLink.changed();
     const connectionAttempt = this.serverConnectionAttempt;
@@ -2289,8 +2337,6 @@ export class NativeRuntimeAdapter implements Runtime {
 
   connect(url: string, authJson: string): void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.connect(url, authJson);
-    this.serverLinkRequested = true;
-    this.remoteLink.changed();
     if (this.db?.reconnectNativeUpstream) {
       // The admitted native host owns the endpoint and credentials. The JS
       // connection manager controls lifecycle only, never a parallel socket.
@@ -2302,101 +2348,239 @@ export class NativeRuntimeAdapter implements Runtime {
     const normalizedAuthJson = normalizeBackendWebSocketAuth(authJson);
     // Validate synchronously before retiring the current transport. Callers
     // historically observe an incompatible native binding at connect() time.
-    const features = this.nativeWireFeatures();
-    const generation = this.serverConnectionGeneration + 1;
-    const predecessorRetirement = this.invalidateServerTransport({
-      rejectWaiters: false,
-      preservePreHelloRetry: true,
-      preserveRemoteWaiters: true,
-      error: new Error("server transport replaced"),
-    });
-    const intent: ServerReplacementIntent = {
-      generation,
-      url,
-      authJson: normalizedAuthJson,
-      features,
-    };
-    this.serverReplacementIntent = intent;
-    this.serverReplacementRetirement = joinServerTransportRetirements(
-      this.serverReplacementRetirement,
-      predecessorRetirement,
+    this.nativeWireFeatures();
+    this.link ??= this.createUpstreamLink();
+    this.serverEndpointUrl = url;
+    this.serverAuthJson = normalizedAuthJson;
+    this.linkCloseReason = "server transport replaced";
+    // An explicit connect replaces any current attempt and tries at once,
+    // even after a refused credential or a fatal failure.
+    this.stepLink(
+      this.linkStatus && this.linkStatus.phase !== "noServer"
+        ? { type: "setOffline", offline: false }
+        : { type: "serverConfigured", configured: true },
     );
-    let replacement = this.serverReplacementPromise;
-    if (!replacement) {
-      replacement = (async () => {
-        for (;;) {
-          while (this.serverReplacementRetirement) {
-            const retirement = this.serverReplacementRetirement;
-            this.serverReplacementRetirement = null;
-            try {
-              await retirement;
-            } catch (error) {
-              // A failed close still owns its predecessor. Future connect()
-              // calls must not erase that failure and admit another transport.
-              this.serverReplacementRetirement = joinServerTransportRetirements(
-                this.serverReplacementRetirement,
-                retirement,
-              );
-              this.serverReplacementRetirement.catch(() => undefined);
-              throw error;
-            }
-          }
-          const latest = this.serverReplacementIntent;
-          if (!latest || this.closed) throw new Error("server transport disconnected");
-          this.serverReplacementIntent = null;
-          let connected: WebSocketCarrier;
-          try {
-            connected = await this.startServerConnection(latest);
-          } catch (error) {
-            if (
-              this.serverReplacementIntent &&
-              (errorMessage(error) === "server transport replaced" ||
-                errorMessage(error) === "server transport disconnected")
-            ) {
-              continue;
-            }
-            throw error;
-          }
-          if (!this.serverReplacementIntent && !this.serverReplacementRetirement) {
-            return connected;
-          }
-        }
-      })();
-      this.serverReplacementPromise = replacement;
-      replacement.then(
-        () => {
-          if (this.serverReplacementPromise === replacement) this.serverReplacementPromise = null;
-        },
-        (error: unknown) => {
-          if (this.serverReplacementPromise === replacement) {
-            this.serverReplacementPromise = null;
-            if (this.serverCarrierPromise === replacement) this.serverCarrierPromise = null;
-          }
-          if (!this.closed && errorMessage(error) !== "server transport disconnected") {
-            this.handleServerTransportError(error);
-          }
-        },
-      );
-    }
-    // Keep every caller that observed the old carrier on the same lifecycle
-    // barrier, even when a newer replacement supersedes its intent.
-    this.serverCarrierPromise = replacement;
   }
 
-  private async startServerConnection(intent: ServerReplacementIntent): Promise<WebSocketCarrier> {
-    const { generation, url, authJson: normalizedAuthJson, features } = intent;
+  private createUpstreamLink(): NativeUpstreamLink {
+    if (!this.db.createUpstreamLink) {
+      throw new Error(
+        "native runtime binding does not expose the upstream link machine; install the matching Jazz native runtime package",
+      );
+    }
+    return this.db.createUpstreamLink(Math.floor(Math.random() * Number.MAX_SAFE_INTEGER));
+  }
+
+  /** Step the shared link machine with `input` and carry out what it decides. */
+  private stepLink(input: UpstreamLinkInput): void {
+    // Carrying out an action can end an attempt synchronously; its input
+    // waits for the current step instead of interleaving with it.
+    this.linkInputs.push(input);
+    if (this.linkStepping) return;
+    this.linkStepping = true;
+    try {
+      for (let next = this.linkInputs.shift(); next; next = this.linkInputs.shift()) {
+        if (this.closed || !this.link) continue;
+        const step = JSON.parse(
+          this.link.handle(Date.now(), JSON.stringify(next)),
+        ) as UpstreamLinkStep;
+        const previous = this.linkStatus;
+        this.linkStatus = step.status;
+        for (const action of step.actions) this.runLinkAction(action);
+        for (const event of step.events) {
+          if (event.type === "authFailed") this.authFailureCallback?.(event.reason);
+        }
+        this.applyLinkStatus(previous, step.status);
+        this.remoteLink.changed();
+      }
+    } finally {
+      this.linkStepping = false;
+    }
+  }
+
+  private runLinkAction(action: UpstreamLinkStep["actions"][number]): void {
+    switch (action.type) {
+      case "connect":
+        this.runLinkAttempt(action.attempt);
+        return;
+      case "close": {
+        if (this.linkAttemptId === action.attempt) this.linkAttemptId = null;
+        const attempt = this.serverConnectionAttempt;
+        if (attempt?.id === action.attempt) {
+          this.finishServerConnectionAttempt(attempt, new Error(this.linkCloseReason), false);
+        }
+        this.pendingInboundServerFrames.length = 0;
+        this.serverPumpScheduled = false;
+        this.serverPumpAgain = false;
+        return;
+      }
+      case "armTimer": {
+        this.clearLinkTimer();
+        const token = action.token;
+        const handle = setTimeout(() => {
+          if (this.linkTimer?.token !== token) return;
+          this.linkTimer = null;
+          this.stepLink({ type: "timerFired", token });
+        }, action.afterMs);
+        this.linkTimer = { token, handle };
+        return;
+      }
+      case "cancelTimer":
+        if (this.linkTimer?.token === action.token) this.clearLinkTimer();
+        return;
+    }
+  }
+
+  /** Publish what the link's new status means for readers and subscriptions. */
+  private applyLinkStatus(previous: UpstreamLinkStatus | null, next: UpstreamLinkStatus): void {
+    const failure = this.linkFailure ?? new Error(next.reason ?? "server transport failed");
+    switch (next.phase) {
+      case "live":
+        if (previous?.outagePublished) {
+          this.serverTransportError = null;
+          this.clearServerTransportErrorWaiters();
+        }
+        return;
+      case "connecting":
+      case "backoff":
+        // Waiters for the connection follow the retries.
+        if (!this.linkConnection) this.awaitLinkConnection();
+        // The outage is reported once so Global waits do not hang; remote
+        // subscriptions stay open and resume on the reconnect.
+        if (next.outagePublished && !previous?.outagePublished) {
+          this.handleServerTransportError(new Error(failure.message), undefined, true);
+        }
+        return;
+      case "awaitingCredential":
+      case "stopped":
+        if (previous?.phase !== next.phase) {
+          this.handleServerTransportError(failure);
+          this.settleLinkConnection(failure);
+        }
+        return;
+      case "offline":
+      case "noServer":
+        this.settleLinkConnection(new Error("server transport disconnected"));
+        return;
+    }
+  }
+
+  /** Make `serverCarrierPromise` wait for the link's next admission. */
+  private awaitLinkConnection(): void {
+    const connection = new Promise<WebSocketCarrier>((resolve, reject) => {
+      this.linkConnection = { resolve, reject };
+    });
+    // Waiters observe the outcome; an unobserved failure is reported as a
+    // transport error instead.
+    connection.catch(() => undefined);
+    this.serverCarrierPromise = connection;
+  }
+
+  /** Fail the pending connection, or resolve it with `carrier`. */
+  private settleLinkConnection(outcome: Error | WebSocketCarrier): void {
+    const connection = this.linkConnection;
+    this.linkConnection = null;
+    if (outcome instanceof Error) {
+      this.serverCarrierPromise = null;
+      connection?.reject(outcome);
+    } else {
+      this.serverCarrierPromise = Promise.resolve(outcome);
+      connection?.resolve(outcome);
+    }
+  }
+
+  private clearLinkTimer(): void {
+    if (this.linkTimer) clearTimeout(this.linkTimer.handle);
+    this.linkTimer = null;
+  }
+
+  /** Report the end of `attempt` to the link machine, once. */
+  private endLinkAttempt(
+    attempt: ServerConnectionAttempt,
+    error: Error,
+    failure: UpstreamLinkFailure,
+  ): void {
+    if (attempt.finished) return;
+    const current = attempt.id === this.linkAttemptId;
+    // Retire the attempt before any suspended pump or handshake can report
+    // its close. Native subscriptions survive the detach.
+    this.finishServerConnectionAttempt(attempt, error, false);
+    if (!current || this.closed) return;
+    this.linkAttemptId = null;
+    // Frames the retired socket buffered belong to its channel state, not
+    // the next connection's.
+    this.pendingInboundServerFrames.length = 0;
+    this.linkFailure = error;
+    try {
+      this.stepLink({ type: "ended", attempt: attempt.id, failure });
+    } finally {
+      this.linkFailure = null;
+    }
+  }
+
+  /** Open the socket for link attempt `id` once its predecessors are retired. */
+  private runLinkAttempt(id: number): void {
+    this.linkAttemptId = id;
+    if (!this.linkConnection) this.awaitLinkConnection();
+    const url = this.serverEndpointUrl;
+    const authJson = this.serverAuthJson;
+    void (async () => {
+      // Every attempt waits for the same retirements; a failed one stays in
+      // place, so it keeps blocking later attempts too.
+      for (
+        let retirement = this.serverReplacementRetirement;
+        retirement;
+        retirement = this.serverReplacementRetirement
+      ) {
+        await retirement;
+        if (this.serverReplacementRetirement === retirement) {
+          this.serverReplacementRetirement = null;
+        }
+      }
+      if (this.closed || this.linkAttemptId !== id || url === null || authJson === null) return;
+      this.startServerConnection(id, url, authJson);
+    })().catch((error: unknown) => {
+      if (this.closed || this.linkAttemptId !== id) return;
+      this.linkAttemptId = null;
+      const failure = error instanceof Error ? error : new Error(errorMessage(error));
+      this.linkFailure = failure;
+      try {
+        this.stepLink({
+          type: "ended",
+          attempt: id,
+          failure: { kind: "fatal", message: failure.message },
+        });
+      } finally {
+        this.linkFailure = null;
+      }
+    });
+  }
+
+  /** One connection attempt: open, negotiate, admit, then report to the link. */
+  private startServerConnection(id: number, url: string, normalizedAuthJson: string): void {
+    this.serverConnectionGeneration += 1;
+    const generation = this.serverConnectionGeneration;
+    const features = this.nativeWireFeatures();
     const transportIdentity = peerIdentityForWebSocketAuth(normalizedAuthJson, this.peerIdentity);
     // A published outage stays visible to Global readers until a retry
     // actually reconnects; each failed attempt must not hide it again.
-    if (!this.serverOutageReported) this.serverTransportError = null;
-    this.serverEndpointUrl = url;
-    this.serverAuthJson = normalizedAuthJson;
+    if (!this.linkStatus?.outagePublished) this.serverTransportError = null;
     this.remoteLink.changed();
     let resolveTerminal!: (error: Error) => void;
     const terminal = new Promise<Error>((resolve) => {
       resolveTerminal = resolve;
     });
     let attempt: ServerConnectionAttempt | null = null;
+    const end = (error: WireError) => {
+      if (!attempt) return;
+      // A link whose transport already failed terminally is not retried
+      // behind that published error.
+      const failure =
+        this.serverTransportError && !this.linkStatus?.outagePublished
+          ? { kind: "fatal" as const, message: error.message }
+          : upstreamLinkFailure(error, attempt.carrier.hasNegotiated);
+      this.endLinkAttempt(attempt, new Error(error.message), failure);
+    };
     const carrier = new WebSocketCarrier({
       endpointUrl: url,
       peerIdentity: transportIdentity,
@@ -2420,32 +2604,23 @@ export class NativeRuntimeAdapter implements Runtime {
           });
         }
       },
+      // A server error that leaves the socket open (or precedes its close)
+      // ends the attempt; a closed socket and the server's reconnect-later
+      // signals arrive as the terminal error.
       onError: (error) => {
-        if (isReconnectLaterWireError(error)) return;
-        if (attempt && this.canRetryNetworkConnection(attempt, error)) return;
         if (
-          this.serverTransportError &&
-          (error.code === "websocket_closed" || error.code === "websocket_error")
-        )
+          isReconnectLaterWireError(error) ||
+          error.code === "websocket_closed" ||
+          error.code === "websocket_error"
+        ) {
           return;
-        this.handleServerTransportError(error, generation);
-        const reason = wireAuthFailureReason(error);
-        if (reason) this.authFailureCallback?.(reason);
-      },
-      onTerminal: (error) => {
-        if (!attempt) return;
-        if (isReconnectLaterWireError(error) && !attempt.carrier.hasNegotiated) return;
-        if (this.canRetryNetworkConnection(attempt, error)) {
-          const recovery = this.retryNetworkConnection(attempt, error);
-          if (recovery) return;
         }
-        this.finishServerConnectionAttempt(
-          attempt,
-          this.serverTransportError ?? new Error(error.message),
-        );
+        end(error);
       },
+      onTerminal: end,
     });
     attempt = {
+      id,
       generation,
       carrier,
       terminal,
@@ -2458,104 +2633,77 @@ export class NativeRuntimeAdapter implements Runtime {
     };
     this.serverConnectionAttempt = attempt;
     this.serverCarrier = carrier;
+    const current = () =>
+      !this.closed &&
+      generation === this.serverConnectionGeneration &&
+      carrier === this.serverCarrier &&
+      attempt === this.serverConnectionAttempt;
     const ready = Promise.race([
       carrier.ready(),
-      attempt.terminal.then((error): never => {
+      terminal.then((error): never => {
         throw error;
       }),
     ]);
-    const connection = ready
+    void ready
       .then(async (negotiation) => {
-        if (
-          generation !== this.serverConnectionGeneration ||
-          carrier !== this.serverCarrier ||
-          attempt !== this.serverConnectionAttempt
-        ) {
+        if (!current()) {
           carrier.close();
-          return carrier;
+          return;
         }
         if (!this.trustedBackend) {
           await this.runWhenCoreIdle(() => {
-            if (generation !== this.serverConnectionGeneration || carrier !== this.serverCarrier)
-              return;
+            if (!current()) return;
             return this.installClientSessionClaims(
               policyClaimsForAdmittedWebSocket(normalizedAuthJson),
             );
           });
-          if (generation !== this.serverConnectionGeneration || carrier !== this.serverCarrier) {
+          if (!current()) {
             carrier.close();
-            return carrier;
+            return;
           }
         }
-        this.preHelloRetryCount = 0;
         const admission = this.connectNegotiatedUpstream(negotiation).catch((error) => {
           throw contextualError("connecting the negotiated upstream transport", error);
         });
         attempt.admission = admission;
         const outcome = await Promise.race([
           admission.then((transport) => ({ type: "admitted" as const, transport })),
-          attempt.terminal.then((error) => ({ type: "terminal" as const, error })),
+          terminal.then((error) => ({ type: "terminal" as const, error })),
         ]);
-        if (outcome.type === "terminal") {
-          throw outcome.error;
-        }
+        // The attempt already ended and reported why.
+        if (outcome.type === "terminal") return;
         attempt.admission = null;
         const transport = outcome.transport;
-        if (
-          this.closed ||
-          generation !== this.serverConnectionGeneration ||
-          carrier !== this.serverCarrier ||
-          attempt !== this.serverConnectionAttempt
-        ) {
+        if (!current()) {
           carrier.close();
           if (attempt.finished) await attempt.retirement;
           else await this.retirePeerTransport(transport);
-          return carrier;
+          return;
         }
-        this.networkRetryCount = 0;
-        this.clearServerOutage();
         attempt.transport = transport;
         this.serverTransport = transport;
-        this.remoteLink.changed();
         transport.setAuxiliaryTraceEnabled?.(this.auxiliaryTraceListeners.size > 0);
         this.watchAuxiliaryOutbound(transport, carrier, generation).catch((error) =>
           this.handleServerTransportError(error, generation),
         );
-        this.pumpServerTransport().catch((error) =>
-          this.handleServerTransportError(error, generation),
-        );
+        const firstPump = this.pumpServerTransport();
+        firstPump.catch((error) => this.handleServerTransportError(error, generation));
         this.pumpSubscriptions();
-        return carrier;
+        this.stepLink({ type: "admitted", attempt: id });
+        // Waiters resume once the new link's first pump pass has run, or has
+        // yielded to a core tick that other work holds.
+        await Promise.race([
+          firstPump.catch(() => undefined),
+          new Promise((resolve) => setTimeout(resolve, 0)),
+        ]);
+        if (current()) this.settleLinkConnection(carrier);
       })
-      .catch((error) => {
-        if (attempt.recovery) return attempt.recovery;
-        if (isRetryablePreHelloWireError(error)) {
-          const retry = this.retryPreHelloConnection(attempt);
-          if (retry) return retry;
-        }
+      .catch((error: unknown) => {
+        // A handshake or admission that fails on this side cannot succeed by
+        // retrying; a refusal from the server already ended the attempt.
         const failure = error instanceof Error ? error : new Error(errorMessage(error));
-        this.finishServerConnectionAttempt(attempt, failure);
-        throw attempt.outcome ?? failure;
+        this.endLinkAttempt(attempt, failure, { kind: "fatal", message: failure.message });
       });
-    connection.catch((error) => {
-      if (isRetryablePreHelloWireError(error)) return;
-      this.handleServerTransportError(error, generation);
-    });
-    return await connection;
-  }
-  private startServerRetry(url: string, authJson: string): Promise<WebSocketCarrier> {
-    const normalizedAuthJson = normalizeBackendWebSocketAuth(authJson);
-    const intent: ServerReplacementIntent = {
-      generation: this.serverConnectionGeneration,
-      url,
-      authJson: normalizedAuthJson,
-      features: this.nativeWireFeatures(),
-    };
-    // Retry from inside the active replacement runner. Calling connect() here
-    // would reuse that runner and make its carrier promise wait on itself.
-    const connection = this.startServerConnection(intent);
-    this.serverCarrierPromise = connection;
-    return connection;
   }
 
   private async connectNegotiatedUpstream(negotiation: WebSocketNegotiation): Promise<Transport> {
@@ -2594,99 +2742,46 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.db.nativeConnectionStatus?.().configured === true;
   }
 
-  private invalidateServerTransport(options: {
-    rejectWaiters: boolean;
-    preservePreHelloRetry: boolean;
-    preserveRemoteWaiters: boolean;
-    error: Error;
-  }): Promise<void> {
-    const attempt = this.serverConnectionAttempt;
-    const transport = this.serverTransport;
-    const attemptTransport = attempt?.transport;
-    this.remoteLink.changed();
-    if (attempt) {
-      this.finishServerConnectionAttempt(attempt, options.error, false);
-    } else {
-      this.serverConnectionGeneration += 1;
-      this.serverConnectionAttempt = null;
-      this.serverCarrier?.close();
-      this.serverCarrier = null;
-    }
-    if (!options.preservePreHelloRetry) {
-      this.preHelloRetryCount = 0;
-      this.networkRetryCount = 0;
-    }
-    this.serverOutageReported = false;
-    this.serverOutageStartedAt = null;
-    this.clearServerReconnectTimer();
-    if (!this.serverReplacementRetirement) this.serverTransportError = null;
-    if (options.rejectWaiters) {
-      this.resolveServerTransportErrorWaiters(new Error("server transport disconnected"));
-    } else if (!options.preserveRemoteWaiters) {
-      this.clearServerTransportErrorWaiters();
-    }
-    this.resolveServerTransportWorkWaiters();
-    this.serverTransport = null;
-    this.serverEndpointUrl = null;
-    this.serverAuthJson = null;
-    this.pendingInboundServerFrames.length = 0;
-    this.serverPumpScheduled = false;
-    this.serverPumpAgain = false;
-    if (!this.serverReplacementPromise) this.serverCarrierPromise = null;
-    const retirements: Promise<void>[] = [];
-    if (attempt?.retirement) retirements.push(attempt.retirement);
-    if (transport && transport !== attemptTransport) {
-      let retirement: Promise<void>;
-      try {
-        retirement = Promise.resolve(this.retirePeerTransport(transport));
-      } catch (retirementError) {
-        retirement = Promise.reject(retirementError);
-      }
-      retirement.catch((error) => {
-        if (!this.closed) this.handleServerTransportError(error);
-      });
-      retirements.push(retirement);
-    }
-    if (retirements.length === 0) return Promise.resolve();
-    return Promise.all(retirements).then(() => undefined);
-  }
-
-  async disconnect(
-    options: {
-      rejectWaiters?: boolean;
-      preservePreHelloRetry?: boolean;
-      preserveRemoteWaiters?: boolean;
-    } = {},
-  ): Promise<void> {
+  async disconnect(options: { rejectWaiters?: boolean } = {}): Promise<void> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.disconnect(options);
     if (this.db?.disconnectNativeUpstream) {
       this.db.disconnectNativeUpstream();
       this.remoteLink.changed();
       return;
     }
-    this.serverReplacementIntent = null;
-    const pendingReplacement = this.serverReplacementPromise;
-    const retirement = this.invalidateServerTransport({
-      rejectWaiters: options.rejectWaiters ?? true,
-      preservePreHelloRetry: options.preservePreHelloRetry ?? false,
-      preserveRemoteWaiters: options.preserveRemoteWaiters ?? false,
-      error: new Error("server transport disconnected"),
-    });
-    this.serverCarrierPromise = null;
-    try {
-      if (pendingReplacement) await pendingReplacement;
-    } catch (error) {
-      if (errorMessage(error) !== "server transport disconnected") throw error;
+    const transport = this.serverTransport;
+    const attempt = this.serverConnectionAttempt;
+    const attemptTransport = attempt?.transport;
+    this.linkCloseReason = "server transport disconnected";
+    this.stepLink({ type: "setOffline", offline: true });
+    this.linkCloseReason = "server transport replaced";
+    this.serverEndpointUrl = null;
+    this.serverAuthJson = null;
+    if (!this.serverReplacementRetirement) this.serverTransportError = null;
+    if (options.rejectWaiters ?? true) {
+      this.resolveServerTransportErrorWaiters(new Error("server transport disconnected"));
+    } else {
+      this.clearServerTransportErrorWaiters();
     }
-    await retirement;
+    this.resolveServerTransportWorkWaiters();
+    this.serverTransport = null;
+    const retirements: Promise<void>[] = [];
+    if (attempt?.retirement) retirements.push(attempt.retirement);
+    if (transport && transport !== attemptTransport) {
+      retirements.push(Promise.resolve().then(() => this.retirePeerTransport(transport)));
+    }
+    this.remoteLink.changed();
+    await Promise.all(retirements);
   }
 
   updateAuth(authJson: string): Promise<void> | void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.updateAuth(authJson);
     if (this.db?.rejectAuthUpdate) return this.db.rejectAuthUpdate();
-    const endpoint = this.serverEndpointUrl ?? this.serverReplacementIntent?.url;
-    if (!endpoint) return;
-    return this.connect(endpoint, authJson);
+    if (!this.serverEndpointUrl) return;
+    this.serverAuthJson = normalizeBackendWebSocketAuth(authJson);
+    // A live link is replaced so the server sees the new credential; a link
+    // waiting for one connects with it.
+    this.stepLink({ type: "credentialUpdated" });
   }
 
   onAuthFailure(callback: (reason: string) => void): void {
@@ -3106,9 +3201,8 @@ export class NativeRuntimeAdapter implements Runtime {
    */
   private async waitForStrictRemoteQueryTransport(tier: string | null | undefined): Promise<void> {
     if (tier !== "remote") return;
-    const initialIntent = this.serverReplacementIntent;
-    const endpoint = initialIntent?.url ?? this.serverEndpointUrl;
-    const identityAuthJson = initialIntent?.authJson ?? this.serverAuthJson ?? "{}";
+    const endpoint = this.serverEndpointUrl;
+    const identityAuthJson = this.serverAuthJson ?? "{}";
     const identity = peerIdentityForWebSocketAuth(identityAuthJson, this.peerIdentity);
     // `connect()` starts its WebSocket handshake before it can admit the
     // native transport. A strict remote read begun in that interval must
@@ -3139,9 +3233,8 @@ export class NativeRuntimeAdapter implements Runtime {
         outage?.cancel();
       }
       if (this.closed) return;
-      const activeIntent = this.serverReplacementIntent;
-      const activeEndpoint = activeIntent?.url ?? this.serverEndpointUrl;
-      const activeAuthJson = activeIntent?.authJson ?? this.serverAuthJson ?? "{}";
+      const activeEndpoint = this.serverEndpointUrl;
+      const activeAuthJson = this.serverAuthJson ?? "{}";
       if (
         this.serverCarrierPromise &&
         (activeEndpoint !== endpoint ||
@@ -3154,6 +3247,11 @@ export class NativeRuntimeAdapter implements Runtime {
             terminal.message === "server transport disconnected") &&
           this.serverCarrierPromise !== null
         ) {
+          continue;
+        }
+        // A first attempt the server is not ready for yet is retried; the
+        // read follows it like any other first attempt.
+        if (this.linkStatus?.phase === "connecting" && this.serverCarrierPromise !== null) {
           continue;
         }
         throw terminal;
@@ -3839,151 +3937,6 @@ export class NativeRuntimeAdapter implements Runtime {
     if (isFirstTerminalError) this.serverTransportErrorCallback?.(this.serverTransportError);
   }
 
-  private canRetryNetworkConnection(attempt: ServerConnectionAttempt, error: WireError): boolean {
-    return (
-      !this.closed &&
-      (this.serverTransportError === null || this.serverOutageReported) &&
-      attempt === this.serverConnectionAttempt &&
-      attempt.generation === this.serverConnectionGeneration &&
-      error.retry === "later" &&
-      (error.code === "websocket_closed" ||
-        error.code === "websocket_error" ||
-        isReconnectLaterWireError(error)) &&
-      // A local-first client opened while offline must also reach its server
-      // once the network returns, so a first connection that fails at the
-      // network layer is retried like a dropped established link.
-      (attempt.carrier.hasNegotiated ||
-        this.networkRetryCount > 0 ||
-        error.code === "websocket_closed" ||
-        error.code === "websocket_error")
-    );
-  }
-
-  /** Retry an established upstream without turning a temporary outage into a query failure. */
-  private retryNetworkConnection(
-    attempt: ServerConnectionAttempt,
-    error: WireError,
-  ): Promise<WebSocketCarrier> | null {
-    if (!this.serverEndpointUrl || !this.serverAuthJson) return null;
-    const url = this.serverEndpointUrl;
-    const authJson = this.serverAuthJson;
-    const delay = networkRetryDelay(
-      this.networkRetryCount++,
-      this.serverOutageReported
-        ? NETWORK_RETRY_MAX_DELAY_MS
-        : NETWORK_RETRY_UNREPORTED_MAX_DELAY_MS,
-    );
-    this.remoteLink.changed();
-    // Retire this generation before any suspended pump or handshake can report
-    // its close as a terminal failure. Native subscriptions survive the detach.
-    this.serverConnectionGeneration += 1;
-    this.serverConnectionAttempt = null;
-    this.serverCarrier = null;
-    this.finishServerConnectionAttempt(attempt, new Error(error.message));
-    // Frames the retired socket buffered belong to its channel state, not the next connection's.
-    this.pendingInboundServerFrames.length = 0;
-    const generation = this.serverConnectionGeneration;
-    this.resolveServerTransportWorkWaiters();
-    const now = Date.now();
-    this.serverOutageStartedAt ??= now;
-    const publishOutage =
-      !this.serverOutageReported && now - this.serverOutageStartedAt >= NETWORK_OUTAGE_REPORT_MS;
-    const recovery = new Promise<WebSocketCarrier>((resolve, reject) => {
-      this.serverReconnectReject = reject;
-      this.serverReconnectTimer = setTimeout(() => {
-        this.serverReconnectTimer = null;
-        this.serverReconnectReject = null;
-        void (async () => {
-          await attempt.retirement;
-          if (
-            this.closed ||
-            generation !== this.serverConnectionGeneration ||
-            this.serverEndpointUrl !== url ||
-            this.serverAuthJson !== authJson
-          ) {
-            throw new Error("server transport disconnected");
-          }
-          const reconnect = this.startServerRetry(url, authJson);
-          return await reconnect;
-        })().then(resolve, reject);
-      }, delay);
-    });
-    attempt.recovery = recovery;
-    this.serverCarrierPromise = recovery;
-    // Each attempt's catch already reports terminal failures. Cancellation by
-    // explicit disconnect/close must not publish a historical transport error.
-    void recovery.catch(() => undefined);
-    if (publishOutage) {
-      this.serverOutageReported = true;
-      this.handleServerTransportError(new Error(error.message), generation, true);
-    }
-    return recovery;
-  }
-
-  /**
-   * A server may reject the first handshake while its authoritative catalogue
-   * is still bootstrapping. This is a protocol-level retry, not a failed
-   * upstream: keep remote waits pending and reconnect with bounded backoff.
-   */
-  private retryPreHelloConnection(
-    attempt: ServerConnectionAttempt,
-  ): Promise<WebSocketCarrier> | null {
-    if (
-      this.closed ||
-      attempt !== this.serverConnectionAttempt ||
-      attempt.generation !== this.serverConnectionGeneration ||
-      attempt.carrier !== this.serverCarrier ||
-      !this.serverEndpointUrl ||
-      !this.serverAuthJson
-    ) {
-      return null;
-    }
-    const url = this.serverEndpointUrl;
-    const authJson = this.serverAuthJson;
-    const delay = Math.min(
-      PRE_HELLO_RETRY_INITIAL_DELAY_MS * 2 ** this.preHelloRetryCount,
-      PRE_HELLO_RETRY_MAX_DELAY_MS,
-    );
-    this.preHelloRetryCount = Math.min(this.preHelloRetryCount + 1, 30);
-    this.serverConnectionGeneration += 1;
-    this.serverConnectionAttempt = null;
-    this.serverCarrier = null;
-    this.serverCarrierPromise = null;
-    this.resolveServerTransportWorkWaiters();
-    attempt.carrier.close();
-    return new Promise((resolve, reject) => {
-      this.serverReconnectReject = reject;
-      this.serverReconnectTimer = setTimeout(() => {
-        this.serverReconnectTimer = null;
-        this.serverReconnectReject = null;
-        if (this.closed || this.serverEndpointUrl !== url || this.serverAuthJson !== authJson) {
-          reject(new Error("server transport disconnected"));
-          return;
-        }
-        const reconnect = this.startServerRetry(url, authJson);
-        void reconnect.then(resolve, reject);
-      }, delay);
-    });
-  }
-
-  private clearServerOutage(): void {
-    this.serverOutageStartedAt = null;
-    if (!this.serverOutageReported) return;
-    this.serverOutageReported = false;
-    this.serverTransportError = null;
-    this.clearServerTransportErrorWaiters();
-    this.remoteLink.changed();
-  }
-
-  private clearServerReconnectTimer(): void {
-    if (this.serverReconnectTimer) {
-      clearTimeout(this.serverReconnectTimer);
-      this.serverReconnectTimer = null;
-    }
-    this.serverReconnectReject?.(new Error("server transport disconnected"));
-    this.serverReconnectReject = null;
-  }
-
   private finishServerConnectionAttempt(
     attempt: ServerConnectionAttempt,
     error: Error,
@@ -4002,7 +3955,6 @@ export class NativeRuntimeAdapter implements Runtime {
       this.serverConnectionGeneration += 1;
       this.serverConnectionAttempt = null;
       this.serverCarrier = null;
-      if (!this.serverReplacementPromise) this.serverCarrierPromise = null;
     }
     attempt.carrier.close();
     const transport = attempt.transport;

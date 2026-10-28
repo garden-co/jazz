@@ -31,6 +31,7 @@ import {
   type Transport,
 } from "./native-runtime-adapter.js";
 import { encodeSchema } from "./schema-codec.js";
+import { createUpstreamLink } from "../testing/napi-runtime-test-utils.js";
 import { applySubscriptionDelta, SubscriptionManager } from "../subscription-manager.js";
 import { setNamedRowValuesEnumerable } from "./row-values-transport.js";
 import { encodeNativeNullValue, storageColumnValueType } from "./native-row-codec.js";
@@ -7738,6 +7739,7 @@ function fakeDb<T extends object>(db: T): T & NativeDbForTest {
   };
   let upstream: Transport | undefined;
   const result: Record<string, unknown> = {
+    createUpstreamLink,
     // A real native binding always advertises the wire features compiled into
     // it. Individual tests can still explicitly set this to `undefined` when
     // exercising the missing-binding diagnostic.

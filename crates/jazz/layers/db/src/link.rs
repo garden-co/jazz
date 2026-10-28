@@ -36,6 +36,8 @@ use std::collections::VecDeque;
 
 use crate::options::RemoteLinkHint;
 
+pub mod host;
+
 /// Retry timing. The defaults are the policy every host uses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LinkPolicy {

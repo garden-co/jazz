@@ -686,6 +686,35 @@ fn mutation_error_event(
 
 type ReadFuture = Pin<Box<dyn Future<Output = HostResult<Vec<u8>>>>>;
 
+/// The shared upstream link machine (`jazz::link`), which decides when the
+/// runtime's WebSocket connects, backs off and reports an outage. The runtime
+/// owns the socket and the timer and steps the machine with JSON documents.
+#[napi(js_name = "UpstreamLink")]
+pub struct NapiUpstreamLink {
+    link: RefCell<jazz::link::host::HostLink>,
+}
+
+#[napi]
+impl NapiUpstreamLink {
+    /// `seed` drives the retry jitter.
+    #[napi(constructor)]
+    pub fn new(seed: f64) -> Self {
+        Self {
+            link: RefCell::new(jazz::link::host::HostLink::new(seed as u64)),
+        }
+    }
+
+    /// Apply one input observed at `now_ms`; returns the actions, events and
+    /// status as JSON.
+    #[napi]
+    pub fn handle(&self, now_ms: f64, input: String) -> napi::Result<String> {
+        self.link
+            .borrow_mut()
+            .handle_json(now_ms, &input)
+            .map_err(napi::Error::from_reason)
+    }
+}
+
 /// A JavaScript-thread-owned read waiting for the server. NAPI promises
 /// execute on a Send worker pool, whereas a Jazz database is deliberately
 /// `Rc`/thread-affine. The adapter drives this object after its peer
@@ -1794,6 +1823,13 @@ impl NapiDb {
             .map_err(host_error)?;
         settle_promises();
         Ok(())
+    }
+
+    /// A fresh upstream link machine for this runtime's server connection;
+    /// `seed` drives its retry jitter.
+    #[napi(js_name = "createUpstreamLink")]
+    pub fn create_upstream_link(&self, seed: f64) -> NapiUpstreamLink {
+        NapiUpstreamLink::new(seed)
     }
 
     /// Connect to the server over byte frames the host carries: each frame

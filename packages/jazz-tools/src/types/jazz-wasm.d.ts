@@ -34,6 +34,11 @@ declare module "jazz-wasm" {
     poll(): Uint8Array | null;
     cancel(): void;
   }
+  /** The core's upstream link machine, stepped with JSON documents. */
+  export class UpstreamLink {
+    constructor(seed: number);
+    handle(nowMs: number, input: string): string;
+  }
   export class WasmPermissionAdviceRequest {
     readonly promise: Promise<"allowed" | "denied" | "unknown">;
     cancel(): void;
@@ -248,6 +253,7 @@ declare module "jazz-wasm" {
     seedForegroundTxTimeHighWater(highWater: bigint): void;
     /** Exact wire features compiled into this WASM artifact. */
     wireFeatures(): number;
+    createUpstreamLink(seed: number): UpstreamLink;
     close(): Promise<boolean>;
     setSessionClaims(claims: Record<string, unknown> | null): void | Promise<void>;
     connectUpstream(): Promise<WasmTransport>;

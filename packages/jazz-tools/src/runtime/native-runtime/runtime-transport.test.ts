@@ -12,6 +12,7 @@ import {
 } from "./websocket.js";
 import { BrowserWorkerTransportPump } from "./browser-worker-transport.js";
 import { NativeRuntimeAdapter, type Transport } from "./native-runtime-adapter.js";
+import { createUpstreamLink } from "../testing/napi-runtime-test-utils.js";
 import {
   JazzClient,
   PersistedWriteRejectedError,
@@ -2481,6 +2482,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () => ({
           connectUpstream: () => transport,
+          createUpstreamLink,
           wireFeatures: () => CLIENT_WIRE_FEATURES,
           setTickScheduler: (callback: (urgency: "immediate" | "deferred") => void) => {
             schedulerCallback = callback;
@@ -3342,6 +3344,7 @@ function fakeDb<T extends object>(
   };
   let upstream: Transport | undefined;
   const result: Record<string, unknown> = {
+    createUpstreamLink,
     setTickScheduler: () => undefined,
     onMutationError: () => undefined,
     // The production binding advertises its compiled capability mask. Keep
