@@ -1623,6 +1623,9 @@ fn foreground_command(
             binding.set_slow_query_threshold_ms(ms as f64)?;
             Response::SlowQueryThresholdSet
         }
+        Request::PendingUploadCount => Response::PendingUploadCount {
+            count: binding.pending_upload_count() as u64,
+        },
         Request::BeginStreamingMutation {
             mutation,
             table,

@@ -2,6 +2,7 @@ import type { WasmSchema, Value } from "../../drivers/types.js";
 import type { RuntimeSourcesConfig } from "../context.js";
 import type { MutationErrorEvent } from "../client.js";
 import type { RemoteLinkState } from "../remote-link-state.js";
+import type { LinkStatus } from "../sync-status.js";
 import type { NativeSelfSignedClientProof } from "./native-codec.js";
 import {
   UNSUPPORTED_STORAGE_CODECS_ERROR_CODE,
@@ -513,7 +514,11 @@ export type BrowserFollowerPortRequest =
       query: string;
       options?: string | null;
     }
-  | { type: "inspect-unsubscribe"; id: number; binding: InspectorAttachmentBinding }
+  | {
+      type: "inspect-unsubscribe";
+      id: number;
+      binding: InspectorAttachmentBinding;
+    }
   | {
       type: "init";
       id: number;
@@ -534,7 +539,11 @@ export type BrowserFollowerPortRequest =
       peerActivityEpoch: number;
       peerProcessedActivityEpoch: number;
     }
-  | { type: "update-auth"; authJson: string; sessionClaims: Record<string, unknown> }
+  | {
+      type: "update-auth";
+      authJson: string;
+      sessionClaims: Record<string, unknown>;
+    }
   | { type: "wait-server"; id: number }
   | { type: "disconnect"; id: number }
   | { type: "flush-local"; id: number }
@@ -619,7 +628,11 @@ export type BrowserInspectorControlRequest =
 
 export type BrowserInspectorControlEvent =
   | { type: "contexts"; id: number; contexts: BrowserInspectorContext[] }
-  | { type: "lifecycle-trace"; id: number; entries: BrowserWorkerLifecycleTrace[] }
+  | {
+      type: "lifecycle-trace";
+      id: number;
+      entries: BrowserWorkerLifecycleTrace[];
+    }
   | {
       type: "result";
       id: number;
@@ -629,9 +642,18 @@ export type BrowserInspectorControlEvent =
     };
 
 export type BrowserFollowerPortEvent =
-  | { type: "inspector-query-result"; id: number; value?: unknown; error?: BrowserRelayError }
+  | {
+      type: "inspector-query-result";
+      id: number;
+      value?: unknown;
+      error?: BrowserRelayError;
+    }
   | { type: "runtime-pong"; connectionId: string; nonce: number }
-  | { type: "inspector-binding"; id: number; binding: InspectorAttachmentBinding }
+  | {
+      type: "inspector-binding";
+      id: number;
+      binding: InspectorAttachmentBinding;
+    }
   | { type: "frames"; frames: Uint8Array[] }
   /**
    * Explicit offline is a property of the durable SharedWorker namespace: it
@@ -639,11 +661,11 @@ export type BrowserFollowerPortEvent =
    */
   | { type: "transport-state"; explicitlyDisconnected: boolean }
   /**
-   * Live reachability of the worker's upstream server. Tabs use it only to
+   * Live reachability of the worker's upstream server. Tabs use `state` to
    * decide whether a local-first read's first load may wait for a remote
-   * answer; older tabs ignore it.
+   * answer, and report `link` as their sync status; older tabs ignore it.
    */
-  | { type: "remote-link"; state: RemoteLinkState }
+  | { type: "remote-link"; state: RemoteLinkState; link?: LinkStatus }
   | {
       type: "result";
       id: number;

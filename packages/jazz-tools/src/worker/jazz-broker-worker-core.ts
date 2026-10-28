@@ -105,7 +105,11 @@ type RuntimeContext = {
   disposePageStoreInvalidation: (() => void) | null;
   disposeTelemetry: (() => void) | null;
   disposeAuxiliaryTrace: (() => void) | null;
-  resetBarrier: { id: number; pending: Set<string>; resolve: () => void } | null;
+  resetBarrier: {
+    id: number;
+    pending: Set<string>;
+    resolve: () => void;
+  } | null;
   storageInvalidated: boolean;
   intentionalStorageReset: boolean;
   serverUrl: string | null;
@@ -500,7 +504,9 @@ function attachBootstrapPort(
       // `pendingWorkerClose`: an ordinary idle close remains cancelable by
       // the bootstrap reservation created in `onconnect`.
       if (message?.type === "connect-runtime") {
-        post(port, { type: "worker-closing" } satisfies BrowserSharedWorkerConnectResponse);
+        post(port, {
+          type: "worker-closing",
+        } satisfies BrowserSharedWorkerConnectResponse);
       } else if (
         message?.type === "probe-foreground-node-lease-worker" ||
         message?.type === "acquire-foreground-node-lease"
@@ -1004,7 +1010,10 @@ async function connectTab(
   } catch (error) {
     finishBootstrap();
     if (!signal.aborted) {
-      post(port, { type: "runtime-error", error: serializeBrowserRelayError(error) });
+      post(port, {
+        type: "runtime-error",
+        error: serializeBrowserRelayError(error),
+      });
       port.close();
     }
   } finally {
@@ -1123,7 +1132,10 @@ async function initialize(context: RuntimeContext): Promise<void> {
       {
         selfSignedClientProof: proof,
         scopeIsolatedRelay: true,
-        slowQueryLog: { appId: options.appId, thresholdMs: options.slowQueryThresholdMs },
+        slowQueryLog: {
+          appId: options.appId,
+          thresholdMs: options.slowQueryThresholdMs,
+        },
       },
     );
     context.runtime = runtime;
@@ -1141,10 +1153,17 @@ async function initialize(context: RuntimeContext): Promise<void> {
         post(peer.port, { type: "mutation-error", event: received }),
       );
     });
-    runtime.onRemoteLinkStateChange((state) => {
+    const announceLink = () => {
       // Only the current runtime speaks for this namespace's upstream.
-      if (context.runtime === runtime) broadcast(context, { type: "remote-link", state });
-    }, new AbortController().signal);
+      if (context.runtime !== runtime) return;
+      broadcast(context, {
+        type: "remote-link",
+        state: runtime.remoteLinkState(),
+        link: runtime.upstreamLinkStatus(),
+      });
+    };
+    runtime.onRemoteLinkStateChange(announceLink, new AbortController().signal);
+    runtime.onUpstreamLinkStatusChange(announceLink, new AbortController().signal);
     context.runtime.onServerTransportError((error, { retrying }) => {
       // Transport failures are foreground events, not authority fates or
       // durable notifications. Only peers that have completed admission own a
@@ -1162,7 +1181,10 @@ async function initialize(context: RuntimeContext): Promise<void> {
       context.disposeAuxiliaryTrace = context.runtime.onAuxiliaryTrace((entries) => {
         broadcast(context, {
           type: "relay-trace",
-          entries: entries.map((entry) => ({ ...entry, hop: "worker-server" })),
+          entries: entries.map((entry) => ({
+            ...entry,
+            hop: "worker-server",
+          })),
         });
       });
     }
@@ -1553,7 +1575,10 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
         let txId: TxId;
         try {
           for (const edit of message.edits) {
-            const context = JSON.stringify({ transaction_id: tx, updated_at: edit.updatedAt });
+            const context = JSON.stringify({
+              transaction_id: tx,
+              updated_at: edit.updatedAt,
+            });
             switch (edit.operation) {
               case "insert":
                 activeRuntime.insert(edit.table, edit.values ?? {}, context, edit.rowId);
@@ -1578,7 +1603,11 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
           throw error;
         }
         peer.inspectorWrites.add(txId);
-        post(peer.port, { type: "inspector-query-result", id: message.id, value: txId });
+        post(peer.port, {
+          type: "inspector-query-result",
+          id: message.id,
+          value: txId,
+        });
         return;
       }
       if (message.type === "inspect-wait") {
@@ -1591,7 +1620,11 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
           !peer.context.storageInvalidated &&
           !peer.context.closing
         )
-          post(peer.port, { type: "inspector-query-result", id: message.id, value: null });
+          post(peer.port, {
+            type: "inspector-query-result",
+            id: message.id,
+            value: null,
+          });
         return;
       }
       if (message.type === "inspect-unsubscribe") {
@@ -1609,7 +1642,12 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
         !!peer.subscriber;
       if (message.type === "inspect-query") {
         const value = await activeRuntime.query(message.query, undefined, "local-only", options);
-        if (current()) post(peer.port, { type: "inspector-query-result", id: message.id, value });
+        if (current())
+          post(peer.port, {
+            type: "inspector-query-result",
+            id: message.id,
+            value,
+          });
       } else {
         if (peer.inspectorSubscriptions.has(message.id))
           throw new Error("Inspector subscription already exists");
@@ -1643,7 +1681,11 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
           attachBootstrapPort(message.leasePort, peer.context.options),
         );
       }
-      post(peer.port, { type: "inspector-binding", id: message.id, binding: message.binding });
+      post(peer.port, {
+        type: "inspector-binding",
+        id: message.id,
+        binding: message.binding,
+      });
       return;
     }
     if (message.type === "init") {
@@ -1682,16 +1724,25 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
             pump.receive(pending);
           }
           if (peer.context.explicitlyDisconnected) {
-            post(peer.port, { type: "transport-state", explicitlyDisconnected: true });
+            post(peer.port, {
+              type: "transport-state",
+              explicitlyDisconnected: true,
+            });
           } else {
             ensureServerConnection(peer.context);
           }
-          post(peer.port, { type: "remote-link", state: activeRuntime.remoteLinkState() });
+          post(peer.port, {
+            type: "remote-link",
+            state: activeRuntime.remoteLinkState(),
+            link: activeRuntime.upstreamLinkStatus(),
+          });
           result(peer, message.id, undefined, {
             peerAuthority,
             workerRealmId,
             ...(peer.inspectorAttachment
-              ? { inspectorAttachmentPhysicalDbName: peer.context.options.dbName }
+              ? {
+                  inspectorAttachmentPhysicalDbName: peer.context.options.dbName,
+                }
               : {}),
           });
         } catch (error) {
@@ -1933,7 +1984,10 @@ function attachInspectorControl(authSessionKey: string, port: MessagePort): void
       return;
     }
     attachTab(context, message.tabId, message.port, true);
-    port.postMessage({ type: "result", id: message.id } satisfies BrowserInspectorControlEvent);
+    port.postMessage({
+      type: "result",
+      id: message.id,
+    } satisfies BrowserInspectorControlEvent);
   };
   const dispose = () => {
     port.removeEventListener("message", onMessage);

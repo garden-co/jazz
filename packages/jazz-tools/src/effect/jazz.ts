@@ -1,6 +1,7 @@
 import { Cause, Context, Effect, Exit, Layer, Option, Queue, Stream } from "effect";
 import type { AccountDbConfig } from "../accounts/context.js";
 import type { AuthState } from "../runtime/auth-state.js";
+import type { SyncStatus } from "../runtime/sync-status.js";
 import type {
   DurabilityTier,
   MutationErrorEvent,
@@ -139,6 +140,13 @@ export interface JazzDb extends JazzReads {
    * rejection as a {@link JazzWriteRejected} failure instead.
    */
   readonly mutationErrors: Stream.Stream<MutationErrorEvent>;
+  /** The current sync status, then every change to it. See {@link Db.getSyncStatus}. */
+  readonly syncStatus: Stream.Stream<SyncStatus>;
+  /**
+   * Succeed once every write committed before the call is accepted by the
+   * server. See {@link Db.waitForSync}.
+   */
+  waitForSync(options?: { timeoutMs?: number }): Effect.Effect<void, JazzError>;
 }
 
 /** Operations available inside {@link JazzDb.transaction}. */
@@ -214,7 +222,10 @@ export class Jazz extends Context.Service<Jazz, JazzDb>()("jazz-tools/effect/Jaz
       Jazz,
       Effect.map(
         Effect.acquireRelease(
-          Effect.tryPromise({ try: () => createDb(config), catch: toJazzError("open") }),
+          Effect.tryPromise({
+            try: () => createDb(config),
+            catch: toJazzError("open"),
+          }),
           (db) => Effect.ignore(Effect.tryPromise(() => db.shutdown(options?.shutdown))),
         ),
         makeJazzDb,
@@ -247,7 +258,10 @@ const makeReads = (target: {
   all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]>;
 }): JazzReads => ({
   all: (query, options) =>
-    Effect.tryPromise({ try: () => target.all(query, options), catch: toJazzError("all") }),
+    Effect.tryPromise({
+      try: () => target.all(query, options),
+      catch: toJazzError("all"),
+    }),
   one: (query, options) =>
     Effect.tryPromise({
       // The same lowering as `Db.one` and `Transaction.one`, which return
@@ -302,7 +316,11 @@ function makeJazzDb(db: Db): JazzDb {
           yield* restore(
             Effect.tryPromise({
               try: () =>
-                (committed as WriteHandle<unknown, unknown> & { wait(): Promise<unknown> }).wait(),
+                (
+                  committed as WriteHandle<unknown, unknown> & {
+                    wait(): Promise<unknown>;
+                  }
+                ).wait(),
               catch: toWriteError("serializableTransaction"),
             }),
           );
@@ -379,20 +397,38 @@ function makeJazzDb(db: Db): JazzDb {
     serializableTransaction: (body) => runTransaction("serializable", body, undefined),
 
     canInsert: (table, data) =>
-      Effect.tryPromise({ try: () => db.canInsert(table, data), catch: toJazzError("canInsert") }),
+      Effect.tryPromise({
+        try: () => db.canInsert(table, data),
+        catch: toJazzError("canInsert"),
+      }),
     canRead: (table, id) =>
-      Effect.tryPromise({ try: () => db.canRead(table, id), catch: toJazzError("canRead") }),
+      Effect.tryPromise({
+        try: () => db.canRead(table, id),
+        catch: toJazzError("canRead"),
+      }),
     canUpdate: (table, id, data) =>
       Effect.tryPromise({
         try: () => db.canUpdate(table, id, data),
         catch: toJazzError("canUpdate"),
       }),
     canDelete: (table, id) =>
-      Effect.tryPromise({ try: () => db.canDelete(table, id), catch: toJazzError("canDelete") }),
+      Effect.tryPromise({
+        try: () => db.canDelete(table, id),
+        catch: toJazzError("canDelete"),
+      }),
 
     // `onAuthChanged` reports the current state as soon as it is attached.
     authState: callbackStream<AuthState>((emit) => db.onAuthChanged(emit)),
     mutationErrors: callbackStream<MutationErrorEvent>((emit) => db.onMutationError(emit)),
+    syncStatus: callbackStream<SyncStatus>((emit) => {
+      emit(db.getSyncStatus());
+      return db.onSyncStatusChange(emit);
+    }),
+    waitForSync: (options) =>
+      Effect.tryPromise({
+        try: (signal) => db.waitForSync({ ...options, signal }),
+        catch: toJazzError("waitForSync"),
+      }),
   };
 }
 

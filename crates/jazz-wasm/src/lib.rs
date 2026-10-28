@@ -1520,6 +1520,12 @@ impl WasmDb {
         })
     }
 
+    /// How many local commits still wait for the server's verdict.
+    #[wasm_bindgen(js_name = pendingUploadCount)]
+    pub fn pending_upload_count(&self) -> Result<u32, JsValue> {
+        Ok(self.binding()?.pending_upload_count() as u32)
+    }
+
     /// The optimistic in-memory side of a browser client/worker pair: its
     /// subscriptions open with the worker's answer.
     #[wasm_bindgen(js_name = setNonDurableClient)]

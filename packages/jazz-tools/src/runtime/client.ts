@@ -25,6 +25,7 @@ import { getTrustedReservedSession, setTrustedReservedSession } from "./db-inter
 import { isRenewableAuthFailure, mapAuthReason } from "./auth-state.js";
 import { httpUrlToWs } from "./url.js";
 import type { RemoteLinkState } from "./remote-link-state.js";
+import type { LinkStatus } from "./sync-status.js";
 import { toError } from "./util.js";
 import { parseUuidBytes } from "./hex.js";
 
@@ -125,7 +126,12 @@ function encodeBranchViewBase(base: BranchViewBase | undefined): WireBranchViewB
   return base?.kind === "current"
     ? { Current: encodeBranchSelector(base.branch) }
     : base?.kind === "snapshot"
-      ? { Snapshot: { branch: encodeBranchSelector(base.branch), snapshot: base.snapshot } }
+      ? {
+          Snapshot: {
+            branch: encodeBranchSelector(base.branch),
+            snapshot: base.snapshot,
+          },
+        }
       : undefined;
 }
 
@@ -167,6 +173,12 @@ export interface Runtime {
   onRemoteLinkStateChange?(listener: (state: RemoteLinkState) => void, signal: AbortSignal): void;
   /** @internal Report the host's view of the server link to the core read gate. */
   setRemoteLinkHint?(state: RemoteLinkState): void;
+  /** @internal The upstream link as the app sees it. */
+  upstreamLinkStatus?(): LinkStatus;
+  /** @internal How many local commits still wait for the server's verdict. */
+  pendingUploadCount?(): number;
+  /** @internal Observe changes of the link status or the pending count. */
+  onSyncStatusChange?(listener: () => void, signal: AbortSignal): void;
   /** @internal Construct a provisional row without staging or accepting a write. */
   previewInsert?(table: string, values: InsertValues, objectId?: string): Row;
   insert(
@@ -311,7 +323,9 @@ declare const openTransactionIdBrand: unique symbol;
 declare const txIdBrand: unique symbol;
 
 /** Identity of a mutable transaction. Invalid after commit or rollback. */
-export type OpenTransactionId = string & { readonly [openTransactionIdBrand]: true };
+export type OpenTransactionId = string & {
+  readonly [openTransactionIdBrand]: true;
+};
 /** Immutable identity assigned to a successfully committed transaction. */
 export type TxId = string & { readonly [txIdBrand]: true };
 
@@ -845,8 +859,8 @@ export interface WriteWaitOptions {
 /** Longest delay `setTimeout` honours; longer ones fire at once. */
 const MAX_WRITE_WAIT_TIMEOUT_MS = 2_147_483_647;
 
-/** Validate a caller's `timeoutMs` before any wait work starts. */
-function validateWriteWaitTimeout(timeoutMs: unknown): void {
+/** @internal Validate a caller's `timeoutMs` before any wait work starts. */
+export function validateWriteWaitTimeout(timeoutMs: unknown): void {
   if (timeoutMs === undefined) return;
   if (
     typeof timeoutMs !== "number" ||
@@ -1103,7 +1117,9 @@ export class JazzClient {
       admin_secret?: string;
       backend_secret?: string;
       backend_session?: Session;
-    } = { jwt_token: this.context.backendSecret ? null : (this.context.jwtToken ?? null) };
+    } = {
+      jwt_token: this.context.backendSecret ? null : (this.context.jwtToken ?? null),
+    };
     // A backend open is a separate trusted-serving credential. Do not send an
     // incidental admin secret alongside it: server admission gives admin
     // precedence, which would turn this runtime's SYSTEM backend authority
@@ -1174,7 +1190,11 @@ export class JazzClient {
     const prerequisite = transactionAdmission.get(this);
     if (prerequisite) {
       const context = this.writeContext(session, attribution);
-      const state: { pending?: Promise<void>; committing: boolean; unopened?: boolean } = {
+      const state: {
+        pending?: Promise<void>;
+        committing: boolean;
+        unopened?: boolean;
+      } = {
         committing: false,
         unopened: true,
       };
@@ -1274,7 +1294,10 @@ export class JazzClient {
             branch,
           ) => {
             assertActive();
-            const writeContext = this.writeContext(session, attribution, id, { updatedAt, branch });
+            const writeContext = this.writeContext(session, attribution, id, {
+              updatedAt,
+              branch,
+            });
             return this.runtime.update(table, objectId, updates, writeContext);
           },
           upsertInternal: (table, objectId, values, options, session, attribution) => {

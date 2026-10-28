@@ -7,6 +7,16 @@ import { runtimeConnectionIncarnation, runtimeRandomBytes } from "../runtime-ent
 import { stripColumnQualifier } from "../query-column-name.js";
 import { writeRow } from "../write-row.js";
 import { RemoteLinkStatePublisher, type RemoteLinkState } from "../remote-link-state.js";
+import {
+  CONNECTED,
+  CONNECTING,
+  DerivedStatePublisher,
+  LOCAL_ONLY,
+  linkStatusFromUpstream,
+  offlineLink,
+  sameLinkStatus,
+  type LinkStatus,
+} from "../sync-status.js";
 import type {
   ColumnDescriptor,
   ColumnType,
@@ -237,6 +247,8 @@ type NativeDb = {
   setRemoteLinkHint?(state: string): void;
   /** A fresh upstream link machine for this runtime's server WebSocket. */
   createUpstreamLink?(seed: number): NativeUpstreamLink;
+  /** How many local commits still wait for the server's verdict. */
+  pendingUploadCount?(): number;
   nativeConnectionStatus?(): {
     configured: boolean;
     explicitlyOffline: boolean;
@@ -555,6 +567,7 @@ type UpstreamLinkStatus = {
   /** Only a new server or `connect()` revives the link: a stop, or a refused credential no renewal fixes. */
   terminal: boolean;
 };
+type RuntimeSyncStatus = { link: LinkStatus; pendingUploads: number };
 type UpstreamLinkStep = {
   actions: Array<
     | { type: "connect"; attempt: number }
@@ -872,7 +885,10 @@ export class NativeRuntimeAdapter implements Runtime {
   private linkStepping = false;
   /** The attempt the link machine is waiting to hear from. */
   private linkAttemptId: number | null = null;
-  private linkTimer: { token: number; handle: ReturnType<typeof setTimeout> } | null = null;
+  private linkTimer: {
+    token: number;
+    handle: ReturnType<typeof setTimeout>;
+  } | null = null;
   /** Settles `serverCarrierPromise` while the link is not live. */
   private linkConnection: {
     resolve: (carrier: WebSocketCarrier) => void;
@@ -889,6 +905,14 @@ export class NativeRuntimeAdapter implements Runtime {
   private nativeLinkPoll: ReturnType<typeof setInterval> | null = null;
   private firstLoadWaitSeen = false;
   private readonly remoteLink = new RemoteLinkStatePublisher(() => this.readRemoteLinkState());
+  private readonly linkStatusPublisher = new DerivedStatePublisher<LinkStatus>(
+    () => this.upstreamLinkStatus(),
+    sameLinkStatus,
+  );
+  private readonly syncStatusPublisher = new DerivedStatePublisher<RuntimeSyncStatus>(
+    () => this.readSyncStatus(),
+    (a, b) => a.pendingUploads === b.pendingUploads && sameLinkStatus(a.link, b.link),
+  );
   private readonly pendingInboundServerFrames: Uint8Array[] = [];
   private serverInboundRouting: Promise<void> = Promise.resolve();
   private serverInboundProcessed = false;
@@ -1385,14 +1409,13 @@ export class NativeRuntimeAdapter implements Runtime {
       !this.db?.nativeConnectionStatus ||
       this.nativeLinkPoll ||
       this.closed ||
-      !this.firstLoadWaitSeen ||
-      !this.remoteLink.hasListeners
+      !this.linkHasListeners()
     ) {
       return;
     }
     this.nativeLinkPoll = setInterval(() => {
-      if (!this.remoteLink.hasListeners) this.stopNativeLinkPoll();
-      else this.remoteLink.changed();
+      if (!this.linkHasListeners()) this.stopNativeLinkPoll();
+      else this.linkChanged();
     }, NATIVE_LINK_POLL_MS);
   }
 
@@ -1407,6 +1430,78 @@ export class NativeRuntimeAdapter implements Runtime {
   private stopNativeLinkPoll(): void {
     if (this.nativeLinkPoll) clearInterval(this.nativeLinkPoll);
     this.nativeLinkPoll = null;
+  }
+
+  /**
+   * Whether someone observes the link: a sync status listener, or a read
+   * gate listener once a read may wait for the server.
+   */
+  private linkHasListeners(): boolean {
+    return (
+      this.syncStatusPublisher.hasListeners ||
+      this.linkStatusPublisher.hasListeners ||
+      (this.firstLoadWaitSeen && this.remoteLink.hasListeners)
+    );
+  }
+
+  private linkChanged(): void {
+    this.remoteLink.changed();
+    this.linkStatusPublisher.changed();
+    this.syncStatusPublisher.changed();
+  }
+
+  /** The upstream link as the app sees it; see {@link LinkStatus}. */
+  upstreamLinkStatus(): LinkStatus {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.upstreamLinkStatus();
+    if (this.closed) return offlineLink("stopped", false);
+    const nativeStatus = this.db?.nativeConnectionStatus?.();
+    if (nativeStatus) {
+      if (!nativeStatus.configured) return LOCAL_ONLY;
+      if (nativeStatus.explicitlyOffline) return offlineLink("disconnected");
+      if (nativeStatus.authRejected) return offlineLink("auth");
+      if (nativeStatus.connected) return CONNECTED;
+      // The relay reports a failure only once its link machine published
+      // an outage, or stopped.
+      if (this.serverTransportError) {
+        return this.serverTransportErrorRetrying ? offlineLink("network") : offlineLink("stopped");
+      }
+      return CONNECTING;
+    }
+    return linkStatusFromUpstream(this.linkStatus);
+  }
+
+  /** How many local commits still wait for the server's verdict. */
+  pendingUploadCount(): number {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.pendingUploadCount();
+    if (this.closed) return 0;
+    return this.db?.pendingUploadCount?.() ?? 0;
+  }
+
+  /** Observe changes of {@link upstreamLinkStatus} alone. */
+  onUpstreamLinkStatusChange(listener: (link: LinkStatus) => void, signal: AbortSignal): void {
+    if (this !== this.ownerRuntime) {
+      this.ownerRuntime.onUpstreamLinkStatusChange(listener, signal);
+      return;
+    }
+    this.linkStatusPublisher.subscribe(listener, signal);
+    this.startNativeLinkPoll();
+  }
+
+  /** Observe changes of {@link upstreamLinkStatus} and {@link pendingUploadCount}. */
+  onSyncStatusChange(listener: () => void, signal: AbortSignal): void {
+    if (this !== this.ownerRuntime) {
+      this.ownerRuntime.onSyncStatusChange(listener, signal);
+      return;
+    }
+    this.syncStatusPublisher.subscribe(listener, signal);
+    this.startNativeLinkPoll();
+  }
+
+  private readSyncStatus(): RuntimeSyncStatus {
+    return {
+      link: this.upstreamLinkStatus(),
+      pendingUploads: this.pendingUploadCount(),
+    };
   }
 
   private readRemoteLinkState(): RemoteLinkState {
@@ -1539,7 +1634,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.linkAttemptId = null;
     this.settleLinkConnection(new Error("server transport disconnected"));
     this.stopNativeLinkPoll();
-    this.remoteLink.changed();
+    this.linkChanged();
     const connectionAttempt = this.serverConnectionAttempt;
     this.serverConnectionAttempt = null;
     if (connectionAttempt) {
@@ -2435,7 +2530,7 @@ export class NativeRuntimeAdapter implements Runtime {
       // connection manager controls lifecycle only, never a parallel socket.
       this.db.reconnectNativeUpstream();
       this.nativeLinkEverConnected = false;
-      this.remoteLink.changed();
+      this.linkChanged();
       return;
     }
     const normalizedAuthJson = normalizeBackendWebSocketAuth(authJson);
@@ -2486,7 +2581,7 @@ export class NativeRuntimeAdapter implements Runtime {
         for (const event of step.events) {
           if (event.type === "authFailed") this.authFailureCallback?.(event.reason);
         }
-        this.remoteLink.changed();
+        this.linkChanged();
       }
     } catch (error) {
       // Inputs queued behind a failed step belong to a link state that no
@@ -2668,7 +2763,7 @@ export class NativeRuntimeAdapter implements Runtime {
     // A published outage stays visible to Global readers until a retry
     // actually reconnects; each failed attempt must not hide it again.
     if (!this.linkStatus?.outagePublished) this.forgetServerTransportError();
-    this.remoteLink.changed();
+    this.linkChanged();
     let resolveTerminal!: (error: Error) => void;
     const terminal = new Promise<Error>((resolve) => {
       resolveTerminal = resolve;
@@ -2770,7 +2865,10 @@ export class NativeRuntimeAdapter implements Runtime {
         });
         attempt.admission = admission;
         const outcome = await Promise.race([
-          admission.then((transport) => ({ type: "admitted" as const, transport })),
+          admission.then((transport) => ({
+            type: "admitted" as const,
+            transport,
+          })),
           terminal.then((error) => ({ type: "terminal" as const, error })),
         ]);
         // The attempt already ended and reported why.
@@ -2805,7 +2903,10 @@ export class NativeRuntimeAdapter implements Runtime {
         // A handshake or admission that fails on this side cannot succeed by
         // retrying; a refusal from the server already ended the attempt.
         const failure = error instanceof Error ? error : new Error(errorMessage(error));
-        this.endLinkAttempt(attempt, failure, { kind: "fatal", message: failure.message });
+        this.endLinkAttempt(attempt, failure, {
+          kind: "fatal",
+          message: failure.message,
+        });
       });
   }
 
@@ -2849,7 +2950,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this !== this.ownerRuntime) return this.ownerRuntime.disconnect(options);
     if (this.db?.disconnectNativeUpstream) {
       this.db.disconnectNativeUpstream();
-      this.remoteLink.changed();
+      this.linkChanged();
       return;
     }
     const transport = this.serverTransport;
@@ -2873,7 +2974,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (transport && transport !== attemptTransport) {
       retirements.push(Promise.resolve().then(() => this.retirePeerTransport(transport)));
     }
-    this.remoteLink.changed();
+    this.linkChanged();
     await Promise.all(retirements);
   }
 
@@ -2948,7 +3049,7 @@ export class NativeRuntimeAdapter implements Runtime {
     // waits armed through an outage are still waiting for their settlement.
     if (!this.serverTransportError) return;
     this.forgetServerTransportError();
-    this.remoteLink.changed();
+    this.linkChanged();
   }
 
   reportRemoteMutationError(event: MutationErrorEvent): void {
@@ -2957,23 +3058,45 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   /** General graceful-shutdown barrier, including recovered durable writes. */
-  async waitForPendingWrites(tier = "global"): Promise<void> {
-    if (this !== this.ownerRuntime) return this.ownerRuntime.waitForPendingWrites(tier);
+  /**
+   * Wait until every write committed so far reaches `tier`. By default a
+   * reported outage fails the wait; `throughOutage` keeps it pending until a
+   * terminal failure, as a write's own Global wait does (#3923). `signal`
+   * ends the wait with its reason; the writes are unaffected.
+   */
+  async waitForPendingWrites(
+    tier = "global",
+    options: { throughOutage?: boolean; signal?: AbortSignal } = {},
+  ): Promise<void> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.waitForPendingWrites(tier, options);
     if (!this.db.waitForPendingWrites)
       throw new Error("Native runtime lacks graceful sync shutdown; rebuild its bindings");
+    const { throughOutage = false, signal } = options;
+    signal?.throwIfAborted();
     await this.flushLocalSettlements();
-    this.throwServerTransportErrorForTier(tier);
+    this.throwServerTransportErrorForTier(tier, throughOutage);
     this.startServerPump();
-    const failure = this.waitForServerTransportError(tier);
+    const failure = this.waitForServerTransportError(tier, throughOutage);
+    let onAbort: (() => void) | undefined;
+    const aborted = signal
+      ? new Promise<never>((_, reject) => {
+          onAbort = () => reject(signal.reason);
+          signal.addEventListener("abort", onAbort, { once: true });
+        })
+      : null;
     try {
       const wait = this.awaitNativeRead(
         Promise.resolve(this.db.waitForPendingWrites(tier)).then(
           (result) => result ?? new Uint8Array(),
         ),
       );
-      await (failure ? Promise.race([wait, failure.promise]) : wait);
+      const races: Promise<unknown>[] = [wait];
+      if (failure) races.push(failure.promise);
+      if (aborted) races.push(aborted);
+      await (races.length > 1 ? Promise.race(races) : wait);
     } finally {
       failure?.cancel();
+      if (onAbort) signal?.removeEventListener("abort", onAbort);
     }
   }
 
@@ -3696,6 +3819,8 @@ export class NativeRuntimeAdapter implements Runtime {
       for (let round = 0; ; round += 1) {
         this.coreTickAgain = false;
         await this.db.tick();
+        // Commits and the server's verdicts change the pending count.
+        this.syncStatusPublisher.changed();
         this.reportSlowQueries();
         this.pumpSubscriptions();
         this.scheduleServerPump();
@@ -4090,14 +4215,16 @@ export class NativeRuntimeAdapter implements Runtime {
       this.serverTransportError === null || (this.serverTransportErrorRetrying && !reconnecting);
     this.serverTransportError = error instanceof Error ? error : new Error(message);
     this.serverTransportErrorRetrying = reconnecting;
-    this.remoteLink.changed();
+    this.linkChanged();
     // An outage the client keeps reconnecting through leaves remote
     // subscriptions and writes' Global waits open: they resume on the next
     // connection (#3572, #3923).
     if (!reconnecting) this.failRemoteSubscriptions(this.serverTransportError);
     this.resolveServerTransportErrorWaiters(this.serverTransportError, reconnecting);
     if (report)
-      this.serverTransportErrorCallback?.(this.serverTransportError, { retrying: reconnecting });
+      this.serverTransportErrorCallback?.(this.serverTransportError, {
+        retrying: reconnecting,
+      });
   }
 
   private finishServerConnectionAttempt(
@@ -4107,7 +4234,7 @@ export class NativeRuntimeAdapter implements Runtime {
   ): void {
     if (attempt.finished) return;
     attempt.finished = true;
-    this.remoteLink.changed();
+    this.linkChanged();
     attempt.outcome = error;
     attempt.resolveTerminal(error);
     const isCurrent =
