@@ -145,6 +145,16 @@ pub struct WireTransportAdapter<W> {
 /// the carrier's count and length prefixes.
 const MAX_MESSAGE_FRAME_BYTES: usize = jazz_protocol::protocol_limits::MAX_WIRE_FRAME_BYTES - 64;
 
+// Keep the existing semantic bytes; this extraction only admits bounded
+// publications at the wire-frame encoder and joiner.
+fn encode_bounded_message(message: &SyncMessage) -> Result<Vec<u8>, postcard::Error> {
+    let bytes = postcard::to_allocvec(message)?;
+    if bytes.len() > jazz_protocol::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES {
+        return Err(postcard::Error::SerializeBufferFull);
+    }
+    Ok(bytes)
+}
+
 /// `message` as wire frames. A `Rows` message can outgrow one frame (a
 /// first result, or one commit's fan-out): its images travel in as many
 /// frames as it takes (a row fits one, as a large value travels as
@@ -152,17 +162,27 @@ const MAX_MESSAGE_FRAME_BYTES: usize = jazz_protocol::protocol_limits::MAX_WIRE_
 /// them one message again.
 pub fn encode_frames(message: SyncMessage) -> Result<Vec<Vec<u8>>, postcard::Error> {
     let SyncMessage::Rows { images } = message else {
-        return Ok(vec![postcard::to_allocvec(&message)?]);
+        let frame = encode_bounded_message(&message)?;
+        if frame.len() > MAX_MESSAGE_FRAME_BYTES {
+            return Err(postcard::Error::SerializeBufferFull);
+        }
+        return Ok(vec![frame]);
     };
     let mut parts = Vec::new();
     split_rows(images, &mut parts)?;
     let last = parts.len() - 1;
     for (i, (images, frame)) in parts.iter_mut().enumerate() {
         if i < last {
-            *frame = postcard::to_allocvec(&SyncMessage::RowsPart {
+            *frame = encode_bounded_message(&SyncMessage::RowsPart {
                 images: std::mem::take(images),
             })?;
         }
+    }
+    if parts.len() > jazz_protocol::protocol_limits::MAX_WIRE_BATCH_FRAMES
+        || parts.iter().map(|(_, frame)| frame.len()).sum::<usize>()
+            > jazz_protocol::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES
+    {
+        return Err(postcard::Error::SerializeBufferFull);
     }
     Ok(parts.into_iter().map(|(_, frame)| frame).collect())
 }
@@ -174,13 +194,16 @@ fn split_rows(
     parts: &mut Vec<(Vec<Image>, Vec<u8>)>,
 ) -> Result<(), postcard::Error> {
     let message = SyncMessage::Rows { images };
-    let frame = postcard::to_allocvec(&message)?;
+    let frame = encode_bounded_message(&message)?;
     let SyncMessage::Rows { mut images } = message else {
         unreachable!()
     };
-    if frame.len() <= MAX_MESSAGE_FRAME_BYTES || images.len() <= 1 {
+    if frame.len() <= MAX_MESSAGE_FRAME_BYTES {
         parts.push((images, frame));
         return Ok(());
+    }
+    if images.len() <= 1 {
+        return Err(postcard::Error::SerializeBufferFull);
     }
     let rest = images.split_off(images.len() / 2);
     split_rows(images, parts)?;
@@ -202,6 +225,8 @@ pub fn decode_message(frame: &[u8]) -> Result<SyncMessage, postcard::Error> {
 pub struct FrameJoiner {
     /// The images of the parts received since the last whole message.
     parts: Option<Vec<Image>>,
+    bytes: usize,
+    frames: usize,
 }
 
 impl FrameJoiner {
@@ -209,15 +234,45 @@ impl FrameJoiner {
     /// or a message other than `Rows` after a `RowsPart`, is the peer's
     /// error.
     pub fn push(&mut self, frame: &[u8]) -> Result<Option<SyncMessage>, TransportError> {
+        let result = self.push_checked(frame);
+        if result.is_err() {
+            // Drop a failed message's partial buffers immediately. The carrier
+            // closes the link; no prefix of that message reaches the database.
+            *self = Self::default();
+        }
+        result
+    }
+
+    fn push_checked(&mut self, frame: &[u8]) -> Result<Option<SyncMessage>, TransportError> {
+        if frame.len() > MAX_MESSAGE_FRAME_BYTES {
+            return Err(TransportError::Failed(
+                "sync frame size limit exceeded".into(),
+            ));
+        }
+        let bytes = self
+            .bytes
+            .checked_add(frame.len())
+            .ok_or_else(|| TransportError::Failed("sync message size overflow".into()))?;
+        if bytes > jazz_protocol::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES
+            || self.frames >= jazz_protocol::protocol_limits::MAX_WIRE_BATCH_FRAMES
+        {
+            return Err(TransportError::Failed(
+                "sync message reassembly limit exceeded".into(),
+            ));
+        }
         let message = decode_message(frame)
             .map_err(|error| TransportError::Failed(format!("malformed sync frame: {error}")))?;
         match (self.parts.take(), message) {
             (parts, SyncMessage::RowsPart { images }) => {
+                self.bytes = bytes;
+                self.frames += 1;
                 self.parts = Some(parts.unwrap_or_default());
                 self.parts.as_mut().expect("parts").extend(images);
                 Ok(None)
             }
             (Some(mut joined), SyncMessage::Rows { images }) => {
+                self.bytes = 0;
+                self.frames = 0;
                 joined.extend(images);
                 Ok(Some(SyncMessage::Rows { images: joined }))
             }
