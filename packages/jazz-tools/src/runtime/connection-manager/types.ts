@@ -246,7 +246,10 @@ export abstract class ConnectionManager {
 
   /** Whether this Db's writes reached the server; see {@link SyncStatus}. */
   syncStatus(): SyncStatus {
-    return syncStatus(this.linkStatus(), this.client?.getRuntime().pendingUploadCount?.() ?? 0);
+    const link = this.linkStatus();
+    // Without a server, local commits are never uploaded, so none wait.
+    if (link.state === "local-only") return syncStatus(link, 0);
+    return syncStatus(link, this.client?.getRuntime().pendingUploadCount?.() ?? 0);
   }
 
   /** The upstream connection as the app sees it, including explicit disconnects. */
@@ -314,7 +317,7 @@ export abstract class ConnectionManager {
    */
   async waitForSync(signal?: AbortSignal): Promise<void> {
     const runtime = this.getCurrentClient()?.getRuntime();
-    if (!runtime) return;
+    if (!runtime || this.linkStatus().state === "local-only") return;
     if (!(runtime instanceof NativeRuntimeAdapter))
       throw new Error("Runtime does not support waiting for sync");
     await runtime.waitForPendingWrites("global", {
