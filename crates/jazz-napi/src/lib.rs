@@ -1173,13 +1173,61 @@ impl NapiDb {
 ///
 /// A directory that holds a store from before storage format 1 is refused
 /// with the `unsupported_storage_codecs` code rather than opened empty next to
-/// its data.
+/// its data. `jazz.sqlite.native-root.v1` admits the regular SQLite database
+/// and sidecar files plus unrelated regular files (such as `.DS_Store` or
+/// notes), which are left alone. It refuses symlinks, directories and other
+/// non-regular entries of any name, and regular files named like another
+/// SQLite database or RocksDB store. Validate before SQLite opens or creates
+/// any file.
 fn store_file(data_path: &str) -> napi::Result<std::path::PathBuf> {
     let dir = std::path::Path::new(data_path);
     jazz::format::refuse_groove_store(dir).map_err(|error| host_error(HostError::Engine(error)))?;
     std::fs::create_dir_all(dir)
         .map_err(|error| napi::Error::from_reason(format!("create {data_path}: {error}")))?;
+    let io_error = |error: std::io::Error| {
+        napi::Error::from_reason(format!("inspect native database root {data_path}: {error}"))
+    };
+    for entry in std::fs::read_dir(dir).map_err(io_error)? {
+        let entry = entry.map_err(io_error)?;
+        // DirEntry::file_type does not follow symlinks, so a link of any name
+        // (which could redirect the database or a sidecar into another root)
+        // is refused here, as is any directory.
+        let regular = entry.file_type().map_err(io_error)?.is_file();
+        if !regular || names_foreign_store(&entry.file_name().to_string_lossy()) {
+            return Err(napi_core_error(&CoreError::new(
+                jazz::db::ErrorCode::UnsupportedStorageCodecs,
+                "native database root uses an unsupported storage layout; expected jazz.sqlite.native-root.v1",
+            )));
+        }
+    }
     Ok(dir.join("jazz.sqlite"))
+}
+
+/// Whether a regular file named `name` in a native database root looks like
+/// part of a store other than `jazz.sqlite`: another SQLite database or
+/// sidecar, or a RocksDB (Groove) file. The match is by name only, so a copy
+/// such as `jazz.sqlite.bak` is a harmless stray.
+fn names_foreign_store(name: &str) -> bool {
+    if matches!(
+        name,
+        "jazz.sqlite" | "jazz.sqlite-wal" | "jazz.sqlite-shm" | "jazz.sqlite-journal"
+    ) {
+        return false;
+    }
+    // SQLite databases and their sidecars, and RocksDB table files.
+    const FOREIGN_SUFFIXES: [&str; 8] = [
+        ".sqlite", ".sqlite3", ".db", ".db3", "-wal", "-shm", "-journal", ".sst",
+    ];
+    const ROCKSDB_NAMES: [&str; 3] = ["CURRENT", "IDENTITY", "LOCK"];
+    const ROCKSDB_PREFIXES: [&str; 2] = ["MANIFEST-", "OPTIONS-"];
+    let lower = name.to_ascii_lowercase();
+    FOREIGN_SUFFIXES
+        .iter()
+        .any(|suffix| lower.ends_with(suffix))
+        || ROCKSDB_NAMES.contains(&name)
+        || ROCKSDB_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
 }
 
 #[napi]
@@ -2372,5 +2420,48 @@ pub fn verify_local_first_identity_proof_napi(
             id: String::new(),
             error: Some(e),
         },
+    }
+}
+
+#[cfg(test)]
+mod native_root_tests {
+    use super::names_foreign_store;
+
+    #[test]
+    fn jazz_sqlite_files_and_unrelated_strays_are_admitted() {
+        for name in [
+            "jazz.sqlite",
+            "jazz.sqlite-wal",
+            "jazz.sqlite-shm",
+            "jazz.sqlite-journal",
+            ".DS_Store",
+            "notes.txt",
+            "jazz.sqlite.bak",
+            "application.data",
+        ] {
+            assert!(!names_foreign_store(name), "{name} should be admitted");
+        }
+    }
+
+    #[test]
+    fn other_sqlite_and_rocksdb_files_are_refused() {
+        for name in [
+            "other.sqlite",
+            "other.SQLITE3",
+            "app.db",
+            "app.db3",
+            "app.db-wal",
+            "app.db-shm",
+            "app.db-journal",
+            "jazz.sqlite.bak-wal",
+            "CURRENT",
+            "LOCK",
+            "IDENTITY",
+            "MANIFEST-000001",
+            "OPTIONS-000005",
+            "000003.sst",
+        ] {
+            assert!(names_foreign_store(name), "{name} should be refused");
+        }
     }
 }
