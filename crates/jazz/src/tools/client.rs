@@ -438,6 +438,7 @@ impl Forwarder {
                 old_index: row.previous_index.unwrap_or(row.index),
                 new_index: row.index,
                 row: changed.then_some(public),
+                splices: row.splices.clone(),
             });
         }
         for row in &added_rows {

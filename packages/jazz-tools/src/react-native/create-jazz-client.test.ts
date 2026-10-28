@@ -388,6 +388,8 @@ function encodeSubscriptionDelta(delta: { added: EncodedRow[] }): Uint8Array {
   writer.vec(() => undefined, 0);
   writer.vec(() => undefined, 0);
   writer.vec(() => undefined, 0);
+  // No updated rows, so no splices.
+  writer.vec(() => undefined, 0);
   return writer.finish();
 }
 

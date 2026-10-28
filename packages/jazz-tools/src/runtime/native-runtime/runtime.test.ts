@@ -7283,6 +7283,7 @@ function encodeTerminalSubscriptionDelta(schema: WasmSchema): Uint8Array {
   suffix.vec(() => {}, 0); // updated previous indices
   suffix.vec(() => {}, 0); // updated indices
   suffix.vec(() => {}, 0); // removed indices
+  suffix.vec(() => {}, 0); // updated splices
   return concatBytes([rowBatches, suffix.finish()]);
 }
 
@@ -7384,6 +7385,8 @@ function encodeSubscriptionDelta(delta: {
   ]) {
     writer.vec((indexWriter, index) => indexWriter.u64(indices[index]!), indices.length);
   }
+  // No opted-in splices on any updated row.
+  writer.vec((row) => row.vec(() => {}, 0), delta.updated.length);
   return writer.finish();
 }
 
@@ -7663,6 +7666,7 @@ function encodeUserWrappedSubscriptionDelta(row: {
   delta.vec(() => undefined, 0);
   delta.vec(() => undefined, 0);
   delta.vec(() => undefined, 0);
+  delta.vec(() => undefined, 0); // updated splices
   return delta.finish();
 }
 
@@ -7701,6 +7705,7 @@ function encodeTeamGatherSubscriptionDelta(delta: {
   writer.vec((indexWriter, index) => indexWriter.u64(index), updated.length);
   writer.vec((indexWriter, index) => indexWriter.u64(index), updated.length);
   writer.vec(() => undefined, 0);
+  writer.vec((row) => row.vec(() => undefined, 0), updated.length); // updated splices
   return writer.finish();
 }
 
