@@ -865,6 +865,44 @@ pub enum SyncMessage {
     Stored {
         tx: u64,
     },
+    /// Client → server, after its first `Schema`: the schema versions
+    /// whose stored names this replica keeps, each with
+    /// [`names_digest`] of them. The server answers with the
+    /// [`SyncMessage::Catalogue`] entries it lacks or keeps otherwise.
+    Holds {
+        versions: Vec<([u8; 16], [u8; 16])>,
+    },
+    /// Server → client: schema versions this store admitted, in admission
+    /// order, with where it stores their tables and columns, and the lens
+    /// cells its lenses made. A replica stores rows as its upstream does
+    /// (rows travel by stored names, untranslated), so it admits each
+    /// version under these names, renaming what it named otherwise while
+    /// it did not know them. Sent ahead of any row after a `Holds`, and
+    /// again when the store admits a version.
+    Catalogue {
+        versions: Vec<CatalogueVersion>,
+        cells: Vec<CatalogueCell>,
+    },
+}
+
+/// One admitted schema version in a [`SyncMessage::Catalogue`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CatalogueVersion {
+    /// Its structural schema, without permissions.
+    pub schema: crate::protocol::SchemaVersion,
+    /// Per table: (name, stored name, per column (name, stored name)).
+    pub names: Vec<(String, String, Vec<(String, String)>)>,
+}
+
+/// A stored column a lens fills (see `crate::names::LensCell`): a copy
+/// of stored column `source`, or a dropped column's backwards default.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CatalogueCell {
+    pub table: String,
+    pub column: String,
+    pub since: [u8; 16],
+    pub source: Option<String>,
+    pub default: Cell,
 }
 
 impl SyncMessage {
@@ -892,6 +930,8 @@ impl SyncMessage {
             Self::SchemaAdmission { .. } => "SchemaAdmission",
             Self::RowsPart { .. } => "RowsPart",
             Self::Stored { .. } => "Stored",
+            Self::Holds { .. } => "Holds",
+            Self::Catalogue { .. } => "Catalogue",
         }
     }
 }
@@ -941,6 +981,20 @@ impl std::ops::Deref for PendingQueue {
 }
 
 impl PendingQueue {
+    /// Stored table `from` is stored as `to` now.
+    fn moved_table(&mut self, from: &str, to: &str) {
+        let commits = std::mem::take(&mut self.commits);
+        self.by_row.clear();
+        for mut pending in commits {
+            for row in &mut pending.rows {
+                if row.0 == from {
+                    row.0 = to.to_owned();
+                }
+            }
+            self.push(pending);
+        }
+    }
+
     fn push(&mut self, pending: Pending) {
         for row in &pending.rows {
             self.by_row
@@ -1069,6 +1123,10 @@ pub(crate) struct Client {
     unsent: Vec<SyncMessage>,
     /// Commits sent but not settled, for resending after a reconnect.
     sent: Vec<SyncMessage>,
+    /// Pending commits written under a schema version other than the
+    /// current one (before an upgrade), by tx: their ops name tables and
+    /// columns as it does, so they upload under it.
+    versions: HashMap<u64, [u8; 16]>,
     node: [u8; 16],
     connection: u64,
     fates: HashMap<u64, Result<(), Error>>,
@@ -1393,6 +1451,10 @@ pub(crate) struct Session {
     fetched_upstream: BTreeSet<u64>,
     /// The client was told its declared version is not admitted.
     told_unadmitted: bool,
+    /// The versions the client keeps names for, with their digests
+    /// (`None` until its `Holds`), and whether it is owed a `Catalogue`.
+    holds: Option<HashMap<[u8; 16], [u8; 16]>>,
+    catalogue_owed: bool,
     /// On a relay, the upstream subscription each of the client's
     /// subscriptions holds (query, binding, include_deleted): its results
     /// settle once the upstream answers, never from the relay's store.
@@ -1437,6 +1499,8 @@ impl Session {
             version: None,
             fetched_upstream: BTreeSet::new(),
             told_unadmitted: false,
+            holds: None,
+            catalogue_owed: false,
             schema: None,
             relayed: BTreeMap::new(),
             first_load: BTreeMap::new(),
@@ -1459,6 +1523,14 @@ impl Session {
 
     /// Nothing to send this tick: no queued result events, no rows its
     /// commits touched, no replies waiting.
+    /// A version was admitted: a client that declared its holdings is
+    /// told of it.
+    pub(super) fn owe_catalogue(&mut self) {
+        if self.holds.is_some() {
+            self.catalogue_owed = true;
+        }
+    }
+
     fn idle(&self) -> bool {
         self.touched.is_empty()
             && self.outbox.is_empty()
@@ -3097,6 +3169,13 @@ pub(crate) const SYNC_DDL: &str = "\
 const REJECTED_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_rejected \
     (tx INTEGER PRIMARY KEY, commit_msg BLOB NOT NULL, error BLOB NOT NULL, serializable INTEGER NOT NULL)";
 
+/// The schema version each pending commit was written under (see
+/// `persist_pending`). Created by the first pending commit, so that
+/// opening an existing store without writing leaves the file
+/// byte-identical.
+const PENDING_VERSIONS_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_pending_versions \
+    (tx INTEGER PRIMARY KEY, version BLOB NOT NULL)";
+
 /// Per remote query, the server seq its result was last settled
 /// through (see `Remote::through`). Created by the first settlement, so
 /// that opening an existing store without one leaves the file
@@ -3220,6 +3299,14 @@ impl Inner {
             rusqlite::params![tx as i64, encode(commit), encode(&rows)],
         )
         .map_err(storage)?;
+        // Which version's names its ops use, should the store reopen under
+        // another one before it settles.
+        self.exec(PENDING_VERSIONS_DDL, []).map_err(storage)?;
+        self.exec(
+            "INSERT OR REPLACE INTO _jazz_pending_versions (tx, version) VALUES (?1, ?2)",
+            rusqlite::params![tx as i64, self.owner_version.as_bytes().to_vec()],
+        )
+        .map_err(storage)?;
         Ok(())
     }
 
@@ -3334,7 +3421,85 @@ impl Inner {
     fn forget_pending(&self, tx: u64) -> Result<(), Error> {
         self.exec("DELETE FROM _jazz_pending WHERE tx = ?1", [tx as i64])
             .map_err(storage)?;
+        if self.has_table("_jazz_pending_versions")? {
+            self.exec(
+                "DELETE FROM _jazz_pending_versions WHERE tx = ?1",
+                [tx as i64],
+            )
+            .map_err(storage)?;
+        }
         Ok(())
+    }
+
+    /// The rows pending commits recorded in stored table `from`, which is
+    /// stored as `to` now.
+    pub(crate) fn rename_pending_rows(&self, from: &str, to: &str) -> Result<(), Error> {
+        let stored: Vec<(i64, Vec<u8>)> = self
+            .conn
+            .prepare("SELECT tx, rows FROM _jazz_pending")
+            .and_then(|mut statement| {
+                statement
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<Result<_, _>>()
+            })
+            .map_err(storage)?;
+        for (tx, rows) in stored {
+            let mut rows: Vec<(String, [u8; 16], Vec<u8>)> = postcard::from_bytes(&rows)
+                .map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?;
+            if !rows.iter().any(|(table, ..)| table == from) {
+                continue;
+            }
+            for row in &mut rows {
+                if row.0 == from {
+                    row.0 = to.to_owned();
+                }
+            }
+            self.exec(
+                "UPDATE _jazz_pending SET rows = ?2 WHERE tx = ?1",
+                rusqlite::params![tx, encode(&rows)],
+            )
+            .map_err(storage)?;
+        }
+        Ok(())
+    }
+
+    fn has_table(&self, name: &str) -> Result<bool, Error> {
+        let count: i64 = self
+            .conn
+            .cached_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [name],
+                |r| r.get(0),
+            )
+            .map_err(storage)?;
+        Ok(count > 0)
+    }
+
+    /// The schema version each pending commit was written under, where
+    /// one was recorded (stores from before have none: the current one).
+    fn pending_versions(&self) -> Result<HashMap<u64, crate::ids::SchemaVersionId>, Error> {
+        if !self.has_table("_jazz_pending_versions")? {
+            return Ok(HashMap::new());
+        }
+        let mut statement = self
+            .conn
+            .prepare("SELECT tx, version FROM _jazz_pending_versions")
+            .map_err(storage)?;
+        let rows = statement
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))
+            .map_err(storage)?;
+        let mut versions = HashMap::new();
+        for row in rows {
+            let (tx, version) = row.map_err(storage)?;
+            let version: [u8; 16] = version.try_into().map_err(|_| {
+                Error::new(
+                    ErrorCode::Storage,
+                    "bad schema version in _jazz_pending_versions",
+                )
+            })?;
+            versions.insert(tx as u64, crate::ids::SchemaVersionId::from_bytes(version));
+        }
+        Ok(versions)
     }
 
     pub(super) fn persist_meta(&self, key: &str, value: u64) -> Result<(), Error> {
@@ -3519,6 +3684,78 @@ impl Inner {
             Some(client) if self.relays_upstream() => client.known,
             _ => self.seq,
         }
+    }
+
+    /// The `Catalogue` session `index` is owed: the admitted versions it
+    /// keeps no names for, or other names for.
+    fn catalogue_for(&mut self, index: usize) -> Option<SyncMessage> {
+        if !std::mem::take(&mut self.sessions[index].catalogue_owed) {
+            return None;
+        }
+        let mut versions = Vec::new();
+        let mut sent = Vec::new();
+        for (version, names) in self.names.in_order() {
+            let digest = crate::names::names_digest(names);
+            let bytes = *version.as_bytes();
+            let holds = self.sessions[index].holds.as_ref()?;
+            if holds.get(&bytes) == Some(&digest) {
+                continue;
+            }
+            let jazz = if version == self.owner_version {
+                &self.owner.jazz
+            } else {
+                match self.admitted.iter().find(|(id, _)| *id == version) {
+                    Some((_, jazz)) => jazz,
+                    // Named by an earlier process, not admitted by this
+                    // one: its columns still travel in rows.
+                    None => continue,
+                }
+            };
+            versions.push(CatalogueVersion {
+                schema: crate::protocol::SchemaVersion {
+                    id: version,
+                    schema: jazz.without_permissions(),
+                },
+                names: names
+                    .tables
+                    .iter()
+                    .map(|(table, (stored, columns))| {
+                        let columns = columns
+                            .iter()
+                            .map(|(column, stored)| (column.clone(), stored.clone()))
+                            .collect();
+                        (table.clone(), stored.clone(), columns)
+                    })
+                    .collect(),
+            });
+            sent.push((bytes, digest));
+        }
+        if versions.is_empty() {
+            return None;
+        }
+        let cells = self
+            .names
+            .cells()
+            .iter()
+            .map(|cell| {
+                let (source, default) = match &cell.rule {
+                    crate::names::LensCellRule::Copy(source) => (Some(source.clone()), Cell::Null),
+                    crate::names::LensCellRule::Dropped(default) => {
+                        (None, Cell::from(default.clone()))
+                    }
+                };
+                CatalogueCell {
+                    table: cell.table.clone(),
+                    column: cell.column.clone(),
+                    since: *cell.since.as_bytes(),
+                    source,
+                    default,
+                }
+            })
+            .collect();
+        let holds = self.sessions[index].holds.get_or_insert_with(HashMap::new);
+        holds.extend(sent);
+        Some(SyncMessage::Catalogue { versions, cells })
     }
 
     /// How a subscription resuming from `since` opens (see [`Resume`]):
@@ -3747,6 +3984,7 @@ impl Inner {
             .collect::<Result<Vec<_>, _>>()
             .map_err(storage)?;
         drop(statement);
+        let versions = self.pending_versions()?;
         for (tx, commit, rows) in pending {
             let mut commit: SyncMessage = postcard::from_bytes(&commit)
                 .map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?;
@@ -3771,6 +4009,11 @@ impl Inner {
                 .cloned()
                 .map(from_wire)
                 .collect::<Result<Vec<_>, _>>()?;
+            // Written under an earlier version: it uploads under that one,
+            // and replays here by the current names (see `rebase`).
+            if let Some(version) = versions.get(&tx).filter(|v| **v != self.owner_version) {
+                client.versions.insert(tx, *version.as_bytes());
+            }
             if let Some(author) = author.as_deref().map(AuthorSubject::from_canonical) {
                 let author = author.map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?;
                 ops.iter_mut()
@@ -3802,6 +4045,22 @@ impl Inner {
 }
 
 impl Client {
+    /// Stored table `from` is stored as `to` now (a replica took its
+    /// upstream's name for it).
+    pub(crate) fn moved_table(&mut self, from: &str, to: &str) {
+        self.pending.moved_table(from, to);
+        self.baselines = std::mem::take(&mut self.baselines)
+            .into_iter()
+            .map(|((table, row, key), mut image)| {
+                if let Some(image) = image.as_mut().filter(|image| image.table == from) {
+                    image.table = to.to_owned();
+                }
+                let table = if table == from { to.to_owned() } else { table };
+                ((table, row, key), image)
+            })
+            .collect();
+    }
+
     /// Its host says there is no server: it is the last word on its store.
     fn no_server(&self) -> bool {
         let link = self.hint.get();
@@ -3813,6 +4072,7 @@ impl Client {
             node,
             connection: 0,
             sent: Vec::new(),
+            versions: HashMap::new(),
             transport: None,
             hint: Rc::new(StdCell::new(Link {
                 hint: RemoteLinkHint::NoServer,
@@ -3887,14 +4147,24 @@ impl Db {
                 m,
                 SyncMessage::Subscribe { .. }
                     | SyncMessage::Schema { .. }
+                    | SyncMessage::Holds { .. }
                     | SyncMessage::Commit { .. }
                     | SyncMessage::PushChunks { .. }
                     | SyncMessage::ChunkRequests { .. }
             )
         });
         let version = *inner.owner_version.as_bytes();
+        // The versions whose names this store keeps: the server sends
+        // those it stores otherwise, or it has and this store lacks.
+        let versions = inner
+            .names
+            .in_order()
+            .into_iter()
+            .map(|(version, names)| (*version.as_bytes(), crate::names::names_digest(names)))
+            .collect();
         let client = inner.client.as_mut().expect("client");
         client.outbox.insert(0, SyncMessage::Schema { version });
+        client.outbox.insert(1, SyncMessage::Holds { versions });
         client.outbox.extend(resubscribe);
         // Relayed reads still waiting are asked again: the old session's
         // answers are lost with it.
@@ -4160,13 +4430,10 @@ impl Db {
             let Some(image) = inner.current_image(table, *row, key)? else {
                 continue;
             };
-            let Some(named) = image_out(&inner.owner, image.clone()) else {
-                continue;
-            };
             expect.push(Expect {
                 id: image.id,
                 key: image.key.clone(),
-                digest: echo_digest(&named),
+                digest: echo_digest(&image),
             });
             expected.push(image);
         }
@@ -4868,10 +5135,11 @@ impl Db {
             // sort key its indexes need.
             while let Some(message) = queue.pop_front() {
                 match message {
+                    // Rows and evictions name stored tables and columns, as
+                    // this store mirrors its upstream's.
                     SyncMessage::Rows { images } => {
-                        let names = inner.owner.clone();
                         for image in images {
-                            let Some(image) = image_in(&names, image) else {
+                            let Some(image) = inner.stored_image(image) else {
                                 continue;
                             };
                             let overlaid = inner.receive_image(image)?;
@@ -4879,10 +5147,14 @@ impl Db {
                         }
                     }
                     SyncMessage::Evict { table, id, key } => {
-                        let Ok(table) = inner.owner.stored_table(&table).map(str::to_owned) else {
+                        if !inner.physical.tables.contains_key(&table) {
                             continue;
-                        };
+                        }
                         rebase |= inner.receive_eviction(&table, RowUuid::from_bytes(id), &key)?;
+                    }
+                    SyncMessage::Catalogue { versions, cells } => {
+                        inner.mirror_catalogue(versions, cells)?;
+                        rebase = true;
                     }
                     SyncMessage::Settled {
                         id,
@@ -5119,6 +5391,7 @@ impl Db {
         for commit in &commits {
             pushes.push(inner.pushes_for(commit)?);
         }
+        let current = *inner.owner_version.as_bytes();
         let client = inner.client.as_mut().expect("client");
         let transport = client.transport.as_mut().expect("transport");
         for commit in &commits {
@@ -5126,14 +5399,25 @@ impl Db {
                 client.sent.push(commit.clone());
             }
         }
+        // A commit written under an earlier version is sent under it: the
+        // server reads its ops by that version's names.
+        let mut declared = current;
         for (commit, (locators, batches)) in commits.into_iter().zip(pushes) {
-            if let SyncMessage::Commit { tx, .. } = &commit
-                && !locators.is_empty()
-            {
-                client.pushed.insert(*tx, locators);
+            if let SyncMessage::Commit { tx, .. } = &commit {
+                if !locators.is_empty() {
+                    client.pushed.insert(*tx, locators);
+                }
+                let version = client.versions.get(tx).copied().unwrap_or(current);
+                if version != declared {
+                    out.push(SyncMessage::Schema { version });
+                    declared = version;
+                }
             }
             out.extend(batches);
             out.push(commit);
+        }
+        if declared != current {
+            out.push(SyncMessage::Schema { version: current });
         }
         out.extend(reads);
         // A full outbound queue keeps the rest, in order, for the flush its
@@ -5168,6 +5452,7 @@ impl Db {
             return Ok(());
         };
         let baseline = std::mem::take(&mut client.baselines);
+        let versions = client.versions.clone();
         let pending: Vec<(u64, Vec<StagedOp>)> = client
             .pending
             .iter()
@@ -5177,6 +5462,19 @@ impl Db {
             .pending
             .iter()
             .flat_map(|p| p.rows.iter().cloned())
+            .collect();
+        // A commit written under an earlier version replays by the names
+        // the current one gives what it wrote, as they stand now (an
+        // upstream's catalogue may have renamed them since).
+        let pending: Vec<(u64, Vec<StagedOp>)> = pending
+            .into_iter()
+            .map(|(tx, ops)| match versions.get(&tx) {
+                Some(version) => {
+                    let version = crate::ids::SchemaVersionId::from_bytes(*version);
+                    (tx, inner.by_current_names(version, ops))
+                }
+                None => (tx, ops),
+            })
             .collect();
         for ((table, row, key), image) in &baseline {
             match image {
@@ -5618,7 +5916,10 @@ impl Db {
             // admitted (a draft awaiting its lens) waits: serving it
             // under another version would expose rows it may not read
             // that way.
-            if !matches!(message, SyncMessage::Schema { .. }) {
+            if !matches!(
+                message,
+                SyncMessage::Schema { .. } | SyncMessage::Holds { .. }
+            ) {
                 let inner = self.inner.borrow_mut();
                 if inner.session_unadmitted(index) {
                     inbound.push_front(message);
@@ -6230,6 +6531,11 @@ impl Db {
                 }
             }
             let mut out = Vec::new();
+            // Rows travel by stored names: the versions they are stored by
+            // reach the client first.
+            if let Some(catalogue) = inner.catalogue_for(index) {
+                out.push(catalogue);
+            }
             if !history_seqs.is_empty() {
                 out.push(SyncMessage::Origins {
                     commits: inner.origins(&history_seqs)?,
@@ -6267,8 +6573,7 @@ impl Db {
                         return true;
                     };
                     let echo = echoes.swap_remove(at);
-                    let same = image_out(&names, image.clone())
-                        .is_some_and(|named| echo_digest(&named) == echo.digest);
+                    let same = echo_digest(image) == echo.digest;
                     if same {
                         held.entry(echo.tx)
                             .or_default()
@@ -6360,9 +6665,6 @@ impl Db {
             }
             let session = &mut inner.sessions[index];
             for message in out {
-                let Some(message) = message_out(&names, message) else {
-                    continue;
-                };
                 // A failed or backed-up client is dropped, never waited
                 // on: one slow client must not stall the others, and its
                 // replica is coherent only with every message. It
@@ -6625,6 +6927,12 @@ impl Db {
             // An older client's held rows: each subscription's opening
             // covers its own.
             SyncMessage::Hold { .. } => {}
+            SyncMessage::Holds { versions } => {
+                let mut inner = self.inner.borrow_mut();
+                let session = &mut inner.sessions[index];
+                session.holds = Some(versions.into_iter().collect());
+                session.catalogue_owed = true;
+            }
             SyncMessage::Unsubscribe { id } => {
                 let mut inner = self.inner.borrow_mut();
                 inner.sessions[index].support.remove(&id);
@@ -7470,66 +7778,6 @@ impl Default for HeldWrites {
             reads: HashSet::new(),
         }
     }
-}
-
-// ---- names on the wire ------------------------------------------------------
-//
-// Stored images name stored tables and columns, which differ between nodes
-// (each names a renamed table or column after where it first stored it). On
-// the wire a row names its table and columns as the client's schema version
-// does: the server maps its stored names to the session's, the client maps
-// them back to its own. A column the receiving side's schema lacks is left
-// out; provenance (`$...`) is never renamed.
-
-/// An image named by `schema` instead of by stored names; `None` when the
-/// schema has no such table.
-fn image_out(schema: &Schema, mut image: Image) -> Option<Image> {
-    let table = schema.by_stored(&image.table)?;
-    image.table = table.name.clone();
-    image.cells = std::mem::take(&mut image.cells)
-        .into_iter()
-        .filter_map(
-            |(name, cell)| match table.columns.iter().find(|c| c.stored == name) {
-                Some(column) => Some((column.name.clone(), cell)),
-                None => name.starts_with('$').then_some((name, cell)),
-            },
-        )
-        .collect();
-    Some(image)
-}
-
-/// An image named by `schema`, by this store's stored names instead.
-fn image_in(schema: &Schema, mut image: Image) -> Option<Image> {
-    let table = schema.tables.get(&image.table)?;
-    image.table = table.stored.clone();
-    image.cells = std::mem::take(&mut image.cells)
-        .into_iter()
-        .filter_map(
-            |(name, cell)| match table.columns.iter().find(|c| c.name == name) {
-                Some(column) => Some((column.stored.clone(), cell)),
-                None => name.starts_with('$').then_some((name, cell)),
-            },
-        )
-        .collect();
-    Some(image)
-}
-
-/// A server message as the session's schema names rows.
-fn message_out(schema: &Schema, message: SyncMessage) -> Option<SyncMessage> {
-    Some(match message {
-        SyncMessage::Rows { images } => SyncMessage::Rows {
-            images: images
-                .into_iter()
-                .filter_map(|image| image_out(schema, image))
-                .collect(),
-        },
-        SyncMessage::Evict { table, id, key } => SyncMessage::Evict {
-            table: schema.by_stored(&table)?.name.clone(),
-            id,
-            key,
-        },
-        other => other,
-    })
 }
 
 // ---- reads through the binding entry point -------------------------------

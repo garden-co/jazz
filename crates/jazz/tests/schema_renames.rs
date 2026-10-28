@@ -999,3 +999,97 @@ fn a_row_a_newer_version_inserts_gives_a_dropped_column_its_backwards_default() 
         "an update keeps the stored value; an insert takes the backwards default"
     );
 }
+
+/// Nico's review, point 6: a replica stores rows as its upstream does and
+/// learns each version's names from it. A client store reopened under a
+/// newer version that renamed a column reads the rows it cached by the new
+/// name, offline (it learned the version's names while connected) and
+/// after reconnecting.
+#[test]
+fn a_client_store_upgraded_across_a_rename_reads_its_cached_rows_by_the_new_name() {
+    let server = server(v1(), vec![(v2(), rename_title())]);
+    seed(&server, "todos", 1, &[("name", text("from server"))]);
+    let path = scratch("upgrade-rename");
+    {
+        let client = block_on(Db::open_at(
+            config(v1(), 1, user(1)),
+            &path,
+            FileOptions::default(),
+        ))
+        .unwrap();
+        let (c, s) = pipe();
+        let _link = block_on(client.connect_upstream(c));
+        server.accept_subscriber(s, user(1));
+        let q = client.prepare_query(&Query::from("todos")).unwrap();
+        let _stream = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
+        pump(&server, &[&client]);
+        assert_eq!(column(&client, "title"), [Some(text("from server"))]);
+    }
+    // The app ships v2 (title renamed to name); the store reopens under it.
+    let client = block_on(Db::open_at(
+        config(v2(), 1, user(1)),
+        &path,
+        FileOptions::default(),
+    ))
+    .unwrap();
+    assert_eq!(
+        column(&client, "name"),
+        [Some(text("from server"))],
+        "offline, by the names the upstream gave v2"
+    );
+    let (c, s) = pipe();
+    let _link = block_on(client.connect_upstream(c));
+    server.accept_subscriber(s, user(1));
+    let q = client.prepare_query(&Query::from("todos")).unwrap();
+    let _stream = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
+    pump(&server, &[&client]);
+    assert_eq!(column(&client, "name"), [Some(text("from server"))]);
+}
+
+/// A client opened under a version it never learned the upstream's names
+/// for names its renamed column on its own; once connected it takes the
+/// upstream's names, and its pending write, staged under the version
+/// before, uploads under that version and reads by the new name.
+#[test]
+fn a_pending_write_staged_before_a_client_upgrade_uploads_and_reads_by_the_new_name() {
+    let server = server(v1(), vec![(v2(), rename_title())]);
+    let path = scratch("upgrade-pending");
+    {
+        let client = block_on(Db::open_at(
+            config(v1(), 1, user(1)),
+            &path,
+            FileOptions::default(),
+        ))
+        .unwrap();
+        let (c, _s) = pipe();
+        let _link = block_on(client.connect_upstream(c));
+        insert(&client, "todos", 7, "title", "offline v1 write");
+        block_on(client.tick()).unwrap();
+    }
+    let client = block_on(Db::open_at(
+        config(v2(), 1, user(1)),
+        &path,
+        FileOptions::default(),
+    ))
+    .unwrap();
+    let (c, s) = pipe();
+    let _link = block_on(client.connect_upstream(c));
+    server.accept_subscriber(s, user(1));
+    pump(&server, &[&client]);
+    assert!(client.take_upstream_rejections().is_empty());
+    assert_eq!(read(&server, "todos", "name"), [text("offline v1 write")]);
+    assert_eq!(column(&client, "name"), [Some(text("offline v1 write"))]);
+}
+
+fn column(db: &Db, name: &str) -> Vec<Option<Value>> {
+    let prepared = db.prepare_query(&Query::from("todos")).unwrap();
+    block_on(db.all(&prepared, local()))
+        .unwrap()
+        .iter()
+        .map(|row| {
+            row.cells()
+                .find(|(n, _)| *n == name)
+                .and_then(|(_, v)| v.cloned())
+        })
+        .collect()
+}

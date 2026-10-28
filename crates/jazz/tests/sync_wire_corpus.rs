@@ -50,11 +50,12 @@ const FORMAT: &str = "jazz-sqlite-sync-wire-corpus-v1";
 
 /// Every `SyncMessage` variant, in declaration order, but `RowsPart`: a
 /// framing of a `Rows` too large for one frame, whose real frames are
-/// megabytes (binding_host's frame-split test covers it).
-const VARIANTS: [&str; 20] = [
+/// megabytes (binding_host's frame-split test covers it); and `Hold`,
+/// retired and never sent, which keeps its tag so `Commit`'s stays (the
+/// storage corpus pins pending uploads stored as `Commit` frames).
+const VARIANTS: [&str; 21] = [
     "Subscribe",
     "Unsubscribe",
-    "Hold",
     "Fetch",
     "Commit",
     "ChunkRequests",
@@ -72,6 +73,8 @@ const VARIANTS: [&str; 20] = [
     "Origins",
     "SchemaAdmission",
     "Stored",
+    "Holds",
+    "Catalogue",
 ];
 
 #[derive(Debug, Serialize, Deserialize)]
