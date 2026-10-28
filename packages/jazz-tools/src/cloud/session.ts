@@ -248,11 +248,63 @@ export function profileFromTokens(
   };
 }
 
+/** Exchange one owned profile's token without reading or writing credentials. */
+async function requestTokenRefresh(profile: CloudProfile, options: CloudSessionOptions) {
+  const fetchImpl = options.fetch ?? fetch;
+  secureUrl(profile.workos.apiBaseUrl, "WorkOS API URL");
+  let response: Awaited<ReturnType<typeof fetchJson>>;
+  try {
+    response = await fetchJson(
+      fetchImpl,
+      `${profile.workos.apiBaseUrl}/user_management/authenticate`,
+      {
+        ...form({
+          grant_type: "refresh_token",
+          refresh_token: profile.refreshToken,
+          client_id: profile.workos.clientId,
+        }),
+        signal: AbortSignal.timeout(options.refreshTimeoutMs ?? REFRESH_TIMEOUT_MS),
+      },
+    );
+  } catch (error) {
+    const timedOut = (error as Error)?.name === "TimeoutError";
+    throw new CloudAuthError(
+      "refresh_failed",
+      timedOut
+        ? "Refreshing the Jazz Cloud session timed out. Try again."
+        : "Could not reach WorkOS to refresh the Jazz Cloud session. Try again.",
+    );
+  }
+  return response;
+}
+
+function refreshedProfile(
+  profile: CloudProfile,
+  { status, body }: Awaited<ReturnType<typeof requestTokenRefresh>>,
+): CloudProfile {
+  if (status !== 200) {
+    throw new CloudAuthError(
+      "session_expired",
+      "Your Jazz Cloud session has expired. Run `jazz-tools login` again.",
+    );
+  }
+  return profileFromTokens(
+    profile.cloudUrl,
+    profile.workos,
+    toTokenResponse(body),
+    profile.createdAt,
+  );
+}
+
+function accessTokenIsFresh(profile: CloudProfile, options: CloudSessionOptions): boolean {
+  const nowSeconds = Math.floor((options.now ?? Date.now)() / 1000);
+  return profile.accessTokenExpiresAt - REFRESH_MARGIN_SECONDS > nowSeconds;
+}
+
 async function refreshProfile(
   stale: CloudProfile,
   options: CloudSessionOptions,
 ): Promise<CloudProfile> {
-  const fetchImpl = options.fetch ?? fetch;
   // Refresh tokens rotate and are single-use, so parallel jazz-tools processes
   // must not refresh at the same time: the loser would present a consumed token
   // and could log the user out. Hold the credentials lock across the whole
@@ -269,51 +321,13 @@ async function refreshProfile(
       // Another process refreshed while we waited for the lock.
       return profile;
     }
-    secureUrl(profile.workos.apiBaseUrl, "WorkOS API URL");
-    let response: Awaited<ReturnType<typeof fetchJson>>;
-    try {
-      response = await fetchJson(
-        fetchImpl,
-        `${profile.workos.apiBaseUrl}/user_management/authenticate`,
-        {
-          ...form({
-            grant_type: "refresh_token",
-            refresh_token: profile.refreshToken,
-            client_id: profile.workos.clientId,
-          }),
-          signal: AbortSignal.timeout(options.refreshTimeoutMs ?? REFRESH_TIMEOUT_MS),
-        },
-      );
-    } catch (error) {
-      // The token may or may not have been consumed; keep the profile so the
-      // next command can try again (it re-reads under the lock).
-      const timedOut = (error as Error)?.name === "TimeoutError";
-      throw new CloudAuthError(
-        "refresh_failed",
-        timedOut
-          ? "Refreshing the Jazz Cloud session timed out. Try again."
-          : "Could not reach WorkOS to refresh the Jazz Cloud session. Try again.",
-      );
+    const response = await requestTokenRefresh(profile, options);
+    // Only forget a definitively rejected token while it is still ours. A
+    // timeout or transport error leaves the stored profile available to retry.
+    if (response.status === 400 || response.status === 401) {
+      await credentials.delete(profile.cloudUrl);
     }
-    const { status, body } = response;
-    if (status !== 200) {
-      // A rejected refresh token is dead for good: forget it so the next
-      // command gives a clear "log in" message instead of retrying a revoked
-      // session. Under the lock the stored token is the one just rejected.
-      if (status === 400 || status === 401) {
-        await credentials.delete(profile.cloudUrl);
-      }
-      throw new CloudAuthError(
-        "session_expired",
-        "Your Jazz Cloud session has expired. Run `jazz-tools login` again.",
-      );
-    }
-    const next = profileFromTokens(
-      profile.cloudUrl,
-      profile.workos,
-      toTokenResponse(body),
-      profile.createdAt,
-    );
+    const next = refreshedProfile(profile, response);
     await credentials.save(next);
     return next;
   }, options.env);
@@ -336,8 +350,7 @@ export async function getAccessToken(
       `Not logged in to ${options.cloudUrl}. Run \`jazz-tools login\`.`,
     );
   }
-  const nowSeconds = Math.floor((options.now ?? Date.now)() / 1000);
-  if (!options.forceRefresh && profile.accessTokenExpiresAt - REFRESH_MARGIN_SECONDS > nowSeconds) {
+  if (!options.forceRefresh && accessTokenIsFresh(profile, options)) {
     return profile.accessToken;
   }
   return (await refreshProfile(profile, options)).accessToken;
@@ -345,4 +358,45 @@ export async function getAccessToken(
 
 export function canRefresh(env: NodeJS.ProcessEnv = process.env): boolean {
   return !env.JAZZ_CLOUD_TOKEN?.trim();
+}
+
+/**
+ * Retire one stored login. Removing it under the lock transfers ownership to
+ * this operation; a later login must not be read, refreshed or removed by it.
+ * Remote revocation remains best effort and never holds the credentials lock.
+ */
+export async function logoutStoredSession(
+  options: CloudSessionOptions,
+): Promise<{ loggedOut: boolean; sessionRevoked: boolean }> {
+  const captured = await withCredentialsLock(async (credentials) => {
+    const profile = await credentials.read(options.cloudUrl);
+    if (profile) await credentials.delete(options.cloudUrl);
+    return profile;
+  }, options.env);
+  if (!captured) return { loggedOut: false, sessionRevoked: false };
+
+  let profile = captured;
+  const refresh = async () => {
+    profile = refreshedProfile(profile, await requestTokenRefresh(profile, options));
+  };
+  const revoke = () =>
+    fetchJson(options.fetch ?? fetch, `${options.cloudUrl}/api/v1/logout`, {
+      method: "POST",
+      headers: { accept: "application/json", authorization: `Bearer ${profile.accessToken}` },
+    });
+  try {
+    if (!accessTokenIsFresh(profile, options)) await refresh();
+    let response = await revoke();
+    if (response.status === 401) {
+      await refresh();
+      response = await revoke();
+    }
+    return {
+      loggedOut: true,
+      sessionRevoked:
+        response.status >= 200 && response.status < 300 && response.body?.revoked === true,
+    };
+  } catch {
+    return { loggedOut: true, sessionRevoked: false };
+  }
 }
