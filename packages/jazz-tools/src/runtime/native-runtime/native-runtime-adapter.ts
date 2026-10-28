@@ -94,6 +94,7 @@ import {
   type WireError,
   wireAuthFailureReason,
 } from "./websocket.js";
+import { isRenewableAuthFailure, mapAuthReason } from "../auth-state.js";
 import {
   createRecord,
   createRecordValueDecoder,
@@ -519,6 +520,8 @@ type TransactionOwnerState = {
 
 type ServerTransportErrorWaiter = {
   active: boolean;
+  /** A write's Global wait outlives an outage the client keeps retrying (#3923). */
+  throughOutage: boolean;
   reject: (error: Error) => void;
 };
 
@@ -802,7 +805,9 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly subscriptions = new Map<number, SubscriptionState>();
   private authFailureCallback: ((reason: string) => void) | null = null;
   private mutationErrorCallback: ((event: MutationErrorEvent) => void) | null = null;
-  private serverTransportErrorCallback: ((error: Error) => void) | null = null;
+  private serverTransportErrorCallback:
+    | ((error: Error, state: { retrying: boolean }) => void)
+    | null = null;
   private readonly deliveredMutationErrors = new Set<string>();
   private serverTransport: Transport | null = null;
   private peerUpstreamAttached = false;
@@ -825,6 +830,10 @@ export class NativeRuntimeAdapter implements Runtime {
   private networkRetryCount = 0;
   /** The current `serverTransportError` is a published outage, not a terminal failure. */
   private serverOutageReported = false;
+  /** The client keeps reconnecting through the current `serverTransportError`. */
+  private serverTransportErrorRetrying = false;
+  private serverTransportErrorAwaitsAuth = false;
+  private nativeAuthRefusalRenewable = false;
   private serverOutageStartedAt: number | null = null;
   private serverLinkRequested = false;
   private nativeLinkEverConnected = false;
@@ -1008,11 +1017,14 @@ export class NativeRuntimeAdapter implements Runtime {
     // unavailable and remote subscriptions fail once it stops retrying,
     // while local work keeps running (#4337).
     this.db.onUpstreamFailure?.((failure) => {
-      if (!failure) return this.clearRemoteServerTransportError();
+      if (!failure) {
+        this.nativeAuthRefusalRenewable = false;
+        return this.clearRemoteServerTransportError();
+      }
       this.handleServerTransportError(
         new Error(failure.reason),
         this.serverConnectionGeneration,
-        failure.retrying,
+        failure.retrying || this.nativeAuthRefusalRenewable,
       );
     });
   }
@@ -2128,26 +2140,58 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!write) {
       throw new Error(`Wait for transaction failed: unknown transaction ${txId}`);
     }
+    const { signal } = options;
     // Claim the error as soon as the transaction ID is available, before any
     // readiness or transport awaits. Reuse this wait across transport wakes.
     const settlement = options.observeOnly ? write.wait(tier, true) : write.wait(tier);
     // Readiness can outlive a rejected settlement. Observe it now so the host
     // never sees an unhandled Promise rejection while readiness is pending.
     void settlement.catch(() => undefined);
-    if (options.ready) await options.ready;
+    if (options.ready) {
+      if (signal) {
+        // A wait abandoned while readiness is pending must not park here.
+        let wake!: () => void;
+        const aborted = new Promise<void>((resolve) => {
+          wake = () => resolve();
+          signal.addEventListener("abort", wake, { once: true });
+        });
+        try {
+          await Promise.race([options.ready, aborted]);
+        } finally {
+          signal.removeEventListener("abort", wake);
+        }
+      } else {
+        await options.ready;
+      }
+    }
+    // An outage the client keeps retrying delays the settlement; only a
+    // terminal transport failure, closing the runtime or the caller's signal
+    // ends the wait (#3923).
     for (;;) {
-      this.throwServerTransportErrorForTier(tier);
+      if (this.closed) throw new Error("Wait for transaction failed: native runtime is closed");
+      signal?.throwIfAborted();
+      this.throwServerTransportErrorForTier(tier, true);
       const observedServerWorkEpoch = this.serverTransportWorkEpoch;
       this.startServerPump();
-      this.throwServerTransportErrorForTier(tier);
-      const transportError = this.waitForServerTransportError(tier);
+      this.throwServerTransportErrorForTier(tier, true);
+      const transportError = this.waitForServerTransportError(tier, true);
       const transportWork = this.waitForServerTransportWork(tier, observedServerWorkEpoch);
+      let stopAbortWake: (() => void) | undefined;
       try {
         const wakes: Array<Promise<"settled" | "work"> | Promise<never>> = [
           settlement.then(() => "settled" as const),
         ];
         if (transportError) wakes.push(transportError.promise);
         if (transportWork) wakes.push(transportWork.promise.then(() => "work" as const));
+        if (signal) {
+          wakes.push(
+            new Promise<"work">((resolve) => {
+              const wake = () => resolve("work");
+              signal.addEventListener("abort", wake, { once: true });
+              stopAbortWake = () => signal.removeEventListener("abort", wake);
+            }),
+          );
+        }
         if ((await Promise.race(wakes)) === "settled") {
           this.pumpSubscriptions();
           return;
@@ -2159,6 +2203,7 @@ export class NativeRuntimeAdapter implements Runtime {
         }
         throw error;
       } finally {
+        stopAbortWake?.();
         transportError?.cancel();
         transportWork?.cancel();
       }
@@ -2415,7 +2460,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const transportIdentity = peerIdentityForWebSocketAuth(normalizedAuthJson, this.peerIdentity);
     // A published outage stays visible to Global readers until a retry
     // actually reconnects; each failed attempt must not hide it again.
-    if (!this.serverOutageReported) this.serverTransportError = null;
+    if (!this.serverOutageReported) this.forgetServerTransportError();
     this.serverEndpointUrl = url;
     this.serverAuthJson = normalizedAuthJson;
     this.remoteLink.changed();
@@ -2455,8 +2500,15 @@ export class NativeRuntimeAdapter implements Runtime {
           (error.code === "websocket_closed" || error.code === "websocket_error")
         )
           return;
-        this.handleServerTransportError(error, generation);
         const reason = wireAuthFailureReason(error);
+        // A refused credential the app renews leads to a reconnect, as an
+        // outage does: writes' Global waits and remote subscriptions wait
+        // for it (#3923).
+        const renewable = reason !== null && isRenewableAuthFailure(reason);
+        this.handleServerTransportError(error, generation, renewable);
+        // A retired socket's refusal is not this connection's auth state.
+        if (generation !== this.serverConnectionGeneration) return;
+        this.serverTransportErrorAwaitsAuth = renewable;
         if (reason) this.authFailureCallback?.(reason);
       },
       onTerminal: (error) => {
@@ -2646,7 +2698,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.serverOutageReported = false;
     this.serverOutageStartedAt = null;
     this.clearServerReconnectTimer();
-    if (!this.serverReplacementRetirement) this.serverTransportError = null;
+    if (!this.serverReplacementRetirement) this.forgetServerTransportError();
     if (options.rejectWaiters) {
       this.resolveServerTransportErrorWaiters(new Error("server transport disconnected"));
     } else if (!options.preserveRemoteWaiters) {
@@ -2710,6 +2762,7 @@ export class NativeRuntimeAdapter implements Runtime {
 
   updateAuth(authJson: string): Promise<void> | void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.updateAuth(authJson);
+    this.nativeAuthRefusalRenewable = false;
     if (this.db?.rejectAuthUpdate) return this.db.rejectAuthUpdate();
     const endpoint = this.serverEndpointUrl ?? this.serverReplacementIntent?.url;
     if (!endpoint) return;
@@ -2721,7 +2774,13 @@ export class NativeRuntimeAdapter implements Runtime {
     this.authFailureCallback = callback;
     // A native host's socket reports a refused credential as auth state, as
     // the web socket path does, so the app renews from it (#4248, #4296).
-    this.db.onAuthRejected?.((reason) => this.authFailureCallback?.(reason));
+    this.db.onAuthRejected?.((reason) => {
+      // The native host stops its link on a refused credential and reports
+      // that as a terminal upstream failure. A credential the app renews
+      // restarts it, so treat it as the web socket path does (#3923).
+      this.nativeAuthRefusalRenewable = isRenewableAuthFailure(mapAuthReason(reason));
+      this.authFailureCallback?.(reason);
+    });
   }
 
   onMutationError(callback: (event: MutationErrorEvent) => void): void {
@@ -2731,29 +2790,45 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   /**
-   * Observe a terminal upstream transport/protocol failure. This has no fate
-   * semantics: it only wakes remote waits and subscriptions that are active
-   * in this runtime.
+   * Observe the first upstream transport failure, and whether the client
+   * keeps reconnecting through it. This has no fate semantics: it only wakes
+   * remote waits and subscriptions that are active in this runtime.
    */
-  onServerTransportError(callback: (error: Error) => void): void {
+  onServerTransportError(callback: (error: Error, state: { retrying: boolean }) => void): void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.onServerTransportError(callback);
     this.serverTransportErrorCallback = callback;
   }
 
+  /**
+   * The server refused a credential that nothing renews, so the link will
+   * not reconnect on its own: end the waits and remote subscriptions held
+   * for a new credential, as a terminal failure does (#3923). A later
+   * `updateAuth` reconnects as usual.
+   */
+  endCredentialWait(): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.endCredentialWait();
+    // A native host reports its refusal before the upstream failure it ends in.
+    this.nativeAuthRefusalRenewable = false;
+    const error = this.serverTransportError;
+    if (!error || !this.serverTransportErrorRetrying) return;
+    this.serverTransportErrorAwaitsAuth = false;
+    this.handleServerTransportError(error, this.serverConnectionGeneration, false);
+  }
+
   /** Record a terminal error relayed from a durable browser-worker upstream. */
-  reportRemoteServerTransportError(error: Error): void {
+  reportRemoteServerTransportError(error: Error, retrying = false): void {
     if (this !== this.ownerRuntime)
-      return this.ownerRuntime.reportRemoteServerTransportError(error);
-    this.handleServerTransportError(error);
+      return this.ownerRuntime.reportRemoteServerTransportError(error, retrying);
+    this.handleServerTransportError(error, this.serverConnectionGeneration, retrying);
   }
 
   /** Clear a terminal remote-peer error after its replacement transport is ready. */
   clearRemoteServerTransportError(): void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.clearRemoteServerTransportError();
-    // Armed waiters without a latched error keep their channel for a later one.
+    // Armed waiters keep their channel for a later error: writes' Global
+    // waits armed through an outage are still waiting for their settlement.
     if (!this.serverTransportError) return;
-    this.serverTransportError = null;
-    this.clearServerTransportErrorWaiters();
+    this.forgetServerTransportError();
     this.remoteLink.changed();
   }
 
@@ -3860,6 +3935,12 @@ export class NativeRuntimeAdapter implements Runtime {
     });
   }
 
+  private forgetServerTransportError(): void {
+    this.serverTransportError = null;
+    this.serverTransportErrorRetrying = false;
+    this.serverTransportErrorAwaitsAuth = false;
+  }
+
   private handleServerTransportError(
     error: unknown,
     generation = this.serverConnectionGeneration,
@@ -3867,15 +3948,31 @@ export class NativeRuntimeAdapter implements Runtime {
   ): void {
     if (generation !== this.serverConnectionGeneration) return;
     const message = errorMessage(error);
-    if (this.serverTransportError && message === "websocket closed") return;
-    const isFirstTerminalError = this.serverTransportError === null;
+    if (this.serverTransportError && message === "websocket closed") {
+      // Keep the more telling error already published; only its escalation
+      // from retrying to terminal is news.
+      if (reconnecting || !this.serverTransportErrorRetrying) return;
+      error = this.serverTransportError;
+    }
+    // The connection a renewable credential refusal ended closes on that same
+    // error; the app's renewed token still reconnects it.
+    if (error === this.serverTransportError && this.serverTransportErrorAwaitsAuth)
+      reconnecting = true;
+    this.serverTransportErrorAwaitsAuth = false;
+    // Report the first error, and again when an error the client was
+    // retrying through turns terminal.
+    const report =
+      this.serverTransportError === null || (this.serverTransportErrorRetrying && !reconnecting);
     this.serverTransportError = error instanceof Error ? error : new Error(message);
+    this.serverTransportErrorRetrying = reconnecting;
     this.remoteLink.changed();
     // An outage the client keeps reconnecting through leaves remote
-    // subscriptions open: their native sources resume on the next connection.
+    // subscriptions and writes' Global waits open: they resume on the next
+    // connection (#3572, #3923).
     if (!reconnecting) this.failRemoteSubscriptions(this.serverTransportError);
-    this.resolveServerTransportErrorWaiters(this.serverTransportError);
-    if (isFirstTerminalError) this.serverTransportErrorCallback?.(this.serverTransportError);
+    this.resolveServerTransportErrorWaiters(this.serverTransportError, reconnecting);
+    if (report)
+      this.serverTransportErrorCallback?.(this.serverTransportError, { retrying: reconnecting });
   }
 
   private canRetryNetworkConnection(attempt: ServerConnectionAttempt, error: WireError): boolean {
@@ -4009,8 +4106,8 @@ export class NativeRuntimeAdapter implements Runtime {
     this.serverOutageStartedAt = null;
     if (!this.serverOutageReported) return;
     this.serverOutageReported = false;
-    this.serverTransportError = null;
-    this.clearServerTransportErrorWaiters();
+    this.forgetServerTransportError();
+    // Writes' Global waits armed through the outage keep waiting.
     this.remoteLink.changed();
   }
 
@@ -4151,24 +4248,37 @@ export class NativeRuntimeAdapter implements Runtime {
     }
   }
 
-  private throwServerTransportErrorForTier(tier: string): void {
-    if ((tier === "global" || tier === "remote") && this.serverTransportError) {
-      throw this.serverTransportError;
-    }
+  /**
+   * The transport error a remote operation fails on. A write's Global wait
+   * (`throughOutage`) only fails on one the client stops retrying: an outage
+   * delays its settlement, it does not decide it (#3923).
+   */
+  private serverTransportErrorFor(throughOutage: boolean): Error | null {
+    if (throughOutage && this.serverTransportErrorRetrying) return null;
+    return this.serverTransportError;
+  }
+
+  private throwServerTransportErrorForTier(tier: string, throughOutage = false): void {
+    if (tier !== "global" && tier !== "remote") return;
+    const error = this.serverTransportErrorFor(throughOutage);
+    if (error) throw error;
   }
 
   private waitForServerTransportError(
     tier: string,
+    throughOutage = false,
   ): { promise: Promise<never>; cancel: () => void } | null {
     if (tier !== "global" && tier !== "remote") return null;
-    if (this.serverTransportError) {
+    const error = this.serverTransportErrorFor(throughOutage);
+    if (error) {
       return {
-        promise: Promise.reject(this.serverTransportError),
+        promise: Promise.reject(error),
         cancel: () => {},
       };
     }
     const waiter: ServerTransportErrorWaiter = {
       active: true,
+      throughOutage,
       reject: () => {},
     };
     const promise = new Promise<never>((_, reject) => {
@@ -4186,10 +4296,12 @@ export class NativeRuntimeAdapter implements Runtime {
     };
   }
 
-  private resolveServerTransportErrorWaiters(error: Error): void {
+  private resolveServerTransportErrorWaiters(error: Error, retrying = false): void {
     const waiters = this.serverTransportErrorWaiters.splice(0);
     for (const waiter of waiters) {
-      if (waiter.active) waiter.reject(error);
+      if (!waiter.active) continue;
+      if (retrying && waiter.throughOutage) this.serverTransportErrorWaiters.push(waiter);
+      else waiter.reject(error);
     }
   }
 
