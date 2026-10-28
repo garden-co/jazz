@@ -69,6 +69,7 @@ fn open_db() -> Db {
             author: AuthorSubject::for_test_bytes([0xa1; 16]),
         },
         id_source: None,
+        chunk_store: None,
     }))
     .expect("open db")
 }

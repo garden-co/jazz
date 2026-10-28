@@ -387,7 +387,7 @@ fn a_plain_sqlite_connection_runs_the_schema_queries_and_triggers() {
     let durable = |plain: &rusqlite::Connection| -> i64 {
         plain
             .query_row(
-                "SELECT COALESCE(SUM(durable), 0) FROM _jazz_lv_root",
+                "SELECT COALESCE(SUM(refs), 0) FROM _jazz_lv_root",
                 [],
                 |r| r.get(0),
             )
@@ -481,8 +481,8 @@ fn appends_extend_the_edit_tail_until_consolidation() {
         ),
         vec![row(1)]
     );
-    // Past the tail's bound the value is consolidated into new nodes.
-    for n in 8..80 {
+    // Past an epoch's edit bytes the value is consolidated into new nodes.
+    for n in 8..(8 + jazz::large_values::epoch::EPOCH_EDIT_BYTES / 4) {
         let suffix = format!("[{n}]");
         block_on(db.append_value("docs", row(1), "body", suffix.clone().into_bytes())).unwrap();
         expected.push_str(&suffix);
@@ -493,6 +493,29 @@ fn appends_extend_the_edit_tail_until_consolidation() {
         "consolidation wrote new nodes: {nodes} -> {after}"
     );
     assert_eq!(body(&db, 1), expected);
+}
+
+#[test]
+fn many_versions_with_small_edits_share_one_epoch() {
+    let db = db();
+    let mut expected = text(33, LARGE);
+    insert(&db, 1, &expected, b"");
+    let (nodes, _) = db.large_value_nodes_for_test().unwrap();
+    // Each append is its own commit, so its own version in history.
+    for n in 0..300 {
+        let suffix = if n % 2 == 0 { "a" } else { "é" };
+        block_on(db.append_value("docs", row(1), "body", suffix.as_bytes().to_vec())).unwrap();
+        expected.push_str(suffix);
+    }
+    let (after, _) = db.large_value_nodes_for_test().unwrap();
+    assert_eq!(after, nodes, "no version wrote a node");
+    let (epochs, edit_bytes) = db.large_value_epochs_for_test().unwrap();
+    assert_eq!(epochs, 1, "every version names a prefix of one epoch");
+    // A one-character append costs two or three bytes of edits.
+    assert!(edit_bytes <= 300 * 3, "{edit_bytes} edit bytes");
+    assert_eq!(body(&db, 1), expected);
+    block_on(db.tick()).unwrap();
+    assert_eq!(db.large_value_epochs_for_test().unwrap().0, 1);
 }
 
 #[test]

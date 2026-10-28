@@ -324,7 +324,9 @@ export interface DbSubscriptionSource {
  *
  * @internal
  */
-export type SubscriptionHandle = (() => void) & { readonly ready?: Promise<void> };
+export type SubscriptionHandle = (() => void) & {
+  readonly ready?: Promise<void>;
+};
 
 const dbSubscriptionSources = new WeakMap<Db, DbSubscriptionSource>();
 
@@ -618,7 +620,11 @@ function toWriteRecordForOperation(
   }
 }
 
-type WireSplicePage = { kind: "bytes" | "text_utf16" | "text_utf8"; from: number; to: number };
+type WireSplicePage = {
+  kind: "bytes" | "text_utf16" | "text_utf8";
+  from: number;
+  to: number;
+};
 
 type WireLargeValueUpdate =
   | {
@@ -839,9 +845,9 @@ function jsonPointerValue(value: unknown, pointer: string): unknown {
 }
 
 /**
- * Temporary binding-level materialization until #2090 carries exact terminal
- * demand into the engine. It preserves the public result/coordinate contract and
- * only touches selected columns; it must not be used as a chunk-demand model.
+ * The engine reads each partial selection of the physical query only in part
+ * (SPEC 19.12). A column a transform also depends on is read whole instead,
+ * and its visible selection is taken here from the whole value.
  */
 function applyPartialValueSelections<T>(
   row: T,
@@ -962,9 +968,8 @@ function prepareTransformRead<T>(
       computedState: undefined,
       version: 0,
       physical: outputIncludes === built.includes ? built : { ...built, includes: outputIncludes },
-      transform: Object.keys(built.partialSelect).length
-        ? (row: WasmRow) => applyPartialValueSelections(decode(row), built.partialSelect)
-        : decode,
+      // The engine applies every partial selection of this physical query.
+      transform: decode,
     };
   }
   const relations = hasIncludes ? analyzeRelations(query._schema) : undefined;
@@ -1038,6 +1043,11 @@ function prepareTransformRead<T>(
     }
     const dependencyColumns = dependencies ? [...dependencies] : noWriteDependencies;
     const hasPartial = Object.keys(partialSelect).length > 0;
+    // Selections the engine did not apply: those whose column it read whole.
+    const wholeRead = Object.fromEntries(
+      Object.entries(partialSelect).filter(([column]) => !Object.hasOwn(partial, column)),
+    );
+    const sliceWhole = Object.keys(wholeRead).length > 0;
     const excluded = Object.keys(includes);
     return {
       select: physical,
@@ -1054,7 +1064,7 @@ function prepareTransformRead<T>(
               const appValues = computed
                 ? computedColumnValues(transforms!, computed, stored!, computedState, partial)
                 : undefined;
-              const result = hasPartial ? applyPartialValueSelections(row, partialSelect) : row;
+              const result = sliceWhole ? applyPartialValueSelections(row, wholeRead) : row;
               if (visibleTransforms)
                 applyColumnTransforms(
                   result,
@@ -1761,7 +1771,10 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     }
     const values = toWriteRecordForOperation(operation, record, table._schema, table._table);
     try {
-      return { values, value: id === undefined ? undefined : immediateWriteRow(table, id, values) };
+      return {
+        values,
+        value: id === undefined ? undefined : immediateWriteRow(table, id, values),
+      };
     } catch (error) {
       this.requireBinding(operation).preparation.failure = error;
       throw error;
@@ -2314,13 +2327,21 @@ export class Db {
     if (!credentialsChanged && this.authStateStore.getState().error === undefined) return false;
 
     if (!this.authStateStore.validateJwtToken(jwtToken, trustedReservedSession)) return false;
-    this.connection.updateAuth({ mode: "bearer", jwtToken, trustedReservedSession });
+    this.connection.updateAuth({
+      mode: "bearer",
+      jwtToken,
+      trustedReservedSession,
+    });
     this.publishAuthUpdate(jwtToken, trustedReservedSession);
     return true;
   }
 
   private publishAuthUpdate(jwtToken?: string, trustedReservedSession?: Session): void {
-    const nextConfig = { ...this.config, jwtToken, cookieSession: undefined } as DbConfig;
+    const nextConfig = {
+      ...this.config,
+      jwtToken,
+      cookieSession: undefined,
+    } as DbConfig;
     setTrustedReservedSession(nextConfig, trustedReservedSession);
     const nextInternalSession = resolveClientInternalSessionSync(nextConfig);
     this.config.jwtToken = jwtToken;
