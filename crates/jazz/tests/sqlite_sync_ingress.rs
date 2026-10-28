@@ -5,7 +5,7 @@ use jazz::db::{SyncMessage, decode_message};
 /// another payload to its frame. The independent bytes pin ordinary traffic.
 #[test]
 fn semantic_decoder_refuses_noncanonical_varints_and_suffixes() {
-    let valid = [1, 128, 1]; // Unsubscribe { id: 128 }.
+    let valid = [jazz::db::SYNC_ENCODING_PREFIX, &[1, 128, 1]].concat(); // Unsubscribe { id: 128 }.
     assert!(matches!(
         decode_message(&valid).unwrap(),
         SyncMessage::Unsubscribe { id: 128 }
@@ -18,8 +18,9 @@ fn semantic_decoder_refuses_noncanonical_varints_and_suffixes() {
         &[255],
         &[1, 128],
     ] {
+        let invalid = [jazz::db::SYNC_ENCODING_PREFIX, invalid].concat();
         assert!(
-            decode_message(invalid).is_err(),
+            decode_message(&invalid).is_err(),
             "accepted malformed bytes: {invalid:?}"
         );
     }

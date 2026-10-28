@@ -58,10 +58,10 @@ use crate::values::{
 };
 pub use sync::{
     BuiltOn, Cell as SyncCell, CorpusReader, FirstLoad, FrameJoiner, Image, LOCAL_BASE,
-    NON_DURABLE_BASE, RelationSnapshot, RemoteLinkHint, SerializedReadResult, SubscriberId,
-    SyncMessage, Transport, TransportError, Upstream, WireBase, WireError, WireKind, WireOp,
-    WireTarget, WireTransport, WireTransportAdapter, WriteConflict, decode_message, duplex,
-    encode_frames, validate_frame_batch_for_corpus,
+    NON_DURABLE_BASE, RelationSnapshot, RemoteLinkHint, SYNC_ENCODING_PREFIX, SerializedReadResult,
+    SubscriberId, SyncMessage, Transport, TransportError, Upstream, WireBase, WireError, WireKind,
+    WireOp, WireTarget, WireTransport, WireTransportAdapter, WriteConflict, decode_message, duplex,
+    encode_frames, encode_message, validate_frame_batch_for_corpus,
 };
 
 /// Shape identity: equal for bindings of one query against one schema.

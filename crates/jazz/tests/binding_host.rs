@@ -603,7 +603,7 @@ fn a_first_result_larger_than_one_wire_frame_splits_into_rows_messages() {
     let mut joiner = FrameJoiner::default();
     for (i, frame) in frames.iter().enumerate() {
         assert!(frame.len() < limit);
-        let decoded = postcard::from_bytes::<SyncMessage>(frame).unwrap();
+        let decoded = jazz::db::decode_message(frame).unwrap();
         match (i == last, decoded) {
             (false, SyncMessage::RowsPart { .. }) | (true, SyncMessage::Rows { .. }) => {}
             (_, other) => panic!("frame {i} of {}: {other:?}", frames.len()),
@@ -650,11 +650,18 @@ fn a_frame_is_one_message_and_a_rows_message_ends_its_parts() {
     ));
     // Postcard alone reads a valid prefix and ignores the rest.
     let trailing = [frame.as_slice(), &[0]].concat();
-    assert!(postcard::from_bytes::<SyncMessage>(&trailing).is_ok());
+    assert!(
+        postcard::from_bytes::<SyncMessage>(
+            trailing
+                .strip_prefix(jazz::db::SYNC_ENCODING_PREFIX)
+                .unwrap()
+        )
+        .is_ok()
+    );
     assert!(decode_message(&trailing).is_err());
     assert!(FrameJoiner::default().push(&trailing).is_err());
     // Parts followed by anything but their `Rows` are the peer's error.
-    let part = postcard::to_allocvec(&SyncMessage::RowsPart { images: Vec::new() }).unwrap();
+    let part = jazz::db::encode_message(&SyncMessage::RowsPart { images: Vec::new() }).unwrap();
     let mut joiner = FrameJoiner::default();
     assert!(joiner.push(&part).unwrap().is_none());
     assert!(joiner.push(&frame).is_err());

@@ -1,9 +1,9 @@
-//! The pinned SQLite sync wire corpus: `fixtures/sqlite_sync_wire_v1.json`.
+//! The pinned SQLite sync wire corpus: `fixtures/sqlite_sync_wire_v4.json`.
 //!
-//! After the `Hello`, a connection carries postcard [`SyncMessage`] frames
+//! After the `Hello`, a connection carries versioned [`SyncMessage`] frames
 //! (and, server to client, `WireFrame::Error`) in websocket frame batches.
-//! The corpus holds one real frame of every `SyncMessage` variant, recorded
-//! from a scenario that sends each of them through the production encoder,
+//! The corpus pins every `SyncMessage` variant. Ordinary bodies retain their
+//! historical bytes; catalogue bodies are assembled from independent fields,
 //! plus a rejected `Fate` with and without its reason name, `Hello` and
 //! `Error` frames, and frames a reader must reject. The
 //! jazz-tools node test `wire-frame-artifact-corpus.test.ts` runs every one
@@ -12,9 +12,9 @@
 //! each pinned frame still decodes to its variant and re-encodes to the
 //! same bytes, so a change to the message layout fails here first.
 //!
-//! The wire has not shipped yet: until alpha.60 a layout change re-runs the
-//! producer (`JAZZ_WRITE_SQLITE_SYNC_WIRE_CORPUS=1`). After it, a change
-//! needs a new wire version and corpus beside this one.
+//! The v4 envelope retains the independently pinned historical message bodies.
+//! Catalogue fixtures are independently assembled from specified fields. Historical
+//! corpora stay unchanged; an incompatible layout needs a distinct version.
 
 use crate::common;
 
@@ -45,13 +45,13 @@ use serde::{Deserialize, Serialize};
 
 use common::{compile_schema, read_and_allow_all_writes, session_eq};
 
-const CORPUS: &str = "sqlite_sync_wire_v1.json";
-const FORMAT: &str = "jazz-sqlite-sync-wire-corpus-v1";
+const CORPUS: &str = "sqlite_sync_wire_v4.json";
+const FORMAT: &str = "jazz-sqlite-sync-wire-corpus-v4";
 
 /// Every `SyncMessage` variant, in declaration order, but `RowsPart`: a
 /// framing of a `Rows` too large for one frame, whose real frames are
 /// megabytes (binding_host's frame-split test covers it).
-const VARIANTS: [&str; 20] = [
+const VARIANTS: [&str; 24] = [
     "Subscribe",
     "Unsubscribe",
     "Hold",
@@ -72,6 +72,10 @@ const VARIANTS: [&str; 20] = [
     "Origins",
     "SchemaAdmission",
     "Stored",
+    "CatalogueMetadataV1",
+    "CatalogueFetchV1",
+    "CatalogueCoveredV1",
+    "PolicyDescriptorV1",
 ];
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -153,7 +157,7 @@ fn every_pinned_sync_frame_decodes_to_its_variant_and_reencodes_exactly() {
     assert_eq!(variants, VARIANTS, "one frame of every variant, in order");
     for message in &corpus.messages {
         let bytes = unhex(&message.frame_hex);
-        let decoded: SyncMessage = postcard::from_bytes(&bytes).unwrap_or_else(|error| {
+        let decoded: SyncMessage = jazz::db::decode_message(&bytes).unwrap_or_else(|error| {
             panic!(
                 "{}: the pinned frame no longer decodes ({error}); the sync wire layout changed",
                 message.variant
@@ -161,7 +165,7 @@ fn every_pinned_sync_frame_decodes_to_its_variant_and_reencodes_exactly() {
         });
         assert_eq!(variant(&decoded), message.variant);
         assert_eq!(
-            postcard::to_allocvec(&decoded).unwrap(),
+            jazz::db::encode_message(&decoded).unwrap(),
             bytes,
             "{}: re-encoding changed the bytes; the sync wire layout changed",
             message.variant
@@ -183,7 +187,7 @@ fn every_pinned_rejected_fate_decodes_with_its_reason_and_reencodes_exactly() {
     );
     for fate in &corpus.fates {
         let bytes = unhex(&fate.frame_hex);
-        let decoded: SyncMessage = postcard::from_bytes(&bytes).unwrap_or_else(|error| {
+        let decoded: SyncMessage = jazz::db::decode_message(&bytes).unwrap_or_else(|error| {
             panic!(
                 "{}: the pinned frame no longer decodes ({error}); the fate layout changed",
                 fate.name
@@ -199,7 +203,7 @@ fn every_pinned_rejected_fate_decodes_with_its_reason_and_reencodes_exactly() {
         assert_eq!(reason, &fate.reason, "{}", fate.name);
         assert!(!message.is_empty(), "{}", fate.name);
         assert_eq!(
-            postcard::to_allocvec(&decoded).unwrap(),
+            jazz::db::encode_message(&decoded).unwrap(),
             bytes,
             "{}: re-encoding changed the bytes; the fate layout changed",
             fate.name
@@ -257,7 +261,7 @@ struct Recording {
 impl Transport for Recording {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
         for frame in encode_frames(message).unwrap() {
-            let decoded: SyncMessage = postcard::from_bytes(&frame).unwrap();
+            let decoded: SyncMessage = jazz::db::decode_message(&frame).unwrap();
             // The pinned Commit is the first that relays a session's write
             // built on an unsettled commit (bases, origin), else the first.
             let relayed = matches!(
@@ -279,7 +283,7 @@ impl Transport for Recording {
                 .entry(variant(&decoded))
                 .or_insert_with(|| (self.peer.to_owned(), frame.clone()));
             let pinned_relayed = matches!(
-                postcard::from_bytes(&pinned.1),
+                jazz::db::decode_message(&pinned.1),
                 Ok(SyncMessage::Commit { bases, origin: Some(_), .. })
                     if bases.iter().any(|base: &jazz::db::WireBase| matches!(base.on, jazz::db::BuiltOn::Commit { .. }))
             );
@@ -405,6 +409,7 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
         },
     )))
     .unwrap();
+    server.initialize_authority_catalogue().unwrap();
     let shared = RowUuid::from_bytes([0x11; 16]);
     block_on(server.insert(
         "notes",
@@ -421,6 +426,7 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     // Chunks: a client subscribes and pulls the large value it reads.
     let alice = open(0x51, user(1), false);
     connect(&alice, &server, user(1), &recorded);
+    drive(&[&alice, &server], alice.cover_catalogue("notes", None)).unwrap();
     let notes = alice.prepare_query(&Query::from("notes")).unwrap();
     let stream = block_on(alice.subscribe(&notes, ReadOpts::default())).unwrap();
     pump(&[&alice, &server, &alice]);
@@ -546,7 +552,7 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     // Refused: a subscription the server cannot serve. No replica sends
     // one (it prepares queries against the same schema), so a raw session
     // does, on the schema version alice announced.
-    let schema = postcard::from_bytes::<SyncMessage>(&recorded.borrow()["Schema"].1).unwrap();
+    let schema = jazz::db::decode_message(&recorded.borrow()["Schema"].1).unwrap();
     let inbound = Rc::new(RefCell::new(VecDeque::from([
         schema,
         SyncMessage::Subscribe {
@@ -573,9 +579,9 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     recorded.borrow().clone()
 }
 
-/// Writes `fixtures/sqlite_sync_wire_v1.json` when
-/// `JAZZ_WRITE_SQLITE_SYNC_WIRE_CORPUS=1`. Until alpha.60 ships, re-run it
-/// for a sync message layout change; after, add a new corpus instead.
+/// Writes `fixtures/sqlite_sync_wire_v4.json` when
+/// `JAZZ_WRITE_SQLITE_SYNC_WIRE_CORPUS=1`. This diagnostic producer must not
+/// replace independent fixtures to accommodate an incompatible layout change.
 #[test]
 #[ignore = "#1787: manual wire corpus producer; run for a sync wire layout change"]
 fn produce_sqlite_sync_wire_corpus_v1() {

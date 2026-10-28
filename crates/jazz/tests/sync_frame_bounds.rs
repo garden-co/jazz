@@ -18,7 +18,11 @@ fn image(actor: u8, bytes: usize) -> Image {
 fn raw(message: &SyncMessage) -> Vec<u8> {
     // The untrusted peer can bypass our encoder. Raw postcard is intentional
     // here so malformed or oversized inputs reach the public admission boundary.
-    postcard::to_allocvec(message).unwrap()
+    [
+        jazz::db::SYNC_ENCODING_PREFIX,
+        postcard::to_allocvec(message).unwrap().as_slice(),
+    ]
+    .concat()
 }
 fn rows(message: Option<SyncMessage>) -> Vec<Image> {
     match message {

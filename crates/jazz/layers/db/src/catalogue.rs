@@ -207,6 +207,23 @@ impl Inner {
         self.conn.execute("INSERT INTO _jazz_catalogue_head_v1(slot,value) VALUES(1,?1) ON CONFLICT(slot) DO UPDATE SET value=excluded.value WHERE value<>excluded.value",[encode(head)?]).map_err(storage)?;
         Ok(())
     }
+    /// At most the current descriptor and the requested fixed descriptor;
+    /// no history or unrelated catalogue versions are scanned per read.
+    pub(super) fn catalogue_records(
+        &self,
+        opened: SchemaVersionId,
+    ) -> Result<(CatalogueHeadV1, Vec<CatalogueSchemaV1>), Error> {
+        let head = self
+            .catalogue_head()?
+            .ok_or_else(|| absent("accepted catalogue is unavailable"))?;
+        let mut records = Vec::new();
+        for version in BTreeSet::from([head.current, opened]) {
+            if let Some(record) = self.catalogue_schema(version)? {
+                records.push(record);
+            }
+        }
+        Ok((head, records))
+    }
 }
 
 impl Db {
@@ -292,7 +309,8 @@ impl Db {
                 .map_err(storage)?;
         }
         drop(inner);
-        result
+        result?;
+        self.broadcast_catalogue_metadata()
     }
 
     /// Read an accepted identity without fetching, granting access or minting
@@ -326,6 +344,59 @@ impl Db {
         Ok(inner
             .catalogue_table(version, table)?
             .and_then(|t| t.columns.get(column).map(|c| c.id)))
+    }
+    /// Fresh authority catalogue coverage through the normal query/policy path.
+    /// Offline metadata lookup is deliberately a separate API.
+    pub async fn cover_catalogue(
+        &self,
+        table: &str,
+        scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+    ) -> Result<(), Error> {
+        let opened = self.inner().schema.jazz.version_id();
+        if self.is_client() {
+            self.fetch_catalogue(table, opened, scope).await
+        } else {
+            self.authority_catalogue_coverage(table, opened, scope)
+                .map(drop)
+        }
+    }
+
+    pub(super) fn authority_catalogue_coverage(
+        &self,
+        table: &str,
+        opened: SchemaVersionId,
+        scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+    ) -> Result<(CatalogueHeadV1, Vec<CatalogueSchemaV1>), Error> {
+        let inner = self.inner();
+        if !inner.authority || inner.client.is_some() {
+            return Err(absent("fresh catalogue coverage requires the authority"));
+        }
+        if inner.catalogue_schema(opened)?.is_none() {
+            return Err(absent("opened schema has no accepted catalogue identity"));
+        }
+        let view = inner
+            .governed(opened)
+            .ok_or_else(|| absent("opened catalogue schema is not admitted"))?;
+        let (head, records) = inner.catalogue_records(opened)?;
+        if head.current != inner.owner.jazz.version_id() {
+            return Err(absent(
+                "catalogue head and installed policies are not aligned",
+            ));
+        }
+        drop(inner);
+        let db = Db {
+            inner: self.inner.clone(),
+            view: Some(view),
+        };
+        let prepared = db.prepare_query(&Query::from(table).limit(0))?;
+        let (prepared, author) = match scope {
+            Some((author, claims)) => (prepared.with_identity_claims(author, claims), Some(author)),
+            None => (prepared, None),
+        };
+        // LIMIT 0 avoids row bodies, while the ordinary compiler still checks
+        // sources and policy semantics. Coverage is not permission to read rows.
+        db.inner().run(&prepared, author, &ReadSpec::default())?;
+        Ok((head, records))
     }
 }
 

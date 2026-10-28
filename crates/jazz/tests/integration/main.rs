@@ -25,6 +25,10 @@ mod binding_host;
 mod branch_views;
 #[path = "../callback_transaction_cancellation.rs"]
 mod callback_transaction_cancellation;
+#[path = "../catalogue_sync.rs"]
+mod catalogue_sync;
+#[path = "../catalogue_wire_v4.rs"]
+mod catalogue_wire_v4;
 #[path = "../claims_change.rs"]
 mod claims_change;
 #[path = "../column_defaults.rs"]

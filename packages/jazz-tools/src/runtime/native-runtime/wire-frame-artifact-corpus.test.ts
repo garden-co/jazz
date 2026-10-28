@@ -34,8 +34,8 @@ type WasmArtifactFrameValidator = ArtifactFrameValidator & {
   WasmDb: { prototype: { wireFeatures?: () => number } };
 };
 
-// `crates/jazz/fixtures/sqlite_sync_wire_v1.json` freezes one real Rust-encoded
-// frame of every SQLite sync message variant (see
+// `crates/jazz/fixtures/sqlite_sync_wire_v4.json` pins each sync message using
+// historical ordinary bodies and independent catalogue field bytes (see
 // crates/jazz/tests/sync_wire_corpus.rs), rejected Fate frames with and
 // without a reason name, Hello and Error frames, and
 // batches a reader must reject. Every one runs through both freshly generated
@@ -57,8 +57,8 @@ describe("wire frame artifact corpus", () => {
     "executes every pinned sync message and frame and rejects malformed input through NAPI and WASM",
     async () => {
       const corpus = syncWireCorpus();
-      expect(corpus.format).toBe("jazz-sqlite-sync-wire-corpus-v1");
-      expect(corpus.messages.map((message) => message.variant)).toHaveLength(20);
+      expect(corpus.format).toBe("jazz-sqlite-sync-wire-corpus-v4");
+      expect(corpus.messages.map((message) => message.variant)).toHaveLength(24);
       expect(corpus.fates.map((fate) => fate.reason)).toEqual(["client_clock_too_far_ahead", null]);
       const accepted = [
         ...corpus.messages.map((message) => ({
@@ -130,7 +130,7 @@ describe("wire frame artifact corpus", () => {
 function syncWireCorpus(): SyncWireCorpus {
   return JSON.parse(
     readFileSync(
-      new URL("../../../../../crates/jazz/fixtures/sqlite_sync_wire_v1.json", import.meta.url),
+      new URL("../../../../../crates/jazz/fixtures/sqlite_sync_wire_v4.json", import.meta.url),
       "utf8",
     ),
   ) as SyncWireCorpus;

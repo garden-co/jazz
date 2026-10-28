@@ -71,7 +71,16 @@ impl Inner {
         Ok(())
     }
 
-    /// Called within the authority catalogue publication savepoint.
+    /// Only a descriptor matching the whole accepted head may govern reads.
+    /// Publication of a newer head invalidates cached policies until its matching
+    /// descriptor arrives; a transport split cannot retain a revoked grant.
+    pub(super) fn policy_descriptor(&self) -> Result<Option<PolicyDescriptorV1>, Error> {
+        let descriptor = self.stored_policy_descriptor()?;
+        let head = self.catalogue_head()?;
+        Ok(descriptor.filter(|d| head.as_ref() == Some(&d.head)))
+    }
+
+    /// Called within catalogue publication or upstream sync's savepoint.
     pub(super) fn record_policy_descriptor(
         &self,
         descriptor: &PolicyDescriptorV1,

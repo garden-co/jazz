@@ -148,10 +148,16 @@ pub struct WireTransportAdapter<W> {
 /// the carrier's count and length prefixes.
 const MAX_MESSAGE_FRAME_BYTES: usize = jazz_protocol::protocol_limits::MAX_WIRE_FRAME_BYTES - 64;
 
-// Keep the existing semantic bytes; this extraction only admits bounded
-// publications at the wire-frame encoder and joiner.
-fn encode_bounded_message(message: &SyncMessage) -> Result<Vec<u8>, postcard::Error> {
-    let bytes = postcard::to_allocvec(message)?;
+/// `jazz.sqlite.sync.v4`: semantic-message version, independent of the
+/// websocket Hello. Historical unversioned SQLite and E2EE v2/v3 layouts are
+/// not interpreted as this enum, which preserves main's read-view fields.
+pub const SYNC_ENCODING_PREFIX: &[u8] = b"JSQL\x04";
+
+/// Encode one logical semantic message. Byte carriers use [`encode_frames`]
+/// to apply per-frame limits and split atomic row publications.
+pub fn encode_message(message: &SyncMessage) -> Result<Vec<u8>, postcard::Error> {
+    let mut bytes = SYNC_ENCODING_PREFIX.to_vec();
+    bytes.extend(postcard::to_allocvec(message)?);
     if bytes.len() > jazz_protocol::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES {
         return Err(postcard::Error::SerializeBufferFull);
     }
@@ -165,7 +171,7 @@ fn encode_bounded_message(message: &SyncMessage) -> Result<Vec<u8>, postcard::Er
 /// them one message again.
 pub fn encode_frames(message: SyncMessage) -> Result<Vec<Vec<u8>>, postcard::Error> {
     let SyncMessage::Rows { images } = message else {
-        let frame = encode_bounded_message(&message)?;
+        let frame = encode_message(&message)?;
         if frame.len() > MAX_MESSAGE_FRAME_BYTES {
             return Err(postcard::Error::SerializeBufferFull);
         }
@@ -176,7 +182,7 @@ pub fn encode_frames(message: SyncMessage) -> Result<Vec<Vec<u8>>, postcard::Err
     let last = parts.len() - 1;
     for (i, (images, frame)) in parts.iter_mut().enumerate() {
         if i < last {
-            *frame = encode_bounded_message(&SyncMessage::RowsPart {
+            *frame = encode_message(&SyncMessage::RowsPart {
                 images: std::mem::take(images),
             })?;
         }
@@ -197,7 +203,7 @@ fn split_rows(
     parts: &mut Vec<(Vec<Image>, Vec<u8>)>,
 ) -> Result<(), postcard::Error> {
     let message = SyncMessage::Rows { images };
-    let frame = encode_bounded_message(&message)?;
+    let frame = encode_message(&message)?;
     let SyncMessage::Rows { mut images } = message else {
         unreachable!()
     };
@@ -213,10 +219,16 @@ fn split_rows(
     split_rows(rest, parts)
 }
 
-/// One frame's [`SyncMessage`]: exactly one canonical postcard value.
-/// Alternate varint spellings and bytes after its message are malformed.
+/// One v4 semantic message: its version header and exactly one canonical
+/// postcard value. Byte carriers additionally enforce their per-frame limit.
 pub fn decode_message(frame: &[u8]) -> Result<SyncMessage, postcard::Error> {
-    jazz_types::postcard_exact::decode_postcard_exact(frame)
+    if frame.len() > jazz_protocol::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES {
+        return Err(postcard::Error::DeserializeBadEncoding);
+    }
+    let body = frame
+        .strip_prefix(SYNC_ENCODING_PREFIX)
+        .ok_or(postcard::Error::DeserializeBadEncoding)?;
+    jazz_types::postcard_exact::decode_postcard_exact(body)
 }
 
 /// Joins a `Rows` message's frames (see [`encode_frames`]) back into the
@@ -370,15 +382,15 @@ pub enum CorpusReader {
     /// The server after the `Hello`: every frame is a sync message.
     Server,
     /// A client: each frame is a `Hello` (tag 0), an `Error` (tag 1) or a
-    /// sync message, as its websocket reads them. No server-sent message
-    /// has tag 0 or 1.
+    /// versioned sync message, as its websocket reads them. The sync header
+    /// cannot collide with either carrier tag.
     Client,
 }
 
 /// Test-only: decode one websocket frame batch the way `reader` does, with
 /// the production decoders, negotiating a `Hello` against
 /// `negotiated_features`. NAPI and WASM expose it so the pinned wire corpus
-/// (`crates/jazz/fixtures/sqlite_sync_wire_v1.json`) runs through each
+/// (`crates/jazz/fixtures/sqlite_sync_wire_v4.json`) runs through each
 /// shipped artifact. Not a host API.
 #[doc(hidden)]
 pub fn validate_frame_batch_for_corpus(
@@ -947,6 +959,29 @@ pub enum SyncMessage {
     Stored {
         tx: u64,
     },
+    /// Authority-issued catalogue metadata and fresh coverage.
+    CatalogueMetadataV1 {
+        head: CatalogueHeadV1,
+        schemas: Vec<CatalogueSchemaV1>,
+    },
+    /// Tag 22, jazz.sqlite.sync.catalogue-fetch.v1. Evaluate the opened
+    /// schema's zero-row query under this authenticated or trusted scope.
+    CatalogueFetchV1 {
+        id: u64,
+        table: String,
+        opened: crate::ids::SchemaVersionId,
+        scope: Option<(String, BTreeMap<String, Value>)>,
+    },
+    /// Tag 23, jazz.sqlite.sync.catalogue-covered.v1. The metadata must be
+    /// admitted before this fresh authority answer can complete its request.
+    CatalogueCoveredV1 {
+        id: u64,
+        head: CatalogueHeadV1,
+        opened: crate::ids::SchemaVersionId,
+    },
+
+    /// Mutable authority policies for this exact catalogue head.
+    PolicyDescriptorV1(PolicyDescriptorV1),
 }
 
 impl SyncMessage {
@@ -974,6 +1009,10 @@ impl SyncMessage {
             Self::SchemaAdmission { .. } => "SchemaAdmission",
             Self::RowsPart { .. } => "RowsPart",
             Self::Stored { .. } => "Stored",
+            Self::CatalogueMetadataV1 { .. } => "CatalogueMetadataV1",
+            Self::CatalogueFetchV1 { .. } => "CatalogueFetchV1",
+            Self::CatalogueCoveredV1 { .. } => "CatalogueCoveredV1",
+            Self::PolicyDescriptorV1(..) => "PolicyDescriptorV1",
         }
     }
 }
@@ -1157,6 +1196,8 @@ pub(crate) struct Client {
     /// The `known` cut last written to `_jazz_meta`.
     persisted_known: u64,
     answers: HashMap<u64, Option<Result<(u64, Vec<[u8; 16]>), Error>>>,
+    catalogue_answers:
+        HashMap<u64, Option<Result<(CatalogueHeadV1, crate::ids::SchemaVersionId), Error>>>,
     /// Permission preflights asked for; `None` until answered.
     advice: HashMap<u64, Option<PermissionAdvice>>,
     /// Large-value nodes asked for and not yet answered.
@@ -1404,6 +1445,19 @@ impl SettledBy {
 /// An upstream subscription's identity: query, binding, include_deleted.
 type RemoteRead = (Query, BTreeMap<String, Value>, bool);
 
+struct ForwardedCatalogue {
+    upstream: u64,
+    connection: u64,
+    opened: crate::ids::SchemaVersionId,
+    owner_schema: crate::ids::SchemaVersionId,
+    deadline: Rc<Instant>,
+}
+
+struct ReleasedReads {
+    subscriptions: Vec<RemoteRead>,
+    fetches: Vec<u64>,
+}
+
 pub(crate) struct Session {
     transport: Box<dyn Transport>,
     identity: AuthorSubject,
@@ -1475,6 +1529,8 @@ pub(crate) struct Session {
     /// On a relay, LocalFirst subscriptions waiting for the upstream's
     /// first answer for at most their first-load wait.
     first_load: BTreeMap<u64, FirstLoadWait>,
+    forwarded_catalogue: BTreeMap<u64, ForwardedCatalogue>,
+    catalogue_pending: bool,
 }
 
 /// A relayed LocalFirst subscription's first-load wait: once `until`
@@ -1513,6 +1569,8 @@ impl Session {
             schema: None,
             relayed: BTreeMap::new(),
             first_load: BTreeMap::new(),
+            forwarded_catalogue: BTreeMap::new(),
+            catalogue_pending: false,
         }
     }
 
@@ -1520,14 +1578,22 @@ impl Session {
     /// once no other member reads them) and return the upstream
     /// subscriptions it relayed, for the caller to release.
     #[must_use]
-    fn close(&mut self, dropped: &std::cell::Cell<usize>) -> Vec<RemoteRead> {
+    fn close(&mut self, dropped: &std::cell::Cell<usize>) -> ReleasedReads {
         dropped.set(dropped.get() + self.subs.len());
         let relayed = std::mem::take(&mut self.relayed);
+        let fetches = self
+            .forwarded_catalogue
+            .values()
+            .map(|r| r.upstream)
+            .collect();
         *self = Session {
             open: false,
             ..Session::new(Box::new(ClosedTransport), self.identity)
         };
-        relayed.into_values().collect()
+        ReleasedReads {
+            subscriptions: relayed.into_values().collect(),
+            fetches,
+        }
     }
 
     /// Nothing to send this tick: no queued result events, no rows its
@@ -3513,9 +3579,10 @@ impl Inner {
 impl Client {
     fn cancel_fetch(&mut self, id: u64) {
         self.answers.remove(&id);
-        self.outbox.retain(
-            |message| !matches!(message, SyncMessage::Fetch { id: request, .. } if *request == id),
-        );
+        self.catalogue_answers.remove(&id);
+        self.outbox.retain(|message| !matches!(message,
+            SyncMessage::Fetch { id: request, .. } | SyncMessage::CatalogueFetchV1 { id: request, .. }
+            if *request == id));
     }
 
     /// Its host says there is no server: it is the last word on its store.
@@ -3550,6 +3617,7 @@ impl Client {
             known: 0,
             persisted_known: 0,
             answers: HashMap::new(),
+            catalogue_answers: HashMap::new(),
             advice: HashMap::new(),
             requested: BTreeSet::new(),
             wanted: BTreeSet::new(),
@@ -3611,6 +3679,7 @@ impl Db {
                     | SyncMessage::Commit { .. }
                     | SyncMessage::PushChunks { .. }
                     | SyncMessage::ChunkRequests { .. }
+                    | SyncMessage::CatalogueFetchV1 { .. }
             )
         });
         let version = *inner.owner_version.as_bytes();
@@ -4694,6 +4763,42 @@ impl Db {
                             inner.record_settled(node, tx, Some(seq))?;
                         }
                     }
+                    SyncMessage::CatalogueMetadataV1 { head, schemas } => {
+                        inner.record_catalogue(&head, &schemas)?;
+                        inner.client.as_mut().expect("client").relay_ready = true;
+                        for session in &mut inner.sessions {
+                            session.catalogue_pending = true;
+                        }
+                    }
+                    SyncMessage::PolicyDescriptorV1(descriptor) => {
+                        inner.record_policy_descriptor(&descriptor)?;
+                        inner.client.as_mut().expect("client").relay_ready = true;
+                        for session in &mut inner.sessions {
+                            session.catalogue_pending = true;
+                        }
+                    }
+                    SyncMessage::CatalogueCoveredV1 { id, head, opened } => {
+                        let result = if inner.catalogue_head()?.as_ref() != Some(&head)
+                            || inner.catalogue_schema(opened)?.is_none()
+                        {
+                            Err(Error::new(
+                                ErrorCode::NotObserved,
+                                "catalogue coverage lacks its exact accepted metadata",
+                            ))
+                        } else {
+                            Ok((head, opened))
+                        };
+                        inner.client.as_mut().expect("client").relay_ready = true;
+                        if let Some(slot) = inner
+                            .client
+                            .as_mut()
+                            .expect("client")
+                            .catalogue_answers
+                            .get_mut(&id)
+                        {
+                            *slot = Some(result);
+                        }
+                    }
                     SyncMessage::Advice { id, advice } => {
                         let client = inner.client.as_mut().expect("client");
                         // Late answers to cancelled requests are dropped.
@@ -4718,7 +4823,10 @@ impl Db {
                         let error = Error::new(code, message);
                         client.relay_ready |=
                             client.relayed_fetches.iter().any(|f| f.upstream == id);
-                        if let Some(slot) = client.answers.get_mut(&id) {
+                        if let Some(slot) = client.catalogue_answers.get_mut(&id) {
+                            *slot = Some(Err(error));
+                            client.relay_ready = true;
+                        } else if let Some(slot) = client.answers.get_mut(&id) {
                             *slot = Some(Err(error));
                         } else if let Some(key) = client.remote_ids.get(&id)
                             && let Some(remote) = client.remote.get(key)
@@ -5283,7 +5391,13 @@ impl Db {
             .get_mut(subscriber.slot)
             .filter(|session| session.open && session.generation == subscriber.generation)
         {
-            for (query, binding, include_deleted) in session.close(&dropped) {
+            let released = session.close(&dropped);
+            if let Some(client) = inner.client.as_mut() {
+                for id in released.fetches {
+                    client.cancel_fetch(id);
+                }
+            }
+            for (query, binding, include_deleted) in released.subscriptions {
                 inner.release_remote(&query, &binding, include_deleted, RemoteReach::REMOTE);
             }
             inner.forget_relayed(subscriber.slot);
@@ -5329,6 +5443,9 @@ impl Db {
 
     /// Serve one session's inbound messages for this tick.
     fn serve_session(&self, index: usize) -> Result<(), Error> {
+        if self.inner.borrow().sessions[index].catalogue_pending {
+            self.queue_catalogue_metadata(index)?;
+        }
         let (inbound, failed): (Vec<SyncMessage>, bool) = {
             let mut inner = self.inner.borrow_mut();
             let session = &mut inner.sessions[index];
@@ -5417,7 +5534,9 @@ impl Db {
             // A read the server cannot serve is refused to the client,
             // which would otherwise wait on it.
             let read = match &message {
-                SyncMessage::Subscribe { id, .. } | SyncMessage::Fetch { id, .. } => Some(*id),
+                SyncMessage::Subscribe { id, .. }
+                | SyncMessage::Fetch { id, .. }
+                | SyncMessage::CatalogueFetchV1 { id, .. } => Some(*id),
                 _ => None,
             };
             let fetch = matches!(message, SyncMessage::Fetch { .. }).then(|| message.clone());
@@ -5599,6 +5718,7 @@ impl Db {
                 self.inner.borrow_mut().closed.push((subscriber, error));
             }
         }
+        self.progress_catalogue_fetches();
         self.notify();
         let mut inner = self.inner.borrow_mut();
         let through = inner.served_through();
@@ -6079,7 +6199,12 @@ impl Db {
                 // reconnects and resumes from its last settled seq.
                 if session.transport.send(message).is_err() {
                     let released = session.close(&dropped);
-                    for (query, binding, include_deleted) in released {
+                    if let Some(client) = inner.client.as_mut() {
+                        for id in released.fetches {
+                            client.cancel_fetch(id);
+                        }
+                    }
+                    for (query, binding, include_deleted) in released.subscriptions {
                         inner.release_remote(
                             &query,
                             &binding,
@@ -6225,6 +6350,71 @@ impl Db {
                 let session = &mut inner.sessions[index];
                 session.version = Some(crate::ids::SchemaVersionId::from_bytes(version));
                 session.schema = None;
+                drop(inner);
+                self.queue_catalogue_metadata(index)?;
+            }
+            SyncMessage::CatalogueFetchV1 {
+                id,
+                table,
+                opened,
+                scope,
+            } => {
+                let (author, scope_claims) = match scope {
+                    Some((author, requested)) => {
+                        let author = AuthorSubject::from_canonical(&author)
+                            .map_err(|e| query_error(e.to_string()))?;
+                        let authenticated = claims.clone().unwrap_or_else(|| {
+                            self.inner()
+                                .claims
+                                .get(&identity)
+                                .cloned()
+                                .unwrap_or_default()
+                        });
+                        if identity != AuthorSubject::SYSTEM
+                            && (author != identity || requested != authenticated)
+                        {
+                            return Err(Error::new(
+                                ErrorCode::WriteRejected,
+                                "catalogue request scope differs from its authenticated connection",
+                            ));
+                        }
+                        (author, requested)
+                    }
+                    None => (
+                        identity,
+                        claims.unwrap_or_else(|| {
+                            self.inner()
+                                .claims
+                                .get(&identity)
+                                .cloned()
+                                .unwrap_or_default()
+                        }),
+                    ),
+                };
+                if self.is_client() {
+                    self.forward_catalogue_fetch(index, id, table, opened, (author, scope_claims))?;
+                } else {
+                    let (head, schemas) = self.authority_catalogue_coverage(
+                        &table,
+                        opened,
+                        Some((author, scope_claims)),
+                    )?;
+                    let mut inner = self.inner();
+                    inner.sessions[index]
+                        .outbox
+                        .push(SyncMessage::CatalogueMetadataV1 {
+                            head: head.clone(),
+                            schemas,
+                        });
+                    if let Some(descriptor) = inner.policy_descriptor()? {
+                        inner.sessions[index]
+                            .outbox
+                            .push(SyncMessage::PolicyDescriptorV1(descriptor));
+                    }
+                    inner.sessions[index]
+                        .outbox
+                        .push(SyncMessage::CatalogueCoveredV1 { id, head, opened });
+                }
             }
             SyncMessage::Subscribe {
                 id,
@@ -7455,6 +7645,13 @@ impl Db {
     }
 }
 
+fn schema_admission_error() -> Error {
+    Error::new(
+        ErrorCode::Schema,
+        "schema version is awaiting published catalogue admission; deploy it to the server",
+    )
+}
+
 impl Db {
     /// Install the host hook for one-shot read progress and deadlines. The
     /// host schedules a later tick and re-polls waiting operations afterwards.
@@ -7524,6 +7721,259 @@ impl Db {
             let nanos = next.saturating_duration_since(Instant::now()).as_nanos();
             let millis = nanos.div_ceil(1_000_000).max(1).min(u128::from(u64::MAX)) as u64;
             scheduler.schedule_tick_after(millis);
+        }
+    }
+}
+
+impl Db {
+    pub(super) async fn fetch_catalogue(
+        &self,
+        table: &str,
+        opened: crate::ids::SchemaVersionId,
+        scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+    ) -> Result<(), Error> {
+        let deadline = Instant::now() + std::time::Duration::from_secs(15);
+        self.fetch_catalogue_until(table, opened, scope, deadline)
+            .await
+    }
+
+    async fn fetch_catalogue_until(
+        &self,
+        table: &str,
+        opened: crate::ids::SchemaVersionId,
+        scope: Option<(AuthorSubject, BTreeMap<String, Value>)>,
+        deadline: Instant,
+    ) -> Result<(), Error> {
+        self.ensure_storage_owner_active()?;
+        let _wake = self.read_deadline(Some(deadline));
+        let _attempt = self.read_attempt_deadline();
+        let (id, connection) = {
+            let mut inner = self.inner();
+            let client = inner.client.as_mut().expect("client");
+            if client.unadmitted {
+                return Err(schema_admission_error());
+            }
+            if client.transport.is_none() || !may_wait(client.hint.get()) {
+                return Err(Error::new(
+                    ErrorCode::NotObserved,
+                    "catalogue coverage has no available authority",
+                ));
+            }
+            let id = client.next_id;
+            client.next_id += 1;
+            client.catalogue_answers.insert(id, None);
+            client.outbox.push(SyncMessage::CatalogueFetchV1 {
+                id,
+                table: table.into(),
+                opened,
+                scope: scope.map(|(author, claims)| (author.canonical().to_owned(), claims)),
+            });
+            (id, client.connection)
+        };
+        let _request = FetchRequest {
+            inner: self.inner.clone(),
+            id,
+        };
+        self.schedule_pending_tick();
+        poll_fn(|_| {
+            self.ensure_storage_owner_active()?;
+            let mut inner = self.inner();
+            let client = inner.client.as_mut().expect("client");
+            if client.connection != connection {
+                return Poll::Ready(Err(Error::new(
+                    ErrorCode::NotObserved,
+                    "catalogue coverage interrupted by reconnect",
+                )));
+            }
+            if client.unadmitted {
+                return Poll::Ready(Err(schema_admission_error()));
+            }
+            if let Some(Some(answer)) = client.catalogue_answers.remove(&id) {
+                return Poll::Ready(answer.and_then(|(head, version)| {
+                    if inner.catalogue_head()?.as_ref() != Some(&head)
+                        || inner.catalogue_schema(opened)?.is_none()
+                    {
+                        Err(Error::new(
+                            ErrorCode::NotObserved,
+                            "catalogue coverage metadata changed before completion",
+                        ))
+                    } else if version == opened {
+                        Ok(())
+                    } else {
+                        Err(Error::new(
+                            ErrorCode::Protocol,
+                            "catalogue coverage answered another schema",
+                        ))
+                    }
+                }));
+            }
+            // Keep an unanswered slot; removing it would lose a later answer.
+            client.catalogue_answers.insert(id, None);
+            if client.transport.is_none()
+                || !may_wait(client.hint.get())
+                || Instant::now() >= deadline
+            {
+                return Poll::Ready(Err(Error::new(
+                    ErrorCode::NotObserved,
+                    "fresh catalogue coverage unavailable",
+                )));
+            }
+            Poll::Pending
+        })
+        .await
+    }
+
+    pub(super) fn broadcast_catalogue_metadata(&self) -> Result<(), Error> {
+        let count = self.inner.borrow().sessions.len();
+        for index in 0..count {
+            self.queue_catalogue_metadata(index)?;
+        }
+        self.schedule_pending_tick();
+        Ok(())
+    }
+    fn queue_catalogue_metadata(&self, index: usize) -> Result<(), Error> {
+        let mut inner = self.inner();
+        if !inner.sessions[index].open {
+            return Ok(());
+        }
+        inner.sessions[index].catalogue_pending = false;
+        if inner.catalogue_head()?.is_none() {
+            return Ok(());
+        }
+        let opened = inner.sessions[index]
+            .version
+            .unwrap_or(inner.owner.jazz.version_id());
+        let (head, schemas) = inner.catalogue_records(opened)?;
+        inner.sessions[index]
+            .outbox
+            .push(SyncMessage::CatalogueMetadataV1 { head, schemas });
+        if let Some(descriptor) = inner.policy_descriptor()? {
+            inner.sessions[index]
+                .outbox
+                .push(SyncMessage::PolicyDescriptorV1(descriptor));
+        }
+        Ok(())
+    }
+    fn forward_catalogue_fetch(
+        &self,
+        index: usize,
+        id: u64,
+        table: String,
+        opened: crate::ids::SchemaVersionId,
+        scope: (AuthorSubject, BTreeMap<String, Value>),
+    ) -> Result<(), Error> {
+        let deadline = self
+            .read_deadline(Some(Instant::now() + std::time::Duration::from_secs(15)))
+            .expect("deadline");
+        let mut inner = self.inner();
+        if inner.sessions[index].forwarded_catalogue.contains_key(&id) {
+            return Err(query_error("duplicate forwarded request ID"));
+        }
+        let owner_schema = inner.owner.jazz.version_id();
+        let client = inner.client.as_mut().expect("relay");
+        if client.transport.is_none() || !may_wait(client.hint.get()) {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                "catalogue relay has no available authority",
+            ));
+        }
+        let upstream = client.next_id;
+        client.next_id += 1;
+        let connection = client.connection;
+        client.catalogue_answers.insert(upstream, None);
+        client.outbox.push(SyncMessage::CatalogueFetchV1 {
+            id: upstream,
+            table,
+            opened,
+            scope: Some((scope.0.canonical().to_owned(), scope.1)),
+        });
+        inner.sessions[index].forwarded_catalogue.insert(
+            id,
+            ForwardedCatalogue {
+                upstream,
+                connection,
+                opened,
+                owner_schema,
+                deadline,
+            },
+        );
+        Ok(())
+    }
+    fn progress_catalogue_fetches(&self) {
+        let mut inner = self.inner();
+        for index in 0..inner.sessions.len() {
+            let mut ready = Vec::new();
+            for (&id, request) in &inner.sessions[index].forwarded_catalogue {
+                // Receiving the requested catalogue can install its policies and
+                // replace the owner's Schema allocation. Keep the structural
+                // schema and connection guards, not that allocation's address.
+                let answer = if request.owner_schema != inner.owner.jazz.version_id()
+                    || Instant::now() >= *request.deadline
+                    || inner.client.as_ref().is_none_or(|c| {
+                        c.connection != request.connection
+                            || c.transport.is_none()
+                            || !may_wait(c.hint.get())
+                    }) {
+                    Some(Err(Error::new(
+                        ErrorCode::NotObserved,
+                        "catalogue relay coverage interrupted or unavailable",
+                    )))
+                } else {
+                    inner
+                        .client
+                        .as_ref()
+                        .expect("relay")
+                        .catalogue_answers
+                        .get(&request.upstream)
+                        .cloned()
+                        .flatten()
+                };
+                if let Some(answer) = answer {
+                    ready.push((id, answer));
+                }
+            }
+            for (id, answer) in ready {
+                let request = inner.sessions[index]
+                    .forwarded_catalogue
+                    .remove(&id)
+                    .expect("pending");
+                if let Some(client) = inner.client.as_mut() {
+                    client.cancel_fetch(request.upstream);
+                }
+                let result = answer.and_then(|(head, opened)| {
+                    let (cached, schemas) = inner.catalogue_records(opened)?;
+                    if cached != head || opened != request.opened {
+                        return Err(Error::new(
+                            ErrorCode::NotObserved,
+                            "catalogue relay lacks the exact covered metadata",
+                        ));
+                    }
+                    Ok((head, opened, schemas, inner.policy_descriptor()?))
+                });
+                match result {
+                    Ok((head, opened, schemas, descriptor)) => {
+                        inner.sessions[index]
+                            .outbox
+                            .push(SyncMessage::CatalogueMetadataV1 {
+                                head: head.clone(),
+                                schemas,
+                            });
+                        if let Some(descriptor) = descriptor {
+                            inner.sessions[index]
+                                .outbox
+                                .push(SyncMessage::PolicyDescriptorV1(descriptor));
+                        }
+                        inner.sessions[index]
+                            .outbox
+                            .push(SyncMessage::CatalogueCoveredV1 { id, head, opened });
+                    }
+                    Err(error) => inner.sessions[index].outbox.push(SyncMessage::Refused {
+                        id,
+                        code: error.code,
+                        message: error.message,
+                    }),
+                }
+            }
         }
     }
 }
