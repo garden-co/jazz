@@ -204,3 +204,6 @@ mod sqlite_union_queries;
 
 #[path = "../sqlite_union_prefixes.rs"]
 mod sqlite_union_prefixes;
+
+#[path = "../sqlite_serializable_content.rs"]
+mod sqlite_serializable_content;

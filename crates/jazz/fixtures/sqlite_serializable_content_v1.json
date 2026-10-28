@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "wireRole": "jazz.sqlite.serializable-content.v1",
+  "encoding": "jazz.sqlite.sync.v4",
+  "plainRole": "jazz.sqlite.serializable-read-content.v1",
+  "plainPreimageHex": "08636f756e746572730707070707070707070707070707070700010576616c7565010f040000",
+  "unionRole": "jazz.sqlite.serializable-union-read-content.v1",
+  "unionPreimagesHex": [
+    "2608636f756e746572730707070707070707070707070707070700010576616c7565010f0400000161",
+    "2608636f756e746572730707070707070707070707070707070700010576616c7565010f0400000162"
+  ],
+  "commitFields": {
+    "envelope": "4a53514c04",
+    "commit_tag": "04",
+    "node": "22222222222222222222222222222222",
+    "transaction": "8001",
+    "kind_tag": "02",
+    "snapshot": "7f",
+    "reads_count": "01",
+    "query": "056e6f7465730000000000000000000000000000",
+    "bindings": "00",
+    "include_deleted": "00",
+    "rows_count": "01",
+    "row": "33333333333333333333333333333333",
+    "row_sequence": "8001",
+    "own_count": "01",
+    "own_publication": "8180808080808008",
+    "content_reads_count": "01",
+    "content_rows_count": "01",
+    "content_digest": "5555555555555555555555555555555555555555555555555555555555555555",
+    "ops": "00",
+    "author": "00",
+    "session": "00",
+    "expect": "00",
+    "bases": "00",
+    "origin": "00"
+  },
+  "commitHex": "4a53514c0404222222222222222222222222222222228001027f01056e6f746573000000000000000000000000000000000133333333333333333333333333333333800101818080808080800801015555555555555555555555555555555555555555555555555555555555555555000000000000"
+}

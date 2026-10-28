@@ -690,6 +690,49 @@ pub enum WireKind {
         reads: Vec<WireRead>,
         own: Vec<u64>,
     },
+    /// jazz.sqlite.serializable-content.v1. Snapshot and own publications retain
+    /// the ordinary coordinate contract. Every read row additionally carries a
+    /// versioned logical-content digest, including its semantic UNION arm.
+    SerializableContentV1 {
+        snapshot: u64,
+        reads: Vec<WireRead>,
+        own: Vec<u64>,
+        content: Vec<Vec<[u8; 32]>>,
+    },
+}
+
+impl WireKind {
+    fn serializable(&self) -> bool {
+        !matches!(self, Self::Mergeable)
+    }
+
+    fn read_content(&self) -> Result<Option<&Vec<Vec<[u8; 32]>>>, Error> {
+        match self {
+            Self::SerializableContentV1 { reads, content, .. } => {
+                if content.len() != reads.len()
+                    || content
+                        .iter()
+                        .zip(reads)
+                        .any(|(content, read)| content.len() != read.rows.len())
+                {
+                    return Err(Error::new(
+                        ErrorCode::Protocol,
+                        "invalid serializable-content-v1 dimensions",
+                    ));
+                }
+                Ok(Some(content))
+            }
+            Self::Serializable { reads, .. }
+                if reads.iter().any(|read| read.query.relation.is_some()) =>
+            {
+                Err(Error::new(
+                    ErrorCode::Protocol,
+                    "retained relation reads require serializable-content-v1 evidence",
+                ))
+            }
+            _ => Ok(None),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1025,6 +1068,7 @@ pub(crate) enum Kind {
         snapshot: u64,
         reads: Vec<WireRead>,
         own: Vec<u64>,
+        content: Option<Vec<Vec<[u8; 32]>>>,
     },
 }
 
@@ -3383,6 +3427,7 @@ impl Inner {
         snapshot: u64,
         reads: Vec<WireRead>,
         own: Vec<u64>,
+        content: Option<Vec<Vec<[u8; 32]>>>,
     ) -> Result<Kind, Error> {
         let mut carried = BTreeMap::new();
         for tx in own {
@@ -3405,6 +3450,7 @@ impl Inner {
             snapshot,
             reads,
             own: carried.into_values().collect(),
+            content,
         })
     }
 
@@ -4014,10 +4060,26 @@ impl Db {
                         snapshot,
                         reads,
                         own,
-                    } => WireKind::Serializable {
-                        snapshot,
-                        reads,
-                        own,
+                        content,
+                    } => match content {
+                        Some(content) if reads.is_empty() && content.is_empty() => {
+                            WireKind::Serializable {
+                                snapshot,
+                                reads,
+                                own,
+                            }
+                        }
+                        Some(content) => WireKind::SerializableContentV1 {
+                            snapshot,
+                            reads,
+                            own,
+                            content,
+                        },
+                        None => WireKind::Serializable {
+                            snapshot,
+                            reads,
+                            own,
+                        },
                     },
                 };
                 let commit = SyncMessage::Commit {
@@ -4874,7 +4936,7 @@ impl Db {
                         let client = inner.client.as_mut().expect("client");
                         client.known = client.known.max(through);
                         let serializable = client.sent.iter().any(|m| {
-                            matches!(m, SyncMessage::Commit { tx: sent, kind: WireKind::Serializable { .. }, .. } if *sent == tx)
+                            matches!(m, SyncMessage::Commit { tx: sent, kind, .. } if *sent == tx && kind.serializable())
                         });
                         client.pending.remove(tx);
                         client.stored.remove(&tx);
@@ -7203,9 +7265,11 @@ impl Db {
         // serializable one goes up as serializable, and its upstream
         // validates it; this store applies it optimistically meanwhile, as
         // any replica applies its own.
+        // Validate the complete evidence shape before a relay can persist or
+        // forward it. A malformed body must never be normalised to a legacy kind.
+        kind.read_content().map_err(|error| (error, Vec::new()))?;
         let relay = self.is_client();
-        let forward =
-            matches!(kind, WireKind::Serializable { .. }) && self.inner.borrow().relays_upstream();
+        let forward = kind.serializable() && self.inner.borrow().relays_upstream();
         let upload = match std::mem::replace(&mut kind, WireKind::Mergeable) {
             WireKind::Serializable {
                 snapshot,
@@ -7214,7 +7278,17 @@ impl Db {
             } if forward => self
                 .inner
                 .borrow()
-                .relayed_serializable(origin.0, snapshot, reads, own)
+                .relayed_serializable(origin.0, snapshot, reads, own, None)
+                .map_err(|e| (e, Vec::new()))?,
+            WireKind::SerializableContentV1 {
+                snapshot,
+                reads,
+                own,
+                content,
+            } if forward => self
+                .inner
+                .borrow()
+                .relayed_serializable(origin.0, snapshot, reads, own, Some(content))
                 .map_err(|e| (e, Vec::new()))?,
             unchanged => {
                 kind = unchanged;
@@ -7242,8 +7316,15 @@ impl Db {
             snapshot,
             reads,
             own,
+        }
+        | WireKind::SerializableContentV1 {
+            snapshot,
+            reads,
+            own,
+            ..
         } = &kind
         {
+            let content = kind.read_content().map_err(|error| (error, Vec::new()))?;
             let inner = self.inner();
             // The sender's own commits its snapshot included, by local seq
             // and where each settled here (earlier on this connection, so
@@ -7272,9 +7353,11 @@ impl Db {
                     return Err((Error::serialization_conflict(), rows));
                 }
             }
-            for read in reads {
+            for (index, read) in reads.iter().enumerate() {
+                let normalized = normalize_relation(&read.query, &inner.schema)
+                    .map_err(|error| (error, Vec::new()))?;
                 let prepared = PreparedQuery {
-                    query: read.query.clone(),
+                    query: normalized.unwrap_or_else(|| read.query.clone()),
                     binding: read.binding.clone(),
                     shape: Shape([0; 16]),
                     binding_id: Binding([0; 16]),
@@ -7285,9 +7368,17 @@ impl Db {
                     include_deleted: read.include_deleted,
                     ..ReadSpec::default()
                 };
-                let now: Vec<([u8; 16], u64)> = inner
-                    .read_versions(&prepared, identity, &spec)
-                    .map_err(|e| (e, Vec::new()))?
+                let current = inner
+                    .read_rows(&prepared, identity, &spec)
+                    .map_err(|error| (error, Vec::new()))?;
+                let content_changed = match content {
+                    Some(content) => {
+                        read_contents(&current).map_err(|error| (error, Vec::new()))?
+                            != content[index]
+                    }
+                    None => false,
+                };
+                let now: Vec<([u8; 16], u64)> = versions(&current)
                     .iter()
                     .map(|(row, seq)| (*row.0.as_bytes(), *seq))
                     .collect();
@@ -7298,7 +7389,7 @@ impl Db {
                     .iter()
                     .map(|(row, seq)| (*row, settled.get(seq).copied().unwrap_or(*seq)))
                     .collect();
-                if now != then {
+                if now != then || content_changed {
                     let rows = mentioned(&inner);
                     return Err((Error::serialization_conflict(), rows));
                 }
