@@ -1034,6 +1034,19 @@ pub(crate) struct Link {
     pub(crate) detached: bool,
 }
 
+/// A commit of this store's that the authority refused, kept with its
+/// payload so it can be retried (INV-TX-9).
+#[derive(Clone, Debug)]
+pub struct RejectedTransaction {
+    /// The commit's local seq (its transaction time).
+    pub seq: u64,
+    /// Why the authority refused it.
+    pub error: Error,
+    pub serializable: bool,
+    /// The writes it made, as it uploaded them.
+    pub ops: Vec<WireOp>,
+}
+
 /// Handle for a connected upstream.
 #[derive(Debug)]
 pub struct Upstream(u64);
@@ -1070,6 +1083,11 @@ pub(crate) struct Client {
     answers: HashMap<u64, Option<Result<(u64, Vec<[u8; 16]>), Error>>>,
     /// Permission preflights asked for; `None` until answered.
     advice: HashMap<u64, Option<PermissionAdvice>>,
+    /// The next permission preflight's id. Each client starts at a random
+    /// point, so an id held over from another instance (a reopened
+    /// database) or a late answer to one never names a request of this
+    /// one (INV-API-28).
+    next_advice: u64,
     /// Large-value nodes asked for and not yet answered.
     requested: BTreeSet<ChunkRequest>,
     /// Nodes to ask for on the next send.
@@ -2883,6 +2901,12 @@ pub(crate) const SYNC_DDL: &str = "\
     CREATE INDEX IF NOT EXISTS _jazz_settled_by_seq ON _jazz_settled (seq);\
     CREATE TABLE IF NOT EXISTS _jazz_nodes (node BLOB PRIMARY KEY, author INTEGER NOT NULL) WITHOUT ROWID;";
 
+/// The retry store for refused commits. It is created by the first refusal
+/// it keeps, not on open, so that opening an existing store without writing
+/// leaves the file byte-identical.
+const REJECTED_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_rejected \
+    (tx INTEGER PRIMARY KEY, commit_msg BLOB NOT NULL, error BLOB NOT NULL, serializable INTEGER NOT NULL)";
+
 type RowKey = (String, RowUuid, Vec<u8>);
 
 fn encode<T: Serialize>(value: &T) -> Vec<u8> {
@@ -2985,6 +3009,79 @@ impl Inner {
         )
         .map_err(storage)?;
         Ok(())
+    }
+
+    /// Move refused commit `tx`'s payload from the upload queue into the
+    /// retry store.
+    fn retain_rejected(&self, tx: u64, error: &Error, serializable: bool) -> Result<(), Error> {
+        self.exec(REJECTED_DDL, []).map_err(storage)?;
+        self.exec(
+            "INSERT OR REPLACE INTO _jazz_rejected (tx, commit_msg, error, serializable) \
+             SELECT tx, commit_msg, ?2, ?3 FROM _jazz_pending WHERE tx = ?1",
+            rusqlite::params![tx as i64, encode(&wire_error(error)), serializable],
+        )
+        .map_err(storage)?;
+        Ok(())
+    }
+
+    /// The refused commits in the retry store, oldest first.
+    pub(crate) fn rejected_transactions(&self) -> Result<Vec<RejectedTransaction>, Error> {
+        if !self.has_rejected_store()? {
+            return Ok(Vec::new());
+        }
+        let mut statement = self
+            .conn
+            .prepare_cached(
+                "SELECT tx, commit_msg, error, serializable FROM _jazz_rejected ORDER BY tx",
+            )
+            .map_err(storage)?;
+        let rows = statement
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)? as u64,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, Vec<u8>>(2)?,
+                    r.get::<_, bool>(3)?,
+                ))
+            })
+            .map_err(storage)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage)?;
+        let decode = |e: postcard::Error| Error::new(ErrorCode::Storage, e.to_string());
+        rows.into_iter()
+            .map(|(seq, commit, error, serializable)| {
+                let ops = match postcard::from_bytes::<SyncMessage>(&commit).map_err(decode)? {
+                    SyncMessage::Commit { ops, .. } => ops,
+                    _ => Vec::new(),
+                };
+                Ok(RejectedTransaction {
+                    seq,
+                    error: from_wire_error(postcard::from_bytes(&error).map_err(decode)?),
+                    serializable,
+                    ops,
+                })
+            })
+            .collect()
+    }
+
+    /// Drop refused commit `tx` from the retry store.
+    pub(crate) fn discard_rejected(&self, tx: u64) -> Result<(), Error> {
+        if !self.has_rejected_store()? {
+            return Ok(());
+        }
+        self.exec("DELETE FROM _jazz_rejected WHERE tx = ?1", [tx as i64])
+            .map_err(storage)?;
+        Ok(())
+    }
+
+    fn has_rejected_store(&self) -> Result<bool, Error> {
+        self.conn
+            .query_row(
+                "SELECT count(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = '_jazz_rejected'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(storage)
     }
 
     fn forget_pending(&self, tx: u64) -> Result<(), Error> {
@@ -3443,6 +3540,7 @@ impl Client {
                 detached: false,
             })),
             next_id: 1,
+            next_advice: fresh_advice_base(),
             remote: HashMap::new(),
             remote_ids: HashMap::new(),
             outbox: Vec::new(),
@@ -4296,8 +4394,8 @@ impl Db {
         let Some(client) = inner.client.as_mut() else {
             return 0;
         };
-        let id = client.next_id;
-        client.next_id += 1;
+        let id = client.next_advice;
+        client.next_advice += 1;
         if client.transport.is_some() && may_wait(client.hint.get()) {
             client.advice.insert(id, None);
             let (author, session) = match session {
@@ -4341,11 +4439,17 @@ impl Db {
         .await
     }
 
-    /// Resolve an outstanding request as `Unknown`; its answer is ignored.
+    /// Resolve an outstanding request as `Unknown`: its waiter is removed,
+    /// a request not yet sent is never sent, and a late answer is ignored.
     pub fn cancel_permission_advice_request(&self, id: u64) {
         let mut inner = self.inner.borrow_mut();
-        if let Some(slot) = inner.client.as_mut().and_then(|c| c.advice.get_mut(&id)) {
-            slot.get_or_insert(PermissionAdvice::Unknown);
+        let Some(client) = inner.client.as_mut() else {
+            return;
+        };
+        if client.advice.remove(&id).is_some() {
+            client
+                .outbox
+                .retain(|m| !matches!(m, SyncMessage::Advise { id: asked, .. } if *asked == id));
         }
     }
 
@@ -4608,6 +4712,14 @@ impl Db {
                         let relayed = client.relayed_fates.contains_key(&tx);
                         if let Err(error) = &result {
                             let origins = inner.relayed_origins(tx)?;
+                            // The originating store keeps its own refused
+                            // payload, for a host that reports refusals,
+                            // until the host has (INV-TX-9). A relay keeps
+                            // none of its sessions'.
+                            if inner.upstream_rejections.is_some() && !relayed && origins.is_empty()
+                            {
+                                inner.retain_rejected(tx, error, serializable)?;
+                            }
                             for &(node, session_tx) in &origins {
                                 let refused = Err(wire_error(error));
                                 inner.record_fate(node, session_tx, &refused)?;
@@ -7017,6 +7129,14 @@ fn commit_who(
         (None, Some(author)) if author != AuthorSubject::SYSTEM => Ok(Who::Attributed(author)),
         (None, _) => Ok(Who::Local),
     }
+}
+
+/// Where a client's permission advice ids start: random, below 2^51 so the
+/// ids stay exact as JavaScript numbers, and never 0 (the id of advice
+/// asked without a client).
+fn fresh_advice_base() -> u64 {
+    let (high, _) = uuid::Uuid::new_v4().as_u64_pair();
+    (high >> 13) | 1
 }
 
 /// [`readable`] for the version of the row at `seq`.
