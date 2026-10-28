@@ -384,3 +384,58 @@ fn an_untrusted_commit_over_the_session_budget_is_rejected_without_sending() {
     }
     assert_eq!(visible(&link.server), 1, "the session survives the refusal");
 }
+
+/// A pending commit too large for one stored value (a Durable Object keeps
+/// at most 2 MiB in one) is kept in parts: it survives a reopen whole and
+/// uploads as one commit, and its parts go once it settles.
+#[test]
+fn a_pending_commit_over_one_stored_value_survives_a_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("writer.sqlite");
+    let writer_author = AuthorSubject::for_test_bytes([0x56; 16]);
+    let open_writer = || {
+        block_on(Db::open_at(
+            DbConfig::new(
+                schema(),
+                DbIdentity {
+                    node: NodeUuid::from_bytes([0x56; 16]),
+                    author: writer_author,
+                },
+            ),
+            &path,
+            Default::default(),
+        ))
+        .unwrap()
+    };
+    {
+        // A replica whose link sends nothing: about 3 MB stays pending.
+        let writer = open_writer();
+        let unreachable = open(0xc6, AuthorSubject::SYSTEM);
+        let _subscriber = link(
+            &unreachable,
+            &writer,
+            writer_author,
+            &Rc::new(RefCell::new(0)),
+        );
+        commit_notes(&writer, ROWS);
+        block_on(writer.tick()).unwrap();
+    }
+    let parts = |path: &std::path::Path| -> i64 {
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .query_row("SELECT count(*) FROM _jazz_commit_parts", [], |r| r.get(0))
+            .unwrap()
+    };
+    assert!(parts(&path) > 1, "kept in parts");
+    let writer = open_writer();
+    let server = open(0xc5, AuthorSubject::SYSTEM);
+    let room = Rc::new(RefCell::new(usize::MAX));
+    let _subscriber = link(&server, &writer, writer_author, &room);
+    for _ in 0..20 {
+        block_on(writer.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+    }
+    assert_eq!(visible(&server), ROWS);
+    drop(writer);
+    assert_eq!(parts(&path), 0, "parts go once the commit settles");
+}

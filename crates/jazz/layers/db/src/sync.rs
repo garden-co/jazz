@@ -3519,6 +3519,17 @@ pub(crate) const SYNC_DDL: &str = "\
 const REJECTED_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_rejected \
     (tx INTEGER PRIMARY KEY, commit_msg BLOB NOT NULL, error BLOB NOT NULL, serializable INTEGER NOT NULL)";
 
+/// A pending or refused commit whose encoding is over [`COMMIT_PART_BYTES`]
+/// is kept here in parts, in order, and its `commit_msg` is empty: no stored
+/// value is larger than a part, so a store with a small value limit (a
+/// Durable Object's 2 MiB) keeps commits that travel in several frames.
+/// Created by the first such commit.
+const COMMIT_PARTS_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_commit_parts \
+    (tx INTEGER NOT NULL, n INTEGER NOT NULL, part BLOB NOT NULL, PRIMARY KEY (tx, n)) WITHOUT ROWID";
+
+/// The largest value a commit is stored in (see `COMMIT_PARTS_DDL`).
+const COMMIT_PART_BYTES: usize = 1024 * 1024;
+
 /// The schema version each pending commit was written under (see
 /// `persist_pending`). Created by the first pending commit, so that
 /// opening an existing store without writing leaves the file
@@ -3742,9 +3753,25 @@ impl Inner {
             .iter()
             .map(|(t, r, k)| (t.clone(), *r.0.as_bytes(), k.clone()))
             .collect();
+        let commit = encode(commit);
+        let inline = if commit.len() > COMMIT_PART_BYTES {
+            self.exec(COMMIT_PARTS_DDL, []).map_err(storage)?;
+            self.exec("DELETE FROM _jazz_commit_parts WHERE tx = ?1", [tx as i64])
+                .map_err(storage)?;
+            for (n, part) in commit.chunks(COMMIT_PART_BYTES).enumerate() {
+                self.exec(
+                    "INSERT INTO _jazz_commit_parts (tx, n, part) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![tx as i64, n as i64, part],
+                )
+                .map_err(storage)?;
+            }
+            Vec::new()
+        } else {
+            commit
+        };
         self.exec(
             "INSERT OR REPLACE INTO _jazz_pending (tx, commit_msg, rows) VALUES (?1, ?2, ?3)",
-            rusqlite::params![tx as i64, encode(commit), encode(&rows)],
+            rusqlite::params![tx as i64, inline, encode(&rows)],
         )
         .map_err(storage)?;
         // Which version's names its ops use, should the store reopen under
@@ -3854,6 +3881,7 @@ impl Inner {
         let decode = |e: postcard::Error| Error::new(ErrorCode::Storage, e.to_string());
         rows.into_iter()
             .map(|(seq, commit, error, serializable)| {
+                let commit = self.commit_bytes(seq, commit)?;
                 let ops = match postcard::from_bytes::<SyncMessage>(&commit).map_err(decode)? {
                     SyncMessage::Commit { ops, .. } => ops,
                     _ => Vec::new(),
@@ -3875,7 +3903,7 @@ impl Inner {
         }
         self.exec("DELETE FROM _jazz_rejected WHERE tx = ?1", [tx as i64])
             .map_err(storage)?;
-        Ok(())
+        self.forget_commit_parts(tx)
     }
 
     fn has_rejected_store(&self) -> Result<bool, Error> {
@@ -3898,7 +3926,7 @@ impl Inner {
             )
             .map_err(storage)?;
         }
-        Ok(())
+        self.forget_commit_parts(tx)
     }
 
     /// The rows pending commits recorded in stored table `from`, which is
@@ -3930,6 +3958,52 @@ impl Inner {
             )
             .map_err(storage)?;
         }
+        Ok(())
+    }
+
+    /// Commit `tx`'s encoding, as `persist_pending` stored it: `stored`, or
+    /// its parts when that is empty.
+    fn commit_bytes(&self, tx: u64, stored: Vec<u8>) -> Result<Vec<u8>, Error> {
+        if !stored.is_empty() {
+            return Ok(stored);
+        }
+        let mut statement = self
+            .conn
+            .prepare_cached("SELECT part FROM _jazz_commit_parts WHERE tx = ?1 ORDER BY n")
+            .map_err(storage)?;
+        let parts = statement
+            .query_map([tx as i64], |r| r.get::<_, Vec<u8>>(0))
+            .map_err(storage)?;
+        let mut bytes = Vec::new();
+        for part in parts {
+            bytes.extend(part.map_err(storage)?);
+        }
+        Ok(bytes)
+    }
+
+    /// Drop commit `tx`'s parts once neither the upload queue nor the retry
+    /// store keeps it.
+    fn forget_commit_parts(&self, tx: u64) -> Result<(), Error> {
+        if !self.has_table("_jazz_commit_parts")? {
+            return Ok(());
+        }
+        let kept = |table: &str| -> Result<bool, Error> {
+            if !self.has_table(table)? {
+                return Ok(false);
+            }
+            self.conn
+                .query_row(
+                    &format!("SELECT count(*) > 0 FROM {table} WHERE tx = ?1"),
+                    [tx as i64],
+                    |r| r.get(0),
+                )
+                .map_err(storage)
+        };
+        if kept("_jazz_pending")? || kept("_jazz_rejected")? {
+            return Ok(());
+        }
+        self.exec("DELETE FROM _jazz_commit_parts WHERE tx = ?1", [tx as i64])
+            .map_err(storage)?;
         Ok(())
     }
 
@@ -4456,6 +4530,7 @@ impl Inner {
         drop(statement);
         let versions = self.pending_versions()?;
         for (tx, commit, rows) in pending {
+            let commit = self.commit_bytes(tx, commit)?;
             let mut commit: SyncMessage = postcard::from_bytes(&commit)
                 .map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?;
             // The rows it expected are not kept across a reopen: the
