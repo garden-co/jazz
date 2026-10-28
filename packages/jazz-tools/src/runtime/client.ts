@@ -517,6 +517,8 @@ export type InternalQueryExecutionOptions = Omit<QueryExecutionOptions, "tier"> 
   tier?: InternalReadTier;
   visibility?: QueryVisibility;
   openTransactionId?: OpenTransactionId;
+  /** Columns whose updates a subscription also delivers as splices. */
+  splices?: readonly string[];
 };
 
 export interface ResolvedQueryExecutionOptions {
@@ -525,6 +527,7 @@ export interface ResolvedQueryExecutionOptions {
   firstLoadRemoteWaitMs?: number;
   visibility: QueryVisibility;
   branch?: BranchView;
+  splices?: readonly string[];
 }
 
 type ResolvedInternalQueryExecutionOptions = ResolvedQueryExecutionOptions & {
@@ -669,6 +672,7 @@ export function resolveEffectiveQueryExecutionOptions(
     ...(firstLoadRemoteWaitMs !== undefined ? { firstLoadRemoteWaitMs } : {}),
     visibility: options?.visibility ?? "public",
     branch: options?.branch,
+    ...(options?.splices?.length ? { splices: options.splices } : {}),
   };
 }
 
@@ -700,6 +704,7 @@ function encodeQueryExecutionOptions(
   const payload: {
     first_load_remote_wait_ms?: number;
     transaction_id?: string;
+    splices?: readonly string[];
     read_view?: {
       source: {
         BranchView: {
@@ -729,7 +734,14 @@ function encodeQueryExecutionOptions(
     };
   }
 
-  if (!payload.transaction_id && !payload.first_load_remote_wait_ms && !payload.read_view) {
+  if (options.splices?.length) payload.splices = options.splices;
+
+  if (
+    !payload.transaction_id &&
+    !payload.first_load_remote_wait_ms &&
+    !payload.read_view &&
+    !payload.splices
+  ) {
     return undefined;
   }
 

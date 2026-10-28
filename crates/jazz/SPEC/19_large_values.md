@@ -529,8 +529,23 @@ result (`ReadOpts::splices`), so an editor can apply remote changes as
 transactions: each updated row carries the column's splices from the version
 the result showed. When they cannot be computed locally (that version is no
 longer held, or chunks are still to arrive) the row carries none for the
-column, and the reader takes the value whole. The Rust engine API ships
-first; the TypeScript option follows.
+column, and the reader takes the value whole. A column the update left
+unchanged carries an empty list.
+
+On a range-partial column the splices are page-relative: they turn the page
+the result showed into the new page, computed from the two page cells, so an
+edit before the window that shifts its contents is a splice of the window
+too. Splices on a JSON-pointer-partial column are refused explicitly as not
+supported yet.
+
+`JazzClient` subscriptions take the same option (`subscribe_with_opts` with
+`ReadOpts::with_splices`) and carry the splices on each `OrderedUpdated`.
+TypeScript takes `splices: [column, ...]` in the query options of
+`Db.subscribe`; the update callback's second argument maps each updated row's
+id to its columns' splices, UTF-16 with a string insert for text and bytes
+with a `Uint8Array` insert for bytes. TypeScript accepts only TEXT and BYTEA
+columns without a column transform and rejects others when subscribing, as
+not supported yet.
 
 Native Rust exposes `Db::insert_streaming_value`: the caller supplies the
 ordinary row cells, the target column and a `std::io::Read`; Jazz derives the

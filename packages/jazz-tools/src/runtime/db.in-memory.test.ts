@@ -1,7 +1,7 @@
 import { localAccountConfig } from "./testing/account-fixtures.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
-import { type Db } from "./db.js";
+import { type Db, type DbSubscriptionUpdate } from "./db.js";
 import { createDb } from "./default-create-db.js";
 
 const schema = {
@@ -280,6 +280,82 @@ describe("createDb in-memory driver", () => {
         .select({ metadata: { at: "/nested/answer" } }),
     );
     expect(metadata).toEqual({ id: inserted.id, metadata: 43 });
+  });
+
+  it("delivers opted-in columns' changes as splices, page-relative on a range select", async () => {
+    db = await createDb({
+      ...(await localAccountConfig("in-memory-large-value-subscription-splices-test")),
+      driver: { type: "memory" },
+    });
+
+    const prefix = "a".repeat(70_000);
+    const { value: inserted } = db.insert(largeValues.documents, {
+      payload: new Uint8Array(70_000),
+      body: `${prefix}hello world`,
+      metadata: {},
+      done: false,
+    });
+    await Promise.resolve();
+    const whole: DbSubscriptionUpdate[] = [];
+    const page: Array<{ rows: unknown[]; update: DbSubscriptionUpdate }> = [];
+    const stopWhole = db.subscribe(
+      largeValues.documents.where({ id: inserted.id }),
+      { onUpdate: (_rows, update) => whole.push(update) },
+      { splices: ["body", "payload"] },
+    );
+    const stopPage = db.subscribe(
+      largeValues.documents
+        .where({ id: inserted.id })
+        .select({ body: { from: prefix.length + 6, to: prefix.length + 11 } }),
+      { onUpdate: (rows, update) => page.push({ rows, update }) },
+      { splices: ["body"] },
+    );
+    await expect.poll(() => whole.length > 0 && page.length > 0).toBe(true);
+
+    await db
+      .update(
+        largeValues.documents,
+        inserted.id,
+        {},
+        {
+          applyDiffs: {
+            body: {
+              within: { from: prefix.length + 6, to: prefix.length + 11 },
+              splices: [{ at: 0, delete: 5, insert: "🪩 wide" }],
+            },
+            payload: {
+              within: { from: 10, to: 12 },
+              splices: [{ at: 0, delete: 2, insert: new Uint8Array([7]) }],
+            },
+          },
+        },
+      )
+      .wait({ tier: "local" });
+
+    await expect.poll(() => whole.at(-1)?.splices.get(inserted.id)).toBeDefined();
+    expect(whole.at(-1)!.splices.get(inserted.id)).toEqual({
+      body: [{ at: prefix.length + 6, delete: 5, insert: "🪩 wide" }],
+      payload: [{ at: 10, delete: 2, insert: new Uint8Array([7]) }],
+    });
+    // The window now covers "🪩 wi"; its splice turns "world" into exactly that.
+    await expect.poll(() => page.at(-1)?.update.splices.get(inserted.id)).toBeDefined();
+    const last = page.at(-1)!;
+    expect(last.rows).toEqual([{ id: inserted.id, body: "🪩 wi" }]);
+    const splices = last.update.splices.get(inserted.id)!.body!;
+    let text = "world";
+    for (const splice of splices) {
+      text =
+        text.slice(0, splice.at) +
+        (splice.insert as string) +
+        text.slice(splice.at + splice.delete);
+    }
+    expect(text).toBe("🪩 wi");
+
+    stopWhole();
+    stopPage();
+    expect(() =>
+      db!.subscribe(largeValues.documents, { onUpdate: () => {} }, { splices: ["metadata"] }),
+    ).toThrow(/not supported yet/);
   });
 
   it("keeps descriptor-shaped JSON values ordinary for direct and transactional upserts", async () => {

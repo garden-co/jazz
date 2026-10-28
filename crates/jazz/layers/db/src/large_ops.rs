@@ -51,35 +51,7 @@ pub struct LargeValueUpdateSplice {
     pub insert: Vec<u8>,
 }
 
-/// One edit of a [`Db::value_delta`]: replace `delete` bytes at `at` with
-/// `insert`. Edits apply in order, each in the coordinates of the value the
-/// earlier ones made. Text edits also carry the same edit in UTF-16 code
-/// units; they are zero for bytes columns.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct LargeValueDeltaSplice {
-    /// Byte offset.
-    pub at: u64,
-    /// Bytes removed.
-    pub delete: u64,
-    /// Bytes inserted, UTF-8 for text.
-    pub insert: Vec<u8>,
-    /// UTF-16 offset (text only).
-    pub at_utf16: u64,
-    /// UTF-16 code units removed (text only).
-    pub delete_utf16: u64,
-}
-
-impl From<lv::ReplaceEdit> for LargeValueDeltaSplice {
-    fn from(edit: lv::ReplaceEdit) -> Self {
-        LargeValueDeltaSplice {
-            at: edit.offset,
-            delete: edit.delete_length,
-            insert: edit.insert_bytes,
-            at_utf16: edit.utf16_offset,
-            delete_utf16: edit.delete_utf16_length,
-        }
-    }
-}
+pub use jazz_model::model::public_api::types::LargeValueDeltaSplice;
 
 /// An RFC 6901 JSON replacement of an existing member or array element.
 /// Missing parents are never created, so a typo cannot change a document's

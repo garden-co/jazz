@@ -81,7 +81,12 @@ export type {
   ColumnTransformRegistry,
 } from "./column-transforms.js";
 import { toValue, toWriteRecord } from "./value-converter.js";
-import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
+import {
+  RowChangeKind,
+  SubscriptionManager,
+  type SubscriptionDelta,
+  type ValueSplices,
+} from "./subscription-manager.js";
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
 import { AuthRenewalBackoff } from "./auth-renewal-backoff.js";
 import {
@@ -245,6 +250,11 @@ export type QueryOptions = ReadTierOptions & {
   branch?: Branch;
   /** Optional live base, or `[base, snapshotRef]` for a frozen base. */
   base?: BranchBase;
+  /**
+   * TEXT or BYTEA columns whose changes a subscription also delivers as splices
+   * (see {@link DbSubscriptionUpdate}). One-shot reads ignore it.
+   */
+  splices?: readonly string[];
 };
 
 type InternalDbQueryOptions = Omit<QueryOptions, "tier"> & {
@@ -260,9 +270,24 @@ type InternalDbQueryOptions = Omit<QueryOptions, "tier"> & {
  */
 export interface DbSubscriptionCallbacks<T extends { id: string }> {
   /** Called with the complete current result whenever the query changes. */
-  onUpdate: (rows: T[]) => void;
+  onUpdate: (rows: T[], update: DbSubscriptionUpdate) => void;
   /** Called once when the subscription terminates with an error. */
   onError?: (error: Error) => void;
+}
+
+/** What changed in one subscription update, beyond the complete result. */
+export interface DbSubscriptionUpdate {
+  /**
+   * Per updated row id, the splices of each column named in the `splices`
+   * option. They turn the value the previous update showed into the new one,
+   * and apply in order: each splice's offsets are in the value the earlier ones
+   * produced. TEXT splices count UTF-16 code units and insert a string; BYTEA
+   * splices count bytes and insert a `Uint8Array`. On a range select they are
+   * relative to the selected window. A row or column without an entry changed
+   * in a way that could not be expressed as splices (or not at all): read its
+   * new value from the rows instead.
+   */
+  splices: ReadonlyMap<string, ValueSplices>;
 }
 
 /** Package-internal callbacks for incremental subscription consumers. */
@@ -293,6 +318,13 @@ function lowerPublicDbQueryOptions(options?: QueryOptions): InternalDbQueryOptio
   if (firstLoadRemoteWaitMs !== undefined) lowered.firstLoadRemoteWaitMs = firstLoadRemoteWaitMs;
   if (candidate.branch !== undefined) lowered.branch = candidate.branch as Branch;
   if (candidate.base !== undefined) lowered.base = candidate.base as BranchBase;
+  const splices = (candidate as { splices?: unknown }).splices;
+  if (splices !== undefined) {
+    if (!Array.isArray(splices) || !splices.every((column) => typeof column === "string")) {
+      throw new Error("splices must be an array of column names.");
+    }
+    if (splices.length > 0) lowered.splices = [...splices];
+  }
   if (isInspectorLocalQueryOptions(options)) lowered.tier = "local-only";
   return lowered;
 }
@@ -584,6 +616,31 @@ function normalizeQueryOptions(
   options?: InternalDbQueryOptions,
 ) {
   return normalizeViewOptions(schema, table, options) ?? {};
+}
+
+/** Splices are only defined for plain TEXT and BYTEA columns of the result table. */
+function assertSpliceableColumns(
+  schema: WasmSchema,
+  table: string,
+  query: { readonly _columnTransforms?: ColumnTransformMap },
+  columns: readonly string[],
+): void {
+  const descriptors = resolveQueryTable(schema, table)?.columns ?? [];
+  for (const column of columns) {
+    const descriptor = descriptors.find((candidate) => candidate.name === column);
+    if (!descriptor) throw new Error(`splices: "${column}" is not a column of "${table}".`);
+    const type = descriptor.column_type.type;
+    if (type !== "Text" && type !== "Bytea") {
+      throw new Error(
+        `splices: column "${column}" is ${type}; splices are not supported yet for columns other than TEXT and BYTEA.`,
+      );
+    }
+    if (query._columnTransforms?.[column]) {
+      throw new Error(
+        `splices: column "${column}" has a column transform; splices are not supported yet for transformed columns.`,
+      );
+    }
+  }
 }
 
 function assertWritableTable(table: { readonly _table: string }): void {
@@ -3290,7 +3347,13 @@ export class Db {
         if (update.all === undefined) {
           throw new Error("Jazz subscription update is missing its materialized result.");
         }
-        onUpdate(update.all);
+        const splices = new Map<string, ValueSplices>();
+        for (const change of update.delta) {
+          if (change.kind === RowChangeKind.Updated && change.splices) {
+            splices.set(change.id, change.splices);
+          }
+        }
+        onUpdate(update.all, { splices });
       },
       ...(onError === undefined ? {} : { onError }),
     };
@@ -3359,6 +3422,9 @@ export class Db {
     const bufferedDeltas: SubscriptionDelta<T>[] = [];
 
     const queryOptions = normalizeQueryOptions(query._schema, builtQuery.table, options);
+    if (queryOptions.splices) {
+      assertSpliceableColumns(planningSchema, outputTable, query, queryOptions.splices);
+    }
     const readSession = this.getAccessContext()?.readSession ?? session;
     type NativeSubscription = {
       id: number | null;
