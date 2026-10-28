@@ -726,11 +726,11 @@ pub enum SyncMessage {
     Unsubscribe {
         id: u64,
     },
-    /// Retired: clients before subscription-scoped coherence sent every
-    /// settled row version they held, as (table, id, branch key, seq), on
-    /// each reconnect. A server ignores it: a resumed subscription's
-    /// opening brings its rows up to date from `since`. It keeps its place
-    /// so the variants after it keep their wire tags.
+    /// Rows, as (stored table, id, branch key, seq), whose shipped deltas
+    /// the replica could not apply: it lacks the version a delta was made
+    /// over (SPEC 19.8). The server ships each whole, or evicts it. A
+    /// subscription's rows are never declared: its opening brings them up
+    /// to date from `since`. The seq is not read.
     Hold {
         rows: Vec<(String, [u8; 16], Vec<u8>, u64)>,
     },
