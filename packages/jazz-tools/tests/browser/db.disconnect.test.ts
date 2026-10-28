@@ -118,15 +118,15 @@ describe("Db disconnect/reconnect", () => {
       await db.reconnect();
       expect(await db.all(pending, { tier: "remote" })).toEqual([]);
       // No broader remote query may fetch the missing newer version for us.
-      // The row left every subscription, so it is cold: the cache may drop
-      // it or hold its newer version, never the stale one.
+      // Nothing watches a row that left every subscription: the resumed
+      // answer's listing evicts it rather than refreshing it.
       await waitForCondition(
         async () => {
           const cached = await db.all(todoByTitle(label), inspectorLocalQueryOptions());
-          return cached.every((item) => item.done) && !visible.some((item) => item.id === row.id);
+          return cached.length === 0 && !visible.some((item) => item.id === row.id);
         },
         SYNC_OPERATION_TIMEOUT_MS,
-        "stale row stayed in the foreground local cache",
+        "the row that left the query stayed in the foreground local cache",
       );
       stop();
     },
