@@ -2,6 +2,7 @@ import type { WasmSchema, Value } from "../../drivers/types.js";
 import type { RuntimeSourcesConfig } from "../context.js";
 import type { MutationErrorEvent } from "../client.js";
 import type { RemoteLinkState } from "../remote-link-state.js";
+import type { LinkStatus } from "../sync-status.js";
 import type { NativeSelfSignedClientProof } from "./native-codec.js";
 import {
   UNSUPPORTED_STORAGE_CODECS_ERROR_CODE,
@@ -639,11 +640,11 @@ export type BrowserFollowerPortEvent =
    */
   | { type: "transport-state"; explicitlyDisconnected: boolean }
   /**
-   * Live reachability of the worker's upstream server. Tabs use it only to
+   * Live reachability of the worker's upstream server. Tabs use `state` to
    * decide whether a local-first read's first load may wait for a remote
-   * answer; older tabs ignore it.
+   * answer, and report `link` as their sync status; older tabs ignore it.
    */
-  | { type: "remote-link"; state: RemoteLinkState }
+  | { type: "remote-link"; state: RemoteLinkState; link?: LinkStatus }
   | {
       type: "result";
       id: number;

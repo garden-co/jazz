@@ -33,12 +33,14 @@ export {
   UnsupportedSnapshotError,
 } from "./snapshot-ref.js";
 export type { PublicSession, RuntimeSourcesConfig } from "./context.js";
+export type { ValueSplices } from "./subscription-manager.js";
 /** Encode the opaque logical identity exposed as `session.user` by bindings. */
 export { canonicalAuthorSubject as userIdentity } from "./author-id.js";
 export {
   Db,
   type ActiveQuerySubscriptionTrace,
   type DbSubscriptionCallbacks,
+  type DbSubscriptionUpdate,
   type LogoutOptions,
   Transaction,
   type TransactionKind,
@@ -59,6 +61,7 @@ export {
 } from "./db.js";
 export type { AccountDbConfig as DbConfig } from "../accounts/context.js";
 export type { AuthFailureReason, AuthState } from "./auth-state.js";
+export type { LinkStatus, SyncStatus } from "./sync-status.js";
 export {
   fetchStoredPermissions,
   fetchSchemaHashes,

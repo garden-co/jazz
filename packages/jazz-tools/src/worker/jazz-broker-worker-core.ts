@@ -41,6 +41,8 @@ import {
 import { encodeSchema } from "../runtime/native-runtime/schema-codec.js";
 import { deliverMutationErrorToAttachedPeers } from "./mutation-error-delivery.js";
 import { toError } from "../runtime/util.js";
+import type { RemoteLinkState } from "../runtime/remote-link-state.js";
+import { sameLinkStatus, type LinkStatus } from "../runtime/sync-status.js";
 
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 
@@ -1141,10 +1143,19 @@ async function initialize(context: RuntimeContext): Promise<void> {
         post(peer.port, { type: "mutation-error", event: received }),
       );
     });
-    runtime.onRemoteLinkStateChange((state) => {
+    let announced: { state: RemoteLinkState; link: LinkStatus } | null = null;
+    const announceLink = () => {
       // Only the current runtime speaks for this namespace's upstream.
-      if (context.runtime === runtime) broadcast(context, { type: "remote-link", state });
-    }, new AbortController().signal);
+      if (context.runtime !== runtime) return;
+      const state = runtime.remoteLinkState();
+      const link = runtime.upstreamLinkStatus();
+      // Both sources can report one transition; attaching peers get their own copy.
+      if (announced?.state === state && sameLinkStatus(announced.link, link)) return;
+      announced = { state, link };
+      broadcast(context, { type: "remote-link", state, link });
+    };
+    runtime.onRemoteLinkStateChange(announceLink, new AbortController().signal);
+    runtime.onUpstreamLinkStatusChange(announceLink, new AbortController().signal);
     context.runtime.onServerTransportError((error, { retrying }) => {
       // Transport failures are foreground events, not authority fates or
       // durable notifications. Only peers that have completed admission own a
@@ -1686,7 +1697,11 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
           } else {
             ensureServerConnection(peer.context);
           }
-          post(peer.port, { type: "remote-link", state: activeRuntime.remoteLinkState() });
+          post(peer.port, {
+            type: "remote-link",
+            state: activeRuntime.remoteLinkState(),
+            link: activeRuntime.upstreamLinkStatus(),
+          });
           result(peer, message.id, undefined, {
             peerAuthority,
             workerRealmId,

@@ -47,7 +47,10 @@ import {
   type TxId,
   type PermissionAdvice,
   type StreamingValueSource,
+  validateWriteWaitTimeout,
+  WriteWaitTimeoutError,
 } from "./client.js";
+import { sameSyncStatus, type SyncStatus } from "./sync-status.js";
 import {
   type BrowserForegroundNodeLease,
   type RuntimeSource,
@@ -81,7 +84,12 @@ export type {
   ColumnTransformRegistry,
 } from "./column-transforms.js";
 import { toValue, toWriteRecord } from "./value-converter.js";
-import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
+import {
+  RowChangeKind,
+  SubscriptionManager,
+  type SubscriptionDelta,
+  type ValueSplices,
+} from "./subscription-manager.js";
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
 import { AuthRenewalBackoff } from "./auth-renewal-backoff.js";
 import {
@@ -245,6 +253,11 @@ export type QueryOptions = ReadTierOptions & {
   branch?: Branch;
   /** Optional live base, or `[base, snapshotRef]` for a frozen base. */
   base?: BranchBase;
+  /**
+   * TEXT or BYTEA columns whose changes a subscription also delivers as splices
+   * (see {@link DbSubscriptionUpdate}). One-shot reads ignore it.
+   */
+  splices?: readonly string[];
 };
 
 type InternalDbQueryOptions = Omit<QueryOptions, "tier"> & {
@@ -260,9 +273,25 @@ type InternalDbQueryOptions = Omit<QueryOptions, "tier"> & {
  */
 export interface DbSubscriptionCallbacks<T extends { id: string }> {
   /** Called with the complete current result whenever the query changes. */
-  onUpdate: (rows: T[]) => void;
+  onUpdate: (rows: T[], update: DbSubscriptionUpdate) => void;
   /** Called once when the subscription terminates with an error. */
   onError?: (error: Error) => void;
+}
+
+/** What changed in one subscription update, beyond the complete result. */
+export interface DbSubscriptionUpdate {
+  /**
+   * Per updated row id, the splices of each column named in the `splices`
+   * option. They turn the value the previous update showed into the new one,
+   * and apply in order: each splice's offsets are in the value the earlier ones
+   * produced. TEXT splices count UTF-16 code units and insert a string; BYTEA
+   * splices count bytes and insert a `Uint8Array`. On a range select they are
+   * relative to the selected window. A column the update left unchanged has
+   * an empty list. A row or column without an entry has splices that could
+   * not be computed on this device (its previous version is no longer held,
+   * say): read its new value from the rows instead.
+   */
+  splices: ReadonlyMap<string, ValueSplices>;
 }
 
 /** Package-internal callbacks for incremental subscription consumers. */
@@ -293,6 +322,13 @@ function lowerPublicDbQueryOptions(options?: QueryOptions): InternalDbQueryOptio
   if (firstLoadRemoteWaitMs !== undefined) lowered.firstLoadRemoteWaitMs = firstLoadRemoteWaitMs;
   if (candidate.branch !== undefined) lowered.branch = candidate.branch as Branch;
   if (candidate.base !== undefined) lowered.base = candidate.base as BranchBase;
+  const splices = (candidate as { splices?: unknown }).splices;
+  if (splices !== undefined) {
+    if (!Array.isArray(splices) || !splices.every((column) => typeof column === "string")) {
+      throw new Error("splices must be an array of column names.");
+    }
+    if (splices.length > 0) lowered.splices = [...splices];
+  }
   if (isInspectorLocalQueryOptions(options)) lowered.tier = "local-only";
   return lowered;
 }
@@ -584,6 +620,53 @@ function normalizeQueryOptions(
   options?: InternalDbQueryOptions,
 ) {
   return normalizeViewOptions(schema, table, options) ?? {};
+}
+
+/** Splices are only defined for plain TEXT and BYTEA columns of the result table. */
+function assertSpliceableColumns(
+  schema: WasmSchema,
+  table: string,
+  query: { readonly _columnTransforms?: ColumnTransformMap },
+  columns: readonly string[],
+): void {
+  const descriptors = resolveQueryTable(schema, table)?.columns ?? [];
+  for (const column of columns) {
+    const descriptor = descriptors.find((candidate) => candidate.name === column);
+    if (!descriptor) throw new Error(`splices: "${column}" is not a column of "${table}".`);
+    const type = descriptor.column_type.type;
+    if (type !== "Text" && type !== "Bytea") {
+      throw new Error(
+        `splices: column "${column}" is ${type}; splices are not supported yet for columns other than TEXT and BYTEA.`,
+      );
+    }
+    if (query._columnTransforms?.[column]) {
+      throw new Error(
+        `splices: column "${column}" has a column transform; splices are not supported yet for transformed columns.`,
+      );
+    }
+  }
+}
+
+/**
+ * A range-selected splice column must be read in part: a computed or
+ * transformed column that depends on it makes the engine read it whole and
+ * TypeScript cut the window, so the engine's splices would be in whole-value
+ * coordinates while the rows show the window.
+ */
+function assertSplicesReadInPart(
+  built: NormalizedBuiltQuery,
+  physical: NormalizedBuiltQuery,
+  columns: readonly string[],
+): void {
+  for (const column of columns) {
+    if (
+      Object.hasOwn(built.partialSelect, column) &&
+      !Object.hasOwn(physical.partialSelect, column)
+    )
+      throw new Error(
+        `splices: column "${column}" is selected in part, but a computed or transformed column depends on it, so it is read whole; splices are not supported yet for such columns.`,
+      );
+  }
 }
 
 function assertWritableTable(table: { readonly _table: string }): void {
@@ -2092,6 +2175,7 @@ export class Db {
   private localFirstRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private shutdownPromise: Promise<void> | null = null;
   private readonly shutdownAbort = new AbortController();
+  private syncStatusSnapshot: SyncStatus | null = null;
   private readonly activeQuerySubscriptionTraces = new Map<
     string,
     StoredActiveQuerySubscriptionTrace
@@ -2535,6 +2619,84 @@ export class Db {
     return () => {
       this.mutationErrorListeners.delete(listener);
     };
+  }
+
+  /**
+   * Whether this Db's writes have reached the server: the upstream
+   * connection, and how many committed transactions the server has not
+   * accepted or rejected yet. The same object is returned until the status
+   * changes, so it can back `useSyncExternalStore` directly.
+   */
+  getSyncStatus(): SyncStatus {
+    const next = this.connection.syncStatus();
+    if (this.syncStatusSnapshot && sameSyncStatus(next, this.syncStatusSnapshot)) {
+      return this.syncStatusSnapshot;
+    }
+    this.syncStatusSnapshot = next;
+    return next;
+  }
+
+  /**
+   * Call `listener` whenever {@link getSyncStatus} changes.
+   *
+   * @returns an unsubscribe callback
+   */
+  onSyncStatusChange(listener: (status: SyncStatus) => void): () => void {
+    const subscription = new AbortController();
+    const end = () => subscription.abort();
+    this.shutdownAbort.signal.addEventListener("abort", end, { once: true });
+    subscription.signal.addEventListener(
+      "abort",
+      () => this.shutdownAbort.signal.removeEventListener("abort", end),
+      { once: true },
+    );
+    let published = this.getSyncStatus();
+    this.connection.onSyncStatusChange(() => {
+      const status = this.getSyncStatus();
+      if (status === published) return;
+      published = status;
+      listener(status);
+    }, subscription.signal);
+    return end;
+  }
+
+  /**
+   * Resolve once every write committed on this Db before the call has been
+   * accepted by the server.
+   *
+   * Like `write.wait({ tier: "global" })`, the wait lasts through network
+   * outages, reconnects and credential renewal. It rejects with the
+   * server's error for the first of those writes it rejected, when the link
+   * stops for good, with a {@link WriteWaitTimeoutError} once `timeoutMs`
+   * passes, or with `signal.reason` when `signal` aborts. Ending the wait
+   * never cancels the writes: they stay queued. In a browser tab it covers
+   * that tab's own writes, not ones the shared worker recovered from storage.
+   */
+  async waitForSync(options: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<void> {
+    const { timeoutMs, signal } = options;
+    validateWriteWaitTimeout(timeoutMs);
+    this.assertOpen();
+    signal?.throwIfAborted();
+    const control = new AbortController();
+    const forward = () => control.abort(signal!.reason);
+    signal?.addEventListener("abort", forward, { once: true });
+    // Shutdown ends the wait instead of leaving it parked on a closed runtime.
+    const shutdown = () => control.abort(new Error("Db was shut down"));
+    this.shutdownAbort.signal.addEventListener("abort", shutdown, { once: true });
+    const timer =
+      timeoutMs === undefined
+        ? undefined
+        : setTimeout(
+            () => control.abort(new WriteWaitTimeoutError("global", timeoutMs)),
+            timeoutMs,
+          );
+    try {
+      await this.connection.waitForSync(control.signal);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      signal?.removeEventListener("abort", forward);
+      this.shutdownAbort.signal.removeEventListener("abort", shutdown);
+    }
   }
 
   getConfig(): DbConfig {
@@ -3293,7 +3455,13 @@ export class Db {
         if (update.all === undefined) {
           throw new Error("Jazz subscription update is missing its materialized result.");
         }
-        onUpdate(update.all);
+        const splices = new Map<string, ValueSplices>();
+        for (const change of update.delta) {
+          if (change.kind === RowChangeKind.Updated && change.splices) {
+            splices.set(change.id, change.splices);
+          }
+        }
+        onUpdate(update.all, { splices });
       },
       ...(onError === undefined ? {} : { onError }),
     };
@@ -3362,6 +3530,10 @@ export class Db {
     const bufferedDeltas: SubscriptionDelta<T>[] = [];
 
     const queryOptions = normalizeQueryOptions(query._schema, builtQuery.table, options);
+    if (queryOptions.splices) {
+      assertSpliceableColumns(planningSchema, outputTable, query, queryOptions.splices);
+      assertSplicesReadInPart(builtQuery, prepared.physical, queryOptions.splices);
+    }
     const readSession = this.getAccessContext()?.readSession ?? session;
     type NativeSubscription = {
       id: number | null;
@@ -3470,6 +3642,9 @@ export class Db {
         )
           throw error;
         prepared = prepareTransformRead(query, builtQuery, outputTable, prepared.computedState);
+        // A dependency found only now may make a splice column read whole.
+        if (queryOptions.splices)
+          assertSplicesReadInPart(builtQuery, prepared.physical, queryOptions.splices);
         wasmQuery = translateQuery(builderJson, planningSchema, prepared.physical);
         retireNativeSubscription(activeSubscription);
         const replacement = createSubscriptionGeneration();

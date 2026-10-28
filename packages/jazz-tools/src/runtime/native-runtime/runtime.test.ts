@@ -7283,6 +7283,7 @@ function encodeTerminalSubscriptionDelta(schema: WasmSchema): Uint8Array {
   suffix.vec(() => {}, 0); // updated previous indices
   suffix.vec(() => {}, 0); // updated indices
   suffix.vec(() => {}, 0); // removed indices
+  suffix.vec(() => {}, 0); // updated splices
   return concatBytes([rowBatches, suffix.finish()]);
 }
 
@@ -7384,6 +7385,8 @@ function encodeSubscriptionDelta(delta: {
   ]) {
     writer.vec((indexWriter, index) => indexWriter.u64(indices[index]!), indices.length);
   }
+  // No opted-in splices on any updated row.
+  writer.vec((row) => row.vec(() => {}, 0), delta.updated.length);
   return writer.finish();
 }
 
@@ -7663,6 +7666,7 @@ function encodeUserWrappedSubscriptionDelta(row: {
   delta.vec(() => undefined, 0);
   delta.vec(() => undefined, 0);
   delta.vec(() => undefined, 0);
+  delta.vec(() => undefined, 0); // updated splices
   return delta.finish();
 }
 
@@ -7701,6 +7705,7 @@ function encodeTeamGatherSubscriptionDelta(delta: {
   writer.vec((indexWriter, index) => indexWriter.u64(index), updated.length);
   writer.vec((indexWriter, index) => indexWriter.u64(index), updated.length);
   writer.vec(() => undefined, 0);
+  writer.vec((row) => row.vec(() => undefined, 0), updated.length); // updated splices
   return writer.finish();
 }
 
@@ -8223,4 +8228,56 @@ it("rejects a negative slow-query threshold and leaves the native default withou
   } finally {
     await runtime.close();
   }
+});
+
+describe("NativeRuntimeAdapter waitForPendingWrites cancellation", () => {
+  const open = (db: object) =>
+    new NativeRuntimeAdapter(
+      { openMemory: () => fakeDb(db) },
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+  it("cancels a pollable binding wait when the caller gives up", async () => {
+    const cancel = vi.fn();
+    const runtime = open({
+      tick: () => undefined,
+      waitForPendingWrites: () => ({ poll: () => null, cancel }),
+    });
+    const control = new AbortController();
+    const wait = runtime.waitForPendingWrites("global", {
+      throughOutage: true,
+      signal: control.signal,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(cancel).not.toHaveBeenCalled();
+    control.abort(new Error("gave up"));
+    await expect(wait).rejects.toThrow("gave up");
+    await vi.waitFor(() => expect(cancel).toHaveBeenCalled());
+    await runtime.close();
+  });
+
+  it("settles a promise-shaped binding wait's cancel token when the caller gives up", async () => {
+    let cancelled: Promise<void> | undefined;
+    const runtime = open({
+      tick: () => undefined,
+      waitForPendingWrites: (_tier: string, token?: Promise<void>) => {
+        cancelled = token;
+        return new Promise<never>(() => undefined);
+      },
+    });
+    const control = new AbortController();
+    const wait = runtime.waitForPendingWrites("global", {
+      throughOutage: true,
+      signal: control.signal,
+    });
+    await vi.waitFor(() => expect(cancelled).toBeDefined());
+    control.abort(new Error("gave up"));
+    await expect(wait).rejects.toThrow("gave up");
+    await expect(cancelled).resolves.toBeUndefined();
+    await runtime.close();
+  });
 });

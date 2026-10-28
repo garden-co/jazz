@@ -47,6 +47,8 @@ export {
 } from "../runtime/unsupported-storage-codecs-error.js";
 
 export { useAccountState } from "../react-core/use-account-state.js";
+export { useSyncStatus } from "../react-core/use-sync-status.js";
+export type { LinkStatus, SyncStatus } from "../runtime/sync-status.js";
 
 export { createAccountManager, type AccountManagerConfig } from "./create-account-manager.js";
 export * from "../accounts/exports.js";

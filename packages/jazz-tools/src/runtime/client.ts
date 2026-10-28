@@ -25,6 +25,7 @@ import { getTrustedReservedSession, setTrustedReservedSession } from "./db-inter
 import { isRenewableAuthFailure, mapAuthReason } from "./auth-state.js";
 import { httpUrlToWs } from "./url.js";
 import type { RemoteLinkState } from "./remote-link-state.js";
+import type { LinkStatus } from "./sync-status.js";
 import { toError } from "./util.js";
 import { parseUuidBytes } from "./hex.js";
 
@@ -167,6 +168,12 @@ export interface Runtime {
   onRemoteLinkStateChange?(listener: (state: RemoteLinkState) => void, signal: AbortSignal): void;
   /** @internal Report the host's view of the server link to the core read gate. */
   setRemoteLinkHint?(state: RemoteLinkState): void;
+  /** @internal The upstream link as the app sees it. */
+  upstreamLinkStatus?(): LinkStatus;
+  /** @internal How many local commits still wait for the server's verdict. */
+  pendingUploadCount?(): number;
+  /** @internal Observe changes of the link status or the pending count. */
+  onSyncStatusChange?(listener: () => void, signal: AbortSignal): void;
   /** @internal Construct a provisional row without staging or accepting a write. */
   previewInsert?(table: string, values: InsertValues, objectId?: string): Row;
   insert(
@@ -519,6 +526,8 @@ export type InternalQueryExecutionOptions = Omit<QueryExecutionOptions, "tier"> 
   tier?: InternalReadTier;
   visibility?: QueryVisibility;
   openTransactionId?: OpenTransactionId;
+  /** Columns whose updates a subscription also delivers as splices. */
+  splices?: readonly string[];
 };
 
 export interface ResolvedQueryExecutionOptions {
@@ -527,6 +536,7 @@ export interface ResolvedQueryExecutionOptions {
   firstLoadRemoteWaitMs?: number;
   visibility: QueryVisibility;
   branch?: BranchView;
+  splices?: readonly string[];
 }
 
 type ResolvedInternalQueryExecutionOptions = ResolvedQueryExecutionOptions & {
@@ -671,6 +681,7 @@ export function resolveEffectiveQueryExecutionOptions(
     ...(firstLoadRemoteWaitMs !== undefined ? { firstLoadRemoteWaitMs } : {}),
     visibility: options?.visibility ?? "public",
     branch: options?.branch,
+    ...(options?.splices?.length ? { splices: options.splices } : {}),
   };
 }
 
@@ -702,6 +713,7 @@ function encodeQueryExecutionOptions(
   const payload: {
     first_load_remote_wait_ms?: number;
     transaction_id?: string;
+    splices?: readonly string[];
     read_view?: {
       source: {
         BranchView: {
@@ -731,7 +743,14 @@ function encodeQueryExecutionOptions(
     };
   }
 
-  if (!payload.transaction_id && !payload.first_load_remote_wait_ms && !payload.read_view) {
+  if (options.splices?.length) payload.splices = options.splices;
+
+  if (
+    !payload.transaction_id &&
+    !payload.first_load_remote_wait_ms &&
+    !payload.read_view &&
+    !payload.splices
+  ) {
     return undefined;
   }
 
@@ -845,8 +864,8 @@ export interface WriteWaitOptions {
 /** Longest delay `setTimeout` honours; longer ones fire at once. */
 const MAX_WRITE_WAIT_TIMEOUT_MS = 2_147_483_647;
 
-/** Validate a caller's `timeoutMs` before any wait work starts. */
-function validateWriteWaitTimeout(timeoutMs: unknown): void {
+/** @internal Validate a caller's `timeoutMs` before any wait work starts. */
+export function validateWriteWaitTimeout(timeoutMs: unknown): void {
   if (timeoutMs === undefined) return;
   if (
     typeof timeoutMs !== "number" ||

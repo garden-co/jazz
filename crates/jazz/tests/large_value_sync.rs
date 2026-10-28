@@ -2172,6 +2172,15 @@ fn a_json_pointer_select_reads_its_subtree() {
     let server = open_json(0, AuthorSubject::SYSTEM);
     let alice = open_json(1, user(1));
     connect(&server, &alice, user(1));
+    // A column selected by JSON pointer cannot take splices yet.
+    let pointer = Query::from("docs")
+        .select(["doc"])
+        .select_part("doc", Part::JsonPointer("/0".into()));
+    let refused = block_on(alice.subscribe(
+        &alice.prepare_query(&pointer).unwrap(),
+        ReadOpts::default().with_splices(["doc"]),
+    ));
+    assert!(refused.is_err());
     let items: Vec<serde_json::Value> = (0..20_000)
         .map(|n| serde_json::json!({ "n": n, "text": text(n, 40) }))
         .collect();
@@ -2309,6 +2318,30 @@ fn value_delta_turns_one_version_into_another() {
     assert_eq!(apply_delta_utf16(&v4_text, &to_inline), "short");
     let from_inline = block_on(db.value_delta("docs", row(1), "body", v5, v1)).unwrap();
     assert_eq!(apply_delta_utf16("short", &from_inline), v1_text);
+    // Between inline values: nothing when they are equal, else only the
+    // characters that differ.
+    let inline = |value: &str| {
+        block_on(db.update(
+            "docs",
+            row(1),
+            [("body".to_owned(), Value::String(value.into()))].into(),
+            Default::default(),
+        ))
+        .unwrap()
+        .mergeable_tx_id()
+    };
+    let (v6, v7) = (inline("short é text"), inline("short é text"));
+    assert_eq!(
+        block_on(db.value_delta("docs", row(1), "body", v6, v7)).unwrap(),
+        []
+    );
+    let v8 = inline("short ü text");
+    let narrow = block_on(db.value_delta("docs", row(1), "body", v7, v8)).unwrap();
+    assert_eq!(apply_delta_utf16("short é text", &narrow), "short ü text");
+    assert_eq!(
+        (narrow.len(), narrow[0].at_utf16, narrow[0].delete_utf16),
+        (1, 6, 1)
+    );
 }
 
 #[test]
@@ -2418,4 +2451,80 @@ fn subscriptions_take_a_columns_changes_as_splices() {
         ReadOpts::default().with_splices(["id"]),
     ));
     assert!(refused.is_err());
+}
+
+#[test]
+fn a_range_select_takes_its_pages_changes_as_page_splices() {
+    use jazz::query::Part;
+    let server = open(0, AuthorSubject::SYSTEM);
+    let alice = open(1, user(1));
+    connect(&server, &alice, user(1));
+    let mut body = text(14, LARGE * 6);
+    insert(
+        &server,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String(body.clone())),
+            ("blob", Value::Bytes(Vec::new())),
+        ],
+    );
+    let page = 500_000..500_040;
+    let query = Query::from("docs").select(["body"]).select_part(
+        "body",
+        Part::TextUtf16 {
+            from: page.start as u64,
+            to: page.end as u64,
+        },
+    );
+    let mut stream = block_on(alice.subscribe(
+        &alice.prepare_query(&query).unwrap(),
+        ReadOpts::default().with_splices(["body"]),
+    ))
+    .unwrap();
+    pump(&server, &[&alice]);
+    no_rejections(&mut stream);
+    let shown = |body: &str| body[page.clone()].to_owned();
+    let before = shown(&body);
+    // An edit inside the page is one page-relative splice.
+    block_on(server.splice_value(
+        "docs",
+        row(1),
+        "body",
+        jazz::db::LargeValueUpdateSplice {
+            at: 500_010,
+            delete: 2,
+            insert: "XY".as_bytes().to_vec(),
+        },
+        Default::default(),
+    ))
+    .unwrap();
+    body.replace_range(500_010..500_012, "XY");
+    pump(&server, &[&alice]);
+    let got = splices_of(&mut stream, "body");
+    assert_eq!(got.len(), 1, "{got:?}");
+    let splices = got[0].clone().expect("page splices");
+    assert_eq!(splices.len(), 1);
+    assert_eq!((splices[0].at_utf16, splices[0].delete_utf16), (10, 2));
+    assert_eq!(apply_delta_utf16(&before, &splices), shown(&body));
+    // An insertion before the page shifts the window's content into it.
+    let before = shown(&body);
+    block_on(server.splice_value(
+        "docs",
+        row(1),
+        "body",
+        jazz::db::LargeValueUpdateSplice {
+            at: 10,
+            delete: 0,
+            insert: "+++".as_bytes().to_vec(),
+        },
+        Default::default(),
+    ))
+    .unwrap();
+    body.replace_range(10..10, "+++");
+    pump(&server, &[&alice]);
+    for splices in splices_of(&mut stream, "body") {
+        let splices = splices.expect("page splices");
+        assert_eq!(apply_delta_utf16(&before, &splices), shown(&body));
+    }
 }

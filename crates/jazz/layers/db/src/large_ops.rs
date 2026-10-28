@@ -51,35 +51,7 @@ pub struct LargeValueUpdateSplice {
     pub insert: Vec<u8>,
 }
 
-/// One edit of a [`Db::value_delta`]: replace `delete` bytes at `at` with
-/// `insert`. Edits apply in order, each in the coordinates of the value the
-/// earlier ones made. Text edits also carry the same edit in UTF-16 code
-/// units; they are zero for bytes columns.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct LargeValueDeltaSplice {
-    /// Byte offset.
-    pub at: u64,
-    /// Bytes removed.
-    pub delete: u64,
-    /// Bytes inserted, UTF-8 for text.
-    pub insert: Vec<u8>,
-    /// UTF-16 offset (text only).
-    pub at_utf16: u64,
-    /// UTF-16 code units removed (text only).
-    pub delete_utf16: u64,
-}
-
-impl From<lv::ReplaceEdit> for LargeValueDeltaSplice {
-    fn from(edit: lv::ReplaceEdit) -> Self {
-        LargeValueDeltaSplice {
-            at: edit.offset,
-            delete: edit.delete_length,
-            insert: edit.insert_bytes,
-            at_utf16: edit.utf16_offset,
-            delete_utf16: edit.delete_utf16_length,
-        }
-    }
-}
+pub use jazz_model::model::public_api::types::LargeValueDeltaSplice;
 
 /// An RFC 6901 JSON replacement of an existing member or array element.
 /// Missing parents are never created, so a typo cannot change a document's
@@ -300,7 +272,11 @@ impl Inner {
             let edits = self.chunks.run(|inputs| lv::delta_attempt(a, b, inputs))?;
             return Ok(edits.into_iter().map(Into::into).collect());
         }
-        // An inline side: one replace of the whole value.
+        if let (Logical::Inline(a), Logical::Inline(b)) = (&a, &b) {
+            return Ok(byte_splices(a, b, text));
+        }
+        // One inline side, one chunked: the value crossed the chunking
+        // threshold, so it changed; one replace of the whole value.
         let (delete, delete_utf16) = match &a {
             Logical::Inline(bytes) => (bytes.len() as u64, utf16_len(bytes, text)?),
             Logical::Chunked(value) => (value.byte_length, value.utf16_length.unwrap_or(0)),
@@ -1424,6 +1400,46 @@ impl TxRef<'_> {
 /// Whether `cell` holds a string, JSON or bytes value: inline or chunked.
 fn large_cell(cell: &Sql) -> bool {
     matches!(cell, Sql::Text(_) | Sql::Blob(_) | Sql::Integer(_))
+}
+
+/// The splices that turn `a` into `b`: none when they are equal, else one
+/// replace of the bytes between their common prefix and suffix, kept on
+/// character boundaries for text.
+pub(crate) fn byte_splices(a: &[u8], b: &[u8], text: bool) -> Vec<LargeValueDeltaSplice> {
+    let boundary = |bytes: &[u8], at: usize| at == bytes.len() || bytes[at] & 0xc0 != 0x80;
+    let mut prefix = a.iter().zip(b).take_while(|(x, y)| x == y).count();
+    let mut suffix = a[prefix..]
+        .iter()
+        .rev()
+        .zip(b[prefix..].iter().rev())
+        .take_while(|(x, y)| x == y)
+        .count();
+    if text {
+        while prefix > 0 && !boundary(a, prefix) {
+            prefix -= 1;
+        }
+        while suffix > 0 && !boundary(a, a.len() - suffix) {
+            suffix -= 1;
+        }
+    }
+    let (deleted, inserted) = (&a[prefix..a.len() - suffix], &b[prefix..b.len() - suffix]);
+    if deleted.is_empty() && inserted.is_empty() {
+        return Vec::new();
+    }
+    let units = |bytes: &[u8]| {
+        if text {
+            std::str::from_utf8(bytes).map_or(0, |s| s.encode_utf16().count() as u64)
+        } else {
+            0
+        }
+    };
+    vec![LargeValueDeltaSplice {
+        at: prefix as u64,
+        delete: deleted.len() as u64,
+        insert: inserted.to_vec(),
+        at_utf16: units(&a[..prefix]),
+        delete_utf16: units(deleted),
+    }]
 }
 
 /// The UTF-16 length of inline text `bytes`; zero for bytes columns.

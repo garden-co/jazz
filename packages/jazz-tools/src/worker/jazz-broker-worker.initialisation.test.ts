@@ -133,6 +133,8 @@ const mocks = vi.hoisted(() => {
           onServerTransportError: vi.fn(),
           onRemoteLinkStateChange: vi.fn(),
           remoteLinkState: vi.fn(() => "connected"),
+          onUpstreamLinkStatusChange: vi.fn(),
+          upstreamLinkStatus: vi.fn(() => ({ state: "connected" })),
           setRemoteLinkHint: vi.fn(),
           onPeerTransportWork: vi.fn(() => () => {}),
           progressPeerTransport: vi.fn(async () => undefined),

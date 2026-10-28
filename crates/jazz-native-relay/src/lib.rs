@@ -43,10 +43,11 @@ use node_lease::{ForegroundNodeLease, ForegroundNodeLeasePool};
 /// `jazz-rn` constant.) Breaking command/response changes bump the value:
 /// 1 was the first public ABI; 2 added `CodedOperationError` answers to
 /// existing commands, so a JS bundle and native build from different ABIs
-/// refuse to open rather than misread a failure; 3 added its `reason_name`.
+/// refuse to open rather than misread a failure; 3 added its `reason_name`;
+/// 4 ends each subscription delta with its updated rows' splices.
 /// Append-only commands use optional native capabilities while existing
 /// command layouts remain stable.
-pub const NATIVE_RELAY_ABI_V1: u16 = 3;
+pub const NATIVE_RELAY_ABI_V1: u16 = 4;
 
 const FOREGROUND_WAKE_IMMEDIATE: u8 = 0;
 const FOREGROUND_WAKE_CANCELLED: u8 = 3;
@@ -512,6 +513,10 @@ pub enum ForegroundDbCommandRequest {
     SetSlowQueryThresholdMs {
         ms: u64,
     },
+    /// How many of the foreground's commits still wait for the server's
+    /// verdict (append-only: an older native build answers it with an error
+    /// and the host reports none).
+    PendingUploadCount,
 }
 
 /// One refusal of a scope's credential by its upstream. Every refusal gets a
@@ -708,6 +713,10 @@ pub enum ForegroundDbCommandResponse {
     },
     /// Answer to [`ForegroundDbCommandRequest::SetSlowQueryThresholdMs`].
     SlowQueryThresholdSet,
+    /// Answer to [`ForegroundDbCommandRequest::PendingUploadCount`].
+    PendingUploadCount {
+        count: u64,
+    },
 }
 
 /// One already-materialized subscription event.  The byte payload deliberately

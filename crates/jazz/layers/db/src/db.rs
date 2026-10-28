@@ -34,6 +34,7 @@ mod fanout;
 pub use fanout::FanoutStats;
 #[path = "large_ops.rs"]
 mod large_ops;
+pub(crate) use large_ops::byte_splices;
 pub use large_ops::{
     JsonSetEdit, LargeValueDeltaSplice, LargeValueStagingPolicy, LargeValueUpdate,
     LargeValueUpdatePage, LargeValueUpdateSplice, StreamingMutationKind, StreamingValueUpload,

@@ -5279,6 +5279,17 @@ impl Db {
         Ok(())
     }
 
+    /// How many local commits await the upstream's verdict: committed here
+    /// (recovered ones included) and not yet accepted or refused by the
+    /// server. Zero on a database that has never had an upstream.
+    pub fn pending_upload_count(&self) -> usize {
+        self.inner
+            .borrow()
+            .client
+            .as_ref()
+            .map_or(0, |client| client.pending.len())
+    }
+
     /// Whether chunks this replica requested may still arrive: it is
     /// connected to an upstream that may answer, with requests outstanding
     /// (sent, or recorded by a read for the next send). A non-durable

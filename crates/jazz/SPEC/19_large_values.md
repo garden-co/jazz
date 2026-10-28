@@ -269,7 +269,8 @@ encoding, that turn a's value into b's:
 | same epoch, `n_a ≤ n_b`                               | b's edits after a's prefix: a byte range of the epoch                                                                                                                            |
 | same epoch, `n_a > n_b`, or epochs over the same root | the common edit prefix (a byte comparison), then the inverse of a's remaining edits and b's remaining edits; inverting a deletion reads the deleted bytes from the base          |
 | different roots                                       | each side as pieces (leaf spans and inserted bytes); both trees are walked together, subtrees with equal hashes are skipped, and only differing leaves are compared byte by byte |
-| either side inline                                    | one replace of the whole value                                                                                                                                                   |
+| both sides inline                                     | nothing when equal, else one replace between their common prefix and suffix                                                                                                      |
+| one side inline                                       | one replace of the whole value                                                                                                                                                   |
 
 The result need not be minimal when content moves. Reading it needs only the
 leaves in changed regions. Merge strategies and the public
@@ -536,8 +537,25 @@ result (`ReadOpts::splices`), so an editor can apply remote changes as
 transactions: each updated row carries the column's splices from the version
 the result showed. When they cannot be computed locally (that version is no
 longer held, or chunks are still to arrive) the row carries none for the
-column, and the reader takes the value whole. The Rust engine API ships
-first; the TypeScript option follows.
+column, and the reader takes the value whole. A column the update left
+unchanged carries an empty list.
+
+On a range-partial column the splices are page-relative: they turn the page
+the result showed into the new page, computed from the two page cells, so an
+edit before the window that shifts its contents is a splice of the window
+too. Splices on a JSON-pointer-partial column are refused explicitly as not
+supported yet, and so, in TypeScript, are splices on a range-selected column
+that a computed column or transform makes the engine read whole (its rows
+show the window, its splices would be over the whole value).
+
+`JazzClient` subscriptions take the same option (`subscribe_with_opts` with
+`ReadOpts::with_splices`) and carry the splices on each `OrderedUpdated`.
+TypeScript takes `splices: [column, ...]` in the query options of
+`Db.subscribe`; the update callback's second argument maps each updated row's
+id to its columns' splices, UTF-16 with a string insert for text and bytes
+with a `Uint8Array` insert for bytes. TypeScript accepts only TEXT and BYTEA
+columns without a column transform and rejects others when subscribing, as
+not supported yet.
 
 Native Rust exposes `Db::insert_streaming_value`: the caller supplies the
 ordinary row cells, the target column and a `std::io::Read`; Jazz derives the
