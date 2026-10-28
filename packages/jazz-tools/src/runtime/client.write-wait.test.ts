@@ -15,8 +15,10 @@ function heldWaitClient() {
   let authFailure: ((reason: string) => void) | null = null;
   const signals: AbortSignal[] = [];
   const settle: Array<() => void> = [];
+  const endCredentialWait = vi.fn();
   const runtime = {
     ...runtimeTransactionRecordStubs,
+    endCredentialWait,
     onAuthFailure: (callback: (reason: string) => void) => {
       authFailure = callback;
     },
@@ -50,6 +52,7 @@ function heldWaitClient() {
     handle,
     signals,
     onAuthFailure,
+    endCredentialWait,
     refuse: (reason: string) => authFailure?.(reason),
     settleAll: () => settle.splice(0).forEach((resolve) => resolve()),
   };
@@ -104,61 +107,24 @@ describe("write waits (#3923)", () => {
   );
 
   it.each(["authentication expired", "invalid token", "account disabled"])(
-    "ends a held Global wait when nothing renews a refused credential (%s)",
-    async (reason) => {
-      const { handle, refuse, onAuthFailure, signals } = heldWaitClient();
-      const held = track(handle.wait({ tier: "global" }));
-      await flush();
+    "ends the runtime's credential wait when nothing renews a refusal (%s)",
+    (reason) => {
+      const { refuse, onAuthFailure, endCredentialWait } = heldWaitClient();
       refuse(reason);
-      await flush();
-      expect(held.value).toBeInstanceOf(Error);
-      expect((held.value as Error).message).toMatch(/nothing renews it/);
-      expect(signals[0]!.aborted).toBe(true);
+      expect(endCredentialWait).toHaveBeenCalledOnce();
       expect(onAuthFailure).toHaveBeenCalledOnce();
-      // A wait issued while the refusal stands fails too, until new auth.
-      await expect(handle.wait({ tier: "global" })).rejects.toThrow(/nothing renews it/);
     },
   );
 
-  it("keeps a held Global wait through a refusal the app renews", async () => {
-    const { client, handle, refuse, settleAll } = heldWaitClient();
-    setCredentialRenewal(client, () => true);
-    const held = track(handle.wait({ tier: "global" }));
-    await flush();
+  it("leaves the credential wait to a renewer, except for a revocation", () => {
+    const { client, refuse, endCredentialWait } = heldWaitClient();
+    const renews = vi.fn(() => true);
+    setCredentialRenewal(client, renews);
     refuse("authentication expired");
-    await flush();
-    expect(held.value).toBe("pending");
-    settleAll();
-    await flush();
-    expect(held.value).toBe("resolved");
-  });
-
-  it("leaves a renewer's revoked credential to the runtime and local waits alone", async () => {
-    const { client, handle, refuse, settleAll } = heldWaitClient();
-    setCredentialRenewal(client, () => true);
-    const local = track(handle.wait({ tier: "local" }));
-    const global = track(handle.wait({ tier: "global" }));
-    await flush();
-    refuse("session revoked");
-    await flush();
+    expect(renews).toHaveBeenCalledWith("expired");
+    expect(endCredentialWait).not.toHaveBeenCalled();
     // No new token fixes a revocation, renewer or not.
-    expect(global.value).toBeInstanceOf(Error);
-    expect(local.value).toBe("pending");
-    settleAll();
-    await flush();
-    expect(local.value).toBe("resolved");
-  });
-
-  it("lets new Global waits run again once auth is updated", async () => {
-    const { client, handle, refuse, settleAll } = heldWaitClient();
-    refuse("authentication expired");
-    await expect(handle.wait({ tier: "global" })).rejects.toThrow(/nothing renews it/);
-    client.updateAuthToken("next-token");
-    const next = track(handle.wait({ tier: "global" }));
-    await flush();
-    expect(next.value).toBe("pending");
-    settleAll();
-    await flush();
-    expect(next.value).toBe("resolved");
+    refuse("session revoked");
+    expect(endCredentialWait).toHaveBeenCalledOnce();
   });
 });

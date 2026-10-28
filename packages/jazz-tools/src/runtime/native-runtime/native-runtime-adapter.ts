@@ -2120,7 +2120,23 @@ export class NativeRuntimeAdapter implements Runtime {
     // Readiness can outlive a rejected settlement. Observe it now so the host
     // never sees an unhandled Promise rejection while readiness is pending.
     void settlement.catch(() => undefined);
-    if (options.ready) await options.ready;
+    if (options.ready) {
+      if (signal) {
+        // A wait abandoned while readiness is pending must not park here.
+        let wake!: () => void;
+        const aborted = new Promise<void>((resolve) => {
+          wake = () => resolve();
+          signal.addEventListener("abort", wake, { once: true });
+        });
+        try {
+          await Promise.race([options.ready, aborted]);
+        } finally {
+          signal.removeEventListener("abort", wake);
+        }
+      } else {
+        await options.ready;
+      }
+    }
     // An outage the client keeps retrying delays the settlement; only a
     // terminal transport failure, closing the runtime or the caller's signal
     // ends the wait (#3923).
@@ -2463,8 +2479,9 @@ export class NativeRuntimeAdapter implements Runtime {
         // for it (#3923).
         const renewable = reason !== null && isRenewableAuthFailure(reason);
         this.handleServerTransportError(error, generation, renewable);
-        if (generation === this.serverConnectionGeneration)
-          this.serverTransportErrorAwaitsAuth = renewable;
+        // A retired socket's refusal is not this connection's auth state.
+        if (generation !== this.serverConnectionGeneration) return;
+        this.serverTransportErrorAwaitsAuth = renewable;
         if (reason) this.authFailureCallback?.(reason);
       },
       onTerminal: (error) => {
@@ -2718,6 +2735,7 @@ export class NativeRuntimeAdapter implements Runtime {
 
   updateAuth(authJson: string): Promise<void> | void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.updateAuth(authJson);
+    this.nativeAuthRefusalRenewable = false;
     if (this.db?.rejectAuthUpdate) return this.db.rejectAuthUpdate();
     const endpoint = this.serverEndpointUrl ?? this.serverReplacementIntent?.url;
     if (!endpoint) return;
@@ -2752,6 +2770,22 @@ export class NativeRuntimeAdapter implements Runtime {
   onServerTransportError(callback: (error: Error, state: { retrying: boolean }) => void): void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.onServerTransportError(callback);
     this.serverTransportErrorCallback = callback;
+  }
+
+  /**
+   * The server refused a credential that nothing renews, so the link will
+   * not reconnect on its own: end the waits and remote subscriptions held
+   * for a new credential, as a terminal failure does (#3923). A later
+   * `updateAuth` reconnects as usual.
+   */
+  endCredentialWait(): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.endCredentialWait();
+    // A native host reports its refusal before the upstream failure it ends in.
+    this.nativeAuthRefusalRenewable = false;
+    const error = this.serverTransportError;
+    if (!error || !this.serverTransportErrorRetrying) return;
+    this.serverTransportErrorAwaitsAuth = false;
+    this.handleServerTransportError(error, this.serverConnectionGeneration, false);
   }
 
   /** Record a terminal error relayed from a durable browser-worker upstream. */

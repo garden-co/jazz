@@ -245,9 +245,11 @@ reconnects and Core accepts or rejects the queued write, however long the outage
 lasts. Both choices apply the initial mutation locally and upload it when connected.
 
 A `global` wait fails early only when the client stops trying to reach Core: a
-protocol error, a closed client, or a credential the server refuses and nothing
-renews (an account's refresh cycle renews an expired token, so its waits keep
-going). To bound how long you wait, pass `timeoutMs`. The wait then rejects with
+protocol error, a closed client, or a credential the server refuses that nothing
+renews. Only an account context's refresh cycle and a local-first token the Db
+mints itself count as renewing a credential, so their waits outlast an expired
+token. With a static token or a backend secret, a refused credential ends the
+wait. To bound how long you wait, pass `timeoutMs`. The wait then rejects with
 a `WriteWaitTimeoutError` (`code: "timeout"`), but the write stays queued and may
 still be accepted, so do not retry it:
 

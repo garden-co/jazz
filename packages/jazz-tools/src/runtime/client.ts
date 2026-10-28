@@ -283,6 +283,8 @@ export interface Runtime {
   nativeUpstreamConfigured?(): boolean;
   /** Push updated auth credentials into the live Rust transport. */
   updateAuth(auth_json: string): void;
+  /** End waits held for a refused credential that nothing will renew. */
+  endCredentialWait?(): void;
   /** Register a callback invoked when the Rust transport rejects the JWT. */
   onAuthFailure(callback: (reason: string) => void): void;
 }
@@ -1065,10 +1067,6 @@ export class JazzClient {
   private resolvedSession: Session | null;
   private shutdownPromise: Promise<void> | null = null;
   private discarded = false;
-  /** Global waits in flight, ended early by a timeout or a refusal nothing renews. */
-  private readonly heldGlobalWaits = new Set<AbortController>();
-  /** Set while the server refuses a credential that nothing renews. */
-  private unrenewedCredentialRefusal: Error | null = null;
   /** Facade-owned subscription releases, fenced against terminal reentrancy. */
   private activeSubscriptionReleases = new Map<number, () => void>();
 
@@ -1387,20 +1385,15 @@ export class JazzClient {
   /**
    * @internal The server refused this client's credential. A refusal the app
    * renews holds Global waits until the new credential reconnects, as an
-   * outage does; with nothing to renew it, the refusal ends them (#3923).
+   * outage does; with nothing to renew it, the runtime ends them and its
+   * remote subscriptions as a terminal failure (#3923).
    */
   handleCredentialRefusal(reason: AuthFailureReason): void {
     if (isRenewableAuthFailure(reason) && credentialRenewal.get(this)?.(reason) === true) return;
-    const error = new Error(
-      `Waiting for the write to reach the global tier failed: the server refused the credential (${reason}) ` +
-        "and nothing renews it. The write was already applied locally: do not retry it.",
-    );
-    this.unrenewedCredentialRefusal = error;
-    for (const wait of this.heldGlobalWaits) wait.abort(error);
+    this.runtime.endCredentialWait?.();
   }
 
   private updateAuthSnapshot(update: AuthUpdate, updateRuntime = true): void {
-    this.unrenewedCredentialRefusal = null;
     const previousJwtToken = this.context.jwtToken;
     const previousCookieSession = this.context.cookieSession;
     const previousTrustedReservedSession = getTrustedReservedSession(this.context);
@@ -2172,8 +2165,8 @@ export class JazzClient {
     timeoutMs?: number,
   ): Promise<void> {
     validateWriteWaitTimeout(timeoutMs);
-    // A timeout or an unrenewed credential refusal ends the wait here and in
-    // the runtime, so an abandoned wait leaves no runtime work behind.
+    // A timeout ends the wait here and in the runtime, so an abandoned wait
+    // leaves no runtime work behind.
     const control = new AbortController();
     const ended = new Promise<never>((_, reject) => {
       control.signal.addEventListener("abort", () => reject(control.signal.reason), {
@@ -2187,10 +2180,6 @@ export class JazzClient {
         () => control.abort(new WriteWaitTimeoutError(tier, timeoutMs)),
         timeoutMs,
       );
-    }
-    if (tier === "global") {
-      if (this.unrenewedCredentialRefusal) control.abort(this.unrenewedCredentialRefusal);
-      this.heldGlobalWaits.add(control);
     }
     try {
       // Register before awaiting host readiness. Readiness still gates completion,
@@ -2206,7 +2195,6 @@ export class JazzClient {
       throw this.normalizeTransactionWaitError(error);
     } finally {
       clearTimeout(timer);
-      this.heldGlobalWaits.delete(control);
       if (!control.signal.aborted) control.abort(new Error("write wait ended"));
     }
   }

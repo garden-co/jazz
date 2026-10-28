@@ -1114,6 +1114,114 @@ describe("NativeRuntimeAdapter server transport", () => {
     }
   });
 
+  it("ends waits and remote subscriptions held for a credential nothing renews, until auth is updated", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const settlement = deferred<void>();
+    const write = {
+      ...fakeWrite(),
+      wait: (tier: string) => (tier === "local" ? Promise.resolve() : settlement.promise),
+    };
+    const nativeSubscription = {
+      closed: false,
+      readAll: () => [],
+      close() {
+        this.closed = true;
+        return true;
+      },
+    };
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            insert: () => write,
+            subscribe: () => nativeSubscription,
+            connectUpstream: () => new FakeTransport([]),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const authFailures: string[] = [];
+    try {
+      // As JazzClient does when no renewer is registered.
+      runtime.onAuthFailure((reason) => {
+        authFailures.push(reason);
+        runtime.endCredentialWait();
+      });
+      const transportStates: Array<{ message: string; retrying: boolean }> = [];
+      runtime.onServerTransportError((error, state) =>
+        transportStates.push({ message: error.message, retrying: state.retrying }),
+      );
+      runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+      await runtime.waitForUpstreamServerConnection();
+      const insertTodo = async () =>
+        await committedTxId(
+          runtime.insert(
+            "todos",
+            { title: { type: "Text", value: "static token" } },
+            null,
+            "00000000-0000-0000-0000-000000000014",
+          ),
+        );
+      const txId = await insertTodo();
+      let outcome: unknown = "pending";
+      void runtime.waitForTransaction(txId, "global").then(
+        () => (outcome = "resolved"),
+        (error: unknown) => (outcome = error),
+      );
+      const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "remote");
+      const updates = vi.fn();
+      runtime.executeSubscription(handle, updates);
+
+      const frame = new PostcardWriter();
+      frame.u64(1);
+      frame.u64(3);
+      frame.u64(1);
+      frame.string("authentication expired");
+      sockets[0]!.emitMessage(encodeWebSocketFrameBatch([frame.finish()]));
+      await vi.waitFor(() => expect(authFailures).toEqual(["expired"]));
+      sockets[0]!.emitServerClose();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      // Reported as a renewable refusal, then as terminal once nothing renews it.
+      expect(transportStates.map((state) => state.retrying)).toEqual([true, false]);
+      expect(outcome).toBeInstanceOf(Error);
+      expect(nativeSubscription.closed).toBe(true);
+      expect(updates).toHaveBeenCalledWith(expect.any(Error));
+      await expect(runtime.waitForTransaction(txId, "global")).rejects.toThrow(
+        "authentication expired",
+      );
+
+      // A new credential reconnects, and Global waits hold again.
+      await runtime.updateAuth('{"jwt_token":"next"}');
+      await vi.waitFor(() => expect(sockets).toHaveLength(2));
+      let next: unknown = "pending";
+      void runtime.waitForTransaction(await insertTodo(), "global").then(
+        () => (next = "resolved"),
+        (error: unknown) => (next = error),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(next).toBe("pending");
+      settlement.resolve();
+      await vi.waitFor(() => expect(next).toBe("resolved"));
+    } finally {
+      settlement.resolve();
+      await runtime.close();
+    }
+  });
+
   it("fails a remote subscription that survived an outage once the reconnect hits a terminal error", async () => {
     vi.useFakeTimers();
     const sockets: FakeWebSocket[] = [];
