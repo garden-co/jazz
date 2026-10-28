@@ -155,50 +155,39 @@ pub struct WireTransportAdapter<W> {
 /// the carrier's count and length prefixes.
 const MAX_MESSAGE_FRAME_BYTES: usize = jazz_protocol::protocol_limits::MAX_WIRE_FRAME_BYTES - 64;
 
-/// `message` as wire frames. A `Rows` message can outgrow one frame (a
-/// first result, or one commit's fan-out): its images travel in as many
-/// frames as it takes (a row fits one, as a large value travels as
-/// chunks), each but the last a `RowsPart`, and [`FrameJoiner`] makes
-/// them one message again.
+/// The first byte of a frame carrying a leading part of a message too
+/// large for one frame: more parts follow. Postcard writes a
+/// [`SyncMessage`]'s variant tag as one byte below 0x80, so neither part
+/// marker begins a whole message, a `Hello` or a `WireFrame`.
+const PART: u8 = 0xFF;
+/// The first byte of the frame carrying a split message's last part.
+const LAST_PART: u8 = 0xFE;
+
+/// `message` as wire frames: one frame, unless it outgrows one (a first
+/// result, one commit's fan-out, a large commit). Then its encoding
+/// travels in as many parts as it takes, each behind a part marker, and
+/// [`FrameJoiner`] makes them one message again. Splitting is a transport
+/// matter: any message may be split, and no message knows it was.
 pub fn encode_frames(message: SyncMessage) -> Result<Vec<Vec<u8>>, postcard::Error> {
-    let SyncMessage::Rows { images } = message else {
-        return Ok(vec![postcard::to_allocvec(&message)?]);
-    };
-    let mut parts = Vec::new();
-    split_rows(images, &mut parts)?;
+    let bytes = postcard::to_allocvec(&message)?;
+    if bytes.len() <= MAX_MESSAGE_FRAME_BYTES {
+        return Ok(vec![bytes]);
+    }
+    let parts = bytes.chunks(MAX_MESSAGE_FRAME_BYTES - 1);
     let last = parts.len() - 1;
-    for (i, (images, frame)) in parts.iter_mut().enumerate() {
-        if i < last {
-            *frame = postcard::to_allocvec(&SyncMessage::RowsPart {
-                images: std::mem::take(images),
-            })?;
-        }
-    }
-    Ok(parts.into_iter().map(|(_, frame)| frame).collect())
+    Ok(parts
+        .enumerate()
+        .map(|(i, part)| {
+            let mut frame = Vec::with_capacity(part.len() + 1);
+            frame.push(if i == last { LAST_PART } else { PART });
+            frame.extend_from_slice(part);
+            frame
+        })
+        .collect())
 }
 
-/// `images` halved until each half encodes as a `Rows` within one frame,
-/// in order, each with that encoding.
-fn split_rows(
-    images: Vec<Image>,
-    parts: &mut Vec<(Vec<Image>, Vec<u8>)>,
-) -> Result<(), postcard::Error> {
-    let message = SyncMessage::Rows { images };
-    let frame = postcard::to_allocvec(&message)?;
-    let SyncMessage::Rows { mut images } = message else {
-        unreachable!()
-    };
-    if frame.len() <= MAX_MESSAGE_FRAME_BYTES || images.len() <= 1 {
-        parts.push((images, frame));
-        return Ok(());
-    }
-    let rest = images.split_off(images.len() / 2);
-    split_rows(images, parts)?;
-    split_rows(rest, parts)
-}
-
-/// One frame's [`SyncMessage`]: exactly one postcard value, so a frame
-/// with bytes after its message is malformed rather than truncated.
+/// One whole message's bytes as a [`SyncMessage`]: exactly one postcard
+/// value, so bytes after the message are malformed rather than truncated.
 pub fn decode_message(frame: &[u8]) -> Result<SyncMessage, postcard::Error> {
     match postcard::take_from_bytes(frame)? {
         (message, []) => Ok(message),
@@ -206,37 +195,56 @@ pub fn decode_message(frame: &[u8]) -> Result<SyncMessage, postcard::Error> {
     }
 }
 
-/// Joins a `Rows` message's frames (see [`encode_frames`]) back into the
+/// Joins a split message's frames (see [`encode_frames`]) back into the
 /// one message they encode.
 #[derive(Default)]
 pub struct FrameJoiner {
-    /// The images of the parts received since the last whole message.
-    parts: Option<Vec<Image>>,
+    /// The bytes of the parts received since the last whole message.
+    parts: Option<Vec<u8>>,
 }
 
 impl FrameJoiner {
     /// The message `frame` completes, if any. A frame that does not decode,
-    /// or a message other than `Rows` after a `RowsPart`, is the peer's
-    /// error.
+    /// a whole message between a split message's parts, a last part with
+    /// no leading ones, or parts beyond the logical message ceiling are the
+    /// peer's error.
     pub fn push(&mut self, frame: &[u8]) -> Result<Option<SyncMessage>, TransportError> {
-        let message = decode_message(frame)
-            .map_err(|error| TransportError::Failed(format!("malformed sync frame: {error}")))?;
-        match (self.parts.take(), message) {
-            (parts, SyncMessage::RowsPart { images }) => {
-                self.parts = Some(parts.unwrap_or_default());
-                self.parts.as_mut().expect("parts").extend(images);
-                Ok(None)
+        let failed = |why: String| TransportError::Failed(format!("malformed sync frame: {why}"));
+        let joined;
+        let bytes = match (frame.split_first(), self.parts.take()) {
+            (Some((&marker @ (PART | LAST_PART), part)), parts) => {
+                let mut parts = match (marker, parts) {
+                    (LAST_PART, None) => {
+                        return Err(failed("a last part with no parts before it".to_owned()));
+                    }
+                    (_, parts) => parts.unwrap_or_default(),
+                };
+                if parts.len() + part.len()
+                    > jazz_protocol::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES
+                {
+                    return Err(failed(
+                        "a split message beyond the message ceiling".to_owned(),
+                    ));
+                }
+                parts.extend_from_slice(part);
+                if marker == PART {
+                    self.parts = Some(parts);
+                    return Ok(None);
+                }
+                joined = parts;
+                joined.as_slice()
             }
-            (Some(mut joined), SyncMessage::Rows { images }) => {
-                joined.extend(images);
-                Ok(Some(SyncMessage::Rows { images: joined }))
+            (_, Some(_)) => {
+                return Err(failed(
+                    "a split message's parts end with its last part, not a whole message"
+                        .to_owned(),
+                ));
             }
-            (Some(_), message) => Err(TransportError::Failed(format!(
-                "a Rows message's parts end with its Rows frame, not {}",
-                message.kind()
-            ))),
-            (None, message) => Ok(Some(message)),
-        }
+            (_, None) => frame,
+        };
+        decode_message(bytes)
+            .map(Some)
+            .map_err(|error| failed(error.to_string()))
     }
 }
 
@@ -258,8 +266,8 @@ impl<W: WireTransport> Transport for WireTransportAdapter<W> {
         Ok(())
     }
 
-    /// The next whole message: a `Rows` whose frames have not all arrived
-    /// waits for the rest.
+    /// The next whole message: a split message whose frames have not all
+    /// arrived waits for the rest.
     fn try_recv(&mut self) -> Option<SyncMessage> {
         if self.failed.is_some() {
             return None;
@@ -316,10 +324,13 @@ pub fn validate_frame_batch_for_corpus(
             .map(drop)
             .map_err(|error| format!("hello rejected: {}", error.message))
     };
-    let message = |frame: &[u8]| {
-        decode_message(frame)
-            .map(drop)
-            .map_err(|error| format!("malformed sync message: {error}"))
+    // Frames of a split message join across the batch, as a reader's do.
+    let mut joiner = FrameJoiner::default();
+    let mut message = |frame: &[u8]| {
+        joiner.push(frame).map(drop).map_err(|error| match error {
+            TransportError::Failed(error) => error,
+            TransportError::Backpressure => "backpressure".to_owned(),
+        })
     };
     let frames = decode_websocket_frame_batch(batch)
         .map_err(|error| format!("malformed websocket frame batch: {error}"))?;
@@ -747,7 +758,8 @@ pub enum SyncMessage {
     /// branch view the read observes, so its window and versions are the
     /// view's. A view frozen at a snapshot reference is resolved by the
     /// receiver (a reopened tab's capture, which its worker settled), which
-    /// also sends the [`SyncMessage::Origins`] of the commits it names.
+    /// also sends the origins of the commits it names (see
+    /// [`SyncMessage::Rows`]).
     Fetch {
         id: u64,
         query: Query,
@@ -809,8 +821,14 @@ pub enum SyncMessage {
         nodes: Vec<WireChunk>,
         missing: Vec<WireChunkRef>,
     },
+    /// Row images. `origins` names the transactions behind the history
+    /// versions among them, as (seq, writer node, writer tx): a replica
+    /// lists a history version only once it knows its `$transactionId`,
+    /// and a one-shot read frozen at a snapshot names the commits that
+    /// snapshot holds. Empty for current rows.
     Rows {
         images: Vec<Image>,
+        origins: Vec<(u64, [u8; 16], u64)>,
     },
     /// The row is unavailable to this reader (a write or a policy change
     /// took its read access): the replica drops its copy (INV-SYNC-14).
@@ -880,13 +898,6 @@ pub enum SyncMessage {
         version: [u8; 16],
     },
     // server → client
-    /// The transactions behind the versions a history read ships, as
-    /// (seq, writer node, writer tx), sent ahead of their `Rows`: a
-    /// replica lists a history version only once it knows its
-    /// `$transactionId`.
-    Origins {
-        commits: Vec<(u64, [u8; 16], u64)>,
-    },
     /// Whether the server has admitted the schema version the session
     /// declared, sent when that changes. Until it is admitted the server
     /// holds the session's messages (a draft awaiting its lens), so a
@@ -894,14 +905,6 @@ pub enum SyncMessage {
     /// rather than waiting out its budget.
     SchemaAdmission {
         admitted: bool,
-    },
-    /// The leading images of a `Rows` message too large for one wire
-    /// frame; the message's final frame is the `Rows` itself. A receiver
-    /// joins the parts and applies them as that one message, so a
-    /// commit's rows reach readers whole (a wire framing only: never sent
-    /// as a message of its own).
-    RowsPart {
-        images: Vec<Image>,
     },
     /// A relay holds the session's commit `tx` in its store and uploads
     /// it: the commit is `Local` for a non-durable session (a tab over its
@@ -971,9 +974,7 @@ impl SyncMessage {
             Self::Advise { .. } => "Advise",
             Self::Advice { .. } => "Advice",
             Self::Schema { .. } => "Schema",
-            Self::Origins { .. } => "Origins",
             Self::SchemaAdmission { .. } => "SchemaAdmission",
-            Self::RowsPart { .. } => "RowsPart",
             Self::Stored { .. } => "Stored",
             Self::Holds { .. } => "Holds",
             Self::Catalogue { .. } => "Catalogue",
@@ -5466,7 +5467,12 @@ impl Db {
                 match message {
                     // Rows and evictions name stored tables and columns, as
                     // this store mirrors its upstream's.
-                    SyncMessage::Rows { images } => {
+                    SyncMessage::Rows { images, origins } => {
+                        // A history version is listed once its transaction
+                        // is known.
+                        for (seq, node, tx) in origins {
+                            inner.record_settled(node, tx, Some(seq))?;
+                        }
                         for image in images {
                             let Some(mut image) = inner.stored_image(image) else {
                                 continue;
@@ -5523,11 +5529,6 @@ impl Db {
                         }
                         // In the tick's savepoint, with the rows it settles.
                         inner.store_watermark(&watermark, through)?;
-                    }
-                    SyncMessage::Origins { commits } => {
-                        for (seq, node, tx) in commits {
-                            inner.record_settled(node, tx, Some(seq))?;
-                        }
                     }
                     SyncMessage::Advice { id, advice } => {
                         let client = inner.client.as_mut().expect("client");
@@ -7080,11 +7081,11 @@ impl Db {
             if let Some(catalogue) = inner.catalogue_for(index) {
                 out.push(catalogue);
             }
-            if !history_seqs.is_empty() {
-                out.push(SyncMessage::Origins {
-                    commits: inner.origins(&history_seqs)?,
-                });
-            }
+            let origins = if history_seqs.is_empty() {
+                Vec::new()
+            } else {
+                inner.origins(&history_seqs)?
+            };
             let session = &mut inner.sessions[index];
             session.watch = watch;
             session.held = held_rows;
@@ -7135,8 +7136,8 @@ impl Db {
                     }
                 }
             }
-            if !images.is_empty() {
-                out.push(SyncMessage::Rows { images });
+            if !images.is_empty() || !origins.is_empty() {
+                out.push(SyncMessage::Rows { images, origins });
             }
             out.extend(evictions);
             out.extend(std::mem::take(&mut session.outbox));
@@ -7157,7 +7158,7 @@ impl Db {
             if !own.is_empty() {
                 let mut shipped = HashSet::new();
                 for message in &mut out {
-                    let SyncMessage::Rows { images } = message else {
+                    let SyncMessage::Rows { images, .. } = message else {
                         continue;
                     };
                     let mut bases = Vec::new();
@@ -7204,16 +7205,17 @@ impl Db {
                         }
                     }
                 }
-                out.retain(
-                    |message| !matches!(message, SyncMessage::Rows { images } if images.is_empty()),
-                );
+                out.retain(|message| {
+                    !matches!(message, SyncMessage::Rows { images, origins }
+                            if images.is_empty() && origins.is_empty())
+                });
             }
             // Chunked cells go as deltas over the version of their row the
             // replica holds (SPEC 19.8).
             let mut shipped = std::mem::take(&mut inner.sessions[index].shipped);
             for message in &mut out {
                 match message {
-                    SyncMessage::Rows { images } => {
+                    SyncMessage::Rows { images, .. } => {
                         for image in images.iter_mut() {
                             inner.ship_deltas(&mut shipped, image)?;
                         }
@@ -7780,13 +7782,8 @@ impl Db {
                 origins.extend(named);
                 let through = at.unwrap_or(inner.served_through());
                 let session = &mut inner.sessions[index];
-                if !origins.is_empty() {
-                    session
-                        .outbox
-                        .push(SyncMessage::Origins { commits: origins });
-                }
-                if !images.is_empty() {
-                    session.outbox.push(SyncMessage::Rows { images });
+                if !images.is_empty() || !origins.is_empty() {
+                    session.outbox.push(SyncMessage::Rows { images, origins });
                 }
                 session.outbox.push(SyncMessage::Answer {
                     id,

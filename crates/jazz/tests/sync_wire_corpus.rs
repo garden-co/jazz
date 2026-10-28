@@ -48,12 +48,11 @@ use common::{compile_schema, read_and_allow_all_writes, session_eq};
 const CORPUS: &str = "sqlite_sync_wire_v1.json";
 const FORMAT: &str = "jazz-sqlite-sync-wire-corpus-v1";
 
-/// Every `SyncMessage` variant, in declaration order, but `RowsPart`: a
-/// framing of a `Rows` too large for one frame, whose real frames are
-/// megabytes (binding_host's frame-split test covers it); and `Hold`,
-/// retired and never sent, which keeps its tag so `Commit`'s stays (the
-/// storage corpus pins pending uploads stored as `Commit` frames).
-const VARIANTS: [&str; 21] = [
+/// Every `SyncMessage` variant, in declaration order, but `Hold`, which
+/// a replica sends only when a large value's delta cannot apply. A
+/// message too large for one frame travels in parts below the message
+/// layer (binding_host's frame-split test covers it).
+const VARIANTS: [&str; 20] = [
     "Subscribe",
     "Unsubscribe",
     "Fetch",
@@ -70,7 +69,6 @@ const VARIANTS: [&str; 21] = [
     "Advise",
     "Advice",
     "Schema",
-    "Origins",
     "SchemaAdmission",
     "Stored",
     "Holds",
@@ -443,7 +441,7 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     .unwrap();
     pump(&[&alice, &server, &alice]);
 
-    // Fetch, Answer, Origins: a serializable transaction's second read is
+    // Fetch, Answer: a serializable transaction's second read is
     // pinned to its snapshot, so after a newer write it answers from
     // history.
     let open_tx = OpenTransactionId::new();
@@ -460,8 +458,8 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     );
     alice.abandon_transaction_handle(open_tx).unwrap();
 
-    // Origins: a history subscription ships superseded versions, and the
-    // commits behind them first.
+    // A history subscription ships superseded versions, with the commits
+    // behind them.
     let history = alice
         .prepare_query(
             &Query::from("history.notes").filter(eq(col("id"), lit(Value::Uuid(shared.0)))),

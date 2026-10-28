@@ -1313,6 +1313,8 @@ struct OwnerSession {
     untrusted: bool,
     /// Reads held until the permissions head is published, in order.
     held: VecDeque<SyncMessage>,
+    /// The parts of a message split across frames, until its last part.
+    joiner: jazz::db::FrameJoiner,
     queues: Rc<SessionQueues>,
     output: tokio_mpsc::UnboundedSender<Outbound>,
     egress: Arc<AtomicUsize>,
@@ -1716,6 +1718,7 @@ impl Owner {
                 subscriber,
                 untrusted: identity != AuthorSubject::SYSTEM,
                 held: VecDeque::new(),
+                joiner: jazz::db::FrameJoiner::default(),
                 queues,
                 output,
                 egress,
@@ -1733,8 +1736,9 @@ impl Owner {
         };
         let mut inbound = owner_session.queues.inbound.borrow_mut();
         for frame in frames {
-            match jazz::db::decode_message(&frame) {
-                Ok(SyncMessage::Commit { tx, .. }) if gated => {
+            match owner_session.joiner.push(&frame) {
+                Ok(None) => {}
+                Ok(Some(SyncMessage::Commit { tx, .. })) if gated => {
                     owner_session
                         .queues
                         .outbound
@@ -1751,18 +1755,20 @@ impl Owner {
                             global: true,
                         });
                 }
-                Ok(
+                Ok(Some(
                     message @ (SyncMessage::Subscribe { .. }
                     | SyncMessage::Unsubscribe { .. }
                     | SyncMessage::Fetch { .. }
                     | SyncMessage::Hold { .. }),
-                ) if gated => owner_session.held.push_back(message),
-                Ok(message) => inbound.push_back(message),
+                )) if gated => owner_session.held.push_back(message),
+                Ok(Some(message)) => inbound.push_back(message),
                 Err(error) => {
                     drop(inbound);
-                    let _ = owner_session
-                        .output
-                        .send((Err(format!("malformed sync frame: {error}")), 0));
+                    let error = match error {
+                        jazz::db::TransportError::Failed(error) => error,
+                        jazz::db::TransportError::Backpressure => "backpressure".to_owned(),
+                    };
+                    let _ = owner_session.output.send((Err(error), 0));
                     self.close_session(session);
                     return;
                 }

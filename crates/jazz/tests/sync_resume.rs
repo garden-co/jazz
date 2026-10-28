@@ -83,7 +83,7 @@ struct Pipe {
 
 impl Transport for Pipe {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
-        if let (Some(count), SyncMessage::Rows { images }) = (&self.shipped, &message) {
+        if let (Some(count), SyncMessage::Rows { images, .. }) = (&self.shipped, &message) {
             *count.borrow_mut() += images.len();
         }
         self.out.borrow_mut().push_back(message);
