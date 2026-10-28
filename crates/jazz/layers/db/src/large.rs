@@ -856,6 +856,20 @@ impl Chunks {
         std::mem::take(&mut self.state.lock().expect("chunk cache").demand)
     }
 
+    /// Demand for nodes a session pulled that this relay lacks, with the
+    /// span of `root`'s tree the pull asked for.
+    pub(crate) fn add_demand(
+        &self,
+        requests: impl IntoIterator<Item = ChunkRequest>,
+        span: Option<([u8; 32], std::ops::Range<u64>)>,
+    ) {
+        let mut state = self.state.lock().expect("chunk cache");
+        state.demand.extend(requests);
+        if let Some((root, span)) = span {
+            state.note_span(root, span);
+        }
+    }
+
     /// The base-tree ranges reads waited on, by root.
     pub(crate) fn take_spans(&self) -> HashMap<[u8; 32], std::ops::Range<u64>> {
         std::mem::take(&mut self.state.lock().expect("chunk cache").spans)
@@ -1016,13 +1030,7 @@ impl Chunks {
                         state.demand.extend(absent);
                         state.fetch.extend(fetching);
                         if let Some((root, span)) = span {
-                            state
-                                .spans
-                                .entry(root)
-                                .and_modify(|held| {
-                                    *held = held.start.min(span.start)..held.end.max(span.end)
-                                })
-                                .or_insert(span);
+                            state.note_span(root, span);
                         }
                         return Err(missing());
                     }
@@ -1125,6 +1133,14 @@ impl Chunks {
 }
 
 impl State {
+    /// Widen the span the next pull of `root`'s tree asks for.
+    fn note_span(&mut self, root: [u8; 32], span: std::ops::Range<u64>) {
+        self.spans
+            .entry(root)
+            .and_modify(|held| *held = held.start.min(span.start)..held.end.max(span.end))
+            .or_insert(span);
+    }
+
     fn evict(&mut self) {
         let Some(budget) = self.budget else {
             return;
@@ -2173,11 +2189,14 @@ fn under(
     Ok(false)
 }
 
+/// What a pull is answered with: the nodes found, the wanted nodes not
+/// under the cited tree, and the wanted nodes under it this store lacks.
+pub(crate) type Pulled = (Vec<([u8; 32], Vec<u8>)>, Vec<[u8; 32]>, Vec<[u8; 32]>);
+
 /// Answer a pull of `root`'s tree (a version the reader may read): the
 /// nodes of `wanted` under it and, for `span` (base-tree bytes), every
 /// node on the paths covering those bytes beneath a wanted one, parents
-/// first, until `budget` bytes. Returns what was found and the wanted
-/// nodes not sent. A node the chunk store answers only asynchronously
+/// first, until `budget` bytes (see [`Pulled`]). A node the chunk store answers only asynchronously
 /// fails the pull as missing; it is answered again once fetched.
 pub(crate) fn pulled(
     conn: &Connection,
@@ -2186,7 +2205,7 @@ pub(crate) fn pulled(
     wanted: &[[u8; 32]],
     span: Option<std::ops::Range<u64>>,
     budget: usize,
-) -> Result<(Vec<([u8; 32], Vec<u8>)>, Vec<[u8; 32]>), Error> {
+) -> Result<Pulled, Error> {
     let wanted_set: BTreeSet<[u8; 32]> = wanted.iter().copied().collect();
     let mut out = Vec::new();
     let mut sent = BTreeSet::new();
@@ -2235,13 +2254,14 @@ pub(crate) fn pulled(
         }
     }
     let mut down = None;
-    let mut missing = Vec::new();
+    let mut foreign = Vec::new();
+    let mut absent = Vec::new();
     for hash in wanted {
         if sent.contains(hash) {
             continue;
         }
         if !under(conn, root, hash, &mut down)? {
-            missing.push(*hash);
+            foreign.push(*hash);
             continue;
         }
         match stored_bytes(conn, chunks, &ChunkRequest { object_hash: *hash })? {
@@ -2249,10 +2269,10 @@ pub(crate) fn pulled(
                 sent.insert(*hash);
                 out.push((*hash, bytes));
             }
-            None => missing.push(*hash),
+            None => absent.push(*hash),
         }
     }
-    Ok((out, missing))
+    Ok((out, foreign, absent))
 }
 
 /// Whether a parent this store holds names `hash`: a node a range pull

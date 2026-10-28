@@ -1421,6 +1421,9 @@ pub(crate) struct Session {
     /// Fetches whose upstream answer arrived, or that this relay already
     /// asked its upstream to refresh: served from this store.
     fetched_upstream: BTreeSet<u64>,
+    /// A relay's pulls of nodes it is still fetching from its upstream:
+    /// answered from its store once they arrive (or are unavailable).
+    parked_pulls: Vec<WirePull>,
     /// The client was told its declared version is not admitted.
     told_unadmitted: bool,
     /// On a relay, the upstream subscription each of the client's
@@ -1468,6 +1471,7 @@ impl Session {
             backlog_reads: (None, HashMap::new()),
             version: None,
             fetched_upstream: BTreeSet::new(),
+            parked_pulls: Vec::new(),
             told_unadmitted: false,
             schema: None,
             relayed: BTreeMap::new(),
@@ -3140,6 +3144,10 @@ impl Inner {
                 crate::large::install_fetched(&self.conn, &self.chunks, &request, node.bytes)?;
             }
         }
+        let parked = self
+            .sessions
+            .iter()
+            .any(|session| !session.parked_pulls.is_empty());
         let client = self.client.as_mut().expect("client");
         for missing in missing {
             let request = missing.request();
@@ -3147,6 +3155,8 @@ impl Inner {
             client.unavailable.insert(request);
         }
         client.arrived = true;
+        // Pulls this relay parked for its sessions are answered now.
+        client.relay_ready |= parked;
         Ok(())
     }
 
@@ -5211,6 +5221,42 @@ impl Inner {
     /// Session `index`'s relayed reads that are ready to serve from this
     /// store: the upstream answered, or a first-load wait ran out or can no
     /// longer be answered. A refusal goes to the session as its own.
+    /// The pulls a relay parked for session `index` whose nodes it now
+    /// holds, or that its upstream cannot answer: they are answered again.
+    fn parked_pulls_ready(&mut self, index: usize) -> Result<Option<Vec<WirePull>>, Error> {
+        let parked = std::mem::take(&mut self.sessions[index].parked_pulls);
+        if parked.is_empty() {
+            return Ok(None);
+        }
+        let connected = self
+            .client
+            .as_ref()
+            .is_some_and(|client| client.transport.is_some());
+        let mut ready = Vec::new();
+        let mut kept = Vec::new();
+        for pull in parked {
+            let mut settled = true;
+            for hash in &pull.nodes {
+                let unavailable = self.client.as_ref().is_some_and(|client| {
+                    client
+                        .unavailable
+                        .contains(&ChunkRequest { object_hash: *hash })
+                });
+                if connected && !unavailable && crate::large::node(&self.conn, hash)?.is_none() {
+                    settled = false;
+                    break;
+                }
+            }
+            if settled {
+                ready.push(pull)
+            } else {
+                kept.push(pull)
+            }
+        }
+        self.sessions[index].parked_pulls = kept;
+        Ok((!ready.is_empty()).then_some(ready))
+    }
+
     fn relayed_fetches_ready(&mut self, index: usize) -> (Vec<SyncMessage>, Vec<RelayedAnswer>) {
         let Some(client) = self.client.as_mut() else {
             return (Vec::new(), Vec::new());
@@ -5652,6 +5698,9 @@ impl Db {
         }
         for message in relayed.into_iter().rev() {
             inbound.push_front(message);
+        }
+        if let Some(pulls) = self.inner.borrow_mut().parked_pulls_ready(index)? {
+            inbound.push_front(SyncMessage::ChunkRequests { pulls });
         }
         // Writes held back by the ingress limit, and what the session sent
         // after them, in order. A read is never answered ahead of a commit
@@ -7178,10 +7227,11 @@ impl Db {
                 }
             }
             SyncMessage::ChunkRequests { pulls } => {
-                let replies = db.answer_pulls(policy, pulls)?;
-                self.inner.borrow_mut().sessions[index]
-                    .outbox
-                    .extend(replies);
+                let (replies, parked) = db.answer_pulls(policy, pulls)?;
+                let mut inner = self.inner.borrow_mut();
+                let session = &mut inner.sessions[index];
+                session.outbox.extend(replies);
+                session.parked_pulls.extend(parked);
             }
             SyncMessage::PushChunks { nodes } => {
                 let inner = self.inner.borrow();
@@ -7289,9 +7339,10 @@ impl Db {
         &self,
         identity: Option<AuthorSubject>,
         pulls: Vec<WirePull>,
-    ) -> Result<Vec<SyncMessage>, Error> {
+    ) -> Result<(Vec<SyncMessage>, Vec<WirePull>), Error> {
         let inner = self.inner();
         let mut replies = Vec::new();
+        let mut parked = Vec::new();
         let mut nodes = Vec::new();
         let mut missing = Vec::new();
         let mut size = 0;
@@ -7322,17 +7373,41 @@ impl Db {
                 &inner.chunks,
                 &pull.root,
                 &pull.nodes,
-                span,
+                span.clone(),
                 PULL_BYTES,
             );
-            let (found, absent) = match found {
+            let (found, foreign, absent) = match found {
                 Err(error) if crate::large::is_missing(&error) => {
                     fetching = true;
                     continue;
                 }
                 found => found?,
             };
+            missing.extend(foreign.into_iter().map(|hash| WireChunkRef { hash }));
+            // A relay fetches what it lacks from its upstream, through the
+            // version it received, and answers once it arrives; what its
+            // upstream cannot answer is missing here too.
+            let (fetch, absent): (Vec<_>, Vec<_>) = match &inner.client {
+                Some(client) if client.transport.is_some() => {
+                    absent.into_iter().partition(|hash| {
+                        !client
+                            .unavailable
+                            .contains(&ChunkRequest { object_hash: *hash })
+                    })
+                }
+                _ => (Vec::new(), absent),
+            };
             missing.extend(absent.into_iter().map(|hash| WireChunkRef { hash }));
+            if !fetch.is_empty() {
+                inner.chunks.add_demand(
+                    fetch.iter().map(|hash| ChunkRequest { object_hash: *hash }),
+                    span.clone().map(|span| (pull.root, span)),
+                );
+                parked.push(WirePull {
+                    nodes: fetch,
+                    ..pull.clone()
+                });
+            }
             for (hash, bytes) in found {
                 size += bytes.len();
                 nodes.push(WireChunk { hash, bytes });
@@ -7349,7 +7424,7 @@ impl Db {
             return Err(crate::large::missing());
         }
         replies.push(SyncMessage::Chunks { nodes, missing });
-        Ok(replies)
+        Ok((replies, parked))
     }
 
     /// The roots of the chunked values of the settled versions a commit

@@ -1,18 +1,3 @@
-A pull names the row version it reads through (table, row, branch, version),
-the root of the tree it reads there, the hashes of the nodes it lacks, and
-optionally a range of that tree's bytes. A read maps its logical range through
-the edit tail to the smallest base-tree range covering it; the requester holds
-everything above the nodes it lacks, so a range pull is answered with those
-nodes and every node beneath them on the paths covering the range, parents
-first, in one round trip (up to a bounded number of bytes per answer; a read
-past them pulls again). The requester accepts a node it asked for or one a
-parent it holds names. The authority answers only when the requester may read
-that version and the version holds that root, and only with nodes reachable
-from it. Anything else is answered as for an absent node. A replica records,
-for each root it receives, the version it arrived in, and pulls through it. A
-relay answers from its own store when it holds the nodes and forwards upstream
-otherwise.
-
 # jazz — Specification · 19. Large values
 
 ## Overview
@@ -359,16 +344,20 @@ range through the edits and needs only the nodes on the paths covering it, so
 reading one page of a large document pulls the root, one path of branches and
 the leaves of that page.
 
-A pull names the row version it reads through (table, row, branch, version,
-column) and either a node hash or a range in the column's coordinates (bytes,
-or UTF-16 code units for strings), with the hashes of nodes the requester
-already holds. A range pull is answered with every node on the paths from the
-version's root to the leaves covering the range, minus those held, in one
-round trip. The authority answers only when the requester may read that
-version; a node pull also needs the node to be reachable from that version's
-root, which a range pull satisfies by construction. Anything else is answered
-as for an absent node. A relay answers from its own store when it holds the
-nodes and forwards upstream otherwise.
+A pull names the row version it reads through (table, row, branch, version),
+the root of the tree it reads there, the hashes of the nodes it lacks, and
+optionally a range of that tree's bytes. A read maps its logical range through
+the edit tail to the smallest base-tree range covering it; the requester holds
+everything above the nodes it lacks, so a range pull is answered with those
+nodes and every node beneath them on the paths covering the range, parents
+first, in one round trip (up to a bounded number of bytes per answer; a read
+past them pulls again). The requester accepts a node it asked for or one a
+parent it holds names. The authority answers only when the requester may read
+that version and the version holds that root, and only with nodes reachable
+from it. Anything else is answered as for an absent node. A replica records,
+for each root it receives, the version it arrived in, and pulls through it. A
+relay answers from its own store when it holds the nodes and forwards upstream
+otherwise.
 
 `INV-CONTENT-7`: epoch ids, cells and materializations never cross the wire;
 a value crosses as inline bytes, as a tree reference whose nodes are pulled

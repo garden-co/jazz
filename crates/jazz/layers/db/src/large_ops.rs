@@ -236,8 +236,13 @@ impl Inner {
                 };
                 check_range(&range, len)?;
                 if utf16 {
-                    self.chunks
-                        .run(|inputs| lv::utf16_range_attempt(&value, range.clone(), inputs))
+                    // A UTF-16 code unit is one to three UTF-8 bytes, so
+                    // these bytes hold the range: the pull asks for them.
+                    let bytes = range.start.min(value.byte_length)
+                        ..range.end.saturating_mul(3).min(value.byte_length);
+                    self.chunks.run_range(&value, bytes, |inputs| {
+                        lv::utf16_range_attempt(&value, range.clone(), inputs)
+                    })
                 } else {
                     self.chunks.run_range(&value, range.clone(), |inputs| {
                         lv::byte_range_attempt(&value, range.clone(), inputs)

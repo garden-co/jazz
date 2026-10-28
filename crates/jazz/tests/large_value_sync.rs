@@ -314,6 +314,48 @@ fn a_range_read_pulls_its_whole_path_in_one_round_trip() {
 }
 
 #[test]
+fn a_utf16_range_read_pulls_its_whole_path_in_one_round_trip() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let alice = open(1, user(1));
+    let log = connect(&server, &alice, user(1));
+    // Mixed widths: one, two and three UTF-8 bytes per code unit.
+    let body: String = text(5, LARGE * 4)
+        .chars()
+        .enumerate()
+        .map(|(n, c)| match n % 3 {
+            0 => c,
+            1 => 'é',
+            _ => '€',
+        })
+        .collect();
+    insert(
+        &server,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String(body.clone())),
+            ("blob", Value::Bytes(Vec::new())),
+        ],
+    );
+    let _stream = subscribe(&alice, Query::from("docs").select(["blob"]));
+    pump(&server, &[&alice]);
+    log.borrow_mut().clear();
+    let range = 700_000..700_050;
+    let first = block_on(alice.read_text_utf16_range("docs", row(1), "body", range.clone()));
+    assert!(first.is_err(), "the first read asks for the range");
+    block_on(alice.tick()).unwrap();
+    block_on(server.tick()).unwrap();
+    block_on(alice.tick()).unwrap();
+    let got = block_on(alice.read_text_utf16_range("docs", row(1), "body", range.clone()));
+    let expected: String = body.chars().skip(700_000).take(50).collect();
+    assert_eq!(got.unwrap(), expected);
+    assert_eq!(requests(&log), 1, "{:?}", log.borrow());
+    let (after, _) = alice.large_value_nodes_for_test().unwrap();
+    let (total, _) = server.large_value_nodes_for_test().unwrap();
+    assert!(after < total, "only the covering paths: {after} of {total}");
+}
+
+#[test]
 fn pulls_answer_only_for_versions_the_reader_may_read() {
     let server = open(0, AuthorSubject::SYSTEM);
     let mallory = open(9, user(9));
@@ -1285,4 +1327,247 @@ fn a_held_upload_does_not_hold_other_sessions_reads() {
     assert!(drain(&mut stream, &mut shown), "bob's read is served");
     assert_eq!(shown.into_iter().collect::<Vec<_>>(), [row(1)]);
     assert_eq!(local_cell(&server, "docs", 2, "body").unwrap(), None);
+}
+
+// ---- through a relay ------------------------------------------------------
+
+/// Tick a tab, its relay and the relay's upstream until quiet.
+fn pump_chain(core: &Db, relay: &Db, tab: &Db) {
+    for _ in 0..12 {
+        block_on(tab.tick()).unwrap();
+        block_on(relay.tick()).unwrap();
+        block_on(core.tick()).unwrap();
+        block_on(relay.tick()).unwrap();
+        block_on(tab.tick()).unwrap();
+    }
+}
+
+fn requests(log: &Log) -> usize {
+    log.borrow()
+        .iter()
+        .filter(|kind| **kind == "requests")
+        .count()
+}
+
+#[test]
+fn a_range_read_through_a_relay_fetches_only_its_path_at_every_hop() {
+    let core = open(0, AuthorSubject::SYSTEM);
+    let relay = open(5, user(5));
+    let tab = open(6, user(6));
+    let upstream = connect(&core, &relay, user(5));
+    let downstream = connect(&relay, &tab, user(6));
+    let blob: Vec<u8> = (0..LARGE * 16).map(|n| (n * 7 % 251) as u8).collect();
+    insert(
+        &core,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String("small".into())),
+            ("blob", Value::Bytes(blob.clone())),
+        ],
+    );
+    let _stream = subscribe(&tab, Query::from("docs").select(["body"]));
+    pump_chain(&core, &relay, &tab);
+    assert_eq!(relay.large_value_nodes_for_test().unwrap().0, 0);
+    assert_eq!(tab.large_value_nodes_for_test().unwrap().0, 0);
+    upstream.borrow_mut().clear();
+    downstream.borrow_mut().clear();
+    let range = 3_000_000..3_000_100;
+    let first = block_on(tab.read_value_range("docs", row(1), "blob", range.clone()));
+    assert!(first.is_err(), "the first read asks for the range");
+    pump_chain(&core, &relay, &tab);
+    let got = block_on(tab.read_value_range("docs", row(1), "blob", range.clone()));
+    assert_eq!(got.unwrap(), blob[3_000_000..3_000_100]);
+    // One pull per hop: the relay forwards what it lacks with the range,
+    // and answers the tab from its store once the path arrives.
+    assert_eq!(requests(&downstream), 1, "{:?}", downstream.borrow());
+    assert_eq!(requests(&upstream), 1, "{:?}", upstream.borrow());
+    let (total, _) = core.large_value_nodes_for_test().unwrap();
+    let (at_relay, _) = relay.large_value_nodes_for_test().unwrap();
+    let (at_tab, _) = tab.large_value_nodes_for_test().unwrap();
+    assert!(
+        at_relay < total,
+        "the relay holds the path: {at_relay} of {total}"
+    );
+    assert_eq!(at_tab, at_relay, "the tab holds the same path");
+    // A second tab reading the same range is answered by the relay alone.
+    let other = open(7, user(7));
+    let beside = connect(&relay, &other, user(7));
+    let _other_stream = subscribe(&other, Query::from("docs").select(["body"]));
+    pump_chain(&core, &relay, &other);
+    upstream.borrow_mut().clear();
+    let _ = block_on(other.read_value_range("docs", row(1), "blob", range.clone()));
+    pump_chain(&core, &relay, &other);
+    let got = block_on(other.read_value_range("docs", row(1), "blob", range.clone()));
+    assert_eq!(got.unwrap(), blob[3_000_000..3_000_100]);
+    assert_eq!(requests(&beside), 1);
+    assert_eq!(requests(&upstream), 0, "{:?}", upstream.borrow());
+}
+
+#[test]
+fn a_whole_value_reaches_a_tab_through_its_relay() {
+    let core = open(0, AuthorSubject::SYSTEM);
+    let relay = open(5, user(5));
+    let tab = open(6, user(6));
+    connect(&core, &relay, user(5));
+    connect(&relay, &tab, user(6));
+    let body = text(3, LARGE);
+    insert(
+        &core,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String(body.clone())),
+            ("blob", Value::Bytes(Vec::new())),
+        ],
+    );
+    let _stream = subscribe(&tab, Query::from("docs"));
+    pump_chain(&core, &relay, &tab);
+    assert_eq!(
+        local_cell(&tab, "docs", 1, "body").unwrap(),
+        Some(Value::String(body))
+    );
+}
+
+#[test]
+fn a_relay_forwards_no_pull_its_tab_may_not_make() {
+    let core = open(0, AuthorSubject::SYSTEM);
+    let relay = open(5, user(5));
+    let tab = open(9, user(9));
+    let upstream = connect(&core, &relay, user(5));
+    let (_, up, down) = connect_wires(&relay, &tab, user(9));
+    let _relay_stream = subscribe(&relay, Query::from("docs").select(["blob"]));
+    let _stream = subscribe(&tab, Query::from("docs").select(["blob"]));
+    pump_chain(&core, &relay, &tab);
+    insert(
+        &core,
+        "drafts",
+        2,
+        vec![("body", Value::String(text(8, LARGE)))],
+    );
+    insert(
+        &core,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String(text(1, LARGE))),
+            ("blob", Value::Bytes(Vec::new())),
+        ],
+    );
+    for _ in 0..4 {
+        block_on(core.tick()).unwrap();
+        block_on(relay.tick()).unwrap();
+    }
+    let draft = jazz::large_values::prepare(
+        jazz::large_values::LargeValueKind::String,
+        text(8, LARGE).as_bytes(),
+    )
+    .unwrap()
+    .value_ref
+    .root
+    .object_hash
+    .0;
+    let (seq, key) = down
+        .borrow()
+        .iter()
+        .find_map(|message| match message {
+            SyncMessage::Rows { images } => images
+                .iter()
+                .find(|image| image.id == *row(1).0.as_bytes())
+                .map(|image| (image.seq, image.key.clone())),
+            _ => None,
+        })
+        .expect("the doc's image");
+    down.borrow_mut().clear();
+    upstream.borrow_mut().clear();
+    let pull = |table: &str, id: u8, seq: u64, root: [u8; 32]| WirePull {
+        table: table.to_owned(),
+        id: *row(id).0.as_bytes(),
+        key: key.clone(),
+        seq,
+        root,
+        nodes: vec![draft],
+        span: Some((0, LARGE as u64)),
+    };
+    let mut pulls = vec![pull("docs", 1, seq, draft)];
+    pulls.extend((0..seq + 4).map(|seq| pull("drafts", 2, seq, draft)));
+    up.borrow_mut()
+        .push_back(SyncMessage::ChunkRequests { pulls });
+    for _ in 0..4 {
+        block_on(relay.tick()).unwrap();
+        block_on(core.tick()).unwrap();
+    }
+    let mut missing = BTreeSet::new();
+    for message in down.borrow().iter() {
+        if let SyncMessage::Chunks {
+            nodes,
+            missing: absent,
+        } = message
+        {
+            assert!(nodes.is_empty(), "nothing is sent");
+            missing.extend(absent.iter().map(|node| node.hash));
+        }
+    }
+    assert!(missing.contains(&draft));
+    assert_eq!(requests(&upstream), 0, "nothing goes upstream");
+    assert_eq!(relay.large_value_nodes_for_test().unwrap().0, 0);
+}
+
+#[test]
+fn edits_cross_a_relay_as_deltas_both_ways() {
+    let core = open(0, AuthorSubject::SYSTEM);
+    let relay = open(5, user(5));
+    let tab = open(6, user(6));
+    let (relay_up, relay_down) = connect_spied(&core, &relay, user(5));
+    let (tab_up, tab_down) = connect_spied(&relay, &tab, user(6));
+    let _relay_stream = subscribe(&relay, Query::from("docs"));
+    let _stream = subscribe(&tab, Query::from("docs"));
+    let mut expected = text(4, LARGE);
+    insert(
+        &tab,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String(expected.clone())),
+            ("blob", Value::Bytes(Vec::new())),
+        ],
+    );
+    pump_chain(&core, &relay, &tab);
+    assert_eq!(
+        local_cell(&core, "docs", 1, "body").unwrap(),
+        Some(Value::String(expected.clone()))
+    );
+    // The tab's appends go up as deltas over each hop, and the core's
+    // come down as deltas over each hop.
+    for n in 0..60 {
+        let suffix = format!("<{n}>");
+        let writer = if n % 2 == 0 { &tab } else { &core };
+        block_on(writer.append_value("docs", row(1), "body", suffix.clone().into_bytes())).unwrap();
+        expected.push_str(&suffix);
+        pump_chain(&core, &relay, &tab);
+    }
+    for (wire, kind) in [
+        (&tab_up, "commit"),
+        (&relay_up, "commit"),
+        (&relay_down, "rows"),
+        (&tab_down, "rows"),
+    ] {
+        let wire = wire.borrow();
+        let later: Vec<_> = wire.iter().filter(|(k, ..)| *k == kind).skip(2).collect();
+        assert!(later.len() >= 20, "{kind}: {wire:?}");
+        let small = later
+            .iter()
+            .filter(|(_, size, delta)| *delta && *size < 512)
+            .count();
+        assert!(
+            small * 10 >= later.len() * 9,
+            "{kind}: small deltas: {wire:?}"
+        );
+    }
+    for db in [&core, &relay, &tab] {
+        assert_eq!(
+            local_cell(db, "docs", 1, "body").unwrap(),
+            Some(Value::String(expected.clone()))
+        );
+    }
 }
