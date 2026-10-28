@@ -1,5 +1,5 @@
 use jazz_server::JazzServer;
-use jazz_testkit::{connect_ready_client, connect_ready_user, wait_for_query};
+use jazz_testkit::{connect_ready_client, connect_ready_user, wait_for_global_txs, wait_for_query};
 
 use super::*;
 
@@ -130,6 +130,183 @@ async fn local_insert_with_nested_exists_rel_policy_allows_correlated_insert_inn
     alice.shutdown().await.expect("shutdown Alice client");
     client.shutdown().await.expect("shutdown client");
     server.shutdown().await;
+}
+
+fn compound_witness_read_policy() -> jazz::tools::PolicyExpr {
+    use jazz::tools::public_schema::{
+        RelationCmpOp, RelationColumnRef, RelationExpr, RelationJoinCondition, RelationJoinKind,
+        RelationPredicate, RelationRowIdRef, RelationValueRef,
+    };
+
+    let column = |scope: &str, column: &str| RelationColumnRef {
+        scope: Some(scope.to_owned()),
+        column: column.to_owned(),
+    };
+    jazz::tools::PolicyExpr::ExistsRel {
+        rel: RelationExpr::Filter {
+            input: Box::new(RelationExpr::Join {
+                left: Box::new(RelationExpr::TableScan {
+                    table: "resource_access".into(),
+                    alias: Some("access".to_owned()),
+                }),
+                right: Box::new(RelationExpr::TableScan {
+                    table: "workspace_memberships".into(),
+                    alias: Some("membership".to_owned()),
+                }),
+                on: vec![
+                    RelationJoinCondition {
+                        left: column("access", "workspace"),
+                        right: column("membership", "workspace"),
+                    },
+                    RelationJoinCondition {
+                        left: column("access", "subject"),
+                        right: column("membership", "subject"),
+                    },
+                ],
+                join_kind: RelationJoinKind::Inner,
+            }),
+            predicate: RelationPredicate::Cmp {
+                left: column("access", "resource"),
+                op: RelationCmpOp::Eq,
+                right: RelationValueRef::RowId(RelationRowIdRef::Outer),
+            },
+        },
+    }
+}
+
+/// Alice sees a resource only when one membership row matches both access keys.
+/// ```text
+/// access row ──workspace + subject──► one membership row
+/// split membership rows ──one key each──✗
+/// ```
+#[tokio::test]
+async fn compound_exists_rel_requires_one_matching_witness_row() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = SchemaBuilder::new()
+                .table(
+                    TableSchema::builder("resources")
+                        .column("name", ColumnType::Text)
+                        .policies(permissions(|p| {
+                            p.allow_read().where_(compound_witness_read_policy());
+                            p.allow_insert().always();
+                        })),
+                )
+                .table(
+                    TableSchema::builder("resource_access")
+                        .fk_column("resource", "resources")
+                        .column("workspace", ColumnType::Text)
+                        .column("subject", ColumnType::Text)
+                        .policies(permissions(|p| {
+                            p.allow_read().never();
+                            p.allow_insert().always();
+                        })),
+                )
+                .table(
+                    TableSchema::builder("workspace_memberships")
+                        .column("workspace", ColumnType::Text)
+                        .column("subject", ColumnType::Text)
+                        .policies(permissions(|p| {
+                            p.allow_read().never();
+                            p.allow_insert().always();
+                        })),
+                )
+                .build();
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
+            let admin = connect_ready_client(
+                &server,
+                &schema,
+                "compound-witness-admin",
+                "resources",
+                Duration::from_secs(30),
+            )
+            .await;
+
+            let (complete, _, complete_tx) = admin
+                .insert("resources", row_input!("name" => "complete"))
+                .expect("seed complete resource");
+            let (split, _, split_tx) = admin
+                .insert("resources", row_input!("name" => "split"))
+                .expect("seed split resource");
+            let (_, _, access_complete_tx) = admin
+                .insert(
+                    "resource_access",
+                    row_input!(
+                        "resource" => complete,
+                        "workspace" => "workspace-a",
+                        "subject" => "alice"
+                    ),
+                )
+                .expect("seed complete access row");
+            let (_, _, access_split_tx) = admin
+                .insert(
+                    "resource_access",
+                    row_input!(
+                        "resource" => split,
+                        "workspace" => "workspace-b",
+                        "subject" => "alice"
+                    ),
+                )
+                .expect("seed split access row");
+            let (_, _, complete_membership_tx) = admin
+                .insert(
+                    "workspace_memberships",
+                    row_input!("workspace" => "workspace-a", "subject" => "alice"),
+                )
+                .expect("seed complete witness");
+            let (_, _, split_workspace_tx) = admin
+                .insert(
+                    "workspace_memberships",
+                    row_input!("workspace" => "workspace-b", "subject" => "bob"),
+                )
+                .expect("seed workspace-only witness");
+            let (_, _, split_subject_tx) = admin
+                .insert(
+                    "workspace_memberships",
+                    row_input!("workspace" => "workspace-c", "subject" => "alice"),
+                )
+                .expect("seed subject-only witness");
+            wait_for_global_txs(
+                &admin,
+                &[
+                    complete_tx.unwrap(),
+                    split_tx.unwrap(),
+                    access_complete_tx.unwrap(),
+                    access_split_tx.unwrap(),
+                    complete_membership_tx.unwrap(),
+                    split_workspace_tx.unwrap(),
+                    split_subject_tx.unwrap(),
+                ],
+            )
+            .await;
+
+            let alice = connect_ready_user(
+                &server,
+                &schema,
+                ALICE_ID,
+                "resources",
+                Duration::from_secs(30),
+            )
+            .await;
+            wait_for_query(
+                &alice,
+                Query::from("resources").select(["name"]),
+                jazz::tools::ReadTier::Remote,
+                Duration::from_secs(5),
+                "compound policy requires both equalities on one membership row",
+                |rows| {
+                    (rows.len() == 1 && rows[0].1 == [Value::Text("complete".into())]).then_some(())
+                },
+            )
+            .await;
+
+            alice.shutdown().await.expect("shutdown Alice client");
+            admin.shutdown().await.expect("shutdown seed client");
+            server.shutdown().await;
+        })
+        .await;
 }
 
 /// Verifies UPDATE USING enforcement for a correlated EXISTS_REL policy.

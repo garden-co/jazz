@@ -1241,6 +1241,9 @@ type BuiltRelation = {
   table?: string;
   conditions?: BuiltCondition[];
   hops?: string[];
+  orderBy?: Array<[string, "asc" | "desc"]>;
+  limit?: number;
+  offset?: number;
   gather?: BuiltGather;
   union?: {
     inputs: BuiltUnionArm[];
@@ -1270,6 +1273,15 @@ function cloneBuiltRelation(relation: BuiltRelation): BuiltRelation {
     ...(relation.table ? { table: relation.table } : {}),
     ...(relation.conditions ? { conditions: relation.conditions.map(cloneBuiltCondition) } : {}),
     ...(relation.hops ? { hops: [...relation.hops] } : {}),
+    ...(relation.orderBy
+      ? {
+          orderBy: relation.orderBy.map(
+            ([key, direction]) => [key, direction] as [string, "asc" | "desc"],
+          ),
+        }
+      : {}),
+    ...(relation.limit !== undefined ? { limit: relation.limit } : {}),
+    ...(relation.offset !== undefined ? { offset: relation.offset } : {}),
     ...(relation.gather ? { gather: cloneBuiltGather(relation.gather) } : {}),
     ...(relation.union
       ? {
@@ -1529,16 +1541,29 @@ export class TypedTableQueryBuilder<
       (condition) => !(condition.op === "eq" && condition.value === currentToken),
     );
 
-    const needsExplicitSeed =
-      this._unionVal !== undefined || this._hops.length > 0 || this._gatherVal !== undefined;
     const seedSource = options.start === undefined ? this : this.where(options.start);
+    // The seed's own filters travel in an explicit seed: the gather's
+    // top-level conditions filter its output.
+    const needsExplicitSeed =
+      this._unionVal !== undefined ||
+      this._hops.length > 0 ||
+      this._gatherVal !== undefined ||
+      seedSource._conditions.length > 0;
     const clone = needsExplicitSeed
       ? this._clone<TInclude, TSelection, TRequired, TDeleted>()
       : seedSource._clone<TInclude, TSelection, TRequired, TDeleted>();
     clone._conditions = [];
     clone._hops = [];
+    const seed = needsExplicitSeed ? seedSource._serializeRelation() : undefined;
+    if (seed) {
+      // These modifiers remain on the gathered result. Keep only windows
+      // nested inside the seed (such as individual UNION arms).
+      delete seed.orderBy;
+      delete seed.limit;
+      delete seed.offset;
+    }
     clone._gatherVal = {
-      ...(needsExplicitSeed ? { seed: seedSource._serializeRelation() } : {}),
+      ...(seed ? { seed } : {}),
       max_depth: maxDepth,
       step_table: stepBuilt.table,
       step_current_column: currentCondition.column,
@@ -1661,14 +1686,26 @@ export class TypedTableQueryBuilder<
   }
 
   _serializeRelation(): BuiltRelation {
+    const output = {
+      ...(this._orderBys.length
+        ? {
+            orderBy: this._orderBys.map(
+              ([key, direction]) => [key, direction] as [string, "asc" | "desc"],
+            ),
+          }
+        : {}),
+      ...(this._limitVal !== undefined ? { limit: this._limitVal } : {}),
+      ...(this._offsetVal !== undefined ? { offset: this._offsetVal } : {}),
+    };
     if (this._unionVal) {
-      return cloneBuiltRelation(this._unionVal);
+      return { ...cloneBuiltRelation(this._unionVal), ...output };
     }
     return {
       table: this._table,
       conditions: this._conditions.map(cloneBuiltCondition),
       hops: [...this._hops],
       ...(this._gatherVal ? { gather: cloneBuiltGather(this._gatherVal) } : {}),
+      ...output,
     };
   }
 }
@@ -2275,12 +2312,20 @@ function derivedUnionArmLabel(relation: BuiltRelation): string {
 }
 
 function canonicalUnionRelation(relation: BuiltRelation): string {
+  // jazz.sdk.union-arm-output.v1 extends only seeds with output modifiers.
+  // Existing unmodified seeds retain their exact canonical bytes and labels.
+  const output = {
+    ...(relation.orderBy ? { orderBy: relation.orderBy } : {}),
+    ...(relation.limit !== undefined ? { limit: relation.limit } : {}),
+    ...(relation.offset !== undefined ? { offset: relation.offset } : {}),
+  };
   const normalized = {
     ...(relation.table ? { table: relation.table } : {}),
     conditions: [...(relation.conditions ?? [])]
       .map((condition) => canonicalJson(condition))
       .sort(),
     hops: relation.hops ?? [],
+    ...(Object.keys(output).length ? { output_v1: output } : {}),
     ...(relation.gather ? { gather: relation.gather } : {}),
     ...(relation.union
       ? {

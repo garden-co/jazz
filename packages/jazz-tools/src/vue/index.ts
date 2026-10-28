@@ -26,6 +26,8 @@ export {
 export * from "../accounts/exports.js";
 
 export { useAccountState } from "./use-account-state.js";
+export { useSyncStatus } from "./use-sync-status.js";
+export type { LinkStatus, SyncStatus } from "../runtime/sync-status.js";
 
 export { createJazzSession, type JazzSessionConfig } from "../session/create-jazz-session.js";
 export type {

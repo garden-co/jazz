@@ -159,10 +159,67 @@ pub struct EnumCaseDescriptor {
     pub fields: Vec<ColumnDescriptor>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum ColumnMergeStrategy {
     Counter,
     GSet,
+    /// Concurrent edits to a plain-text string are merged three-way.
+    Text,
+    /// As [`Self::Text`], never splitting markdown syntax.
+    Markdown,
+    /// As [`Self::Text`], never splitting HTML tags or entities.
+    Html,
+}
+
+impl ColumnMergeStrategy {
+    const NAMES: [(&'static str, Self); 5] = [
+        ("Counter", Self::Counter),
+        ("GSet", Self::GSet),
+        ("Text", Self::Text),
+        ("Markdown", Self::Markdown),
+        ("Html", Self::Html),
+    ];
+
+    /// Whether this strategy merges the text of a string column.
+    pub fn is_text(self) -> bool {
+        matches!(self, Self::Text | Self::Markdown | Self::Html)
+    }
+}
+
+/// A strategy this version does not know (a schema written by a newer
+/// Jazz) is refused by name rather than as an unknown serde variant.
+/// Binary encodings keep the derived variant-index form.
+impl<'de> Deserialize<'de> for ColumnMergeStrategy {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename = "ColumnMergeStrategy")]
+        enum Indexed {
+            Counter,
+            GSet,
+            Text,
+            Markdown,
+            Html,
+        }
+        if !deserializer.is_human_readable() {
+            return Ok(match Indexed::deserialize(deserializer)? {
+                Indexed::Counter => Self::Counter,
+                Indexed::GSet => Self::GSet,
+                Indexed::Text => Self::Text,
+                Indexed::Markdown => Self::Markdown,
+                Indexed::Html => Self::Html,
+            });
+        }
+        let name = String::deserialize(deserializer)?;
+        Self::NAMES
+            .iter()
+            .find(|(known, _)| *known == name)
+            .map(|(_, strategy)| *strategy)
+            .ok_or_else(|| {
+                serde::de::Error::custom(format!(
+                    "merge strategy `{name}` is not supported by this version of Jazz"
+                ))
+            })
+    }
 }
 
 /// Interned column name type.
@@ -295,6 +352,22 @@ impl ColumnDescriptor {
                         "Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns"
                             .to_owned(),
                     )
+                } else {
+                    Ok(())
+                }
+            }
+            Some(
+                strategy @ (ColumnMergeStrategy::Text
+                | ColumnMergeStrategy::Markdown
+                | ColumnMergeStrategy::Html),
+            ) => {
+                if self.nullable || !matches!(self.column_type, ColumnType::Text) {
+                    Err(format!(
+                        "{strategy:?} merge strategy is only supported on non-nullable TEXT columns, got {} ({:?}, nullable={})",
+                        self.name_str(),
+                        self.column_type,
+                        self.nullable
+                    ))
                 } else {
                     Ok(())
                 }
