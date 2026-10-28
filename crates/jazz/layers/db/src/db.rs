@@ -49,7 +49,7 @@ pub(crate) mod sync;
 #[path = "transaction_reads.rs"]
 mod transaction_reads;
 pub use crate::names::LensEffects;
-pub use crate::options::REMOTE_LINK_ATTEMPT_WINDOW;
+pub use crate::options::{REMOTE_LINK_ATTEMPT_WINDOW, TickScheduler, TickUrgency};
 use crate::result_tree::{ResultNode, ResultRelation, ResultTree};
 pub use crate::values::CurrentRow;
 use crate::values::{
@@ -378,6 +378,8 @@ struct Inner {
     /// One-way, owner-wide fence for new application mutations during close.
     mutation_admission_closed: bool,
     retired: bool,
+    scheduler: Option<Rc<dyn TickScheduler>>,
+    read_deadlines: Vec<Weak<web_time::Instant>>,
     /// Large-value chunks: the cache the collation and decoders read.
     chunks: Arc<crate::large::Chunks>,
     /// Nodes a large-value edit consolidated, stored when the edited cell
@@ -1109,6 +1111,8 @@ impl Db {
                 conn,
                 mutation_admission_closed: false,
                 retired: false,
+                scheduler: None,
+                read_deadlines: Vec::new(),
                 chunks,
                 pending_nodes: Vec::new(),
                 merging: false,
@@ -1253,6 +1257,8 @@ impl Db {
         let mut inner = self.inner();
         inner.fan.collect();
         inner.reclaim_large_values(RECLAIM_NODES_PER_TICK)?;
+        drop(inner);
+        self.schedule_read_deadlines();
         Ok(())
     }
 
