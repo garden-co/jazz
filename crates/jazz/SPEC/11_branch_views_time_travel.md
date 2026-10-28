@@ -504,7 +504,9 @@ duplicates; Jazz provides no global merge cursor or exactly-once import claim
 Branch-key evolution is monotone. A schema may add an ordinary column to
 `branchBy` only when that column has an immutable, typed, deterministic default.
 Old history and selectors authored under an older schema normalize the missing
-column to that default (`INV-BVIEW-19`).
+column to that default (`INV-BVIEW-19`). The SQLite store leaves a branch
+column at its default out of the stored branch key, so rows written before the
+column existed keep their key, and a node on either version keys them alike.
 
 For example:
 

@@ -17,13 +17,20 @@ use crate::options::{Error, ErrorCode};
 use crate::protocol::{LensOp, MigrationLens};
 use crate::records::Value;
 use crate::schema::JazzSchema;
-use crate::values::{Schema, Sql, StoredNames, storage, unsupported};
+use crate::values::{Column, Schema, Sql, StoredNames, in_savepoint, storage, to_sql, unsupported};
 
 /// One row per (version, table, column); `col` is '' for the table itself.
 /// `n` orders versions by admission.
 pub(crate) const DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_names (version BLOB NOT NULL, \
      tbl TEXT NOT NULL, col TEXT NOT NULL, n INTEGER NOT NULL, stored_tbl TEXT NOT NULL, \
      stored_col TEXT NOT NULL, PRIMARY KEY (version, tbl, col)) WITHOUT ROWID;";
+
+/// Each stored table's branch columns (SPEC 4, INV-BVIEW-19), with the
+/// default a row written without one is keyed as (`has_dflt` 0: none); a
+/// table is listed with `col` '' once it has been admitted. Every version
+/// admitted to the file, in any session, must key rows the same way.
+const BRANCH_COLUMNS_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_branch_columns (tbl TEXT NOT NULL, \
+     col TEXT NOT NULL, has_dflt INTEGER NOT NULL, dflt, PRIMARY KEY (tbl, col)) WITHOUT ROWID;";
 
 /// Stored columns that lenses fill in rows inserted by versions that do not
 /// name them, one row per (stored table, stored column, lens target version):
@@ -138,11 +145,35 @@ impl LensEffects {
     }
 }
 
+/// A digest of where a version stores its tables and columns: equal on
+/// two stores that name it alike.
+pub(crate) fn names_digest(names: &StoredNames) -> [u8; 16] {
+    let mut hasher = blake3::Hasher::new();
+    for (table, (stored, columns)) in &names.tables {
+        for part in [table, stored] {
+            hasher.update(&(part.len() as u64).to_le_bytes());
+            hasher.update(part.as_bytes());
+        }
+        for (column, stored) in columns {
+            for part in [column, stored] {
+                hasher.update(&(part.len() as u64).to_le_bytes());
+                hasher.update(part.as_bytes());
+            }
+        }
+        hasher.update(&[0xff]);
+    }
+    hasher.finalize().as_bytes()[..16]
+        .try_into()
+        .expect("16 bytes")
+}
+
 /// The admitted versions' stored names, by version.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct Names {
     versions: HashMap<SchemaVersionId, (i64, StoredNames)>,
     lens_cells: Vec<LensCell>,
+    /// By stored table: its stored branch columns and their defaults.
+    branches: BTreeMap<String, BTreeMap<String, Option<Sql>>>,
 }
 
 fn schema_error(message: impl Into<String>) -> Error {
@@ -195,6 +226,35 @@ impl Names {
                 |r| r.get(0),
             )
             .map_err(storage)?;
+        let has_branches: bool = conn
+            .query_row(
+                "SELECT count(*) > 0 FROM sqlite_master WHERE name = '_jazz_branch_columns'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(storage)?;
+        if has_branches {
+            let mut statement = conn
+                .prepare("SELECT tbl, col, has_dflt, dflt FROM _jazz_branch_columns")
+                .map_err(storage)?;
+            let rows = statement
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, bool>(2)?,
+                        r.get::<_, Sql>(3)?,
+                    ))
+                })
+                .map_err(storage)?;
+            for row in rows {
+                let (table, column, has_default, default) = row.map_err(storage)?;
+                let columns = names.branches.entry(table).or_default();
+                if !column.is_empty() {
+                    columns.insert(column, has_default.then_some(default));
+                }
+            }
+        }
         if has_cells {
             let mut statement = conn
                 .prepare("SELECT tbl, col, since, src, dflt FROM _jazz_lens_cells")
@@ -321,7 +381,184 @@ impl Names {
         self.versions.get(version).map(|(_, names)| names)
     }
 
-    /// Record `schema`'s names (once per version), in memory and in the file.
+    /// Every admitted version with its names, in admission order.
+    pub(crate) fn in_order(&self) -> Vec<(SchemaVersionId, &StoredNames)> {
+        let mut versions: Vec<(i64, SchemaVersionId, &StoredNames)> = self
+            .versions
+            .iter()
+            .map(|(version, (n, names))| (*n, *version, names))
+            .collect();
+        versions.sort_by_key(|(n, ..)| *n);
+        versions
+            .into_iter()
+            .map(|(_, version, names)| (version, names))
+            .collect()
+    }
+
+    /// The lens cells recorded, as an upstream sends them.
+    pub(crate) fn cells(&self) -> &[LensCell] {
+        &self.lens_cells
+    }
+
+    /// Stored table `from` (or, with `column`, its stored column
+    /// `column.0`) is stored as `to` (`column.1`) now: every version that
+    /// names it, and the lens cells and branch columns kept for it, follow.
+    pub(crate) fn moved(
+        &mut self,
+        conn: &Connection,
+        from: &str,
+        to: &str,
+        column: Option<(&str, &str)>,
+    ) -> Result<(), Error> {
+        in_savepoint(conn, "jazz_names", || {
+            match column {
+                None => {
+                    conn.execute(
+                        "UPDATE _jazz_names SET stored_tbl = ?2 WHERE stored_tbl = ?1",
+                        [from, to],
+                    )
+                    .map_err(storage)?;
+                }
+                Some((old, new)) => {
+                    conn.execute(
+                        "UPDATE _jazz_names SET stored_col = ?3 WHERE stored_tbl = ?1 AND stored_col = ?2",
+                        [from, old, new],
+                    )
+                    .map_err(storage)?;
+                }
+            }
+            for (ddl_table, columns) in [
+                ("_jazz_lens_cells", ["col", "src"].as_slice()),
+                ("_jazz_branch_columns", ["col"].as_slice()),
+            ] {
+                let exists: bool = conn
+                    .query_row(
+                        "SELECT count(*) > 0 FROM sqlite_master WHERE name = ?1",
+                        [ddl_table],
+                        |r| r.get(0),
+                    )
+                    .map_err(storage)?;
+                if !exists {
+                    continue;
+                }
+                match column {
+                    None => {
+                        conn.execute(
+                            &format!("UPDATE {ddl_table} SET tbl = ?2 WHERE tbl = ?1"),
+                            [from, to],
+                        )
+                        .map_err(storage)?;
+                    }
+                    Some((old, new)) => {
+                        for col in columns {
+                            conn.execute(
+                                &format!("UPDATE {ddl_table} SET {col} = ?3 WHERE tbl = ?1 AND {col} = ?2"),
+                                [from, old, new],
+                            )
+                            .map_err(storage)?;
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })?;
+        let table_to = if column.is_none() { to } else { from };
+        for (_, names) in self.versions.values_mut() {
+            for (stored, columns) in names.tables.values_mut() {
+                if stored != from {
+                    continue;
+                }
+                match column {
+                    None => *stored = to.to_owned(),
+                    Some((old, new)) => {
+                        for stored_column in columns.values_mut().filter(|c| *c == old) {
+                            *stored_column = new.to_owned();
+                        }
+                    }
+                }
+            }
+        }
+        for cell in &mut self.lens_cells {
+            if cell.table != from {
+                continue;
+            }
+            cell.table = table_to.to_owned();
+            if let Some((old, new)) = column {
+                if cell.column == old {
+                    cell.column = new.to_owned();
+                }
+                if let LensCellRule::Copy(source) = &mut cell.rule
+                    && source == old
+                {
+                    *source = new.to_owned();
+                }
+            }
+        }
+        match column {
+            None => {
+                if let Some(branches) = self.branches.remove(from) {
+                    self.branches.insert(to.to_owned(), branches);
+                }
+            }
+            Some((old, new)) => {
+                if let Some(branches) = self.branches.get_mut(from)
+                    && let Some(default) = branches.remove(old)
+                {
+                    branches.insert(new.to_owned(), default);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Store `version` under `names` instead of what this file named it
+    /// (an upstream's, which a replica mirrors), keeping its place in
+    /// admission order.
+    pub(crate) fn rename(
+        &mut self,
+        conn: &Connection,
+        version: SchemaVersionId,
+        names: StoredNames,
+    ) -> Result<(), Error> {
+        let Some((n, _)) = self.versions.get(&version).cloned() else {
+            return Ok(());
+        };
+        in_savepoint(conn, "jazz_names", || {
+            let id = version.as_bytes().to_vec();
+            conn.execute("DELETE FROM _jazz_names WHERE version = ?1", [&id])
+                .map_err(storage)?;
+            let mut insert = conn
+                .prepare_cached(
+                    "INSERT INTO _jazz_names (version, tbl, col, n, stored_tbl, stored_col) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                )
+                .map_err(storage)?;
+            for (table, (stored, columns)) in &names.tables {
+                insert
+                    .execute(rusqlite::params![id, table, "", n, stored, ""])
+                    .map_err(storage)?;
+                for (column, stored_column) in columns {
+                    insert
+                        .execute(rusqlite::params![
+                            id,
+                            table,
+                            column,
+                            n,
+                            stored,
+                            stored_column
+                        ])
+                        .map_err(storage)?;
+                }
+            }
+            Ok(())
+        })?;
+        self.versions.insert(version, (n, names));
+        Ok(())
+    }
+
+    /// Record `schema`'s names and branch columns (once per version), in
+    /// the file and then in memory. Both are written in one savepoint, so a
+    /// version is never known by name without its branch columns.
     pub(crate) fn admit(&mut self, conn: &Connection, schema: &Schema) -> Result<(), Error> {
         let version = schema.jazz.version_id();
         if self.versions.contains_key(&version) {
@@ -329,32 +566,128 @@ impl Names {
         }
         let n = self.versions.values().map(|(n, _)| *n).max().unwrap_or(0) + 1;
         let names = schema.names();
-        let id = version.as_bytes().to_vec();
-        let mut insert = conn
-            .prepare_cached(
-                "INSERT OR REPLACE INTO _jazz_names (version, tbl, col, n, stored_tbl, stored_col) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            )
-            .map_err(storage)?;
-        for (table, (stored, columns)) in &names.tables {
-            insert
-                .execute(rusqlite::params![id, table, "", n, stored, ""])
+        let branches = self.new_branches(schema)?;
+        in_savepoint(conn, "jazz_names", || {
+            let id = version.as_bytes().to_vec();
+            let mut insert = conn
+                .prepare_cached(
+                    "INSERT OR REPLACE INTO _jazz_names (version, tbl, col, n, stored_tbl, stored_col) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                )
                 .map_err(storage)?;
-            for (column, stored_column) in columns {
+            for (table, (stored, columns)) in &names.tables {
                 insert
-                    .execute(rusqlite::params![
-                        id,
-                        table,
-                        column,
-                        n,
-                        stored,
-                        stored_column
-                    ])
+                    .execute(rusqlite::params![id, table, "", n, stored, ""])
                     .map_err(storage)?;
+                for (column, stored_column) in columns {
+                    insert
+                        .execute(rusqlite::params![
+                            id,
+                            table,
+                            column,
+                            n,
+                            stored,
+                            stored_column
+                        ])
+                        .map_err(storage)?;
+                }
+            }
+            write_branches(conn, &branches)
+        })?;
+        self.versions.insert(version, (n, names));
+        for (table, column, default) in branches {
+            let columns = self.branches.entry(table).or_default();
+            if let Some(default) = default {
+                columns.insert(column, default);
             }
         }
-        self.versions.insert(version, (n, names));
         Ok(())
+    }
+
+    /// Refuse `schema` if it keys a stored table's rows differently from
+    /// the versions admitted before it (SPEC 4, INV-BVIEW-19): it may add a
+    /// branch column only as a new column with a default, which rows
+    /// written before it and selectors of versions without it read as (see
+    /// [`crate::values::Table::row_branch_key`]); it may not change a
+    /// branch column's default, or turn an existing column into a branch
+    /// column or a branch column into an ordinary one.
+    pub(crate) fn check_branches(&self, schema: &Schema) -> Result<(), Error> {
+        for table in schema.tables.values() {
+            let Some(recorded) = self.branches.get(&table.stored) else {
+                continue;
+            };
+            let branch = branch_columns(table);
+            for (stored, default) in recorded {
+                match branch.get(stored.as_str()) {
+                    Some(column) if branch_default(column)? != *default => {
+                        return Err(unsupported(format!(
+                            "changing the default of branch column {}.{}",
+                            table.name, column.name
+                        )));
+                    }
+                    Some(_) => {}
+                    None => {
+                        if let Some(column) = table.columns.iter().find(|c| c.stored == *stored) {
+                            return Err(unsupported(format!(
+                                "making branch column {}.{} an ordinary column",
+                                table.name, column.name
+                            )));
+                        }
+                    }
+                }
+            }
+            for (stored, column) in &branch {
+                if recorded.contains_key(*stored) {
+                    continue;
+                }
+                if self.stores_column(&table.stored, stored) {
+                    return Err(unsupported(format!(
+                        "making the existing column {}.{} a branch column",
+                        table.name, column.name
+                    )));
+                }
+                if column.default.is_none() {
+                    return Err(unsupported(format!(
+                        "adding branch column {}.{} without a default",
+                        table.name, column.name
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether an admitted version stores a column as `column` of `table`.
+    fn stores_column(&self, table: &str, column: &str) -> bool {
+        self.versions.values().any(|(_, names)| {
+            names
+                .tables
+                .values()
+                .any(|(stored, columns)| stored == table && columns.values().any(|c| c == column))
+        })
+    }
+
+    /// `schema`'s tables and branch columns not recorded yet: (stored
+    /// table, stored column, default), with no column and no default for a
+    /// table itself.
+    fn new_branches(&self, schema: &Schema) -> Result<Vec<NewBranch>, Error> {
+        let mut new = Vec::new();
+        for table in schema.tables.values() {
+            let recorded = self.branches.get(&table.stored);
+            if recorded.is_none() {
+                new.push((table.stored.clone(), String::new(), None));
+            }
+            for (stored, column) in branch_columns(table) {
+                if !recorded.is_some_and(|recorded| recorded.contains_key(stored)) {
+                    new.push((
+                        table.stored.clone(),
+                        stored.to_owned(),
+                        Some(branch_default(column)?),
+                    ));
+                }
+            }
+        }
+        Ok(new)
     }
 
     /// Where `schema` stores its tables and columns.
@@ -499,6 +832,54 @@ impl Names {
             })
         })
     }
+}
+
+/// A stored table and branch column to record, with the column's default
+/// (see [`Names::new_branches`]).
+type NewBranch = (String, String, Option<Option<Sql>>);
+
+fn write_branches(conn: &Connection, branches: &[NewBranch]) -> Result<(), Error> {
+    if branches.is_empty() {
+        return Ok(());
+    }
+    conn.execute_batch(BRANCH_COLUMNS_DDL).map_err(storage)?;
+    let mut insert = conn
+        .prepare_cached(
+            "INSERT OR IGNORE INTO _jazz_branch_columns (tbl, col, has_dflt, dflt) \
+             VALUES (?1, ?2, ?3, ?4)",
+        )
+        .map_err(storage)?;
+    for (table, column, default) in branches {
+        let default = default.clone().flatten();
+        insert
+            .execute(rusqlite::params![
+                table,
+                column,
+                default.is_some(),
+                default.unwrap_or(Sql::Null)
+            ])
+            .map_err(storage)?;
+    }
+    Ok(())
+}
+
+/// A table's branch columns, by stored name.
+fn branch_columns(table: &crate::values::Table) -> BTreeMap<&str, &Column> {
+    table
+        .columns
+        .iter()
+        .filter(|column| table.branch_by.contains(&column.name))
+        .map(|column| (column.stored.as_str(), column))
+        .collect()
+}
+
+/// The default a branch column keys rows written without it as.
+fn branch_default(column: &Column) -> Result<Option<Sql>, Error> {
+    column
+        .default
+        .as_ref()
+        .map(|value| Ok(to_sql(value)?.unwrap_or(Sql::Null)))
+        .transpose()
 }
 
 #[cfg(test)]
