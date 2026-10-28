@@ -727,6 +727,8 @@ struct Spoil {
     inbound: Wire,
     spoiled: Rc<RefCell<bool>>,
     holds: Rc<RefCell<Vec<Vec<u64>>>>,
+    /// The `Hold`s are lost on the way, as in a link that drops.
+    lose_holds: bool,
 }
 
 impl Transport for Spoil {
@@ -751,6 +753,9 @@ impl Transport for Spoil {
             self.holds
                 .borrow_mut()
                 .push(rows.iter().map(|row| row.3).collect());
+            if self.lose_holds {
+                return self.try_recv();
+            }
         }
         Some(message)
     }
@@ -776,6 +781,7 @@ fn a_delta_over_a_version_the_replica_lacks_heals_by_asking_for_the_row() {
             inbound: up,
             spoiled: spoiled.clone(),
             holds: holds.clone(),
+            lose_holds: false,
         }),
         user(2),
     );
@@ -803,6 +809,68 @@ fn a_delta_over_a_version_the_replica_lacks_heals_by_asking_for_the_row() {
         "bob asked for the row whole: {:?}",
         holds.borrow()
     );
+    assert_eq!(
+        local_cell(&bob, "docs", 1, "body").unwrap(),
+        Some(Value::String(expected))
+    );
+}
+
+/// A replica whose `Hold` is lost (the link drops with it in flight)
+/// holds a stale version that no resume may count as held: the results it
+/// settled meanwhile are not stored as resume points, and the row is asked
+/// for again on the next connection.
+#[test]
+fn a_row_asked_for_whole_heals_after_its_hold_is_lost() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let alice = open(1, user(1));
+    let bob = open(2, user(2));
+    connect(&server, &alice, user(1));
+    let (up, down) = (Wire::default(), Wire::default());
+    let spoiled = Rc::new(RefCell::new(false));
+    let holds = Rc::new(RefCell::new(Vec::new()));
+    let _ = block_on(bob.connect_upstream(Box::new(Pipe {
+        out: up.clone(),
+        inbound: down.clone(),
+        log: Log::default(),
+    })));
+    server.accept_subscriber(
+        Box::new(Spoil {
+            out: down,
+            inbound: up,
+            spoiled: spoiled.clone(),
+            holds: holds.clone(),
+            lose_holds: true,
+        }),
+        user(2),
+    );
+    let bob_stream = subscribe(&bob, Query::from("docs"));
+    let mut expected = text(6, LARGE);
+    insert(
+        &alice,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String(expected.clone())),
+            ("blob", Value::Bytes(Vec::new())),
+        ],
+    );
+    pump(&server, &[&alice, &bob]);
+    let suffix = "<lost>".to_owned();
+    block_on(alice.append_value("docs", row(1), "body", suffix.clone().into_bytes())).unwrap();
+    expected.push_str(&suffix);
+    pump(&server, &[&alice, &bob]);
+    assert!(*spoiled.borrow(), "a delta crossed");
+    assert!(!holds.borrow().is_empty(), "bob asked for the row whole");
+    assert_ne!(
+        local_cell(&bob, "docs", 1, "body").unwrap(),
+        Some(Value::String(expected.clone())),
+        "the lost ask leaves bob stale"
+    );
+    // The link drops; bob resubscribes on a new one.
+    drop(bob_stream);
+    let _ = connect(&server, &bob, user(2));
+    let _bob_stream = subscribe(&bob, Query::from("docs"));
+    pump(&server, &[&alice, &bob]);
     assert_eq!(
         local_cell(&bob, "docs", 1, "body").unwrap(),
         Some(Value::String(expected))

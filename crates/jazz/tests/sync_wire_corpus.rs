@@ -48,13 +48,13 @@ use common::{compile_schema, read_and_allow_all_writes, session_eq};
 const CORPUS: &str = "sqlite_sync_wire_v1.json";
 const FORMAT: &str = "jazz-sqlite-sync-wire-corpus-v1";
 
-/// Every `SyncMessage` variant, in declaration order, but `Hold`, which
-/// a replica sends only when a large value's delta cannot apply. A
-/// message too large for one frame travels in parts below the message
-/// layer (binding_host's frame-split test covers it).
-const VARIANTS: [&str; 18] = [
+/// Every `SyncMessage` variant, in declaration order. A message too
+/// large for one frame travels in parts below the message layer
+/// (binding_host's frame-split test covers it).
+const VARIANTS: [&str; 19] = [
     "Read",
     "Unsubscribe",
+    "Hold",
     "Settled",
     "Commit",
     "ChunkRequests",
@@ -568,6 +568,17 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
         user(3),
     );
     pump(&[&server]);
+
+    // Hold: a replica asks for a row whole when a shipped delta does not
+    // apply over the version it holds, which takes a corrupted delta to
+    // provoke; its frame is pinned as a replica encodes it.
+    let hold = SyncMessage::Hold {
+        rows: vec![("notes".to_owned(), [0x11; 16], Vec::new(), 0)],
+    };
+    let [frame] = encode_frames(hold).unwrap().try_into().unwrap();
+    recorded
+        .borrow_mut()
+        .insert("Hold".to_owned(), ("server".to_owned(), frame));
 
     recorded.borrow().clone()
 }

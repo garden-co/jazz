@@ -429,6 +429,12 @@ example, a table created offline under a newer local schema). It then runs the
 lens fills itself, since a copy lens's fill does not bump row seqs and
 therefore never ships. Lens semantics are chapter 10.
 
+A relay that mirrors a new catalogue owes its own sessions the versions they
+now name otherwise, so a tab follows its worker's names. Mirroring is whole or
+not at all. A catalogue the replica cannot mirror (a table it stores under the
+name the upstream stores another table as) drops the link, and every remote
+read fails with why; local reads are served as before.
+
 ### 8.11 Resuming live reads from `since`
 
 A replica persists, per live read, the server seq its result last settled
@@ -460,6 +466,16 @@ resumed read leaves the replica with the same rows as a fresh one
 (`INV-SYNC-25`, `INV-SYNC-11`). A replica that cannot read its watermark opens
 the read fresh.
 
+A watermark claims the replica holds the result as it settled. Two events make
+that untrue for results the replica cannot name, so the replica forgets every
+watermark when either happens, and each read opens fresh until it settles
+again:
+
+- an `Evict`: a result settled earlier may have held the row, and a resume from
+  it would count the row as held after it became readable again;
+- a row asked for whole (§8.12): until its whole image arrives the replica holds
+  a stale version, so it also stores no watermark meanwhile.
+
 ### 8.12 Large values
 
 Chunked large values (SPEC 19.8) travel by reference. A writer pushes a new
@@ -474,8 +490,10 @@ chunks are present (`INV-SYNC-46`).
 Within a session the server ships later versions' chunked cells as deltas over
 the version it last shipped of that row. A replica that cannot apply a delta
 (it lacks that base version) sends `Hold { rows }` for those rows, and the
-server ships each whole or evicts it. A live read's rows are never declared
-this way: its opening brings them up to date from `since`.
+server ships each whole or evicts it. The replica sends the `Hold` again on
+every new connection until the whole image arrives, and stores no watermark
+meanwhile (§8.11). A live read's rows are never declared this way: its opening
+brings them up to date from `since`.
 
 ### 8.13 Relays
 

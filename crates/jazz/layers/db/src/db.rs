@@ -2368,13 +2368,27 @@ impl Inner {
             match self.names.get(version).cloned() {
                 Some(local) if local == *names => {}
                 Some(local) => {
+                    // Whole or not at all, in the file and in memory.
+                    let (physical, kept) = (self.physical.clone(), self.names.clone());
+                    let mut moved = Vec::new();
                     begin_savepoint(&self.conn, "jazz_mirror")?;
-                    let renamed = self.rename_stored(&local, names).and_then(|()| {
-                        let conn = &self.conn;
-                        self.names.rename(conn, *version, names.clone())
-                    });
-                    end_savepoint(&self.conn, "jazz_mirror", renamed.is_ok())?;
-                    renamed?;
+                    let renamed = self
+                        .rename_stored(&local, names, &mut moved)
+                        .and_then(|()| {
+                            let conn = &self.conn;
+                            self.names.rename(conn, *version, names.clone())
+                        });
+                    let ended = end_savepoint(&self.conn, "jazz_mirror", renamed.is_ok());
+                    if let Err(error) = renamed.and(ended) {
+                        self.physical = physical;
+                        self.names = kept;
+                        return Err(error);
+                    }
+                    if let Some(client) = self.client.as_mut() {
+                        for (ours, theirs) in &moved {
+                            client.moved_table(ours, theirs);
+                        }
+                    }
                 }
                 None => {
                     fresh.insert(*version);
@@ -2409,15 +2423,24 @@ impl Inner {
         self.schema = owner.clone();
         self.owner = owner;
         self.reset_everything();
+        // This store's own sessions (a worker's tabs) store rows by its
+        // names, which may have just changed: each is sent the versions
+        // it now names otherwise.
+        for session in &mut self.sessions {
+            session.owe_catalogue();
+        }
         Ok(())
     }
 
     /// Rename the stored columns `local` names otherwise than `upstream`
     /// does, where the upstream's is not stored here yet.
+    /// Tables it stores under another name are pushed to `moved`, as
+    /// (ours, theirs), for the pending queue to follow once it all holds.
     fn rename_stored(
         &mut self,
         local: &crate::values::StoredNames,
         upstream: &crate::values::StoredNames,
+        moved: &mut Vec<(String, String)>,
     ) -> Result<(), Error> {
         for (name, (stored, columns)) in &upstream.tables {
             let Some((ours, our_columns)) = local.tables.get(name) else {
@@ -2425,6 +2448,7 @@ impl Inner {
             };
             if ours != stored {
                 self.rename_stored_table(name, ours, stored)?;
+                moved.push((ours.clone(), stored.clone()));
             }
             for (column, theirs) in columns {
                 let Some(mine) = our_columns.get(column).filter(|mine| *mine != theirs) else {
@@ -2571,9 +2595,6 @@ impl Inner {
         self.physical.tables.insert(theirs.to_owned(), table);
         let conn = &self.conn;
         self.names.moved(conn, ours, theirs, None)?;
-        if let Some(client) = self.client.as_mut() {
-            client.moved_table(ours, theirs);
-        }
         self.rename_pending_rows(ours, theirs)
     }
 
