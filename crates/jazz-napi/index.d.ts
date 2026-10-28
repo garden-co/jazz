@@ -134,6 +134,11 @@ export declare class NapiDb {
    */
   setRemoteLinkHint(state: string): void
   /**
+   * A fresh upstream link machine for this runtime's server connection;
+   * `seed` drives its retry jitter.
+   */
+  createUpstreamLink(seed: number): UpstreamLink
+  /**
    * The slow-query report due now: one line per slow query shape,
    * naming `app`: the first at once, then at most every 10 seconds. The caller
    * writes each line with `console.warn`.
@@ -249,6 +254,22 @@ export declare class Transport {
   tick(): number
   close(): boolean
 }
+
+/**
+ * The shared upstream link machine (`jazz::link`), which decides when the
+ * runtime's WebSocket connects, backs off and reports an outage. The runtime
+ * owns the socket and the timer and steps the machine with JSON documents.
+ */
+export declare class UpstreamLink {
+  /** `seed` drives the retry jitter. */
+  constructor(seed: number)
+  /**
+   * Apply one input observed at `now_ms`; returns the actions, events and
+   * status as JSON.
+   */
+  handle(nowMs: number, input: string): string
+}
+export type NapiUpstreamLink = UpstreamLink
 
 export declare class Write {
   get txId(): string
