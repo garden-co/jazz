@@ -149,6 +149,8 @@ mod sync_untrusted_clients;
 mod sync_wire_corpus;
 #[path = "../text_merge.rs"]
 mod text_merge;
+#[path = "../transaction_commit_kind.rs"]
+mod transaction_commit_kind;
 #[path = "../transaction_handles.rs"]
 mod transaction_handles;
 #[path = "../transaction_identity.rs"]

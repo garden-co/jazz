@@ -5568,6 +5568,9 @@ impl Db {
 
     pub async fn commit_mergeable_handle(&self, id: OpenTransactionId) -> Result<TxReceipt, Error> {
         let batch = self.take_batch(id)?;
+        if !matches!(batch.kind, BatchKind::Mergeable) {
+            return Err(rejected(format!("transaction {id:?} is not mergeable")));
+        }
         self.commit_ops(&batch, sync::Kind::Mergeable)
     }
 
