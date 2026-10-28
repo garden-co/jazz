@@ -44,7 +44,10 @@ pub use large_ops::{
     JsonSetEdit, LargeValueStagingPolicy, LargeValueUpdate, LargeValueUpdatePage,
     LargeValueUpdateSplice, StagedStreamingValue, StreamingMutationKind, StreamingValueUpload,
 };
+#[path = "read_content.rs"]
+mod read_content;
 pub(crate) mod relation;
+use read_content::read_contents;
 #[path = "sync.rs"]
 pub(crate) mod sync;
 #[path = "transaction_reads.rs"]
@@ -2624,16 +2627,16 @@ impl Inner {
             .collect()
     }
 
-    /// The versions of the rows a read returns, its relations' rows
+    /// The rows a read returns, its relations' rows
     /// included: what a serializable read set compares at commit.
-    pub(crate) fn read_versions(
+    pub(crate) fn read_rows(
         &self,
         prepared: &PreparedQuery,
         identity: Option<AuthorSubject>,
         read: &ReadSpec,
-    ) -> Result<Vec<(RowUuid, u64)>, Error> {
+    ) -> Result<Vec<CurrentRow>, Error> {
         let roots = self.run(prepared, identity, read)?;
-        let mut out = versions(&roots);
+        let mut out = roots.clone();
         if !prepared.query.array_subqueries.is_empty() {
             for row in roots {
                 let node = self.node(
@@ -2644,7 +2647,7 @@ impl Inner {
                     &prepared.query.array_subqueries,
                     row,
                 )?;
-                child_versions(&node, &mut out);
+                child_read_rows(&node, &mut out);
             }
         }
         Ok(out)
@@ -5159,6 +5162,7 @@ struct ReadRecord {
     prepared: PreparedQuery,
     include_deleted: bool,
     rows: Vec<(RowUuid, u64)>,
+    content: Vec<[u8; 32]>,
 }
 
 /// An upload the authority refused: the node and local seq of the commit
@@ -5181,12 +5185,12 @@ fn versions(rows: &[CurrentRow]) -> Vec<(RowUuid, u64)> {
 }
 
 /// The versions of a relation tree's child rows, depth first.
-fn child_versions(node: &ResultNode, out: &mut Vec<(RowUuid, u64)>) {
+fn child_read_rows(node: &ResultNode, out: &mut Vec<CurrentRow>) {
     for relation in node.relations.values() {
         if let ResultRelation::Array(children) = relation {
             for child in children {
-                out.push((child.row.id, child.row.seq));
-                child_versions(child, out);
+                out.push(child.row.clone());
+                child_read_rows(child, out);
             }
         }
     }
@@ -5685,8 +5689,10 @@ impl Db {
                         include_deleted: read.include_deleted,
                         ..ReadSpec::default()
                     };
-                    let now = inner.read_versions(&read.prepared, batch.reader(), &spec)?;
-                    let changed = now.len() != read.rows.len()
+                    let current = inner.read_rows(&read.prepared, batch.reader(), &spec)?;
+                    let now = versions(&current);
+                    let changed = read_contents(&current)? != read.content
+                        || now.len() != read.rows.len()
                         || now.iter().zip(&read.rows).any(|(now, then)| {
                             now.0 != then.0
                                 || (now.1 != then.1
@@ -5701,6 +5707,7 @@ impl Db {
                     }
                 }
             }
+            let reads_content = reads.iter().map(|read| read.content.clone()).collect();
             let reads = reads
                 .iter()
                 .map(|read| sync::WireRead {
@@ -5720,6 +5727,7 @@ impl Db {
                     snapshot: *snapshot,
                     reads,
                     own: own.clone(),
+                    content: Some(reads_content),
                 },
             );
         }
@@ -5741,7 +5749,8 @@ impl Db {
                     include_deleted: read.include_deleted,
                     ..ReadSpec::default()
                 };
-                if inner.read_versions(&read.prepared, batch.reader(), &spec)? != read.rows {
+                let current = inner.read_rows(&read.prepared, batch.reader(), &spec)?;
+                if versions(&current) != read.rows || read_contents(&current)? != read.content {
                     return Err(conflict(
                         "a row read by the transaction changed since its snapshot",
                     ));
@@ -6064,7 +6073,9 @@ impl Db {
             cut: Some(inner.serializable_cut(*snapshot, own)?),
             ..ReadSpec::default()
         };
-        let rows = inner.read_versions(prepared, identity, &read)?;
+        let rows = inner.read_rows(prepared, identity, &read)?;
+        let content = read_contents(&rows)?;
+        let rows = versions(&rows);
         if let Some(Batch {
             kind: BatchKind::Serializable { reads, pinned, .. },
             ..
@@ -6077,6 +6088,7 @@ impl Db {
                 prepared: prepared.clone(),
                 include_deleted,
                 rows,
+                content,
             });
         }
         Ok(())
