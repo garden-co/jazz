@@ -465,6 +465,19 @@ name (or omitting `select`) materializes the complete value. Object-form
 partial selections apply to the root query only; in an include builder they
 fail explicitly rather than returning the complete value.
 
+The engine reads a partial selection only in part: the query carries each
+part (`Query.partial`, and `ArraySubquery.partial` for the Rust include API),
+and the replica reads, and pulls (§19.8), only the chunks that part's byte
+span covers, through every relay on the way. A text range in UTF-16 units
+reads at most the bytes `[from, 3 * to)`; a JSON pointer reads the document
+only as far as the pointer needs, unless the document's shape requires all
+of it. Edits to the value reach the replica as deltas (§19.6) the part reads
+through, so a subscribed part follows them without fetching anything more.
+Two subscriptions over the same rows in different parts are distinct shapes.
+Partial selections in aggregate, union or joined queries fail explicitly. A
+column that a computed column or transform also depends on is read whole and
+its selection is taken from the whole value.
+
 `Db.update` accepts ordinary replacements and an `applyDiffs` option. Both are
 one atomic mutation, but the same column must not appear in both inputs:
 

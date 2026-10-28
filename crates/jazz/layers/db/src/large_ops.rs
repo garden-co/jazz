@@ -212,7 +212,18 @@ impl Inner {
         if utf16 && crate::large::kind(&col) == lv::LargeValueKind::Bytes {
             return Err(not_large(table, column));
         }
-        match self.chunks.logical(cell.as_ref())? {
+        self.cell_range(cell.as_ref(), range, utf16)
+    }
+
+    /// `range` of a cell's logical value (UTF-16 code units when `utf16`,
+    /// else bytes), reading only the chunks it covers.
+    pub(crate) fn cell_range(
+        &self,
+        cell: ValueRef<'_>,
+        range: std::ops::Range<u64>,
+        utf16: bool,
+    ) -> Result<Vec<u8>, Error> {
+        match self.chunks.logical(cell)? {
             Logical::Inline(bytes) if utf16 => {
                 let text = std::str::from_utf8(bytes).map_err(|_| query("cell is not text"))?;
                 let len = text.encode_utf16().count() as u64;
@@ -250,6 +261,89 @@ impl Inner {
                 }
             }
         }
+    }
+
+    /// A selected cell read only in `part` (SPEC 19.12): only the chunks
+    /// the part covers are read.
+    pub(crate) fn partial_cell(
+        &self,
+        ty: &ValueType,
+        cell: ValueRef<'_>,
+        part: &crate::query::Part,
+    ) -> Result<Option<Value>, Error> {
+        use crate::query::Part;
+        if let ValueType::Nullable(inner) = ty {
+            return Ok(Some(match cell {
+                ValueRef::Null => Value::Nullable(None),
+                cell => Value::Nullable(self.partial_cell(inner, cell, part)?.map(Box::new)),
+            }));
+        }
+        let text = |bytes: Vec<u8>, split: &str| {
+            String::from_utf8(bytes)
+                .map(Value::String)
+                .map_err(|_| query(split))
+        };
+        Ok(Some(match part {
+            Part::Bytes { from, to } => Value::Bytes(self.cell_range(cell, *from..*to, false)?),
+            Part::TextUtf16 { from, to } => text(
+                self.cell_range(cell, *from..*to, true)?,
+                "UTF-16 range splits a surrogate pair",
+            )?,
+            Part::TextUtf8 { from, to } => text(
+                self.cell_range(cell, *from..*to, false)?,
+                "UTF-8 range splits a code point",
+            )?,
+            Part::JsonPointer(pointer) => {
+                let found = self
+                    .cell_pointer(cell, pointer)?
+                    .ok_or_else(|| query("JSON pointer path does not exist"))?;
+                Value::String(found.to_string())
+            }
+        }))
+    }
+
+    /// The subtree at JSON pointer `pointer` of a JSON cell, reading the
+    /// document only as far as the pointer needs when it can.
+    pub(crate) fn cell_pointer(
+        &self,
+        cell: ValueRef<'_>,
+        pointer: &str,
+    ) -> Result<Option<serde_json::Value>, Error> {
+        let source = match self.chunks.logical(cell)? {
+            Logical::Inline(bytes) => bytes.to_vec(),
+            Logical::Chunked(value) => {
+                let mut source = Vec::new();
+                let mut offset = 0;
+                while offset < value.byte_length {
+                    let end = (offset + lv::LEAF_MIN_BYTES as u64).min(value.byte_length);
+                    source.extend(self.chunks.run_range(&value, offset..end, |inputs| {
+                        lv::byte_range_attempt(&value, offset..end, inputs)
+                    })?);
+                    offset = end;
+                    match lv::json_pointer_prefix(&source, pointer)
+                        .map_err(|e| query(e.to_string()))?
+                    {
+                        lv::JsonPointerPrefix::Found(found) => return Ok(found),
+                        lv::JsonPointerPrefix::NeedMore => {}
+                        lv::JsonPointerPrefix::RequiresFullDocument => {
+                            if offset < value.byte_length {
+                                let rest = offset..value.byte_length;
+                                source.extend(self.chunks.run_range(
+                                    &value,
+                                    rest.clone(),
+                                    |inputs| lv::byte_range_attempt(&value, rest.clone(), inputs),
+                                )?);
+                            }
+                            break;
+                        }
+                    }
+                }
+                source
+            }
+        };
+        let json: serde_json::Value =
+            serde_json::from_slice(&source).map_err(|e| query(format!("stored JSON: {e}")))?;
+        Ok(json.pointer(pointer).cloned())
     }
 
     /// The value `edit` makes of the current cell. A chunked value gains a
@@ -426,41 +520,7 @@ impl Db {
         if !large_cell(&cell) {
             return Ok(None);
         }
-        let source = match inner.chunks.logical(cell.as_ref())? {
-            Logical::Inline(bytes) => bytes.to_vec(),
-            Logical::Chunked(value) => {
-                let mut source = Vec::new();
-                let mut offset = 0;
-                while offset < value.byte_length {
-                    let end = (offset + lv::LEAF_MIN_BYTES as u64).min(value.byte_length);
-                    source.extend(inner.chunks.run_range(&value, offset..end, |inputs| {
-                        lv::byte_range_attempt(&value, offset..end, inputs)
-                    })?);
-                    offset = end;
-                    match lv::json_pointer_prefix(&source, pointer)
-                        .map_err(|e| query(e.to_string()))?
-                    {
-                        lv::JsonPointerPrefix::Found(found) => return Ok(found),
-                        lv::JsonPointerPrefix::NeedMore => {}
-                        lv::JsonPointerPrefix::RequiresFullDocument => {
-                            if offset < value.byte_length {
-                                let rest = offset..value.byte_length;
-                                source.extend(inner.chunks.run_range(
-                                    &value,
-                                    rest.clone(),
-                                    |inputs| lv::byte_range_attempt(&value, rest.clone(), inputs),
-                                )?);
-                            }
-                            break;
-                        }
-                    }
-                }
-                source
-            }
-        };
-        let json: serde_json::Value =
-            serde_json::from_slice(&source).map_err(|e| query(format!("stored JSON: {e}")))?;
-        Ok(json.pointer(pointer).cloned())
+        inner.cell_pointer(cell.as_ref(), pointer)
     }
 
     /// Append bytes (UTF-8 for a string) to a cell, as one row update.

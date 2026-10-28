@@ -38,6 +38,9 @@ struct GroupKey {
     /// The array relations nested in each row: queries that differ only
     /// in them compile to the same root SQL.
     relations: String,
+    /// The parts of large values each row is read in: queries that differ
+    /// only in them compile to the same SQL too.
+    partial: String,
 }
 
 struct Member {
@@ -278,6 +281,7 @@ impl Inner {
             identity: (session_used || !prepared.query.array_subqueries.is_empty())
                 .then(|| format!("{identity:?}")),
             relations: format!("{:?}", prepared.query.array_subqueries),
+            partial: format!("{:?}", compiled.partial),
         };
         let now = settled.get();
         let member = |queue: &Queue| Member {

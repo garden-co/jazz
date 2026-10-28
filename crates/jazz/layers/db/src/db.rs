@@ -854,6 +854,7 @@ fn normalize_relation(query: &Query, schema: &Schema) -> Result<Option<Query>, E
     }
     resolved.array_subqueries = query.array_subqueries.clone();
     resolved.select = query.select.clone();
+    resolved.partial = query.partial.clone();
     resolved.relation = None;
     Ok(Some(resolved))
 }
@@ -2659,7 +2660,11 @@ impl Inner {
                 .enumerate()
                 .map(|(i, (name, ty))| {
                     let cell = row.get_ref(first + i).map_err(storage)?;
-                    match from_sql(ty, cell, &self.chunks) {
+                    let value = match compiled.partial.get(i).and_then(Option::as_ref) {
+                        Some(part) => self.partial_cell(ty, cell, part),
+                        None => from_sql(ty, cell, &self.chunks),
+                    };
+                    match value {
                         Err(error) if crate::large::is_missing(&error) => {
                             blocked = true;
                             Ok((name.clone(), None))

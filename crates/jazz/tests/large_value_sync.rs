@@ -1571,3 +1571,356 @@ fn edits_cross_a_relay_as_deltas_both_ways() {
         );
     }
 }
+
+// ---- partial selections ------------------------------------------------------
+
+fn partial_rows(db: &Db, query: &Query, column: &str) -> Vec<Option<Value>> {
+    let rows = block_on(db.all(
+        &db.prepare_query(query).unwrap(),
+        ReadOpts {
+            tier: ReadTier::LocalOnly,
+            ..ReadOpts::default()
+        },
+    ))
+    .unwrap();
+    rows.iter()
+        .map(|row| {
+            row.cells()
+                .find(|(name, _)| *name == column)
+                .and_then(|(_, value)| value.cloned())
+        })
+        .collect()
+}
+
+fn no_rejections(stream: &mut SubscriptionStream) -> usize {
+    let mut events = 0;
+    while let Some(event) = stream.try_next_event() {
+        let text = format!("{event:?}");
+        assert!(!text.contains("Rejected"), "{text}");
+        events += 1;
+    }
+    events
+}
+
+#[test]
+fn a_partial_select_through_a_relay_fetches_only_its_range_and_follows_edits() {
+    use jazz::query::Part;
+    let core = open(0, AuthorSubject::SYSTEM);
+    let relay = open(5, user(5));
+    let tab = open(6, user(6));
+    let upstream = connect(&core, &relay, user(5));
+    let downstream = connect(&relay, &tab, user(6));
+    let mut blob: Vec<u8> = (0..LARGE * 16).map(|n| (n * 7 % 251) as u8).collect();
+    insert(
+        &core,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String("small".into())),
+            ("blob", Value::Bytes(blob.clone())),
+        ],
+    );
+    let range = 3_000_000..3_000_100;
+    let query = Query::from("docs").select(["blob"]).select_part(
+        "blob",
+        Part::Bytes {
+            from: range.start as u64,
+            to: range.end as u64,
+        },
+    );
+    let mut stream = subscribe(&tab, query.clone());
+    pump_chain(&core, &relay, &tab);
+    assert!(no_rejections(&mut stream) > 0, "the subscription opened");
+    assert_eq!(
+        partial_rows(&tab, &query, "blob"),
+        vec![Some(Value::Bytes(blob[range.clone()].to_vec()))]
+    );
+    let (total, _) = core.large_value_nodes_for_test().unwrap();
+    let (at_relay, _) = relay.large_value_nodes_for_test().unwrap();
+    let (at_tab, _) = tab.large_value_nodes_for_test().unwrap();
+    assert!(
+        at_relay < total,
+        "the relay holds the path: {at_relay} of {total}"
+    );
+    assert!(at_tab <= at_relay, "the tab holds the path: {at_tab}");
+    // The range's whole path in one pull per hop.
+    assert_eq!(requests(&downstream), 1, "{:?}", downstream.borrow());
+    assert_eq!(requests(&upstream), 1, "{:?}", upstream.borrow());
+    upstream.borrow_mut().clear();
+    downstream.borrow_mut().clear();
+    // Edits outside the range and inside it reach the tab as deltas the
+    // range reads through: nothing more is fetched.
+    for n in 0..10u8 {
+        block_on(core.append_value("docs", row(1), "blob", vec![n; 16])).unwrap();
+        blob.extend([n; 16]);
+        pump_chain(&core, &relay, &tab);
+    }
+    block_on(core.splice_value(
+        "docs",
+        row(1),
+        "blob",
+        jazz::db::LargeValueUpdateSplice {
+            at: 3_000_010,
+            delete: 5,
+            insert: b"edited".to_vec(),
+        },
+        Default::default(),
+    ))
+    .unwrap();
+    blob.splice(3_000_010..3_000_015, b"edited".iter().copied());
+    pump_chain(&core, &relay, &tab);
+    assert!(no_rejections(&mut stream) > 0, "the edits were delivered");
+    assert_eq!(
+        partial_rows(&tab, &query, "blob"),
+        vec![Some(Value::Bytes(blob[range.clone()].to_vec()))]
+    );
+    assert_eq!(requests(&downstream), 0, "{:?}", downstream.borrow());
+    assert_eq!(requests(&upstream), 0, "{:?}", upstream.borrow());
+    assert_eq!(tab.large_value_nodes_for_test().unwrap().0, at_tab);
+}
+
+#[test]
+fn a_partial_select_in_an_include_fetches_only_its_range_through_a_relay() {
+    use jazz::query::{ArraySubquery, Part};
+    use jazz::result_tree::ResultRelation;
+    let core = open(0, AuthorSubject::SYSTEM);
+    let relay = open(5, user(5));
+    let tab = open(6, user(6));
+    let upstream = connect(&core, &relay, user(5));
+    let downstream = connect(&relay, &tab, user(6));
+    let mut blob: Vec<u8> = (0..LARGE * 16).map(|n| (n * 11 % 251) as u8).collect();
+    insert(
+        &core,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String("small".into())),
+            ("blob", Value::Bytes(blob.clone())),
+        ],
+    );
+    insert(&core, "links", 2, vec![("doc", Value::Uuid(row(1).0))]);
+    let range = 2_000_000..2_000_080;
+    let query = Query::from("links").array_subquery(
+        ArraySubquery::new("doc", "docs", "id", "doc")
+            .select(["blob"])
+            .select_part(
+                "blob",
+                Part::Bytes {
+                    from: range.start as u64,
+                    to: range.end as u64,
+                },
+            ),
+    );
+    let included = |db: &Db| {
+        let tree = block_on(db.all_result_tree(
+            &db.prepare_query(&query).unwrap(),
+            ReadOpts {
+                tier: ReadTier::LocalOnly,
+                ..ReadOpts::default()
+            },
+        ))
+        .unwrap();
+        tree.roots
+            .iter()
+            .flat_map(|node| {
+                let ResultRelation::Array(children) = &node.relations["doc"] else {
+                    panic!("expected an array relation");
+                };
+                children
+                    .iter()
+                    .map(|child| {
+                        child
+                            .row
+                            .cells()
+                            .find(|(name, _)| *name == "blob")
+                            .and_then(|(_, value)| value.cloned())
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut stream = subscribe(&tab, query.clone());
+    pump_chain(&core, &relay, &tab);
+    assert!(no_rejections(&mut stream) > 0, "the subscription opened");
+    assert_eq!(
+        included(&tab),
+        vec![Some(Value::Bytes(blob[range.clone()].to_vec()))]
+    );
+    let (total, _) = core.large_value_nodes_for_test().unwrap();
+    let (at_relay, _) = relay.large_value_nodes_for_test().unwrap();
+    let (at_tab, _) = tab.large_value_nodes_for_test().unwrap();
+    assert!(
+        at_relay < total,
+        "the relay holds the path: {at_relay} of {total}"
+    );
+    assert!(at_tab <= at_relay, "the tab holds the path: {at_tab}");
+    assert_eq!(requests(&downstream), 1, "{:?}", downstream.borrow());
+    assert_eq!(requests(&upstream), 1, "{:?}", upstream.borrow());
+    upstream.borrow_mut().clear();
+    downstream.borrow_mut().clear();
+    // An edit inside the included range arrives as a delta it reads through.
+    block_on(core.splice_value(
+        "docs",
+        row(1),
+        "blob",
+        jazz::db::LargeValueUpdateSplice {
+            at: 2_000_020,
+            delete: 3,
+            insert: b"included".to_vec(),
+        },
+        Default::default(),
+    ))
+    .unwrap();
+    blob.splice(2_000_020..2_000_023, b"included".iter().copied());
+    pump_chain(&core, &relay, &tab);
+    assert!(no_rejections(&mut stream) > 0, "the edit was delivered");
+    assert_eq!(
+        included(&tab),
+        vec![Some(Value::Bytes(blob[range.clone()].to_vec()))]
+    );
+    assert_eq!(requests(&downstream), 0, "{:?}", downstream.borrow());
+    assert_eq!(requests(&upstream), 0, "{:?}", upstream.borrow());
+    assert_eq!(tab.large_value_nodes_for_test().unwrap().0, at_tab);
+}
+
+#[test]
+fn partial_selects_read_only_their_part_of_text_and_json() {
+    use jazz::query::Part;
+    let server = open(0, AuthorSubject::SYSTEM);
+    let alice = open(1, user(1));
+    connect(&server, &alice, user(1));
+    let body: String = text(5, LARGE * 4)
+        .chars()
+        .enumerate()
+        .map(|(n, c)| if n % 3 == 1 { 'é' } else { c })
+        .collect();
+    insert(
+        &server,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String(body.clone())),
+            ("blob", Value::Bytes(Vec::new())),
+        ],
+    );
+    let (total, _) = server.large_value_nodes_for_test().unwrap();
+    let utf16 = Query::from("docs").select(["body"]).select_part(
+        "body",
+        Part::TextUtf16 {
+            from: 700_000,
+            to: 700_050,
+        },
+    );
+    let mut stream = subscribe(&alice, utf16.clone());
+    pump(&server, &[&alice]);
+    no_rejections(&mut stream);
+    let expected: String = body.chars().skip(700_000).take(50).collect();
+    assert_eq!(
+        partial_rows(&alice, &utf16, "body"),
+        vec![Some(Value::String(expected))]
+    );
+    let (after_utf16, _) = alice.large_value_nodes_for_test().unwrap();
+    assert!(after_utf16 < total, "{after_utf16} of {total}");
+    // UTF-8 bytes on code point boundaries; one splitting one is refused.
+    let start = body.char_indices().nth(300_000).unwrap().0 as u64;
+    let end = body.char_indices().nth(300_020).unwrap().0 as u64;
+    let utf8 = Query::from("docs").select(["body"]).select_part(
+        "body",
+        Part::TextUtf8 {
+            from: start,
+            to: end,
+        },
+    );
+    // A second subscription to the same rows in another part reads its
+    // own part; the first keeps its own.
+    let mut utf8_stream = subscribe(&alice, utf8.clone());
+    pump(&server, &[&alice]);
+    assert!(no_rejections(&mut utf8_stream) > 0);
+    let got = partial_rows(&alice, &utf8, "body");
+    let Some(Some(Value::String(got))) = got.first().cloned() else {
+        panic!("{got:?}");
+    };
+    assert_eq!(got, body[start as usize..end as usize]);
+    let (after_utf8, _) = alice.large_value_nodes_for_test().unwrap();
+    assert!(after_utf8 < total, "{after_utf8} of {total}");
+    let expected: String = body.chars().skip(700_000).take(50).collect();
+    assert_eq!(
+        partial_rows(&alice, &utf16, "body"),
+        vec![Some(Value::String(expected))]
+    );
+    let split = Query::from("docs").select(["body"]).select_part(
+        "body",
+        Part::TextUtf8 {
+            from: start + 1,
+            to: end,
+        },
+    );
+    let error = block_on(alice.all(
+        &alice.prepare_query(&split).unwrap(),
+        ReadOpts {
+            tier: ReadTier::LocalOnly,
+            ..ReadOpts::default()
+        },
+    ));
+    assert!(
+        format!("{error:?}").contains("splits a code point")
+            || body.is_char_boundary(start as usize + 1),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn a_json_pointer_select_reads_its_subtree() {
+    use jazz::query::Part;
+    let schema = || {
+        compile_schema(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("docs")
+                        .column("doc", ColumnType::Json { schema: None })
+                        .policies(allow_all_policies()),
+                )
+                .build(),
+        )
+    };
+    let open_json = |node: u8, author: AuthorSubject| {
+        block_on(Db::open(DbConfig::new(
+            schema(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([node; 16]),
+                author,
+            },
+        )))
+        .unwrap()
+    };
+    let server = open_json(0, AuthorSubject::SYSTEM);
+    let alice = open_json(1, user(1));
+    connect(&server, &alice, user(1));
+    let items: Vec<serde_json::Value> = (0..20_000)
+        .map(|n| serde_json::json!({ "n": n, "text": text(n, 40) }))
+        .collect();
+    let doc = serde_json::json!(items);
+    insert(
+        &server,
+        "docs",
+        1,
+        vec![("doc", Value::String(doc.to_string()))],
+    );
+    let query = Query::from("docs")
+        .select(["doc"])
+        .select_part("doc", Part::JsonPointer("/3/text".into()));
+    let _stream = subscribe(&alice, query.clone());
+    pump(&server, &[&alice]);
+    assert_eq!(
+        partial_rows(&alice, &query, "doc"),
+        vec![Some(Value::String(
+            serde_json::json!(text(3, 40)).to_string()
+        ))]
+    );
+    let (after, _) = alice.large_value_nodes_for_test().unwrap();
+    let (total, _) = server.large_value_nodes_for_test().unwrap();
+    assert!(
+        after < total,
+        "a leading array index reads a prefix: {after} of {total}"
+    );
+}

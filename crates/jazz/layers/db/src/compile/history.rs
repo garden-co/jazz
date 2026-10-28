@@ -125,6 +125,7 @@ impl Ctx<'_> {
             versioned: true,
             union: false,
             preps: self.preps,
+            partial: Vec::new(),
         })
     }
     /// The versions of the rows of `source` that `bound` names, as a SQL

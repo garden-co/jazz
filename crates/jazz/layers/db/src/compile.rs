@@ -337,6 +337,9 @@ pub struct Compiled {
     /// The statement with prefix-tie ranks in its order, used instead when
     /// a rank prep finds chunked values sharing a sort key.
     pub ranked_sql: Option<String>,
+    /// The part each projected column is read in, if only a part
+    /// (SPEC 19.12); empty when none is.
+    pub partial: Vec<Option<crate::query::Part>>,
 }
 
 impl<'a> Ctx<'a> {
@@ -697,6 +700,7 @@ impl<'a> Ctx<'a> {
         Ok(Compiled {
             sql,
             ranked_sql: None,
+            partial: Vec::new(),
             params: self.params,
             projection,
             tables: self.tables,
@@ -709,11 +713,16 @@ impl<'a> Ctx<'a> {
         })
     }
 
-    pub fn compile_query(
-        mut self,
-        query: &Query,
-        include_deleted: bool,
-    ) -> Result<Compiled, Error> {
+    pub fn compile_query(self, query: &Query, include_deleted: bool) -> Result<Compiled, Error> {
+        let schema = self.schema;
+        let mut compiled = self.compile_shape(query, include_deleted)?;
+        if !query.partial.is_empty() {
+            compiled.partial = partial_projection(schema, &query.table, &query.partial, &compiled)?;
+        }
+        Ok(compiled)
+    }
+
+    fn compile_shape(mut self, query: &Query, include_deleted: bool) -> Result<Compiled, Error> {
         if let Some(column) = deletion_column(query) {
             if !include_deleted {
                 return Err(query_error(format!(
@@ -789,6 +798,7 @@ impl<'a> Ctx<'a> {
             versioned: false,
             union: false,
             preps: self.preps,
+            partial: Vec::new(),
         })
     }
 
@@ -972,6 +982,7 @@ impl<'a> Ctx<'a> {
             versioned: false,
             union: true,
             preps: self.preps,
+            partial: Vec::new(),
         })
     }
 
@@ -1219,6 +1230,7 @@ impl<'a> Ctx<'a> {
         Ok(Compiled {
             sql,
             ranked_sql: None,
+            partial: Vec::new(),
             params: self.params,
             projection,
             tables: self.tables,
@@ -1395,7 +1407,8 @@ impl<'a> Ctx<'a> {
                 and(&wheres),
             )
         };
-        Ok(Compiled {
+        let schema = self.schema;
+        let mut compiled = Compiled {
             sql: statement(&order),
             ranked_sql: ranked_order.as_deref().map(statement),
             params: self.params,
@@ -1407,7 +1420,12 @@ impl<'a> Ctx<'a> {
             versioned: false,
             union: false,
             preps: self.preps,
-        })
+            partial: Vec::new(),
+        };
+        if !array.partial.is_empty() {
+            compiled.partial = partial_projection(schema, &array.table, &array.partial, &compiled)?;
+        }
+        Ok(compiled)
     }
 
     /// One cell of row `id` of `table`, read through the same view and cut
@@ -3599,4 +3617,68 @@ fn inherits(policy: &PolicyExpr) -> bool {
         PolicyExpr::Exists { condition, .. } => inherits(condition),
         _ => false,
     }
+}
+
+/// The part each of `compiled`'s projected columns is read in: a partial
+/// selection names a large-capable column of the root table of a plain row
+/// query, read in a part its kind has.
+fn partial_projection(
+    schema: &Schema,
+    table: &str,
+    partial: &[crate::query::PartialSelect],
+    compiled: &Compiled,
+) -> Result<Vec<Option<crate::query::Part>>, Error> {
+    use crate::query::Part;
+    use jazz_types::large_values::LargeValueKind as Kind;
+    if compiled.aggregate || compiled.union || compiled.joined > 0 {
+        return Err(unsupported(
+            "partial large-value selections in aggregate, union or joined queries",
+        ));
+    }
+    let table = schema.table(table)?;
+    let mut out = vec![None; compiled.projection.len()];
+    for selected in partial {
+        let column = table
+            .column(&selected.column)
+            .filter(|column| crate::large::large_capable(column))
+            .ok_or_else(|| {
+                query_error(format!(
+                    "partial selection of {:?} needs a text, bytes or JSON column",
+                    selected.column
+                ))
+            })?;
+        let kind = crate::large::kind(column);
+        let fits = matches!(
+            (&selected.part, kind),
+            (Part::Bytes { .. }, Kind::Bytes)
+                | (Part::TextUtf16 { .. } | Part::TextUtf8 { .. }, Kind::String)
+                | (Part::JsonPointer(_), Kind::Json)
+        );
+        if !fits {
+            return Err(query_error(format!(
+                "partial selection of {:?} does not fit its column's kind",
+                selected.column
+            )));
+        }
+        if let Part::Bytes { from, to } | Part::TextUtf16 { from, to } | Part::TextUtf8 { from, to } =
+            &selected.part
+            && from > to
+        {
+            return Err(query_error(format!(
+                "partial selection of {:?} ends before it starts",
+                selected.column
+            )));
+        }
+        // A compilation that projects no such column (one reading only the
+        // rows' ids) reads none of it.
+        let Some(index) = compiled
+            .projection
+            .iter()
+            .position(|(name, _)| *name == column.name)
+        else {
+            continue;
+        };
+        out[index] = Some(selected.part.clone());
+    }
+    Ok(out)
 }
