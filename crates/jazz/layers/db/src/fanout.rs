@@ -275,7 +275,7 @@ impl Inner {
         read: ReadSpec,
         settled: sync::SettledBy,
     ) -> Result<(Queue, Weak<RefCell<Group>>), Error> {
-        self.check_splices(&prepared.query.table, &read.splices)?;
+        self.check_splices(&prepared.query, &read.splices)?;
         let (compiled, session_used) = self.compile_tracked(prepared, identity, &read)?;
         let key = GroupKey {
             renames: renames(prepared.schema.as_ref().unwrap_or(&self.owner)),
@@ -1194,18 +1194,27 @@ impl Inner {
         }
     }
 
-    /// Refuse splices of a column that is not a large-capable column of
-    /// `table`.
-    fn check_splices(&self, table: &str, columns: &[String]) -> Result<(), Error> {
+    /// Refuse splices of a column that is not a large-capable column of the
+    /// query's table, or that it selects by JSON pointer.
+    fn check_splices(&self, query: &Query, columns: &[String]) -> Result<(), Error> {
         if columns.is_empty() {
             return Ok(());
         }
+        let table = &query.table;
         let t = self.schema.table(table)?;
         for column in columns {
             if !t.column(column).is_some_and(crate::large::large_capable) {
                 return Err(crate::values::query_error(format!(
                     "splices of {column:?} need a text, bytes or JSON column of {table:?}"
                 )));
+            }
+            if query.partial.iter().any(|selected| {
+                selected.column == *column
+                    && matches!(selected.part, crate::query::Part::JsonPointer(_))
+            }) {
+                return Err(crate::values::unsupported(
+                    "splices of a column selected by JSON pointer",
+                ));
             }
         }
         Ok(())
@@ -1218,20 +1227,41 @@ impl Inner {
     fn add_splices(
         &self,
         group: &Group,
-        prior: &HashMap<RowUuid, u64>,
+        prior: &HashMap<RowUuid, CurrentRow>,
         event: &mut SubscriptionEvent,
     ) {
+        use crate::query::Part;
         let SubscriptionEvent::Delta { updated, .. } = event else {
             return;
         };
         for out in updated {
-            let Some(&from) = prior.get(&out.row.id) else {
+            let Some(before) = prior.get(&out.row.id) else {
                 continue;
             };
+            let from = before.seq;
             if from == out.row.seq {
                 continue;
             }
             for column in &group.key.splices {
+                let part = group
+                    .prepared
+                    .query
+                    .partial
+                    .iter()
+                    .find(|selected| selected.column == *column)
+                    .map(|selected| &selected.part);
+                if let Some(part) = part {
+                    // A page is read in part: its splices turn the page the
+                    // result showed into the new one, in page coordinates.
+                    if !matches!(part, Part::JsonPointer(_))
+                        && let (Some(old), Some(new)) =
+                            (cell_of(before, column), cell_of(&out.row, column))
+                        && let Some(splices) = page_splices(old, new)
+                    {
+                        out.splices.push((column.clone(), splices));
+                    }
+                    continue;
+                }
                 if let Ok(splices) = self.value_delta(
                     &group.prepared.query.table,
                     out.row.id,
@@ -1248,10 +1278,10 @@ impl Inner {
     /// Bring a group's result up to date; true when it re-ran the query.
     fn refresh_group(&self, group: &mut Group, ids: Option<&BTreeSet<RowUuid>>) -> bool {
         // The versions the result showed, which splices start from.
-        let prior: HashMap<RowUuid, u64> = if group.key.splices.is_empty() {
+        let prior: HashMap<RowUuid, CurrentRow> = if group.key.splices.is_empty() {
             HashMap::new()
         } else {
-            group.rows.iter().map(|row| (row.id, row.seq)).collect()
+            group.rows.iter().map(|row| (row.id, row.clone())).collect()
         };
         if let Some(ids) = ids.filter(|_| group.recheck) {
             match self.recheck_rows(group, ids) {
@@ -1464,6 +1494,65 @@ fn row_key(row: &CurrentRow) -> RowKey {
 /// A row with the same cells at a newer version (a same-value write: its
 /// metadata moved). A pending local version settling as the server's is
 /// the same write, not a new one.
+/// The value of `row`'s cell `column`, unwrapped from any nullable wrapper.
+fn cell_of<'a>(row: &'a CurrentRow, column: &str) -> Option<&'a Value> {
+    let mut value = row
+        .cells
+        .iter()
+        .find(|(name, _)| name == column)?
+        .1
+        .as_ref()?;
+    while let Value::Nullable(Some(inner)) = value {
+        value = inner;
+    }
+    Some(value)
+}
+
+/// The one splice that turns page `old` into page `new`, trimmed to where
+/// they differ (on code point boundaries for text). `None` for a value that
+/// is not a page of bytes or text.
+fn page_splices(old: &Value, new: &Value) -> Option<Vec<crate::db::LargeValueDeltaSplice>> {
+    let (a, b, text) = match (old, new) {
+        (Value::Bytes(a), Value::Bytes(b)) => (a.as_slice(), b.as_slice(), false),
+        (Value::String(a), Value::String(b)) => (a.as_bytes(), b.as_bytes(), true),
+        _ => return None,
+    };
+    let boundary = |bytes: &[u8], at: usize| at == bytes.len() || bytes[at] & 0xc0 != 0x80;
+    let mut prefix = a.iter().zip(b).take_while(|(x, y)| x == y).count();
+    let mut suffix = a[prefix..]
+        .iter()
+        .rev()
+        .zip(b[prefix..].iter().rev())
+        .take_while(|(x, y)| x == y)
+        .count();
+    if text {
+        while prefix > 0 && !boundary(a, prefix) {
+            prefix -= 1;
+        }
+        while suffix > 0 && !boundary(a, a.len() - suffix) {
+            suffix -= 1;
+        }
+    }
+    let (deleted, inserted) = (&a[prefix..a.len() - suffix], &b[prefix..b.len() - suffix]);
+    if deleted.is_empty() && inserted.is_empty() {
+        return Some(Vec::new());
+    }
+    let units = |bytes: &[u8]| {
+        if text {
+            std::str::from_utf8(bytes).map_or(0, |s| s.encode_utf16().count() as u64)
+        } else {
+            0
+        }
+    };
+    Some(vec![crate::db::LargeValueDeltaSplice {
+        at: prefix as u64,
+        delete: deleted.len() as u64,
+        insert: inserted.to_vec(),
+        at_utf16: units(&a[..prefix]),
+        delete_utf16: units(deleted),
+    }])
+}
+
 fn new_version(prior: &CurrentRow, row: &CurrentRow) -> bool {
     prior.seq != row.seq && !(prior.seq >= crate::db::LOCAL_BASE && row.seq < crate::db::LOCAL_BASE)
 }
