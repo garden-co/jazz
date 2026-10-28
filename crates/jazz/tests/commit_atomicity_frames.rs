@@ -439,3 +439,49 @@ fn a_pending_commit_over_one_stored_value_survives_a_reopen() {
     drop(writer);
     assert_eq!(parts(&path), 0, "parts go once the commit settles");
 }
+
+/// A refused commit too large for one stored value is kept for the host in
+/// its parts: listed whole, and its parts go when the host discards it.
+#[test]
+fn a_refused_commit_over_one_stored_value_is_listed_whole_and_discarded() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("writer.sqlite");
+    let writer_author = AuthorSubject::for_test_bytes([0x57; 16]);
+    let writer = block_on(Db::open_at(
+        DbConfig::new(
+            schema(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x57; 16]),
+                author: writer_author,
+            },
+        ),
+        &path,
+        Default::default(),
+    ))
+    .unwrap();
+    writer.track_upstream_rejections();
+    let server = open(0xc7, AuthorSubject::SYSTEM);
+    let room = Rc::new(RefCell::new(usize::MAX));
+    let _subscriber = link(&server, &writer, writer_author, &room);
+    // About 9 MB: over what an untrusted session may send, so refused.
+    commit_notes(&writer, 300);
+    for _ in 0..10 {
+        block_on(writer.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+    }
+    let parts = || -> i64 {
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .query_row("SELECT count(*) FROM _jazz_commit_parts", [], |r| r.get(0))
+            .unwrap()
+    };
+    let rejected = writer.rejected_transactions().unwrap();
+    assert_eq!(rejected.len(), 1);
+    assert_eq!(rejected[0].ops.len(), 300, "listed whole");
+    assert!(parts() > 1, "kept in parts");
+    writer
+        .discard_rejected_transaction(rejected[0].seq)
+        .unwrap();
+    assert!(writer.rejected_transactions().unwrap().is_empty());
+    assert_eq!(parts(), 0, "parts go with the discarded commit");
+}
