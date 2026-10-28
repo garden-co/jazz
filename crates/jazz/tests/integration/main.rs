@@ -129,6 +129,8 @@ mod sync_aggregates;
 mod sync_differential;
 #[path = "../sync_echo.rs"]
 mod sync_echo;
+#[path = "../sync_frame_retry.rs"]
+mod sync_frame_retry;
 #[path = "../sync_gather.rs"]
 mod sync_gather;
 #[path = "../sync_resume.rs"]
