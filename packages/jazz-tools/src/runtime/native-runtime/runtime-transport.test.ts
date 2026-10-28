@@ -2599,6 +2599,73 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(write.wait).toHaveBeenCalledExactlyOnceWith("global");
   });
 
+  it("does not spin a Global wait on inbound frames the pump cannot route yet", async () => {
+    let settle!: () => void;
+    const settlement = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+    const write = {
+      txId: "00000000000070008000000000000008",
+      payload: new Uint8Array(),
+      rowId: new Uint8Array(16),
+      wait: vi.fn(() => settlement),
+      writeState: () => ({}),
+    };
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            insert: () => write,
+            connectUpstream: () => new FakeTransport([]),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await runtime.waitForUpstreamServerConnection();
+
+    const inserted = runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "fate behind a busy pump" } },
+      null,
+      "00000000-0000-0000-0000-000000000008",
+    );
+    // A frame arrived while the pump is suspended elsewhere; only its next,
+    // timer-scheduled pass can route it.
+    const internals = runtime as unknown as {
+      serverPumpRunning: boolean;
+      pendingInboundServerFrames: Uint8Array[];
+      startServerPump(): void;
+    };
+    internals.serverPumpRunning = true;
+    internals.pendingInboundServerFrames.push(Uint8Array.from([2, 42]));
+    let passes = 0;
+    const startServerPump = internals.startServerPump.bind(runtime);
+    internals.startServerPump = () => {
+      passes += 1;
+      // Without a yield to the host, the timer below never runs: end the
+      // spin here so the assertion reports it instead of the heap filling.
+      if (passes > 1_000) settle();
+      startServerPump();
+    };
+
+    const wait = runtime.waitForTransaction(await committedTxId(inserted), "global");
+    await waitForServerPumpTimer();
+    settle();
+    await wait;
+
+    expect(passes).toBeLessThan(10);
+  });
+
   it("rejects active concurrent Global waits and subscriptions for a relayed terminal error without inventing a rejection", async () => {
     const remoteSettlement = new Promise<void>(() => {});
     const localSubscription = {
