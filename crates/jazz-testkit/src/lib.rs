@@ -12,6 +12,8 @@ mod transport_control;
 #[cfg(feature = "scenarios")]
 pub use transport_control::TransportControl;
 #[cfg(feature = "scenarios")]
+pub mod contention;
+#[cfg(feature = "scenarios")]
 mod permissions;
 #[cfg(feature = "scenarios")]
 mod scenarios;
