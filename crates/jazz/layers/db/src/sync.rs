@@ -7308,7 +7308,7 @@ impl Db {
                 _ => return Err(unresolved()),
             };
             let seq = delta.delta.seq;
-            if !readable_version(&inner, &table.stored, row, &delta.key, seq, identity)? {
+            if !still_readable_version(&inner, &table.stored, row, &delta.key, seq, identity)? {
                 return Err(unresolved());
             }
             let base = inner
@@ -7352,7 +7352,9 @@ impl Db {
             let row = RowUuid::from_bytes(pull.id);
             let image = match inner.schema.stored_table(&pull.table) {
                 Ok(table)
-                    if readable_version(&inner, table, row, &pull.key, pull.seq, identity)? =>
+                    if still_readable_version(
+                        &inner, table, row, &pull.key, pull.seq, identity,
+                    )? =>
                 {
                     inner
                         .version_image(table, row, &pull.key, pull.seq)?
@@ -7448,7 +7450,7 @@ impl Db {
             else {
                 continue;
             };
-            if !readable_version(&inner, table, row, &source.key, source.seq, identity)? {
+            if !still_readable_version(&inner, table, row, &source.key, source.seq, identity)? {
                 continue;
             }
             if let Some(image) = inner.version_image(table, row, &source.key, source.seq)? {
@@ -7765,6 +7767,21 @@ fn readable_version(
     let schema = inner.owner.clone();
     let table = owned_table(&schema, table)?;
     inner.check_version(table, row, key, seq, author, Operation::Select)
+}
+
+/// Whether `identity` may read the version of `row` at `seq` and, still,
+/// the row as it stands: losing read access takes effect at once for the
+/// content of every earlier version too (SPEC 19.9, INV-RLS-13).
+fn still_readable_version(
+    inner: &Inner,
+    table: &str,
+    row: RowUuid,
+    key: &[u8],
+    seq: u64,
+    identity: Option<AuthorSubject>,
+) -> Result<bool, Error> {
+    Ok(readable_version(inner, table, row, key, seq, identity)?
+        && readable(inner, table, row, key, identity)?)
 }
 
 /// Whether `identity` may read a row of stored table `table`.

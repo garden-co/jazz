@@ -879,6 +879,84 @@ fn a_delta_over_a_version_the_writer_cannot_read_is_rejected() {
     assert_eq!(fates, vec![(1, true), (2, true), (3, true), (4, true)]);
 }
 
+/// A pull that cites a version the reader could read then, after the reader
+/// lost access to the row, is answered with nothing (SPEC 19.9, INV-RLS-13).
+#[test]
+fn pulls_after_read_access_is_lost_are_answered_with_nothing() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let mallory = open(9, user(9));
+    let (_, up, down) = connect_wires(&server, &mallory, user(9));
+    insert(
+        &server,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String("x".to_owned())),
+            ("blob", Value::Bytes(Vec::new())),
+        ],
+    );
+    let _stream = subscribe(&mallory, Query::from("notes"));
+    pump(&server, &[&mallory]);
+    insert(
+        &server,
+        "notes",
+        5,
+        vec![("text", Value::String(text(3, LARGE)))],
+    );
+    for _ in 0..4 {
+        block_on(server.tick()).unwrap();
+    }
+    let (seq, key, root) = down
+        .borrow()
+        .iter()
+        .find_map(|message| match message {
+            SyncMessage::Rows { images } => images.iter().find_map(|image| {
+                let cell = image.cells.iter().find_map(|(name, cell)| match cell {
+                    SyncCell::Large(descriptor) if name.ends_with("text") => Some(descriptor),
+                    _ => None,
+                })?;
+                let value = jazz::large_values::decode_large_value_ref(cell).ok()?;
+                Some((image.seq, image.key.clone(), value.root.object_hash.0))
+            }),
+            _ => None,
+        })
+        .expect("the note's image");
+    // Access goes: no doc exists any more.
+    block_on(server.delete("docs", row(1), Default::default())).unwrap();
+    for _ in 0..4 {
+        block_on(server.tick()).unwrap();
+    }
+    let evicted = down
+        .borrow()
+        .iter()
+        .any(|message| matches!(message, SyncMessage::Evict { .. }));
+    down.borrow_mut().clear();
+    up.borrow_mut().push_back(SyncMessage::ChunkRequests {
+        pulls: vec![WirePull {
+            table: "notes".to_owned(),
+            id: *row(5).0.as_bytes(),
+            key,
+            seq,
+            root,
+            nodes: vec![root],
+            span: Some((0, LARGE as u64)),
+        }],
+    });
+    block_on(server.tick()).unwrap();
+    let mut sent = BTreeSet::new();
+    for message in down.borrow().iter() {
+        if let SyncMessage::Chunks { nodes, .. } = message {
+            sent.extend(nodes.iter().map(|node| node.hash));
+        }
+    }
+    eprintln!("REVIEW PROBE: evicted={evicted} sent_nodes={}", sent.len());
+    assert!(
+        sent.is_empty(),
+        "nodes of a row the reader can no longer read were sent ({} nodes, evicted={evicted})",
+        sent.len()
+    );
+}
+
 #[test]
 fn naming_a_hidden_trees_hash_reads_nothing() {
     let server = open(0, AuthorSubject::SYSTEM);

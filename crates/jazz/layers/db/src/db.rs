@@ -3251,7 +3251,7 @@ impl Inner {
         Ok(out)
     }
 
-    fn check(
+    pub(crate) fn check(
         &self,
         table: &Table,
         row: RowUuid,
