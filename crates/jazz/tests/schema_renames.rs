@@ -1093,3 +1093,84 @@ fn column(db: &Db, name: &str) -> Vec<Option<Value>> {
         })
         .collect()
 }
+
+/// A worker opened under v2 before it learned the authority's names; a
+/// tab connects to it first; then the worker connects and mirrors the
+/// authority's catalogue. The tab is sent the worker's new names, so it
+/// still reads `name`.
+#[test]
+fn a_tab_behind_a_worker_reads_a_renamed_column_after_the_worker_mirrors() {
+    use jazz::db::RemoteLinkHint;
+    let server = server(v1(), vec![(v2(), rename_title())]);
+    seed(&server, "todos", 1, &[("name", text("from server"))]);
+    let worker = block_on(Db::open(config(v2(), 0xa0, user(0xa0)))).unwrap();
+    let tab = block_on(Db::open(config(v2(), 0xa1, user(0xa0)))).unwrap();
+    tab.set_non_durable_client();
+    tab.set_remote_link_hint(RemoteLinkHint::Live);
+    let (tc, ts) = pipe();
+    let _tab_link = block_on(tab.connect_upstream(tc));
+    worker.accept_subscriber(ts, user(0xa0));
+    pump(&worker, &[&tab]);
+
+    let (wc, ws) = pipe();
+    let _worker_link = block_on(worker.connect_upstream(wc));
+    server.accept_subscriber(ws, user(0xa0));
+    worker.set_remote_link_hint(RemoteLinkHint::Live);
+    let q = tab.prepare_query(&Query::from("todos")).unwrap();
+    let _stream = block_on(tab.subscribe(&q, ReadOpts::default())).unwrap();
+    for _ in 0..6 {
+        block_on(tab.tick()).unwrap();
+        block_on(worker.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+        block_on(worker.tick()).unwrap();
+        block_on(tab.tick()).unwrap();
+    }
+    assert_eq!(
+        column(&worker, "name"),
+        [Some(text("from server"))],
+        "worker"
+    );
+    assert_eq!(column(&tab, "name"), [Some(text("from server"))], "tab");
+}
+
+/// A store that keeps a table under a name the upstream stores another
+/// table as cannot mirror it yet (their rows would have to merge): it
+/// stops syncing with that upstream and says why on its remote reads,
+/// while local reads keep being served and nothing is half renamed.
+#[test]
+fn a_catalogue_the_store_cannot_mirror_refuses_remote_reads_and_keeps_local_ones() {
+    let server = server(v1(), vec![(v2(), rename_title()), (v3(), rename_todos())]);
+    seed(&server, "tasks", 1, &[("name", text("from server"))]);
+    let path = scratch("unmirrorable");
+    {
+        // Offline under v1, then v3 without the lenses between: `tasks` is
+        // stored here as itself, beside v1's `todos`.
+        let client = open_at(v1(), &path);
+        insert(&client, "todos", 2, "title", "v1 row");
+    }
+    let client = open_at(v3(), &path);
+    insert(&client, "tasks", 3, "name", "local task");
+    let (c, s) = pipe();
+    let _link = block_on(client.connect_upstream(c));
+    server.accept_subscriber(s, AuthorSubject::SYSTEM);
+    let q = client.prepare_query(&Query::from("tasks")).unwrap();
+    let mut stream = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
+    pump(&server, &[&client]);
+    let mut rejected = None;
+    while let Some(event) = stream.try_next_event() {
+        if let jazz::db::SubscriptionEvent::Rejected { reason } = event {
+            rejected = Some(reason);
+        }
+    }
+    let reason = rejected.expect("the remote read says why");
+    assert!(reason.contains("not supported"), "{reason}");
+    assert_eq!(
+        read_query(&client, Query::from("tasks"), "name", local()),
+        [text("local task")]
+    );
+    let stored = stored(&path);
+    assert!(
+        stored.contains_key("tasks") && stored.contains_key("todos"),
+        "{stored:?}"
+    );
+}

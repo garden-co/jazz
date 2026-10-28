@@ -307,8 +307,9 @@ other holds.
 
 **Authority to client.** A session already watches every row it shipped,
 across all its subscriptions and support rows (§8). The watch also records
-the seq of the version last shipped, or held for an own commit (`Fate.held`),
-or declared on resume (`Hold`). A row version with chunked cells goes out as
+the seq of the version last shipped this session, or held for an own commit
+(`Fate.held`). A new session starts with none, so its first image of each row
+goes whole. A row version with chunked cells goes out as
 `Delta` against that seq where the stored base value allows, else as `Tree`.
 An `Evict` drops the recorded seq.
 
@@ -317,8 +318,11 @@ An `Evict` drops the recorded seq.
 A client that cannot place a `Delta` (no version at that seq, or an edit
 count that differs) skips that image and sends `Hold` for the row with seq 0,
 saying it holds no version. The authority then ships the row's current image
-whole, or an `Evict` if it is no longer readable, exactly as on resume. A
-`Delta` is never applied to any version but the one it names.
+whole, or an `Evict` if it is no longer readable. Until that arrives the
+client holds a stale version of the row, so it stores no resume point and
+forgets the ones it had (a resume from them would count the row as held), and
+it sends the `Hold` again on its next connection. A `Delta` is never applied
+to any version but the one it names.
 
 **Client to authority.** A client's settled versions all came from the
 authority, so it bases a commit's chunked values on the newest settled

@@ -510,3 +510,56 @@ fn a_caught_up_subscription_resumes_without_shipping_rows() {
     assert_eq!(*shipped.borrow(), 0);
     assert_eq!(ids(&client, None), ids(&server, Some(alice())));
 }
+
+/// A cold row evicted through another subscription, then readable again
+/// without changing, reaches the replica when the first subscription
+/// resumes: the eviction made its older resume point untrue.
+#[test]
+fn a_row_evicted_and_readable_again_returns_when_an_older_subscription_resumes() {
+    use jazz::query::{col, eq, lit};
+    let server = seeded(1);
+    let client = open(1, alice());
+    let (client_side, server_side, _) = pipe();
+    let _upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice());
+    let q1 = client
+        .prepare_query(
+            &Query::from("messages").filter(eq(col("body"), lit(Value::String("m0".into())))),
+        )
+        .unwrap();
+    let s1 = block_on(client.subscribe(&q1, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    assert_eq!(ids(&client, None), [id(3, 0)], "q1 brings m0");
+    drop(s1);
+    pump(&server, &client);
+
+    let q2 = client.prepare_query(&Query::from("messages")).unwrap();
+    let s2 = block_on(client.subscribe(&q2, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    block_on(server.delete("memberships", id(2, 0), Default::default())).unwrap();
+    pump(&server, &client);
+    assert!(ids(&client, None).is_empty(), "q2 evicts m0 on access loss");
+    drop(s2);
+    pump(&server, &client);
+
+    // Access regained, m0 itself unchanged.
+    server
+        .seed_settled_mergeable_for_bootstrap(
+            "memberships",
+            id(2, 1),
+            AuthorSubject::SYSTEM,
+            cells(&[
+                ("room", Value::Uuid(id(1, 0).0)),
+                ("member", Value::String(subject())),
+            ]),
+        )
+        .unwrap();
+    let _s1 = block_on(client.subscribe(&q1, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    assert_eq!(
+        ids(&server, Some(alice())),
+        [id(3, 0)],
+        "server: m0 readable"
+    );
+    assert_eq!(ids(&client, None), [id(3, 0)], "client converges on m0");
+}

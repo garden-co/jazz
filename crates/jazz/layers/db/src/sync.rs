@@ -1219,6 +1219,11 @@ pub(crate) struct Client {
     relay_ready: bool,
     /// The server said it has not admitted this client's schema version.
     unadmitted: bool,
+    /// Rows asked for whole (their shipped deltas did not apply), until a
+    /// whole image of each arrives. This store holds a stale version of
+    /// each, so no result it settles is the server's: no watermark is
+    /// stored while any is owed, and each is asked again on reconnect.
+    whole: HashSet<(String, [u8; 16], Vec<u8>)>,
 }
 
 /// A session's commit a relay uploads as its own, for its upload: the
@@ -3646,6 +3651,24 @@ impl Inner {
             .map_err(storage)
     }
 
+    /// Forget every remote query's resume point: this store may no longer
+    /// hold a result as it settled (a row it held was evicted, or is owed
+    /// whole), so each opens fresh until it settles again. An eviction is
+    /// rare enough that a fresh opening costs less than knowing which
+    /// results held the row.
+    fn forget_watermarks(&mut self) -> Result<(), Error> {
+        if self.has_table("_jazz_watermarks")? {
+            self.exec("DELETE FROM _jazz_watermarks", [])
+                .map_err(storage)?;
+        }
+        if let Some(client) = self.client.as_mut() {
+            for remote in client.remote.values_mut() {
+                remote.through = None;
+            }
+        }
+        Ok(())
+    }
+
     fn store_watermark(&self, key: &[u8; 32], through: u64) -> Result<(), Error> {
         self.exec(WATERMARKS_DDL, []).map_err(storage)?;
         self.exec(
@@ -4415,6 +4438,7 @@ impl Client {
             relayed_fetches: Vec::new(),
             relay_ready: false,
             unadmitted: false,
+            whole: HashSet::new(),
         }
     }
 }
@@ -4459,6 +4483,7 @@ impl Db {
                 SyncMessage::Subscribe { .. }
                     | SyncMessage::Schema { .. }
                     | SyncMessage::Holds { .. }
+                    | SyncMessage::Hold { .. }
                     | SyncMessage::Commit { .. }
                     | SyncMessage::PushChunks { .. }
                     | SyncMessage::ChunkRequests { .. }
@@ -4479,6 +4504,15 @@ impl Db {
         // What the old session could not answer, the new one may.
         client.unavailable.clear();
         client.outbox.extend(resubscribe);
+        // Rows still owed whole were asked of the old session.
+        if !client.whole.is_empty() {
+            let rows = client
+                .whole
+                .iter()
+                .map(|(table, id, key)| (table.clone(), *id, key.clone(), 0))
+                .collect();
+            client.outbox.push(SyncMessage::Hold { rows });
+        }
         // Relayed reads still waiting are asked again: the old session's
         // answers are lost with it.
         let reask: Vec<SyncMessage> = client
@@ -5473,9 +5507,10 @@ impl Db {
                             };
                             let named = (image.table.clone(), image.id, image.key.clone());
                             if !inner.receive_deltas(&mut image)? {
-                                inner.ask_whole(named);
+                                inner.ask_whole(named)?;
                                 continue;
                             }
+                            inner.client.as_mut().expect("client").whole.remove(&named);
                             if inner.record_vias(&named.0, &image)? {
                                 // A node no version held may be held by
                                 // this one: missing answers are transient.
@@ -5490,10 +5525,25 @@ impl Db {
                             continue;
                         }
                         rebase |= inner.receive_eviction(&table, RowUuid::from_bytes(id), &key)?;
+                        // Results settled before this one may have held
+                        // the row: a resume from them would count it as
+                        // held, though this store no longer has it.
+                        inner.forget_watermarks()?;
+                        let client = inner.client.as_mut().expect("client");
+                        client.whole.remove(&(table, id, key));
                     }
                     SyncMessage::Catalogue { versions, cells } => {
-                        inner.mirror_catalogue(versions, cells)?;
-                        rebase = true;
+                        match inner.mirror_catalogue(versions, cells) {
+                            Ok(()) => rebase = true,
+                            // This store cannot store rows as its upstream
+                            // does: it stops syncing with it, nothing that
+                            // follows applies, and its remote reads fail
+                            // with why. Local reads are served as before.
+                            Err(error) => {
+                                inner.refuse_upstream(error);
+                                queue.clear();
+                            }
+                        }
                     }
                     SyncMessage::Settled {
                         id,
@@ -5509,7 +5559,12 @@ impl Db {
                         let remote = client.remote.get_mut(&key).expect("remote");
                         remote.answered.set(true);
                         remote.global.set(global);
-                        remote.through = Some(through);
+                        // A row owed whole is stale here: this store does
+                        // not hold the result as of `through`.
+                        let resumable = client.whole.is_empty();
+                        if resumable {
+                            remote.through = Some(through);
+                        }
                         let watermark = remote.watermark;
                         // Cached rows the server's result lacks are stale.
                         if let Some(ids) = window {
@@ -5522,7 +5577,9 @@ impl Db {
                             ));
                         }
                         // In the tick's savepoint, with the rows it settles.
-                        inner.store_watermark(&watermark, through)?;
+                        if resumable {
+                            inner.store_watermark(&watermark, through)?;
+                        }
                     }
                     SyncMessage::Origins { commits } => {
                         for (seq, node, tx) in commits {
@@ -5748,7 +5805,11 @@ impl Db {
             }
         }
         // A commit written under an earlier version is sent under it: the
-        // server reads its ops by that version's names.
+        // server reads its ops by that version's names. An authority keeps
+        // admitting every version it published (a server replays its
+        // catalogue on start), so the server holds the session's later
+        // messages behind such a switch only for a version never published
+        // (a draft), as it does for a session declaring one.
         let mut declared = current;
         for (commit, (hashes, batches)) in commits.into_iter().zip(pushes) {
             if let SyncMessage::Commit { tx, .. } = &commit {
@@ -5874,6 +5935,18 @@ impl Inner {
     }
 
     /// Drop the upstream link: reads stop waiting, writes queue.
+    /// The upstream sent what this store cannot follow (a catalogue it
+    /// cannot mirror): drop the link, and fail every remote read with
+    /// `error`. Each connection that sends it again is dropped the same.
+    fn refuse_upstream(&mut self, error: Error) {
+        self.detach_upstream();
+        if let Some(client) = self.client.as_mut() {
+            for remote in client.remote.values() {
+                *remote.refused.borrow_mut() = Some(error.clone());
+            }
+        }
+    }
+
     fn detach_upstream(&mut self) {
         let Some(client) = self.client.as_mut() else {
             return;
@@ -6185,10 +6258,14 @@ impl Inner {
         Ok((deltas, sources))
     }
 
-    /// Ask the upstream for a row whole: a `Hold` of no version of it,
-    /// which it answers as on a resume (SPEC 19.8).
-    fn ask_whole(&mut self, (table, id, key): (String, [u8; 16], Vec<u8>)) {
+    /// Ask the upstream for a row whole: a `Hold` of it, which it answers
+    /// with the row whole or its eviction (SPEC 19.8). Until it arrives
+    /// this store holds a stale version, so every watermark is forgotten
+    /// and none is stored (see `Client::whole`).
+    fn ask_whole(&mut self, (table, id, key): (String, [u8; 16], Vec<u8>)) -> Result<(), Error> {
+        self.forget_watermarks()?;
         let client = self.client.as_mut().expect("client");
+        client.whole.insert((table.clone(), id, key.clone()));
         let asked = client.outbox.iter().any(|message| {
             matches!(message, SyncMessage::Hold { rows } if rows.iter().any(|held| {
                 held.0 == table && held.1 == id && held.2 == key && held.3 == 0
@@ -6199,6 +6276,7 @@ impl Inner {
                 rows: vec![(table, id, key, 0)],
             });
         }
+        Ok(())
     }
 
     /// Apply one server image; returns whether a rebase is needed (the row
