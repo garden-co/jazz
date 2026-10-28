@@ -1145,13 +1145,17 @@ async function initialize(context: RuntimeContext): Promise<void> {
       // Only the current runtime speaks for this namespace's upstream.
       if (context.runtime === runtime) broadcast(context, { type: "remote-link", state });
     }, new AbortController().signal);
-    context.runtime.onServerTransportError((error) => {
+    context.runtime.onServerTransportError((error, { retrying }) => {
       // Transport failures are foreground events, not authority fates or
       // durable notifications. Only peers that have completed admission own a
       // tab runtime capable of rejecting an active remote wait.
       for (const peer of context.peers.values()) {
         if (!peer.subscriber || !peer.pump) continue;
-        post(peer.port, { type: "transport-error", error: serializeBrowserRelayError(error) });
+        post(peer.port, {
+          type: "transport-error",
+          error: serializeBrowserRelayError(error),
+          retrying,
+        });
       }
     });
     if (options.logLevel === "trace") {

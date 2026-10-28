@@ -1132,7 +1132,7 @@ impl Table {
                 );
             }
         }
-        branch_key(&values)
+        self.normalized_branch_key(values)
     }
 
     /// The branch key a row with these cells lives under.
@@ -1148,7 +1148,32 @@ impl Table {
                 crate::protocol::BranchColumnValue::from(value),
             );
         }
+        self.normalized_branch_key(values)
+    }
+
+    /// The branch key of these branch-column values. A branch column at its
+    /// default is left out (INV-BVIEW-19): a branch column a later schema
+    /// version adds must have an immutable default, so the rows written
+    /// before it, and the selectors of versions that do not name it, keep
+    /// the key they had and read as that default.
+    fn normalized_branch_key(
+        &self,
+        mut values: BTreeMap<String, crate::protocol::BranchColumnValue>,
+    ) -> Vec<u8> {
+        values.retain(|name, value| {
+            self.branch_default(name)
+                .is_none_or(|default| *value != crate::protocol::BranchColumnValue::from(default))
+        });
         branch_key(&values)
+    }
+
+    /// A branch column's declared default, unwrapped from its nullability.
+    fn branch_default(&self, column: &str) -> Option<Value> {
+        let mut value = self.column(column)?.default.clone()?;
+        while let Value::Nullable(Some(inner)) = value {
+            value = *inner;
+        }
+        Some(value)
     }
 
     /// Branch-column cells named by a selector, decoded by column type.
@@ -1158,9 +1183,14 @@ impl Table {
     ) -> Result<BTreeMap<String, Value>, Error> {
         let mut cells = BTreeMap::new();
         for column in &self.branch_by {
-            let encoded = selector.values.get(column).ok_or_else(|| {
-                query_error(format!("branch selector has no `{}.{column}`", self.name))
-            })?;
+            // A selector of a version before the column names its default.
+            let Some(encoded) = selector.values.get(column) else {
+                let default = self.branch_default(column).ok_or_else(|| {
+                    query_error(format!("branch selector has no `{}.{column}`", self.name))
+                })?;
+                cells.insert(column.clone(), default);
+                continue;
+            };
             let ty = &self.column(column).expect("branch column").ty;
             let value = encoded
                 .decode_as(ty)

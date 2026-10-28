@@ -2,6 +2,7 @@ import { copyAccountConfigAdmission } from "../../accounts/config-capability.js"
 import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
 import { getRuntimeSchemaCacheKey } from "../../drivers/schema-wire.js";
 import type { WasmSchema } from "../../drivers/types.js";
+import { setCredentialRenewal } from "../client.js";
 import type { AuthUpdate, JazzClient, MutationErrorEvent } from "../client.js";
 import type { DbConfig } from "../db.js";
 import type { Session } from "../context.js";
@@ -56,6 +57,8 @@ export interface DbForConnection {
   readonly runtimeSource: RuntimeSource<any>;
   readonly isShuttingDown: boolean;
   markUnauthenticated(reason: AuthFailureReason): void;
+  /** Whether something renews the credential after this refusal. */
+  renewsCredential?(reason: AuthFailureReason): boolean;
   clearAuthError(): void;
   onMutationError(event: MutationErrorEvent): void;
   /** Enables Inspector-local reads after the worker's authenticated receipt. */
@@ -118,6 +121,7 @@ export abstract class ConnectionManager {
       foregroundNodeLease: this.foregroundNodeLease,
     });
     client.onMutationError((event) => this.host.onMutationError(event));
+    setCredentialRenewal(client, (reason) => this.host.renewsCredential?.(reason) === true);
 
     this.client = client;
     this.clientSchema = runtimeSchema;
