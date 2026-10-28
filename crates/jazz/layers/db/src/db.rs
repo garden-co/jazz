@@ -35,8 +35,8 @@ pub use fanout::FanoutStats;
 #[path = "large_ops.rs"]
 mod large_ops;
 pub use large_ops::{
-    JsonSetEdit, LargeValueStagingPolicy, LargeValueUpdate, LargeValueUpdatePage,
-    LargeValueUpdateSplice, StreamingMutationKind, StreamingValueUpload,
+    JsonSetEdit, LargeValueDeltaSplice, LargeValueStagingPolicy, LargeValueUpdate,
+    LargeValueUpdatePage, LargeValueUpdateSplice, StreamingMutationKind, StreamingValueUpload,
 };
 #[path = "sync.rs"]
 pub(crate) mod sync;
@@ -170,6 +170,10 @@ pub struct SubscriptionOutputRow {
     pub row: CurrentRow,
     pub previous_index: Option<usize>,
     pub index: usize,
+    /// For an updated row, each [`ReadOpts::splices`] column's change from
+    /// the row's previous result, when both versions are still held and
+    /// readable. A column left out changed in a way the reader takes whole.
+    pub splices: Vec<(String, Vec<LargeValueDeltaSplice>)>,
 }
 
 impl std::ops::Deref for SubscriptionOutputRow {
@@ -223,6 +227,9 @@ struct ReadSpec {
     settled_only: bool,
     view: Option<View>,
     cut: Option<Cut>,
+    /// Columns whose changes updated rows carry as splices
+    /// ([`ReadOpts::splices`]).
+    splices: Vec<String>,
 }
 
 impl ReadSpec {
@@ -255,6 +262,7 @@ impl ReadSpec {
             settled_only: inner.client.is_some() && opts.tier == ReadTier::Remote,
             view,
             cut,
+            splices: opts.splices.clone(),
         })
     }
 

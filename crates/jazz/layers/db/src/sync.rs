@@ -6981,6 +6981,7 @@ impl Db {
                     include_deleted,
                     settled_only: strict,
                     view: viewed.view,
+                    splices: Vec::new(),
                 };
                 let rows = inner.run(&prepared, policy, &read)?;
                 let mut images = Vec::new();

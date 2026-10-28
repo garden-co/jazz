@@ -51,6 +51,36 @@ pub struct LargeValueUpdateSplice {
     pub insert: Vec<u8>,
 }
 
+/// One edit of a [`Db::value_delta`]: replace `delete` bytes at `at` with
+/// `insert`. Edits apply in order, each in the coordinates of the value the
+/// earlier ones made. Text edits also carry the same edit in UTF-16 code
+/// units; they are zero for bytes columns.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct LargeValueDeltaSplice {
+    /// Byte offset.
+    pub at: u64,
+    /// Bytes removed.
+    pub delete: u64,
+    /// Bytes inserted, UTF-8 for text.
+    pub insert: Vec<u8>,
+    /// UTF-16 offset (text only).
+    pub at_utf16: u64,
+    /// UTF-16 code units removed (text only).
+    pub delete_utf16: u64,
+}
+
+impl From<lv::ReplaceEdit> for LargeValueDeltaSplice {
+    fn from(edit: lv::ReplaceEdit) -> Self {
+        LargeValueDeltaSplice {
+            at: edit.offset,
+            delete: edit.delete_length,
+            insert: edit.insert_bytes,
+            at_utf16: edit.utf16_offset,
+            delete_utf16: edit.delete_utf16_length,
+        }
+    }
+}
+
 /// An RFC 6901 JSON replacement of an existing member or array element.
 /// Missing parents are never created, so a typo cannot change a document's
 /// shape.
@@ -213,6 +243,101 @@ impl Inner {
             return Err(not_large(table, column));
         }
         self.cell_range(cell.as_ref(), range, utf16)
+    }
+
+    /// `delta(a, b)` (SPEC 19.6) between the values `column` of `row` holds
+    /// in its versions `from` and `to`, for a reader allowed to read both.
+    /// Only the chunks in changed regions are read.
+    pub(crate) fn value_delta(
+        &self,
+        table: &str,
+        row: RowUuid,
+        column: &str,
+        (from, to): (u64, u64),
+        reader: Option<AuthorSubject>,
+    ) -> Result<Vec<LargeValueDeltaSplice>, Error> {
+        let t = self.schema.table(table)?;
+        if !t.branch_by.is_empty() {
+            return Err(unsupported("large-value deltas on branched tables"));
+        }
+        let col = t
+            .column(column)
+            .filter(|c| crate::large::large_capable(c))
+            .ok_or_else(|| not_large(table, column))?;
+        let text = crate::large::kind(col) != lv::LargeValueKind::Bytes;
+        let mut cells = Vec::with_capacity(2);
+        for seq in [from, to] {
+            if let Some(author) = reader
+                && !self.check_version(t, row, &[], seq, author, Operation::Select)?
+            {
+                return Err(Error::new(
+                    ErrorCode::NotObserved,
+                    format!("version {seq} of the row is not readable"),
+                ));
+            }
+            cells.push(self.version_cell(t, row, &col.stored, seq)?);
+        }
+        fn logical<'a>(chunks: &crate::large::Chunks, cell: &'a Sql) -> Result<Logical<'a>, Error> {
+            match cell {
+                Sql::Null => Ok(Logical::Inline(&[][..])),
+                cell => chunks.logical(cell.as_ref()),
+            }
+        }
+        let (a, b) = (
+            logical(&self.chunks, &cells[0])?,
+            logical(&self.chunks, &cells[1])?,
+        );
+        if let (Logical::Chunked(a), Logical::Chunked(b)) = (&a, &b) {
+            let edits = self.chunks.run(|inputs| lv::delta_attempt(a, b, inputs))?;
+            return Ok(edits.into_iter().map(Into::into).collect());
+        }
+        // An inline side: one replace of the whole value.
+        let (delete, delete_utf16) = match &a {
+            Logical::Inline(bytes) => (bytes.len() as u64, utf16_len(bytes, text)?),
+            Logical::Chunked(value) => (value.byte_length, value.utf16_length.unwrap_or(0)),
+        };
+        let insert = match b {
+            Logical::Inline(bytes) => bytes.to_vec(),
+            Logical::Chunked(value) => self.chunks.value_bytes(&value)?,
+        };
+        if delete == 0 && insert.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(vec![LargeValueDeltaSplice {
+            at: 0,
+            delete,
+            insert,
+            at_utf16: 0,
+            delete_utf16,
+        }])
+    }
+
+    /// The stored cell `stored` of `row`'s version `seq`, current or in
+    /// history.
+    fn version_cell(&self, t: &Table, row: RowUuid, stored: &str, seq: u64) -> Result<Sql, Error> {
+        for table in [t.stored.clone(), format!("{}__h", t.stored)] {
+            let sql = format!(
+                "SELECT {} FROM {} WHERE id = ?1 AND _b = ?2 AND _seq = ?3",
+                quote(stored),
+                quote(&table)
+            );
+            let cell: Option<Sql> = self
+                .conn
+                .cached_row(
+                    &sql,
+                    rusqlite::params![row.0.as_bytes().to_vec(), Vec::<u8>::new(), seq as i64],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(storage)?;
+            if let Some(cell) = cell {
+                return Ok(cell);
+            }
+        }
+        Err(Error::new(
+            ErrorCode::NotObserved,
+            format!("version {seq} of the row is not held"),
+        ))
     }
 
     /// `range` of a cell's logical value (UTF-16 code units when `utf16`,
@@ -466,6 +591,24 @@ impl Db {
         self.fetching(|| {
             self.inner()
                 .read_range(table, row, column, range.clone(), false)
+        })
+        .await
+    }
+
+    /// `delta(a, b)` (SPEC 19.6): the edits that turn the value `column` of
+    /// `row` holds in version `from` into its value in version `to`, for a
+    /// reader allowed to read both versions. Only changed regions are read.
+    pub async fn value_delta(
+        &self,
+        table: &str,
+        row: RowUuid,
+        column: &str,
+        from: u64,
+        to: u64,
+    ) -> Result<Vec<LargeValueDeltaSplice>, Error> {
+        self.fetching(|| {
+            let inner = self.inner();
+            inner.value_delta(table, row, column, (from, to), inner.reader())
         })
         .await
     }
@@ -1272,4 +1415,13 @@ impl TxRef<'_> {
 /// Whether `cell` holds a string, JSON or bytes value: inline or chunked.
 fn large_cell(cell: &Sql) -> bool {
     matches!(cell, Sql::Text(_) | Sql::Blob(_) | Sql::Integer(_))
+}
+
+/// The UTF-16 length of inline text `bytes`; zero for bytes columns.
+fn utf16_len(bytes: &[u8], text: bool) -> Result<u64, Error> {
+    if !text {
+        return Ok(0);
+    }
+    let text = std::str::from_utf8(bytes).map_err(|_| query("cell is not text"))?;
+    Ok(text.encode_utf16().count() as u64)
 }

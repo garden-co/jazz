@@ -142,6 +142,10 @@ pub struct ReadOpts {
     /// absent serde field is [`FirstLoad::Deliver`].
     #[serde(default)]
     pub first_load: FirstLoad,
+    /// Large-capable columns whose changes a subscription's updated rows
+    /// also carry as splices from the row's previous result (SPEC 19.12).
+    #[serde(default)]
+    pub splices: Vec<String>,
 }
 
 impl Default for ReadOpts {
@@ -150,6 +154,7 @@ impl Default for ReadOpts {
             tier: ReadTier::LocalFirst,
             read_view: ReadViewSpec::default(),
             first_load: FirstLoad::Deliver,
+            splices: Vec::new(),
         }
     }
 }
@@ -161,6 +166,12 @@ impl ReadOpts {
             tier,
             ..Self::default()
         }
+    }
+
+    /// Deliver `columns`' changes in updated rows as splices too.
+    pub fn with_splices(mut self, columns: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.splices = columns.into_iter().map(Into::into).collect();
+        self
     }
 
     /// Evaluate the query as a live head branch composed over an optional base.

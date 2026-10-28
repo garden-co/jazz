@@ -12,7 +12,9 @@ use json_syntax::StreamingJsonValidator;
 use thiserror::Error;
 
 pub mod chunks;
+mod delta;
 pub mod epoch;
+pub use delta::delta_attempt;
 mod inputs;
 pub use inputs::{AttemptError, ChunkInputs, LoadedChunk};
 

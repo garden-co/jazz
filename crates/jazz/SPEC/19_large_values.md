@@ -519,10 +519,18 @@ reject `applyDiffs` explicitly, as do React Native transactions until its
 foreground codec carries the descriptor.
 
 `Db` exposes `value_delta(table, row, column, from_version, to_version)`,
-returning `delta` (§19.6) as splices in the column's coordinates, for callers
-allowed to read both versions. Subscriptions may opt into receiving a large
-string column's changes as splices from the previous result, so an editor can
-apply remote changes as transactions.
+returning `delta` (§19.6) as splices for callers allowed to read both
+versions: each replaces `delete` bytes at `at` with `insert`, applied in
+order, and text splices carry the same edit in UTF-16 units (`at_utf16`,
+`delete_utf16`). It reads only the changed regions; a version the replica no
+longer holds, or one the reader may not read, fails. Subscriptions opt into
+receiving a large-capable column's changes as splices from the row's previous
+result (`ReadOpts::splices`), so an editor can apply remote changes as
+transactions: each updated row carries the column's splices from the version
+the result showed. When they cannot be computed locally (that version is no
+longer held, or chunks are still to arrive) the row carries none for the
+column, and the reader takes the value whole. The Rust engine API ships
+first; the TypeScript option follows.
 
 Native Rust exposes `Db::insert_streaming_value`: the caller supplies the
 ordinary row cells, the target column and a `std::io::Read`; Jazz derives the

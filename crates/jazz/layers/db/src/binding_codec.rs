@@ -640,6 +640,7 @@ mod tests {
                 row: row.clone(),
                 previous_index: None,
                 index: 0,
+                splices: Vec::new(),
             }],
             &[],
             &[RemovedRow {

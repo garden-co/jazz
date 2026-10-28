@@ -1924,3 +1924,222 @@ fn a_json_pointer_select_reads_its_subtree() {
         "a leading array index reads a prefix: {after} of {total}"
     );
 }
+
+/// `edits` applied in order to `bytes`.
+fn apply_delta(bytes: &[u8], edits: &[jazz::db::LargeValueDeltaSplice]) -> Vec<u8> {
+    let mut out = bytes.to_vec();
+    for edit in edits {
+        let at = edit.at as usize;
+        out.splice(at..at + edit.delete as usize, edit.insert.iter().copied());
+    }
+    out
+}
+
+/// `edits` applied in order to `text` by their UTF-16 coordinates.
+fn apply_delta_utf16(text: &str, edits: &[jazz::db::LargeValueDeltaSplice]) -> String {
+    let mut units: Vec<u16> = text.encode_utf16().collect();
+    for edit in edits {
+        let at = edit.at_utf16 as usize;
+        let insert = std::str::from_utf8(&edit.insert).unwrap();
+        units.splice(at..at + edit.delete_utf16 as usize, insert.encode_utf16());
+    }
+    String::from_utf16(&units).unwrap()
+}
+
+#[test]
+fn value_delta_turns_one_version_into_another() {
+    let db = open(0, AuthorSubject::SYSTEM);
+    let v1_text: String = text(11, LARGE * 8)
+        .chars()
+        .enumerate()
+        .map(|(n, c)| if n % 97 == 0 { '😀' } else { c })
+        .collect();
+    let v1 = block_on(
+        db.insert(
+            "docs",
+            [
+                ("body".to_owned(), Value::String(v1_text.clone())),
+                ("blob".to_owned(), Value::Bytes(Vec::new())),
+            ]
+            .into(),
+            InsertOptions {
+                row_id: Some(row(1)),
+                ..Default::default()
+            },
+        ),
+    )
+    .unwrap()
+    .mergeable_tx_id();
+    let at = v1_text.char_indices().nth(1_000_000).unwrap().0 as u64;
+    let v2 = block_on(db.splice_value(
+        "docs",
+        row(1),
+        "body",
+        jazz::db::LargeValueUpdateSplice {
+            at,
+            delete: 4,
+            insert: "spliced é".as_bytes().to_vec(),
+        },
+        Default::default(),
+    ))
+    .unwrap()
+    .mergeable_tx_id();
+    let v3 = block_on(db.append_value("docs", row(1), "body", " and appended".into()))
+        .unwrap()
+        .mergeable_tx_id();
+    let mut v3_text = v1_text.clone();
+    v3_text.replace_range(at as usize..at as usize + 4, "spliced é");
+    v3_text.push_str(" and appended");
+    let forward = block_on(db.value_delta("docs", row(1), "body", v1, v3)).unwrap();
+    assert_eq!(forward.len(), 2, "{forward:?}");
+    assert_eq!(
+        apply_delta(v1_text.as_bytes(), &forward),
+        v3_text.as_bytes()
+    );
+    assert_eq!(apply_delta_utf16(&v1_text, &forward), v3_text);
+    let back = block_on(db.value_delta("docs", row(1), "body", v3, v2)).unwrap();
+    let mut v2_text = v3_text.clone();
+    v2_text.truncate(v2_text.len() - " and appended".len());
+    assert_eq!(apply_delta_utf16(&v3_text, &back), v2_text);
+    // A whole new value with a small change is a small delta.
+    let mut v4_text = v3_text.clone();
+    let mid = v4_text.char_indices().nth(500_000).unwrap().0;
+    v4_text.replace_range(mid..mid, "a whole new value ");
+    let v4 = block_on(db.update(
+        "docs",
+        row(1),
+        [("body".to_owned(), Value::String(v4_text.clone()))].into(),
+        Default::default(),
+    ))
+    .unwrap()
+    .mergeable_tx_id();
+    let rewritten = block_on(db.value_delta("docs", row(1), "body", v3, v4)).unwrap();
+    assert_eq!(apply_delta_utf16(&v3_text, &rewritten), v4_text);
+    let moved: usize = rewritten
+        .iter()
+        .map(|edit| edit.delete as usize + edit.insert.len())
+        .sum();
+    assert!(moved < v4_text.len() / 10, "{moved} of {}", v4_text.len());
+    // An inline side is one whole replace.
+    let v5 = block_on(db.update(
+        "docs",
+        row(1),
+        [("body".to_owned(), Value::String("short".into()))].into(),
+        Default::default(),
+    ))
+    .unwrap()
+    .mergeable_tx_id();
+    let to_inline = block_on(db.value_delta("docs", row(1), "body", v4, v5)).unwrap();
+    assert_eq!(apply_delta_utf16(&v4_text, &to_inline), "short");
+    let from_inline = block_on(db.value_delta("docs", row(1), "body", v5, v1)).unwrap();
+    assert_eq!(apply_delta_utf16("short", &from_inline), v1_text);
+}
+
+#[test]
+fn value_delta_needs_both_versions_readable() {
+    let db = open(1, user(1));
+    let handle = block_on(db.insert(
+        "drafts",
+        [("body".to_owned(), Value::String(text(12, LARGE * 2)))].into(),
+        InsertOptions {
+            row_id: Some(row(3)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    let seq = handle.mergeable_tx_id();
+    let error = block_on(db.value_delta("drafts", row(3), "body", seq, seq)).unwrap_err();
+    assert!(error.to_string().contains("not readable"), "{error}");
+    let system = open(0, AuthorSubject::SYSTEM);
+    let missing = block_on(system.value_delta("docs", row(4), "body", 1, 2)).unwrap_err();
+    assert!(missing.to_string().contains("not held"), "{missing}");
+}
+
+/// The `column` splices of every updated row in the events `stream` holds.
+fn splices_of(
+    stream: &mut SubscriptionStream,
+    column: &str,
+) -> Vec<Option<Vec<jazz::db::LargeValueDeltaSplice>>> {
+    let mut out = Vec::new();
+    while let Some(event) = stream.try_next_event() {
+        if let jazz::db::SubscriptionEvent::Delta { updated, .. } = event {
+            for row in updated {
+                out.push(
+                    row.splices
+                        .iter()
+                        .find(|(name, _)| name == column)
+                        .map(|(_, splices)| splices.clone()),
+                );
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn subscriptions_take_a_columns_changes_as_splices() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let alice = open(1, user(1));
+    connect(&server, &alice, user(1));
+    let mut body = text(13, LARGE * 6);
+    insert(
+        &server,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String(body.clone())),
+            ("blob", Value::Bytes(Vec::new())),
+        ],
+    );
+    let query = Query::from("docs").select(["body"]);
+    let mut stream = block_on(alice.subscribe(
+        &alice.prepare_query(&query).unwrap(),
+        ReadOpts::default().with_splices(["body"]),
+    ))
+    .unwrap();
+    pump(&server, &[&alice]);
+    no_rejections(&mut stream);
+    // A remote edit arrives with its splices from the previous result.
+    block_on(server.splice_value(
+        "docs",
+        row(1),
+        "body",
+        jazz::db::LargeValueUpdateSplice {
+            at: 1_000_000,
+            delete: 3,
+            insert: "remote é".as_bytes().to_vec(),
+        },
+        Default::default(),
+    ))
+    .unwrap();
+    pump(&server, &[&alice]);
+    let next = {
+        let mut next = body.clone();
+        next.replace_range(1_000_000..1_000_003, "remote é");
+        next
+    };
+    let remote = splices_of(&mut stream, "body");
+    assert_eq!(remote.len(), 1, "{remote:?}");
+    let splices = remote[0].clone().expect("the edit came as splices");
+    assert_eq!(splices.len(), 1);
+    assert_eq!(apply_delta_utf16(&body, &splices), next);
+    body = next;
+    // So does a local one, and the settlement that follows it.
+    block_on(alice.append_value("docs", row(1), "body", " local".into())).unwrap();
+    block_on(alice.tick()).unwrap();
+    let local = splices_of(&mut stream, "body");
+    assert_eq!(local.len(), 1, "{local:?}");
+    let splices = local[0].clone().expect("the local edit came as splices");
+    let appended = format!("{body} local");
+    assert_eq!(apply_delta_utf16(&body, &splices), appended);
+    pump(&server, &[&alice]);
+    for splices in splices_of(&mut stream, "body").into_iter().flatten() {
+        assert_eq!(apply_delta_utf16(&appended, &splices), appended);
+    }
+    // Only large-capable columns can be asked for.
+    let refused = block_on(alice.subscribe(
+        &alice.prepare_query(&query).unwrap(),
+        ReadOpts::default().with_splices(["id"]),
+    ));
+    assert!(refused.is_err());
+}
