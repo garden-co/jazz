@@ -69,6 +69,8 @@ mod local_first_first_load_gate;
 mod local_first_server_wait;
 #[path = "../maybe_conflicting.rs"]
 mod maybe_conflicting;
+#[path = "../mutation_admission.rs"]
+mod mutation_admission;
 #[path = "../order_by_unselected_column.rs"]
 mod order_by_unselected_column;
 #[path = "../parameterized_subscription_routing.rs"]
@@ -121,6 +123,8 @@ mod snapshots;
 mod storage_corpus;
 #[path = "../storage_errors.rs"]
 mod storage_errors;
+#[path = "../streaming_upload_ownership.rs"]
+mod streaming_upload_ownership;
 #[path = "../structured_result_tree.rs"]
 mod structured_result_tree;
 #[path = "../sync_aggregates.rs"]
