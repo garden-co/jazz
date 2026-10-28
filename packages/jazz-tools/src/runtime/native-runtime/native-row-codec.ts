@@ -69,6 +69,16 @@ export type NativeSubscriptionDelta = {
   updatedPreviousIndices: number[];
   updatedIndices: number[];
   removedIndices: number[];
+  /** Per updated row: each opted-in column's splices from its previous result. */
+  updatedSplices: Array<Array<{ column: string; splices: NativeSplice[] }>>;
+};
+/** One edit of a large value: bytes, and for text the same edit in UTF-16 units. */
+export type NativeSplice = {
+  at: number;
+  delete: number;
+  insert: Uint8Array;
+  atUtf16: number;
+  deleteUtf16: number;
 };
 export type NativeRelationSubscriptionSnapshot = {
   rootCount: number;
@@ -170,6 +180,18 @@ export function readNativeSubscriptionDelta(reader: PostcardReaderLike): NativeS
     updatedPreviousIndices: reader.readVec((indexReader) => indexReader.u64()),
     updatedIndices: reader.readVec((indexReader) => indexReader.u64()),
     removedIndices: reader.readVec((indexReader) => indexReader.u64()),
+    updatedSplices: reader.readVec((rowReader) =>
+      rowReader.readVec((columnReader) => ({
+        column: columnReader.string(),
+        splices: columnReader.readVec((spliceReader) => ({
+          at: spliceReader.u64(),
+          delete: spliceReader.u64(),
+          insert: spliceReader.bytes(),
+          atUtf16: spliceReader.u64(),
+          deleteUtf16: spliceReader.u64(),
+        })),
+      })),
+    ),
   };
   const rowCount = (batches: NativeRowBatch[]) =>
     batches.reduce((count, batch) => count + batch.rows.length, 0);
@@ -180,7 +202,8 @@ export function readNativeSubscriptionDelta(reader: PostcardReaderLike): NativeS
     delta.addedIndices.length !== rowCount(delta.added) ||
     delta.updatedPreviousIndices.length !== rowCount(delta.updated) ||
     delta.updatedIndices.length !== rowCount(delta.updated) ||
-    delta.removedIndices.length !== delta.removed.length
+    delta.removedIndices.length !== delta.removed.length ||
+    delta.updatedSplices.length !== rowCount(delta.updated)
   ) {
     throw new Error("subscription occurrence sidecar length mismatch");
   }

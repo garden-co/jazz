@@ -999,3 +999,178 @@ fn a_row_a_newer_version_inserts_gives_a_dropped_column_its_backwards_default() 
         "an update keeps the stored value; an insert takes the backwards default"
     );
 }
+
+/// Nico's review, point 6: a replica stores rows as its upstream does and
+/// learns each version's names from it. A client store reopened under a
+/// newer version that renamed a column reads the rows it cached by the new
+/// name, offline (it learned the version's names while connected) and
+/// after reconnecting.
+#[test]
+fn a_client_store_upgraded_across_a_rename_reads_its_cached_rows_by_the_new_name() {
+    let server = server(v1(), vec![(v2(), rename_title())]);
+    seed(&server, "todos", 1, &[("name", text("from server"))]);
+    let path = scratch("upgrade-rename");
+    {
+        let client = block_on(Db::open_at(
+            config(v1(), 1, user(1)),
+            &path,
+            FileOptions::default(),
+        ))
+        .unwrap();
+        let (c, s) = pipe();
+        let _link = block_on(client.connect_upstream(c));
+        server.accept_subscriber(s, user(1));
+        let q = client.prepare_query(&Query::from("todos")).unwrap();
+        let _stream = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
+        pump(&server, &[&client]);
+        assert_eq!(column(&client, "title"), [Some(text("from server"))]);
+    }
+    // The app ships v2 (title renamed to name); the store reopens under it.
+    let client = block_on(Db::open_at(
+        config(v2(), 1, user(1)),
+        &path,
+        FileOptions::default(),
+    ))
+    .unwrap();
+    assert_eq!(
+        column(&client, "name"),
+        [Some(text("from server"))],
+        "offline, by the names the upstream gave v2"
+    );
+    let (c, s) = pipe();
+    let _link = block_on(client.connect_upstream(c));
+    server.accept_subscriber(s, user(1));
+    let q = client.prepare_query(&Query::from("todos")).unwrap();
+    let _stream = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
+    pump(&server, &[&client]);
+    assert_eq!(column(&client, "name"), [Some(text("from server"))]);
+}
+
+/// A client opened under a version it never learned the upstream's names
+/// for names its renamed column on its own; once connected it takes the
+/// upstream's names, and its pending write, staged under the version
+/// before, uploads under that version and reads by the new name.
+#[test]
+fn a_pending_write_staged_before_a_client_upgrade_uploads_and_reads_by_the_new_name() {
+    let server = server(v1(), vec![(v2(), rename_title())]);
+    let path = scratch("upgrade-pending");
+    {
+        let client = block_on(Db::open_at(
+            config(v1(), 1, user(1)),
+            &path,
+            FileOptions::default(),
+        ))
+        .unwrap();
+        let (c, _s) = pipe();
+        let _link = block_on(client.connect_upstream(c));
+        insert(&client, "todos", 7, "title", "offline v1 write");
+        block_on(client.tick()).unwrap();
+    }
+    let client = block_on(Db::open_at(
+        config(v2(), 1, user(1)),
+        &path,
+        FileOptions::default(),
+    ))
+    .unwrap();
+    let (c, s) = pipe();
+    let _link = block_on(client.connect_upstream(c));
+    server.accept_subscriber(s, user(1));
+    pump(&server, &[&client]);
+    assert!(client.take_upstream_rejections().is_empty());
+    assert_eq!(read(&server, "todos", "name"), [text("offline v1 write")]);
+    assert_eq!(column(&client, "name"), [Some(text("offline v1 write"))]);
+}
+
+fn column(db: &Db, name: &str) -> Vec<Option<Value>> {
+    let prepared = db.prepare_query(&Query::from("todos")).unwrap();
+    block_on(db.all(&prepared, local()))
+        .unwrap()
+        .iter()
+        .map(|row| {
+            row.cells()
+                .find(|(n, _)| *n == name)
+                .and_then(|(_, v)| v.cloned())
+        })
+        .collect()
+}
+
+/// A worker opened under v2 before it learned the authority's names; a
+/// tab connects to it first; then the worker connects and mirrors the
+/// authority's catalogue. The tab is sent the worker's new names, so it
+/// still reads `name`.
+#[test]
+fn a_tab_behind_a_worker_reads_a_renamed_column_after_the_worker_mirrors() {
+    use jazz::db::RemoteLinkHint;
+    let server = server(v1(), vec![(v2(), rename_title())]);
+    seed(&server, "todos", 1, &[("name", text("from server"))]);
+    let worker = block_on(Db::open(config(v2(), 0xa0, user(0xa0)))).unwrap();
+    let tab = block_on(Db::open(config(v2(), 0xa1, user(0xa0)))).unwrap();
+    tab.set_non_durable_client();
+    tab.set_remote_link_hint(RemoteLinkHint::Live);
+    let (tc, ts) = pipe();
+    let _tab_link = block_on(tab.connect_upstream(tc));
+    worker.accept_subscriber(ts, user(0xa0));
+    pump(&worker, &[&tab]);
+
+    let (wc, ws) = pipe();
+    let _worker_link = block_on(worker.connect_upstream(wc));
+    server.accept_subscriber(ws, user(0xa0));
+    worker.set_remote_link_hint(RemoteLinkHint::Live);
+    let q = tab.prepare_query(&Query::from("todos")).unwrap();
+    let _stream = block_on(tab.subscribe(&q, ReadOpts::default())).unwrap();
+    for _ in 0..6 {
+        block_on(tab.tick()).unwrap();
+        block_on(worker.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+        block_on(worker.tick()).unwrap();
+        block_on(tab.tick()).unwrap();
+    }
+    assert_eq!(
+        column(&worker, "name"),
+        [Some(text("from server"))],
+        "worker"
+    );
+    assert_eq!(column(&tab, "name"), [Some(text("from server"))], "tab");
+}
+
+/// A store that keeps a table under a name the upstream stores another
+/// table as cannot mirror it yet (their rows would have to merge): it
+/// stops syncing with that upstream and says why on its remote reads,
+/// while local reads keep being served and nothing is half renamed.
+#[test]
+fn a_catalogue_the_store_cannot_mirror_refuses_remote_reads_and_keeps_local_ones() {
+    let server = server(v1(), vec![(v2(), rename_title()), (v3(), rename_todos())]);
+    seed(&server, "tasks", 1, &[("name", text("from server"))]);
+    let path = scratch("unmirrorable");
+    {
+        // Offline under v1, then v3 without the lenses between: `tasks` is
+        // stored here as itself, beside v1's `todos`.
+        let client = open_at(v1(), &path);
+        insert(&client, "todos", 2, "title", "v1 row");
+    }
+    let client = open_at(v3(), &path);
+    insert(&client, "tasks", 3, "name", "local task");
+    let (c, s) = pipe();
+    let _link = block_on(client.connect_upstream(c));
+    server.accept_subscriber(s, AuthorSubject::SYSTEM);
+    let q = client.prepare_query(&Query::from("tasks")).unwrap();
+    let mut stream = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
+    pump(&server, &[&client]);
+    let mut rejected = None;
+    while let Some(event) = stream.try_next_event() {
+        if let jazz::db::SubscriptionEvent::Rejected { reason } = event {
+            rejected = Some(reason);
+        }
+    }
+    let reason = rejected.expect("the remote read says why");
+    assert!(reason.contains("not supported"), "{reason}");
+    assert_eq!(
+        read_query(&client, Query::from("tasks"), "name", local()),
+        [text("local task")]
+    );
+    let stored = stored(&path);
+    assert!(
+        stored.contains_key("tasks") && stored.contains_key("todos"),
+        "{stored:?}"
+    );
+}
