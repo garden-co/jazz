@@ -521,10 +521,10 @@ knows before it forwards the commit: an upstream seq stays; its own
 unsettled version (one of its own commits, pending or settled), the
 session's `Own` predecessor and the session's own `Commit` all become
 `Commit { relay node, tx }` of the relay's own commit that carries them, or
-the upstream seq that commit already landed at, so a chain of relays needs
-no shared names. A version in the relay's local range that is no commit of
-its own (an upstream relay's unsettled version, or one from before the
-relay's store was reset) cannot be named upstream: the write counts as built
+the upstream seq that commit already landed at, so Core never sees a
+relay's local seqs. A version in the relay's local range that is no commit of
+its own (one from before the relay's store was reset) cannot be named
+upstream: the write counts as built
 on the newest version of the row the relay holds accepted upstream, so it may
 be flagged over a version its writer saw but never the other way round. A
 base on a commit the relay rejected or never received rejects the write there

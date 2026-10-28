@@ -91,6 +91,8 @@ impl Clone for JazzClient {
 
 struct Shared {
     db: Db,
+    /// The app, named in slow-query reports.
+    app: String,
     identity: DbIdentity,
     schema: Schema,
     /// Asks the driver for a tick.
@@ -207,6 +209,9 @@ impl Shared {
     async fn tick(&self) {
         if let Err(error) = self.db.tick().await {
             tracing::warn!(%error, "jazz client tick failed");
+        }
+        for line in self.db.take_slow_query_report(Some(&self.app)) {
+            tracing::warn!(app = %self.app, "{line}");
         }
         self.forward();
         self.progress.send_modify(|generation| *generation += 1);
@@ -526,6 +531,7 @@ impl JazzClient {
         let (progress, _) = watch::channel(0);
         let shared = Rc::new(Shared {
             db,
+            app: context.app_id.to_string(),
             identity,
             schema: context.schema.clone(),
             work: work.clone(),
@@ -1356,6 +1362,13 @@ impl JazzClient {
     /// Get the current schema.
     pub fn schema(&self) -> Result<Schema> {
         Ok(self.shared.schema.clone())
+    }
+
+    /// Log query shapes whose runs take at least `threshold` as `tracing`
+    /// warnings, one line per shape, at most every 10 s (`None` turns the log
+    /// off). Defaults to [`crate::slow::DEFAULT_SLOW_QUERY_THRESHOLD`].
+    pub fn set_slow_query_threshold(&self, threshold: Option<Duration>) {
+        self.shared.db.set_slow_query_threshold(threshold);
     }
 
     /// Check if connected to server.

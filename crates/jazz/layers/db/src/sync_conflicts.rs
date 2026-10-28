@@ -269,7 +269,7 @@ impl Inner {
     /// the commit carrying one of the session's) is named as this relay's.
     /// A base on a commit this relay rejected, or never received, rejects
     /// the write. A version in this relay's local range that is not one of
-    /// its own commits (an upstream relay's, or one from before a reset)
+    /// its own commits (one from before a reset)
     /// cannot be named upstream: the write counts as built on the newest
     /// version of the row this relay holds accepted, so it may be flagged
     /// over a version its writer saw, never the other way round.

@@ -1611,6 +1611,14 @@ fn foreground_command(
                 events_json: serde_json::Value::Array(events).to_string(),
             }
         }
+        Request::TakeSlowQueryReport { app } => Response::SlowQueryReport {
+            lines_json: serde_json::Value::from(binding.take_slow_query_report(app.as_deref()))
+                .to_string(),
+        },
+        Request::SetSlowQueryThresholdMs { ms } => {
+            binding.set_slow_query_threshold_ms(ms as f64)?;
+            Response::SlowQueryThresholdSet
+        }
         Request::BeginStreamingMutation {
             mutation,
             table,

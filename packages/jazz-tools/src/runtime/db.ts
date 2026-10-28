@@ -161,6 +161,13 @@ export type DbConfig = {
   telemetryCollectorUrl?: string;
   /** Enable runtime tracing for DevTools-only diagnostics. */
   devMode?: boolean;
+  /**
+   * Slow-query log: queries whose runs take at least this many milliseconds
+   * are reported with `console.warn`, one line per query shape with its plan
+   * and the index that would likely make it fast (default 50; 0 turns the
+   * log off).
+   */
+  slowQueryThresholdMs?: number;
 } & (
   | {
       /** Local-first auth via a local seed. */

@@ -649,8 +649,8 @@ transport:
   terminal fate. A relay or local receiver answers with its local
   acknowledgement once the write is durable there, so its clients keep reading
   while it is offline; its own upstream link then puts that write ahead of the
-  requests it forwards. Each hop guarantees its own order, so the chain gives
-  read-your-writes end to end.
+  requests it forwards. Each hop (client to relay, relay to Core) guarantees
+  its own order, so the two give read-your-writes end to end.
 
 What this does not cover: a write still held on the client (for example behind
 its large-value upload) has not been sent, so no barrier names it. A one-shot

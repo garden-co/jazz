@@ -82,9 +82,8 @@ pub const LOCAL_BASE: u64 = 1 << 52;
 /// ships to it for versions it has not settled). A relay would need 2^51
 /// local commits to reach it. Still below 2^53.
 ///
-/// Two tiers only: a durable replica behind a durable relay numbers from
-/// `LOCAL_BASE` like the relay, so relaying to one is not supported (no
-/// shipped topology has it).
+/// One relay tier only (SPEC 9 §9.5): a durable replica behind a relay would
+/// number from `LOCAL_BASE` like the relay, so that is not supported.
 pub const NON_DURABLE_BASE: u64 = LOCAL_BASE + (1 << 51);
 
 /// A message transport between a client and its server.
@@ -7749,7 +7748,6 @@ fn commit_who(
     }
 }
 
-/// Whether `identity` may read a row of stored table `table`.
 /// [`readable`] for the version of the row at `seq`.
 fn readable_version(
     inner: &Inner,
@@ -7767,6 +7765,7 @@ fn readable_version(
     inner.check_version(table, row, key, seq, author, Operation::Select)
 }
 
+/// Whether `identity` may read a row of stored table `table`.
 fn readable(
     inner: &Inner,
     table: &str,
