@@ -32,6 +32,8 @@ struct GroupKey {
     renames: String,
     sql: String,
     params: String,
+    /// Identical SQL can expose different aliases or projected value types.
+    projection: String,
     /// Set only when the SQL depends on the identity's session (array
     /// relations, read as the identity, always may).
     identity: Option<String>,
@@ -275,6 +277,7 @@ impl Inner {
             renames: renames(prepared.schema.as_ref().unwrap_or(&self.owner)),
             sql: compiled.sql.clone(),
             params: format!("{:?}", compiled.params),
+            projection: format!("{:?}", compiled.projection),
             identity: (session_used || !prepared.query.array_subqueries.is_empty())
                 .then(|| format!("{identity:?}")),
             relations: format!("{:?}", prepared.query.array_subqueries),

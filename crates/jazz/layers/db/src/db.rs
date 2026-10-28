@@ -44,6 +44,7 @@ pub use large_ops::{
     JsonSetEdit, LargeValueStagingPolicy, LargeValueUpdate, LargeValueUpdatePage,
     LargeValueUpdateSplice, StagedStreamingValue, StreamingMutationKind, StreamingValueUpload,
 };
+pub(crate) mod relation;
 #[path = "sync.rs"]
 pub(crate) mod sync;
 #[path = "transaction_reads.rs"]
@@ -772,84 +773,7 @@ fn update_target_not_loaded(operation: &str, table: &str, row: RowUuid) -> Error
     )
 }
 
-/// A relation facade query (hopTo, gather, match), as clients send it: the
-/// ordinary query it stands for, the way Jazz's validation normalizes it.
-/// A union stays a relation query ([`union_plan`] reads its arms when it
-/// compiles). Projections that rename or narrow the output are not
-/// supported yet. `None` when the query is not a relation query.
-fn normalize_relation(query: &Query, schema: &Schema) -> Result<Option<Query>, Error> {
-    use crate::query::{RelationProjectExpr, RelationRowIdRef};
-    let Some(relation) = &query.relation else {
-        return Ok(None);
-    };
-    let not_yet = |what: &str| crate::values::unsupported(what.to_owned());
-    let has_ordinary_clauses = !query.filters.is_empty()
-        || !query.joins.is_empty()
-        || query.flat_join.is_some()
-        || !query.policy_branches.is_empty()
-        || !query.reachable.is_empty()
-        || !query.inherits.is_empty()
-        || !query.includes.is_empty()
-        || !query.order_by.is_empty()
-        || query.aggregate.is_some()
-        || query.limit.is_some()
-        || query.offset != 0;
-    if has_ordinary_clauses {
-        return Err(crate::values::query_error(
-            "relation query cannot be combined with ordinary query clauses",
-        ));
-    }
-    if union_plan(query, schema)?.is_some() {
-        if query.select.is_some() || !query.array_subqueries.is_empty() {
-            return Err(not_yet("selections or relations on union queries"));
-        }
-        return Ok(Some(query.clone()));
-    }
-    let relation_error = |e: crate::query::QueryError| crate::values::query_error(e.to_string());
-    let mut resolved = crate::query::relation_query_to_query(relation).map_err(relation_error)?;
-    if resolved.table != query.table {
-        return Err(crate::values::query_error(
-            "relation query output table does not match its Query envelope",
-        ));
-    }
-    if let Some(columns) =
-        crate::query::relation_output_projection_if_present(relation).map_err(relation_error)?
-    {
-        let (scope, _) =
-            crate::query::relation_output_projection(relation).map_err(relation_error)?;
-        let table = schema.table(&resolved.table)?;
-        let mut projected = BTreeSet::new();
-        let identity = columns.iter().all(|column| {
-            let same = match &column.expr {
-                RelationProjectExpr::RowId(RelationRowIdRef::Current) => column.alias == "id",
-                RelationProjectExpr::Column(reference) => {
-                    reference.scope.as_deref() == Some(scope.as_str())
-                        && reference.column == column.alias
-                }
-                RelationProjectExpr::RowId(_) => false,
-            };
-            if same && column.alias != "id" {
-                projected.insert(column.alias.as_str());
-            }
-            same
-        });
-        let full = identity
-            && projected.len() == table.columns.len()
-            && table
-                .columns
-                .iter()
-                .all(|column| projected.contains(column.name.as_str()));
-        if !full {
-            return Err(not_yet(
-                "relation projections that rename or narrow the output columns",
-            ));
-        }
-    }
-    resolved.array_subqueries = query.array_subqueries.clone();
-    resolved.select = query.select.clone();
-    resolved.relation = None;
-    Ok(Some(resolved))
-}
+pub(super) use relation::normalize as normalize_relation;
 
 /// A public `UNION ALL`: each arm, by label, as the ordinary query it
 /// stands for, and the order and window over the whole union. Every arm
@@ -858,9 +782,6 @@ fn normalize_relation(query: &Query, schema: &Schema) -> Result<Option<Query>, E
 /// arm.
 pub(crate) struct UnionPlan {
     pub arms: Vec<(String, Query)>,
-    pub order_by: Vec<crate::query::OrderBy>,
-    pub offset: usize,
-    pub limit: Option<usize>,
 }
 
 /// The union a relation query stands for, or `None` when it is not one.
@@ -888,15 +809,11 @@ pub(crate) fn union_plan(query: &Query, schema: &Schema) -> Result<Option<UnionP
                 "union arm labels must be 1..=4096 bytes, NUL-free, and unique",
             ));
         }
-        if crate::query::relation_union_parts(&arm.input).is_some() {
-            return Err(crate::values::unsupported("unions nested in union arms"));
-        }
         let mut envelope = Query::from(query.table.as_str());
         envelope.relation = Some(crate::query::RelationQuery { rel: arm.input });
-        let resolved = normalize_relation(&envelope, schema)?.expect("a relation query");
+        let resolved = normalize_relation(&envelope, schema)?.unwrap_or(envelope);
         arms.push((arm.label, resolved));
     }
-    let mut order_by = Vec::new();
     for term in parts.order_by.unwrap_or_default() {
         if term
             .column
@@ -908,17 +825,8 @@ pub(crate) fn union_plan(query: &Query, schema: &Schema) -> Result<Option<UnionP
                 "union order_by must be scoped to the union output table",
             ));
         }
-        order_by.push(crate::query::OrderBy {
-            column: term.column.column,
-            direction: term.direction,
-        });
     }
-    Ok(Some(UnionPlan {
-        arms,
-        order_by,
-        offset: parts.offset.unwrap_or(0),
-        limit: parts.limit,
-    }))
+    Ok(Some(UnionPlan { arms }))
 }
 
 /// A union read with its window widened to start at its first row (limit

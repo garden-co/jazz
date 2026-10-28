@@ -1468,6 +1468,8 @@ pub(crate) struct Session {
     /// Per client subscription: its queue, its group, whether it is
     /// windowed, and whether its opening's row ids were sent.
     subs: BTreeMap<u64, (fanout::Queue, Weak<RefCell<fanout::Group>>, bool, bool)>,
+    /// Hidden bounded predecessor results, retired with their outer request.
+    prefix_subs: BTreeMap<u64, Vec<(fanout::Queue, Weak<RefCell<fanout::Group>>)>>,
     outbox: Vec<SyncMessage>,
     /// Evictions answering a `Hold`: they describe the state the client
     /// declared, so they go out before any row this tick ships (a resumed
@@ -1549,6 +1551,7 @@ impl Session {
             identity,
             claims: None,
             subs: BTreeMap::new(),
+            prefix_subs: BTreeMap::new(),
             outbox: Vec::new(),
             stale: Vec::new(),
             touched: BTreeSet::new(),
@@ -1579,7 +1582,11 @@ impl Session {
     /// subscriptions it relayed, for the caller to release.
     #[must_use]
     fn close(&mut self, dropped: &std::cell::Cell<usize>) -> ReleasedReads {
-        dropped.set(dropped.get() + self.subs.len());
+        dropped.set(
+            dropped.get()
+                + self.subs.len()
+                + self.prefix_subs.values().map(Vec::len).sum::<usize>(),
+        );
         let relayed = std::mem::take(&mut self.relayed);
         let fetches = self
             .forwarded_catalogue
@@ -1607,6 +1614,11 @@ impl Session {
                 .subs
                 .values()
                 .all(|(queue, ..)| queue.borrow().is_empty())
+            && self
+                .prefix_subs
+                .values()
+                .flatten()
+                .all(|(queue, _)| queue.borrow().is_empty())
     }
 }
 
@@ -1680,6 +1692,9 @@ fn gather_shaped(query: &Query, via: &crate::query::ReachableVia) -> bool {
 /// an aggregate its input rows (its filters and traversals, every column,
 /// no window), which the client aggregates as it would local rows.
 pub(crate) fn remote_query(query: &Query) -> std::borrow::Cow<'_, Query> {
+    if let std::borrow::Cow::Owned(input) = crate::db::relation::input(query) {
+        return std::borrow::Cow::Owned(remote_query(&input).into_owned());
+    }
     if let Some(prefix) = crate::db::union_prefix(query) {
         return std::borrow::Cow::Owned(prefix);
     }
@@ -3734,9 +3749,12 @@ impl Db {
         listed: &[[u8; 16]],
         through: u64,
     ) -> Result<(), Error> {
-        // A history read lists versions and a flat join tuples, not the
-        // rows a replica caches.
-        if history_source_table(&query.table).is_some() || query.flat_join.is_some() {
+        // History and flat joins list versions/tuples; UNION lists arm
+        // occurrences. None of these receipts can evict ordinary cached rows.
+        if history_source_table(&query.table).is_some()
+            || query.flat_join.is_some()
+            || crate::db::relation::is_union(&query)
+        {
             return Ok(());
         }
         let listed: HashSet<[u8; 16]> = listed.iter().copied().collect();
@@ -4066,6 +4084,7 @@ impl Db {
     /// referenced row, gathers seeded by a claim, multi-hop includes) would
     /// see a partial replica, so they are refused explicitly.
     pub(crate) fn remote_shape(&self, query: &Query) -> Result<(), Error> {
+        crate::db::relation::predecessor_queries(query)?;
         let schema = self.inner().schema.clone();
         if let Some(plan) = crate::db::union_plan(query, &schema)? {
             return plan
@@ -5845,15 +5864,27 @@ impl Db {
             // Seqs of shipped history versions: their origins go first.
             let mut history_seqs = BTreeSet::new();
             for (id, queue, group, list) in subs {
-                let events: Vec<SubscriptionEvent> = queue.borrow_mut().drain(..).collect();
+                let mut events: Vec<SubscriptionEvent> = queue.borrow_mut().drain(..).collect();
+                let mut ready = group
+                    .upgrade()
+                    .is_some_and(|group| !group.borrow().awaiting());
+                if let Some(prefixes) = inner.sessions[index].prefix_subs.get(&id) {
+                    for (queue, prefix) in prefixes {
+                        ready &= prefix
+                            .upgrade()
+                            .is_some_and(|group| !group.borrow().awaiting());
+                        events.extend(queue.borrow_mut().drain(..));
+                    }
+                }
                 if events.is_empty() {
                     continue;
                 }
                 // A relay's result settles once its upstream answered.
-                let answered = events
-                    .iter()
-                    .any(|event| matches!(event, SubscriptionEvent::Delta { settled: true, .. }));
-                let global = events.iter().any(|event| {
+                let answered = ready
+                    && events.iter().any(|event| {
+                        matches!(event, SubscriptionEvent::Delta { settled: true, .. })
+                    });
+                let global = ready && events.iter().any(|event| {
                     matches!(event, SubscriptionEvent::Delta { settled: true, tier, .. } if *tier == DurabilityTier::Global)
                 });
                 let first = images.len();
@@ -6257,6 +6288,15 @@ impl Db {
                 inner.session_policy(index)
             };
             let db = self.session_db(index);
+            let prefixes = crate::db::relation::predecessor_queries(&wait.prepared.query)?
+                .into_iter()
+                .map(|query| {
+                    let mut prefix =
+                        db.prepare_query_bound(&query, wait.prepared.binding.clone())?;
+                    prefix.request_claims = wait.prepared.request_claims.clone();
+                    Ok(prefix)
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
             let mut inner = db.inner();
             let authority = inner.authority;
             let (queue, group) = inner.subscribe_member(
@@ -6268,11 +6308,36 @@ impl Db {
                 },
                 SettledBy::Always(authority),
             )?;
+            let mut replacement = Vec::new();
+            for prefix in &prefixes {
+                match inner.subscribe_member(
+                    prefix,
+                    policy,
+                    ReadSpec {
+                        include_deleted: wait.include_deleted,
+                        ..ReadSpec::default()
+                    },
+                    SettledBy::Always(authority),
+                ) {
+                    Ok(member) => replacement.push(member),
+                    Err(error) => {
+                        inner
+                            .fan
+                            .dropped
+                            .set(inner.fan.dropped.get() + 1 + replacement.len());
+                        return Err(error);
+                    }
+                }
+            }
             let session = &mut inner.sessions[index];
             if let Some((_, _, windowed, _)) = session.subs.remove(&id) {
                 session.subs.insert(id, (queue, group, windowed, false));
+                let old_prefixes = session
+                    .prefix_subs
+                    .insert(id, replacement)
+                    .map_or(0, |prefixes| prefixes.len());
                 let dropped = inner.fan.dropped.clone();
-                dropped.set(dropped.get() + 1);
+                dropped.set(dropped.get() + 1 + old_prefixes);
             }
         }
         Ok(())
@@ -6428,6 +6493,13 @@ impl Db {
             } => {
                 let local = tier == ReadTier::LocalOnly;
                 let prepared = with_claims(db.prepare_query_bound(&query, binding)?);
+                let prefixes = crate::db::relation::predecessor_queries(&query)?
+                    .into_iter()
+                    .map(|query| {
+                        db.prepare_query_bound(&query, prepared.binding.clone())
+                            .map(&with_claims)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
                 let windowed = crate::db::is_windowed(&query);
                 // A relay serves what its upstream lists, settled once the
                 // upstream answers: its own store may be cold. A Remote
@@ -6468,23 +6540,40 @@ impl Db {
                 let mut inner = db.inner();
                 let support = Rc::new(inner.support_of(&query)?);
                 let authority = inner.authority;
-                let subscribed = inner.subscribe_member(
-                    &prepared,
-                    policy,
-                    ReadSpec {
-                        include_deleted,
-                        // A Remote one leaves out this replica's pending
-                        // versions: only the authority confirms them.
-                        settled_only: relayed.is_some() && tier == ReadTier::Remote,
-                        ..ReadSpec::default()
-                    },
-                    match relayed {
-                        Some((answered, _, global)) => {
-                            SettledBy::Remote(answered.clone(), global.clone())
+                let read = ReadSpec {
+                    include_deleted,
+                    settled_only: relayed.is_some() && tier == ReadTier::Remote,
+                    ..ReadSpec::default()
+                };
+                let settlement = match relayed {
+                    Some((answered, _, global)) => {
+                        SettledBy::Remote(answered.clone(), global.clone())
+                    }
+                    None => SettledBy::Always(authority),
+                };
+                let subscribed = inner
+                    .subscribe_member(&prepared, policy, read.clone(), settlement.clone())
+                    .and_then(|(queue, group)| {
+                        let mut prefix_subs = Vec::new();
+                        for prefix in &prefixes {
+                            match inner.subscribe_member(
+                                prefix,
+                                policy,
+                                read.clone(),
+                                settlement.clone(),
+                            ) {
+                                Ok(member) => prefix_subs.push(member),
+                                Err(error) => {
+                                    inner
+                                        .fan
+                                        .dropped
+                                        .set(inner.fan.dropped.get() + 1 + prefix_subs.len());
+                                    return Err(error);
+                                }
+                            }
                         }
-                        None => SettledBy::Always(authority),
-                    },
-                );
+                        Ok((queue, group, prefix_subs))
+                    });
                 if attached.is_some() {
                     match &subscribed {
                         Ok(_) => {
@@ -6503,7 +6592,8 @@ impl Db {
                         ),
                     }
                 }
-                let (queue, group) = subscribed?;
+                let (queue, group, prefixes) = subscribed?;
+                inner.sessions[index].prefix_subs.insert(id, prefixes);
                 inner.sessions[index]
                     .subs
                     .insert(id, (queue, group, windowed, false));
@@ -6583,7 +6673,14 @@ impl Db {
                 {
                     inner.release_remote(&query, &binding, include_deleted, RemoteReach::REMOTE);
                 }
+                let mut released = inner.sessions[index]
+                    .prefix_subs
+                    .remove(&id)
+                    .unwrap_or_default();
                 if let Some((queue, group, ..)) = inner.sessions[index].subs.remove(&id) {
+                    released.push((queue, group));
+                }
+                for (queue, group) in released {
                     let dropped = inner.fan.dropped.clone();
                     dropped.set(dropped.get() + 1);
                     // Rows the result lost since the last tick were not
@@ -6665,6 +6762,7 @@ impl Db {
                 wait,
                 view,
             } => {
+                let prefix_queries = crate::db::relation::predecessor_queries(&query)?;
                 // A relay asks its upstream first for a Remote read, then
                 // serves it from its store once the answer's rows are in
                 // it; the read waits for that answer while the link is down
@@ -6823,6 +6921,21 @@ impl Db {
                             inner.images_where(&table, false, ID_AT_SEQ, &[&rid, &seq])?;
                         if found.is_empty() {
                             found = inner.images_where(&table, true, ID_AT_SEQ, &[&rid, &seq])?;
+                        }
+                        images.extend(found);
+                    }
+                }
+                for query in prefix_queries {
+                    let mut prefix = prepared.clone();
+                    prefix.query = normalize_relation(&query, &inner.schema)?.unwrap_or(query);
+                    let table = inner.schema.stored_table(&prefix.query.table)?;
+                    for row in inner.run(&prefix, policy, &read)? {
+                        let rid = row.id.as_bytes().to_vec();
+                        let seq = row.seq as i64;
+                        let mut found =
+                            inner.images_where(table, false, ID_AT_SEQ, &[&rid, &seq])?;
+                        if found.is_empty() {
+                            found = inner.images_where(table, true, ID_AT_SEQ, &[&rid, &seq])?;
                         }
                         images.extend(found);
                     }
