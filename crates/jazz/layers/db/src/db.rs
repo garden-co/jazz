@@ -5812,10 +5812,13 @@ impl Db {
         };
         let rows = inner.read_versions(prepared, None, &read)?;
         if let Some(Batch {
-            kind: BatchKind::Serializable { reads, .. },
+            kind: BatchKind::Serializable { reads, pinned, .. },
             ..
         }) = inner.batches.get_mut(&id)
         {
+            // Even a LocalOnly read observes this cut. Later remote coverage
+            // must not move a snapshot whose results have already escaped.
+            *pinned = true;
             reads.push(ReadRecord {
                 prepared: prepared.clone(),
                 include_deleted,
@@ -5926,8 +5929,9 @@ impl TxRef<'_> {
     }
 
     /// As [`Self::all_prepared_as`], at `tier`: a `Remote` read waits for
-    /// the authority's answer, offline too; any other tier answers offline
-    /// from the replica, at the cut it knows.
+    /// the authority's answer, offline too. `LocalOnly` never asks the
+    /// authority; `LocalFirst` can answer offline from the replica's known cut.
+    /// The first successful serializable read fixes its snapshot for later reads.
     pub async fn all_prepared_at(
         &self,
         prepared: &PreparedQuery,
@@ -5935,9 +5939,9 @@ impl TxRef<'_> {
         identity: Option<AuthorSubject>,
         tier: ReadTier,
     ) -> Result<Vec<CurrentRow>, Error> {
-        // A client hydrates a serializable read from the authority at the
-        // snapshot first, unless the link cannot answer (then the replica
-        // answers and the authority's validation decides).
+        // Except for LocalOnly, a client hydrates a serializable read from
+        // the authority at the snapshot first. LocalFirst may answer from
+        // the replica when the link cannot answer.
         let snapshot = match self.db.inner.borrow().batches.get(&self.id) {
             Some(Batch {
                 kind:
@@ -5985,6 +5989,7 @@ impl TxRef<'_> {
         }
         if let Some((snapshot, pinned)) = snapshot
             && self.db.is_client()
+            && tier != ReadTier::LocalOnly
         {
             let at = pinned.then_some(snapshot);
             self.db.remote_shape(&prepared.query)?;
