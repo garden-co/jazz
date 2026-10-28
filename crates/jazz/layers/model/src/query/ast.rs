@@ -51,6 +51,48 @@ pub struct Query {
     /// table for the result.
     #[serde(default, with = "relation_query_wire")]
     pub relation: Option<RelationQuery>,
+    /// Selected columns read only in part (SPEC 19.12): each reads only the
+    /// chunks its range or pointer covers. Root rows only.
+    #[serde(default)]
+    pub partial: Vec<PartialSelect>,
+}
+
+/// A selected column read only in part.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct PartialSelect {
+    /// The selected column.
+    pub column: String,
+    /// The part of it read.
+    pub part: Part,
+}
+
+/// What part of a large-capable value a selection reads. Ranges are
+/// half-open `[from, to)`.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum Part {
+    /// Bytes of a bytes column.
+    Bytes {
+        /// First bytes offset read.
+        from: u64,
+        /// Offset just past the last read.
+        to: u64,
+    },
+    /// UTF-16 code units of a text column.
+    TextUtf16 {
+        /// First UTF-16 code units offset read.
+        from: u64,
+        /// Offset just past the last read.
+        to: u64,
+    },
+    /// UTF-8 bytes of a text column, on code point boundaries.
+    TextUtf8 {
+        /// First UTF-8 bytes offset read.
+        from: u64,
+        /// Offset just past the last read.
+        to: u64,
+    },
+    /// The subtree at an RFC 6901 pointer of a JSON column.
+    JsonPointer(String),
 }
 
 /// Human-readable query JSON retains the relation tree. Non-human serializers

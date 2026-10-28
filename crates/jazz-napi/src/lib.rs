@@ -596,10 +596,14 @@ impl Inner {
         let reporter = Rc::clone(&host);
         *binding.hooks.rejected.borrow_mut() =
             Some(Box::new(move |tx_id, error, serializable, _| {
-                if let Some(callback) = reporter.upstream_mutation_errors.borrow().as_ref() {
-                    let event = mutation_error_event(&tx_id.to_string(), error, serializable, true);
-                    callback.call(event, ThreadsafeFunctionCallMode::NonBlocking);
-                }
+                let callbacks = reporter.upstream_mutation_errors.borrow();
+                let Some(callback) = callbacks.as_ref() else {
+                    return false;
+                };
+                let event = mutation_error_event(&tx_id.to_string(), error, serializable, true);
+                // A call the queue dropped did not reach JS: keep the
+                // refusal for the next delivery.
+                callback.call(event, ThreadsafeFunctionCallMode::NonBlocking) == napi::Status::Ok
             }));
         Self { binding, host }
     }
@@ -685,6 +689,35 @@ fn mutation_error_event(
 // ---- pending operations ------------------------------------------------------------
 
 type ReadFuture = Pin<Box<dyn Future<Output = HostResult<Vec<u8>>>>>;
+
+/// The shared upstream link machine (`jazz::link`), which decides when the
+/// runtime's WebSocket connects, backs off and reports an outage. The runtime
+/// owns the socket and the timer and steps the machine with JSON documents.
+#[napi(js_name = "UpstreamLink")]
+pub struct NapiUpstreamLink {
+    link: RefCell<jazz::link::host::HostLink>,
+}
+
+#[napi]
+impl NapiUpstreamLink {
+    /// `seed` drives the retry jitter.
+    #[napi(constructor)]
+    pub fn new(seed: f64) -> Self {
+        Self {
+            link: RefCell::new(jazz::link::host::HostLink::new(seed as u64)),
+        }
+    }
+
+    /// Apply one input observed at `now_ms`; returns the actions, events and
+    /// status as JSON.
+    #[napi]
+    pub fn handle(&self, now_ms: f64, input: String) -> napi::Result<String> {
+        self.link
+            .borrow_mut()
+            .handle_json(now_ms, &input)
+            .map_err(napi::Error::from_reason)
+    }
+}
 
 /// A JavaScript-thread-owned read waiting for the server. NAPI promises
 /// execute on a Send worker pool, whereas a Jazz database is deliberately
@@ -1654,6 +1687,8 @@ impl NapiDb {
             .weak::<true>()
             .build()?;
         *inner.host.upstream_mutation_errors.borrow_mut() = Some(upstream);
+        // Refusals kept while nobody listened reach this callback now.
+        inner.binding.redeliver_rejections();
         Ok(())
     }
 
@@ -1775,6 +1810,12 @@ impl NapiDb {
         Ok(evicted as u32)
     }
 
+    /// How many local commits still wait for the server's verdict.
+    #[napi(js_name = "pendingUploadCount")]
+    pub fn pending_upload_count(&self) -> js::Result<u32> {
+        Ok(self.binding()?.pending_upload_count() as u32)
+    }
+
     /// The optimistic in-memory side of a client/worker pair: its
     /// subscriptions open with the worker's answer.
     #[napi(js_name = "setNonDurableClient")]
@@ -1794,6 +1835,13 @@ impl NapiDb {
             .map_err(host_error)?;
         settle_promises();
         Ok(())
+    }
+
+    /// A fresh upstream link machine for this runtime's server connection;
+    /// `seed` drives its retry jitter.
+    #[napi(js_name = "createUpstreamLink")]
+    pub fn create_upstream_link(&self, seed: f64) -> NapiUpstreamLink {
+        NapiUpstreamLink::new(seed)
     }
 
     /// The slow-query report due now: one line per slow query shape,
