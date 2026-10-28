@@ -52,7 +52,7 @@ pub(crate) mod text_merge;
 pub mod values;
 
 #[cfg(feature = "testing")]
-pub use large::full_materializations_for_test;
+pub use large::{full_materializations_for_test, set_prep_answer_limit_for_test};
 
 /// Structured read results.
 pub mod result_tree {

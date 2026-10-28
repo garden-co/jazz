@@ -17,8 +17,8 @@
 //! chunked value's sort prefix, so indexes, orderings and ranges read
 //! [`key_sql`]. The questions the key cannot answer (values sharing it,
 //! orderings of unindexed columns, `contains`, literals over the inline
-//! threshold) are answered in Rust before the statement runs and handed to
-//! it through `_jazz_lv_scratch`. Epochs and chunks live in the same
+//! threshold) are answered in Rust before the statement runs and bound to
+//! it as one JSON parameter, so reads never write. Epochs and chunks live in the same
 //! database, so a row, its epoch and the chunks they reference commit in
 //! one transaction; reference counts are kept by triggers on every table
 //! that has a large-capable column. With a chunk store
@@ -120,8 +120,7 @@ CREATE INDEX IF NOT EXISTS _jazz_lv_upload_node_hash ON _jazz_lv_upload_node (ha
 CREATE TABLE IF NOT EXISTS _jazz_lv_reclaim (root BLOB PRIMARY KEY) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS _jazz_lv_via (root BLOB PRIMARY KEY, tbl TEXT NOT NULL, \
  id BLOB NOT NULL, key BLOB NOT NULL, seq INTEGER NOT NULL) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS _jazz_lv_scratch (slot INTEGER NOT NULL, cell INTEGER NOT NULL, \
- v BLOB, k, PRIMARY KEY (slot, cell)) WITHOUT ROWID;
+DROP TABLE IF EXISTS _jazz_lv_scratch;
 CREATE TRIGGER IF NOT EXISTS _jazz_lv_root_unreferenced AFTER UPDATE OF refs ON _jazz_lv_root \
  WHEN NEW.refs = 0 BEGIN \
  INSERT INTO _jazz_lv_reclaim (root) SELECT NEW.root \
@@ -1274,28 +1273,71 @@ fn order_runs(
     Ok(())
 }
 
-/// Answer one prep into `_jazz_lv_scratch`. Returns whether a rank prep
-/// found chunked values that share a sort key.
+/// The most JSON one prep may bind: Durable Object SQLite refuses a value
+/// over 2 MiB.
+const ANSWER_BYTES: usize = 2_000_000;
+
+#[cfg(any(test, feature = "testing"))]
+thread_local! {
+    static ANSWER_BYTES_FOR_TEST: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Lower the per-prep answer limit on this thread, so tests reach it
+/// without storing thousands of chunked values (`None` restores it).
+#[cfg(any(test, feature = "testing"))]
+pub fn set_prep_answer_limit_for_test(bytes: Option<usize>) {
+    ANSWER_BYTES_FOR_TEST.with(|limit| limit.set(bytes));
+}
+
+fn answer_bytes() -> usize {
+    #[cfg(any(test, feature = "testing"))]
+    if let Some(bytes) = ANSWER_BYTES_FOR_TEST.with(std::cell::Cell::get) {
+        return bytes;
+    }
+    ANSWER_BYTES
+}
+
+/// A sort key as a rank answer holds it: `[text, null]` or `[null, hex]`,
+/// so the statement reads it back with its storage class.
+fn key_answer(key: &Sql) -> Result<[serde_json::Value; 2], Error> {
+    use serde_json::Value;
+    Ok(match key {
+        Sql::Text(bytes) => {
+            let text = std::str::from_utf8(bytes).map_err(|_| {
+                Error::new(
+                    ErrorCode::Storage,
+                    "a large value's text sort key is not UTF-8",
+                )
+            })?;
+            [Value::String(text.to_owned()), Value::Null]
+        }
+        Sql::Blob(bytes) => [Value::Null, Value::String(crate::compile::hex(bytes))],
+        _ => [Value::Null, Value::Null],
+    })
+}
+
+/// Answer one prep: the JSON parameter the statement reads its answers
+/// from, and whether a rank prep found chunked values that share a sort
+/// key. A match answers an array of the cells that pass; a rank an object
+/// of cell to `[text key, blob key (hex), rank]`; a class an object of
+/// cell to content id (hex). Only reads: the answers never touch the store.
 pub(crate) fn answer(
     conn: &Connection,
     chunks: &Chunks,
     prep: &crate::compile::Prep,
-) -> Result<bool, Error> {
+) -> Result<(Sql, bool), Error> {
     use crate::compile::{MatchTest, Prep};
     use crate::tools::CmpOp;
-    let mut insert = conn
-        .prepare_cached(
-            "INSERT OR REPLACE INTO _jazz_lv_scratch (slot, cell, v, k) VALUES (?1, ?2, ?3, ?4)",
-        )
-        .map_err(storage)?;
-    let slot = prep.slot();
-    match prep {
+    use serde_json::Value;
+    let (answers, ties) = match prep {
         Prep::Match {
             table,
             column,
             test,
             ..
         } => {
+            let mut cells = Vec::new();
             for (cell, _) in chunked_cells(conn, table, column, None)? {
                 let pass = match test {
                     MatchTest::Contains(needle) => {
@@ -1320,12 +1362,10 @@ pub(crate) fn answer(
                     }
                 };
                 if pass {
-                    insert
-                        .execute(rusqlite::params![slot, cell, Sql::Null, Sql::Null])
-                        .map_err(storage)?;
+                    cells.push(Value::from(cell));
                 }
             }
-            Ok(false)
+            (Value::Array(cells), false)
         }
         Prep::Rank {
             table, column, key, ..
@@ -1346,12 +1386,13 @@ pub(crate) fn answer(
                     .push(cell);
             }
             let mut ties = false;
+            let mut answers = serde_json::Map::new();
             for (_, (key, cells)) in groups {
+                let [text, blob] = key_answer(&key)?;
                 if cells.len() < 2 {
                     for cell in cells {
-                        insert
-                            .execute(rusqlite::params![slot, cell, Sql::Null, key])
-                            .map_err(storage)?;
+                        let entry = Value::Array(vec![text.clone(), blob.clone(), Value::Null]);
+                        answers.insert(cell.to_string(), entry);
                     }
                     continue;
                 }
@@ -1361,31 +1402,46 @@ pub(crate) fn answer(
                 // Cells of one logical value share a rank.
                 for (rank, run) in runs.iter().enumerate() {
                     for cell in run {
-                        insert
-                            .execute(rusqlite::params![slot, cell, rank as i64, key])
-                            .map_err(storage)?;
+                        let entry =
+                            Value::Array(vec![text.clone(), blob.clone(), Value::from(rank)]);
+                        answers.insert(cell.to_string(), entry);
                     }
                 }
             }
-            Ok(ties)
+            (Value::Object(answers), ties)
         }
         Prep::Class { columns, .. } => {
+            let mut answers = serde_json::Map::new();
             for (table, column) in columns {
                 for (cell, _) in chunked_cells(conn, table, column, None)? {
                     let class = blake3::hash(&chunks.materialize(ValueRef::Integer(cell))?);
-                    insert
-                        .execute(rusqlite::params![
-                            slot,
-                            cell,
-                            class.as_bytes().to_vec(),
-                            Sql::Null
-                        ])
-                        .map_err(storage)?;
+                    answers.insert(
+                        cell.to_string(),
+                        Value::String(crate::compile::hex(class.as_bytes())),
+                    );
                 }
             }
-            Ok(false)
+            (Value::Object(answers), false)
         }
+    };
+    let json = answers.to_string();
+    if json.len() > answer_bytes() {
+        let (table, column) = match prep {
+            Prep::Match { table, column, .. } | Prep::Rank { table, column, .. } => {
+                (table.as_str(), column.as_str())
+            }
+            Prep::Class { columns, .. } => columns.first().map_or(("", ""), |(table, column)| {
+                (table.as_str(), column.as_str())
+            }),
+        };
+        return Err(crate::values::unsupported(format!(
+            "a read that matches, orders or compares this many large values of \
+             `{table}.{column}` at once ({} bytes of answers, more than {})",
+            json.len(),
+            answer_bytes()
+        )));
     }
+    Ok((Sql::Text(json.into_bytes()), ties))
 }
 
 /// Fill the key columns of chunked cells that have none: cells stored

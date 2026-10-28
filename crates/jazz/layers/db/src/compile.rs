@@ -168,9 +168,9 @@ impl LargeColumn {
 }
 
 /// A question about chunked cells that their sort key cannot answer,
-/// answered in Rust before the statement runs. Each writes its answers to
-/// `_jazz_lv_scratch` under its slot, which the statement reads. The slot
-/// is a hash of the question, so the same query compiles to the same SQL.
+/// answered in Rust before the statement runs. Its answers are bound to
+/// the statement as one JSON parameter, the prep's `slot` (a parameter
+/// index), keyed by chunked cell, so a read never writes.
 #[derive(Clone, Debug)]
 pub enum Prep {
     /// The chunked cells of `table.column` that pass `test`.
@@ -216,14 +216,6 @@ impl MatchTest {
 }
 
 impl Prep {
-    fn new(make: impl FnOnce(i64) -> Prep, question: &str) -> Prep {
-        let hash = blake3::hash(question.as_bytes());
-        // 52 bits: exact as a JS number (Durable Objects).
-        let slot =
-            i64::from_le_bytes(hash.as_bytes()[..8].try_into().expect("8 bytes")) & ((1 << 52) - 1);
-        make(slot)
-    }
-
     pub fn slot(&self) -> i64 {
         match self {
             Prep::Match { slot, .. } | Prep::Rank { slot, .. } | Prep::Class { slot, .. } => *slot,
@@ -231,19 +223,44 @@ impl Prep {
     }
 }
 
-/// SQL: whether `cell` is among a prep's answers.
+/// SQL: whether the chunked cell `cell` is among a match prep's answers
+/// (a JSON array of cells).
 fn scratch_has(slot: i64, cell: &str) -> String {
-    format!("EXISTS (SELECT 1 FROM _jazz_lv_scratch WHERE slot = {slot} AND cell = {cell})")
+    format!("({cell} IN (SELECT value FROM json_each(?{slot})))")
 }
 
-/// SQL: a prep's answer value for `cell`.
-fn scratch_value(slot: i64, cell: &str) -> String {
-    format!("(SELECT v FROM _jazz_lv_scratch WHERE slot = {slot} AND cell = {cell})")
+/// SQL: a chunked cell's answer in a prep's answers (a JSON object keyed
+/// by cell), read through `value`, an expression of the entry's JSON
+/// `value`. The answers are materialized once per statement, and SQLite
+/// indexes them for the lookup, so a read costs a search per row, not a
+/// scan of every answer.
+fn answer_of(slot: i64, cell: &str, value: &str) -> String {
+    format!(
+        "(WITH _jazz_answers (_cell, _v) AS MATERIALIZED \
+         (SELECT CAST(key AS INTEGER), {value} FROM json_each(?{slot})) \
+         SELECT _v FROM _jazz_answers WHERE _cell = {cell})"
+    )
 }
 
-/// SQL: a rank prep's sort key for `cell`.
+/// SQL: a class prep's content id for the chunked cell `cell`.
+fn scratch_class(slot: i64, cell: &str) -> String {
+    answer_of(slot, cell, "unhex(value)")
+}
+
+/// SQL: a rank prep's rank for the chunked cell `cell`, NULL when no other
+/// value shares its sort key.
+fn scratch_rank(slot: i64, cell: &str) -> String {
+    answer_of(slot, cell, "json_extract(value, '$[2]')")
+}
+
+/// SQL: a rank prep's sort key for the chunked cell `cell`: TEXT or BLOB,
+/// as the key column would hold it.
 fn scratch_key(slot: i64, cell: &str) -> String {
-    format!("(SELECT k FROM _jazz_lv_scratch WHERE slot = {slot} AND cell = {cell})")
+    answer_of(
+        slot,
+        cell,
+        "COALESCE(json_extract(value, '$[0]'), unhex(json_extract(value, '$[1]')))",
+    )
 }
 
 /// SQL text plus its positional parameters.
@@ -266,6 +283,9 @@ pub struct Ctx<'a> {
     pub settled_only: bool,
     /// Questions the statement needs answered first.
     pub preps: Vec<Prep>,
+    /// Each prep's question, parallel to `preps`: one question is asked
+    /// (and bound) once.
+    questions: Vec<String>,
     /// The authority's node, whose own commits history reads name by their
     /// seq; `None` on a replica, which lists only versions whose
     /// transaction it knows.
@@ -379,6 +399,7 @@ impl<'a> Ctx<'a> {
             cut: None,
             settled_only: false,
             preps: Vec::new(),
+            questions: Vec::new(),
             history_origin: None,
             overlaid_rows: 0,
             overlay_tables: BTreeSet::new(),
@@ -635,7 +656,7 @@ impl<'a> Ctx<'a> {
                         let by = format!(
                             "(CASE WHEN {} THEN {} ELSE {sql} END)",
                             crate::large::chunked_sql(&sql),
-                            scratch_value(slot, &sql)
+                            scratch_class(slot, &sql)
                         );
                         let (key, _) = self.order_key(&large);
                         (sql.clone(), by, key)
@@ -2986,7 +3007,7 @@ pub(crate) fn json_ids<'a>(ids: impl IntoIterator<Item = &'a [u8]>) -> Sql {
     Sql::Text(serde_json::Value::Array(items).to_string().into_bytes())
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -3067,13 +3088,17 @@ impl Ctx<'_> {
         }
     }
 
+    /// The parameter a prep's answers are bound to: one per question, a
+    /// placeholder until the statement runs.
     fn prep(&mut self, make: impl FnOnce(i64) -> Prep, question: String) -> i64 {
-        let prep = Prep::new(make, &question);
-        let slot = prep.slot();
-        if !self.preps.iter().any(|p| p.slot() == slot) {
-            self.preps.push(prep);
+        if let Some(at) = self.questions.iter().position(|q| *q == question) {
+            return self.preps[at].slot();
         }
-        slot
+        self.bind(Sql::Null);
+        let prep = make(self.params.len() as i64);
+        self.questions.push(question);
+        self.preps.push(prep);
+        self.preps.last().expect("pushed").slot()
     }
 
     /// An author record (`$createdBy`, `$updatedBy.identity`, ...) against
@@ -3247,7 +3272,7 @@ impl Ctx<'_> {
                 scratch_key(slot, c)
             ),
         };
-        (sql, scratch_value(slot, c))
+        (sql, scratch_rank(slot, c))
     }
 
     fn prep_match(&mut self, column: &LargeColumn, test: MatchTest) -> i64 {
@@ -3295,8 +3320,8 @@ impl Ctx<'_> {
             "(CASE WHEN COALESCE({} OR {}, 0) THEN {} IS {} ELSE {} IS {} END)",
             crate::large::chunked_sql(&a.cell),
             crate::large::chunked_sql(&b.cell),
-            scratch_value(slot, &a.cell),
-            scratch_value(slot, &b.cell),
+            scratch_class(slot, &a.cell),
+            scratch_class(slot, &b.cell),
             a.cell,
             b.cell
         );
