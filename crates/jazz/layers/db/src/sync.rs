@@ -53,6 +53,9 @@ use jazz_types::time::{GlobalTime, TxTime};
 use serde::{Deserialize, Serialize};
 
 use super::*;
+
+#[path = "large_delta.rs"]
+mod large_delta;
 pub use crate::options::{FirstLoad, RemoteLinkHint};
 
 #[path = "sync_conflicts.rs"]
@@ -60,6 +63,7 @@ mod conflicts;
 pub use crate::wire::TransportError;
 pub(crate) use conflicts::Built;
 pub use conflicts::WriteConflict;
+pub use large_delta::{CellDelta, WireDelta};
 
 /// Wall-clock Unix ms.
 fn now_ms() -> i64 {
@@ -336,10 +340,18 @@ pub enum Cell {
     Null,
     Int(i64),
     Real(f64),
-    /// Raw TEXT bytes: a large-capable cell may be tagged bytes or a chunked
-    /// descriptor, which travel as stored (never as chunk bytes).
+    /// Raw TEXT bytes.
     Text(#[serde(with = "serde_bytes")] Vec<u8>),
     Blob(Vec<u8>),
+    /// A chunked large value, as its encoded descriptor: a stored chunked
+    /// cell names an epoch local to its store, so it travels as the
+    /// descriptor and is interned again where it lands (never as chunk
+    /// bytes).
+    Large(#[serde(with = "serde_bytes")] Vec<u8>),
+    /// A chunked large value as the edits extending the same column's
+    /// value in a version of the row the receiver holds: only on the
+    /// wire, where the receiver makes it [`Cell::Large`] again (SPEC 19.8).
+    Delta(WireDelta),
 }
 
 impl From<Sql> for Cell {
@@ -362,6 +374,8 @@ impl From<&Cell> for Sql {
             Cell::Real(v) => Sql::Real(*v),
             Cell::Text(v) => Sql::Text(v.clone()),
             Cell::Blob(v) => Sql::Blob(v.clone()),
+            // Not a stored cell until interned ([`Inner::stored_cells`]).
+            Cell::Large(_) | Cell::Delta(_) => Sql::Null,
         }
     }
 }
@@ -436,6 +450,19 @@ pub struct WireBase {
     /// The row's branch key (empty unbranched).
     pub key: Vec<u8>,
     pub on: BuiltOn,
+}
+
+/// The settled version of a row a commit writes that its writer holds, so
+/// that the writer did not push the nodes of its chunked values' trees
+/// (SPEC 19.4): the authority counts that version's trees as the writer's
+/// when it may read the version.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireSource {
+    /// The op that writes the row.
+    pub op: u32,
+    /// The row's branch key (empty unbranched).
+    pub key: Vec<u8>,
+    pub seq: u64,
 }
 
 /// The version a write was built on.
@@ -603,35 +630,41 @@ pub enum WireError {
     Other(String),
 }
 
-/// A large-value node named by its locator and the object hash it must
-/// match.
+/// A large-value node named by its object hash.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireChunkRef {
-    pub locator: jazz_types::large_values::Locator,
     pub hash: [u8; 32],
 }
 
 /// A large-value node's encoded bytes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireChunk {
-    pub locator: jazz_types::large_values::Locator,
     pub hash: [u8; 32],
     #[serde(with = "serde_bytes")]
     pub bytes: Vec<u8>,
 }
 
-impl WireChunkRef {
-    fn of(request: &ChunkRequest) -> Self {
-        Self {
-            locator: request.locator,
-            hash: request.object_hash,
-        }
-    }
+/// A pull of a large value's nodes, citing the version of a row that
+/// holds it (SPEC 19.8): the authority answers only for a version the
+/// reader may read, and only with nodes of that version's tree `root`.
+/// `nodes` are the ones the reader lacks; `span`, base-tree bytes
+/// `[start, end)` a read needs, asks for every node beneath them that
+/// covers those bytes in the same answer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WirePull {
+    pub table: String,
+    pub id: [u8; 16],
+    pub key: Vec<u8>,
+    pub seq: u64,
+    pub root: [u8; 32],
+    pub nodes: Vec<[u8; 32]>,
+    pub span: Option<(u64, u64)>,
+}
 
+impl WireChunkRef {
     fn request(&self) -> ChunkRequest {
         ChunkRequest {
             object_hash: self.hash,
-            locator: self.locator,
         }
     }
 }
@@ -640,7 +673,6 @@ impl WireChunk {
     fn request(&self) -> ChunkRequest {
         ChunkRequest {
             object_hash: self.hash,
-            locator: self.locator,
         }
     }
 }
@@ -649,6 +681,12 @@ impl WireChunk {
 /// flushed once it reaches this, so with one more node at most and the
 /// message's framing it still fits one wire frame.
 const CHUNK_BATCH_BYTES: usize = jazz_protocol::protocol_limits::MAX_WIRE_FRAME_BYTES / 2;
+/// The most node bytes one range pull is answered with: a read past them
+/// pulls again for the rest.
+const PULL_BYTES: usize = 4 << 20;
+/// The most node bytes one `ChunkRequests` is answered with, across all
+/// its pulls: the rest is answered once that has been sent.
+const ANSWER_PULL_BYTES: usize = 4 * PULL_BYTES;
 const _: () = assert!(
     CHUNK_BATCH_BYTES + jazz_types::large_values::MAX_ENCODED_NODE_BYTES + 64 * 1024
         <= jazz_protocol::protocol_limits::MAX_WIRE_FRAME_BYTES
@@ -731,6 +769,12 @@ pub enum SyncMessage {
         /// (see [`Expect`]): the authority skips echoing a row whose new
         /// version is exactly that. Empty when the writer does not know.
         expect: Vec<Expect>,
+        /// The ops' chunked cells that travel as edits extending the
+        /// writer's newest settled version of their row (SPEC 19.8).
+        deltas: Vec<CellDelta>,
+        /// For each op whose chunked values travel as trees, the settled
+        /// version of its row their unpushed nodes sit under.
+        sources: Vec<WireSource>,
         /// The base of each row the commit writes over an image its
         /// writer held (SPEC 4 §4.6); a row it inserted, or wrote without
         /// holding, has none. Only the authority's conflict derivation
@@ -741,10 +785,10 @@ pub enum SyncMessage {
         /// `pending` nodes stand for.
         origin: Option<([u8; 16], u64)>,
     },
-    /// Large-value nodes the client's descriptors name and it lacks
-    /// (pull by locator; holding the locator is the read capability).
+    /// Large-value nodes the client lacks, pulled through the row
+    /// versions that hold them.
     ChunkRequests {
-        requests: Vec<WireChunkRef>,
+        pulls: Vec<WirePull>,
     },
     /// Nodes of the client's new large values, sent ahead of the commit
     /// that references them. The server holds them under a receipt until
@@ -1090,7 +1134,7 @@ pub(crate) struct Client {
     /// Nodes to ask for on the next send.
     wanted: BTreeSet<ChunkRequest>,
     /// Nodes pushed for each unsettled commit.
-    pushed: HashMap<u64, Vec<jazz_types::large_values::Locator>>,
+    pushed: HashMap<u64, Vec<jazz_types::large_values::ContentHash>>,
     /// Requests the server could not answer; never asked again.
     unavailable: BTreeSet<ChunkRequest>,
     /// Chunks arrived this tick: results waiting for them run again.
@@ -1363,6 +1407,11 @@ pub(crate) struct Session {
     /// row shipped (`id`), include target and array correlation. A commit
     /// that writes a matching row ships its image (or an eviction).
     watch: HashSet<u64>,
+    /// The newest version of each row with chunked cells the replica was
+    /// shipped, held for an own commit or declared holding, by (table,
+    /// id, branch key): later versions' chunked cells go as deltas over it
+    /// (SPEC 19.8). An eviction drops it.
+    shipped: HashMap<(String, [u8; 16], Vec<u8>), u64>,
     /// Resumed subscriptions whose opening is still to send: `since` seq.
     resume: BTreeMap<u64, u64>,
     /// Supporting rows shipped to the replica, and rows of fetches and
@@ -1391,6 +1440,12 @@ pub(crate) struct Session {
     /// Fetches whose upstream answer arrived, or that this relay already
     /// asked its upstream to refresh: served from this store.
     fetched_upstream: BTreeSet<u64>,
+    /// A relay's pulls of nodes it is still fetching from its upstream:
+    /// answered from its store once they arrive (or are unavailable).
+    parked_pulls: Vec<WirePull>,
+    /// Pulls past an answer's byte budget: answered once the session's
+    /// outbox has drained (SPEC 19.8).
+    deferred_pulls: Vec<WirePull>,
     /// The client was told its declared version is not admitted.
     told_unadmitted: bool,
     /// On a relay, the upstream subscription each of the client's
@@ -1428,6 +1483,7 @@ impl Session {
             echoes: Vec::new(),
             support: BTreeMap::new(),
             watch: HashSet::new(),
+            shipped: HashMap::new(),
             resume: BTreeMap::new(),
             held: BTreeMap::new(),
             open: true,
@@ -1437,6 +1493,8 @@ impl Session {
             backlog_reads: (None, HashMap::new()),
             version: None,
             fetched_upstream: BTreeSet::new(),
+            parked_pulls: Vec::new(),
+            deferred_pulls: Vec::new(),
             told_unadmitted: false,
             schema: None,
             relayed: BTreeMap::new(),
@@ -2587,8 +2645,125 @@ impl Inner {
         let mut images = rows.collect::<Result<Vec<_>, _>>().map_err(storage)?;
         for image in &mut images {
             self.resolve_authors(image)?;
+            self.portable_large(image)?;
         }
         Ok(images)
+    }
+
+    /// Images carry chunked values by their descriptors: epochs are local
+    /// to one database.
+    fn portable_large(&self, image: &mut Image) -> Result<(), Error> {
+        let Some(table) = self.physical.tables.get(&image.table) else {
+            return Ok(());
+        };
+        for (name, cell) in &mut image.cells {
+            let Cell::Int(chunked) = cell else {
+                continue;
+            };
+            if !table
+                .by_stored_column(name)
+                .is_some_and(crate::large::large_capable)
+            {
+                continue;
+            }
+            let value = self.chunks.descriptor(*chunked)?;
+            *cell = Cell::Large(
+                jazz_types::large_values::encode_large_value_ref(&value)
+                    .map_err(|e| Error::new(ErrorCode::Storage, format!("large value: {e}")))?,
+            );
+        }
+        Ok(())
+    }
+
+    /// `image`'s chunked cells as deltas over the version of the row
+    /// `shipped` says the replica holds, and `shipped` updated for it
+    /// (SPEC 19.8).
+    fn ship_deltas(
+        &self,
+        shipped: &mut HashMap<(String, [u8; 16], Vec<u8>), u64>,
+        image: &mut Image,
+    ) -> Result<(), Error> {
+        let held = shipped
+            .get(&(image.table.clone(), image.id, image.key.clone()))
+            .copied();
+        hold_shipped(shipped, image);
+        let Some(seq) = held.filter(|_| !image.deleted) else {
+            return Ok(());
+        };
+        let row = RowUuid::from_bytes(image.id);
+        let Some(base) = self.version_image(&image.table, row, &image.key, seq)? else {
+            return Ok(());
+        };
+        for (name, cell) in &mut image.cells {
+            let Cell::Large(descriptor) = cell else {
+                continue;
+            };
+            let Some((_, old)) = base.cells.iter().find(|(n, _)| n == name) else {
+                continue;
+            };
+            let (Some(old), Ok(new)) = (
+                self.large_of(&image.table, name, old)?,
+                jazz_types::large_values::decode_large_value_ref(descriptor),
+            ) else {
+                continue;
+            };
+            if let Some(delta) = large_delta::extend(seq, &old, &new) {
+                *cell = Cell::Delta(delta);
+            }
+        }
+        Ok(())
+    }
+
+    /// The version of a row at `seq`, current or in history.
+    fn version_image(
+        &self,
+        table: &str,
+        row: RowUuid,
+        key: &[u8],
+        seq: u64,
+    ) -> Result<Option<Image>, Error> {
+        let id = row.0.as_bytes().to_vec();
+        let seq = seq as i64;
+        for history in [false, true] {
+            let found = self
+                .images_where(
+                    table,
+                    history,
+                    "id = ?1 AND _b = ?2 AND _seq = ?3",
+                    &[&id, &key, &seq],
+                )?
+                .pop();
+            if found.is_some() {
+                return Ok(found);
+            }
+        }
+        Ok(None)
+    }
+
+    /// The chunked value a cell of stored `table`'s `column` holds, as an
+    /// image carries it (a descriptor) or as stored (an epoch cell).
+    fn large_of(
+        &self,
+        table: &str,
+        column: &str,
+        cell: &Cell,
+    ) -> Result<Option<jazz_types::large_values::LargeValueRef>, Error> {
+        match cell {
+            Cell::Large(descriptor) => {
+                Ok(jazz_types::large_values::decode_large_value_ref(descriptor).ok())
+            }
+            Cell::Int(chunked)
+                if self
+                    .physical
+                    .tables
+                    .get(table)
+                    .and_then(|table| table.by_stored_column(column))
+                    .is_some_and(crate::large::large_capable) =>
+            {
+                self.chunks.descriptor(*chunked).map(Some)
+            }
+            _ => Ok(None),
+        }
     }
 
     /// Images carry authors by their identity parts: codes are local to
@@ -2643,6 +2818,17 @@ impl Inner {
         type Parts = (Option<uuid::Uuid>, Option<String>, Option<String>);
         let mut parts: BTreeMap<&'static str, Parts> = BTreeMap::new();
         for (name, cell) in &image.cells {
+            if let Cell::Large(descriptor) = cell {
+                let value =
+                    jazz_types::large_values::decode_large_value_ref(descriptor).map_err(|e| {
+                        Error::new(
+                            ErrorCode::Storage,
+                            format!("large value from upstream: {e}"),
+                        )
+                    })?;
+                cells.push((name.clone(), self.large_cell(&value)?));
+                continue;
+            }
             let Some((stored, part)) = crate::values::author_part(name) else {
                 cells.push((name.clone(), Sql::from(cell)));
                 continue;
@@ -2707,7 +2893,32 @@ impl Inner {
             Sql::Integer(image.deleted as i64),
             Sql::Integer(image.content as i64),
         ];
-        for (column, value) in self.stored_cells(image)? {
+        let physical = self.physical.tables.get(&image.table);
+        let mut cells = self.stored_cells(image)?;
+        // Key columns are this store's: an upstream's keys for columns
+        // indexed here are kept, others dropped, and missing ones derived.
+        if let Some(physical) = physical {
+            cells.retain(|(name, _)| {
+                crate::large::keyed_by(name).is_none() || physical.key_of_key(name).is_some()
+            });
+            for key in &physical.keys {
+                if cells.iter().any(|(name, _)| *name == key.stored) {
+                    continue;
+                }
+                let keyed = crate::large::keyed_by(&key.stored).expect("a key column");
+                let Some((_, cell)) = cells.iter().find(|(name, _)| name == keyed) else {
+                    continue;
+                };
+                let cell = match self.key_cell(cell) {
+                    Ok(cell) => cell,
+                    // A replica may not hold the value's first chunks.
+                    Err(error) if crate::large::is_missing(&error) => Sql::Null,
+                    Err(error) => return Err(error),
+                };
+                cells.push((key.stored.clone(), cell));
+            }
+        }
+        for (column, value) in cells {
             names.push(quote(&column));
             values.push(value);
         }
@@ -2929,42 +3140,85 @@ fn encode<T: Serialize>(value: &T) -> Vec<u8> {
 }
 
 impl Inner {
+    /// Pulls of `wanted` nodes, each through the received row version
+    /// whose tree holds it, with the ranges reads of each tree wait on
+    /// (SPEC 19.8). A node no received version holds is unavailable.
+    fn pulls(
+        &mut self,
+        wanted: Vec<ChunkRequest>,
+        spans: &HashMap<[u8; 32], std::ops::Range<u64>>,
+    ) -> Result<Vec<WirePull>, Error> {
+        let mut by_root: BTreeMap<[u8; 32], WirePull> = BTreeMap::new();
+        for request in wanted {
+            let Some((root, via)) = crate::large::via_of(&self.conn, &request.object_hash)? else {
+                let client = self.client.as_mut().expect("client");
+                client.requested.remove(&request);
+                client.unavailable.insert(request);
+                continue;
+            };
+            by_root
+                .entry(root)
+                .or_insert_with(|| WirePull {
+                    table: via.table,
+                    id: via.id,
+                    key: via.key,
+                    seq: via.seq,
+                    root,
+                    nodes: Vec::new(),
+                    span: spans.get(&root).map(|span| (span.start, span.end)),
+                })
+                .nodes
+                .push(request.object_hash);
+        }
+        Ok(by_root.into_values().collect())
+    }
+
     /// Store requested nodes the server sent.
     fn receive_chunks(
         &mut self,
         nodes: Vec<WireChunk>,
         missing: Vec<WireChunkRef>,
     ) -> Result<(), Error> {
-        let client = self.client.as_mut().expect("client");
-        let mut accepted = Vec::new();
         for node in nodes {
             let request = node.request();
-            // Only nodes this replica asked for, verified against the hash
-            // it learned from the parent or descriptor.
-            if client.requested.remove(&request) {
-                accepted.push((request, node.bytes));
+            // Only nodes this replica asked for, or that a parent it holds
+            // names (a range pull sends them parents first), verified
+            // against the hash it learned from the parent or descriptor.
+            let client = self.client.as_mut().expect("client");
+            if client.requested.remove(&request)
+                || crate::large::has_parent(&self.conn, &request.object_hash)?
+            {
+                crate::large::install_fetched(&self.conn, &self.chunks, &request, node.bytes)?;
             }
         }
+        let parked = self
+            .sessions
+            .iter()
+            .any(|session| !session.parked_pulls.is_empty());
+        let client = self.client.as_mut().expect("client");
         for missing in missing {
             let request = missing.request();
             client.requested.remove(&request);
             client.unavailable.insert(request);
         }
         client.arrived = true;
-        for (request, bytes) in accepted {
-            crate::large::install_fetched(&self.conn, &self.chunks, &request, bytes)?;
-        }
+        // Pulls this relay parked for its sessions are answered now.
+        client.relay_ready |= parked;
         Ok(())
     }
 
     /// The nodes a commit's large values need pushed first: (their
-    /// locators, the batches carrying them).
+    /// hashes, the batches carrying them). Every node goes but those under
+    /// the trees of the settled version each op names as its source
+    /// (SPEC 19.4). `None` when this replica must first fetch nodes it
+    /// lacks (a value copied from a row it holds only partly): they are
+    /// asked for, and the commit waits.
     fn pushes_for(
-        &self,
+        &mut self,
         commit: &SyncMessage,
-    ) -> Result<(Vec<jazz_types::large_values::Locator>, Vec<SyncMessage>), Error> {
-        let SyncMessage::Commit { ops, .. } = commit else {
-            return Ok((Vec::new(), Vec::new()));
+    ) -> Result<Option<(Vec<jazz_types::large_values::ContentHash>, Vec<SyncMessage>)>, Error> {
+        let SyncMessage::Commit { ops, sources, .. } = commit else {
+            return Ok(Some((Vec::new(), Vec::new())));
         };
         fn large(value: &Value, out: &mut Vec<jazz_types::large_values::LargeValueRef>) {
             match value {
@@ -2973,44 +3227,99 @@ impl Inner {
                 _ => {}
             }
         }
-        let mut values = Vec::new();
-        for op in ops {
-            let cells = match op {
-                WireOp::Insert { cells, .. }
-                | WireOp::Update { cells, .. }
-                | WireOp::Upsert { cells, .. } => Some(cells),
-                WireOp::Restore { cells, .. } => cells.as_ref(),
-                WireOp::Delete { .. } | WireOp::Move { .. } => None,
-            };
-            for value in cells.into_iter().flat_map(|cells| cells.values()) {
-                large(value, &mut values);
-            }
-        }
-        let mut locators = Vec::new();
+        let mut hashes = Vec::new();
         let mut batches = Vec::new();
         let mut batch = Vec::new();
         let mut size = 0;
-        for value in &values {
-            for (request, bytes) in crate::large::unpushed(&self.conn, value)? {
-                locators.push(request.locator);
-                size += bytes.len();
-                batch.push(WireChunk {
-                    locator: request.locator,
-                    hash: request.object_hash,
-                    bytes,
-                });
-                if size >= CHUNK_BATCH_BYTES {
-                    batches.push(SyncMessage::PushChunks {
-                        nodes: std::mem::take(&mut batch),
+        let mut absent = Vec::new();
+        for (index, op) in ops.iter().enumerate() {
+            let (row, cells) = match op {
+                WireOp::Insert { row, cells, .. }
+                | WireOp::Update { row, cells, .. }
+                | WireOp::Upsert { row, cells, .. }
+                | WireOp::Restore {
+                    row,
+                    cells: Some(cells),
+                    ..
+                } => (RowUuid::from_bytes(*row), cells),
+                _ => continue,
+            };
+            let mut values = Vec::new();
+            for value in cells.values() {
+                large(value, &mut values);
+            }
+            if values.is_empty() {
+                continue;
+            }
+            let mut named = BTreeSet::new();
+            if let Some(source) = sources.iter().find(|source| source.op as usize == index)
+                && let Ok(table) = self.schema.stored_table(op.table())
+                && let Some(image) = self.held_version(table, row, &source.key, source.seq)?
+            {
+                named = self.large_roots(table, &image)?;
+            }
+            for value in &values {
+                let nodes = match crate::large::to_push(&self.conn, &self.chunks, value, &named)? {
+                    Ok(nodes) => nodes,
+                    Err(missing) => {
+                        absent.extend(missing);
+                        continue;
+                    }
+                };
+                for (request, bytes) in nodes {
+                    hashes.push(jazz_types::large_values::ContentHash(request.object_hash));
+                    size += bytes.len();
+                    batch.push(WireChunk {
+                        hash: request.object_hash,
+                        bytes,
                     });
-                    size = 0;
+                    if size >= CHUNK_BATCH_BYTES {
+                        batches.push(SyncMessage::PushChunks {
+                            nodes: std::mem::take(&mut batch),
+                        });
+                        size = 0;
+                    }
                 }
             }
+        }
+        if !absent.is_empty() {
+            let client = self.client.as_mut().expect("client");
+            client.wanted.extend(absent);
+            return Ok(None);
         }
         if !batch.is_empty() {
             batches.push(SyncMessage::PushChunks { nodes: batch });
         }
-        Ok((locators, batches))
+        Ok(Some((hashes, batches)))
+    }
+
+    /// Record the version each chunked value of a received image
+    /// arrived in (`table` as the wire names it): pulls of its nodes cite
+    /// it.
+    /// Whether the image had any.
+    fn record_vias(&self, table: &str, image: &Image) -> Result<bool, Error> {
+        let via = crate::large::Via {
+            table: table.to_owned(),
+            id: image.id,
+            key: image.key.clone(),
+            seq: image.seq,
+        };
+        let roots = self.large_roots(&image.table, image)?;
+        for root in &roots {
+            crate::large::record_via(&self.conn, root, &via)?;
+        }
+        Ok(!roots.is_empty())
+    }
+
+    /// The roots of an image's chunked values.
+    fn large_roots(&self, table: &str, image: &Image) -> Result<BTreeSet<[u8; 32]>, Error> {
+        let mut roots = BTreeSet::new();
+        for (name, cell) in &image.cells {
+            if let Some(value) = self.large_of(table, name, cell)? {
+                roots.insert(value.root.object_hash.0);
+            }
+        }
+        Ok(roots)
     }
 
     fn persist_pending(&self, tx: u64, commit: &SyncMessage, rows: &[RowKey]) -> Result<(), Error> {
@@ -3585,6 +3894,8 @@ impl Db {
         let version = *inner.owner_version.as_bytes();
         let client = inner.client.as_mut().expect("client");
         client.outbox.insert(0, SyncMessage::Schema { version });
+        // What the old session could not answer, the new one may.
+        client.unavailable.clear();
         // Reading the held rows can fail, and connecting cannot: the send
         // that reads them reports the error, and the next one tries again.
         client.hold_owed = true;
@@ -3808,19 +4119,25 @@ impl Db {
         // newest pending commit to the row, else the settled image under
         // its pending writes.
         let mut bases = Vec::new();
+        // The settled image of each written row, which its chunked values
+        // go as deltas over (SPEC 19.8).
+        let mut settled_images = HashMap::new();
         let by_row = inner.row_ops(&ops);
         for (table, row, key) in &rows {
             let row_key = (table.clone(), *row, key.clone());
             let client = inner.client.as_ref().expect("client");
-            let settled = match client.baselines.get(&row_key) {
-                Some(image) => image.as_ref().map(|image| image.seq),
+            let image = match client.baselines.get(&row_key) {
+                Some(image) => image.clone(),
                 None => {
                     let image = inner.upstream_baseline(table, *row, key)?;
-                    let seq = image.as_ref().map(|image| image.seq);
-                    baselines.push((row_key.clone(), image));
-                    seq
+                    baselines.push((row_key.clone(), image.clone()));
+                    image
                 }
             };
+            let settled = image.as_ref().map(|image| image.seq);
+            if let Some(image) = image.filter(|image| !image.deleted) {
+                settled_images.insert(row_key.clone(), image);
+            }
             // This replica sends the commit: its predecessor goes by how
             // far back it is.
             let on = match client.pending.newest(&row_key) {
@@ -3844,7 +4161,11 @@ impl Db {
             Some(relayed) => (relayed.bases, Some(relayed.origin)),
             None => (bases, None),
         };
-        let wire: Result<Vec<WireOp>, Error> = ops.iter().map(to_wire).collect();
+        let mut wire: Result<Vec<WireOp>, Error> = ops.iter().map(to_wire).collect();
+        let (mut deltas, mut sources) = (Vec::new(), Vec::new());
+        if let Ok(wire) = &mut wire {
+            (deltas, sources) = inner.commit_deltas(wire, &rows, &settled_images)?;
+        }
         // Each written row as this replica now holds it, so the authority
         // can skip echoing a version that is exactly this.
         let mut expected = Vec::new();
@@ -3888,6 +4209,8 @@ impl Db {
                     author: author.map(|author| author.canonical().to_owned()),
                     session: session_claims,
                     expect,
+                    deltas,
+                    sources,
                     bases,
                     origin,
                 };
@@ -4319,6 +4642,10 @@ impl Db {
     /// again.
     pub fn awaiting_chunks(&self) -> bool {
         let inner = self.inner.borrow();
+        // Offloaded nodes the next tick fetches from the chunk store.
+        if inner.chunks.has_fetch() {
+            return true;
+        }
         inner.client.as_ref().is_some_and(|client| {
             let unavailable = |request: &ChunkRequest| client.unavailable.contains(request);
             client.transport.is_some()
@@ -4559,9 +4886,19 @@ impl Db {
                     SyncMessage::Rows { images } => {
                         let names = inner.owner.clone();
                         for image in images {
-                            let Some(image) = image_in(&names, image) else {
+                            let named = (image.table.clone(), image.id, image.key.clone());
+                            let Some(mut image) = image_in(&names, image) else {
                                 continue;
                             };
+                            if !inner.receive_deltas(&mut image)? {
+                                inner.ask_whole(named);
+                                continue;
+                            }
+                            if inner.record_vias(&named.0, &image)? {
+                                // A node no version held may be held by
+                                // this one: missing answers are transient.
+                                inner.client.as_mut().expect("client").unavailable.clear();
+                            }
                             let overlaid = inner.receive_image(image)?;
                             rebase |= overlaid;
                         }
@@ -4709,8 +5046,8 @@ impl Db {
                         }
                         client.fates.insert(tx, result);
                         let node = client.node;
-                        if let Some(locators) = client.pushed.remove(&tx) {
-                            crate::large::mark_pushed(&inner.conn, &locators)?;
+                        if let Some(hashes) = client.pushed.remove(&tx) {
+                            crate::large::mark_pushed(&inner.conn, &hashes)?;
                         }
                         inner.record_settled(node, tx, accepted.then_some(through))?;
                         inner.forget_pending(tx)?;
@@ -4812,30 +5149,39 @@ impl Db {
             .into_iter()
             .filter(|r| !client.requested.contains(r) && !client.unavailable.contains(r))
             .collect();
-        for batch in wanted.chunks(256) {
-            client.requested.extend(batch.iter().cloned());
+        client.requested.extend(wanted.iter().cloned());
+        let spans = inner.chunks.take_spans();
+        let pulls = inner.pulls(wanted, &spans)?;
+        for batch in pulls.chunks(64) {
             out.push(SyncMessage::ChunkRequests {
-                requests: batch.iter().map(WireChunkRef::of).collect(),
+                pulls: batch.to_vec(),
             });
         }
-        let commits = std::mem::take(&mut client.unsent);
-        // Each commit's new large-value nodes go ahead of it.
+        let client = inner.client.as_mut().expect("client");
+        let mut commits = std::mem::take(&mut client.unsent);
+        // Each commit's large-value nodes go ahead of it. A commit whose
+        // nodes must be fetched first waits, and so do those after it.
         let mut pushes = Vec::with_capacity(commits.len());
         for commit in &commits {
-            pushes.push(inner.pushes_for(commit)?);
+            match inner.pushes_for(commit)? {
+                Some(push) => pushes.push(push),
+                None => break,
+            }
         }
+        let waiting = commits.split_off(pushes.len());
         let client = inner.client.as_mut().expect("client");
+        client.unsent = waiting;
         let transport = client.transport.as_mut().expect("transport");
         for commit in &commits {
             if !client.sent.iter().any(|m| matches!((m, commit), (SyncMessage::Commit { tx: a, .. }, SyncMessage::Commit { tx: b, .. }) if a == b)) {
                 client.sent.push(commit.clone());
             }
         }
-        for (commit, (locators, batches)) in commits.into_iter().zip(pushes) {
+        for (commit, (hashes, batches)) in commits.into_iter().zip(pushes) {
             if let SyncMessage::Commit { tx, .. } = &commit
-                && !locators.is_empty()
+                && !hashes.is_empty()
             {
-                client.pushed.insert(*tx, locators);
+                client.pushed.insert(*tx, hashes);
             }
             out.extend(batches);
             out.push(commit);
@@ -4974,6 +5320,42 @@ impl Inner {
     /// Session `index`'s relayed reads that are ready to serve from this
     /// store: the upstream answered, or a first-load wait ran out or can no
     /// longer be answered. A refusal goes to the session as its own.
+    /// The pulls a relay parked for session `index` whose nodes it now
+    /// holds, or that its upstream cannot answer: they are answered again.
+    fn parked_pulls_ready(&mut self, index: usize) -> Result<Option<Vec<WirePull>>, Error> {
+        let parked = std::mem::take(&mut self.sessions[index].parked_pulls);
+        if parked.is_empty() {
+            return Ok(None);
+        }
+        let connected = self
+            .client
+            .as_ref()
+            .is_some_and(|client| client.transport.is_some());
+        let mut ready = Vec::new();
+        let mut kept = Vec::new();
+        for pull in parked {
+            let mut settled = true;
+            for hash in &pull.nodes {
+                let unavailable = self.client.as_ref().is_some_and(|client| {
+                    client
+                        .unavailable
+                        .contains(&ChunkRequest { object_hash: *hash })
+                });
+                if connected && !unavailable && crate::large::node(&self.conn, hash)?.is_none() {
+                    settled = false;
+                    break;
+                }
+            }
+            if settled {
+                ready.push(pull)
+            } else {
+                kept.push(pull)
+            }
+        }
+        self.sessions[index].parked_pulls = kept;
+        Ok((!ready.is_empty()).then_some(ready))
+    }
+
     fn relayed_fetches_ready(&mut self, index: usize) -> (Vec<SyncMessage>, Vec<RelayedAnswer>) {
         let Some(client) = self.client.as_mut() else {
             return (Vec::new(), Vec::new());
@@ -5085,6 +5467,143 @@ impl Inner {
         Some(Rc::new(
             self.named(jazz).with_policies_of(self.owner.clone()),
         ))
+    }
+
+    /// `image`'s deltas made whole over the versions they name (SPEC
+    /// 19.8). False when this replica holds no such version (it evicted
+    /// the row, INV-SYNC-14) or not the value a delta was made over.
+    fn receive_deltas(&self, image: &mut Image) -> Result<bool, Error> {
+        let row = RowUuid::from_bytes(image.id);
+        for (name, cell) in &mut image.cells {
+            let Cell::Delta(delta) = cell else {
+                continue;
+            };
+            let Some(base) = self.held_version(&image.table, row, &image.key, delta.seq)? else {
+                return Ok(false);
+            };
+            let Some((_, old)) = base.cells.iter().find(|(n, _)| n == name) else {
+                return Ok(false);
+            };
+            let Some(old) = self.large_of(&image.table, name, old)? else {
+                return Ok(false);
+            };
+            let Some(value) = large_delta::apply(&old, delta) else {
+                return Ok(false);
+            };
+            *cell = Cell::Large(
+                jazz_types::large_values::encode_large_value_ref(&value)
+                    .map_err(|e| Error::new(ErrorCode::Storage, format!("large value: {e}")))?,
+            );
+        }
+        Ok(true)
+    }
+
+    /// The version of a row at `seq` this replica holds settled: the
+    /// upstream baseline under its pending writes, or a stored one.
+    fn held_version(
+        &self,
+        table: &str,
+        row: RowUuid,
+        key: &[u8],
+        seq: u64,
+    ) -> Result<Option<Image>, Error> {
+        let client = self.client.as_ref().expect("client");
+        if let Some(Some(image)) = client.baselines.get(&(table.to_owned(), row, key.to_vec()))
+            && image.seq == seq
+        {
+            return Ok(Some(image.clone()));
+        }
+        self.version_image(table, row, key, seq)
+    }
+
+    /// A commit's chunked values that extend the same column's value in
+    /// their row's settled image, as deltas over it: each op's cell holds
+    /// NULL in its place (SPEC 19.8). The upstream holds every settled
+    /// version, as it shipped them. The rest travel as trees, named with
+    /// that settled image as their source (SPEC 19.4).
+    fn commit_deltas(
+        &self,
+        ops: &mut [WireOp],
+        rows: &[RowKey],
+        settled: &HashMap<RowKey, Image>,
+    ) -> Result<(Vec<CellDelta>, Vec<WireSource>), Error> {
+        let mut deltas = Vec::new();
+        let mut sources = Vec::new();
+        for (index, op) in ops.iter_mut().enumerate() {
+            let Ok(table) = self.schema.table(op.table()) else {
+                continue;
+            };
+            let (row, cells) = match op {
+                WireOp::Insert { row, cells, .. }
+                | WireOp::Update { row, cells, .. }
+                | WireOp::Upsert { row, cells, .. }
+                | WireOp::Restore {
+                    row,
+                    cells: Some(cells),
+                    ..
+                } => (RowUuid::from_bytes(*row), cells),
+                _ => continue,
+            };
+            // An op over several branches (a view's) has no one base.
+            let mut keys = rows
+                .iter()
+                .filter(|(stored, written, _)| *stored == table.stored && *written == row);
+            let (Some(row_key), None) = (keys.next(), keys.next()) else {
+                continue;
+            };
+            let Some(base) = settled.get(row_key) else {
+                continue;
+            };
+            let mut trees = false;
+            for (column, cell) in cells.iter_mut() {
+                let (value, depth) = large_delta::unwrap(cell);
+                let Value::Large(large) = value else {
+                    continue;
+                };
+                let stored = table.stored_name(column);
+                let old = match base.cells.iter().find(|(name, _)| name == stored) {
+                    Some((_, old)) => self.large_of(&table.stored, stored, old)?,
+                    None => None,
+                };
+                let delta = old.and_then(|old| large_delta::extend(base.seq, &old, large));
+                if let Some(delta) = delta {
+                    *value = Value::Nullable(None);
+                    deltas.push(CellDelta {
+                        op: index as u32,
+                        column: column.clone(),
+                        depth,
+                        key: row_key.2.clone(),
+                        delta,
+                    });
+                } else {
+                    trees = true;
+                }
+            }
+            if trees {
+                sources.push(WireSource {
+                    op: index as u32,
+                    key: row_key.2.clone(),
+                    seq: base.seq,
+                });
+            }
+        }
+        Ok((deltas, sources))
+    }
+
+    /// Ask the upstream for a row whole: a `Hold` of no version of it,
+    /// which it answers as on a resume (SPEC 19.8).
+    fn ask_whole(&mut self, (table, id, key): (String, [u8; 16], Vec<u8>)) {
+        let client = self.client.as_mut().expect("client");
+        let asked = client.outbox.iter().any(|message| {
+            matches!(message, SyncMessage::Hold { rows } if rows.iter().any(|held| {
+                held.0 == table && held.1 == id && held.2 == key && held.3 == 0
+            }))
+        });
+        if !asked {
+            client.outbox.push(SyncMessage::Hold {
+                rows: vec![(table, id, key, 0)],
+            });
+        }
     }
 
     /// Apply one server image; returns whether a rebase is needed (the row
@@ -5278,6 +5797,18 @@ impl Db {
         for message in relayed.into_iter().rev() {
             inbound.push_front(message);
         }
+        if let Some(pulls) = self.inner.borrow_mut().parked_pulls_ready(index)? {
+            inbound.push_front(SyncMessage::ChunkRequests { pulls });
+        }
+        // Pulls an earlier answer deferred, once what it sent has drained.
+        {
+            let mut inner = self.inner.borrow_mut();
+            let session = &mut inner.sessions[index];
+            if session.outbox.is_empty() && !session.deferred_pulls.is_empty() {
+                let pulls = std::mem::take(&mut session.deferred_pulls);
+                inbound.push_front(SyncMessage::ChunkRequests { pulls });
+            }
+        }
         // Writes held back by the ingress limit, and what the session sent
         // after them, in order. A read is never answered ahead of a commit
         // sent before it that it could observe (INV-SYNC-49); a read that
@@ -5338,8 +5869,19 @@ impl Db {
                 _ => None,
             };
             let fetch = matches!(message, SyncMessage::Fetch { .. }).then(|| message.clone());
+            // A message served while the chunk store fetches the nodes it
+            // needs is served again once they arrive.
+            let again = (fetch.is_none() && self.inner.borrow().chunks.store().is_some())
+                .then(|| message.clone());
             match (self.serve(index, message), read) {
                 (Ok(()), _) => {}
+                (Err(error), _)
+                    if crate::large::is_missing(&error)
+                        && again.is_some()
+                        && self.inner.borrow().chunks.has_fetch() =>
+                {
+                    held.push_back(again.expect("a copy"));
+                }
                 // A relay's read whose large values it is still fetching
                 // from its upstream is served again once they arrive,
                 // from its store: the upstream is not asked again.
@@ -5921,6 +6463,7 @@ impl Db {
                         held.entry(echo.tx)
                             .or_default()
                             .push(Held::of(echo.index, image));
+                        hold_shipped(&mut session.shipped, image);
                     }
                     !same
                 });
@@ -6006,7 +6549,24 @@ impl Db {
                     |message| !matches!(message, SyncMessage::Rows { images } if images.is_empty()),
                 );
             }
+            // Chunked cells go as deltas over the version of their row the
+            // replica holds (SPEC 19.8).
+            let mut shipped = std::mem::take(&mut inner.sessions[index].shipped);
+            for message in &mut out {
+                match message {
+                    SyncMessage::Rows { images } => {
+                        for image in images.iter_mut() {
+                            inner.ship_deltas(&mut shipped, image)?;
+                        }
+                    }
+                    SyncMessage::Evict { table, id, key } => {
+                        shipped.remove(&(table.clone(), *id, key.clone()));
+                    }
+                    _ => {}
+                }
+            }
             let session = &mut inner.sessions[index];
+            session.shipped = shipped;
             for message in out {
                 let Some(message) = message_out(&names, message) else {
                     continue;
@@ -6267,6 +6827,7 @@ impl Db {
                 let mut held = std::mem::take(&mut inner.sessions[index].held);
                 let mut touched = Vec::new();
                 let mut evict = Vec::new();
+                let mut declared_held = Vec::new();
                 let mut by_table: BTreeMap<String, HashMap<([u8; 16], Vec<u8>), u64>> =
                     BTreeMap::new();
                 for (table, id, key, seq) in rows {
@@ -6305,6 +6866,8 @@ impl Db {
                                     watch_key(&Sql::Blob(id.to_vec())),
                                 )));
                                 watch.insert(held_key(&stored, &id));
+                                // Seq 0 asks for the row whole (SPEC 19.8).
+                                declared_held.push(((stored.clone(), id, key.clone()), seq));
                                 // The replica keeps it whether or not a
                                 // live query reads it: held, a commit to a
                                 // table its read policy depends on (the
@@ -6321,15 +6884,25 @@ impl Db {
                                     touched.push((stored.clone(), RowUuid::from_bytes(id), key));
                                 }
                             }
-                            _ => evict.push(SyncMessage::Evict {
-                                table: stored.clone(),
-                                id,
-                                key,
-                            }),
+                            _ => {
+                                declared_held.push(((stored.clone(), id, key.clone()), 0));
+                                evict.push(SyncMessage::Evict {
+                                    table: stored.clone(),
+                                    id,
+                                    key,
+                                })
+                            }
                         }
                     }
                 }
                 let session = &mut inner.sessions[index];
+                for (row, seq) in declared_held {
+                    if seq == 0 {
+                        session.shipped.remove(&row);
+                    } else {
+                        session.shipped.insert(row, seq);
+                    }
+                }
                 session.watch = watch;
                 session.held = held;
                 session.touched.extend(touched);
@@ -6550,6 +7123,7 @@ impl Db {
                     include_deleted,
                     settled_only: strict,
                     view: viewed.view,
+                    splices: Vec::new(),
                 };
                 let rows = inner.run(&prepared, policy, &read)?;
                 let mut images = Vec::new();
@@ -6649,6 +7223,8 @@ impl Db {
                 author,
                 session,
                 expect,
+                deltas,
+                sources,
                 bases,
                 origin,
             } => {
@@ -6688,6 +7264,19 @@ impl Db {
                     None => match commit_who(policy, author.as_deref(), session.is_some())
                         .map_err(|error| (error, Vec::new()))
                         .and_then(|who| {
+                            let (ops, mut roots) = db
+                                .resolve_deltas(policy, ops, deltas)
+                                .map_err(|error| (error, Vec::new()))?;
+                            roots.extend(
+                                db.source_roots(policy, &ops, &sources)
+                                    .map_err(|error| (error, Vec::new()))?,
+                            );
+                            let possession = crate::large::Possession {
+                                author: receipt_author(&identity),
+                                checked: policy.is_some(),
+                                roots,
+                                settle: Default::default(),
+                            };
                             let vouched = vouched(policy, who, session);
                             self.with_claims(vouched, || {
                                 db.authorize_commit(
@@ -6697,11 +7286,21 @@ impl Db {
                                     ops,
                                     (node, tx),
                                     (bases, writer),
+                                    possession,
                                 )
                             })
                         }) {
                         // The accepted commit recorded its fate atomically.
                         Ok(rows) => (Ok(()), rows),
+                        // Its large values need nodes the chunk store is
+                        // still fetching: it is applied again once they
+                        // arrive, not refused.
+                        Err((error, _))
+                            if crate::large::is_missing(&error)
+                                && self.inner.borrow().chunks.has_fetch() =>
+                        {
+                            return Err(error);
+                        }
                         Err((error, rows)) => {
                             let result = Err(wire_error(&error));
                             let inner = self.inner.borrow();
@@ -6778,34 +7377,13 @@ impl Db {
                     });
                 }
             }
-            SyncMessage::ChunkRequests { requests } => {
+            SyncMessage::ChunkRequests { pulls } => {
+                let (replies, parked, deferred) = db.answer_pulls(policy, pulls)?;
                 let mut inner = self.inner.borrow_mut();
-                let mut replies = Vec::new();
-                let mut nodes = Vec::new();
-                let mut missing = Vec::new();
-                let mut size = 0;
-                for request in requests {
-                    match crate::large::node(&inner.conn, &request.locator)? {
-                        Some((hash, bytes)) if hash.as_slice() == request.hash => {
-                            size += bytes.len();
-                            nodes.push(WireChunk {
-                                locator: request.locator,
-                                hash: request.hash,
-                                bytes,
-                            });
-                            if size >= CHUNK_BATCH_BYTES {
-                                replies.push(SyncMessage::Chunks {
-                                    nodes: std::mem::take(&mut nodes),
-                                    missing: Vec::new(),
-                                });
-                                size = 0;
-                            }
-                        }
-                        _ => missing.push(request),
-                    }
-                }
-                replies.push(SyncMessage::Chunks { nodes, missing });
-                inner.sessions[index].outbox.extend(replies);
+                let session = &mut inner.sessions[index];
+                session.outbox.extend(replies);
+                session.parked_pulls.extend(parked);
+                session.deferred_pulls.extend(deferred);
             }
             SyncMessage::PushChunks { nodes } => {
                 let inner = self.inner.borrow();
@@ -6814,6 +7392,7 @@ impl Db {
                 // A relay pushes what its sessions push on to its upstream,
                 // ahead of the commits that name it.
                 let relay = inner.client.is_some();
+                let author = receipt_author(&inner.sessions[index].identity);
                 in_savepoint(&inner.conn, "jazz_lv_push", || {
                     for node in nodes {
                         // A node that fails authentication is dropped; a
@@ -6826,9 +7405,13 @@ impl Db {
                             &request,
                             node.bytes,
                             expires,
+                            &author,
                         );
                         if relay && received.is_ok() {
-                            crate::large::mark_unpushed(&inner.conn, &request.locator)?;
+                            crate::large::mark_unpushed(
+                                &inner.conn,
+                                &jazz_types::large_values::ContentHash(request.object_hash),
+                            )?;
                         }
                     }
                     Ok(())
@@ -6843,6 +7426,212 @@ impl Db {
     /// Returns the rows the client must hear about either way: the rows it
     /// wrote, so a rejected client rebases onto the authority's versions.
     #[allow(clippy::type_complexity)]
+    /// A commit's deltas made whole over the versions they name (SPEC
+    /// 19.8), each only where `identity` may read that version: naming a
+    /// version must not copy what the writer cannot read into its write.
+    fn resolve_deltas(
+        &self,
+        identity: Option<AuthorSubject>,
+        mut ops: Vec<WireOp>,
+        deltas: Vec<CellDelta>,
+    ) -> Result<(Vec<WireOp>, BTreeSet<[u8; 32]>), Error> {
+        let mut roots = BTreeSet::new();
+        let unresolved = || {
+            Error::new(
+                ErrorCode::WriteRejected,
+                "a large-value delta names no version of its row the writer may read",
+            )
+        };
+        let inner = self.inner();
+        for delta in deltas {
+            let op = ops.get_mut(delta.op as usize).ok_or_else(unresolved)?;
+            let table = inner.schema.table(op.table())?;
+            let stored = table.stored_name(&delta.column).to_owned();
+            let (row, cells) = match op {
+                WireOp::Insert { row, cells, .. }
+                | WireOp::Update { row, cells, .. }
+                | WireOp::Upsert { row, cells, .. }
+                | WireOp::Restore {
+                    row,
+                    cells: Some(cells),
+                    ..
+                } => (RowUuid::from_bytes(*row), cells),
+                _ => return Err(unresolved()),
+            };
+            let seq = delta.delta.seq;
+            if !still_readable_version(&inner, &table.stored, row, &delta.key, seq, identity)? {
+                return Err(unresolved());
+            }
+            let base = inner
+                .version_image(&table.stored, row, &delta.key, seq)?
+                .ok_or_else(unresolved)?;
+            let (_, old) = base
+                .cells
+                .iter()
+                .find(|(name, _)| *name == stored)
+                .ok_or_else(unresolved)?;
+            let old = inner
+                .large_of(&table.stored, &stored, old)?
+                .ok_or_else(unresolved)?;
+            let value = large_delta::apply(&old, &delta.delta).ok_or_else(unresolved)?;
+            roots.insert(value.root.object_hash.0);
+            let cell = cells.get_mut(&delta.column).ok_or_else(unresolved)?;
+            *cell = large_delta::wrap(Value::Large(Box::new(value)), delta.depth);
+        }
+        Ok((ops, roots))
+    }
+
+    /// Answer pulls (SPEC 19.8): each only where `identity` may read the
+    /// version it cites and that version holds its root, and only with
+    /// nodes of that tree. Everything else comes back missing, so naming
+    /// a hash never reads another row's content. A node only in an
+    /// asynchronous chunk store fails the whole batch as missing before
+    /// anything is sent: it is answered again once its nodes are fetched.
+    ///
+    /// One answer carries at most about [`ANSWER_PULL_BYTES`], each node
+    /// once: the pulls (and wanted nodes) past it come back deferred, to
+    /// be answered once the session's outbox has drained.
+    fn answer_pulls(
+        &self,
+        identity: Option<AuthorSubject>,
+        pulls: Vec<WirePull>,
+    ) -> Result<(Vec<SyncMessage>, Vec<WirePull>, Vec<WirePull>), Error> {
+        let inner = self.inner();
+        let mut replies = Vec::new();
+        let mut parked = Vec::new();
+        let mut deferred = Vec::new();
+        let mut nodes = Vec::new();
+        let mut missing = Vec::new();
+        let mut size = 0;
+        let mut answered = 0;
+        let mut sent = std::collections::HashSet::new();
+        let mut fetching = false;
+        for pull in pulls {
+            if answered >= ANSWER_PULL_BYTES {
+                deferred.push(pull);
+                continue;
+            }
+            let row = RowUuid::from_bytes(pull.id);
+            let image = match inner.schema.stored_table(&pull.table) {
+                Ok(table)
+                    if still_readable_version(
+                        &inner, table, row, &pull.key, pull.seq, identity,
+                    )? =>
+                {
+                    inner
+                        .version_image(table, row, &pull.key, pull.seq)?
+                        .map(|image| (table, image))
+                }
+                _ => None,
+            };
+            let holds = match &image {
+                Some((table, image)) => inner.large_roots(table, image)?.contains(&pull.root),
+                None => false,
+            };
+            if !holds {
+                missing.extend(pull.nodes.into_iter().map(|hash| WireChunkRef { hash }));
+                continue;
+            }
+            let span = pull.span.map(|(start, end)| start..end);
+            let found = crate::large::pulled(
+                &inner.conn,
+                &inner.chunks,
+                &pull.root,
+                &pull.nodes,
+                span.clone(),
+                PULL_BYTES.min(ANSWER_PULL_BYTES - answered),
+                &mut sent,
+            );
+            let (found, foreign, absent, rest) = match found {
+                Err(error) if crate::large::is_missing(&error) => {
+                    fetching = true;
+                    continue;
+                }
+                found => found?,
+            };
+            missing.extend(foreign.into_iter().map(|hash| WireChunkRef { hash }));
+            if !rest.is_empty() {
+                deferred.push(WirePull {
+                    nodes: rest,
+                    span: None,
+                    ..pull.clone()
+                });
+            }
+            // A relay fetches what it lacks from its upstream, through the
+            // version it received, and answers once it arrives; what its
+            // upstream cannot answer is missing here too.
+            let (fetch, absent): (Vec<_>, Vec<_>) = match &inner.client {
+                Some(client) if client.transport.is_some() => {
+                    absent.into_iter().partition(|hash| {
+                        !client
+                            .unavailable
+                            .contains(&ChunkRequest { object_hash: *hash })
+                    })
+                }
+                _ => (Vec::new(), absent),
+            };
+            missing.extend(absent.into_iter().map(|hash| WireChunkRef { hash }));
+            if !fetch.is_empty() {
+                inner.chunks.add_demand(
+                    fetch.iter().map(|hash| ChunkRequest { object_hash: *hash }),
+                    span.clone().map(|span| (pull.root, span)),
+                );
+                parked.push(WirePull {
+                    nodes: fetch,
+                    ..pull.clone()
+                });
+            }
+            for (hash, bytes) in found {
+                size += bytes.len();
+                answered += bytes.len();
+                nodes.push(WireChunk { hash, bytes });
+                if size >= CHUNK_BATCH_BYTES {
+                    replies.push(SyncMessage::Chunks {
+                        nodes: std::mem::take(&mut nodes),
+                        missing: Vec::new(),
+                    });
+                    size = 0;
+                }
+            }
+        }
+        if fetching {
+            return Err(crate::large::missing());
+        }
+        replies.push(SyncMessage::Chunks { nodes, missing });
+        Ok((replies, parked, deferred))
+    }
+
+    /// The roots of the chunked values of the settled versions a commit
+    /// names as its sources, each where `identity` may read it: the trees
+    /// the writer holds without pushing them (SPEC 19.4). A source it may
+    /// not read, or this store lacks, counts for nothing.
+    fn source_roots(
+        &self,
+        identity: Option<AuthorSubject>,
+        ops: &[WireOp],
+        sources: &[WireSource],
+    ) -> Result<BTreeSet<[u8; 32]>, Error> {
+        let inner = self.inner();
+        let mut roots = BTreeSet::new();
+        for source in sources {
+            let Some(op) = ops.get(source.op as usize) else {
+                continue;
+            };
+            let (Ok(table), Some(row)) = (inner.schema.stored_table(op.table()), wire_row(op))
+            else {
+                continue;
+            };
+            if !still_readable_version(&inner, table, row, &source.key, source.seq, identity)? {
+                continue;
+            }
+            if let Some(image) = inner.version_image(table, row, &source.key, source.seq)? {
+                roots.extend(inner.large_roots(table, &image)?);
+            }
+        }
+        Ok(roots)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn authorize_commit(
         &self,
         who: Who,
@@ -6851,6 +7640,7 @@ impl Db {
         ops: Vec<WireOp>,
         origin: ([u8; 16], u64),
         (bases, writer): (Vec<WireBase>, ([u8; 16], u64)),
+        possession: crate::large::Possession,
     ) -> Result<Vec<(String, RowUuid, Vec<u8>)>, (Error, Vec<(String, RowUuid, Vec<u8>)>)> {
         let ops: Vec<StagedOp> = match ops.into_iter().map(from_wire).collect::<Result<_, _>>() {
             Ok(ops) => ops,
@@ -6991,12 +7781,15 @@ impl Db {
             // The unit was made over the sender's image (SPEC 4, INV-HIST-8);
             // text merges read what each row was built on.
             inner.merging = true;
+            inner.possession = Some(possession);
             inner.merge_bases = std::mem::take(&mut built);
             inner.text_in.borrow_mut().clear();
             let applied = ops
                 .iter()
                 .try_for_each(|op| inner.apply_as(op, who, seq).map(drop))
-                .and_then(|()| inner.finish_checks(seq));
+                .and_then(|()| inner.finish_checks(seq))
+                .and_then(|()| inner.settle_possession());
+            inner.possession = None;
             inner.merging = false;
             built = std::mem::take(&mut inner.merge_bases);
             if let Err(error) = applied {
@@ -7155,6 +7948,21 @@ fn readable_version(
     inner.check_version(table, row, key, seq, author, Operation::Select)
 }
 
+/// Whether `identity` may read the version of `row` at `seq` and, still,
+/// the row as it stands: losing read access takes effect at once for the
+/// content of every earlier version too (SPEC 19.9, INV-RLS-13).
+fn still_readable_version(
+    inner: &Inner,
+    table: &str,
+    row: RowUuid,
+    key: &[u8],
+    seq: u64,
+    identity: Option<AuthorSubject>,
+) -> Result<bool, Error> {
+    Ok(readable_version(inner, table, row, key, seq, identity)?
+        && readable(inner, table, row, key, identity)?)
+}
+
 /// Whether `identity` may read a row of stored table `table`.
 fn readable(
     inner: &Inner,
@@ -7216,14 +8024,53 @@ fn image_out(schema: &Schema, mut image: Image) -> Option<Image> {
     image.table = table.name.clone();
     image.cells = std::mem::take(&mut image.cells)
         .into_iter()
-        .filter_map(
-            |(name, cell)| match table.columns.iter().find(|c| c.stored == name) {
+        .filter_map(|(name, cell)| {
+            // A key column travels named after the column it keys.
+            if let Some(keyed) = crate::large::keyed_by(&name) {
+                let column = table.columns.iter().find(|c| c.stored == keyed)?;
+                return Some((crate::large::key_column(&column.name), cell));
+            }
+            match table.columns.iter().find(|c| c.stored == name) {
                 Some(column) => Some((column.name.clone(), cell)),
                 None => name.starts_with('$').then_some((name, cell)),
-            },
-        )
+            }
+        })
         .collect();
     Some(image)
+}
+
+/// The author a session's receipts are kept under: its identity.
+fn receipt_author(identity: &AuthorSubject) -> Vec<u8> {
+    identity.canonical().as_bytes().to_vec()
+}
+
+/// The row a write names.
+fn wire_row(op: &WireOp) -> Option<RowUuid> {
+    match op {
+        WireOp::Insert { row, .. }
+        | WireOp::Update { row, .. }
+        | WireOp::Upsert { row, .. }
+        | WireOp::Delete { row, .. }
+        | WireOp::Restore { row, .. }
+        | WireOp::Move { row, .. } => Some(RowUuid::from_bytes(*row)),
+    }
+}
+
+/// Record that the replica holds `image`, when it has chunked cells: its
+/// later versions' go as deltas over it (SPEC 19.8).
+fn hold_shipped(shipped: &mut HashMap<(String, [u8; 16], Vec<u8>), u64>, image: &Image) {
+    if image.deleted
+        || !image
+            .cells
+            .iter()
+            .any(|(_, cell)| matches!(cell, Cell::Large(_)))
+    {
+        return;
+    }
+    let seq = shipped
+        .entry((image.table.clone(), image.id, image.key.clone()))
+        .or_insert(image.seq);
+    *seq = (*seq).max(image.seq);
 }
 
 /// An image named by `schema`, by this store's stored names instead.
@@ -7232,12 +8079,16 @@ fn image_in(schema: &Schema, mut image: Image) -> Option<Image> {
     image.table = table.stored.clone();
     image.cells = std::mem::take(&mut image.cells)
         .into_iter()
-        .filter_map(
-            |(name, cell)| match table.columns.iter().find(|c| c.name == name) {
+        .filter_map(|(name, cell)| {
+            if let Some(keyed) = crate::large::keyed_by(&name) {
+                let column = table.columns.iter().find(|c| c.name == keyed)?;
+                return Some((crate::large::key_column(&column.stored), cell));
+            }
+            match table.columns.iter().find(|c| c.name == name) {
                 Some(column) => Some((column.stored.clone(), cell)),
                 None => name.starts_with('$').then_some((name, cell)),
-            },
-        )
+            }
+        })
         .collect();
     Some(image)
 }

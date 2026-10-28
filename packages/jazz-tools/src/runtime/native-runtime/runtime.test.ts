@@ -2828,8 +2828,9 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     expect(queryBytes).toBeDefined();
-    expect(Array.from(queryBytes!.slice(-10))).toEqual([
-      4, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0xf8, 0x3f,
+    // The literal 1.0 (tag 4, LEB128 f64 bits), then the query's empty partial selects.
+    expect(Array.from(queryBytes!.slice(-11))).toEqual([
+      4, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0xf8, 0x3f, 0,
     ]);
   });
 

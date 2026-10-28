@@ -10,9 +10,9 @@ re-runs the producer and re-pins the hashes here and in the test instead
 are stored, and a rejection's reason name changed how fates are recorded).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `b43565e8a6a85d251ab29128c4f52b2c71ff7791f9e5d42f2a1ee5c40d2e92a9`.
+  the SQLite file `a7b2f33fa3b2a6c97785ed60e99b6e1b109e553f7d4f32e8081ed669b75cd8c3`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `89d5bae39a2d389b4ca190c4209d431708b8768b98b8c5b152945e871f533cbf`.
+  `b4ef918dd0d3c904ac6e209ba0402e129f5ec35c5c316d11e55694694f082fc7`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
