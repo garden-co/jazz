@@ -1820,9 +1820,10 @@ fn root_exists_rel_at_correlation(
                         .insert(route[1..].to_vec(), correlations);
                 }
             } else {
-                let mut rebased = vec![reverse_index];
-                rebased.extend(route);
-                lowered.outer_correlations.insert(rebased, correlations);
+                lowered.outer_correlations.insert(
+                    rebase_sibling_route(&route, index, reverse_index),
+                    correlations,
+                );
             }
         }
         lowered.filters = next
@@ -1845,6 +1846,22 @@ fn root_exists_rel_at_correlation(
         lowered.scope_paths.clear();
     }
     Ok(())
+}
+
+/// Moves a route through a sibling of the join removed at `removed_index`
+/// under the reversed edge at `reverse_index`. Siblings after the removed join
+/// shift down one position in the reversed edge's `nested_joins`.
+fn rebase_sibling_route(route: &[usize], removed_index: usize, reverse_index: usize) -> Vec<usize> {
+    let mut rebased = vec![reverse_index];
+    if let Some((&first, rest)) = route.split_first() {
+        rebased.push(if first > removed_index {
+            first - 1
+        } else {
+            first
+        });
+        rebased.extend_from_slice(rest);
+    }
+    rebased
 }
 
 fn append_exists_rel_policy_clause(
@@ -3207,6 +3224,15 @@ mod tests {
     use crate::query::RelationProjectColumn;
     use crate::query::provider_claim_operand_key;
     use crate::query::{InheritsOperation, JoinTarget, Operand, Predicate};
+
+    #[test]
+    fn rebasing_sibling_routes_accounts_for_the_removed_join() {
+        // Joins [a, b, c] with b (index 1) re-rooted: the reversed edge holds [a, c].
+        assert_eq!(rebase_sibling_route(&[0], 1, 4), vec![4, 0]);
+        assert_eq!(rebase_sibling_route(&[2], 1, 4), vec![4, 1]);
+        assert_eq!(rebase_sibling_route(&[2, 3], 1, 4), vec![4, 1, 3]);
+    }
+
     #[test]
     fn rejects_user_columns_in_the_compiler_aggregate_namespace() {
         let schema = SchemaBuilder::new()
