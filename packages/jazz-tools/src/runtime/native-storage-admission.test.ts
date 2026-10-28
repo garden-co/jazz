@@ -72,9 +72,34 @@ for (const backend of [false, true]) {
       expect((error as Error).message).toContain("jazz.sqlite.native-root.v1");
     }
 
-    it("refuses an unknown file without creating a neighbouring empty store", async () => {
+    it.each([".DS_Store", "notes.txt", "jazz.sqlite.bak"])(
+      "ignores a stray regular file %s and opens the store beside it",
+      async (name) => {
+        const root = temporaryRoot();
+        writeFileSync(join(root, name), "Alice's unrelated file");
+        const before = snapshot(root)[`./${name}`];
+        const db = open(root);
+        await db.close();
+        expect(readdirSync(root)).toContain("jazz.sqlite");
+        expect(snapshot(root)[`./${name}`]).toBe(before);
+      },
+    );
+
+    it.each(["other.sqlite", "legacy.db", "legacy.db-wal", "CURRENT", "MANIFEST-000001"])(
+      "refuses a foreign store file %s without creating a neighbouring empty store",
+      async (name) => {
+        const root = temporaryRoot();
+        writeFileSync(join(root, name), "Alice's existing data");
+        const before = snapshot(root);
+        await refused(root);
+        expect(snapshot(root)).toEqual(before);
+      },
+    );
+
+    it("refuses a directory in the root without touching it", async () => {
       const root = temporaryRoot();
-      writeFileSync(join(root, "application.data"), "Alice's existing data");
+      mkdirSync(join(root, "attachments"));
+      writeFileSync(join(root, "attachments", "retained"), "Alice's nested data");
       const before = snapshot(root);
       await refused(root);
       expect(snapshot(root)).toEqual(before);
@@ -91,20 +116,24 @@ for (const backend of [false, true]) {
 
     it
       .skipIf(process.platform === "win32")
-      .each(["jazz.sqlite", "jazz.sqlite-wal", "jazz.sqlite-shm", "jazz.sqlite-journal"])(
-      "refuses a symlink at %s without touching its target",
-      async (name) => {
-        const parent = temporaryRoot();
-        const root = join(parent, "alice");
-        mkdirSync(root);
-        const target = join(parent, "bob.data");
-        writeFileSync(target, "Bob's external data");
-        symlinkSync(target, join(root, name));
-        const before = snapshot(parent);
-        await refused(root);
-        expect(snapshot(parent)).toEqual(before);
-      },
-    );
+      .each([
+        "jazz.sqlite",
+        "jazz.sqlite-wal",
+        "jazz.sqlite-shm",
+        "jazz.sqlite-journal",
+        "notes.txt",
+        ".DS_Store",
+      ])("refuses a symlink at %s without touching its target", async (name) => {
+      const parent = temporaryRoot();
+      const root = join(parent, "alice");
+      mkdirSync(root);
+      const target = join(parent, "bob.data");
+      writeFileSync(target, "Bob's external data");
+      symlinkSync(target, join(root, name));
+      const before = snapshot(parent);
+      await refused(root);
+      expect(snapshot(parent)).toEqual(before);
+    });
 
     it("creates a missing root and preserves ordinary rows when reopened", async () => {
       const parent = temporaryRoot();
