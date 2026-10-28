@@ -978,10 +978,20 @@ pub enum SyncMessage {
     /// (rows travel by stored names, untranslated), so it admits each
     /// version under these names, renaming what it named otherwise while
     /// it did not know them. Sent ahead of any row after a `Holds`, and
-    /// again when the store admits a version.
+    /// again when the store admits a version or learns more of its
+    /// authority's catalogue.
+    ///
+    /// `namespace`: the authority's (see `Inner::namespace`), once the
+    /// sender knows it; a replica that holds another one is another app's
+    /// and refuses this upstream. `confirmed`: the versions whose names are
+    /// the authority's, each with its names' digest (every version the
+    /// authority admitted; on a relay, those its upstream confirmed). Only
+    /// a confirmed version's tables and columns have an identity.
     Catalogue {
+        namespace: Option<[u8; 16]>,
         versions: Vec<CatalogueVersion>,
         cells: Vec<CatalogueCell>,
+        confirmed: Vec<([u8; 16], [u8; 16])>,
     },
 }
 
@@ -1575,6 +1585,8 @@ pub(crate) struct Session {
     /// (`None` until its `Holds`), and whether it is owed a `Catalogue`.
     holds: Option<HashMap<[u8; 16], [u8; 16]>>,
     catalogue_owed: bool,
+    /// The namespace and confirmations the client was last sent.
+    told: Option<(Option<[u8; 16]>, Vec<([u8; 16], [u8; 16])>)>,
     /// On a relay, the upstream subscription each of the client's
     /// subscriptions holds (query, binding, include_deleted): its results
     /// settle once the upstream answers, never from the relay's store.
@@ -1624,6 +1636,7 @@ impl Session {
             told_unadmitted: false,
             holds: None,
             catalogue_owed: false,
+            told: None,
             schema: None,
             relayed: BTreeMap::new(),
             first_load: BTreeMap::new(),
@@ -1861,6 +1874,8 @@ fn id_watch(table: &str, id: [u8; 16]) -> u64 {
 pub(super) const ACTIVATED_META: &str = "activated";
 /// The `_jazz_meta` key of a digest of the current schema's read policies.
 pub(super) const POLICIES_META: &str = "policies";
+/// The `_jazz_meta` key of the authority namespace (see `Inner::namespace`).
+pub(super) const NAMESPACE_META: &str = "namespace";
 
 /// The stored tables `support` reads rows of.
 fn support_tables(support: &[Support], out: &mut Vec<String>) {
@@ -3907,6 +3922,58 @@ impl Inner {
         Ok(())
     }
 
+    /// The namespace of the authority whose catalogue this store keeps:
+    /// minted once by an authority with no upstream, mirrored by every
+    /// replica of it (see [`SyncMessage::Catalogue`]); `None` on a store
+    /// that has received none yet. Stored identities are derived from it
+    /// (see [`crate::names::identity`]), so two apps' tables never share one.
+    pub(super) fn namespace(&self) -> Result<Option<[u8; 16]>, Error> {
+        let stored = match self.conn.cached_row(
+            "SELECT v FROM _jazz_meta WHERE k = ?1",
+            [NAMESPACE_META],
+            |r| r.get::<_, Vec<u8>>(0),
+        ) {
+            Ok(bytes) => Some(
+                bytes
+                    .try_into()
+                    .map_err(|_| Error::new(ErrorCode::Storage, "bad namespace in _jazz_meta"))?,
+            ),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(error) => return Err(storage(error)),
+        };
+        if stored.is_some() || !self.publishes_catalogue() {
+            return Ok(stored);
+        }
+        let minted = *uuid::Uuid::new_v4().as_bytes();
+        self.persist_namespace(minted)?;
+        Ok(Some(minted))
+    }
+
+    pub(super) fn persist_namespace(&self, namespace: [u8; 16]) -> Result<(), Error> {
+        self.exec(
+            "INSERT OR REPLACE INTO _jazz_meta (k, v) VALUES (?1, ?2)",
+            rusqlite::params![NAMESPACE_META, namespace.to_vec()],
+        )
+        .map_err(storage)?;
+        Ok(())
+    }
+
+    /// Whether this store's catalogue is its own: an authority with no
+    /// upstream. Every version it admits is confirmed; a replica's are
+    /// confirmed by the `Catalogue` it mirrors.
+    pub(super) fn publishes_catalogue(&self) -> bool {
+        self.authority && self.client.is_none()
+    }
+
+    /// Whether `version`'s names are the authority's.
+    pub(super) fn names_confirmed(&self, version: &crate::ids::SchemaVersionId) -> bool {
+        if self.publishes_catalogue() {
+            self.names.get(version).is_some()
+        } else {
+            self.names.confirmed(version)
+        }
+    }
+
     pub(super) fn meta(&self, key: &str) -> Result<Option<u64>, Error> {
         match self
             .conn
@@ -4084,16 +4151,29 @@ impl Inner {
 
     /// The `Catalogue` session `index` is owed: the admitted versions it
     /// keeps no names for, or other names for.
-    fn catalogue_for(&mut self, index: usize) -> Option<SyncMessage> {
+    fn catalogue_for(&mut self, index: usize) -> Result<Option<SyncMessage>, Error> {
         if !std::mem::take(&mut self.sessions[index].catalogue_owed) {
-            return None;
+            return Ok(None);
         }
+        if self.sessions[index].holds.is_none() {
+            return Ok(None);
+        }
+        let namespace = self.namespace()?;
+        let confirmed: Vec<([u8; 16], [u8; 16])> = if self.publishes_catalogue() {
+            self.names
+                .in_order()
+                .into_iter()
+                .map(|(version, names)| (*version.as_bytes(), crate::names::names_digest(names)))
+                .collect()
+        } else {
+            self.names.confirmations()
+        };
         let mut versions = Vec::new();
         let mut sent = Vec::new();
         for (version, names) in self.names.in_order() {
             let digest = crate::names::names_digest(names);
             let bytes = *version.as_bytes();
-            let holds = self.sessions[index].holds.as_ref()?;
+            let holds = self.sessions[index].holds.as_ref().expect("holds");
             if holds.get(&bytes) == Some(&digest) {
                 continue;
             }
@@ -4126,8 +4206,9 @@ impl Inner {
             });
             sent.push((bytes, digest));
         }
-        if versions.is_empty() {
-            return None;
+        let told = (namespace, confirmed);
+        if versions.is_empty() && self.sessions[index].told.as_ref() == Some(&told) {
+            return Ok(None);
         }
         let cells = self
             .names
@@ -4151,7 +4232,14 @@ impl Inner {
             .collect();
         let holds = self.sessions[index].holds.get_or_insert_with(HashMap::new);
         holds.extend(sent);
-        Some(SyncMessage::Catalogue { versions, cells })
+        let (namespace, confirmed) = told.clone();
+        self.sessions[index].told = Some(told);
+        Ok(Some(SyncMessage::Catalogue {
+            namespace,
+            versions,
+            cells,
+            confirmed,
+        }))
     }
 
     /// How a subscription resuming from `since` opens (see [`Resume`]):
@@ -5620,9 +5708,14 @@ impl Db {
                         let client = inner.client.as_mut().expect("client");
                         client.whole.remove(&(table, id, key));
                     }
-                    SyncMessage::Catalogue { versions, cells } => {
-                        match inner.mirror_catalogue(versions, cells) {
-                            Ok(()) => rebase = true,
+                    SyncMessage::Catalogue {
+                        namespace,
+                        versions,
+                        cells,
+                        confirmed,
+                    } => {
+                        match inner.mirror_catalogue(namespace, versions, cells, &confirmed) {
+                            Ok(renamed) => rebase |= renamed,
                             // This store cannot store rows as its upstream
                             // does: it stops syncing with it, nothing that
                             // follows applies, and its remote reads fail
@@ -6903,6 +6996,7 @@ impl Db {
             }
             if recheck.is_empty()
                 && inner.sessions[index].idle()
+                && !inner.sessions[index].catalogue_owed
                 && !written_keys
                     .iter()
                     .any(|(_, keys)| keys.iter().any(|k| inner.sessions[index].watch.contains(k)))
@@ -7244,7 +7338,7 @@ impl Db {
             let mut out = Vec::new();
             // Rows travel by stored names: the versions they are stored by
             // reach the client first.
-            if let Some(catalogue) = inner.catalogue_for(index) {
+            if let Some(catalogue) = inner.catalogue_for(index)? {
                 out.push(catalogue);
             }
             if !history_seqs.is_empty() {
