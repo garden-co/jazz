@@ -7658,8 +7658,22 @@ impl Db {
     /// Existing live deadlines are armed when a hook is installed or replaced.
     /// This does not install a timer or executor by itself.
     pub fn set_tick_scheduler(&self, scheduler: Option<Rc<dyn TickScheduler>>) {
-        self.inner.borrow_mut().scheduler = scheduler;
+        let expired = {
+            let mut inner = self.inner.borrow_mut();
+            inner.scheduler = scheduler;
+            let now = Instant::now();
+            inner
+                .read_deadlines
+                .iter()
+                .filter_map(Weak::upgrade)
+                .any(|deadline| *deadline <= now)
+        };
         self.schedule_read_deadlines();
+        // A newly installed hook missed the old timer. Request one drive turn
+        // so expired reads can settle, without rearming them on every tick.
+        if expired {
+            self.schedule_pending_tick();
+        }
     }
 
     pub(crate) fn read_deadline(&self, at: Option<Instant>) -> Option<Rc<Instant>> {
