@@ -8,13 +8,12 @@ never rewrites these. Until then format 1 is still moving, so such a change
 re-runs the producer and re-pins the hashes here and in the test instead
 (for example: per-write timestamps on the wire changed how pending uploads
 are stored, a rejection's reason name changed how fates are recorded, and
-pending uploads moved from one encoded message to a row per op, and the
-pending header lost its echo flag).
+pending uploads moved from one encoded message to a row per op).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `b36c63df8c1c86e1a53a8d03abb096a578b54e4751ea722a6bf7b108203842e7`.
+  the SQLite file `ee21141c812da22c74ceb53b8f15da26885b5b33d0dbef9880528b180a463a09`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `1f0fda71b9f1abe43d5080a911ffc035cc4985f0f7ee49822f0d7af1316e5cde`.
+  `94ab9a72d943afdccc33f3ef3dfd1e898a812da55b19fc2bad976f019109b747`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
@@ -29,7 +28,7 @@ nodes and write times:
   write as sent (`_st` bit 2, at `_seq` = minus the commit's seq);
 - a client that synced `projects` and `documents`, wrote one row that
   settled, one stamped far ahead of the server's clock that the server
-  rejected (so `_jazz_applied` keeps a rejected fate with its reason name),
+  rejected (so `_jazz_transactions` keeps a rejected fate with its reason name),
   then two writes (an insert and an update) that never reached the
   server: its pending uploads;
 - then the server activated a second schema version that renames
@@ -66,3 +65,7 @@ Replacing a pending commit's `author` and `session` fields with one `acting`
 enum (`Own`, `Attributed`, `Session`), which changes the encoded
 `_jazz_pending` header, regenerated it the same way. A pending row in the
 earlier layout is refused as an unsupported storage format, never misread.
+
+Merging `_jazz_applied` and `_jazz_settled` into one `_jazz_transactions`
+table keyed by an interned node code (`_jazz_nodes.n`) regenerated it the
+same way.
