@@ -54,22 +54,22 @@ const FORMAT: &str = "jazz-sqlite-sync-wire-corpus-v1";
 const VARIANTS: [&str; 19] = [
     "Read",
     "Unsubscribe",
-    "Hold",
+    "ResendWhole",
     "Settled",
     "Commit",
     "ChunkRequests",
     "PushChunks",
     "Chunks",
     "Rows",
-    "Evict",
+    "AccessLost",
     "Refused",
     "Fate",
-    "Advise",
-    "Advice",
+    "CheckAllowed",
+    "CheckAllowedResult",
     "Schema",
     "SchemaAdmission",
     "Stored",
-    "Holds",
+    "KnownCatalogue",
     "Catalogue",
 ];
 
@@ -332,7 +332,7 @@ impl Transport for Recording {
 /// `Read` (its span carries a snapshot and a view), `Rows` carrying the
 /// commits behind history versions, and a `Catalogue` carrying versions
 /// with their stored names and a lens's cells.
-const SHAPES: [&str; 3] = ["Read/once", "Rows/origins", "Catalogue/versions"];
+const SHAPES: [&str; 3] = ["Read/once", "Rows/tx_ids", "Catalogue/versions"];
 
 fn shape(message: &SyncMessage) -> Option<&'static str> {
     match message {
@@ -340,7 +340,7 @@ fn shape(message: &SyncMessage) -> Option<&'static str> {
             span: ReadSpan::Once { .. },
             ..
         } => Some(SHAPES[0]),
-        SyncMessage::Rows { origins, .. } if !origins.is_empty() => Some(SHAPES[1]),
+        SyncMessage::Rows { tx_ids, .. } if !tx_ids.is_empty() => Some(SHAPES[1]),
         SyncMessage::Catalogue {
             versions, cells, ..
         } if !versions.is_empty() && !cells.is_empty() => Some(SHAPES[2]),
@@ -514,7 +514,7 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     .unwrap();
     pump(&[&alice, &server, &alice]);
 
-    // Read (once), Settled with a listing: a serializable
+    // Read (once), Settled with members: a serializable
     // transaction's second read is pinned to its snapshot, so after a
     // newer write it answers from history.
     let open_tx = OpenTransactionId::new();
@@ -541,7 +541,7 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     let _history = block_on(alice.subscribe(&history, ReadOpts::default())).unwrap();
     pump(&[&alice, &server, &alice]);
 
-    // Advise, Advice.
+    // CheckAllowed, CheckAllowedResult.
     let id = alice.request_permission_advice(
         PermissionAdviceAction::Read {
             table: "notes".to_owned(),
@@ -565,8 +565,8 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     drop(stream);
     pump(&[&alice, &server, &alice]);
 
-    // Hold, Evict: alice's own note is deleted while she is away; she
-    // reconnects holding it.
+    // ResendWhole, AccessLost: alice's own note is deleted while she is
+    // away; she reconnects holding it.
     block_on(server.delete("notes", mine, Default::default())).unwrap();
     connect(&alice, &server, user(1), &recorded);
     pump(&[&alice, &server, &alice]);
@@ -663,16 +663,16 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     );
     pump(&[&server]);
 
-    // Hold: a replica asks for a row whole when a shipped delta does not
+    // ResendWhole: a replica asks for a row whole when a shipped delta does not
     // apply over the version it holds, which takes a corrupted delta to
     // provoke; its frame is pinned as a replica encodes it.
-    let hold = SyncMessage::Hold {
+    let hold = SyncMessage::ResendWhole {
         rows: vec![("notes".to_owned(), [0x11; 16], Vec::new(), 0)],
     };
     let [frame] = encode_frames(hold).unwrap().try_into().unwrap();
     recorded
         .borrow_mut()
-        .insert("Hold".to_owned(), ("server".to_owned(), frame));
+        .insert("ResendWhole".to_owned(), ("server".to_owned(), frame));
 
     recorded.borrow().clone()
 }
