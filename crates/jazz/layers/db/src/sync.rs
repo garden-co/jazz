@@ -4400,6 +4400,10 @@ impl Inner {
         Ok(origins)
     }
 
+    /// Where `node`'s commit `tx` landed: `Some(Some(seq))`, rejected
+    /// (`Some(None)`), or unknown here (`None`). A row with no `seq` reads as
+    /// rejected: every `record_fate` is paired with a `record_settled` in the
+    /// same transaction, so an accepted commit's row always has one.
     fn settled(&self, node: [u8; 16], tx: u64) -> Result<Option<Option<u64>>, Error> {
         match self.conn.cached_row(
             "SELECT t.seq FROM _jazz_transactions AS t JOIN _jazz_nodes AS n ON n.n = t.n \
