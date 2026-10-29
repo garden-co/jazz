@@ -531,17 +531,7 @@ impl MergeStrategy {
     }
 }
 
-/// How a text-merging column's values are cut into the units a merge never
-/// splits.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TextFormat {
-    /// Words, whitespace and other characters.
-    Plain,
-    /// Plain units, plus delimiter runs, list markers and link targets.
-    Markdown,
-    /// Plain units, plus tags and entities.
-    Html,
-}
+pub use jazz_text::TextFormat;
 
 #[cfg(any(test, feature = "testing"))]
 fn is_counter_column_type(column_type: &StorageColumnType) -> bool {

@@ -11,6 +11,7 @@ runtime = []
 testing = ["runtime", "jazz-types/testing"]
 
 [dependencies]
+jazz-text.workspace = true
 jazz-types.workspace = true
 base64 = "0.22"
 blake3 = "1"

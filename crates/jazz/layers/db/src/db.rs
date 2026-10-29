@@ -5080,7 +5080,7 @@ impl Inner {
         let cell = self.bind_cell(table, column, value, Cells::Authored)?;
         let incoming = self.logical_text(&column.name, value)?;
         let format = column.merge.text_format().expect("a text strategy");
-        let merged = crate::text_merge::merge3(format, &base, &current, &incoming);
+        let merged = jazz_text::merge3(format, &base, &current, &incoming);
         Ok((merged != incoming).then_some((merged, cell)))
     }
 

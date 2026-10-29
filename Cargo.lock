@@ -1999,6 +1999,7 @@ dependencies = [
  "futures",
  "jazz-model",
  "jazz-protocol",
+ "jazz-text",
  "jazz-types",
  "postcard",
  "rusqlite",
@@ -2152,6 +2153,7 @@ dependencies = [
  "blake3",
  "hex",
  "internment",
+ "jazz-text",
  "jazz-types",
  "jsonschema",
  "postcard",
@@ -2340,6 +2342,14 @@ dependencies = [
  "tokio",
  "uuid",
  "zstd",
+]
+
+[[package]]
+name = "jazz-text"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
