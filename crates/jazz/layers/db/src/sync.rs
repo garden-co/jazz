@@ -7517,9 +7517,22 @@ impl Db {
     /// they sent (a message it cannot decode or serve), or because what it
     /// had for them could not be sent (a full queue, or a message it cannot
     /// encode). The host closes their links and tells each peer why; each
-    /// is already disconnected.
+    /// is already disconnected. Empty unless the host tracks them
+    /// ([`Db::track_closed_subscribers`]).
     pub fn take_closed_subscribers(&self) -> Vec<(SubscriberId, Error)> {
-        std::mem::take(&mut self.inner.borrow_mut().closed)
+        self.inner
+            .borrow_mut()
+            .closed
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
+    }
+
+    /// Keep the sessions the server ends, with why, for
+    /// [`Db::take_closed_subscribers`]: for a host that takes them, as
+    /// often as it ticks.
+    pub fn track_closed_subscribers(&self) {
+        self.inner.borrow_mut().closed.get_or_insert_with(Vec::new);
     }
 
     /// Serve one session's inbound messages for this tick.
@@ -7836,7 +7849,9 @@ impl Db {
             if let Err(error) = self.serve_session(index) {
                 let subscriber = self.subscriber_at(index);
                 self.disconnect_subscriber(subscriber);
-                self.inner.borrow_mut().closed.push((subscriber, error));
+                if let Some(closed) = self.inner.borrow_mut().closed.as_mut() {
+                    closed.push((subscriber, error));
+                }
             }
         }
         self.notify();
@@ -8438,10 +8453,12 @@ impl Db {
                         TransportError::Backpressure => ErrorCode::Backpressure,
                         TransportError::Failed(_) => ErrorCode::Protocol,
                     };
-                    inner.closed.push((
-                        subscriber,
-                        Error::new(code, format!("could not send to this session: {error}")),
-                    ));
+                    if let Some(closed) = inner.closed.as_mut() {
+                        closed.push((
+                            subscriber,
+                            Error::new(code, format!("could not send to this session: {error}")),
+                        ));
+                    }
                     let session = &mut inner.sessions[index];
                     let released = session.close(&dropped);
                     for (query, binding, include_deleted) in released {
