@@ -36,7 +36,7 @@ fn open(node: u8) -> Db {
 fn connect(client: &Db, server: &Db) {
     let (a, b) = duplex();
     block_on(client.connect_upstream(a));
-    server.accept_subscriber(b, AuthorSubject::SYSTEM);
+    server.accept_subscriber(b, AuthorSubject::SYSTEM).unwrap();
 }
 fn drive<T>(dbs: &[&Db], future: impl Future<Output = T>) -> T {
     let mut future = pin!(future);

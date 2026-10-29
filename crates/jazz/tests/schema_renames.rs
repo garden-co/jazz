@@ -410,7 +410,7 @@ fn a_table_rename_holds_across_reopen_and_for_a_fresh_receiver() {
     let fresh = block_on(Db::open(config(after, 2, user(2)))).unwrap();
     let (client_side, server_side) = pipe();
     let _link = block_on(fresh.connect_upstream(client_side));
-    server.accept_subscriber(server_side, user(2));
+    server.accept_subscriber(server_side, user(2)).unwrap();
     let query = fresh.prepare_query(&Query::from("documents")).unwrap();
     let mut stream = block_on(fresh.subscribe(&query, ReadOpts::default())).unwrap();
     pump(&server, &[&fresh]);
@@ -594,8 +594,8 @@ fn a_client_on_the_old_schema_syncs_with_a_server_on_the_new_one() {
     let (new_client, new_server) = pipe();
     let _old_link = block_on(old.connect_upstream(old_client));
     let _new_link = block_on(new.connect_upstream(new_client));
-    server.accept_subscriber(old_server, user(1));
-    server.accept_subscriber(new_server, user(2));
+    server.accept_subscriber(old_server, user(1)).unwrap();
+    server.accept_subscriber(new_server, user(2)).unwrap();
     let old_query = old.prepare_query(&Query::from("todos")).unwrap();
     let new_query = new.prepare_query(&Query::from("tasks")).unwrap();
     let _old_stream = block_on(old.subscribe(&old_query, ReadOpts::default())).unwrap();
@@ -673,7 +673,7 @@ fn an_old_client_is_served_under_the_current_policies_by_the_stored_column() {
     let client = block_on(Db::open(config(old_schema, 1, user(1)))).unwrap();
     let (client_side, server_side) = pipe();
     let _link = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, user(1));
+    server.accept_subscriber(server_side, user(1)).unwrap();
     let query = client.prepare_query(&Query::from("notes")).unwrap();
     let _stream = block_on(client.subscribe(&query, ReadOpts::default())).unwrap();
     pump(&server, &[&client]);
@@ -852,8 +852,8 @@ fn a_row_a_client_on_the_old_schema_inserts_gets_the_copy() {
     let (new_client, new_server) = pipe();
     let _old_link = block_on(old.connect_upstream(old_client));
     let _new_link = block_on(new.connect_upstream(new_client));
-    server.accept_subscriber(old_server, user(1));
-    server.accept_subscriber(new_server, user(2));
+    server.accept_subscriber(old_server, user(1)).unwrap();
+    server.accept_subscriber(new_server, user(2)).unwrap();
     let new_query = new.prepare_query(&Query::from("todos")).unwrap();
     let _new_stream = block_on(new.subscribe(&new_query, ReadOpts::default())).unwrap();
 
@@ -1019,7 +1019,7 @@ fn a_client_store_upgraded_across_a_rename_reads_its_cached_rows_by_the_new_name
         .unwrap();
         let (c, s) = pipe();
         let _link = block_on(client.connect_upstream(c));
-        server.accept_subscriber(s, user(1));
+        server.accept_subscriber(s, user(1)).unwrap();
         let q = client.prepare_query(&Query::from("todos")).unwrap();
         let _stream = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
         pump(&server, &[&client]);
@@ -1039,7 +1039,7 @@ fn a_client_store_upgraded_across_a_rename_reads_its_cached_rows_by_the_new_name
     );
     let (c, s) = pipe();
     let _link = block_on(client.connect_upstream(c));
-    server.accept_subscriber(s, user(1));
+    server.accept_subscriber(s, user(1)).unwrap();
     let q = client.prepare_query(&Query::from("todos")).unwrap();
     let _stream = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
     pump(&server, &[&client]);
@@ -1074,7 +1074,7 @@ fn a_pending_write_staged_before_a_client_upgrade_uploads_and_reads_by_the_new_n
     .unwrap();
     let (c, s) = pipe();
     let _link = block_on(client.connect_upstream(c));
-    server.accept_subscriber(s, user(1));
+    server.accept_subscriber(s, user(1)).unwrap();
     pump(&server, &[&client]);
     assert!(client.take_upstream_rejections().is_empty());
     assert_eq!(read(&server, "todos", "name"), [text("offline v1 write")]);
@@ -1109,12 +1109,12 @@ fn a_tab_behind_a_worker_reads_a_renamed_column_after_the_worker_mirrors() {
     tab.set_remote_link_hint(RemoteLinkHint::Live);
     let (tc, ts) = pipe();
     let _tab_link = block_on(tab.connect_upstream(tc));
-    worker.accept_subscriber(ts, user(0xa0));
+    worker.accept_subscriber(ts, user(0xa0)).unwrap();
     pump(&worker, &[&tab]);
 
     let (wc, ws) = pipe();
     let _worker_link = block_on(worker.connect_upstream(wc));
-    server.accept_subscriber(ws, user(0xa0));
+    server.accept_subscriber(ws, user(0xa0)).unwrap();
     worker.set_remote_link_hint(RemoteLinkHint::Live);
     let q = tab.prepare_query(&Query::from("todos")).unwrap();
     let _stream = block_on(tab.subscribe(&q, ReadOpts::default())).unwrap();
@@ -1152,7 +1152,7 @@ fn a_catalogue_the_store_cannot_mirror_refuses_remote_reads_and_keeps_local_ones
     insert(&client, "tasks", 3, "name", "local task");
     let (c, s) = pipe();
     let _link = block_on(client.connect_upstream(c));
-    server.accept_subscriber(s, AuthorSubject::SYSTEM);
+    server.accept_subscriber(s, AuthorSubject::SYSTEM).unwrap();
     let q = client.prepare_query(&Query::from("tasks")).unwrap();
     let mut stream = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
     pump(&server, &[&client]);

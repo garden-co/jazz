@@ -962,3 +962,44 @@ fn slow_query_commands_have_pinned_bytes_and_answer() {
     );
     fixture.close(foreground);
 }
+
+/// A relay uploads its clients' writes as its own identity, so it serves
+/// clients of that identity only: one of another identity is refused
+/// before its database is opened.
+#[test]
+fn a_relay_refuses_a_client_of_another_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let identity = |byte: u8| DbIdentity {
+        node: NodeUuid::from_bytes([byte; 16]),
+        author: AuthorSubject::for_test_bytes([0x5a; 16]),
+    };
+    let relay = NativeRelay::spawn(RelayOpenConfig {
+        supported_abi: NativeRelayAbiRange {
+            minimum: NATIVE_RELAY_ABI_V1,
+            maximum: NATIVE_RELAY_ABI_V1,
+        },
+        scope: RelayScope {
+            app_namespace: "app".to_owned(),
+            storage_namespace: "default".to_owned(),
+            auth_scope: Some("alice".to_owned()),
+        },
+        sqlite_path: directory.path().join("alice.sqlite"),
+        schema: schema(),
+        identity: identity(0x01),
+    })
+    .unwrap();
+    let other = DbIdentity {
+        author: AuthorSubject::for_test_bytes([0x5b; 16]),
+        ..identity(0x02)
+    };
+    match relay.attach_client(other, BTreeMap::new()) {
+        Err(RelayError::Host(binding_host::HostError::Engine(error))) => {
+            assert_eq!(error.reason, Some(jazz::db::Reason::IdentityMismatch));
+        }
+        Err(error) => panic!("expected an identity mismatch, got {error}"),
+        Ok(_) => panic!("the relay served a client of another identity"),
+    }
+    relay
+        .attach_client(identity(0x03), BTreeMap::new())
+        .expect("the relay serves its own identity");
+}

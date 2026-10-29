@@ -437,11 +437,14 @@ pub enum Reason {
     /// The write was built on an unsettled write the authority rejected,
     /// so it is rejected too (code `WriteRejected`, SPEC 4 §4.6).
     PredecessorRejected,
+    /// A store configured as one user was asked to serve a session of
+    /// another identity (code `Protocol`): relays serve one identity.
+    IdentityMismatch,
 }
 
 impl Reason {
     /// Every reason, in declaration order.
-    pub const ALL: [Reason; 11] = [
+    pub const ALL: [Reason; 12] = [
         Reason::AuthorizationDenied,
         Reason::ClientClockTooFarAhead,
         Reason::SerializationConflict,
@@ -453,6 +456,7 @@ impl Reason {
         Reason::MissingChunks,
         Reason::PermissionsHeadMissing,
         Reason::PredecessorRejected,
+        Reason::IdentityMismatch,
     ];
 
     /// The stable, snake_case name of this reason.
@@ -474,6 +478,7 @@ impl Reason {
             Reason::MissingChunks => "missing_chunks",
             Reason::PermissionsHeadMissing => "permissions_head_missing",
             Reason::PredecessorRejected => "predecessor_rejected",
+            Reason::IdentityMismatch => "identity_mismatch",
         }
     }
 

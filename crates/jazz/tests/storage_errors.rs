@@ -142,7 +142,9 @@ fn synced(client: &Db, txs: &[u64]) -> Vec<String> {
     let server = block_on(Db::open_history_complete(config(0xee))).unwrap();
     let (client_side, server_side) = duplex();
     let _upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+    server
+        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
+        .unwrap();
     for tx in txs {
         drive(
             &[client, &server, client],
@@ -302,7 +304,9 @@ fn a_reopened_replica_resumes_its_subscription_from_its_stored_watermark() {
     let tx = insert(&client, 1, "held").unwrap();
     let (client_side, server_side) = duplex();
     let upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+    server
+        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
+        .unwrap();
     let prepared = client.prepare_query(&Query::from("items")).unwrap();
     let stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
     drive(
@@ -326,7 +330,9 @@ fn a_reopened_replica_resumes_its_subscription_from_its_stored_watermark() {
         inner: client_side,
         sent: Rc::clone(&sent),
     })));
-    server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+    server
+        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
+        .unwrap();
     let prepared = client.prepare_query(&Query::from("items")).unwrap();
     let _stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
     block_on(client.tick()).unwrap();
@@ -363,7 +369,9 @@ fn a_serializable_commit_is_not_validated_against_an_unreadable_store() {
     let client = block_on(Db::open(config(0x11))).unwrap();
     let (client_side, server_side) = duplex();
     let _upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+    server
+        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
+        .unwrap();
 
     let open = jazz::tools::OpenTransactionId::new();
     block_on(client.begin_serializable(open)).unwrap();

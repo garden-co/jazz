@@ -6833,12 +6833,35 @@ impl Inner {
 // ---- server ---------------------------------------------------------------
 
 impl Db {
-    /// Serve a client over `transport` as `identity`.
+    /// Whether this store may serve a session of `identity`. A store
+    /// configured as a user serves only that user: it relays what its
+    /// sessions write under its own identity, so another user's writes
+    /// would be attributed to this one. Another identity is refused with
+    /// [`Reason::IdentityMismatch`]. A system store (a server) serves any
+    /// identity.
+    pub fn check_serves(&self, identity: AuthorSubject) -> Result<(), Error> {
+        let own = self.inner.borrow().identity.author;
+        if matches!(own, AuthorSubject::Authenticated(_)) && identity != own {
+            return Err(Error::with_reason(
+                ErrorCode::Protocol,
+                Reason::IdentityMismatch,
+                format!(
+                    "a store configured as {} serves only its own identity, not {}",
+                    own.canonical(),
+                    identity.canonical()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Serve a client over `transport` as `identity`, once
+    /// [`Self::check_serves`] allows it.
     pub fn accept_subscriber(
         &self,
         transport: Box<dyn Transport>,
         identity: AuthorSubject,
-    ) -> SubscriberId {
+    ) -> Result<SubscriberId, Error> {
         self.accept_subscriber_with_claims(transport, identity, None)
     }
 
@@ -6849,7 +6872,8 @@ impl Db {
         transport: Box<dyn Transport>,
         identity: AuthorSubject,
         claims: Option<BTreeMap<String, Value>>,
-    ) -> SubscriberId {
+    ) -> Result<SubscriberId, Error> {
+        self.check_serves(identity)?;
         let mut inner = self.inner.borrow_mut();
         // A third tier of local seqs would meet a foreground's own (see
         // `NON_DURABLE_BASE`); its sessions refuse what it relays.
@@ -6872,7 +6896,7 @@ impl Db {
                 inner.sessions.len() - 1
             }
         };
-        SubscriberId { slot, generation }
+        Ok(SubscriberId { slot, generation })
     }
 
     /// The handle of the session in `slot`.

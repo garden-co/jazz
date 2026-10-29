@@ -198,7 +198,9 @@ impl Net {
         let (client_side, server_side) = duplex();
         let client = &mut self.clients[index];
         client.upstream = Some(block_on(client.db.connect_upstream(client_side)));
-        self.server.accept_subscriber(server_side, user(client.who));
+        self.server
+            .accept_subscriber(server_side, user(client.who))
+            .unwrap();
     }
 
     fn pump(&self) {

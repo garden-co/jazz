@@ -175,6 +175,7 @@ async fn self_signed_subscriber_admission_requires_the_exact_proof() {
     // reserved identity must not bypass its issuer guard.
     assert!(db
         .accept_subscriber(claimed_author.as_bytes().to_vec(), JsValue::NULL, None)
+        .unwrap()
         .is_err());
 
     await_promise(

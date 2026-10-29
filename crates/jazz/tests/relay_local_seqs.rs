@@ -114,17 +114,24 @@ struct Net {
 
 impl Net {
     fn new(tabs: usize) -> Self {
-        Self::with_schema(tabs, schema, author(WORKER))
+        Self::with_schema(tabs, schema, author(WORKER), author(WORKER))
     }
 
-    /// Tabs of `tab_author` (a relay applies a session's read policy
-    /// unless the session is its own identity).
-    fn with_schema(tabs: usize, schema: fn() -> JazzSchema, tab_author: AuthorSubject) -> Self {
+    /// A worker configured as `worker_author` (and served as it), with
+    /// tabs of `tab_author` (a relay applies a session's read policy
+    /// unless the session is its own identity). Only a system worker
+    /// serves tabs of another identity.
+    fn with_schema(
+        tabs: usize,
+        schema: fn() -> JazzSchema,
+        worker_author: AuthorSubject,
+        tab_author: AuthorSubject,
+    ) -> Self {
         let mut net = Net {
             core: open_in(schema(), 0xc0, AuthorSubject::SYSTEM),
-            worker: open_in(schema(), WORKER, author(WORKER)),
+            worker: open_in(schema(), WORKER, worker_author),
             worker_up: None,
-            worker_as: author(WORKER),
+            worker_as: worker_author,
             tabs: Vec::new(),
             to_tabs: Vec::new(),
         };
@@ -136,13 +143,15 @@ impl Net {
             let (client_side, server_side) = duplex();
             block_on(tab.connect_upstream(client_side));
             let sent = Rc::default();
-            net.worker.accept_subscriber(
-                Box::new(Tap {
-                    inner: server_side,
-                    sent: Rc::clone(&sent),
-                }),
-                tab_author.clone(),
-            );
+            net.worker
+                .accept_subscriber(
+                    Box::new(Tap {
+                        inner: server_side,
+                        sent: Rc::clone(&sent),
+                    }),
+                    tab_author.clone(),
+                )
+                .unwrap();
             net.to_tabs.push(sent);
             net.tabs.push(tab);
         }
@@ -153,7 +162,8 @@ impl Net {
         let (client_side, server_side) = duplex();
         self.worker_up = Some(block_on(self.worker.connect_upstream(client_side)));
         self.core
-            .accept_subscriber(server_side, self.worker_as.clone());
+            .accept_subscriber(server_side, self.worker_as.clone())
+            .unwrap();
         self.worker.set_remote_link_hint(RemoteLinkHint::Live);
     }
 
@@ -370,7 +380,9 @@ fn a_tabs_transaction_over_its_own_commit_settled_by_a_worker_without_a_server_c
     tab.set_remote_link_hint(RemoteLinkHint::Live);
     let (client_side, server_side) = duplex();
     block_on(tab.connect_upstream(client_side));
-    worker.accept_subscriber(server_side, author(WORKER));
+    worker
+        .accept_subscriber(server_side, author(WORKER))
+        .unwrap();
     let pump = || {
         for _ in 0..4 {
             block_on(tab.tick()).unwrap();
@@ -466,10 +478,7 @@ fn a_tabs_row_stays_while_its_worker_settles_the_insert_under_its_update() {
 /// everything the relay holds.)
 #[test]
 fn a_session_gets_no_unreadable_version_under_its_own_pending_write() {
-    let mut net = Net::with_schema(1, secret_schema, author(0x70));
-    net.worker_as = AuthorSubject::SYSTEM;
-    net.worker_offline();
-    net.worker_online();
+    let net = Net::with_schema(1, secret_schema, AuthorSubject::SYSTEM, author(0x70));
     let inserted = block_on(
         net.tab(0)
             .insert("notes", body("plain"), Default::default()),

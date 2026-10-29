@@ -179,13 +179,15 @@ impl Net {
         match client.via {
             None => self
                 .core
-                .accept_subscriber(server_side, author(client.node)),
+                .accept_subscriber(server_side, author(client.node))
+                .unwrap(),
             Some(_) => self
                 .worker
                 .as_ref()
                 .expect("worker")
                 .db
-                .accept_subscriber(server_side, author(WORKER)),
+                .accept_subscriber(server_side, author(WORKER))
+                .unwrap(),
         };
     }
 
@@ -193,7 +195,9 @@ impl Net {
         let (client_side, server_side) = duplex();
         let worker = self.worker.as_mut().expect("worker");
         worker.up = Some(block_on(worker.db.connect_upstream(client_side)));
-        self.core.accept_subscriber(server_side, author(WORKER));
+        self.core
+            .accept_subscriber(server_side, author(WORKER))
+            .unwrap();
     }
 
     fn worker_offline(&mut self) {
@@ -714,7 +718,8 @@ fn a_relays_commit_a_write_was_built_on_is_what_its_writer_saw() {
     // renamed to the worker's own commits.
     let core = open(CORE, AuthorSubject::SYSTEM);
     let (mut relay, server_side) = duplex();
-    core.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+    core.accept_subscriber(server_side, AuthorSubject::SYSTEM)
+        .unwrap();
     let relay_node = [0x77; 16];
     let row = block_on(core.insert(
         "todos",
@@ -1164,7 +1169,8 @@ fn behind_two_relays_a_write_over_the_upper_relays_version_is_kept_conservativel
     const LOWER: u8 = 0xa2;
     const TAB: u8 = 0xa3;
     let core = open(CORE, AuthorSubject::SYSTEM);
-    let upper = open(UPPER, author(UPPER));
+    // One user's stores: a relay serves its own identity only.
+    let upper = open(UPPER, author(LOWER));
     let lower = open(LOWER, author(LOWER));
     let tab = open(TAB, author(LOWER));
     tab.set_non_durable_client();
@@ -1172,10 +1178,10 @@ fn behind_two_relays_a_write_over_the_upper_relays_version_is_kept_conservativel
         let (client_side, server_side) = duplex();
         client.set_remote_link_hint(RemoteLinkHint::Live);
         let up = block_on(client.connect_upstream(client_side));
-        server.accept_subscriber(server_side, author(as_));
+        server.accept_subscriber(server_side, author(as_)).unwrap();
         up
     };
-    let upper_up = link(&upper, &core, UPPER);
+    let upper_up = link(&upper, &core, LOWER);
     let _lower_up = link(&lower, &upper, LOWER);
     let _tab_up = link(&tab, &lower, LOWER);
     let stores = [&tab, &lower, &upper, &core];
@@ -1223,7 +1229,7 @@ fn behind_two_relays_a_write_over_the_upper_relays_version_is_kept_conservativel
     let write =
         block_on(tab.update("todos", row, cells(&[("title", "tab")]), Default::default())).unwrap();
     pump();
-    let _upper_up = link(&upper, &core, UPPER);
+    let _upper_up = link(&upper, &core, LOWER);
     pump();
     let mut turn = pin!(tab.wait_for_transaction(write.mergeable_tx_id(), DurabilityTier::Global));
     let mut context = Context::from_waker(Waker::noop());

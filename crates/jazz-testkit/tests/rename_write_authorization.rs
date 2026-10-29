@@ -116,7 +116,7 @@ fn open_writer(
     .expect("open writer");
     let (client_side, authority_side) = duplex();
     let upstream = block_on(writer.connect_upstream(client_side));
-    authority.accept_subscriber(authority_side, author);
+    authority.accept_subscriber(authority_side, author).unwrap();
     let query = writer
         .prepare_query(&Query::from(table))
         .expect("prepare writer query");

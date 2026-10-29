@@ -78,7 +78,7 @@ fn tighter_read_policy_evicts_held_rows_from_subscribed_replicas() {
     let client = open(1, alice);
     let (client_side, server_side) = duplex();
     let _upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice);
+    server.accept_subscriber(server_side, alice).unwrap();
     let prepared = client.prepare_query(&Query::from("users")).unwrap();
     let _stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
     pump(&server, &client);
