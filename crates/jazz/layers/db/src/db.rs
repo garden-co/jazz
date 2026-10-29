@@ -1455,7 +1455,8 @@ impl Db {
         arg: A,
         attempt: impl Fn(A) -> Result<T, Error>,
     ) -> Result<T, Error> {
-        if self.inner().chunks.store().is_none() {
+        // A peek: the store gate would undo a transaction's cached overlay.
+        if self.inner.staging().chunks.store().is_none() {
             return attempt(arg);
         }
         self.fetching(|| attempt(arg.clone())).await
@@ -6074,6 +6075,25 @@ pub(crate) struct LargeEdits {
     pub(crate) pending_nodes: Vec<jazz_types::large_values::PreparedLargeValue>,
 }
 
+/// An admitted read's boundary in the batch's append-only staging buffers.
+/// Capturing lengths retains no copy of unrelated staged writes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct BatchPrefix {
+    ops: usize,
+    derived: usize,
+    pending_nodes: usize,
+}
+
+impl Batch {
+    fn prefix(&self) -> BatchPrefix {
+        BatchPrefix {
+            ops: self.ops.len(),
+            derived: self.edits.derived.len(),
+            pending_nodes: self.edits.pending_nodes.len(),
+        }
+    }
+}
+
 enum BatchKind {
     Mergeable,
     /// Serializable: reads see the store as of `snapshot` plus the batch's
@@ -6732,6 +6752,75 @@ impl Db {
         result
     }
 
+    /// Run `read` over the batch's writes staged before `prefix` was
+    /// captured, so a read that waited (for authority coverage, or behind a
+    /// cancelled read) does not see writes staged meanwhile. When nothing
+    /// was staged since, this is [`Self::in_overlay`] and keeps its cached
+    /// overlay; otherwise the prefix is replayed in a throwaway savepoint,
+    /// which undoes the cached overlay, so the next stage replays the batch.
+    fn in_overlay_prefix<R>(
+        &self,
+        id: OpenTransactionId,
+        prefix: BatchPrefix,
+        read: impl FnOnce(&mut Inner, Option<Cut>) -> Result<R, Error>,
+    ) -> Result<R, Error> {
+        // Peek without the store gate, which would undo the cached overlay.
+        let grown = self
+            .inner
+            .staging()
+            .batches
+            .get(&id)
+            .is_none_or(|batch| batch.prefix() != prefix);
+        if !grown {
+            return self.in_overlay(id, None, read);
+        }
+        let mut inner = self.inner();
+        let batch = inner
+            .batches
+            .get(&id)
+            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
+        let unavailable = || {
+            Error::new(
+                ErrorCode::NotObserved,
+                "transaction staged prefix is no longer available",
+            )
+        };
+        let ops = batch
+            .ops
+            .get(..prefix.ops)
+            .ok_or_else(unavailable)?
+            .to_vec();
+        let edits = LargeEdits {
+            derived: batch
+                .edits
+                .derived
+                .get(..prefix.derived)
+                .ok_or_else(unavailable)?
+                .to_vec(),
+            pending_nodes: batch
+                .edits
+                .pending_nodes
+                .get(..prefix.pending_nodes)
+                .ok_or_else(unavailable)?
+                .to_vec(),
+        };
+        let snapshot = match &batch.kind {
+            BatchKind::Mergeable => None,
+            BatchKind::Serializable { snapshot, own, .. } => {
+                Some(inner.serializable_cut(*snapshot, own)?)
+            }
+        };
+        let own = inner.seq + 1;
+        begin_savepoint(&inner.conn, "overlay")?;
+        let mark = inner.changed.borrow().len();
+        let result = inner
+            .apply_with_edits(&ops, &edits, ops.len(), own)
+            .and_then(|()| read(&mut inner, snapshot.map(|cut| Cut { own, ..cut })));
+        inner.changed.borrow_mut().truncate(mark);
+        end_savepoint(&inner.conn, "overlay", false)?;
+        result
+    }
+
     fn stage(&self, id: OpenTransactionId, op: StagedOp) -> Result<(), Error> {
         self.stage_with_edits(id, op, LargeEdits::default())
     }
@@ -6825,6 +6914,17 @@ impl Db {
         prepared: &PreparedQuery,
         include_deleted: bool,
     ) -> Result<(), Error> {
+        // A mergeable read records nothing: peek without the store gate,
+        // so the batch's cached overlay stays for its next stage or read.
+        if !matches!(
+            self.inner.staging().batches.get(&id),
+            Some(Batch {
+                kind: BatchKind::Serializable { .. },
+                ..
+            })
+        ) {
+            return Ok(());
+        }
         let mut inner = self.inner();
         let Some(Batch {
             kind: BatchKind::Serializable { snapshot, own, .. },
@@ -6969,10 +7069,21 @@ impl TxRef<'_> {
         identity: Option<AuthorSubject>,
         tier: ReadTier,
     ) -> Result<Vec<CurrentRow>, Error> {
+        // Capture before hydration: later writes must not leak into an
+        // already admitted read, including when another read is cancelled.
+        // Peeks skip the store gate, which would undo the cached overlay.
+        let prefix = self
+            .db
+            .inner
+            .staging()
+            .batches
+            .get(&self.id)
+            .ok_or_else(|| rejected("transaction is not open"))?
+            .prefix();
         // Except for LocalOnly, a client hydrates a serializable read from
         // the authority at the snapshot first. LocalFirst may answer from
         // the replica when the link cannot answer.
-        let snapshot = match self.db.inner.borrow().batches.get(&self.id) {
+        let snapshot = match self.db.inner.staging().batches.get(&self.id) {
             Some(Batch {
                 kind:
                     BatchKind::Serializable {
@@ -7058,7 +7169,7 @@ impl TxRef<'_> {
             }
         }
         // Relations nest inside the overlay, so they see staged rows too.
-        let rows = self.db.in_overlay(self.id, None, |inner, cut| {
+        let rows = self.db.in_overlay_prefix(self.id, prefix, |inner, cut| {
             let read = ReadSpec {
                 include_deleted,
                 cut,
