@@ -11,9 +11,9 @@ are stored, a rejection's reason name changed how fates are recorded, and
 pending uploads moved from one encoded message to a row per op).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `d1303ff8760d785241b5d8e7cef9d84866ae54166c2c268378211ad27772f404`.
+  the SQLite file `1b34dbb34e39a2e2be9493b59e158f4ace433f2ba4a143a54c1a92331fd51a63`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `48d25fea2df42965e9f836f76f46f83a78da472ceab62966a485d28b1bbe6321`.
+  `96d525843b11a1e43d2d6b804e68c54cba41dc13d64f750fde5088af94333fde`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
@@ -29,8 +29,10 @@ nodes and write times:
 - a client that synced `projects` and `documents`, wrote one row that
   settled, one stamped far ahead of the server's clock that the server
   rejected (so `_jazz_transactions` keeps a rejected fate with its reason name),
-  then two writes (an insert and an update) that never reached the
-  server: its pending uploads;
+  then two writes (an insert and an update) and a serializable transaction
+  that read one project and inserted two, none of which reached the
+  server: its pending uploads, the last one stored as two op rows and a
+  read row;
 - a row of `drafts` on a base branch that the draft branch overrides with a
   version the client may not read: the client's view of the draft over that
   base hides the row, so the client keeps a marker of it in `_jazz_withheld`;
@@ -72,6 +74,12 @@ earlier layout is refused as an unsupported storage format, never misread.
 Merging `_jazz_applied` and `_jazz_settled` into one `_jazz_transactions`
 table keyed by an interned node code (`_jazz_nodes.n`) regenerated it the
 same way.
+
+Deleting a settled commit's pending rows in one statement (the
+`_jazz_pending_forget` trigger on `_jazz_pending`, with
+`_jazz_pending_versions` now created on open) regenerated it the same way,
+adding the serializable pending commit above so the per-op layout is
+pinned with more than one op and a read.
 
 Hiding branch-view rows whose head version the reader may not read added the
 client's `_jazz_withheld` table (created on the first hidden eviction) and
