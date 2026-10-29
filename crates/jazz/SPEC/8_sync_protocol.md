@@ -309,10 +309,11 @@ for one query's result:
   base's cut): with a live read's opening (a resumed one's written after
   `since`), with a one-shot read's answer, and again when the head or the
   base writes such a row. They follow from the view's query, not from what
-  the session shipped, so they hold across reconnects. Known limits: a
-  head version the replica may not read ships as its eviction, so it does
-  not mask the base row the replica holds; joined tables and policy tables
-  are not masked (policy tables are read as the current state).
+  the session shipped, so they hold across reconnects. A head version the
+  replica may not read ships as its eviction like any unreadable row, so
+  the replica's view falls back to the base row it holds: what this
+  reader can see of the view. Known limits: joined tables and policy
+  tables are not masked (policy tables are read as the current state).
 - A listing judges only the rows the view holds. A cached row it leaves out
   that the head supplies is evicted; one the live base supplies may be
   another read's, so the replica asks for the head's and the base's row
