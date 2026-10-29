@@ -2,17 +2,17 @@
 
 What an alpha.60 server has in its data directory: one `jazz.sqlite`
 (storage format 1, `jazz::format::STORAGE_FORMAT`), gzip-compressed and
-base64-encoded. It holds the app's rows and, as host tables, the server
-catalogue, the account registry and the runtime catalogue (see
-`dev/proofs/server-host-tables.md`).
+base64-encoded. It holds the app's rows, the catalogue tables (schemas,
+lenses and permissions revisions) and, as host tables, the account registry
+(see `dev/proofs/server-host-tables.md`).
 
 Once alpha.60 ships the file is immutable: a change it would not read bumps
-`STORAGE_FORMAT` or the host-table key versions and adds a new corpus beside
+`STORAGE_FORMAT` or the host-table layout and adds a new corpus beside
 this one. Until then format 1 is still moving, so such a change re-runs the
 producer and re-pins the hash and account here and in the test.
 
 - `jazz.sqlite.gz.base64`: SHA-256 of the SQLite file
-  `fe634477960156d1dec4f15da21e70772e5971f49a2683e45caead2bbc09f139`.
+  `5708b62d1caa51866a9f516eaec5f399d344dd487a93c465dec06abd94822c42`.
 
 Producer: `produce_server_data_dir_corpus_v1` in
 `crates/jazz-server/src/server/data_dir_corpus.rs` (ignored;
@@ -23,7 +23,7 @@ Producer: `produce_server_data_dir_corpus_v1` in
 - deployed `notes(title, body)` with a migration introducing `body` (default
   `(none)`), then written a second note with a body;
 - asked to register `alice` (issuer `https://issuer.example`), who got account
-  `db7fbe12-7054-4c8c-8243-a5f0fcd1ec21`;
+  `659979e8-20ab-43f9-b63c-12dd1d0d18a6`;
 - shut down, which checkpoints the WAL into the file.
 
 Reader: `pinned_server_data_dir_reopens_and_accepts_current_writes`, run by

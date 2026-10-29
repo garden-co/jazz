@@ -56,8 +56,8 @@ const CLIENT_FILE: &str = "sqlite-storage-v1/client.sqlite.gz.base64";
 /// change re-runs the producer and re-pins these; after that the corpus is
 /// immutable and a new storage format gets a new corpus beside it (see
 /// `fixtures/sqlite-storage-v1/README.md`).
-const SERVER_SHA256: &str = "10b80281a18cd8915064ae0fa29f0db6bbc4dc7ffc85953d8405e8174602871e";
-const CLIENT_SHA256: &str = "ce978c856e9311be76d5134510536203bfdfb6297df3214f932f9026e82edd82";
+const SERVER_SHA256: &str = "7a81bc82fb13501ee5a8795ea245578e49f17a7e773348a9591c7c8ee929b344";
+const CLIENT_SHA256: &str = "e64b0ea565bcb45c7647f114e6963013ce88d1cda4a7a4c91c552a2352da8cba";
 
 const SERVER_NODE: [u8; 16] = [0xa0; 16];
 const CLIENT_NODE: [u8; 16] = [0xc0; 16];
@@ -883,6 +883,12 @@ fn another_storage_format_is_refused_without_changing_the_file() {
         ("older", "UPDATE _jazz_format SET version = 0"),
         // Tables but no stamp: not a file Jazz wrote.
         ("unstamped", "DROP TABLE _jazz_format"),
+        // A development format-1 store from before the catalogue was rows:
+        // stored names keyed by version id.
+        (
+            "versioned names",
+            "ALTER TABLE _jazz_names ADD COLUMN version BLOB",
+        ),
     ] {
         let path = edited_server_corpus(name, sql);
         let before = digest_tree(&path);
