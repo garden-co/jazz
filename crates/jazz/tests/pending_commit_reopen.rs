@@ -360,6 +360,10 @@ fn pending_rows_in_another_layout_are_refused_as_another_format() {
             "UPDATE _jazz_pending_items SET part = 7",
         ),
         (
+            "a mergeable commit with reads",
+            "UPDATE _jazz_pending_items SET part = 1",
+        ),
+        (
             "a row id that is not 16 bytes",
             "UPDATE _jazz_pending_rows SET id = x'0102'",
         ),

@@ -350,13 +350,65 @@ are (a resend's writer may not hold them as the commit left them).
 
 ### 8.4 Downstream: reads and rows
 
-`Read { id, query, binding, include_deleted, tier, wait, span }` asks for one
-query's result:
+`Read { id, query, binding, include_deleted, tier, wait, view, span }` asks
+for one query's result:
 
+- `view` is the read view the result is of: the current state, a branch view
+  (head over an optional live or frozen base), or a snapshot. It is part of
+  the read's identity (`INV-BVIEW-12`): the server keeps a live read in its
+  view, as ch. 11 §11.5 maintains it. A replica asks for a branch view as it is, over
+  a live or a frozen base; a snapshot read asks for the current rows and
+  applies the cut itself.
+- A base row can reach a replica through any of its reads, and a head
+  image the view's query would not match (a tombstone, a version outside
+  its filter) still masks it there. So for a branch view over a base the
+  server also ships, for each branched table the read reads, the head's
+  rows whose base row the reader may see through the view: of the root
+  table, base rows the query matches, read without its window on the base
+  alone (as of a frozen base's cut) and narrowed to the head's ids; of a
+  table it reads besides (a relation, a join, a policy's table), base rows
+  the reader may read. It ships all of them with a live read's opening (a
+  resumed one's too, since whether the reader may read one can change
+  without it changing) and with a one-shot read's answer, and one again
+  when the head or the base writes it, unless the reader already knows it
+  hidden (below) and still may not read it. A row whose base row the reader
+  may not see is never shipped or evicted for this, so a view tells the
+  reader nothing of rows it could not see anyway. The server follows these
+  rows for the read that masks with them, and stops when that read ends. These rows follow from the
+  view's query and the server's state, not from what the session shipped,
+  so they hold across reconnects.
+- A head row of these the reader may not read is **hidden**, not absent:
+  in the view its effective row is the head's version, which the reader's
+  policy denies, so the view leaves the row out, as the authority's own
+  evaluation of the view does. The server sends `AccessLost { hidden: true
+}` for it (§8.6) once: a later write to either version sends nothing
+  while the reader still may not read the head's, so the reader learns that
+  the row is hidden, not when it is edited. The replica keeps a marker of it in
+  `_jazz_withheld` that masks the base's row of the id in every branch view
+  over a base with that head; reads of any other view (the base itself,
+  the head alone, the current state) ignore it, and no read lists it, deleted
+  rows included. The marker reveals only what the eviction does: that a
+  version exists. A write through the view to a hidden row is refused
+  (`WriteRejected`): it would land over a version the replica cannot see,
+  as is a write to that version through any target.
+  An eviction is hidden only for the head of one of the session's branch
+  views over a base; any other read's access loss keeps no marker. It lifts when an image of the row arrives (the head
+  writes it readably again, or a policy input change grants access: the
+  server rechecks masking rows as it does supporting rows, §8.6), or when
+  an `AccessLost { hidden: false }` says the row is gone. A view opened or
+  resumed later re-derives it from the server's state, and a relay passes
+  its markers on to its sessions as hidden evictions. Known limit: the
+  replica evaluates a view's read policies over policy tables as their
+  current state, not in the view.
+- A listing judges only the rows the view holds. A cached row it leaves out
+  that the head supplies is evicted; one the live base supplies may be
+  another read's, so the replica asks for the head's and the base's row
+  whole (`ResendWhole`) instead, and the answer brings the head row that masks it
+  or the base row as it is now, or their evictions.
 - `span: Live { since }` keeps it current until `Unsubscribe` (§8.5);
   `since` resumes it (§8.11).
-- `span: Once { at, view }` answers it once, at the current state or as of
-  server seq `at`, in branch view `view`.
+- `span: Once { at }` answers it once, at the current state or as of
+  server seq `at`.
 - `tier` says how far the read reaches past a relay: `LocalOnly` is served
   from the relay's store, `LocalFirst` from it too while the relay asks its
   upstream, `Remote` once its upstream answered. An authority's store is the
@@ -436,8 +488,15 @@ image, supporting row or count (`INV-SYNC-13`), and ships accepted rows only,
 never another node's pending or refused writes (`INV-SYNC-12`).
 
 When a reader loses read access to a row it holds, through a write or a policy
-change, the server sends `AccessLost { table, id, key }` and the replica drops
-its copy (`INV-SYNC-14`). This includes a row the reader's own accepted commit
+change, the server sends `AccessLost { table, id, key, hidden }` and the
+replica drops its copy (`INV-SYNC-14`). `hidden` says the row still exists as
+a version the reader may not read, rather than being gone: in a branch view
+over a base it still overrides the base's row, so the replica keeps a marker
+that masks that row (§8.4). An eviction of a version that still exists keeps
+the session watching the row's id, since the replica may hold the row on
+another branch, and later writes that leave that version unreadable send
+nothing more, whichever of the session's reads watches the id; a version
+that becomes readable ships again. This includes a row the reader's own accepted commit
 wrote and cannot read (a write-only insert): the commit's fate reports its
 acceptance. Local copies are not a redaction boundary; eviction keeps the
 replica coherent, not secret.
@@ -588,7 +647,7 @@ type are never read as another's.
 
 A replica persists, per live read, the server seq its result last settled
 through, in `_jazz_watermarks` keyed by a digest of the query, binding,
-`include_deleted` flag and reader identity (not the tier or wait, and not the
+`include_deleted` flag, the view it asked for and reader identity (not the tier or wait, and not the
 schema version: the key is over stored names). On reconnect or reopen, it
 sends `Read { span: Live { since } }` with that seq.
 
@@ -620,8 +679,11 @@ that untrue for results the replica cannot name, so the replica forgets every
 watermark when either happens, and each read opens fresh until it settles
 again:
 
-- an `AccessLost`: a result settled earlier may have held the row, and a resume
-  from it would count the row as held after it became readable again;
+- an `AccessLost` for a row the replica held: a result settled earlier may
+  have held the row, and a resume from it would count the row as held after it
+  became readable again. One for a row it holds no image of changes no
+  result, so the watermarks stay (a hidden one still writes its marker, which
+  masks rows but holds none);
 - a row asked for whole (§8.12): until its whole image arrives the replica holds
   a stale version, so it also stores no watermark meanwhile.
 

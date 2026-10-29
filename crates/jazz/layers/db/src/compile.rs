@@ -199,6 +199,9 @@ pub struct Ctx<'a> {
     pub params: Vec<Sql>,
     /// Every table the compiled SQL reads: the invalidation dependencies.
     pub tables: BTreeSet<String>,
+    /// Whether `_jazz_withheld` exists: a branch view over a base masks
+    /// base rows its markers name too.
+    pub withheld: bool,
     /// The branch view every branched table is read through.
     pub view: Option<View>,
     /// An as-of cut every table is read through.
@@ -315,6 +318,7 @@ impl<'a> Ctx<'a> {
             binding,
             params: Vec::new(),
             tables: BTreeSet::new(),
+            withheld: false,
             view: None,
             cut: None,
             settled_only: false,
@@ -333,6 +337,11 @@ impl<'a> Ctx<'a> {
 
     pub fn with_view(mut self, view: Option<View>) -> Self {
         self.view = view;
+        self
+    }
+
+    pub fn with_withheld(mut self, withheld: bool) -> Self {
+        self.withheld = withheld;
         self
     }
 
@@ -505,10 +514,21 @@ impl<'a> Ctx<'a> {
                 let base_cut = view.base_cut.clone().or_else(|| self.cut.clone());
                 let base_rows = self.rows_at(table, &columns, base_cut);
                 let head_rows = self.rows(table, &columns);
+                // A head version this reader may not read still overrides
+                // the base's row: the replica holds a marker of it.
+                let withheld = if self.withheld {
+                    let name = self.bind(Sql::Text(table.stored.clone().into_bytes()));
+                    format!(
+                        " AND NOT EXISTS (SELECT 1 FROM _jazz_withheld AS w \
+                         WHERE w.tbl = {name} AND w.id = m.id AND w._b = {head})"
+                    )
+                } else {
+                    String::new()
+                };
                 format!(
                     "(SELECT {columns} FROM {rows} WHERE _b = {head} UNION ALL SELECT {inherited} \
                      FROM {base_rows} AS m WHERE m._b = {base} AND NOT EXISTS (SELECT 1 FROM {head_rows} AS x \
-                     WHERE x.id = m.id AND x._b = {head}))"
+                     WHERE x.id = m.id AND x._b = {head}){withheld})"
                 )
             }
         })

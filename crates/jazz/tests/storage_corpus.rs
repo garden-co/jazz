@@ -59,8 +59,8 @@ const CLIENT_FILE: &str = "sqlite-storage-v1/client.sqlite.gz.base64";
 /// change re-runs the producer and re-pins these; after that the corpus is
 /// immutable and a new storage format gets a new corpus beside it (see
 /// `fixtures/sqlite-storage-v1/README.md`).
-const SERVER_SHA256: &str = "9a306fbc36b3baf47eb8099e7fc23313c75ddfd5942b35c02026b0d386c7d16b";
-const CLIENT_SHA256: &str = "53711b160846ecadafea7021c5f60e60f5fbb68c24d655761499d38c050a4c93";
+const SERVER_SHA256: &str = "0bd49cd130a2a205eadac2356299665f49eb6569cd2caee8bfbe360b31dc69f3";
+const CLIENT_SHA256: &str = "fcbd981b7c8e257e0c383fbeb37542c49cb720b9fcde1dda326479ab25c13034";
 
 const SERVER_NODE: [u8; 16] = [0xa0; 16];
 const CLIENT_NODE: [u8; 16] = [0xc0; 16];
@@ -95,6 +95,24 @@ fn draft_branch() -> BranchSelector {
     BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([0xbb; 16])))])
 }
 
+/// The branch `draft_branch()` is viewed over.
+fn draft_base() -> BranchSelector {
+    BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([0xba; 16])))])
+}
+
+/// The client's view of the drafts: the draft branch over its base.
+fn draft_view() -> ReadOpts {
+    ReadOpts::default().branch_view(
+        draft_branch(),
+        Some(jazz::protocol::BranchViewBase::Current(draft_base())),
+    )
+}
+
+/// `who`'s subject, as a draft's `owner`.
+fn subject(who: AuthorSubject) -> Value {
+    Value::String(who.principal_parts().1)
+}
+
 /// Deterministic letters.
 fn text(seed: u64, len: usize) -> String {
     let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
@@ -116,9 +134,25 @@ fn blob(n: u8) -> Vec<u8> {
 
 /// `projects(name)`, `documents(project -> projects, title, body, blob,
 /// rank, status: enum)` with an index on `title` and a text-merging `body`, and
-/// `drafts(branch_id, title)` branched by `branch_id`. `title_column` names
+/// `drafts(branch_id, title, owner)` branched by `branch_id`, readable when
+/// it has no owner or the reader owns it. `title_column` names
 /// `documents.title`.
 fn schema(title_column: &str) -> JazzSchema {
+    use jazz::tools::{CmpOp, PolicyExpr, PolicyValue, TablePolicies};
+    let owned = PolicyExpr::Or(vec![
+        PolicyExpr::IsNull {
+            column: "owner".to_owned(),
+        },
+        PolicyExpr::Cmp {
+            column: "owner".to_owned(),
+            op: CmpOp::Eq,
+            value: PolicyValue::SessionRef(vec![
+                "user".to_owned(),
+                "identity".to_owned(),
+                "subject".to_owned(),
+            ]),
+        },
+    ]);
     let mut schema = SchemaBuilder::new()
         .table(
             TableSchemaBuilder::new("projects")
@@ -146,8 +180,15 @@ fn schema(title_column: &str) -> JazzSchema {
             TableSchemaBuilder::new("drafts")
                 .column("branch_id", ColumnType::Uuid)
                 .column("title", ColumnType::Text)
+                .nullable_column("owner", ColumnType::Text)
                 .branch_by("branch_id")
-                .policies(allow_all_policies()),
+                .policies(
+                    TablePolicies::new()
+                        .with_select(owned)
+                        .with_insert(PolicyExpr::True)
+                        .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+                        .with_delete(PolicyExpr::True),
+                ),
         )
         .build();
     let documents = schema.get_mut(&TableName::new("documents")).unwrap();
@@ -459,6 +500,36 @@ fn produce_sqlite_storage_corpus_v1() {
                 block_on(client.subscribe(&query, ReadOpts::default())).unwrap()
             })
             .collect();
+        // A row of the draft's base that the draft overrides with a version
+        // the client may not read: its view hides the row, and the client
+        // keeps a marker of it (`_jazz_withheld`).
+        block_on(server.insert(
+            "drafts",
+            cells(&[("title", string("Shared"))]),
+            InsertOptions {
+                row_id: Some(draft(2)),
+                target: ExactWriteTarget::Branch(draft_base()),
+                updated_at_ms: at(15),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        block_on(server.update(
+            "drafts",
+            draft(2),
+            cells(&[("owner", subject(user(1)))]),
+            UpdateOptions {
+                target: jazz::db::WriteTarget::BranchView {
+                    head: draft_branch(),
+                    base: Some(jazz::protocol::BranchViewBase::Current(draft_base())),
+                },
+                updated_at_ms: at(16),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        let drafts = client.prepare_query(&Query::from("drafts")).unwrap();
+        let _view = block_on(client.subscribe(&drafts, draft_view())).unwrap();
         pump(&[&client, &server]);
         // A text edit the server merges with one it made meanwhile: it keeps
         // the client's write as sent beside the merged version.
@@ -788,7 +859,10 @@ fn assert_server_corpus(server: &Db, with_client_writes: bool) {
             ReadOpts::default().branch_view(draft_branch(), None),
         )
         .unwrap(),
-        vec![expect(draft(1), &[("title", string("On a branch"))])]
+        vec![
+            expect(draft(1), &[("title", string("On a branch"))]),
+            expect(draft(2), &[("title", string("Shared"))]),
+        ]
     );
 }
 
@@ -819,6 +893,14 @@ fn pinned_sqlite_corpus_reopens_and_accepts_current_writes() {
                 expect(document(1), &[("title", string("Spec"))]),
                 expect(document(2), &[("title", string("Notes (offline)"))]),
             ]
+        );
+        // Its view of the drafts still hides the row the draft overrides
+        // with a version it may not read.
+        let mut view = draft_view();
+        view.tier = ReadTier::LocalOnly;
+        assert_eq!(
+            rows(&client, Query::from("drafts").select(["title"]), view).unwrap(),
+            vec![expect(draft(1), &[("title", string("On a branch"))])]
         );
         // Its pending uploads are resent and land on the server.
         let (client_side, server_side) = duplex();
