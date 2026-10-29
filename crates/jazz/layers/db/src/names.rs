@@ -15,7 +15,7 @@ use rusqlite::Connection;
 use crate::ids::SchemaVersionId;
 use crate::options::{Error, ErrorCode};
 use crate::protocol::{LensOp, MigrationLens};
-use crate::records::Value;
+use crate::records::{Value, ValueType};
 use crate::schema::JazzSchema;
 use crate::values::{Column, Schema, Sql, StoredNames, in_savepoint, storage, to_sql, unsupported};
 
@@ -40,6 +40,20 @@ const BRANCH_COLUMNS_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_branch_column
 const LENS_CELLS_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_lens_cells (tbl TEXT NOT NULL, \
      col TEXT NOT NULL, since BLOB NOT NULL, src TEXT, dflt, PRIMARY KEY (tbl, col, since)) \
      WITHOUT ROWID;";
+
+/// Each stored column's value type, recorded when a version storing it is
+/// first admitted (a stored column never changes type). A column added again
+/// under a name some earlier version stored continues that stored column
+/// only if its type is the one recorded here (see [`Names::resolve`]).
+const COLUMN_TYPES_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_column_types (tbl TEXT NOT NULL, \
+     col TEXT NOT NULL, ty BLOB NOT NULL, PRIMARY KEY (tbl, col)) WITHOUT ROWID;";
+
+/// The versions whose names this replica's authority confirmed, each with
+/// the [`names_digest`] it confirmed: a version is confirmed while its names
+/// still have that digest. An authority confirms every version it admits,
+/// so it keeps none.
+const CONFIRMED_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_confirmed_names (version BLOB NOT NULL \
+     PRIMARY KEY, digest BLOB NOT NULL) WITHOUT ROWID;";
 
 /// A stored column a lens into version `since` fills in rows inserted by
 /// versions that do not name it.
@@ -145,6 +159,25 @@ impl LensEffects {
     }
 }
 
+/// The identity of stored table `table` (with `column`, of its stored
+/// column) in the app whose authority namespace is `namespace`: a name-based
+/// UUID (RFC 9562 version 5) of the stored names. Stored names never change
+/// for the life of a table or column (a rename lens keeps them, and a column
+/// added again continues its stored column only with the same type), so
+/// neither does its identity, on the authority or any replica mirroring it.
+pub(crate) fn identity(namespace: [u8; 16], table: &str, column: Option<&str>) -> uuid::Uuid {
+    let mut name = Vec::new();
+    let parts = match column {
+        None => vec![b"table".as_slice(), table.as_bytes()],
+        Some(column) => vec![b"column".as_slice(), table.as_bytes(), column.as_bytes()],
+    };
+    for part in parts {
+        name.extend_from_slice(&(part.len() as u64).to_le_bytes());
+        name.extend_from_slice(part);
+    }
+    uuid::Uuid::new_v5(&uuid::Uuid::from_bytes(namespace), &name)
+}
+
 /// A digest of where a version stores its tables and columns: equal on
 /// two stores that name it alike.
 pub(crate) fn names_digest(names: &StoredNames) -> [u8; 16] {
@@ -174,6 +207,10 @@ pub(crate) struct Names {
     lens_cells: Vec<LensCell>,
     /// By stored table: its stored branch columns and their defaults.
     branches: BTreeMap<String, BTreeMap<String, Option<Sql>>>,
+    /// By (stored table, stored column): its value type.
+    types: BTreeMap<(String, String), ValueType>,
+    /// The digests this replica's authority confirmed, by version.
+    confirmed: HashMap<SchemaVersionId, [u8; 16]>,
 }
 
 fn schema_error(message: impl Into<String>) -> Error {
@@ -253,6 +290,45 @@ impl Names {
                 if !column.is_empty() {
                     columns.insert(column, has_default.then_some(default));
                 }
+            }
+        }
+        if table_exists(conn, "_jazz_column_types")? {
+            let mut statement = conn
+                .prepare("SELECT tbl, col, ty FROM _jazz_column_types")
+                .map_err(storage)?;
+            let rows = statement
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Vec<u8>>(2)?,
+                    ))
+                })
+                .map_err(storage)?;
+            for row in rows {
+                let (table, column, ty) = row.map_err(storage)?;
+                let ty = postcard::from_bytes(&ty).map_err(|_| {
+                    Error::new(ErrorCode::Storage, "bad value type in _jazz_column_types")
+                })?;
+                names.types.insert((table, column), ty);
+            }
+        }
+        if table_exists(conn, "_jazz_confirmed_names")? {
+            let mut statement = conn
+                .prepare("SELECT version, digest FROM _jazz_confirmed_names")
+                .map_err(storage)?;
+            let rows = statement
+                .query_map([], |r| {
+                    Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?))
+                })
+                .map_err(storage)?;
+            for row in rows {
+                let (version, digest) = row.map_err(storage)?;
+                let bad = || Error::new(ErrorCode::Storage, "bad row in _jazz_confirmed_names");
+                let version = SchemaVersionId::from_bytes(version.try_into().map_err(|_| bad())?);
+                names
+                    .confirmed
+                    .insert(version, digest.try_into().map_err(|_| bad())?);
             }
         }
         if has_cells {
@@ -430,6 +506,7 @@ impl Names {
             for (ddl_table, columns) in [
                 ("_jazz_lens_cells", ["col", "src"].as_slice()),
                 ("_jazz_branch_columns", ["col"].as_slice()),
+                ("_jazz_column_types", ["col"].as_slice()),
             ] {
                 let exists: bool = conn
                     .query_row(
@@ -494,6 +571,19 @@ impl Names {
                 }
             }
         }
+        self.types = std::mem::take(&mut self.types)
+            .into_iter()
+            .map(|((table, stored_column), ty)| {
+                if table != from {
+                    return ((table, stored_column), ty);
+                }
+                let stored_column = match column {
+                    Some((old, new)) if stored_column == old => new.to_owned(),
+                    _ => stored_column,
+                };
+                ((table_to.to_owned(), stored_column), ty)
+            })
+            .collect();
         match column {
             None => {
                 if let Some(branches) = self.branches.remove(from) {
@@ -561,13 +651,22 @@ impl Names {
     /// version is never known by name without its branch columns.
     pub(crate) fn admit(&mut self, conn: &Connection, schema: &Schema) -> Result<(), Error> {
         let version = schema.jazz.version_id();
+        // A version a file admitted before its column types were kept
+        // records them when it is opened again.
+        let types = self.new_types(schema)?;
         if self.versions.contains_key(&version) {
+            if !types.is_empty() {
+                in_savepoint(conn, "jazz_names", || write_types(conn, &types))?;
+                self.types
+                    .extend(types.into_iter().map(|(key, ty, _)| (key, ty)));
+            }
             return Ok(());
         }
         let n = self.versions.values().map(|(n, _)| *n).max().unwrap_or(0) + 1;
         let names = schema.names();
         let branches = self.new_branches(schema)?;
         in_savepoint(conn, "jazz_names", || {
+            write_types(conn, &types)?;
             let id = version.as_bytes().to_vec();
             let mut insert = conn
                 .prepare_cached(
@@ -595,6 +694,8 @@ impl Names {
             write_branches(conn, &branches)
         })?;
         self.versions.insert(version, (n, names));
+        self.types
+            .extend(types.into_iter().map(|(key, ty, _)| (key, ty)));
         for (table, column, default) in branches {
             let columns = self.branches.entry(table).or_default();
             if let Some(default) = default {
@@ -602,6 +703,107 @@ impl Names {
             }
         }
         Ok(())
+    }
+
+    /// `schema`'s stored columns whose type is not recorded yet, each with
+    /// its type encoded as the file keeps it.
+    fn new_types(&self, schema: &Schema) -> Result<Vec<NewType>, Error> {
+        let mut new = Vec::new();
+        for table in schema.tables.values() {
+            for column in &table.columns {
+                let key = (table.stored.clone(), column.stored.clone());
+                if self.types.contains_key(&key) {
+                    continue;
+                }
+                let bytes = postcard::to_allocvec(&column.ty).map_err(|error| {
+                    Error::new(
+                        ErrorCode::Storage,
+                        format!("encoding a column type: {error}"),
+                    )
+                })?;
+                new.push((key, column.ty.clone(), bytes));
+            }
+        }
+        Ok(new)
+    }
+
+    /// Refuse `schema` if it stores a column under a stored column recorded
+    /// with another type: values of one type are never read as another's.
+    pub(crate) fn check_types(&self, schema: &Schema) -> Result<(), Error> {
+        for table in schema.tables.values() {
+            for column in &table.columns {
+                if self
+                    .stored_type(&table.stored, &column.stored)
+                    .is_some_and(|ty| *ty != column.ty)
+                {
+                    return Err(unsupported(format!(
+                        "changing the type of {}.{}",
+                        table.name, column.name
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The value type of stored column `column` of stored table `table`,
+    /// once a version storing it was admitted.
+    pub(crate) fn stored_type(&self, table: &str, column: &str) -> Option<&ValueType> {
+        self.types.get(&(table.to_owned(), column.to_owned()))
+    }
+
+    /// Whether `version`'s names are the ones this replica's authority
+    /// confirmed for it.
+    pub(crate) fn confirmed(&self, version: &SchemaVersionId) -> bool {
+        match (self.confirmed.get(version), self.get(version)) {
+            (Some(digest), Some(names)) => *digest == names_digest(names),
+            _ => false,
+        }
+    }
+
+    /// The versions confirmed, with their digests, in admission order.
+    pub(crate) fn confirmations(&self) -> Vec<([u8; 16], [u8; 16])> {
+        self.in_order()
+            .into_iter()
+            .filter(|(version, _)| self.confirmed(version))
+            .map(|(version, names)| (*version.as_bytes(), names_digest(names)))
+            .collect()
+    }
+
+    /// Record that the authority confirmed these (version, digest) pairs;
+    /// whether any is new here.
+    pub(crate) fn confirm(
+        &mut self,
+        conn: &Connection,
+        confirmed: &[([u8; 16], [u8; 16])],
+    ) -> Result<bool, Error> {
+        let new: Vec<_> = confirmed
+            .iter()
+            .map(|(version, digest)| (SchemaVersionId::from_bytes(*version), *digest))
+            .filter(|(version, digest)| self.confirmed.get(version) != Some(digest))
+            .collect();
+        if new.is_empty() {
+            return Ok(false);
+        }
+        in_savepoint(conn, "jazz_names", || {
+            conn.execute_batch(CONFIRMED_DDL).map_err(storage)?;
+            let mut insert = conn
+                .prepare_cached(
+                    "INSERT OR REPLACE INTO _jazz_confirmed_names (version, digest) VALUES (?1, ?2)",
+                )
+                .map_err(storage)?;
+            for (version, digest) in &new {
+                insert
+                    .execute(rusqlite::params![
+                        version.as_bytes().to_vec(),
+                        digest.to_vec()
+                    ])
+                    .map_err(storage)?;
+            }
+            Ok(())
+        })?;
+        self.confirmed.extend(new);
+        Ok(true)
     }
 
     /// Refuse `schema` if it keys a stored table's rows differently from
@@ -696,13 +898,20 @@ impl Names {
     /// table or column takes the stored name its source has: the source of a
     /// lens into `schema` (`lenses` may name others; only lenses targeting
     /// `schema` count) where one says it was renamed, else `base`'s table or
-    /// column of the same name. A new table or column is stored under its own
-    /// name unless another admitted version stores a differently named one
-    /// there (a rename freed the logical name, not the stored one), when it
-    /// gets a fresh suffix. Where a lens from an admitted source adds it, any
-    /// admitted version storing one there counts: the lens says the source
-    /// lacks it, so a table or column dropped and added again is a new
-    /// lineage with its own default, not the data it held before.
+    /// column of the same name, if it has the type that stored column holds
+    /// (a type changed in place makes a new column). A new table is stored
+    /// under its own name
+    /// unless another admitted version stores a differently named one there
+    /// (a rename freed the logical name, not the stored one), when it gets a
+    /// fresh suffix. A column added again without a lens, under a name an
+    /// admitted version stored in its table, continues the stored column the
+    /// last such version kept it in only if it has that column's type: its
+    /// identity is that stored column's, and only values of its type are
+    /// stored there. Any other new column gets a stored name no admitted
+    /// version uses. Where a lens from an admitted source adds a table or
+    /// column, any admitted version storing one there counts: the lens says
+    /// the source lacks it, so one dropped and added again is a new lineage
+    /// with its own default, not the data it held before.
     pub(crate) fn resolve(
         &self,
         schema: &JazzSchema,
@@ -765,26 +974,65 @@ impl Names {
                 if from != &column.name && table.branch_by.contains(&column.name) {
                     return Err(unsupported(format!("renaming branch column {name}.{from}")));
                 }
-                match source_columns.and_then(|columns| columns.get(from)) {
+                // A column whose type differs from the one its source column
+                // is stored with is a new column: values of one type are
+                // never read as another's. The rows already stored have no
+                // value in it, so a required one needs a default.
+                let retyped = source_columns
+                    .and_then(|columns| columns.get(from))
+                    .and_then(|stored_column| self.stored_type(&stored, stored_column))
+                    .is_some_and(|ty| *ty != column.ty);
+                if retyped
+                    && !column.nullable()
+                    && column.default.is_none()
+                    && !effects
+                        .defaults
+                        .contains_key(&(name.clone(), column.name.clone()))
+                {
+                    return Err(unsupported(format!(
+                        "changing the type of required column {name}.{} without a default",
+                        column.name
+                    )));
+                }
+                let source_column = source_columns
+                    .and_then(|columns| columns.get(from))
+                    .filter(|_| !retyped);
+                match source_column {
                     Some(stored_column) => {
                         taken.insert(stored_column.clone());
                         columns.insert(column.name.clone(), stored_column.clone());
                     }
-                    None if from != &column.name => {
+                    None if from != &column.name
+                        && !source_columns.is_some_and(|columns| columns.contains_key(from)) =>
+                    {
                         return Err(schema_error(format!(
                             "lens renames column `{from}` of `{name}` to `{}`, but the source has no `{from}`",
                             column.name
                         )));
                     }
-                    None => fresh.push(column.name.clone()),
+                    None => fresh.push(column),
                 }
             }
             for column in fresh {
-                let stored_column = self.fresh(&column, &taken, |candidate, logical| {
-                    self.claims_column(&stored, candidate, logical, lineage)
-                });
+                // Added again without a lens: it continues the stored
+                // column the version last storing one of its name used,
+                // when its values fit that column's type. Otherwise (and
+                // always for a column a lens adds) it starts a new one.
+                let previous = (!lineage)
+                    .then(|| self.last_stored_as(&stored, &column.name))
+                    .flatten()
+                    .filter(|previous| {
+                        !taken.contains(*previous)
+                            && self.stored_type(&stored, previous) == Some(&column.ty)
+                    });
+                let stored_column = match previous {
+                    Some(previous) => previous.to_owned(),
+                    None => self.fresh(&column.name, &taken, |candidate, _| {
+                        self.claims_column(&stored, candidate, "", true)
+                    }),
+                };
                 taken.insert(stored_column.clone());
-                columns.insert(column, stored_column);
+                columns.insert(column.name.clone(), stored_column);
             }
             names.tables.insert(name.clone(), (stored, columns));
         }
@@ -820,6 +1068,23 @@ impl Names {
         })
     }
 
+    /// The stored column the most recently admitted version naming a column
+    /// `logical` of stored table `table` keeps it in.
+    fn last_stored_as(&self, table: &str, logical: &str) -> Option<&str> {
+        self.versions
+            .values()
+            .filter_map(|(n, names)| {
+                names
+                    .tables
+                    .values()
+                    .find(|(stored, _)| stored == table)
+                    .and_then(|(_, columns)| columns.get(logical))
+                    .map(|column| (*n, column.as_str()))
+            })
+            .max_by_key(|(n, _)| *n)
+            .map(|(_, column)| column)
+    }
+
     /// Whether an admitted version stores a column other than `logical` (any
     /// column, for a new `lineage`) as `stored` in stored table `table`.
     fn claims_column(&self, table: &str, stored: &str, logical: &str, lineage: bool) -> bool {
@@ -832,6 +1097,37 @@ impl Names {
             })
         })
     }
+}
+
+fn table_exists(conn: &Connection, name: &str) -> Result<bool, Error> {
+    conn.query_row(
+        "SELECT count(*) > 0 FROM sqlite_master WHERE name = ?1",
+        [name],
+        |r| r.get(0),
+    )
+    .map_err(storage)
+}
+
+/// A stored column's type to record: (stored table, stored column), the
+/// type, and its encoding.
+type NewType = ((String, String), ValueType, Vec<u8>);
+
+fn write_types(conn: &Connection, types: &[NewType]) -> Result<(), Error> {
+    if types.is_empty() {
+        return Ok(());
+    }
+    conn.execute_batch(COLUMN_TYPES_DDL).map_err(storage)?;
+    let mut insert = conn
+        .prepare_cached(
+            "INSERT OR IGNORE INTO _jazz_column_types (tbl, col, ty) VALUES (?1, ?2, ?3)",
+        )
+        .map_err(storage)?;
+    for ((table, column), _, bytes) in types {
+        insert
+            .execute(rusqlite::params![table, column, bytes])
+            .map_err(storage)?;
+    }
+    Ok(())
 }
 
 /// A stored table and branch column to record, with the column's default
