@@ -5090,6 +5090,13 @@ impl Inner {
 }
 
 impl Client {
+    pub(super) fn cancel_fetch(&mut self, id: u64) {
+        self.answers.remove(&id);
+        self.outbox.retain(
+            |message| !matches!(message, SyncMessage::Read { id: request, .. } if *request == id),
+        );
+    }
+
     /// Pending commits recorded under the current version without saying
     /// so were written under `version`, about to stop being current.
     pub(crate) fn keep_version(&mut self, version: [u8; 16]) {
@@ -5821,6 +5828,19 @@ impl Inner {
     }
 }
 
+// One in-flight read owns its answer slot and any unsent request. Dropping the
+// caller's future must release both, without affecting another read's work.
+struct FetchRequest {
+    inner: Rc<Store>,
+    id: u64,
+}
+
+impl Drop for FetchRequest {
+    fn drop(&mut self) {
+        self.inner.cancel_fetch(self.id);
+    }
+}
+
 impl Db {
     /// Ask the server for one read and wait for its answer, unless the
     /// link cannot answer or `deadline` passes. Returns the server seq the
@@ -5885,6 +5905,9 @@ impl Db {
         };
         // The request in flight, and the connection it went out on.
         let mut asked: Option<(u64, u64)> = None;
+        // Update this guard in place on reconnect: replacing it while Inner is
+        // borrowed would run its cleanup under that same borrow.
+        let mut request: Option<FetchRequest> = None;
         let answer = poll_fn(|_| {
             let mut inner = self.inner.borrow_mut();
             let answerable = answerable(&inner);
@@ -5903,26 +5926,27 @@ impl Db {
             };
             if ask {
                 if let Some((id, _)) = asked {
-                    client.answers.remove(&id);
+                    client.cancel_fetch(id);
                 }
                 let id = client.next_id;
                 client.next_id += 1;
                 client.answers.insert(id, None);
                 client.outbox.push(message(id));
                 asked = Some((id, client.connection));
-            }
-            let forget = |client: &mut Client| {
-                if let Some((id, _)) = asked {
-                    client.answers.remove(&id);
+                if let Some(request) = &mut request {
+                    request.id = id;
+                } else {
+                    request = Some(FetchRequest {
+                        inner: self.inner.clone(),
+                        id,
+                    });
                 }
-            };
+            }
             if (!strict && !answerable) || deadline.is_some_and(|d| Instant::now() >= d) {
-                forget(client);
                 return Poll::Ready(Ok(None));
             }
             if let Some(expired) = coverage {
                 if client.unadmitted {
-                    forget(client);
                     return Poll::Ready(Err(Error::new(
                         ErrorCode::Schema,
                         "schema version is awaiting published catalogue admission; \
@@ -5930,7 +5954,6 @@ impl Db {
                     )));
                 }
                 if expired() {
-                    forget(client);
                     return Poll::Ready(Err(Error::new(
                         ErrorCode::NotObserved,
                         "Timed out waiting for query coverage",
