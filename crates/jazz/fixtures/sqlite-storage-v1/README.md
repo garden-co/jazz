@@ -11,9 +11,9 @@ are stored, a rejection's reason name changed how fates are recorded, and
 pending uploads moved from one encoded message to a row per op).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `c87086eff997417f78894479504ac5444a1c6d51a8bd50e18b41bb5af2563c7d`.
+  the SQLite file `bd07f66689cec3c42cb3926bee3cbdb466e01e45832f28d747bf5f3cd74e4b2d`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `e0280ce7f06c7362a84221b697af0f5b8866affd1eb101622907a090936a7d21`.
+  `ac4eea486bc89e67ff0b1607ab456c8098780a9dce3f616d7115304dfba021b1`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
@@ -49,3 +49,7 @@ way.
 Replacing the authority's `_jazz_text_in` side table with as-sent history
 versions, when `documents.body` became text-merging, regenerated it the same
 way.
+
+Moving a commit's bases, access proofs (formerly sources) and deltas onto its
+ops, so each pending op is stored with them and `_jazz_pending_items` keeps
+only ops and serializable reads, regenerated it the same way.

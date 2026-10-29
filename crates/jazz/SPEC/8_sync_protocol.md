@@ -178,11 +178,23 @@ messages at 2 MiB, the prelude included.
 ### 8.2 Upstream: commits
 
 A committed transaction travels as one `Commit { node, tx, kind, ops, … }`;
-open transactions never ship (ch. 3, `INV-TX-2`). `ops` are the writes
+open transactions never ship (ch. 3, `INV-TX-2`). Each op is a write
 (`Insert`, `Update`, `Upsert`, `Delete`, `Restore`, `Move`) by the session
-schema's table and column names; the authority resolves them to stored names
-under the schema version the commit was written under (§8.9). The other
-fields:
+schema's table and column names, which the authority resolves to stored names
+under the schema version the commit was written under (§8.9), with what its
+writer knew of the row it writes:
+
+- `bases`: on the commit's first op that writes a row, for each branch key it
+  writes the row under over an image the writer held, the base of that image
+  (SPEC 4 §4.6). A move writes two. Only the authority's conflict derivation
+  reads them.
+- `deltas`: the op's chunked cells travelling as edits over the writer's
+  newest settled version of the row (SPEC 19.8).
+- `access_proof`: when the op's chunked values travel as trees, a version of
+  the row the writer may read whose trees vouch for the nodes it did not push
+  (SPEC 19.4).
+
+The commit's other fields:
 
 - `kind`: `Mergeable`, or `Serializable { snapshot, reads, own }`: the
   snapshot seq, each read with the rows and server versions it returned, and
@@ -191,14 +203,9 @@ fields:
   writes only if every result and written row is unchanged since the snapshot.
   A stale or partial replica can only cause a conflict, never a
   non-serializable commit.
-- `bases`: for each row written over an image the writer held, the base of
-  that image (SPEC 4 §4.6). Only the authority's conflict derivation reads it.
 - `expect`: a digest of each written row as the writer's replica holds it
   afterwards. The authority does not echo a row whose new version matches;
   the writer installs its own as that version (§8.3).
-- `deltas`, `sources`: chunked cells travelling as edits over the writer's
-  newest settled version, and the settled versions that trees' unpushed
-  nodes sit under (SPEC 19.8).
 - `author`, `session`: provenance or a session a trusted link acts for. Only
   a trusted link may set one other than its own identity.
 - `origin`: the session commit a relay uploads this one for.
@@ -206,9 +213,11 @@ fields:
 A replica keeps every unsettled commit and uploads it in order on each
 connection. It is stored a row per op, not as one encoded message:
 
-- `_jazz_pending (tx, header)`: the `Commit` with its lists left empty.
-- `_jazz_pending_items (tx, part, n, item)`: each op, cell delta, source,
-  base and serializable read, by list (`part`) and position (`n`).
+- `_jazz_pending (tx, header)`: the `Commit` with its ops and reads left
+  out.
+- `_jazz_pending_items (tx, part, n, item)`: each op (with its bases, deltas
+  and access proof) and serializable read, by list (`part`) and position
+  (`n`).
 - `_jazz_pending_rows (tx, n, tbl, id, key)`: the local rows it wrote.
 
 `expect` is not kept: after a reopen the server ships those rows. A row's
