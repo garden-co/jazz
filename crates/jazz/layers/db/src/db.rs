@@ -93,6 +93,19 @@ pub struct PreparedQuery {
 }
 
 impl PreparedQuery {
+    /// The same query without its window (limit and offset).
+    pub(crate) fn unwindowed(&self) -> PreparedQuery {
+        let mut query = self.query.clone();
+        query.limit = None;
+        query.offset = 0;
+        let shape = blake3::hash(format!("{:?}unwindowed", self.shape.0).as_bytes());
+        PreparedQuery {
+            query,
+            shape: Shape(short(shape)),
+            ..self.clone()
+        }
+    }
+
     pub fn shape(&self) -> &Shape {
         &self.shape
     }

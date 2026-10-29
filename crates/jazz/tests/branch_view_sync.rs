@@ -685,3 +685,69 @@ fn a_one_shot_view_read_masks_a_held_base_row_with_its_head() {
     opts.tier = ReadTier::Remote;
     assert_eq!(read_once(&server, &client, &rank_one(), opts), ["y"]);
 }
+
+/// A replica holds main's x and y (rank 1) through a main subscription,
+/// and captures main; while it is away, the draft deletes x (`tombstone`)
+/// or moves it out of the filter. Back online, it reads the draft over
+/// main: frozen at its capture, or live.
+fn reconnect_then_view(
+    tombstone: bool,
+    frozen_base: bool,
+    one_shot: bool,
+    bytes: (u8, u8),
+) -> Vec<String> {
+    let server = open(0x01, AuthorSubject::SYSTEM);
+    server.set_authority();
+    let client = open(0x02, alice());
+    let (up, _) = connect(&server, &client);
+    let (main, draft) = (branch(bytes.0), branch(bytes.1));
+    put(&server, &main, 0x45, "x", 1);
+    put(&server, &main, 0x46, "y", 1);
+    let all = client.prepare_query(&Query::from("todos")).unwrap();
+    let _m = block_on(client.subscribe(&all, ReadOpts::default().branch_view(main.clone(), None)))
+        .unwrap();
+    pump(&server, &client);
+    let frozen = block_on(client.capture_snapshot()).unwrap();
+    assert!(client.detach_connection(&up));
+    if tombstone {
+        del(&server, 0x45, &draft, Some(&main));
+    } else {
+        set_rank(&server, 0x45, &draft, &main, 9);
+    }
+    std::mem::forget(connect(&server, &client).0);
+    pump(&server, &client);
+    let base = if frozen_base {
+        BranchViewBase::Snapshot {
+            branch: main,
+            snapshot: frozen,
+        }
+    } else {
+        BranchViewBase::Current(main)
+    };
+    let mut view = ReadOpts::default().branch_view(draft, Some(base));
+    if one_shot {
+        view.tier = ReadTier::Remote;
+        return read_once(&server, &client, &rank_one(), view);
+    }
+    let prepared = client.prepare_query(&rank_one()).unwrap();
+    let _s = block_on(client.subscribe(&prepared, view.clone())).unwrap();
+    pump(&server, &client);
+    titles(&client, &rank_one(), view)
+}
+
+#[test]
+fn a_view_opened_after_a_reconnect_masks_what_the_head_changed_while_away() {
+    let mut bytes = 0x10;
+    for tombstone in [true, false] {
+        for frozen_base in [true, false] {
+            for one_shot in [true, false] {
+                bytes += 2;
+                assert_eq!(
+                    reconnect_then_view(tombstone, frozen_base, one_shot, (bytes, bytes + 1)),
+                    ["y"],
+                    "tombstone {tombstone}, frozen base {frozen_base}, one-shot {one_shot}"
+                );
+            }
+        }
+    }
+}

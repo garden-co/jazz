@@ -1673,11 +1673,6 @@ pub(crate) struct Session {
     /// row it was shipped after the subscriptions that covered it end, so
     /// only an eviction drops it.
     shipped: HashMap<(String, [u8; 16], Vec<u8>), u64>,
-    /// The row ids of branched tables the replica holds, by (stored table,
-    /// branch key): rows shipped to it or written by it, until evicted. A
-    /// branch view over a base ships the head's image of each id the
-    /// replica holds on the base, as it masks it there (ch. 8 §8.4).
-    holds: HashMap<(String, Vec<u8>), HashSet<[u8; 16]>>,
     /// Resumed subscriptions whose opening is still to send.
     resume: BTreeMap<u64, Resume>,
     /// Supporting rows live subscriptions cover, per table, with whether
@@ -1757,7 +1752,6 @@ impl Session {
             support: BTreeMap::new(),
             watch: Watches::default(),
             shipped: HashMap::new(),
-            holds: HashMap::new(),
             resume: BTreeMap::new(),
             held: Kept::default(),
             open: true,
@@ -3337,62 +3331,36 @@ impl Inner {
         Ok(cells)
     }
 
-    /// The head rows that mask base rows session `index` holds, or is
-    /// shipped in `shipping`, under each branch view's `masks` (table, head
-    /// key, base key): for an `opening`, every head row whose id the base
-    /// holds there; otherwise the head rows of the base rows `shipping`
-    /// brings.
+    /// The head rows of `mask`'s view that mask base rows its query
+    /// matches, written after `since` (a resumed read's replica holds the
+    /// older ones).
     fn masking_rows(
         &self,
-        index: usize,
-        masks: &[(String, Vec<u8>, Vec<u8>)],
-        opening: bool,
-        shipping: &[Image],
+        policy: Option<AuthorSubject>,
+        mask: &fanout::ViewMask,
+        since: Option<u64>,
     ) -> Result<Vec<(String, RowUuid, Vec<u8>)>, Error> {
-        let holds = &self.sessions[index].holds;
         let mut out = Vec::new();
-        for (table, head, base) in masks {
-            let held = holds.get(&(table.clone(), base.clone()));
-            let brought: HashSet<[u8; 16]> = shipping
-                .iter()
-                .filter(|image| image.table == *table && image.key == *base)
-                .map(|image| image.id)
-                .collect();
-            if opening {
-                for image in self.images_where(table, false, "_b = ?1", &[head])? {
-                    if held.is_some_and(|held| held.contains(&image.id))
-                        || brought.contains(&image.id)
-                    {
-                        out.push((table.clone(), RowUuid::from_bytes(image.id), head.clone()));
-                    }
-                }
-            } else {
-                for id in brought {
-                    let row = RowUuid::from_bytes(id);
-                    if self.current_image(table, row, head)?.is_some() {
-                        out.push((table.clone(), row, head.clone()));
-                    }
-                }
+        let heads = self.images_where(&mask.table, false, "_b = ?1", &[&mask.head])?;
+        let heads: Vec<Image> = heads
+            .into_iter()
+            .filter(|image| since.is_none_or(|since| image.seq > since))
+            .collect();
+        if heads.is_empty() {
+            return Ok(out);
+        }
+        let shown: HashSet<RowUuid> = self
+            .run(&mask.base_query, policy, &mask.base_read)?
+            .iter()
+            .map(|row| row.id)
+            .collect();
+        for image in heads {
+            let row = RowUuid::from_bytes(image.id);
+            if shown.contains(&row) {
+                out.push((mask.table.clone(), row, mask.head.clone()));
             }
         }
         Ok(out)
-    }
-
-    /// Session `index` now holds `images`' rows of branched tables.
-    fn note_holds<'i>(&mut self, index: usize, images: impl IntoIterator<Item = &'i Image>) {
-        for image in images {
-            let branched = self
-                .owner
-                .by_stored(&image.table)
-                .is_some_and(|table| !table.branch_by.is_empty());
-            if branched {
-                self.sessions[index]
-                    .holds
-                    .entry((image.table.clone(), image.key.clone()))
-                    .or_default()
-                    .insert(image.id);
-            }
-        }
     }
 
     fn current_image(&self, table: &str, row: RowUuid, key: &[u8]) -> Result<Option<Image>, Error> {
@@ -3703,7 +3671,16 @@ fn watermark_key(
     author: AuthorSubject,
 ) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(&encode(&(query, binding, include_deleted, view)));
+    // A current-state read keeps the key it had before views were part of
+    // it, so its resume point survives the upgrade.
+    match view {
+        ReadViewSourceSpec::Current => {
+            hasher.update(&encode(&(query, binding, include_deleted)));
+        }
+        view => {
+            hasher.update(&encode(&(query, binding, include_deleted, view)));
+        }
+    }
     hasher.update(format!("{author:?}").as_bytes());
     *hasher.finalize().as_bytes()
 }
@@ -7452,28 +7429,29 @@ impl Db {
                 }
             }
             // The session's branch views over a base: a head row written
-            // here whose id the replica holds on the base masks it there.
-            let masks: Vec<(String, Vec<u8>, Vec<u8>)> = inner.sessions[index]
+            // over a base row, or a base row written under a head row, may
+            // mask (or unmask) a base row the replica holds.
+            let masks: Vec<fanout::ViewMask> = inner.sessions[index]
                 .subs
                 .values()
                 .filter_map(|(_, group, ..)| group.upgrade())
-                .flat_map(|group| group.borrow().masks().to_vec())
+                .filter_map(|group| group.borrow().mask().cloned())
                 .collect();
-            let masking: Vec<(String, RowUuid, Vec<u8>)> = written_keys
-                .iter()
-                .map(|(written, _)| written)
-                .filter(|(table, row, key)| {
-                    let holds = &inner.sessions[index].holds;
-                    masks.iter().any(|(t, head, base)| {
-                        t == table
-                            && head == key
-                            && holds
-                                .get(&(t.clone(), base.clone()))
-                                .is_some_and(|held| held.contains(row.0.as_bytes()))
-                    })
-                })
-                .cloned()
-                .collect();
+            let mut masking: Vec<(String, RowUuid, Vec<u8>)> = Vec::new();
+            for ((table, row, key), _) in &written_keys {
+                for mask in masks.iter().filter(|mask| mask.table == *table) {
+                    let other = if *key == mask.head {
+                        &mask.base
+                    } else if *key == mask.base {
+                        &mask.head
+                    } else {
+                        continue;
+                    };
+                    if inner.current_image(table, *row, other)?.is_some() {
+                        masking.push((table.clone(), *row, mask.head.clone()));
+                    }
+                }
+            }
             if recheck.is_empty()
                 && masking.is_empty()
                 && inner.sessions[index].idle()
@@ -7529,8 +7507,8 @@ impl Db {
             let mut images = Vec::new();
             // Seqs of shipped history versions: their tx ids go first.
             let mut history_seqs = BTreeSet::new();
-            // Branch views opening (or reset) this tick: the head rows of
-            // base rows the replica already holds ship with them.
+            // Branch views opening (or reset) this tick: the head rows that
+            // mask base rows they match ship with them.
             let mut opening_masks = Vec::new();
             for (id, queue, group, list) in subs {
                 let events: Vec<SubscriptionEvent> = queue.borrow_mut().drain(..).collect();
@@ -7540,9 +7518,15 @@ impl Db {
                 if events
                     .iter()
                     .any(|event| matches!(event, SubscriptionEvent::Delta { reset: true, .. }))
-                    && let Some(group) = group.upgrade()
+                    && let Some(mask) = group
+                        .upgrade()
+                        .and_then(|group| group.borrow().mask().cloned())
                 {
-                    opening_masks.extend(group.borrow().masks().iter().cloned());
+                    let since = inner.sessions[index]
+                        .resume
+                        .get(&id)
+                        .map(|resume| resume.since);
+                    opening_masks.push((mask, since));
                 }
                 // A relay's result settles once its upstream answered.
                 let answered = events
@@ -7764,57 +7748,28 @@ impl Db {
                     }
                 }
             }
-            // A branch view's head rows of the base rows the replica holds
-            // (at its opening) or is shipped now.
-            touched.extend(inner.masking_rows(index, &opening_masks, true, &images)?);
-            touched.extend(inner.masking_rows(index, &masks, false, &images)?);
+            for (mask, since) in &opening_masks {
+                touched.extend(inner.masking_rows(policy, mask, *since)?);
+            }
             // Rows that left a result, and rows a commit wrote: the current
             // image if the client may read it, else an eviction.
-            let mut from = images.len();
-            while !touched.is_empty() {
-                for (table, row, key) in std::mem::take(&mut touched) {
-                    match inner.current_image(&table, row, &key)? {
-                        Some(image) if readable(&inner, &table, row, &key, policy)? => {
-                            images.push(image)
-                        }
-                        _ => evictions.push(SyncMessage::AccessLost {
-                            table,
-                            id: *row.0.as_bytes(),
-                            key,
-                        }),
+            for (table, row, key) in touched {
+                match inner.current_image(&table, row, &key)? {
+                    Some(image) if readable(&inner, &table, row, &key, policy)? => {
+                        images.push(image)
                     }
+                    _ => evictions.push(SyncMessage::AccessLost {
+                        table,
+                        id: *row.0.as_bytes(),
+                        key,
+                    }),
                 }
-                // Base rows shipped so bring their head rows too.
-                touched.extend(
-                    inner
-                        .masking_rows(index, &masks, false, &images[from..])?
-                        .into_iter()
-                        .filter(|(table, row, key)| {
-                            !images.iter().any(|image| {
-                                image.table == *table
-                                    && image.id == *row.0.as_bytes()
-                                    && image.key == *key
-                            })
-                        }),
-                );
-                from = images.len();
             }
             // Rows the session's own commits wrote stay current for the
             // session, in a subscription or not: its pending writes sit on
             // them (see the fetch above).
-            for (table, row, key, _) in &committed {
+            for (table, row, ..) in &committed {
                 watch.hold(SESSION_OWNER, id_watch(table, *row.0.as_bytes()));
-                if inner
-                    .owner
-                    .by_stored(table)
-                    .is_some_and(|table| !table.branch_by.is_empty())
-                {
-                    inner.sessions[index]
-                        .holds
-                        .entry((table.clone(), key.clone()))
-                        .or_default()
-                        .insert(*row.0.as_bytes());
-                }
             }
             // Superseded versions of the client's own commits land in its
             // history, while the row stays readable.
@@ -7854,15 +7809,7 @@ impl Db {
                     !evicted.contains(&(image.table.as_str(), image.id, image.key.as_slice()))
                 });
             }
-            inner.note_holds(index, &images);
             for eviction in &evictions {
-                if let SyncMessage::AccessLost { table, id, key } = eviction
-                    && let Some(held) = inner.sessions[index]
-                        .holds
-                        .get_mut(&(table.clone(), key.clone()))
-                {
-                    held.remove(id);
-                }
                 if let SyncMessage::AccessLost { table, id, .. } = eviction {
                     watch.forget(wk((
                         table.clone(),
@@ -8405,7 +8352,7 @@ impl Db {
                 // the next. A read as of a snapshot reference is this
                 // store's: the reference names commits it settled.
                 let snapshot = frozen_at(&view).cloned();
-                let (relay, refresh) = if snapshot.is_some() {
+                let (relay, refresh) = if matches!(*view, ReadViewSourceSpec::Snapshot { .. }) {
                     (None, false)
                 } else {
                     let mut inner = self.inner.borrow_mut();
@@ -8585,22 +8532,21 @@ impl Db {
                     inner.follow_support(&support, image, None, &mut follow)?;
                 }
                 images.extend(extra);
-                // Under a branch view over a base, the head rows of the base
-                // rows the replica holds or is shipped now mask them.
-                let masks = if read.view.as_ref().is_some_and(|view| view.base.is_some()) {
-                    let tables = inner.read_dependencies_in(&prepared, policy, &read)?;
-                    fanout::view_masks(&inner.schema, &read, &tables)
-                } else {
-                    Vec::new()
-                };
-                for (table, row, key) in inner.masking_rows(index, &masks, true, &images)? {
-                    if let Some(image) = inner.current_image(&table, row, &key)?
-                        && readable(&inner, &table, row, &key, policy)?
-                    {
-                        images.push(image);
+                // Under a branch view over a base, the head rows that mask
+                // base rows its query matches.
+                let schema = prepared
+                    .schema
+                    .clone()
+                    .unwrap_or_else(|| inner.owner.clone());
+                if let Some(mask) = fanout::view_mask(&schema, &prepared, &read) {
+                    for (table, row, key) in inner.masking_rows(policy, &mask, None)? {
+                        if let Some(image) = inner.current_image(&table, row, &key)?
+                            && readable(&inner, &table, row, &key, policy)?
+                        {
+                            images.push(image);
+                        }
                     }
                 }
-                inner.note_holds(index, &images);
                 for image in &images {
                     watch.hold(SESSION_OWNER, id_watch(&image.table, image.id));
                 }
@@ -9562,7 +9508,9 @@ impl Db {
                 .await?;
             return Ok(result(rows));
         }
-        let frozen = frozen_at(&opts.read_view.source).is_some();
+        // A branch view's head is current over a frozen base too: only a
+        // snapshot read is wholly this store's.
+        let frozen = matches!(opts.read_view.source, ReadViewSourceSpec::Snapshot { .. });
         let non_durable = self.inner().non_durable;
         if self.is_client()
             && let Some(reach) = remote_reach(&opts, non_durable, frozen)

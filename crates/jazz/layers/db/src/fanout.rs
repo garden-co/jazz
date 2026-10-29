@@ -91,19 +91,17 @@ pub(super) struct Group {
     /// reads (its head, and its live base): a change on any other key of
     /// that table cannot move the result.
     branches: HashMap<String, Vec<Vec<u8>>>,
-    /// Under a branch view over a base (live or frozen), per branched
-    /// stored table it reads: (table, head key, base key). A replica
-    /// holding the base's row of an id needs the head's to mask it.
-    masks: Vec<(String, Vec<u8>, Vec<u8>)>,
+    /// Under a branch view over a base (live or frozen), what its root
+    /// table's head rows mask (see [`ViewMask`]).
+    mask: Option<ViewMask>,
 }
 
 type SortKey = Vec<(Sql, bool)>;
 
 impl Group {
-    /// Under a branch view over a base: (table, head key, base key) per
-    /// branched stored table it reads.
-    pub(super) fn masks(&self) -> &[(String, Vec<u8>, Vec<u8>)] {
-        &self.masks
+    /// Under a branch view over a base: what its head rows mask.
+    pub(super) fn mask(&self) -> Option<&ViewMask> {
+        self.mask.as_ref()
     }
 
     /// Whether the last run waits on large-value chunks still to arrive.
@@ -362,12 +360,10 @@ impl Inner {
             &read,
             &watches,
         );
-        let masks = view_masks(
+        let mask = view_mask(
             prepared.schema.as_ref().unwrap_or(&self.owner),
+            prepared,
             &read,
-            watches
-                .iter()
-                .map(|(Watch::Table(table) | Watch::Key(table, ..))| table),
         );
         let projected = order_projected(&prepared.query, &compiled);
         let includes = self.output_only_includes(prepared, identity, &read, &compiled)?;
@@ -396,7 +392,7 @@ impl Inner {
             awaiting,
             opened: !awaiting,
             branches,
-            masks,
+            mask,
         }));
         self.read_keys(&mut handle.borrow_mut());
         let weak = Rc::downgrade(&handle);
@@ -1472,34 +1468,65 @@ fn view_branches(
     out
 }
 
-/// Under a branch view over a base, per branched stored table among
-/// `tables`: (table, head key, base key).
-pub(crate) fn view_masks<'t>(
+/// What a branch view over a base masks on a replica that reads it over
+/// the base rows it holds: a base row of its root table the query matches
+/// shows there unless the replica holds the head's row of it too (a
+/// tombstone, or a version the query leaves out), which the view's own
+/// result never ships (ch. 8 §8.4).
+#[derive(Clone)]
+pub(crate) struct ViewMask {
+    /// The root's stored table.
+    pub table: String,
+    pub head: Vec<u8>,
+    pub base: Vec<u8>,
+    /// The query without its window, read on the base alone (as of a
+    /// frozen base's cut): the base rows the replica may show.
+    pub base_query: PreparedQuery,
+    pub base_read: ReadSpec,
+}
+
+/// The [`ViewMask`] of a read of `prepared` in `read`, if it is a branch
+/// view over a base of a branched table.
+pub(crate) fn view_mask(
     schema: &Schema,
+    prepared: &PreparedQuery,
     read: &ReadSpec,
-    tables: impl IntoIterator<Item = &'t String>,
-) -> Vec<(String, Vec<u8>, Vec<u8>)> {
-    let Some(view) = &read.view else {
-        return Vec::new();
-    };
-    let Some(base) = &view.base else {
-        return Vec::new();
-    };
-    let mut out: Vec<(String, Vec<u8>, Vec<u8>)> = Vec::new();
-    for table in tables {
-        if out.iter().any(|(t, ..)| t == table) {
-            continue;
-        }
-        let Some(t) = schema.by_stored(table).filter(|t| !t.branch_by.is_empty()) else {
-            continue;
-        };
-        if let (Ok(head), Ok(base)) = (t.selector_key(&view.head), t.selector_key(base))
-            && head != base
-        {
-            out.push((table.clone(), head, base));
-        }
+) -> Option<ViewMask> {
+    let view = read.view.as_ref()?;
+    let base = view.base.as_ref()?;
+    let query = &prepared.query;
+    if history_source_table(&query.table).is_some() {
+        return None;
     }
-    out
+    let table = schema
+        .stored_table(&query.table)
+        .ok()
+        .and_then(|stored| schema.by_stored(stored))
+        .filter(|table| !table.branch_by.is_empty())?;
+    let (head, base_key) = (
+        table.selector_key(&view.head).ok()?,
+        table.selector_key(base).ok()?,
+    );
+    if head == base_key {
+        return None;
+    }
+    Some(ViewMask {
+        table: schema.stored_table(&query.table).ok()?.to_owned(),
+        head,
+        base: base_key,
+        base_query: prepared.unwindowed(),
+        base_read: ReadSpec {
+            include_deleted: read.include_deleted,
+            settled_only: read.settled_only,
+            view: Some(View {
+                head: base.clone(),
+                base: None,
+                base_cut: None,
+            }),
+            cut: view.base_cut.clone(),
+            splices: Vec::new(),
+        },
+    })
 }
 
 /// Whether every order column of a query is among its shown columns.
