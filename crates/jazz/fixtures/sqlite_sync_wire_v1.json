@@ -54,7 +54,7 @@
     {
       "variant": "Refused",
       "reader": "client",
-      "frame_hex": "0a010115756e6b6e6f776e207461626c65206d697373696e67"
+      "frame_hex": "0a010115756e6b6e6f776e207461626c65206d697373696e6700"
     },
     {
       "variant": "Fate",

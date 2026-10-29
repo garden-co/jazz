@@ -169,7 +169,9 @@ fn deltas(stream: &mut SubscriptionStream) -> (Vec<RowUuid>, Vec<RowUuid>) {
                 added.extend(a.iter().map(|row| row.row_uuid()));
                 removed.extend(r.iter().map(|row| row.row_uuid));
             }
-            SubscriptionEvent::Rejected { reason } => panic!("subscription rejected: {reason}"),
+            SubscriptionEvent::Rejected { code: reason } => {
+                panic!("subscription rejected: {reason:?}")
+            }
             SubscriptionEvent::Closed => {}
         }
     }

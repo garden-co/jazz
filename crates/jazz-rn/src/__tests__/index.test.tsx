@@ -547,6 +547,31 @@ it("decodes a core operation error with its stable code and reason name beside t
   }
 });
 
+it("decodes typed and legacy ABI 3 subscription rejections without exposing diagnostics", () => {
+  const relay = loadRelay(null);
+  const ascii = (text: string) => Array.from(text, (char) => char.charCodeAt(0));
+  // Postcard: SubscriptionEvents (4), one event, Rejected (1), UTF-8 string.
+  // These bytes are also pinned by the Rust foreground codec test.
+  for (const [bytes, code] of [
+    [Uint8Array.of(4, 1, 1, 19, ...ascii("QueryResultProtocol")), "QueryResultProtocol"],
+    [Uint8Array.of(4, 1, 1, 38, ...ascii("Protocol: malformed membership payload")), "Internal"],
+  ] as const) {
+    expect(relay.decodeNativeForegroundResponse(bytes)).toEqual({
+      type: "subscriptionEvents",
+      events: [{ type: "rejected", code }],
+    });
+    expect(() => relay.decodeNativeForegroundResponse(bytes.subarray(0, bytes.length - 1))).toThrow(
+      /truncated/,
+    );
+    expect(() => relay.decodeNativeForegroundResponse(Uint8Array.of(...bytes, 0))).toThrow(
+      /trailing/,
+    );
+  }
+  expect(() => relay.decodeNativeForegroundResponse(Uint8Array.of(4, 1, 1, 2, 0xc3, 0x28))).toThrow(
+    /malformed UTF-8/,
+  );
+});
+
 it("decodes canonical foreground handles through the JavaScript safe integer limit", () => {
   const relay = loadRelay(null);
   const corpus = [

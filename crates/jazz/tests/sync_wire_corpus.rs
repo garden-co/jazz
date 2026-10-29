@@ -871,3 +871,19 @@ fn produce_sqlite_sync_wire_corpus_v1() {
         .join(CORPUS);
     std::fs::write(path, serde_json::to_string_pretty(&corpus).unwrap() + "\n").unwrap();
 }
+
+/// Alice's served failure carries its typed category independently of message
+/// text. These are the unshipped alpha.60 Refused bytes in SQLite sync wire v1.
+#[test]
+fn served_refusal_has_a_typed_wire_category() {
+    let message = SyncMessage::Refused {
+        id: 1,
+        code: jazz::db::ErrorCode::Protocol,
+        message: String::new(),
+        subscription_code: Some(jazz::db::SubscriptionServerFailureCode::PolicyEvaluation),
+    };
+    assert_eq!(
+        postcard::to_allocvec(&message).unwrap(),
+        [10, 1, 5, 0, 1, 4]
+    );
+}

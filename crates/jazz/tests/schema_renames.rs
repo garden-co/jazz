@@ -1158,12 +1158,17 @@ fn a_catalogue_the_store_cannot_mirror_refuses_remote_reads_and_keeps_local_ones
     pump(&server, &[&client]);
     let mut rejected = None;
     while let Some(event) = stream.try_next_event() {
-        if let jazz::db::SubscriptionEvent::Rejected { reason } = event {
-            rejected = Some(reason);
+        if let jazz::db::SubscriptionEvent::Rejected { code } = event {
+            rejected = Some(code);
         }
     }
-    let reason = rejected.expect("the remote read says why");
-    assert!(reason.contains("not supported"), "{reason}");
+    let code = rejected.expect("the remote read says why");
+    // Unsupported catalogue mirroring is a Query error on main. Preserve
+    // that classification when exposing the client-safe failure category.
+    assert_eq!(
+        code,
+        jazz::db::SubscriptionServerFailureCode::QueryValidation
+    );
     assert_eq!(
         read_query(&client, Query::from("tasks"), "name", local()),
         [text("local task")]

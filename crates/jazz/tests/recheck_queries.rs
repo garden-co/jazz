@@ -273,7 +273,9 @@ fn an_optional_json_value_reaches_subscriptions_and_reads() {
                     .chain(&updated)
                     .filter_map(|row| row.cell("meta")),
             ),
-            SubscriptionEvent::Rejected { reason } => panic!("subscription failed: {reason}"),
+            SubscriptionEvent::Rejected { code: reason } => {
+                panic!("subscription failed: {reason:?}")
+            }
             _ => {}
         }
     }
