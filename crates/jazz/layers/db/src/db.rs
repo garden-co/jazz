@@ -396,9 +396,10 @@ struct Inner {
     /// merge reads its base from it. Empty otherwise.
     merge_bases: HashMap<(String, RowUuid, Vec<u8>), sync::Built>,
     /// The values as sent of the upload's text writes, by row version and
-    /// stored column: `Some` for a write its merge changed (kept by
-    /// [`Inner::record_as_sent`]), `None` for one left as sent.
-    as_sent: RefCell<BTreeMap<(String, RowUuid, Vec<u8>), BTreeMap<String, Option<Value>>>>,
+    /// stored column: for a write its merge changed, the value and its
+    /// bound cell (kept by [`Inner::record_as_sent`]); `None` for one left
+    /// as sent.
+    as_sent: RefCell<AsSent>,
     /// A transaction handle's staged writes left applied between its
     /// stages (see [`Db::in_overlay`]); undone by [`Store`] before any
     /// other use of the store.
@@ -739,6 +740,10 @@ enum Cells {
     Authored,
     Carried,
 }
+
+/// [`Inner::as_sent`]: per row version (stored table, row, branch key) and
+/// stored column, a merged write's value as sent and its bound cell.
+type AsSent = BTreeMap<(String, RowUuid, Vec<u8>), BTreeMap<String, Option<(Value, Sql)>>>;
 
 /// A mergeable commit that would move a row to another branch.
 fn branch_move() -> Error {
@@ -4429,21 +4434,24 @@ impl Inner {
             return Ok(None);
         };
         let merged = self.text_merge(table, row, held, (key, seq), built, column, value)?;
+        let (merged, sent) = match merged {
+            Some((merged, cell)) => (Some(merged), Some((value.clone(), cell))),
+            None => (None, None),
+        };
         self.as_sent
             .borrow_mut()
             .entry(version)
             .or_default()
-            .insert(
-                column.stored.clone(),
-                merged.is_some().then(|| value.clone()),
-            );
+            .insert(column.stored.clone(), sent);
         Ok(merged)
     }
 
-    /// [`Self::text_merged`]'s merge: `None` when there is nothing to merge
-    /// or the merge leaves the value as sent. The fast path reads no value:
-    /// whether to merge is decided first, from the row's `_base` and
-    /// `_cols` alone.
+    /// [`Self::text_merged`]'s merge, with the write's value bound as its
+    /// cell: `None` when there is nothing to merge or the merge leaves the
+    /// value as sent. The fast path reads no value: whether to merge is
+    /// decided first, from the row's `_base` and `_cols` alone. The write's
+    /// value is bound before it is read, so a descriptor naming chunks its
+    /// writer does not possess is refused (SPEC 19.4), merged or not.
     #[allow(clippy::too_many_arguments)]
     fn text_merge(
         &self,
@@ -4454,7 +4462,7 @@ impl Inner {
         built: sync::Built,
         column: &crate::values::Column,
         value: &Value,
-    ) -> Result<Option<String>, Error> {
+    ) -> Result<Option<(String, Sql)>, Error> {
         let Some(held) = held else {
             return Ok(None);
         };
@@ -4476,7 +4484,7 @@ impl Inner {
                     return Ok(None);
                 };
                 match sent {
-                    Some(sent) => (self.logical_text(&column.name, &sent)?, current),
+                    Some((sent, _)) => (self.logical_text(&column.name, &sent)?, current),
                     None => (current.clone(), current),
                 }
             }
@@ -4496,10 +4504,11 @@ impl Inner {
                 (base, current)
             }
         };
+        let cell = self.bind_cell(column, value, Cells::Authored)?;
         let incoming = self.logical_text(&column.name, value)?;
         let format = column.merge.text_format().expect("a text strategy");
         let merged = crate::text_merge::merge3(format, &base, &current, &incoming);
-        Ok((merged != incoming).then_some(merged))
+        Ok((merged != incoming).then_some((merged, cell)))
     }
 
     /// Keep, for each row version the upload at `seq` wrote whose text
@@ -4508,7 +4517,37 @@ impl Inner {
     /// merged columns holding their values as sent and every other cell
     /// the version's. A later write chained on it merges over these values
     /// ([`Inner::merge_base`]); no read takes it for a version.
-    pub(crate) fn record_as_sent(&self, seq: u64) -> Result<(), Error> {
+    ///
+    /// First drop the as-sent versions its sender `node` can no longer
+    /// build on. Only a commit's own sender builds on it unsettled, and its
+    /// commits arrive in order. Once one of them writes a row over an
+    /// accepted version (or over none), every later one it sends is built
+    /// on that write or a newer one, and a chain walk stops at the first
+    /// accepted version: the sender's older as-sent versions of the row
+    /// are dead. So a row keeps them only for its writers' current
+    /// unsettled chains.
+    pub(crate) fn record_as_sent(
+        &self,
+        seq: u64,
+        node: [u8; 16],
+        built: &HashMap<(String, RowUuid, Vec<u8>), sync::Built>,
+        rows: &[(String, RowUuid, Vec<u8>)],
+    ) -> Result<(), Error> {
+        for row_key @ (stored, row, key) in rows {
+            if matches!(built.get(row_key), Some(sync::Built::On(_))) {
+                continue;
+            }
+            self.exec(
+                &format!(
+                    "DELETE FROM {} WHERE id = ?1 AND _b = ?2 AND _seq < 0 \
+                     AND (_st & {STATE_AS_SENT}) <> 0 AND EXISTS (SELECT 1 FROM _jazz_settled AS s \
+                     WHERE s.seq = -_seq AND s.node = ?3)",
+                    quote(&format!("{stored}__h"))
+                ),
+                rusqlite::params![row.0.as_bytes().to_vec(), key, node.to_vec()],
+            )
+            .map_err(storage)?;
+        }
         let as_sent = std::mem::take(&mut *self.as_sent.borrow_mut());
         for ((stored, row, key), columns) in as_sent {
             let Some(table) = self.physical.tables.get(&stored) else {
@@ -4521,10 +4560,10 @@ impl Inner {
             ];
             let mut sent = BTreeMap::new();
             for (name, value) in columns {
-                let (Some(value), Some(column)) = (value, table.by_stored_column(&name)) else {
+                let Some((_, cell)) = value else {
                     continue;
                 };
-                values.push(self.bind_cell(column, &value, Cells::Authored)?);
+                values.push(cell);
                 sent.insert(name, values.len());
             }
             if sent.is_empty() {

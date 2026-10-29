@@ -670,8 +670,13 @@ fn assert_server_corpus(server: &Db, with_client_writes: bool) {
         .map(|(_, cells)| cells[0].1.clone())
         .collect();
     assert_eq!(names, [Some(string("Alpha")), Some(string("Alpha 2"))]);
-    // The merged text edit: its value as sent is kept, but never listed.
-    assert_eq!(server.as_sent_versions_for_test().unwrap(), 1);
+    // The merged text edit: its value as sent is kept, but never listed,
+    // until its writer's next write to the row (the offline title edit) is
+    // built on an accepted version.
+    assert_eq!(
+        server.as_sent_versions_for_test().unwrap(),
+        u64::from(!with_client_writes)
+    );
     let bodies: Vec<_> = rows(
         server,
         Query::from("history.documents")

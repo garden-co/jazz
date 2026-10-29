@@ -131,26 +131,33 @@ impl Net {
             clients: Vec::new(),
             dir,
         };
-        for i in 0..clients {
-            let node = 0x50 + i as u8;
-            let db = open(node, author(node));
-            db.set_remote_link_hint(RemoteLinkHint::Live);
-            net.clients.push(Client {
-                node,
-                db,
-                up: None,
-                _docs: None,
-            });
-            net.connect(i);
-            let prepared = net.clients[i]
-                .db
-                .prepare_query(&Query::from("docs"))
-                .unwrap();
-            let stream = net.drive(net.clients[i].db.subscribe(&prepared, ReadOpts::default()));
-            net.clients[i]._docs = Some(stream.unwrap());
-            net.pump();
+        for _ in 0..clients {
+            net.join();
         }
         net
+    }
+
+    /// A new client, connected and subscribed to every doc; its index.
+    fn join(&mut self) -> usize {
+        let i = self.clients.len();
+        let node = 0x50 + i as u8;
+        let db = open(node, author(node));
+        db.set_remote_link_hint(RemoteLinkHint::Live);
+        self.clients.push(Client {
+            node,
+            db,
+            up: None,
+            _docs: None,
+        });
+        self.connect(i);
+        let prepared = self.clients[i]
+            .db
+            .prepare_query(&Query::from("docs"))
+            .unwrap();
+        let stream = self.drive(self.clients[i].db.subscribe(&prepared, ReadOpts::default()));
+        self.clients[i]._docs = Some(stream.unwrap());
+        self.pump();
+        i
     }
 
     fn connect(&mut self, i: usize) {
@@ -388,9 +395,75 @@ fn an_offline_chain_merges_each_write_over_what_its_writer_saw() {
             "client {i}: {held:?}"
         );
     }
+    // Conflict analysis lists the accepted writes only.
+    let seqs: Vec<u64> = net
+        .core
+        .write_conflicts("docs", row, None)
+        .unwrap()
+        .iter()
+        .map(|write| write.seq)
+        .collect();
+    assert_eq!(seqs.len(), accepted.len(), "{seqs:?}");
+    assert!(seqs.windows(2).all(|pair| pair[0] < pair[1]), "{seqs:?}");
+    // A client that joins now catches up on the merged value only.
+    let carol = net.join();
+    assert_eq!(
+        Net::read(net.db(carol), row, "body"),
+        "Hi! Hello! big world"
+    );
+    let held = Net::history(net.db(carol), row);
+    assert!(
+        held.iter().all(|body| accepted.contains(&body.as_str())),
+        "{held:?}"
+    );
+    // Alice's next write is built on a settled version: nothing can build
+    // on her old chain any more, and its as-sent versions go.
     let next = net.edit(0, row, &[("body", "Hi! Hello! big world.")]);
     net.settle(0, next);
     net.assert_everywhere(row, "body", "Hi! Hello! big world.");
+    assert_eq!(net.core.as_sent_versions_for_test().unwrap(), 0);
+}
+
+/// A read through a cut never takes an as-sent version for a version of
+/// its row: not before the row existed, nor between its versions.
+#[test]
+fn a_read_at_a_snapshot_never_sees_a_value_as_sent() {
+    let mut net = Net::new(2);
+    let before = block_on(net.core.capture_snapshot()).unwrap();
+    let row = net.seed(0, &[("body", "The cat sat.")]);
+    let seeded = block_on(net.core.capture_snapshot()).unwrap();
+    net.offline(0);
+    net.offline(1);
+    let alice = net.edit(0, row, &[("body", "The black cat sat.")]);
+    let bob = net.edit(1, row, &[("body", "The cat slept.")]);
+    net.online(0);
+    net.settle(0, alice);
+    net.online(1);
+    net.settle(1, bob);
+    assert_eq!(net.core.as_sent_versions_for_test().unwrap(), 1);
+    let at = |snapshot: &jazz::protocol::SnapshotRef| -> Vec<String> {
+        let opts = ReadOpts {
+            read_view: jazz::protocol::ReadViewSpec {
+                source: jazz::protocol::ReadViewSourceSpec::Snapshot {
+                    snapshot: snapshot.clone(),
+                },
+                include_deleted: false,
+            },
+            ..Default::default()
+        };
+        let prepared = net.core.prepare_query(&Query::from("docs")).unwrap();
+        block_on(net.core.all(&prepared, opts))
+            .unwrap()
+            .into_iter()
+            .map(|current| match current.cell("body") {
+                Some(Value::String(text)) => text,
+                other => panic!("`body` is {other:?}"),
+            })
+            .collect()
+    };
+    assert!(at(&before).is_empty(), "{:?}", at(&before));
+    assert_eq!(at(&seeded), ["The cat sat."]);
+    net.assert_everywhere(row, "body", "The black cat slept.");
 }
 
 /// The as-sent version a chained write merges over is stored, not held in
@@ -557,6 +630,18 @@ fn large_values_merge_edits_at_both_ends() {
     // The merged value is stored as a local write's would be: chunked.
     let stored = net.core.stored_bytes_for_test("docs", row, "body").unwrap();
     assert!(stored < 64 * 1024, "{stored} bytes stored inline");
+    // Bob's write as sent is kept, chunked too: the seed, alice's version,
+    // the merge and bob's value as sent each hold a tree.
+    assert_eq!(net.core.as_sent_versions_for_test().unwrap(), 1);
+    let (_, roots) = net.core.large_value_nodes_for_test().unwrap();
+    assert_eq!(roots, 4);
+    // Bob's next write is built on the merge, settled: his value as sent
+    // goes, and with it its tree's reference.
+    let next = net.edit(1, row, &[("body", "short")]);
+    net.settle(1, next);
+    assert_eq!(net.core.as_sent_versions_for_test().unwrap(), 0);
+    let (_, roots) = net.core.large_value_nodes_for_test().unwrap();
+    assert_eq!(roots, 3);
 }
 
 #[test]

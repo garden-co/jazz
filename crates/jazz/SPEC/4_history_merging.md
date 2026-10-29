@@ -202,8 +202,13 @@ as-sent version when it has one, by the same lookup as an accepted base. A
 later write of the same upload to the row was built on the earlier one as
 sent, and merges over it the same way. An as-sent version is never a
 version of the row: history reads, reads through a cut, conflict
-analysis and sync all skip it (bit 2 set), and it stays in history as
-long as the version it shadows. A write built on a rejected commit is rejected
+analysis and sync all skip it (bit 2 set). Only a commit's sender builds
+on it unsettled, and a sender's commits arrive in order, so once one of
+its writes to a row is built on an accepted version (or on none), its
+older as-sent versions of that row are dropped: a row keeps them only for
+its writers' current unsettled chains. A merged write's value is checked
+before the merge reads it, as an unmerged one's is (a descriptor naming
+chunks its writer does not possess is refused, ch. 19 §19.4). A write built on a rejected commit is rejected
 too (§4.6), so a base is always a value Core accepted. The merge is
 token-level, not tree-aware: it keeps markup tokens whole but does not
 check that merged markdown or HTML is well formed. Conflict analysis

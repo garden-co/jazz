@@ -8839,6 +8839,7 @@ impl Db {
             inner.merging = false;
             built = std::mem::take(&mut inner.merge_bases);
             if let Err(error) = applied {
+                inner.as_sent.borrow_mut().clear();
                 inner.abandon_checks();
                 inner.changed.borrow_mut().truncate(mark);
                 end_savepoint(&inner.conn, "upload", false).map_err(|e| (e, Vec::new()))?;
@@ -8879,7 +8880,7 @@ impl Db {
             if !relay {
                 let inner = self.inner.borrow();
                 inner.record_bases(&ops, &by_row, &built, seq, &rows)?;
-                inner.record_as_sent(seq)?;
+                inner.record_as_sent(seq, origin.0, &built, &rows)?;
             }
             Ok(rows)
         });
@@ -8892,6 +8893,7 @@ impl Db {
                 Ok(rows)
             }
             Err(error) => {
+                inner.as_sent.borrow_mut().clear();
                 inner.changed.borrow_mut().truncate(mark);
                 end_savepoint(&inner.conn, "upload", false).map_err(|e| (e, Vec::new()))?;
                 inner.seq = seq - 1;
