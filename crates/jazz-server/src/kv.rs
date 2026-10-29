@@ -1,6 +1,7 @@
 //! A small ordered key-value store for the server's own administrative
-//! state (the schema catalogue and the account journal): one host table in
-//! the app's store file (see [`jazz::host`]).
+//! state (the account journal): one host table in the app's store file (see
+//! [`jazz::host`]). The schema catalogue has typed tables of its own (see
+//! [`jazz::catalogue`]).
 //!
 //! Writes run on the store's thread, on the one connection the runtime's
 //! rows use too, and wait for it (at most the one runtime job or tick slice
@@ -16,8 +17,6 @@ use jazz::host::{HostPair, HostReader, HostTable, HostTables};
 /// Errors are reported as text: callers wrap them in their own error types.
 pub(crate) type KvResult<T> = Result<T, String>;
 
-/// The server catalogue's host table.
-pub(crate) const CATALOGUE: HostTable = HostTable::new("catalogue");
 /// The account journal's host table.
 pub(crate) const ACCOUNTS: HostTable = HostTable::new("accounts");
 
@@ -108,15 +107,10 @@ impl HostKv {
     }
 
     /// Write every pair in one transaction: all or none.
+    #[cfg(test)]
     pub(crate) fn write_many(&self, pairs: &[HostPair]) -> KvResult<()> {
         let pairs = pairs.to_vec();
         self.call(move |tables, table| tables.host_put_many(table, &pairs))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn delete(&self, key: &[u8]) -> KvResult<()> {
-        let key = key.to_vec();
-        self.call(move |tables, table| tables.host_delete(table, &key))
     }
 
     /// Every pair whose key starts with `prefix`, in key order.

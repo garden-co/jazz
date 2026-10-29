@@ -1,7 +1,7 @@
 //! The pinned server data directory: a `jazz.sqlite` a catalogue-driven
-//! server wrote, holding the rows, the runtime catalogue and the server's
-//! host tables (`_jazz_host_catalogue`, `_jazz_host_accounts`,
-//! `_jazz_host_runtime_catalogue`; see `dev/proofs/server-host-tables.md`).
+//! server wrote, holding the rows, the catalogue tables (`_jazz_schemas`,
+//! `_jazz_lenses`, `_jazz_permissions`) and the account journal host table
+//! (`_jazz_host_accounts`; see `dev/proofs/server-host-tables.md`).
 //!
 //! `fixtures/server-data-dir-v1/` was written once by
 //! `produce_server_data_dir_corpus_v1` and is never regenerated after
@@ -41,9 +41,9 @@ const FIXTURE: &str = concat!(
     "/fixtures/server-data-dir-v1/jazz.sqlite.gz.base64"
 );
 /// SHA-256 of the decoded file.
-const SHA256: &str = "bd218c13ea8bc53c3ed2513cb4396f8309a2a517e556677b1d42a18992ca3a79";
+const SHA256: &str = "aba3227d3ef16c85111bc06cb77852d300e881a96aa7774169b482725142a994";
 /// The account the producer registered for Alice.
-const ALICE_ACCOUNT: &str = "99f895c2-eb94-41d3-bd84-8c44114b619b";
+const ALICE_ACCOUNT: &str = "ab1a686c-2c31-488b-b12b-0f456b1b2c49";
 const ADMIN_SECRET: &str = "corpus-admin";
 
 fn app_id() -> AppId {

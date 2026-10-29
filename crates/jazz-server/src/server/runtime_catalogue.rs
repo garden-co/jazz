@@ -100,38 +100,56 @@ pub(crate) async fn publish_permissions_and_runtime(
         )))
     })?;
 
-    if let Some(runtime) = shell {
-        let current = state
-            .catalogue
-            .active_schema(&state.catalogue_store)
-            .map_err(PermissionsPublicationError::Catalogue)?;
-        let revision = match current {
-            Some(current)
-                if current.summary.schema_hash == schema_hash
-                    && current.permissions == permissions =>
-            {
-                current.summary.version
-            }
-            Some(current) => current.summary.version.checked_add(1).ok_or_else(|| {
-                PermissionsPublicationError::Bridge("active schema revision overflow".to_owned())
-            })?,
-            None => 1,
-        };
-        runtime
-            .validate_schema_activation(revision, compiled)
-            .await
-            .map_err(PermissionsPublicationError::Bridge)?;
-    }
-
-    state
+    let runtime = shell.ok_or_else(|| {
+        PermissionsPublicationError::Bridge("server runtime is not running".to_owned())
+    })?;
+    crate::server::permissions_validation::validate_permissions_relations(&permissions).map_err(
+        |error| PermissionsPublicationError::Catalogue(CatalogueError::WriteError(error)),
+    )?;
+    let current = state
         .catalogue
-        .publish_permissions_bundle(
-            &state.catalogue_store,
-            schema_hash,
-            permissions,
-            expected_parent_bundle_object_id,
-        )
+        .active_schema(&state.catalogue_store)
         .map_err(PermissionsPublicationError::Catalogue)?;
+    let current_parent = current.as_ref().map(|head| head.summary.bundle_object_id);
+    if current_parent != expected_parent_bundle_object_id {
+        return Err(PermissionsPublicationError::Catalogue(
+            CatalogueError::WriteError(format!(
+                "stale permissions parent: expected {expected_parent_bundle_object_id:?}, current {current_parent:?}"
+            )),
+        ));
+    }
+    let revision = match current {
+        Some(current)
+            if current.summary.schema_hash == schema_hash && current.permissions == permissions =>
+        {
+            current.summary.version
+        }
+        Some(current) => current.summary.version.checked_add(1).ok_or_else(|| {
+            PermissionsPublicationError::Bridge("active schema revision overflow".to_owned())
+        })?,
+        None => 1,
+    };
+    // The revision's row and its activation commit together.
+    let applied = runtime
+        .apply_catalogue(jazz::catalogue::CatalogueChange {
+            put: jazz::catalogue::CataloguePut {
+                permissions: vec![(
+                    revision,
+                    schema_hash,
+                    permissions.into_iter().collect(),
+                    super::catalogue::unix_timestamp_millis(),
+                )],
+                ..Default::default()
+            },
+            activate: Some((revision, compiled, Vec::new())),
+            ..Default::default()
+        })
+        .await;
+    state
+        .catalogue_store
+        .refresh()
+        .map_err(PermissionsPublicationError::Catalogue)?;
+    applied.map_err(PermissionsPublicationError::Bridge)?;
     let head = state
         .catalogue
         .active_schema(&state.catalogue_store)
@@ -142,10 +160,6 @@ pub(crate) async fn publish_permissions_and_runtime(
             )
         })?
         .summary;
-
-    publish_runtime_catalogue_locked(state, &[], &[])
-        .await
-        .map_err(PermissionsPublicationError::Bridge)?;
     Ok(head)
 }
 
@@ -217,7 +231,6 @@ async fn publish_runtime_lens(
     let source_schema = known_schema(state, supplied_schemas, lens.source_hash)?;
     let target_schema = known_schema(state, supplied_schemas, lens.target_hash)?;
     let runtime_lens = compile_lens(lens, &source_schema, &target_schema)?;
-    let (new_tables, dropped_tables) = lens.table_changes();
     let initial_schema = JazzSchema::new(&source_schema)
         .map_err(|error| format!("convert lens source schema for runtime: {error}"))?;
     let target_runtime = JazzSchema::new(&target_schema)
@@ -228,7 +241,7 @@ async fn publish_runtime_lens(
     }
     let runtime_shell = runtime_shell(state, shell, initial_schema)?;
     runtime_shell
-        .publish_schema_with_lens(target_runtime, runtime_lens, new_tables, dropped_tables)
+        .publish_schema_with_lens(target_runtime, runtime_lens)
         .await
         .map_err(|error| format!("publish schema lineage to runtime shell: {error}"))?;
     Ok(())
@@ -519,12 +532,12 @@ mod tests {
         .expect("retry selection");
         assert_eq!(replay.version, second.version);
         let runtime = server.state.runtime().unwrap();
-        let snapshot = runtime.trusted_catalogue_snapshot_for_test().await.unwrap();
         assert_eq!(
-            snapshot.current_write_schema.schema,
+            runtime.current_schema().await.unwrap().version_id(),
             JazzSchema::new(&right).unwrap().version_id()
         );
-        assert_eq!(snapshot.current_write_schema.revision, second.version);
+        let catalogue = runtime.catalogue().await.unwrap();
+        assert_eq!(catalogue.head().unwrap().revision, second.version);
         let stored = server
             .state
             .catalogue
@@ -537,7 +550,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejected_activation_does_not_advance_administrative_selection() {
+    async fn a_stale_activation_is_rejected_and_leaves_the_catalogue_unchanged() {
         let (server, left, right) = sibling_catalogue().await;
         let first = publish_permissions_and_runtime(
             &server.state,
@@ -548,45 +561,35 @@ mod tests {
         .await
         .ok()
         .expect("activate left sibling");
+        let second = publish_permissions_and_runtime(
+            &server.state,
+            SchemaHash::compute(&right),
+            HashMap::new(),
+            Some(first.bundle_object_id),
+        )
+        .await
+        .ok()
+        .expect("activate right sibling");
         let runtime = server.state.runtime().unwrap();
-        // Simulate a runtime ahead of the administrative store. The proposed
-        // revision must be rejected before the store selects the right sibling.
-        runtime
+        let error = runtime
             .activate_schema(
-                first.version + 2,
+                first.version,
                 JazzSchema::new(&left).unwrap(),
                 HashMap::new(),
             )
             .await
-            .unwrap();
-        for _ in 0..2 {
-            let result = publish_permissions_and_runtime(
-                &server.state,
-                SchemaHash::compute(&right),
-                HashMap::new(),
-                Some(first.bundle_object_id),
-            )
-            .await;
-            assert!(
-                matches!(result, Err(PermissionsPublicationError::Bridge(message))
-                if message.contains("stale active schema revision"))
-            );
-            let stored = server
-                .state
-                .catalogue
-                .active_schema(&server.state.catalogue_store)
-                .unwrap()
-                .unwrap();
-            assert_eq!(stored.summary.bundle_object_id, first.bundle_object_id);
-            assert_eq!(stored.summary.schema_hash, SchemaHash::compute(&left));
-            assert_eq!(stored.summary.version, first.version);
-        }
-        let snapshot = runtime.trusted_catalogue_snapshot_for_test().await.unwrap();
+            .expect_err("an older revision is stale");
+        assert!(error.contains("stale active schema revision"), "{error}");
         assert_eq!(
-            snapshot.current_write_schema.schema,
-            JazzSchema::new(&left).unwrap().version_id()
+            runtime.current_schema().await.unwrap().version_id(),
+            JazzSchema::new(&right).unwrap().version_id()
         );
-        assert_eq!(snapshot.current_write_schema.revision, first.version + 2);
+        let catalogue = runtime.catalogue().await.unwrap();
+        let head = catalogue.head().unwrap();
+        assert_eq!(
+            (head.revision, head.schema),
+            (second.version, SchemaHash::compute(&right))
+        );
         server.shutdown().await;
     }
 }

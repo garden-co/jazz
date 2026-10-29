@@ -11,13 +11,12 @@ mod account_store;
 mod accounts;
 mod builder;
 mod catalogue;
-mod catalogue_entry;
-mod catalogue_payload_codec;
 mod catalogue_storage;
 #[cfg(test)]
 mod data_dir_corpus;
 pub use crate::runtime::{ServerRuntimeActivity, ServerRuntimeFrameStream, ServerRuntimeHandle};
 pub(crate) mod deployment;
+mod permissions_validation;
 pub mod routes;
 pub(crate) mod runtime_catalogue;
 mod shutdown;
@@ -26,11 +25,7 @@ mod testing;
 
 pub use builder::{BuiltServer, ServerBuilder, StorageBackend};
 pub(crate) use catalogue::{ActiveSchemaSummary, ServerCatalogue, StoredCatalogue};
-#[cfg(test)]
 pub(crate) use catalogue_storage::CatalogueStorage;
-pub(crate) use catalogue_storage::{
-    CatalogueKvStorage, CatalogueMemoryStorage, DynCatalogueStorage,
-};
 pub use shutdown::{ShutdownController, ShutdownPhase, WebSocketEntryRefused};
 #[cfg(feature = "embedded-server")]
 pub use testing::{
@@ -63,10 +58,6 @@ pub async fn push_catalogue_in_memory(
     runtime_catalogue::publish_runtime_catalogue_locked(&state, schemas, lenses)
         .await
         .map_err(|error| format!("bridge catalogue into server runtime: {error}"))?;
-    state
-        .catalogue
-        .flush(&state.catalogue_store)
-        .map_err(|error| format!("flush server catalogue: {error}"))?;
     Ok(())
 }
 
@@ -122,6 +113,9 @@ pub struct ServerState {
     runtime_catalogue_before_publication_hook: StdMutex<Option<Box<dyn FnOnce() + Send>>>,
     #[cfg(test)]
     runtime_catalogue_after_permissions_read_hook: StdMutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Tests: the shutdown finalizer panics.
+    #[cfg(test)]
+    panic_during_shutdown_for_test: std::sync::atomic::AtomicBool,
     pub shutdown: ShutdownController,
 }
 
@@ -186,15 +180,13 @@ impl ServerState {
         self.runtime_for_client().is_some()
     }
 
-    /// Test-only readback of the installed authority catalogue.
+    /// Test-only readback of the store's catalogue.
     #[cfg(feature = "test")]
     #[doc(hidden)]
-    pub async fn trusted_catalogue_snapshot_for_test(
-        &self,
-    ) -> Result<jazz::protocol::CatalogueSnapshot, String> {
+    pub async fn catalogue_for_test(&self) -> Result<jazz::catalogue::CatalogueRows, String> {
         self.runtime()
             .ok_or_else(|| "server has no runtime shell".to_owned())?
-            .trusted_catalogue_snapshot_for_test()
+            .catalogue()
             .await
     }
 
@@ -282,9 +274,12 @@ impl ServerState {
         }
 
         self.shutdown.set_phase(ShutdownPhase::FlushingRuntime);
-        if let Err(error) = self.catalogue.flush(&self.catalogue_store) {
-            tracing::error!(%error, "shutdown catalogue store flush failed");
-            failed = true;
+        #[cfg(test)]
+        if self
+            .panic_during_shutdown_for_test
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            panic!("test finalizer panic");
         }
 
         self.shutdown.set_phase(ShutdownPhase::ClosingStorage);
@@ -302,10 +297,6 @@ impl ServerState {
             && let Err(error) = accounts.close()
         {
             tracing::error!(%error, "shutdown account registry close failed");
-            failed = true;
-        }
-        if let Err(error) = self.catalogue.close(&self.catalogue_store) {
-            tracing::error!(%error, "shutdown catalogue storage close failed");
             failed = true;
         }
         // The store outlives the shell's sessions but not the server: join
@@ -360,96 +351,12 @@ fn run_shutdown_finalizer(state: Arc<ServerState>) {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::Ordering;
     use std::time::Duration;
 
     use super::*;
-    use crate::middleware::AuthConfig;
     use crate::server::builder::{ServerBuilder, StorageBackend};
-    use crate::server::catalogue_storage::CatalogueStorageResult;
     use jazz::tools::AppId;
-    use jazz::tools::public_schema::{ColumnType, Schema, SchemaBuilder, TableSchema};
-
-    struct CloseObservingStorage {
-        close_calls: Arc<AtomicUsize>,
-    }
-
-    struct PanicFlushStorage;
-
-    impl CatalogueStorage for CloseObservingStorage {
-        fn scan_catalogue_entries(
-            &self,
-        ) -> CatalogueStorageResult<Vec<crate::server::catalogue_entry::CatalogueEntry>> {
-            Ok(Vec::new())
-        }
-
-        fn upsert_catalogue_entry(
-            &mut self,
-            _entry: &crate::server::catalogue_entry::CatalogueEntry,
-        ) -> CatalogueStorageResult<()> {
-            Ok(())
-        }
-
-        fn upsert_catalogue_entries(
-            &mut self,
-            _entries: &[crate::server::catalogue_entry::CatalogueEntry],
-        ) -> CatalogueStorageResult<()> {
-            Ok(())
-        }
-
-        fn flush(&self) -> CatalogueStorageResult<()> {
-            Ok(())
-        }
-
-        fn flush_wal(&self) -> CatalogueStorageResult<()> {
-            Ok(())
-        }
-
-        fn close(&self) -> CatalogueStorageResult<()> {
-            self.close_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-    }
-
-    impl CatalogueStorage for PanicFlushStorage {
-        fn scan_catalogue_entries(
-            &self,
-        ) -> CatalogueStorageResult<Vec<crate::server::catalogue_entry::CatalogueEntry>> {
-            Ok(Vec::new())
-        }
-
-        fn upsert_catalogue_entry(
-            &mut self,
-            _entry: &crate::server::catalogue_entry::CatalogueEntry,
-        ) -> CatalogueStorageResult<()> {
-            Ok(())
-        }
-
-        fn upsert_catalogue_entries(
-            &mut self,
-            _entries: &[crate::server::catalogue_entry::CatalogueEntry],
-        ) -> CatalogueStorageResult<()> {
-            Ok(())
-        }
-
-        fn flush(&self) -> CatalogueStorageResult<()> {
-            panic!("test finalizer panic")
-        }
-
-        fn flush_wal(&self) -> CatalogueStorageResult<()> {
-            Ok(())
-        }
-
-        fn close(&self) -> CatalogueStorageResult<()> {
-            Ok(())
-        }
-    }
-
-    fn shutdown_test_schema() -> Schema {
-        SchemaBuilder::new()
-            .table(TableSchema::builder("users").column("name", ColumnType::Text))
-            .build()
-    }
 
     async fn build_test_state_with_shutdown_timeout(timeout: Duration) -> Arc<ServerState> {
         let app_id = AppId::from_name("lifecycle-test");
@@ -462,34 +369,15 @@ mod tests {
         built.state
     }
 
-    fn build_test_state_with_storage(
-        storage: DynCatalogueStorage,
-        timeout: Duration,
-    ) -> Arc<ServerState> {
-        let app_id = AppId::from_name("shutdown-storage-test");
-        Arc::new(ServerState {
-            catalogue_store: StoredCatalogue::with_test_observability(
-                app_id,
-                Some(shutdown_test_schema()),
-                storage,
-                Vec::new(),
-                std::collections::HashSet::new(),
-            )
-            .expect("build shutdown test catalogue"),
-            accounts: Some(accounts::AccountRegistryOwner::in_memory_for_test()),
-            catalogue: ServerCatalogue,
-            app_id,
-            auth_config: AuthConfig::default(),
-            jwt_verifier: None,
-            core_server_shell: StdRwLock::new(None),
-            websocket_admissions: Arc::new(routes::WebSocketAdmissionState::default()),
-            max_websocket_connections: DEFAULT_MAX_WEBSOCKET_CONNECTIONS,
-            store: None,
-            runtime_catalogue_publication: tokio::sync::Mutex::new(()),
-            runtime_catalogue_before_publication_hook: StdMutex::new(None),
-            runtime_catalogue_after_permissions_read_hook: StdMutex::new(None),
-            shutdown: ShutdownController::new(timeout),
-        })
+    /// Whether the server's store still takes writes.
+    fn store_open(state: &ServerState) -> bool {
+        state
+            .store
+            .as_ref()
+            .expect("store")
+            .kv(crate::kv::ACCOUNTS)
+            .and_then(|kv| kv.write_many(&[]))
+            .is_ok()
     }
 
     #[tokio::test]
@@ -509,13 +397,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_finalization_does_not_close_storage_when_app_requests_remain_active() {
-        let close_calls = Arc::new(AtomicUsize::new(0));
-        let state = build_test_state_with_storage(
-            Box::new(CloseObservingStorage {
-                close_calls: Arc::clone(&close_calls),
-            }),
-            Duration::from_millis(10),
-        );
+        let state = build_test_state_with_shutdown_timeout(Duration::from_millis(10)).await;
         let _request_guard = state
             .shutdown
             .try_enter_app_request()
@@ -525,32 +407,24 @@ mod tests {
         let phase = state.run_shutdown_finalization().await;
 
         assert_eq!(phase, ShutdownPhase::Failed);
-        assert_eq!(
-            close_calls.load(Ordering::SeqCst),
-            0,
+        assert!(
+            store_open(&state),
             "storage must not be closed while app request guards are still active"
         );
     }
 
     #[tokio::test]
-    async fn shutdown_finalization_closes_dynamic_catalogue_storage_after_drain() {
-        let close_calls = Arc::new(AtomicUsize::new(0));
-        let state = build_test_state_with_storage(
-            Box::new(CloseObservingStorage {
-                close_calls: Arc::clone(&close_calls),
-            }),
-            Duration::from_millis(10),
-        );
+    async fn shutdown_finalization_closes_storage_after_drain() {
+        let state = build_test_state_with_shutdown_timeout(Duration::from_millis(10)).await;
 
         state.shutdown.request_shutdown();
         let phase = state.run_shutdown_finalization().await;
 
         assert_eq!(phase, ShutdownPhase::StorageClosed);
         assert_eq!(state.shutdown.phase(), ShutdownPhase::StorageClosed);
-        assert_eq!(
-            close_calls.load(Ordering::SeqCst),
-            1,
-            "drained shutdown must explicitly close dynamic catalogue storage"
+        assert!(
+            !store_open(&state),
+            "drained shutdown must explicitly close the store"
         );
     }
 
@@ -662,8 +536,10 @@ mod tests {
 
     #[tokio::test]
     async fn panicked_shutdown_finalizer_publishes_failed_to_later_callers() {
-        let state =
-            build_test_state_with_storage(Box::new(PanicFlushStorage), Duration::from_secs(1));
+        let state = build_test_state_with_shutdown_timeout(Duration::from_secs(1)).await;
+        state
+            .panic_during_shutdown_for_test
+            .store(true, Ordering::SeqCst);
         state.shutdown.request_shutdown();
 
         assert_eq!(

@@ -175,26 +175,18 @@ async fn deploy_complete_diamond_reopens_and_rejects_incomplete_history() {
         SchemaHash::compute(&d).to_string()
     );
     assert_eq!(expected["schemas"].as_array().unwrap().len(), 4);
-    let snapshot = server
-        .state
-        .runtime()
-        .unwrap()
-        .trusted_catalogue_snapshot()
-        .await
-        .unwrap();
+    let catalogue = server.state.runtime().unwrap().catalogue().await.unwrap();
+    let head = catalogue.head().unwrap();
     assert_eq!(
-        snapshot.current_write_schema.schema,
-        JazzSchema::new(&d).unwrap().version_id()
+        catalogue.schema(&head.schema).unwrap().version,
+        Some(JazzSchema::new(&d).unwrap().version_id())
     );
     assert_eq!(
-        snapshot
-            .lineages
+        catalogue
+            .lenses
             .iter()
-            .find(|(_, p)| p.schema.id == snapshot.current_write_schema.schema)
-            .unwrap()
-            .1
-            .predecessors
-            .len(),
+            .filter(|lens| lens.target == head.schema)
+            .count(),
         2
     );
     deploy_ok(&router, request(&b, &[], vec![])).await;
@@ -473,15 +465,16 @@ async fn compatible_defaults_and_indexes_share_runtime_identity() {
         .build();
     deploy_ok(&router, request(&a, &[&a], vec![])).await;
     deploy_ok(&router, request(&b, &[&b], vec![])).await;
-    let snapshot = server
-        .state
-        .runtime()
-        .unwrap()
-        .trusted_catalogue_snapshot()
-        .await
-        .unwrap();
-    assert_eq!(snapshot.schemas.len(), 1);
-    assert!(snapshot.lineages.is_empty());
+    let catalogue = server.state.runtime().unwrap().catalogue().await.unwrap();
+    assert_eq!(
+        catalogue
+            .schemas
+            .iter()
+            .filter(|schema| schema.version.is_some())
+            .count(),
+        1,
+        "one admitted version for both definitions"
+    );
     let c = schema(&["extra"]);
     let before = graph(&router).await;
     assert_eq!(

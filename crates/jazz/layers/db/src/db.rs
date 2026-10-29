@@ -2335,6 +2335,11 @@ impl Db {
         result
     }
 
+    /// The current schema, with its policies.
+    pub fn current_schema(&self) -> JazzSchema {
+        self.inner().owner.jazz.clone()
+    }
+
     /// The store's catalogue: every schema, lens and permissions revision
     /// it keeps (see [`crate::catalogue`]).
     pub fn catalogue(&self) -> Result<crate::catalogue::CatalogueRows, Error> {

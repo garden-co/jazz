@@ -58,6 +58,9 @@ pub type Permissions = BTreeMap<TableName, TablePolicies>;
 #[derive(Clone, Debug, PartialEq)]
 pub struct CatalogueSchema {
     pub hash: SchemaHash,
+    /// Its place in admission order: the first admitted (the store's
+    /// genesis) is lowest. `None` while it is not admitted.
+    pub admitted: Option<u64>,
     /// The admitted version it compiles to, once admitted.
     pub version: Option<SchemaVersionId>,
     /// Unix milliseconds, on the store that published it.
@@ -101,6 +104,14 @@ impl CatalogueRows {
     /// The current permissions revision.
     pub fn head(&self) -> Option<&PermissionsRevision> {
         self.permissions.last()
+    }
+
+    /// The first version the store admitted.
+    pub fn genesis(&self) -> Option<&CatalogueSchema> {
+        self.schemas
+            .iter()
+            .filter(|schema| schema.admitted.is_some())
+            .min_by_key(|schema| schema.admitted)
     }
 
     pub fn schema(&self, hash: &SchemaHash) -> Option<&CatalogueSchema> {
@@ -196,11 +207,13 @@ fn structural_def(schema: &PublicSchema) -> Result<(SchemaHash, String), Error> 
     Ok((SchemaHash::compute(&schema), canonical_json(&schema)?))
 }
 
-/// A schema's per-table policies.
+/// A schema's per-table policies. A table left at the default policies
+/// (deny everything) has no entry, so equal permissions are equal text.
 pub fn permissions_of(schema: &PublicSchema) -> Permissions {
     schema
         .iter()
         .map(|(name, table)| (*name, table.policies.clone()))
+        .filter(|(_, policies)| *policies != TablePolicies::default())
         .collect()
 }
 
@@ -243,7 +256,12 @@ pub(crate) fn put(conn: &Connection, put: &CataloguePut) -> Result<(), Error> {
         .map_err(storage)?;
     }
     for (revision, schema, permissions, published_at) in &put.permissions {
-        let def = canonical_json(permissions)?;
+        let permissions: Permissions = permissions
+            .iter()
+            .filter(|(_, policies)| **policies != TablePolicies::default())
+            .map(|(name, policies)| (*name, policies.clone()))
+            .collect();
+        let def = canonical_json(&permissions)?;
         conn.prepare_cached(
             "INSERT INTO _jazz_permissions (revision, hash, published_at, def) \
              VALUES (?1, ?2, ?3, ?4) ON CONFLICT (revision) DO UPDATE SET \
@@ -287,10 +305,10 @@ pub(crate) fn read(conn: &Connection) -> Result<CatalogueRows, Error> {
         )
         .map_err(storage)?;
     let sql = if has_versions {
-        "SELECT s.hash, v.version, s.published_at, s.def FROM _jazz_schemas s \
+        "SELECT s.hash, v.version, s.published_at, s.def, v.n FROM _jazz_schemas s \
          LEFT JOIN _jazz_versions v ON v.n = s.n ORDER BY s.hash"
     } else {
-        "SELECT hash, NULL, published_at, def FROM _jazz_schemas ORDER BY hash"
+        "SELECT hash, NULL, published_at, def, NULL FROM _jazz_schemas ORDER BY hash"
     };
     let mut statement = conn.prepare(sql).map_err(storage)?;
     let found = statement
@@ -300,11 +318,12 @@ pub(crate) fn read(conn: &Connection) -> Result<CatalogueRows, Error> {
                 r.get::<_, Option<Vec<u8>>>(1)?,
                 r.get::<_, Option<i64>>(2)?,
                 r.get::<_, String>(3)?,
+                r.get::<_, Option<i64>>(4)?,
             ))
         })
         .map_err(storage)?;
     for row in found {
-        let (hash, version, published_at, def) = row.map_err(storage)?;
+        let (hash, version, published_at, def, admitted) = row.map_err(storage)?;
         let hash = hash_of(hash, "_jazz_schemas")?;
         let version = version
             .map(|version| {
@@ -325,6 +344,7 @@ pub(crate) fn read(conn: &Connection) -> Result<CatalogueRows, Error> {
         }
         rows.schemas.push(CatalogueSchema {
             hash,
+            admitted: admitted.map(|n| n as u64),
             version,
             published_at: published_at.map(|at| at as u64),
             schema,

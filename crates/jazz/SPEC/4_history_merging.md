@@ -235,18 +235,14 @@ Earlier per-family profiles are refused without migration. Some of these
 encodings also change wire bytes; the wire version bump for them ships with
 the alpha.60 release (`dev/proofs/storage-format-cleanup-compatibility.md`).
 
-`jazz.server-catalogue-entry.v1` remains an encoding receipt covered by
-`jazz.catalogue-storage.v1`. Its outer
-`JCAT` entry and all catalogue payload outer version bytes remain v1. Within
-the existing nested relation-tree grammar, a public `UNION ALL` is the
-explicit labeled tag `7`: it stores the arm count, each UTF-8 arm label in
-declared order, then the matching arm trees. Labels are unique, NUL-free, and
-1 through 4096 bytes. The former unlabeled tag `3` is retired and rejected;
-recovery must never synthesize a traversal-position label. The exact positive
-grammar receipt and retired-tag rejection live in
-`catalogue_payload_codec::tests::labeled_relation_union_uses_explicit_canonical_wire_grammar`.
-This changes a nested grammar of the existing family, not its outer profile or
-a new durable-root family.
+The server catalogue has no encoding of its own: schemas, lenses and
+permissions are rows of the store's catalogue tables, with definitions as
+canonical JSON text (ch. 10, §10.2). A public `UNION ALL` in a relation
+policy is stored as its labeled form: each arm carries a UTF-8 label in
+declared order. Labels are unique, NUL-free, and 1 through 4096 bytes, and a
+deploy that breaks that is refused
+(`crates/jazz-server/src/server/permissions_validation.rs`); a label is never
+synthesized from an arm's position.
 
 The native whole-root compatibility receipt is
 `fixtures/native_storage_corpus.md` and its executable tests in

@@ -1,174 +1,140 @@
-//! Build the complete runtime catalogue without installing any of its entries.
+//! Plan a deployment's admission into the store's catalogue, without applying it.
 use super::*;
-use crate::protocol::{
-    CatalogueSnapshot, CurrentWriteSchema, PhysicalIdentityManifest, SchemaLineagePublication,
-    SchemaPredecessor,
-};
+use crate::catalogue::{CatalogueChange, CataloguePut, CatalogueRows};
+use crate::ids::SchemaVersionId;
+use crate::protocol::MigrationLens;
 
-/// Allocate a complete candidate snapshot from validated public artifacts.
-/// Existing schema publications are immutable: adding predecessors to an
-/// already admitted target requires publishing a new convergent target instead.
-pub fn prepare_runtime_snapshot(
+/// The change that applies `prepared` to a store holding `stored`: `put`
+/// (the deployment's new rows), every version the store has not admitted
+/// yet in lineage order with the lenses into it, then the write schema
+/// made current at `revision`. Admitted versions are immutable: a new lens
+/// into one needs a new convergent target instead.
+pub fn prepare_catalogue_change(
     prepared: &PreparedDeployment,
-    current: Option<CatalogueSnapshot>,
+    stored: &CatalogueRows,
+    put: CataloguePut,
     revision: u64,
-) -> Result<CatalogueSnapshot, String> {
-    let all_versions = prepared
+) -> Result<CatalogueChange, String> {
+    let compiled = prepared
         .schemas
         .iter()
-        .map(|schema| {
-            JazzSchema::new(schema)
-                .map(SchemaVersion::new)
-                .map_err(|error| error.to_string())
-        })
+        .map(|schema| JazzSchema::new(schema).map_err(|error| error.to_string()))
         .collect::<Result<Vec<_>, _>>()?;
-    // Defaults and indexes share runtime identity, while public content hashes
-    // retain the exact definition. They must not create duplicate runtime entries.
-    let mut seen = BTreeSet::new();
-    let versions = all_versions
-        .iter()
-        .filter(|v| seen.insert(v.id))
-        .cloned()
-        .collect::<Vec<_>>();
-    let root = versions.first().ok_or("deployment has no schema")?;
     let hashes = prepared
         .schemas
         .iter()
         .map(SchemaHash::compute)
-        .zip(all_versions.iter())
+        .zip(compiled.iter())
         .collect::<HashMap<_, _>>();
-    let mut incoming = BTreeMap::<_, Vec<SchemaPredecessor>>::new();
+    // Defaults and indexes share runtime identity, while public content hashes
+    // retain the exact definition. They must not admit one version twice.
+    let mut seen = BTreeSet::new();
+    let versions = compiled
+        .iter()
+        .filter(|schema| seen.insert(schema.version_id()))
+        .collect::<Vec<_>>();
+    let mut incoming = BTreeMap::<SchemaVersionId, Vec<(Edge, MigrationLens)>>::new();
     for migration in &prepared.migrations {
         let source = hashes[&migration.source_hash];
         let target = hashes[&migration.target_hash];
-        if source.id == target.id {
+        if source.version_id() == target.version_id() {
             continue;
         }
-        let lens = compile_lens(
-            migration,
-            source.schema.public_schema(),
-            target.schema.public_schema(),
-        )
-        .map_err(|error| error.to_string())?;
-        let (new_tables, dropped_tables) = migration.table_changes();
-        incoming
-            .entry(target.id)
-            .or_default()
-            .push(SchemaPredecessor {
-                lens,
-                new_tables,
-                dropped_tables,
-            });
+        let lens = compile_lens(migration, source.public_schema(), target.public_schema())
+            .map_err(|error| error.to_string())?;
+        incoming.entry(target.version_id()).or_default().push((
+            (
+                *migration.source_hash.as_bytes(),
+                *migration.target_hash.as_bytes(),
+            ),
+            lens,
+        ));
     }
-    if versions
+    let roots = versions
         .iter()
-        .filter(|schema| !incoming.contains_key(&schema.id))
-        .count()
-        != 1
-    {
+        .filter(|schema| !incoming.contains_key(&schema.version_id()))
+        .collect::<Vec<_>>();
+    let [root] = roots[..] else {
         return Err("deployment must have exactly one genesis schema".into());
-    }
-    let mut snapshot = match current {
-        Some(snapshot) => {
-            if snapshot
-                .schemas
-                .iter()
-                .any(|schema| !versions.iter().any(|new| new.id == schema.id))
-            {
-                return Err("deployment cannot omit a runtime schema".into());
-            }
-            let targets = snapshot
-                .lineages
-                .iter()
-                .map(|(_, p)| p.schema.id)
-                .collect::<BTreeSet<_>>();
-            let roots = snapshot
-                .schemas
-                .iter()
-                .filter(|schema| !targets.contains(&schema.id))
-                .collect::<Vec<_>>();
-            if roots.len() != 1 || roots[0].id != root.id {
-                return Err("deployment cannot replace the runtime genesis schema".into());
-            }
-            snapshot
-        }
-        None => CatalogueSnapshot {
-            genesis_physical_identities: PhysicalIdentityManifest::allocate(&root.schema),
-            schemas: vec![root.clone()],
-            lineages: vec![],
-            current_write_schema: CurrentWriteSchema {
-                revision: 0,
-                schema: root.id,
-            },
-        },
     };
-    let mut sources = BTreeMap::from([(
-        root.id,
-        (
-            root.schema.clone(),
-            snapshot.genesis_physical_identities.clone(),
-        ),
-    )]);
-    let mut history = vec![snapshot.genesis_physical_identities.clone()];
-    history.extend(
-        snapshot
-            .lineages
-            .iter()
-            .map(|(_, p)| p.physical_identities.clone()),
-    );
-    for schema in versions.iter().skip(1) {
-        let mut predecessors = incoming
-            .remove(&schema.id)
-            .ok_or("missing schema predecessors")?;
-        predecessors.sort_by_key(|p| p.lens.source());
-        predecessors.dedup();
-        let identities = if let Some((_, existing)) = snapshot
-            .lineages
-            .iter()
-            .find(|(_, p)| p.schema.id == schema.id)
+
+    let version_of = |schema: &Schema| {
+        JazzSchema::new(schema)
+            .map(|schema| schema.version_id())
+            .map_err(|error| error.to_string())
+    };
+    let admitted = stored
+        .schemas
+        .iter()
+        .filter_map(|schema| schema.version)
+        .collect::<BTreeSet<_>>();
+    if admitted
+        .iter()
+        .any(|id| !versions.iter().any(|schema| schema.version_id() == *id))
+    {
+        return Err("deployment cannot omit a runtime schema".into());
+    }
+    let stored_versions = stored
+        .schemas
+        .iter()
+        .map(|schema| Ok((schema.hash, version_of(&schema.schema)?)))
+        .collect::<Result<HashMap<_, _>, String>>()?;
+    let mut targets = BTreeSet::new();
+    for lens in &stored.lenses {
+        if let (Some(source), Some(target)) = (
+            stored_versions.get(&lens.source),
+            stored_versions.get(&lens.target),
+        ) && source != target
         {
-            let mut stored = existing.predecessors.clone();
-            stored.sort_by_key(|p| p.lens.source());
-            if stored != predecessors {
+            targets.insert(*target);
+        }
+    }
+    let stored_roots = admitted
+        .iter()
+        .filter(|id| !targets.contains(id))
+        .collect::<Vec<_>>();
+    if !admitted.is_empty() && stored_roots != [&root.version_id()] {
+        return Err("deployment cannot replace the runtime genesis schema".into());
+    }
+    let known = stored
+        .lenses
+        .iter()
+        .map(|lens| (*lens.source.as_bytes(), *lens.target.as_bytes()))
+        .collect::<BTreeSet<_>>();
+
+    let lenses_into = |id: SchemaVersionId| {
+        let mut lenses = incoming
+            .get(&id)
+            .into_iter()
+            .flatten()
+            .map(|(_, lens)| lens.clone())
+            .collect::<Vec<_>>();
+        lenses.sort_by_key(|lens| lens.source());
+        lenses.dedup();
+        lenses
+    };
+    let mut admit = Vec::new();
+    for schema in versions
+        .iter()
+        .filter(|schema| schema.version_id() != root.version_id())
+    {
+        let id = schema.version_id();
+        if admitted.contains(&id) {
+            if incoming[&id].iter().any(|(edge, _)| !known.contains(edge)) {
                 return Err(format!(
                     "schema {} is already published with different predecessors; publish a new convergent target",
-                    SchemaHash::compute(schema.schema.public_schema())
+                    SchemaHash::compute(schema.public_schema())
                 ));
             }
-            existing.physical_identities.clone()
-        } else {
-            let publication = SchemaLineagePublication::author_from_predecessors(
-                schema.clone(),
-                predecessors,
-                &sources,
-                history.clone(),
-            )
-            .map_err(str::to_owned)?;
-            let identities = publication.physical_identities.clone();
-            let sequence = snapshot
-                .lineages
-                .iter()
-                .map(|(seq, _)| *seq)
-                .max()
-                .unwrap_or(0)
-                .checked_add(1)
-                .ok_or("catalogue sequence overflow")?;
-            snapshot.lineages.push((sequence, publication));
-            history.push(identities.clone());
-            identities
-        };
-        sources.insert(schema.id, (schema.schema.clone(), identities));
+            continue;
+        }
+        admit.push(((*schema).clone(), lenses_into(id)));
     }
-    snapshot.schemas = versions;
-    let active = SchemaVersion::new(prepared.active_schema.clone());
-    *snapshot
-        .schemas
-        .iter_mut()
-        .find(|schema| schema.id == active.id)
-        .ok_or("active schema missing")? = active.clone();
-    snapshot.current_write_schema = CurrentWriteSchema {
-        revision,
-        schema: active.id,
-    };
-    Ok(snapshot)
+    let active = prepared.active_schema.clone();
+    let lenses = lenses_into(active.version_id());
+    Ok(CatalogueChange {
+        put,
+        admit,
+        activate: Some((revision, active, lenses)),
+    })
 }
