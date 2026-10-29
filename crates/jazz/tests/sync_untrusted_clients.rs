@@ -8,9 +8,9 @@ use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 
 use jazz::db::{
-    BuiltOn, Db, DbConfig, DbIdentity, DeleteOptions, FileOptions, InsertOptions, LOCAL_BASE,
-    ReadOpts, ReadTier, SyncMessage, Transport, TransportError, WireBase, WireKind, WireOp,
-    WireTarget, WireWrite, block_on,
+    BuiltOn, Db, DbConfig, DbIdentity, DeleteOptions, ErrorCode, FileOptions, InsertOptions,
+    LOCAL_BASE, ReadOpts, ReadTier, SyncMessage, Transport, TransportError, WireBase, WireKind,
+    WireOp, WireTarget, WireWrite, block_on,
 };
 use jazz::ids::RowUuid;
 use jazz::ids::{AuthorSubject, NodeUuid};
@@ -158,6 +158,65 @@ fn a_message_the_server_does_not_serve_ends_only_that_session() {
     assert_eq!(closed.len(), 1);
     assert_eq!(closed[0].0, bad);
     assert_eq!(server.open_subscribers(), 1);
+}
+
+/// A server-side transport that takes what the client sends and refuses
+/// everything the server sends with `error`.
+struct Refusing {
+    error: TransportError,
+    inbound: Q,
+}
+
+impl Transport for Refusing {
+    fn send(&mut self, _: SyncMessage) -> Result<(), TransportError> {
+        Err(self.error.clone())
+    }
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inbound.borrow_mut().pop_front()
+    }
+}
+
+/// A session the server cannot send to is dropped with a typed reason for
+/// the host to tell the client: one whose queue is full may reconnect
+/// later, one sent a message that cannot be encoded may not.
+#[test]
+fn a_session_the_server_cannot_send_to_ends_with_why() {
+    for (error, code) in [
+        (TransportError::Backpressure, ErrorCode::Backpressure),
+        (
+            TransportError::Failed("over the message ceiling: not supported yet".to_owned()),
+            ErrorCode::Protocol,
+        ),
+    ] {
+        let server = server();
+        post(&server, "hello");
+        let alice = client(1, user(1));
+        let (a_client, _, up, _) = pipe();
+        let _a = block_on(alice.connect_upstream(a_client));
+        let session = server.accept_subscriber(
+            Box::new(Refusing {
+                error: error.clone(),
+                inbound: up,
+            }),
+            user(1),
+        );
+        let prepared = alice.prepare_query(&Query::from("messages")).unwrap();
+        let _live = block_on(alice.subscribe(&prepared, ReadOpts::default())).unwrap();
+        for _ in 0..4 {
+            block_on(alice.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+        }
+        let closed = server.take_closed_subscribers();
+        assert_eq!(closed.len(), 1, "{error:?}: {closed:?}");
+        assert_eq!(closed[0].0, session);
+        assert_eq!(closed[0].1.code, code, "{error:?}");
+        assert!(
+            closed[0].1.message.contains(&error.to_string()),
+            "{:?}",
+            closed[0].1
+        );
+        assert_eq!(server.open_subscribers(), 0);
+    }
 }
 
 #[test]

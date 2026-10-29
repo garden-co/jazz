@@ -1165,6 +1165,9 @@ impl Kind {
 
 struct Pending {
     tx: u64,
+    /// A serializable commit: its fate is reported as one (INV-TX-9),
+    /// whether or not it was ever sent.
+    serializable: bool,
     ops: Vec<StagedOp>,
     rows: Vec<(String, RowUuid, Vec<u8>)>,
     /// The commit's `expect` rows as stored here, in its order: the server
@@ -4727,11 +4730,13 @@ impl Inner {
                 ops,
                 author,
                 session,
+                kind,
                 ..
             } = &commit
             else {
                 continue;
             };
+            let serializable = matches!(kind, WireKind::Serializable { .. });
             let mut ops = ops
                 .iter()
                 .cloned()
@@ -4749,6 +4754,7 @@ impl Inner {
             }
             client.pending.push(Pending {
                 tx,
+                serializable,
                 ops,
                 rows,
                 expected: Vec::new(),
@@ -5220,6 +5226,7 @@ impl Db {
         let client = inner.client.as_mut().expect("client");
         let added: Vec<RowKey> = baselines.iter().map(|(key, _)| key.clone()).collect();
         client.baselines.extend(baselines);
+        let serializable = matches!(kind, Kind::Serializable { .. });
         match wire {
             Ok(wire) => {
                 let kind = match kind {
@@ -5247,6 +5254,7 @@ impl Db {
                 client.unsent.push(commit.clone());
                 client.pending.push(Pending {
                     tx: seq,
+                    serializable,
                     ops,
                     rows: rows.clone(),
                     expected,
@@ -5266,6 +5274,7 @@ impl Db {
                 client.fates.insert(seq, Err(error));
                 client.pending.push(Pending {
                     tx: seq,
+                    serializable,
                     ops: Vec::new(),
                     rows,
                     expected: Vec::new(),
@@ -6075,9 +6084,10 @@ impl Db {
                         }
                         let client = inner.client.as_mut().expect("client");
                         client.known = client.known.max(through);
-                        let serializable = client.sent.iter().any(|m| {
-                            matches!(m, SyncMessage::Commit { tx: sent, kind: WireKind::Serializable { .. }, .. } if *sent == tx)
-                        });
+                        // From the pending commit, not what was sent: a
+                        // commit refused before sending was never sent.
+                        let serializable =
+                            client.pending.iter().any(|p| p.tx == tx && p.serializable);
                         client.pending.remove(tx);
                         client.stored.remove(&tx);
                         client.sent.retain(
@@ -6901,9 +6911,11 @@ impl Db {
         Ok(handle.seq)
     }
 
-    /// Sessions the server ended since the last call because of what they
-    /// sent (a message it cannot decode or serve), with why. The host
-    /// closes their links; each is already disconnected.
+    /// Sessions the server ended since the last call, with why: for what
+    /// they sent (a message it cannot decode or serve), or because what it
+    /// had for them could not be sent (a full queue, or a message it cannot
+    /// encode). The host closes their links and tells each peer why; each
+    /// is already disconnected.
     pub fn take_closed_subscribers(&self) -> Vec<(SubscriberId, Error)> {
         std::mem::take(&mut self.inner.borrow_mut().closed)
     }
@@ -7790,12 +7802,28 @@ impl Db {
             }
             let session = &mut inner.sessions[index];
             session.shipped = shipped;
+            let subscriber = SubscriberId {
+                slot: index,
+                generation: session.generation,
+            };
             for message in out {
                 // A failed or backed-up client is dropped, never waited
                 // on: one slow client must not stall the others, and its
                 // replica is coherent only with every message. It
-                // reconnects and resumes from its last settled seq.
-                if session.transport.send(message).is_err() {
+                // reconnects and resumes from its last settled seq. The
+                // host tells it why (see `take_closed_subscribers`): a
+                // backed-up one may reconnect, one sent a message that
+                // cannot be encoded would fail the same way again.
+                if let Err(error) = session.transport.send(message) {
+                    let code = match error {
+                        TransportError::Backpressure => ErrorCode::Backpressure,
+                        TransportError::Failed(_) => ErrorCode::Protocol,
+                    };
+                    inner.closed.push((
+                        subscriber,
+                        Error::new(code, format!("could not send to this session: {error}")),
+                    ));
+                    let session = &mut inner.sessions[index];
                     let released = session.close(&dropped);
                     for (query, binding, include_deleted) in released {
                         inner.release_remote(
