@@ -6,6 +6,7 @@ import { computeSchemaHash } from "../../src/dev/catalogue.js";
 import { deploy, startLocalJazzServer } from "../../src/testing/index.js";
 import { createDb } from "../../src/runtime/default-create-db.js";
 import { localAccountConfig } from "../../src/runtime/testing/account-fixtures.js";
+import { bundleFor } from "../../src/runtime/testing/client-migrations.js";
 import type { Db, QueryBuilder } from "../../src/runtime/db.js";
 
 const app = s.defineApp({ notes: s.table({ title: s.string(), done: s.boolean() }, {}) });
@@ -746,31 +747,30 @@ describe("TS Query API history schema migrations", () => {
       adminSecret: server.adminSecret,
     };
     const deployed = await deploy({ ...deployment, schema: v1, permissions: permissionsV1 });
-    await deploy({
-      ...deployment,
-      schema: v2,
-      permissions: permissionsV2,
-      migration: m.defineMigration({
-        fromHash: deployed.schema.hash,
-        toHash: await computeSchemaHash(v2.wasmSchema),
-        from: schemaV1,
-        to: schemaV2,
-        migrate: {
-          notes: {
-            heading: m.renameFrom("title"),
-            category: m.add.string({ default: "uncategorized" }),
-            legacy: m.drop.string({ backwardsDefault: "" }),
-          },
+    const migration = m.defineMigration({
+      fromHash: deployed.schema.hash,
+      toHash: await computeSchemaHash(v2.wasmSchema),
+      from: schemaV1,
+      to: schemaV2,
+      migrate: {
+        notes: {
+          heading: m.renameFrom("title"),
+          category: m.add.string({ default: "uncategorized" }),
+          legacy: m.drop.string({ backwardsDefault: "" }),
         },
-      }),
+      },
     });
+    await deploy({ ...deployment, schema: v2, permissions: permissionsV2, migration });
+    const migrations = await bundleFor(v1, v2, migration);
     writer = await createDb({
       ...(await localAccountConfig(server.appId, server.url)),
       driver: { type: "persistent" },
+      migrations,
     });
     db = await createDb({
       ...(await localAccountConfig(server.appId, server.url)),
       driver: { type: "persistent" },
+      migrations,
     });
     // Keep ordinary current-row coverage open so this partial reader retains
     // both old-schema versions through normal sync before history is queried.

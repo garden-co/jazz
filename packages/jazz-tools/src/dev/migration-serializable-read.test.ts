@@ -4,6 +4,7 @@ import { migration as m } from "../migration-namespace.js";
 import { definePermissions } from "../permissions/index.js";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
+import { bundleFor } from "../runtime/testing/client-migrations.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 
 it("accepts a serializable read of an unchanged table after migration", async () => {
@@ -28,7 +29,10 @@ it("accepts a serializable read of an unchanged table after migration", async ()
   try {
     const target = { serverUrl: server.url, appId: server.appId, adminSecret: server.adminSecret };
     await deploy({ ...target, schema: oldApp, permissions: permissions(oldApp) });
-    const account = await localAccountConfig(server.appId, server.url);
+    const account = {
+      ...(await localAccountConfig(server.appId, server.url)),
+      migrations: await bundleFor(oldApp, newApp, migration),
+    };
     db = await createDb(account);
     const project = await db.insert(oldApp.projects, { title: "Project" }).wait({ tier: "global" });
     await db.shutdown();
@@ -70,14 +74,20 @@ it("preserves serializable conflict detection after renaming the queried table",
   try {
     const target = { serverUrl: server.url, appId: server.appId, adminSecret: server.adminSecret };
     await deploy({ ...target, schema: oldApp, permissions: oldPermissions });
-    const account = await localAccountConfig(server.appId, server.url);
+    const account = {
+      ...(await localAccountConfig(server.appId, server.url)),
+      migrations: await bundleFor(oldApp, newApp, migration),
+    };
     db = await createDb(account);
     const project = await db.insert(oldApp.projects, { title: "Project" }).wait({ tier: "global" });
     await db.shutdown();
     db = undefined;
     await deploy({ ...target, schema: newApp, permissions: newPermissions, migration });
     db = await createDb(account);
-    writer = await createDb(await localAccountConfig(server.appId, server.url));
+    writer = await createDb({
+      ...(await localAccountConfig(server.appId, server.url)),
+      migrations: account.migrations,
+    });
     expect(await db.all(newApp.initiatives, { tier: "remote" })).toEqual([project]);
     const stable = db.beginSerializableTransaction();
     expect(await stable.all(newApp.initiatives, { tier: "local-first" })).toEqual([project]);

@@ -4,6 +4,7 @@ import { migration as m } from "../migration-namespace.js";
 import { definePermissions } from "../permissions/index.js";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
+import { bundleFor } from "../runtime/testing/client-migrations.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 
 it("preserves rows and their relationship through table and reference-column renames", async () => {
@@ -55,7 +56,10 @@ it("preserves rows and their relationship through table and reference-column ren
   try {
     const target = { serverUrl: server.url, appId: server.appId, adminSecret: server.adminSecret };
     await deploy({ ...target, schema: oldApp, permissions: oldPermissions });
-    const account = await localAccountConfig(server.appId, server.url);
+    const account = {
+      ...(await localAccountConfig(server.appId, server.url)),
+      migrations: await bundleFor(oldApp, newApp, migration),
+    };
     db = await createDb(account);
     const owner = await db.insert(oldApp.users, { name: "Alice" }).wait({ tier: "global" });
     const note = await db

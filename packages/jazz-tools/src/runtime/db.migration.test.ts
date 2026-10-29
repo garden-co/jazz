@@ -436,11 +436,14 @@ it("a client shipping the app's migrations writes a renamed column where the ser
   const after = { notes: s.table({ body: s.string() }, {}) };
   const beforeApp = s.defineApp(before),
     afterApp = s.defineApp(after);
-  const allow = <A extends typeof beforeApp | typeof afterApp>(app: A) =>
-    s.definePermissions(app, ({ policy }) => [
-      policy.notes.allowRead.always(),
-      policy.notes.allowInsert.always(),
-    ]);
+  const allowBefore = s.definePermissions(beforeApp, ({ policy }) => [
+    policy.notes.allowRead.always(),
+    policy.notes.allowInsert.always(),
+  ]);
+  const allowAfter = s.definePermissions(afterApp, ({ policy }) => [
+    policy.notes.allowRead.always(),
+    policy.notes.allowInsert.always(),
+  ]);
   const rename = m.defineMigration({
     from: before,
     to: after,
@@ -455,14 +458,14 @@ it("a client shipping the app's migrations writes a renamed column where the ser
       adminSecret,
       serverUrl,
       schema: beforeApp,
-      permissions: allow(beforeApp),
+      permissions: allowBefore,
     });
     await deploy({
       appId,
       adminSecret,
       serverUrl,
       schema: afterApp,
-      permissions: allow(afterApp),
+      permissions: allowAfter,
       migration: rename,
     });
     const migrations = await bundleFor(beforeApp, afterApp, rename);

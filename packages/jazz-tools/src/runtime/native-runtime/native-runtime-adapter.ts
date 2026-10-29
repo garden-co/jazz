@@ -7046,8 +7046,10 @@ function normalizeSubscriptionRejectionReason(
   if (record.type === "ShapeRegistrationPendingCatalogueAdmission") {
     return { type: "ShapeRegistrationPendingCatalogueAdmission" };
   }
-  if (record.type === "ServerFailure" && typeof record.code === "string") {
-    return { type: "ServerFailure", code: record.code };
+  // NAPI names the server's reason `code`, WASM `detail`.
+  const failure = record.code ?? record.detail;
+  if (record.type === "ServerFailure" && typeof failure === "string") {
+    return { type: "ServerFailure", code: failure };
   }
   if (record.type === "InvalidAuthoritySourceClosure" && typeof record.transition === "string") {
     return {
