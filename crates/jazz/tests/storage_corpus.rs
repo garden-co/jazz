@@ -56,8 +56,8 @@ const CLIENT_FILE: &str = "sqlite-storage-v1/client.sqlite.gz.base64";
 /// change re-runs the producer and re-pins these; after that the corpus is
 /// immutable and a new storage format gets a new corpus beside it (see
 /// `fixtures/sqlite-storage-v1/README.md`).
-const SERVER_SHA256: &str = "9a76235e1d36f74b0e20d3de967d470a4084311d8a3b31d8fc8979cbd5b4da5d";
-const CLIENT_SHA256: &str = "a5ed439e92685a02d790b98b26010257ac5e362617666625fa7a37df818014a1";
+const SERVER_SHA256: &str = "417c3ebbd989a3b52a20d1d87e0c339f0c000c4cdd0df5b38b291f358bb04faf";
+const CLIENT_SHA256: &str = "bc910c6a42d09475f85a7cf2cb8841a685ab3004a4e2266bd6f64a375bcb2098";
 
 const SERVER_NODE: [u8; 16] = [0xa0; 16];
 const CLIENT_NODE: [u8; 16] = [0xc0; 16];
@@ -804,14 +804,17 @@ fn pinned_sqlite_corpus_reopens_and_accepts_current_writes() {
 }
 
 /// The server's recorded fates are format 1 too: the rejected commit's fate
-/// still decodes, with its reason name, from `_jazz_applied`.
+/// still decodes, with its reason name, from `_jazz_transactions`.
 #[test]
 fn pinned_server_corpus_keeps_a_rejected_fate_with_its_reason() {
     let dir = scratch("fates");
     let server_path = install(SERVER_FILE, SERVER_SHA256, &dir);
     let conn = rusqlite::Connection::open(&server_path).unwrap();
     let mut statement = conn
-        .prepare("SELECT node, result FROM _jazz_applied ORDER BY node, tx")
+        .prepare(
+            "SELECT n.node, t.result FROM _jazz_transactions AS t JOIN _jazz_nodes AS n \
+             ON n.n = t.n WHERE t.result IS NOT NULL ORDER BY n.node, t.tx",
+        )
         .unwrap();
     let fates: Vec<(Vec<u8>, Result<(), WireError>)> = statement
         .query_map([], |row| Ok((row.get(0)?, row.get::<_, Vec<u8>>(1)?)))

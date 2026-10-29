@@ -11,9 +11,9 @@ are stored, a rejection's reason name changed how fates are recorded, and
 pending uploads moved from one encoded message to a row per op).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `9a76235e1d36f74b0e20d3de967d470a4084311d8a3b31d8fc8979cbd5b4da5d`.
+  the SQLite file `417c3ebbd989a3b52a20d1d87e0c339f0c000c4cdd0df5b38b291f358bb04faf`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `a5ed439e92685a02d790b98b26010257ac5e362617666625fa7a37df818014a1`.
+  `bc910c6a42d09475f85a7cf2cb8841a685ab3004a4e2266bd6f64a375bcb2098`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
@@ -28,7 +28,7 @@ nodes and write times:
   write as sent (`_st` bit 2, at `_seq` = minus the commit's seq);
 - a client that synced `projects` and `documents`, wrote one row that
   settled, one stamped far ahead of the server's clock that the server
-  rejected (so `_jazz_applied` keeps a rejected fate with its reason name),
+  rejected (so `_jazz_transactions` keeps a rejected fate with its reason name),
   then two writes (an insert and an update) that never reached the
   server: its pending uploads;
 - then the server activated a second schema version that renames
@@ -56,3 +56,7 @@ and `_jazz_schemas`, `_jazz_lenses` and `_jazz_permissions`) regenerated it
 the same way. A development store with the earlier layout (`_jazz_names`
 keyed by version id) is refused at open with "delete the local store and
 resync".
+
+Merging `_jazz_applied` and `_jazz_settled` into one `_jazz_transactions`
+table keyed by an interned node code (`_jazz_nodes.n`) regenerated it the
+same way.
