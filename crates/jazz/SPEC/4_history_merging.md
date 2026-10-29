@@ -17,7 +17,7 @@ Invariant digest:
 - `INV-HIST-8`: For a plain (`MergeStrategy::Lww`) column and for `_deletion`, Core MUST apply each accepted write to the row's post-image as a patch in the order it accepts the writes: every cell the write authored takes the write's value (last arrival wins), every cell it did not author keeps the row's value, and nothing a write authored is dropped. Concurrent writes to different cells of one row therefore all apply, and a write that does not author `_deletion` keeps the row's deletion state, so an edit made over an image older than an accepted delete leaves the row deleted.
 - `INV-HIST-9`: `MergeStrategy::Counter` MUST be declared only on non-nullable integer user columns.
 - `INV-HIST-10`: For `MergeStrategy::Counter`, a write MUST travel as its delta from the row image it was made over, and Core MUST add each accepted delta to the current value, so concurrent increments from the same base sum exactly. Core MUST reject a write whose delta would take the counter outside its column type's range rather than wrap, and a write that does not author a merge column MUST NOT replace that column's accepted ops with the writer's snapshot, also across schema versions.
-- `INV-HIST-24`: A text-merging column (`MergeStrategy::Text`, `Markdown` or `Html`) MUST be declared only on a non-nullable string user column and MUST store a plain string; writes to it travel as plain values. Only Core merges: when a version before the write that its writer never saw (§4.6) authored the column, Core MUST three-way merge the value its writer last saw of the column (the newest commit on its chain that authored the column, as that commit sent it, or else the accepted version the chain was built on), the value it holds and the write's value at token boundaries: changes to disjoint parts of the base all apply, a change both sides made applies once, inserts at one point apply in seq order, overlapping pure inserts and deletes union (as do one side's inserts with the other's replacements), and of two overlapping replacements the write sequenced later wins. Otherwise, or when the merge would spend more than a fixed budget of diff steps, the write's value stands as sent. For a version whose value a merge changed, Core MUST keep the edits back to the value as sent (`_jazz_text_in`) while its sender may still build on it.
+- `INV-HIST-24`: A text-merging column (`MergeStrategy::Text`, `Markdown` or `Html`) MUST be declared only on a string user column, nullable or not, and MUST store a plain string or NULL; writes to it travel as plain values. Only Core merges: when a version before the write that its writer never saw (§4.6) authored the column, Core MUST three-way merge the value its writer last saw of the column (the newest commit on its chain that authored the column, as that commit sent it, or else the accepted version the chain was built on), the value it holds and the write's value at token boundaries: changes to disjoint parts of the base all apply, a change both sides made applies once, inserts at one point apply in seq order, overlapping pure inserts and deletes union (as do one side's inserts with the other's replacements), and of two overlapping replacements the write sequenced later wins. Otherwise, or when the merge would spend more than a fixed budget of diff steps, the write's value stands as sent. On a nullable column a NULL base merges as the empty string, and a write of NULL or a write over a held NULL stands as sent: the later write wins the whole value. For a version whose value a merge changed, Core MUST also keep that version as its writer sent it, flagged as sent in its state bits, and MUST NOT list, sync or read it as a version.
 - `INV-HIST-11`: Content and deletion state MUST be separate layers; content writes MUST NOT change the deletion register, and a current `DeletionEvent::Deleted` MUST hide the content-current row until a current `DeletionEvent::Restored` reveals it.
 - `INV-HIST-12`: Accepted globally settled versions that become per-layer winners MUST be reflected in `jazz_{table}_global_current` or `jazz_{table}_register_global_current`.
 - `INV-HIST-13`: Re-ingesting the same commit unit with identical version rows in a different order MUST be idempotent and MUST NOT create a conflict.
@@ -192,17 +192,23 @@ overlapping either way.
 
 From `The cat sat.`, a concurrent `The black cat sat.` and `The cat
 slept.` merge to `The black cat slept.` in either order. When a merge
-changes a write's value, Core keeps for the merged version (in
-`_jazz_text_in`, keyed by table, row, branch key and seq, made with the first
-such merge) the token-level edits from the merged value back to the value
-as sent, per column: a later write built on that commit (an offline
-chain) is merged over what its writer saw, the value as sent. A later write
-of the same upload to the row was built on the earlier one as sent, and
-merges over it the same way. Only a commit's sender builds on it
-unsettled, and a sender's commits arrive in order, so once one of its
-writes to a row is built on an accepted version (or on none), its older
-entries for that row are dropped: a row keeps entries only for its
-writers' current unsettled chains. A write built on a rejected commit is rejected
+changes a write's value, Core also keeps the write as its writer sent it:
+a hidden history row (in `__h`, at `_seq` = minus the
+commit's seq, so the commit keeps its one seq, with bit 2 of `_st` set,
+"as sent"), holding the version's cells with the merged columns at their
+values as sent. A later write built on that commit (an offline chain) is
+merged over what its writer saw: the chain walk's link is read from its
+as-sent version when it has one, by the same lookup as an accepted base. A
+later write of the same upload to the row was built on the earlier one as
+sent, and merges over it the same way. An as-sent version is never a
+version of the row: history reads, reads through a cut, conflict
+analysis and sync all skip it (bit 2 set). Only a commit's sender builds
+on it unsettled, and a sender's commits arrive in order, so once one of
+its writes to a row is built on an accepted version (or on none), its
+older as-sent versions of that row are dropped: a row keeps them only for
+its writers' current unsettled chains. A merged write's value is checked
+before the merge reads it, as an unmerged one's is (a descriptor naming
+chunks its writer does not possess is refused, ch. 19 §19.4). A write built on a rejected commit is rejected
 too (§4.6), so a base is always a value Core accepted. The merge is
 token-level, not tree-aware: it keeps markup tokens whole but does not
 check that merged markdown or HTML is well formed. Conflict analysis
@@ -235,18 +241,14 @@ Earlier per-family profiles are refused without migration. Some of these
 encodings also change wire bytes; the wire version bump for them ships with
 the alpha.60 release (`dev/proofs/storage-format-cleanup-compatibility.md`).
 
-`jazz.server-catalogue-entry.v1` remains an encoding receipt covered by
-`jazz.catalogue-storage.v1`. Its outer
-`JCAT` entry and all catalogue payload outer version bytes remain v1. Within
-the existing nested relation-tree grammar, a public `UNION ALL` is the
-explicit labeled tag `7`: it stores the arm count, each UTF-8 arm label in
-declared order, then the matching arm trees. Labels are unique, NUL-free, and
-1 through 4096 bytes. The former unlabeled tag `3` is retired and rejected;
-recovery must never synthesize a traversal-position label. The exact positive
-grammar receipt and retired-tag rejection live in
-`catalogue_payload_codec::tests::labeled_relation_union_uses_explicit_canonical_wire_grammar`.
-This changes a nested grammar of the existing family, not its outer profile or
-a new durable-root family.
+The server catalogue has no encoding of its own: schemas, lenses and
+permissions are rows of the store's catalogue tables, with definitions as
+canonical JSON text (ch. 10, §10.2). A public `UNION ALL` in a relation
+policy is stored as its labeled form: each arm carries a UTF-8 label in
+declared order. Labels are unique, NUL-free, and 1 through 4096 bytes, and a
+deploy that breaks that is refused
+(`crates/jazz-server/src/server/permissions_validation.rs`); a label is never
+synthesized from an arm's position.
 
 The native whole-root compatibility receipt is
 `fixtures/native_storage_corpus.md` and its executable tests in
@@ -535,15 +537,16 @@ Core resolves each base before it applies the commit: `Seq(S)` is the
 accepted version at `S` (not checked against the row's history: a seq the
 row never had only makes the analysis more conservative); `Own` and `Commit`
 (only of the sender's own node) are where the named commit of the sender
-landed (`_jazz_settled`), and one Core rejected or never received rejects the
+landed (`_jazz_transactions`), and one Core rejected or never received rejects the
 commit (`predecessor_rejected`). It keeps, in the version the commit wrote
 (the row table and history alike), `_base`: the resolved `Seq` as is, or
 the seq the named commit landed at negated; and `_cols`, the authored stored
 columns as a bitmask over their positions in the row table (stored tables
-only grow by `ADD COLUMN`, so a position never moves). An app column cannot
-take the name of a stored row column (`id`, `rid`, `_b`, `_seq`, `_del`,
-`_c`, `_base`, `_cols`). Both are NULL on every other replica and for Core's
-own writes: those are made over the current image, so they are never maybe
+only grow by `ADD COLUMN`, so a position never moves). A delete or restore
+authors `_st`, the version's state bits (bit 0: its commit wrote no content;
+bit 1: deleted; bit 2, in history only: a merged text write as sent, §4.3). An app column cannot take the name of a stored row column
+(`id`, `rid`, `_b`, `_seq`, `_st`, `_base`, `_cols`). `_base` and `_cols`
+are NULL on every other replica and for Core's own writes: those are made over the current image, so they are never maybe
 conflicting, and in another write's analysis they author every column. The
 flag, the walk and the merge base are derived on demand
 (`Db::write_conflicts` and `Db::merge_base`, behind the `testing` feature);

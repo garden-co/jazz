@@ -349,12 +349,14 @@ describe("column merge strategy DSL", () => {
     );
   });
 
-  it("stores text merge strategies on non-nullable string columns", () => {
+  it("stores text merge strategies on string columns, optional or not", () => {
     resetCollectedState();
     table("docs", {
       body: s.string().merge("text"),
       notes: s.string().merge("markdown"),
       page: s.string().merge("html"),
+      summary: s.string().optional().merge("text"),
+      caption: s.string().merge("markdown").optional(),
     });
 
     const schema = getCollectedSchema();
@@ -367,22 +369,25 @@ describe("column merge strategy DSL", () => {
         mergeStrategy: "markdown",
       },
       { name: "page", sqlType: "TEXT", nullable: false, mergeStrategy: "html" },
+      { name: "summary", sqlType: "TEXT", nullable: true, mergeStrategy: "text" },
+      { name: "caption", sqlType: "TEXT", nullable: true, mergeStrategy: "markdown" },
     ]);
+    expect(() => s.int().merge("text" as never)).toThrow(
+      "text merge strategy is only supported on TEXT columns.",
+    );
     expect(() =>
       s
-        .string()
+        .int()
         .optional()
         .merge("markdown" as never),
-    ).toThrow("markdown merge strategy is only supported on non-nullable TEXT columns.");
-    expect(() => s.int().merge("text" as never)).toThrow(
-      "text merge strategy is only supported on non-nullable TEXT columns.",
-    );
+    ).toThrow("markdown merge strategy is only supported on TEXT columns.");
 
     if (false) {
-      // @ts-expect-error nullable string columns cannot text-merge
-      s.string().optional().merge("text");
+      s.string().optional().merge("html");
       // @ts-expect-error integer columns cannot text-merge
       s.int().merge("html");
+      // @ts-expect-error optional integer columns cannot text-merge
+      s.int().optional().merge("text");
     }
   });
 

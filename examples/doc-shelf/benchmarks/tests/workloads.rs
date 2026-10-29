@@ -6,27 +6,33 @@ fn reads_return_the_logical_answers() {
     assert_eq!(fixture.open_shelf(), 50);
     let mut found = fixture.search();
     found.sort();
-    let mut want: Vec<String> = NEEDLE_DOCS.iter().map(|n| format!("Doc {n:03}")).collect();
-    want.sort();
-    assert_eq!(found, want);
-    let mut dups = fixture.find_duplicates();
-    dups.sort();
-    assert_eq!(
-        dups,
-        [
-            format!("Doc {PASTED:03}"),
-            format!("Doc {PASTED:03} (copy)")
-        ]
-    );
-    let mut bodies: Vec<(String, String)> = (0..DOCS)
-        .map(|n| (body(n), format!("Doc {n:03}")))
-        .chain([(body(PASTED), format!("Doc {PASTED:03} (copy)"))])
+    // Only inline bodies are searched (SPEC 19.5).
+    let want: Vec<String> = needle_found()
+        .iter()
+        .map(|n| format!("Doc {n:03}"))
         .collect();
-    bodies.sort();
-    let first = fixture.first_by_body();
+    assert!(!want.is_empty() && want.len() < NEEDLE_DOCS.len());
+    assert_eq!(found, want);
+    assert_eq!(fixture.find_duplicates(), (2, body(PASTED)));
+    assert!(
+        fixture
+            .find_by_long_literal()
+            .contains("over 65536 bytes is not supported yet")
+    );
+    // Chunked bodies sort before every inline one, among themselves in no
+    // meaningful order; there are more than 20 of them.
+    let long: Vec<String> = (0..DOCS)
+        .filter(|&n| chunked(n))
+        .map(|n| format!("Doc {n:03}"))
+        .chain([format!("Doc {PASTED:03} (copy)")])
+        .collect();
+    assert!(long.len() > 20);
+    let mut first = fixture.first_by_body();
     assert_eq!(first.len(), 20);
-    let want: Vec<String> = bodies.iter().take(20).map(|(_, t)| t.clone()).collect();
-    assert_eq!(first, want);
+    assert!(first.iter().all(|title| long.contains(title)), "{first:?}");
+    first.sort();
+    first.dedup();
+    assert_eq!(first.len(), 20);
 }
 
 #[test]

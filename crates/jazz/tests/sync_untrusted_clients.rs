@@ -8,8 +8,9 @@ use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, DeleteOptions, FileOptions, InsertOptions, LOCAL_BASE, ReadOpts,
-    ReadTier, SyncMessage, Transport, TransportError, WireKind, WireOp, WireTarget, block_on,
+    Acting, BuiltOn, Db, DbConfig, DbIdentity, DeleteOptions, ErrorCode, FileOptions,
+    InsertOptions, LOCAL_BASE, ReadOpts, ReadTier, SyncMessage, Transport, TransportError,
+    WireBase, WireKind, WireOp, WireTarget, WireWrite, block_on,
 };
 use jazz::ids::RowUuid;
 use jazz::ids::{AuthorSubject, NodeUuid};
@@ -127,7 +128,7 @@ fn fates(down: &Q) -> Vec<(u64, bool)> {
     down.borrow()
         .iter()
         .filter_map(|m| match m {
-            SyncMessage::Fate { tx, result, .. } => Some((*tx, result.is_ok())),
+            SyncMessage::Fate { tx, outcome, .. } => Some((*tx, outcome.result().is_ok())),
             _ => None,
         })
         .collect()
@@ -144,9 +145,10 @@ fn a_message_the_server_does_not_serve_ends_only_that_session() {
     server.accept_subscriber(a_server, user(1));
 
     post(&alice, "hello");
-    bad_up
-        .borrow_mut()
-        .push_back(SyncMessage::Rows { images: Vec::new() });
+    bad_up.borrow_mut().push_back(SyncMessage::Rows {
+        images: Vec::new(),
+        tx_ids: Vec::new(),
+    });
     for _ in 0..4 {
         block_on(alice.tick()).unwrap();
         block_on(server.tick()).unwrap();
@@ -156,6 +158,65 @@ fn a_message_the_server_does_not_serve_ends_only_that_session() {
     assert_eq!(closed.len(), 1);
     assert_eq!(closed[0].0, bad);
     assert_eq!(server.open_subscribers(), 1);
+}
+
+/// A server-side transport that takes what the client sends and refuses
+/// everything the server sends with `error`.
+struct Refusing {
+    error: TransportError,
+    inbound: Q,
+}
+
+impl Transport for Refusing {
+    fn send(&mut self, _: SyncMessage) -> Result<(), TransportError> {
+        Err(self.error.clone())
+    }
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        self.inbound.borrow_mut().pop_front()
+    }
+}
+
+/// A session the server cannot send to is dropped with a typed reason for
+/// the host to tell the client: one whose queue is full may reconnect
+/// later, one sent a message that cannot be encoded may not.
+#[test]
+fn a_session_the_server_cannot_send_to_ends_with_why() {
+    for (error, code) in [
+        (TransportError::Backpressure, ErrorCode::Backpressure),
+        (
+            TransportError::Failed("over the message ceiling: not supported yet".to_owned()),
+            ErrorCode::Protocol,
+        ),
+    ] {
+        let server = server();
+        post(&server, "hello");
+        let alice = client(1, user(1));
+        let (a_client, _, up, _) = pipe();
+        let _a = block_on(alice.connect_upstream(a_client));
+        let session = server.accept_subscriber(
+            Box::new(Refusing {
+                error: error.clone(),
+                inbound: up,
+            }),
+            user(1),
+        );
+        let prepared = alice.prepare_query(&Query::from("messages")).unwrap();
+        let _live = block_on(alice.subscribe(&prepared, ReadOpts::default())).unwrap();
+        for _ in 0..4 {
+            block_on(alice.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+        }
+        let closed = server.take_closed_subscribers();
+        assert_eq!(closed.len(), 1, "{error:?}: {closed:?}");
+        assert_eq!(closed[0].0, session);
+        assert_eq!(closed[0].1.code, code, "{error:?}");
+        assert!(
+            closed[0].1.message.contains(&error.to_string()),
+            "{:?}",
+            closed[0].1
+        );
+        assert_eq!(server.open_subscribers(), 0);
+    }
 }
 
 #[test]
@@ -203,12 +264,7 @@ fn a_commit_as_another_identitys_node_is_refused_and_claims_nothing() {
         tx: tx + 1,
         kind,
         ops: Vec::new(),
-        author: None,
-        session: None,
-        expect: Vec::new(),
-        deltas: Vec::new(),
-        sources: Vec::new(),
-        bases: Vec::new(),
+        acting: Acting::Own,
         origin: None,
     });
     block_on(server.tick()).unwrap();
@@ -267,26 +323,23 @@ fn an_upsert_over_a_row_deleted_in_the_same_commit_is_checked_as_an_insert() {
         tx: LOCAL_BASE + 1,
         kind: WireKind::Mergeable,
         ops: vec![
-            WireOp::Delete {
+            WireWrite::Delete {
                 table: "messages".to_owned(),
                 row: [7; 16],
                 target: WireTarget::Root,
                 at: None,
-            },
-            WireOp::Upsert {
+            }
+            .into(),
+            WireWrite::Upsert {
                 table: "messages".to_owned(),
                 row: [7; 16],
                 cells: [("body".to_owned(), Value::String("rewritten".into()))].into(),
                 target: WireTarget::Root,
                 at: None,
-            },
+            }
+            .into(),
         ],
-        author: None,
-        session: None,
-        expect: Vec::new(),
-        deltas: Vec::new(),
-        sources: Vec::new(),
-        bases: Vec::new(),
+        acting: Acting::Own,
         origin: None,
     });
     block_on(server.tick()).unwrap();
@@ -307,19 +360,17 @@ fn the_authority_refuses_cells_that_are_not_of_their_columns_type() {
             node: [2; 16],
             tx: LOCAL_BASE + 1 + i as u64,
             kind: WireKind::Mergeable,
-            ops: vec![WireOp::Insert {
-                table: "messages".to_owned(),
-                row: [10 + i as u8; 16],
-                cells: [("body".to_owned(), value)].into(),
-                target: WireTarget::Root,
-                at: None,
-            }],
-            author: None,
-            session: None,
-            expect: Vec::new(),
-            deltas: Vec::new(),
-            sources: Vec::new(),
-            bases: Vec::new(),
+            ops: vec![
+                WireWrite::Insert {
+                    table: "messages".to_owned(),
+                    row: [10 + i as u8; 16],
+                    cells: [("body".to_owned(), value)].into(),
+                    target: WireTarget::Root,
+                    at: None,
+                }
+                .into(),
+            ],
+            acting: Acting::Own,
             origin: None,
         });
     }
@@ -358,12 +409,7 @@ fn a_reopened_authority_continues_after_the_seq_of_a_rowless_commit() {
         tx: LOCAL_BASE + 1,
         kind: WireKind::Mergeable,
         ops: Vec::new(),
-        author: None,
-        session: None,
-        expect: Vec::new(),
-        deltas: Vec::new(),
-        sources: Vec::new(),
-        bases: Vec::new(),
+        acting: Acting::Own,
         origin: None,
     });
     block_on(server.tick()).unwrap();
@@ -421,4 +467,161 @@ fn a_reopened_replica_continues_after_a_pending_commit_that_left_no_rows() {
         block_on(server.tick()).unwrap();
     }
     assert!(rows(&server).contains("after reopen"), "{}", rows(&server));
+}
+
+/// A base travels on the commit's first op that writes its row, one per row
+/// and branch key: anything else refuses the commit (SPEC 8.2).
+#[test]
+fn the_authority_refuses_misplaced_bases() {
+    let server = server();
+    let row = RowUuid::from_bytes([7; 16]);
+    server
+        .seed_settled_mergeable_for_bootstrap(
+            "messages",
+            row,
+            AuthorSubject::SYSTEM,
+            [("body".to_owned(), Value::String("original".into()))].into(),
+        )
+        .unwrap();
+    let (_m_client, m_server, m_up, m_down) = pipe();
+    server.accept_subscriber(m_server, user(1));
+    let base = || WireBase {
+        key: Vec::new(),
+        on: BuiltOn::Seq(1),
+    };
+    let update = |body: &str, bases: Vec<WireBase>| WireOp {
+        bases,
+        ..WireWrite::Update {
+            table: "messages".to_owned(),
+            row: [7; 16],
+            cells: [("body".to_owned(), Value::String(body.into()))].into(),
+            target: WireTarget::Root,
+            at: None,
+        }
+        .into()
+    };
+    let commit = |n: u64, ops: Vec<WireOp>| SyncMessage::Commit {
+        node: [1; 16],
+        tx: LOCAL_BASE + n,
+        kind: WireKind::Mergeable,
+        ops,
+        acting: Acting::Own,
+        origin: None,
+    };
+    // On the row's second op; twice on its first; then as SPEC 8.2 says.
+    m_up.borrow_mut().push_back(commit(
+        1,
+        vec![update("a", Vec::new()), update("b", vec![base()])],
+    ));
+    m_up.borrow_mut()
+        .push_back(commit(2, vec![update("c", vec![base(), base()])]));
+    m_up.borrow_mut().push_back(commit(
+        3,
+        vec![update("d", vec![base()]), update("e", Vec::new())],
+    ));
+    block_on(server.tick()).unwrap();
+    let refusals: Vec<Option<String>> = m_down
+        .borrow()
+        .iter()
+        .filter_map(|m| match m {
+            SyncMessage::Fate { outcome, .. } => {
+                Some(outcome.result().err().map(|e| format!("{e:?}")))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(refusals.len(), 3, "{refusals:?}");
+    assert!(
+        refusals[0]
+            .as_deref()
+            .is_some_and(|e| e.contains("first op that writes its row")),
+        "{refusals:?}"
+    );
+    assert!(
+        refusals[1]
+            .as_deref()
+            .is_some_and(|e| e.contains("another base")),
+        "{refusals:?}"
+    );
+    assert_eq!(refusals[2], None, "{refusals:?}");
+    assert!(rows(&server).contains("\"e\""), "{}", rows(&server));
+}
+
+/// The subjects of who created each `messages` row, by body.
+fn creators(db: &Db) -> Vec<(String, String)> {
+    let prepared = db
+        .prepare_query(&Query::from("messages").select(["body", "$createdBy.identity.subject"]))
+        .unwrap();
+    let text = |cell: Option<&Value>| match cell {
+        Some(Value::String(v)) => v.clone(),
+        Some(Value::Nullable(Some(v))) => match &**v {
+            Value::String(v) => v.clone(),
+            other => panic!("{other:?}"),
+        },
+        other => panic!("{other:?}"),
+    };
+    let mut rows: Vec<_> = block_on(db.all(&prepared, ReadOpts::default()))
+        .unwrap()
+        .iter()
+        .map(|row| {
+            let cell = |name: &str| row.cells().find(|(n, _)| *n == name).unwrap().1;
+            (
+                text(cell("body")),
+                text(cell("$createdBy.identity.subject")),
+            )
+        })
+        .collect();
+    rows.sort();
+    rows
+}
+
+#[test]
+fn a_session_link_may_not_attribute_and_its_session_writes_are_its_own() {
+    let server = server();
+    let (_m_client, m_server, m_up, m_down) = pipe();
+    server.accept_subscriber(m_server, user(2));
+    let insert = |tx: u64, row: u8, body: &str, acting: Acting| SyncMessage::Commit {
+        node: [2; 16],
+        tx,
+        kind: WireKind::Mergeable,
+        ops: vec![
+            WireWrite::Insert {
+                table: "messages".to_owned(),
+                row: [row; 16],
+                cells: [("body".to_owned(), Value::String(body.to_owned()))].into(),
+                target: WireTarget::Root,
+                at: None,
+            }
+            .into(),
+        ],
+        acting,
+        origin: None,
+    };
+    let other = user(3).canonical().to_owned();
+    m_up.borrow_mut().extend([
+        insert(
+            LOCAL_BASE + 1,
+            1,
+            "attributed",
+            Acting::Attributed {
+                author: other.clone(),
+            },
+        ),
+        insert(
+            LOCAL_BASE + 2,
+            2,
+            "as a session",
+            Acting::Session {
+                author: other,
+                claims: BTreeMap::new(),
+            },
+        ),
+    ]);
+    block_on(server.tick()).unwrap();
+    assert_eq!(
+        fates(&m_down),
+        vec![(LOCAL_BASE + 1, false), (LOCAL_BASE + 2, true)]
+    );
+    let (_, link) = user(2).principal_parts();
+    assert_eq!(creators(&server), vec![("as a session".to_owned(), link)]);
 }

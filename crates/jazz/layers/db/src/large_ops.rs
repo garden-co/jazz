@@ -138,6 +138,23 @@ fn utf16_byte(text: &str, at: u64) -> Option<usize> {
 }
 
 impl Inner {
+    /// Drop queues contain only this owner's uploads. SQL errors retain the
+    /// receipt for the next maintenance pass; crash recovery uses lease expiry.
+    pub(super) fn release_dropped_uploads(&self) -> Result<(), Error> {
+        // Removing an in-memory receipt must not outlive a SQL rollback.
+        // Callback transactions can tick while suspended; defer cleanup until
+        // its deletes can commit independently of that application unit.
+        if !self.conn.is_autocommit() {
+            return Ok(());
+        }
+        let mut cleanup = self.upload_cleanup.borrow_mut();
+        while let Some(id) = cleanup.last() {
+            crate::large::end_upload(&self.conn, id)?;
+            cleanup.pop();
+        }
+        Ok(())
+    }
+
     /// Forget what the finished write's edits derived.
     pub(crate) fn clear_derived(&mut self) {
         self.pending_nodes.clear();
@@ -186,13 +203,15 @@ impl Inner {
             schema: None,
         };
         let compiled = self.compile(&prepared, identity, &ReadSpec::default())?;
-        let cell: Option<Sql> = self.with_preps(&compiled.preps, |_| {
-            let mut statement = self.conn.prepare_cached(&compiled.sql).map_err(storage)?;
-            statement
-                .query_row(params_from_iter(compiled.params.iter()), |r| r.get(3))
-                .optional()
-                .map_err(storage)
-        })?;
+        let cell: Option<Sql> = self
+            .conn
+            .prepare_cached(&compiled.sql)
+            .and_then(|mut statement| {
+                statement
+                    .query_row(params_from_iter(compiled.params.iter()), |r| r.get(3))
+                    .optional()
+            })
+            .map_err(storage)?;
         let cell = cell.ok_or_else(|| {
             Error::new(ErrorCode::NotObserved, "large-value cell is not observed")
         })?;
@@ -709,6 +728,7 @@ impl Db {
     ) -> Result<WriteHandle, Error> {
         let value = {
             let mut inner = self.inner();
+            inner.require_mutation_admission()?;
             let edited = inner
                 .physical_cell(table, row, column, identity_of(opts.identity))
                 .and_then(|(col, cell)| Ok(nullable(&col, inner.edited(table, &col, cell, edit)?)));
@@ -757,6 +777,7 @@ impl Db {
     ) -> Result<WriteHandle, Error> {
         let lowered = {
             let mut inner = self.inner();
+            inner.require_mutation_admission()?;
             let identity = identity_of(opts.identity);
             inner.lower_large_mutations(table, row, &mut patch, mutations, identity)
         };
@@ -863,14 +884,16 @@ impl Db {
     }
 
     /// Begin a resumable upload of one large value, for hosts that feed it
-    /// in pieces (such as an asynchronous browser stream). Nothing is
-    /// stored until the first push.
+    /// in pieces (such as an asynchronous browser stream). The handle is bound
+    /// to this database, exact schema view, table and column. Nothing is stored
+    /// until the first push.
     pub fn begin_streaming_value_upload(
         &self,
         table: &str,
         cells: &BTreeMap<String, Value>,
         column: &str,
     ) -> Result<StreamingValueUpload, Error> {
+        self.inner().require_mutation_admission()?;
         let col = streaming_column(&self.inner(), table, column)?;
         if cells.contains_key(column) {
             return Err(Error::new(
@@ -881,8 +904,22 @@ impl Db {
         let kind = crate::large::kind(&col);
         let emitted = Rc::new(RefCell::new(Vec::new()));
         let stage = Rc::clone(&emitted);
+        let id = upload_id();
+        let schema_instance = {
+            let inner = self.inner.borrow();
+            Rc::downgrade(self.view.as_ref().unwrap_or(&inner.owner))
+        };
         Ok(StreamingValueUpload {
-            id: upload_id(),
+            id,
+            owner: Rc::downgrade(&self.inner),
+            schema: self.schema_view_id(),
+            schema_instance,
+            table: table.to_owned(),
+            column: column.to_owned(),
+            _lease: UploadLease {
+                id,
+                cleanup: self.inner().upload_cleanup.clone(),
+            },
             kind,
             initialized: false,
             preparation: Some(lv::PushStreamingPreparation::new(
@@ -904,7 +941,9 @@ impl Db {
         upload: &mut StreamingValueUpload,
         bytes: &[u8],
     ) -> Result<(), Error> {
+        self.check_streaming_upload(upload)?;
         let inner = self.inner();
+        inner.require_mutation_admission()?;
         let now = streaming_now_ms();
         if upload.preparation.is_none() {
             return Err(closed());
@@ -946,13 +985,33 @@ impl Db {
         &self,
         mut upload: StreamingValueUpload,
     ) -> Result<(), Error> {
+        self.check_streaming_upload(&mut upload)?;
         upload.preparation.take();
         crate::large::end_upload(&self.inner().conn, &upload.id)
     }
 
-    /// Finish an upload and publish its row mutation. Whether or not the
-    /// write succeeds, the upload's lease ends: a committed row holds the
-    /// value from then on, and anything else is reclaimable.
+    fn check_streaming_upload(&self, upload: &mut StreamingValueUpload) -> Result<(), Error> {
+        let mismatch = || schema_error("streaming upload belongs to another database or schema");
+        if !upload.owner.ptr_eq(&Rc::downgrade(&self.inner)) {
+            return Err(mismatch());
+        }
+        let inner = self.inner.borrow();
+        let schema = self.view.as_ref().unwrap_or(&inner.owner);
+        let instance = Rc::downgrade(schema);
+        if !upload.schema_instance.ptr_eq(&instance) {
+            // An equivalent registered handle is allowed. Remember it so each
+            // subsequent chunk does not serialize the whole schema again.
+            if upload.schema != SchemaViewId::for_schema(&schema.jazz) {
+                return Err(mismatch());
+            }
+            upload.schema_instance = instance;
+        }
+        Ok(())
+    }
+
+    /// Finish an upload and publish its row mutation. A committed row holds
+    /// its value from then on. Consuming a failed upload schedules any remaining
+    /// lease cleanup for the next maintenance pass.
     #[allow(clippy::too_many_arguments)]
     pub async fn finish_streaming_value_upload(
         &self,
@@ -967,6 +1026,18 @@ impl Db {
         head: Option<BranchSelector>,
         base: Option<BranchViewBase>,
     ) -> Result<WriteHandle, Error> {
+        self.inner().require_mutation_admission()?;
+        self.check_streaming_upload(&mut upload)?;
+        if upload.table != table || upload.column != column {
+            return Err(schema_error(
+                "streaming upload target differs from its original table or column",
+            ));
+        }
+        if cells.contains_key(column) {
+            return Err(rejected(
+                "the streamed column is also set in the other cells",
+            ));
+        }
         let value = {
             let inner = self.inner();
             let now = streaming_now_ms();
@@ -1083,6 +1154,7 @@ impl Db {
         let inner = self.inner();
         let now = streaming_now_ms();
         let max_age = i64::try_from(inner.staging.max_age_ms).unwrap_or(i64::MAX);
+        inner.release_dropped_uploads()?;
         crate::large::expire_receipts(&inner.conn, now)?;
         crate::large::expire_uploads(&inner.conn, now.saturating_sub(max_age))
     }
@@ -1133,13 +1205,33 @@ fn upload_id() -> [u8; 32] {
 }
 
 /// A resumable upload of one large value: the tree under construction and
-/// the lease that holds its stored nodes.
+/// the lease that holds its stored nodes. Dropping a handle schedules its
+/// remaining lease for cleanup by the original owner, never by another store.
 pub struct StreamingValueUpload {
     id: [u8; 32],
+    owner: std::rc::Weak<Store>,
+    schema: SchemaViewId,
+    schema_instance: std::rc::Weak<Schema>,
+    table: String,
+    column: String,
+    _lease: UploadLease,
     kind: lv::LargeValueKind,
     initialized: bool,
     preparation: Option<lv::PushStreamingPreparation<Stage>>,
     emitted: Rc<RefCell<Vec<lv::StagedChunk>>>,
+}
+
+/// Drop schedules cleanup on the next maintenance tick without borrowing the
+/// database recursively. The existing persisted lease handles crash recovery.
+struct UploadLease {
+    id: [u8; 32],
+    cleanup: Rc<RefCell<Vec<[u8; 32]>>>,
+}
+
+impl Drop for UploadLease {
+    fn drop(&mut self) {
+        self.cleanup.borrow_mut().push(self.id);
+    }
 }
 
 fn streaming_column(
@@ -1379,6 +1471,7 @@ impl TxRef<'_> {
         mutations: Vec<LargeValueUpdate>,
         opts: UpdateOptions,
     ) -> Result<WriteHandle, Error> {
+        self.db.inner().require_mutation_admission()?;
         let edits = self.db.in_overlay(self.id, None, |inner, _| {
             let identity = identity_of(opts.identity);
             let lowered = inner.lower_large_mutations(table, row, &mut patch, mutations, identity);

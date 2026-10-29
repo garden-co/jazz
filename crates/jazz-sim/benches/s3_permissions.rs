@@ -316,7 +316,7 @@ fn forbidden_images(sim: &Sim, model: &Model, persona: &Persona, from: usize) ->
     let mut shipped = 0;
     let mut forbidden = 0;
     for message in sim.downstream_log(&persona.name).into_iter().skip(from) {
-        if let jazz::db::SyncMessage::Rows { images } = message {
+        if let jazz::db::SyncMessage::Rows { images, .. } = message {
             for image in images.iter().filter(|image| !image.deleted) {
                 shipped += 1;
                 if !model.readable(persona.u, &image.table, RowUuid::from_bytes(image.id)) {

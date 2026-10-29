@@ -370,7 +370,7 @@ fn flat_join_with_history_lists_every_version() {
     assert!(error_of(&db, &unbounded).contains("without a bounded row access path"));
 }
 
-/// A synced history join ships the versions and their origins.
+/// A synced history join ships the versions and their tx ids.
 #[test]
 fn synced_flat_join_with_history_ships_versions() {
     let server = open(schema(None), 0);
