@@ -2995,7 +2995,7 @@ impl Inner {
         // An as-sent version is no image: it never syncs.
         let sql = if history {
             format!(
-                "SELECT * FROM (SELECT * FROM {} WHERE _st < {STATE_AS_SENT}) WHERE {filter}",
+                "SELECT * FROM (SELECT * FROM {} WHERE (_st & {STATE_AS_SENT}) = 0) WHERE {filter}",
                 quote(&name)
             )
         } else {

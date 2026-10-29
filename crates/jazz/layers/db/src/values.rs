@@ -443,8 +443,7 @@ pub(crate) const STATE_DELETED: i64 = 2;
 /// sent it, superseded by the merged version at the same seq (SPEC 4
 /// §4.3). Kept only in `__h`, at `_seq` = minus the commit's seq, as the
 /// base of its writer's next chained write; never read as a version, so
-/// every read of `__h` that is not by exact seq takes `_st <`
-/// [`STATE_AS_SENT`].
+/// every read of `__h` that is not by exact seq requires this bit clear.
 pub(crate) const STATE_AS_SENT: i64 = 4;
 
 /// Whether `column` names deletion metadata (`$deletedAt`, `$deletedBy...`).

@@ -52,10 +52,12 @@ use common::{allow_all_policies, compile_schema};
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures");
 const SERVER_FILE: &str = "sqlite-storage-v1/server.sqlite.gz.base64";
 const CLIENT_FILE: &str = "sqlite-storage-v1/client.sqlite.gz.base64";
-/// SHA-256 of the decoded SQLite files. The corpus is immutable: a new
-/// storage format gets a new corpus beside this one.
-const SERVER_SHA256: &str = "80581b37d31f6c34fe48ff3c51851406b3e7583dac5a935947c4b9fee02589c6";
-const CLIENT_SHA256: &str = "a2b424484b1aabb84a073d675b14473eae27ac276b60af7e1b7fd1f363f2cb08";
+/// SHA-256 of the decoded SQLite files. Until alpha.60 ships, a format-1
+/// change re-runs the producer and re-pins these; after that the corpus is
+/// immutable and a new storage format gets a new corpus beside it (see
+/// `fixtures/sqlite-storage-v1/README.md`).
+const SERVER_SHA256: &str = "c87086eff997417f78894479504ac5444a1c6d51a8bd50e18b41bb5af2563c7d";
+const CLIENT_SHA256: &str = "e0280ce7f06c7362a84221b697af0f5b8866affd1eb101622907a090936a7d21";
 
 const SERVER_NODE: [u8; 16] = [0xa0; 16];
 const CLIENT_NODE: [u8; 16] = [0xc0; 16];

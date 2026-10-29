@@ -274,9 +274,10 @@ pub(crate) fn kind(column: &Column) -> LargeValueKind {
 }
 
 /// The triggers that count every chunked cell of `table`'s large-capable
-/// columns, in the current and history tables, against its epoch, and a
-/// partial index per column of the rows holding one. Plain SQL: a chunked
-/// cell is an integer naming its epoch.
+/// columns, in the current and history tables, against its epoch. Plain
+/// SQL: a chunked cell is an integer naming its epoch. They are also how a
+/// reopened store knows which stored columns are large-capable
+/// ([`stored_large_columns`]).
 ///
 /// One trigger per event and table covers every column: each schema
 /// object costs SQLite a scan of `sqlite_schema` when it is created, so a
@@ -315,14 +316,6 @@ pub(crate) fn triggers(table: &Table, columns: &[&Column], set: Option<&str>) ->
             None => quote(&format!("{target}__lv_{what}")),
             Some(set) => quote(&format!("{target}__lv_{what}_{set}")),
         };
-        for (column, name) in columns.iter().zip(&names) {
-            // Only chunked rows: what a prep scans, near-empty otherwise.
-            sql.push_str(&format!(
-                "CREATE INDEX IF NOT EXISTS {} ON {on} (id) WHERE {};\n",
-                quote(&format!("{target}__lv_{}", column.stored)),
-                chunked_sql(name)
-            ));
-        }
         let each = |statement: &dyn Fn(&str) -> String| -> String {
             names
                 .iter()
@@ -360,6 +353,79 @@ pub(crate) fn triggers(table: &Table, columns: &[&Column], set: Option<&str>) ->
         ));
     }
     sql
+}
+
+/// The stored columns of `table` that the refcount triggers of
+/// [`triggers`] watch: its large-capable columns, under every schema
+/// version the store has held. Read from the `AFTER UPDATE OF` column
+/// list of each `__lv_upd` trigger.
+pub(crate) fn stored_large_columns(
+    conn: &Connection,
+    table: &str,
+) -> Result<BTreeSet<String>, Error> {
+    let prefix = format!("{table}__lv_upd");
+    let sqls: Vec<(String, String)> = conn
+        .prepare("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ?1")
+        .and_then(|mut statement| {
+            statement
+                .query_map([table], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<_, _>>()
+        })
+        .map_err(storage)?;
+    let mut columns = BTreeSet::new();
+    for (name, sql) in sqls {
+        if !name.starts_with(&prefix) {
+            continue;
+        }
+        let watched = update_of_columns(&sql).ok_or_else(|| {
+            Error::new(
+                ErrorCode::Storage,
+                format!("large value: unreadable refcount trigger {name}"),
+            )
+        })?;
+        columns.extend(watched);
+    }
+    Ok(columns)
+}
+
+/// The column list of a trigger [`triggers`] wrote:
+/// `CREATE TRIGGER [IF NOT EXISTS] "name" AFTER UPDATE OF "a", "b" ON ...`.
+/// The quoted name is skipped as a whole, so no name can fake the list.
+fn update_of_columns(sql: &str) -> Option<Vec<String>> {
+    let rest = sql
+        .trim_start()
+        .strip_prefix("CREATE TRIGGER ")?
+        .trim_start();
+    let rest = rest.strip_prefix("IF NOT EXISTS ").unwrap_or(rest);
+    let (_name, rest) = quoted(rest)?;
+    let mut rest = rest.trim_start().strip_prefix("AFTER UPDATE OF ")?;
+    let mut columns = Vec::new();
+    loop {
+        let (column, after) = quoted(rest)?;
+        columns.push(column);
+        match after.trim_start().strip_prefix(',') {
+            Some(more) => rest = more,
+            None => return Some(columns),
+        }
+    }
+}
+
+/// A leading `"..."` identifier (doubled quotes escaped) and what follows.
+fn quoted(sql: &str) -> Option<(String, &str)> {
+    let mut rest = sql.trim_start().strip_prefix('"')?;
+    let mut name = String::new();
+    loop {
+        let end = rest.find('"')?;
+        name.push_str(&rest[..end]);
+        rest = &rest[end + 1..];
+        match rest.strip_prefix('"') {
+            Some(escaped) => {
+                name.push('"');
+                rest = escaped;
+            }
+            None => return Some((name, rest)),
+        }
+    }
 }
 
 /// SQL: whether the cell `cell` is chunked.
@@ -2071,6 +2137,42 @@ mod tests {
         let chunks = Chunks::install(None, None).unwrap();
         conn.execute_batch(DDL).unwrap();
         (conn, chunks)
+    }
+
+    /// A reopened store learns its large-capable columns from the
+    /// refcount triggers, including a set a later schema added and names
+    /// that need quoting, even names that read like the column list.
+    #[test]
+    fn stored_large_columns_reads_every_trigger_set() {
+        use crate::records::ValueType;
+        let (conn, _chunks) = chunks();
+        let docs = "d AFTER UPDATE OF \"x\"";
+        let names = ["body", "odd \"name\", ON x", "count", "late"];
+        let mut table = Table::stored_only(
+            docs.to_owned(),
+            names[..3].iter().map(|name| name.to_string()).collect(),
+        );
+        for column in &mut table.columns[..2] {
+            column.ty = ValueType::String;
+        }
+        crate::db::execute_script(&conn, &table.ddl()).unwrap();
+        let mut late = Table::stored_only(docs.to_owned(), vec![names[3].to_owned()]).columns;
+        late[0].ty = ValueType::Bytes;
+        for target in [docs.to_owned(), format!("{docs}__h")] {
+            conn.execute_batch(&format!("ALTER TABLE {} ADD COLUMN late;", quote(&target)))
+                .unwrap();
+        }
+        crate::db::execute_script(&conn, &triggers(&table, &[&late[0]], Some("late"))).unwrap();
+        let expected: BTreeSet<String> = [names[0], names[1], names[3]].map(str::to_owned).into();
+        assert_eq!(stored_large_columns(&conn, docs).unwrap(), expected);
+
+        // A table without large-capable columns has no triggers.
+        let plain = Table::stored_only("plain".to_owned(), vec!["count".to_owned()]);
+        crate::db::execute_script(&conn, &plain.ddl()).unwrap();
+        assert_eq!(
+            stored_large_columns(&conn, "plain").unwrap(),
+            BTreeSet::new()
+        );
     }
 
     fn chunked(conn: &Connection, chunks: &Chunks, kind: LargeValueKind, logical: &[u8]) -> Sql {

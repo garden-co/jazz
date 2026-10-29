@@ -202,7 +202,7 @@ as-sent version when it has one, by the same lookup as an accepted base. A
 later write of the same upload to the row was built on the earlier one as
 sent, and merges over it the same way. An as-sent version is never a
 version of the row: history reads, reads through a cut, conflict
-analysis and sync all skip it (`_st` below 4), and it stays in history as
+analysis and sync all skip it (bit 2 set), and it stays in history as
 long as the version it shadows. A write built on a rejected commit is rejected
 too (§4.6), so a base is always a value Core accepted. The merge is
 token-level, not tree-aware: it keeps markup tokens whole but does not
@@ -541,12 +541,11 @@ commit (`predecessor_rejected`). It keeps, in the version the commit wrote
 (the row table and history alike), `_base`: the resolved `Seq` as is, or
 the seq the named commit landed at negated; and `_cols`, the authored stored
 columns as a bitmask over their positions in the row table (stored tables
-only grow by `ADD COLUMN`, so a position never moves). An app column cannot
-take the name of a stored row column (`id`, `rid`, `_b`, `_seq`, `_st`,
-`_base`, `_cols`). A delete or restore authors `_st`, the version's state
-bits (bit 0: its commit wrote no content; bit 1: deleted; bit 2, in
-history only: a merged text write as sent, §4.3). Both are NULL on every other replica and for Core's
-own writes: those are made over the current image, so they are never maybe
+only grow by `ADD COLUMN`, so a position never moves). A delete or restore
+authors `_st`, the version's state bits (bit 0: its commit wrote no content;
+bit 1: deleted; bit 2, in history only: a merged text write as sent, §4.3). An app column cannot take the name of a stored row column
+(`id`, `rid`, `_b`, `_seq`, `_st`, `_base`, `_cols`). `_base` and `_cols`
+are NULL on every other replica and for Core's own writes: those are made over the current image, so they are never maybe
 conflicting, and in another write's analysis they author every column. The
 flag, the walk and the merge base are derived on demand
 (`Db::write_conflicts` and `Db::merge_base`, behind the `testing` feature);

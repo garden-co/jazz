@@ -425,7 +425,7 @@ impl Inner {
         let sql = format!(
             "SELECT _seq, _base, _cols FROM {} WHERE id = ?1 AND _b = ?2 \
              UNION ALL SELECT _seq, _base, _cols FROM {} WHERE id = ?1 AND _b = ?2 \
-             AND _st < {STATE_AS_SENT} ORDER BY 1",
+             AND (_st & {STATE_AS_SENT}) = 0 ORDER BY 1",
             quote(table),
             quote(&format!("{table}__h"))
         );

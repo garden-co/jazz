@@ -650,18 +650,12 @@ fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> 
             })
             .collect();
         let mut table = Table::stored_only(name.clone(), columns);
-        // A large-capable column has a partial index of its chunked rows
-        // (`large::triggers`): its kind comes from the schemas unioned in.
+        // A large-capable column is one the large-value refcount triggers
+        // watch (`large::triggers`): its kind comes from the schemas unioned
+        // in.
+        let large = crate::large::stored_large_columns(conn, &name)?;
         for column in &mut table.columns {
-            let index = format!("{name}__lv_{}", column.stored);
-            let large: bool = conn
-                .query_row(
-                    "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1)",
-                    [&index],
-                    |row| row.get(0),
-                )
-                .map_err(storage)?;
-            if large {
+            if large.contains(&column.stored) {
                 column.ty = ValueType::Nullable(Box::new(ValueType::String));
             }
         }
@@ -3317,7 +3311,7 @@ impl Inner {
         key: &[u8],
     ) -> Result<Option<(u64, bool)>, Error> {
         let sql = format!(
-            "SELECT _seq, _st >= 2 FROM {} WHERE id = ?1 AND _b = ?2",
+            "SELECT _seq, (_st & {STATE_DELETED}) <> 0 FROM {} WHERE id = ?1 AND _b = ?2",
             quote(table)
         );
         match self.conn.cached_row(
@@ -3353,7 +3347,7 @@ impl Inner {
             return Ok(None);
         };
         let sql = format!(
-            "SELECT _st >= 2 FROM {} WHERE id = ?1 AND _b = ?2 AND _seq = ?3",
+            "SELECT (_st & {STATE_DELETED}) <> 0 FROM {} WHERE id = ?1 AND _b = ?2 AND _seq = ?3",
             quote(&format!("{table}__h"))
         );
         let deleted: i64 = self
@@ -3382,7 +3376,7 @@ impl Inner {
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!(
-            "SELECT MAX(_seq) FROM {} WHERE id = ?1 AND _b = ?2 AND _st < {STATE_AS_SENT} \
+            "SELECT MAX(_seq) FROM {} WHERE id = ?1 AND _b = ?2 AND (_st & {STATE_AS_SENT}) = 0 \
              AND (_seq <= ?3 OR _seq IN ({extra}))",
             quote(&format!("{table}__h"))
         );
@@ -3931,7 +3925,7 @@ impl Inner {
     /// Whether `row`'s current version on branch `key` is a tombstone.
     fn is_deleted_version(&self, table: &Table, row: RowUuid, key: &[u8]) -> Result<bool, Error> {
         let sql = format!(
-            "SELECT _st >= 2 FROM {} WHERE id = ?1 AND _b = ?2",
+            "SELECT (_st & {STATE_DELETED}) <> 0 FROM {} WHERE id = ?1 AND _b = ?2",
             quote(&table.stored)
         );
         let deleted: Option<i64> = self
@@ -4566,7 +4560,7 @@ impl Inner {
                 .conn
                 .cached_row(
                     &format!(
-                        "SELECT count(*) FROM {} WHERE _st >= {STATE_AS_SENT}",
+                        "SELECT count(*) FROM {} WHERE (_st & {STATE_AS_SENT}) <> 0",
                         quote(&format!("{stored}__h"))
                     ),
                     [],
@@ -5520,7 +5514,7 @@ impl Inner {
                 continue;
             }
             let sql = format!(
-                "SELECT {} FROM {} WHERE id = ?1 AND _b = ?2 AND _st < 2",
+                "SELECT {} FROM {} WHERE id = ?1 AND _b = ?2 AND (_st & {STATE_DELETED}) = 0",
                 quote(&column.stored),
                 quote(&t.stored)
             );

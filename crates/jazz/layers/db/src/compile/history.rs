@@ -169,7 +169,7 @@ impl Ctx<'_> {
             keep.push(format!("v._b = {head}"));
         }
         if !include_deleted {
-            gate.push("a._st < 2".to_owned());
+            gate.push(format!("(a._st & {STATE_DELETED}) = 0"));
         }
         if let Some(session) = self.policy {
             gate.push(self.read_policy(table, "a", session)?);
