@@ -938,7 +938,7 @@ pub struct SubscriptionServerFailureReason {
     pub reason_type: String,
     /// Stable, client-safe failure class.
     #[napi(
-        ts_type = "'TableNotFound' | 'SchemaResolution' | 'QueryValidation' | 'QueryLowering' | 'PolicyEvaluation' | 'Internal' | 'QueryResultProtocol'"
+        ts_type = "'TableNotFound' | 'SchemaResolution' | 'QueryValidation' | 'QueryLowering' | 'PolicyEvaluation' | 'Internal' | 'QueryResultProtocol' | 'StrandedStore'"
     )]
     pub code: String,
 }

@@ -554,6 +554,7 @@ it("decodes typed and legacy ABI 3 subscription rejections without exposing diag
   // These bytes are also pinned by the Rust foreground codec test.
   for (const [bytes, code] of [
     [Uint8Array.of(4, 1, 1, 19, ...ascii("QueryResultProtocol")), "QueryResultProtocol"],
+    [Uint8Array.of(4, 1, 1, 13, ...ascii("StrandedStore")), "StrandedStore"],
     [Uint8Array.of(4, 1, 1, 38, ...ascii("Protocol: malformed membership payload")), "Internal"],
   ] as const) {
     expect(relay.decodeNativeForegroundResponse(bytes)).toEqual({

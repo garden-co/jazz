@@ -268,7 +268,8 @@ type NativeForegroundSubscriptionFailureCode =
   | "QueryLowering"
   | "PolicyEvaluation"
   | "Internal"
-  | "QueryResultProtocol";
+  | "QueryResultProtocol"
+  | "StrandedStore";
 
 function isNativeForegroundSubscriptionFailureCode(
   value: string,
@@ -280,7 +281,8 @@ function isNativeForegroundSubscriptionFailureCode(
     value === "QueryLowering" ||
     value === "PolicyEvaluation" ||
     value === "Internal" ||
-    value === "QueryResultProtocol"
+    value === "QueryResultProtocol" ||
+    value === "StrandedStore"
   );
 }
 

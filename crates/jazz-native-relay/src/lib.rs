@@ -3051,6 +3051,7 @@ mod tests {
                 "QueryResultProtocol",
                 b"\x04\x01\x01\x13QueryResultProtocol".as_slice(),
             ),
+            ("StrandedStore", b"\x04\x01\x01\x0dStrandedStore".as_slice()),
             (
                 "Protocol: malformed membership payload",
                 b"\x04\x01\x01\x26Protocol: malformed membership payload".as_slice(),

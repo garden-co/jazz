@@ -1146,6 +1146,7 @@ fn a_catalogue_the_store_cannot_mirror_refuses_remote_reads_and_keeps_local_ones
         // Offline under v1, then v3 without the lenses between: `tasks` is
         // stored here as itself, beside v1's `todos`.
         let client = open_at(v1(), &path);
+        client.become_replica();
         insert(&client, "todos", 2, "title", "v1 row");
     }
     let client = open_at(v3(), &path);
