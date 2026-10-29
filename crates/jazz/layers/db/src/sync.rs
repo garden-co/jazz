@@ -3733,6 +3733,20 @@ impl Inner {
         Ok(())
     }
 
+    /// Whether stored table `table` holds a version of `row` on any branch.
+    fn holds_id(&self, table: &str, row: RowUuid) -> Result<bool, Error> {
+        self.conn
+            .cached_row(
+                &format!(
+                    "SELECT EXISTS (SELECT 1 FROM {} WHERE id = ?1)",
+                    quote(table)
+                ),
+                [row.0.as_bytes().to_vec()],
+                |r| r.get::<_, bool>(0),
+            )
+            .map_err(storage)
+    }
+
     pub(super) fn is_withheld(&self, table: &str, row: RowUuid, key: &[u8]) -> Result<bool, Error> {
         if !self.withheld.get() {
             return Ok(false);
@@ -8093,12 +8107,35 @@ impl Inner {
 // ---- server ---------------------------------------------------------------
 
 impl Db {
-    /// Serve a client over `transport` as `identity`.
+    /// Whether this store may serve a session of `identity`. A store
+    /// configured as a user serves only that user: it relays what its
+    /// sessions write under its own identity, so another user's writes
+    /// would be attributed to this one. Another identity is refused with
+    /// [`Reason::IdentityMismatch`]. A system store (a server) serves any
+    /// identity.
+    pub fn check_serves(&self, identity: AuthorSubject) -> Result<(), Error> {
+        let own = self.inner.borrow().identity.author;
+        if matches!(own, AuthorSubject::Authenticated(_)) && identity != own {
+            return Err(Error::with_reason(
+                ErrorCode::Protocol,
+                Reason::IdentityMismatch,
+                format!(
+                    "a store configured as {} serves only its own identity, not {}",
+                    own.canonical(),
+                    identity.canonical()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Serve a client over `transport` as `identity`, once
+    /// [`Self::check_serves`] allows it.
     pub fn accept_subscriber(
         &self,
         transport: Box<dyn Transport>,
         identity: AuthorSubject,
-    ) -> SubscriberId {
+    ) -> Result<SubscriberId, Error> {
         self.accept_subscriber_with_claims(transport, identity, None)
     }
 
@@ -8109,7 +8146,8 @@ impl Db {
         transport: Box<dyn Transport>,
         identity: AuthorSubject,
         claims: Option<BTreeMap<String, Value>>,
-    ) -> SubscriberId {
+    ) -> Result<SubscriberId, Error> {
+        self.check_serves(identity)?;
         let mut inner = self.inner.borrow_mut();
         // One relay tier only (SPEC 9 §9.5).
         debug_assert!(
@@ -8131,7 +8169,7 @@ impl Db {
                 inner.sessions.len() - 1
             }
         };
-        SubscriberId { slot, generation }
+        Ok(SubscriberId { slot, generation })
     }
 
     /// The handle of the session in `slot`.
@@ -9027,10 +9065,11 @@ impl Db {
                 // A version that exists but is unreadable leaves the id
                 // watched: the replica may hold the row on another branch
                 // (a branch view's base, the main row under a draft). A
-                // relay's marker stands for such a version too.
-                if inner.current_image(&table, row, &key)?.is_some()
-                    || inner.is_withheld(&table, row, &key)?
-                {
+                // relay's marker stands for such a version too. A relay may
+                // not hold the version it evicts at all, while its session
+                // holds the row on another branch: any version of the id
+                // here keeps it watched (#4484).
+                if inner.is_withheld(&table, row, &key)? || inner.holds_id(&table, row)? {
                     unreadable.insert((table.clone(), row, key.clone()));
                 } else {
                     gone.push((table.clone(), *row.0.as_bytes()));

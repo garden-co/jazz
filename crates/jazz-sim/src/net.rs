@@ -411,7 +411,10 @@ impl Sim {
         let identity = conn.identity;
         let upstream = block_on(self.db(client).connect_upstream(client_side));
         self.db(client).set_remote_link_hint(RemoteLinkHint::Live);
-        let subscriber = self.db(&server).accept_subscriber(server_side, identity);
+        let subscriber = self
+            .db(&server)
+            .accept_subscriber(server_side, identity)
+            .expect("the sim's server serves the link");
         let conn = self.connections.get_mut(client).expect("connection");
         conn.upstream = Some(upstream);
         conn.subscriber = Some(subscriber);

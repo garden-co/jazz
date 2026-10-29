@@ -458,7 +458,8 @@ impl SyncFixture {
         let upstream = block_on(db.connect_upstream(client_side));
         let subscriber = self
             .server
-            .accept_subscriber(server_side, AuthorSubject::SYSTEM);
+            .accept_subscriber(server_side, AuthorSubject::SYSTEM)
+            .unwrap();
         let prepared = db
             .prepare_query(&Query::from("docs"))
             .expect("prepare shelf");

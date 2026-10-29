@@ -170,14 +170,16 @@ fn connect_wires(server: &Db, client: &Db, identity: AuthorSubject) -> (Log, Wir
         inbound: down.clone(),
         log: log.clone(),
     })));
-    server.accept_subscriber(
-        Box::new(Pipe {
-            out: down.clone(),
-            inbound: up.clone(),
-            log: log.clone(),
-        }),
-        identity,
-    );
+    server
+        .accept_subscriber(
+            Box::new(Pipe {
+                out: down.clone(),
+                inbound: up.clone(),
+                log: log.clone(),
+            }),
+            identity,
+        )
+        .unwrap();
     (log, up, down)
 }
 
@@ -659,14 +661,16 @@ fn connect_spied(server: &Db, client: &Db, identity: AuthorSubject) -> (Sizes, S
         inbound: down.clone(),
         sizes: sent.clone(),
     })));
-    server.accept_subscriber(
-        Box::new(Spy {
-            out: down,
-            inbound: up,
-            sizes: received.clone(),
-        }),
-        identity,
-    );
+    server
+        .accept_subscriber(
+            Box::new(Spy {
+                out: down,
+                inbound: up,
+                sizes: received.clone(),
+            }),
+            identity,
+        )
+        .unwrap();
     (sent, received)
 }
 
@@ -822,16 +826,18 @@ fn a_delta_over_a_version_the_replica_lacks_heals_by_asking_for_the_row() {
         inbound: down.clone(),
         log: Log::default(),
     })));
-    server.accept_subscriber(
-        Box::new(Spoil {
-            out: down,
-            inbound: up,
-            spoiled: spoiled.clone(),
-            holds: holds.clone(),
-            lose_holds: false,
-        }),
-        user(2),
-    );
+    server
+        .accept_subscriber(
+            Box::new(Spoil {
+                out: down,
+                inbound: up,
+                spoiled: spoiled.clone(),
+                holds: holds.clone(),
+                lose_holds: false,
+            }),
+            user(2),
+        )
+        .unwrap();
     let _bob_stream = subscribe(&bob, Query::from("docs"));
     let mut expected = text(6, LARGE);
     insert(
@@ -880,16 +886,18 @@ fn a_row_asked_for_whole_heals_after_its_hold_is_lost() {
         inbound: down.clone(),
         log: Log::default(),
     })));
-    server.accept_subscriber(
-        Box::new(Spoil {
-            out: down,
-            inbound: up,
-            spoiled: spoiled.clone(),
-            holds: holds.clone(),
-            lose_holds: true,
-        }),
-        user(2),
-    );
+    server
+        .accept_subscriber(
+            Box::new(Spoil {
+                out: down,
+                inbound: up,
+                spoiled: spoiled.clone(),
+                holds: holds.clone(),
+                lose_holds: true,
+            }),
+            user(2),
+        )
+        .unwrap();
     let bob_stream = subscribe(&bob, Query::from("docs"));
     let mut expected = text(6, LARGE);
     insert(
@@ -2036,9 +2044,9 @@ fn requests(log: &Log) -> usize {
 fn a_range_read_through_a_relay_fetches_only_its_path_at_every_hop() {
     let core = open(0, AuthorSubject::SYSTEM);
     let relay = open(5, user(5));
-    let tab = open(6, user(6));
+    let tab = open(6, user(5));
     let upstream = connect(&core, &relay, user(5));
-    let downstream = connect(&relay, &tab, user(6));
+    let downstream = connect(&relay, &tab, user(5));
     let blob: Vec<u8> = (0..LARGE * 16).map(|n| (n * 7 % 251) as u8).collect();
     insert(
         &core,
@@ -2074,8 +2082,8 @@ fn a_range_read_through_a_relay_fetches_only_its_path_at_every_hop() {
     );
     assert_eq!(at_tab, at_relay, "the tab holds the same path");
     // A second tab reading the same range is answered by the relay alone.
-    let other = open(7, user(7));
-    let beside = connect(&relay, &other, user(7));
+    let other = open(7, user(5));
+    let beside = connect(&relay, &other, user(5));
     let _other_stream = subscribe(&other, Query::from("docs").select(["body"]));
     pump_chain(&core, &relay, &other);
     upstream.borrow_mut().clear();
@@ -2091,9 +2099,9 @@ fn a_range_read_through_a_relay_fetches_only_its_path_at_every_hop() {
 fn a_whole_value_reaches_a_tab_through_its_relay() {
     let core = open(0, AuthorSubject::SYSTEM);
     let relay = open(5, user(5));
-    let tab = open(6, user(6));
+    let tab = open(6, user(5));
     connect(&core, &relay, user(5));
-    connect(&relay, &tab, user(6));
+    connect(&relay, &tab, user(5));
     let body = text(3, LARGE);
     insert(
         &core,
@@ -2116,9 +2124,9 @@ fn a_whole_value_reaches_a_tab_through_its_relay() {
 fn a_relay_forwards_no_pull_its_tab_may_not_make() {
     let core = open(0, AuthorSubject::SYSTEM);
     let relay = open(5, user(5));
-    let tab = open(9, user(9));
+    let tab = open(9, user(5));
     let upstream = connect(&core, &relay, user(5));
-    let (_, up, down) = connect_wires(&relay, &tab, user(9));
+    let (_, up, down) = connect_wires(&relay, &tab, user(5));
     let _relay_stream = subscribe(&relay, Query::from("docs").select(["blob"]));
     let _stream = subscribe(&tab, Query::from("docs").select(["blob"]));
     pump_chain(&core, &relay, &tab);
@@ -2293,9 +2301,9 @@ fn a_partial_select_through_a_relay_fetches_only_its_range_and_follows_edits() {
     use jazz::query::Part;
     let core = open(0, AuthorSubject::SYSTEM);
     let relay = open(5, user(5));
-    let tab = open(6, user(6));
+    let tab = open(6, user(5));
     let upstream = connect(&core, &relay, user(5));
-    let downstream = connect(&relay, &tab, user(6));
+    let downstream = connect(&relay, &tab, user(5));
     let mut blob: Vec<u8> = (0..LARGE * 16).map(|n| (n * 7 % 251) as u8).collect();
     insert(
         &core,
@@ -2371,9 +2379,9 @@ fn a_partial_select_in_an_include_fetches_only_its_range_through_a_relay() {
     use jazz::result_tree::ResultRelation;
     let core = open(0, AuthorSubject::SYSTEM);
     let relay = open(5, user(5));
-    let tab = open(6, user(6));
+    let tab = open(6, user(5));
     let upstream = connect(&core, &relay, user(5));
-    let downstream = connect(&relay, &tab, user(6));
+    let downstream = connect(&relay, &tab, user(5));
     let mut blob: Vec<u8> = (0..LARGE * 16).map(|n| (n * 11 % 251) as u8).collect();
     insert(
         &core,

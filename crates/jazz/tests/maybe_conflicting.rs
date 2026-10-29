@@ -178,13 +178,15 @@ impl Net {
         match client.via {
             None => self
                 .core
-                .accept_subscriber(server_side, author(client.node)),
+                .accept_subscriber(server_side, author(client.node))
+                .unwrap(),
             Some(_) => self
                 .worker
                 .as_ref()
                 .expect("worker")
                 .db
-                .accept_subscriber(server_side, author(WORKER)),
+                .accept_subscriber(server_side, author(WORKER))
+                .unwrap(),
         };
     }
 
@@ -192,7 +194,9 @@ impl Net {
         let (client_side, server_side) = duplex();
         let worker = self.worker.as_mut().expect("worker");
         worker.up = Some(block_on(worker.db.connect_upstream(client_side)));
-        self.core.accept_subscriber(server_side, author(WORKER));
+        self.core
+            .accept_subscriber(server_side, author(WORKER))
+            .unwrap();
     }
 
     fn worker_offline(&mut self) {
@@ -713,7 +717,8 @@ fn a_relays_commit_a_write_was_built_on_is_what_its_writer_saw() {
     // renamed to the worker's own commits.
     let core = open(CORE, AuthorSubject::SYSTEM);
     let (mut relay, server_side) = duplex();
-    core.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+    core.accept_subscriber(server_side, AuthorSubject::SYSTEM)
+        .unwrap();
     let relay_node = [0x77; 16];
     let row = block_on(core.insert(
         "todos",

@@ -59,8 +59,8 @@ const CLIENT_FILE: &str = "sqlite-storage-v1/client.sqlite.gz.base64";
 /// change re-runs the producer and re-pins these; after that the corpus is
 /// immutable and a new storage format gets a new corpus beside it (see
 /// `fixtures/sqlite-storage-v1/README.md`).
-const SERVER_SHA256: &str = "a53f081bbd13511d47eaef148de7cf4ee3f0744bf8c1854af044a0329810a828";
-const CLIENT_SHA256: &str = "789ba2976e16213e83be2260bea6f973a26517d0d54e2b6cbaa44c96da66357f";
+const SERVER_SHA256: &str = "0e2551f8b030e01ccf79f524f36bc825acf2edafa5bd5388eb8ca47a91c7e026";
+const CLIENT_SHA256: &str = "d66d83434d1eadb2c352a08823ddbd02484bfaf6a11456dfab3dfe91b114adf9";
 
 const SERVER_NODE: [u8; 16] = [0xa0; 16];
 const CLIENT_NODE: [u8; 16] = [0xc0; 16];
@@ -492,7 +492,7 @@ fn produce_sqlite_storage_corpus_v1() {
         // its writes never reach the server before it quits.
         let (client_side, server_side) = duplex();
         let _upstream = block_on(client.connect_upstream(client_side));
-        server.accept_subscriber(server_side, user(3));
+        server.accept_subscriber(server_side, user(3)).unwrap();
         let streams: Vec<_> = ["projects", "documents"]
             .into_iter()
             .map(|table| {
@@ -905,7 +905,7 @@ fn pinned_sqlite_corpus_reopens_and_accepts_current_writes() {
         // Its pending uploads are resent and land on the server.
         let (client_side, server_side) = duplex();
         let _upstream = block_on(client.connect_upstream(client_side));
-        server.accept_subscriber(server_side, user(3));
+        server.accept_subscriber(server_side, user(3)).unwrap();
         drive(
             &[&client, &server, &client],
             client.wait_for_pending_writes(DurabilityTier::Global),

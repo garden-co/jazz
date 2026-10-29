@@ -125,14 +125,18 @@ impl Net {
         }
         let (client_side, server_side) = duplex();
         block_on(net.direct.connect_upstream(client_side));
-        net.core.accept_subscriber(server_side, author(DIRECT));
+        net.core
+            .accept_subscriber(server_side, author(DIRECT))
+            .unwrap();
         for i in 0..tabs {
             let tab = open(WORKER + 1 + i as u8, author(WORKER));
             tab.set_non_durable_client();
             tab.set_remote_link_hint(RemoteLinkHint::Live);
             let (client_side, server_side) = duplex();
             block_on(tab.connect_upstream(client_side));
-            net.worker.accept_subscriber(server_side, author(WORKER));
+            net.worker
+                .accept_subscriber(server_side, author(WORKER))
+                .unwrap();
             net.tabs.push(tab);
         }
         net
@@ -141,7 +145,9 @@ impl Net {
     fn connect_worker(&mut self) {
         let (client_side, server_side) = duplex();
         self.worker_up = Some(block_on(self.worker.connect_upstream(client_side)));
-        self.core.accept_subscriber(server_side, author(WORKER));
+        self.core
+            .accept_subscriber(server_side, author(WORKER))
+            .unwrap();
     }
 
     fn worker_offline(&mut self) {
@@ -867,17 +873,17 @@ fn a_snapshot_pins_at_the_sequencer_that_answered_its_read() {
     worker.set_remote_link_hint(RemoteLinkHint::Live);
     let (c, s) = duplex();
     let worker_up = block_on(worker.connect_upstream(c));
-    core.accept_subscriber(s, author(WORKER));
+    core.accept_subscriber(s, author(WORKER)).unwrap();
     let direct = open(DIRECT, author(DIRECT));
     let (c, s) = duplex();
     let _direct_up = block_on(direct.connect_upstream(c));
-    core.accept_subscriber(s, author(DIRECT));
+    core.accept_subscriber(s, author(DIRECT)).unwrap();
     let tab = open(WORKER + 1, author(WORKER));
     tab.set_non_durable_client();
     tab.set_remote_link_hint(RemoteLinkHint::Live);
     let (c, s) = duplex();
     let _tab_up = block_on(tab.connect_upstream(c));
-    worker.accept_subscriber(s, author(WORKER));
+    worker.accept_subscriber(s, author(WORKER)).unwrap();
     let pump = |n: usize| {
         for _ in 0..n {
             block_on(tab.tick()).unwrap();
@@ -1001,13 +1007,13 @@ fn a_resend_of_a_settled_commit_is_not_parked_on_an_unrelated_pending_commit() {
     worker.set_remote_link_hint(RemoteLinkHint::Live);
     let (c, s) = duplex();
     let worker_up = block_on(worker.connect_upstream(c));
-    core.accept_subscriber(s, author(WORKER));
+    core.accept_subscriber(s, author(WORKER)).unwrap();
     let tab = open(WORKER + 1, author(WORKER));
     tab.set_non_durable_client();
     tab.set_remote_link_hint(RemoteLinkHint::Live);
     let (c, s) = duplex();
     let tab_up = block_on(tab.connect_upstream(c));
-    worker.accept_subscriber(s, author(WORKER));
+    worker.accept_subscriber(s, author(WORKER)).unwrap();
     let pump = |n: usize| {
         for _ in 0..n {
             block_on(tab.tick()).unwrap();
@@ -1053,7 +1059,7 @@ fn a_resend_of_a_settled_commit_is_not_parked_on_an_unrelated_pending_commit() {
     let (c, s) = duplex();
     let _tab_up = block_on(tab.connect_upstream(c));
     tab.set_remote_link_hint(RemoteLinkHint::Live);
-    worker.accept_subscriber(s, author(WORKER));
+    worker.accept_subscriber(s, author(WORKER)).unwrap();
     let mut wait = pin!(tab.wait_for_transaction(tx, DurabilityTier::Global));
     let mut context = Context::from_waker(Waker::noop());
     let mut fate = None;
@@ -1083,13 +1089,13 @@ fn a_resent_commit_settled_upstream_reaches_global_and_the_tab_commits_on() {
     worker.set_remote_link_hint(RemoteLinkHint::Live);
     let (c, s) = duplex();
     let _worker_up = block_on(worker.connect_upstream(c));
-    core.accept_subscriber(s, author(WORKER));
+    core.accept_subscriber(s, author(WORKER)).unwrap();
     let tab = open(WORKER + 1, author(WORKER));
     tab.set_non_durable_client();
     tab.set_remote_link_hint(RemoteLinkHint::Live);
     let (c, s) = duplex();
     let tab_up = block_on(tab.connect_upstream(c));
-    worker.accept_subscriber(s, author(WORKER));
+    worker.accept_subscriber(s, author(WORKER)).unwrap();
     let pump = |n: usize| {
         for _ in 0..n {
             block_on(tab.tick()).unwrap();
@@ -1125,7 +1131,7 @@ fn a_resent_commit_settled_upstream_reaches_global_and_the_tab_commits_on() {
     let (c, s) = duplex();
     let _tab_up = block_on(tab.connect_upstream(c));
     tab.set_remote_link_hint(RemoteLinkHint::Live);
-    worker.accept_subscriber(s, author(WORKER));
+    worker.accept_subscriber(s, author(WORKER)).unwrap();
     let mut wait = pin!(tab.wait_for_transaction(tx, DurabilityTier::Global));
     let mut context = Context::from_waker(Waker::noop());
     let mut fate = None;

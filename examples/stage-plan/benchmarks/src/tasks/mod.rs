@@ -188,7 +188,9 @@ impl Fixture {
             let db = block_on(Db::open(DbConfig::new(self.schema.clone(), identity(2)))).unwrap();
             let (client_side, server_side) = duplex();
             let upstream = block_on(db.connect_upstream(client_side));
-            worker.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+            worker
+                .accept_subscriber(server_side, AuthorSubject::SYSTEM)
+                .unwrap();
             let all = db.prepare_query(&Query::from("tasks")).unwrap();
             let stream = block_on(db.subscribe(&all, ReadOpts::default())).unwrap();
             pump(&worker, &db);

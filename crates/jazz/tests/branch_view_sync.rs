@@ -154,7 +154,7 @@ fn connect(server: &Db, client: &Db) -> (jazz::db::Upstream, Rc<RefCell<usize>>)
         shipped: Some(shipped.clone()),
     });
     let upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice());
+    server.accept_subscriber(server_side, alice()).unwrap();
     (upstream, shipped)
 }
 
@@ -1895,4 +1895,54 @@ fn a_row_regained_through_a_subscription_is_evicted_again() {
     );
     pump(&server, &client);
     assert_eq!(titles(&client, &by_rank(), on_main), ["y"]);
+}
+
+/// A tab writes main's x through its worker; Bob writes a draft version of
+/// x the tab may not read. The tab's main x stays current through the
+/// worker, with or without a view of the draft (#4484).
+#[test]
+fn a_tabs_own_row_stays_current_through_its_worker_after_an_unreadable_draft_version() {
+    for open_view in [false, true] {
+        let server = open(0x01, AuthorSubject::SYSTEM);
+        server.set_authority();
+        let worker = open(0x02, alice());
+        std::mem::forget(connect(&server, &worker).0);
+        let tab = open(0x03, alice());
+        tab.set_non_durable_client();
+        std::mem::forget(connect(&worker, &tab).0);
+        let tick = || {
+            for _ in 0..6 {
+                block_on(tab.tick()).unwrap();
+                block_on(worker.tick()).unwrap();
+                block_on(server.tick()).unwrap();
+                block_on(worker.tick()).unwrap();
+                block_on(tab.tick()).unwrap();
+            }
+        };
+        let b = if open_view { 0xc1 } else { 0xc3 };
+        let (main, draft) = (branch(b), branch(b + 1));
+        put(&server, &main, 0x46, "y", 2);
+        put(&tab, &main, 0x45, "x", 1);
+        tick();
+        set(&server, 0x45, &draft, &main, &[("owner", subject(bob()))]);
+        tick();
+        let all = tab.prepare_query(&by_rank()).unwrap();
+        let view = ReadOpts::default()
+            .branch_view(draft.clone(), Some(BranchViewBase::Current(main.clone())));
+        let _v = open_view.then(|| block_on(tab.subscribe(&all, view)).unwrap());
+        tick();
+        set(
+            &server,
+            0x45,
+            &main,
+            &main,
+            &[("title", Value::String("x main v2".into()))],
+        );
+        tick();
+        let on_main = ReadOpts::default().branch_view(main.clone(), None);
+        assert!(
+            titles(&tab, &by_rank(), on_main).contains(&"x main v2".to_owned()),
+            "open_view {open_view}"
+        );
+    }
 }

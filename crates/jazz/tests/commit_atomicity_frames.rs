@@ -100,10 +100,12 @@ fn a_commit_split_across_frames_is_applied_whole() {
         released: server_released,
     };
     block_on(reader.connect_upstream(Box::new(WireTransportAdapter::current(reader_side))));
-    server.accept_subscriber(
-        Box::new(WireTransportAdapter::current(server_side)),
-        reader_author,
-    );
+    server
+        .accept_subscriber(
+            Box::new(WireTransportAdapter::current(server_side)),
+            reader_author,
+        )
+        .unwrap();
 
     // Keep the reader subscribed to every note, and let the handshake and
     // the empty first result through.
@@ -197,10 +199,12 @@ fn a_split_commit_a_full_queue_interrupts_arrives_whole() {
         released: Rc::new(RefCell::new(usize::MAX)),
     };
     block_on(writer.connect_upstream(Box::new(WireTransportAdapter::current(writer_side))));
-    server.accept_subscriber(
-        Box::new(WireTransportAdapter::current(server_side)),
-        writer_author,
-    );
+    server
+        .accept_subscriber(
+            Box::new(WireTransportAdapter::current(server_side)),
+            writer_author,
+        )
+        .unwrap();
     for _ in 0..20 {
         block_on(writer.tick()).unwrap();
         block_on(server.tick()).unwrap();
@@ -278,14 +282,16 @@ fn link(
             room: Rc::clone(room),
         }))),
     );
-    server.accept_subscriber(
-        Box::new(WireTransportAdapter::current(GatedWire {
-            outbound: to_writer,
-            inbound: to_server,
-            released: Rc::new(RefCell::new(usize::MAX)),
-        })),
-        writer_author,
-    )
+    server
+        .accept_subscriber(
+            Box::new(WireTransportAdapter::current(GatedWire {
+                outbound: to_writer,
+                inbound: to_server,
+                released: Rc::new(RefCell::new(usize::MAX)),
+            })),
+            writer_author,
+        )
+        .unwrap()
 }
 
 fn commit_notes(writer: &Db, rows: usize) {

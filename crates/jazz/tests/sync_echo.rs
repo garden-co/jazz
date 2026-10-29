@@ -164,14 +164,16 @@ fn connect_raw(
         inbound: down.clone(),
         log: None,
     })));
-    server.accept_subscriber(
-        Box::new(Pipe {
-            out: down,
-            inbound: up.clone(),
-            log: Some(log.clone()),
-        }),
-        identity,
-    );
+    server
+        .accept_subscriber(
+            Box::new(Pipe {
+                out: down,
+                inbound: up.clone(),
+                log: Some(log.clone()),
+            }),
+            identity,
+        )
+        .unwrap();
     (upstream, log, up)
 }
 
