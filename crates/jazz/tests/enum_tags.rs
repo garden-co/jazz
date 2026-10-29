@@ -131,13 +131,15 @@ fn link_as(client: &Db, server: &Db, author: AuthorSubject) -> jazz::db::Upstrea
         out: up.clone(),
         inbound: down.clone(),
     })));
-    server.accept_subscriber(
-        Box::new(Pipe {
-            out: down,
-            inbound: up,
-        }),
-        author,
-    );
+    server
+        .accept_subscriber(
+            Box::new(Pipe {
+                out: down,
+                inbound: up,
+            }),
+            author,
+        )
+        .unwrap();
     link
 }
 

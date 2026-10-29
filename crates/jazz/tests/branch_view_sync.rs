@@ -154,7 +154,7 @@ fn connect(server: &Db, client: &Db) -> (jazz::db::Upstream, Rc<RefCell<usize>>)
         shipped: Some(shipped.clone()),
     });
     let upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice());
+    server.accept_subscriber(server_side, alice()).unwrap();
     (upstream, shipped)
 }
 
