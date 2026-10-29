@@ -29,7 +29,7 @@ use crate::kv::HostKv;
 use crate::kv::HostSql;
 use jazz::catalogue::{CatalogueChange, CatalogueRows};
 use jazz::db::{
-    Db, DbConfig, DbIdentity, FileOptions, LensEffects, Reason, SubscriberId, SyncMessage,
+    Db, DbConfig, DbIdentity, FileOptions, LensEffects, Outcome, Reason, SubscriberId, SyncMessage,
     Transport, TransportError, WireError, block_on,
 };
 use jazz::host::{HostReader, HostTable, HostTables, StoreFile};
@@ -1031,10 +1031,7 @@ impl ServerRuntimeHandle {
             },
         );
         let opened = self
-            .run(move |owner| {
-                owner.open_session(session, served_as, claims, output, egress);
-                Ok(())
-            })
+            .run(move |owner| owner.open_session(session, served_as, claims, output, egress))
             .await;
         if opened.is_err() {
             self.edges()?.remove(&session);
@@ -1588,6 +1585,7 @@ impl Owner {
         let db = block_on(Db::open_file(config(current), file))
             .map_err(|error| format!("open server store: {error}"))?;
         db.set_authority();
+        db.track_closed_subscribers();
         db.set_slow_query_threshold(slow_query_threshold());
         let catalogue = Catalogue::load(&db.catalogue().map_err(|error| error.to_string())?)?;
         Ok(Self {
@@ -1650,7 +1648,7 @@ impl Owner {
         claims: BTreeMap<String, Value>,
         output: tokio_mpsc::UnboundedSender<Outbound>,
         egress: Arc<AtomicUsize>,
-    ) {
+    ) -> Result<(), String> {
         let claims = (identity != AuthorSubject::SYSTEM).then(|| {
             self.db.set_identity_claims(identity, claims.clone());
             claims
@@ -1663,11 +1661,14 @@ impl Owner {
             done: std::cell::Cell::new(false),
             slice: Rc::clone(&self.slice),
         });
-        let subscriber = self.db.accept_subscriber_with_claims(
-            Box::new(SessionTransport(Rc::clone(&queues))),
-            identity,
-            claims,
-        );
+        let subscriber = self
+            .db
+            .accept_subscriber_with_claims(
+                Box::new(SessionTransport(Rc::clone(&queues))),
+                identity,
+                claims,
+            )
+            .map_err(|error| error.to_string())?;
         self.sessions.insert(
             session,
             OwnerSession {
@@ -1688,6 +1689,7 @@ impl Owner {
                 egress,
             },
         );
+        Ok(())
     }
 
     fn receive(&mut self, session: ServerSession, frames: Vec<AbiBytes>) {
@@ -1709,13 +1711,17 @@ impl Owner {
                         .borrow_mut()
                         .push_back(SyncMessage::Fate {
                             tx,
-                            through: self.db.seq_high_water(),
-                            result: Err(WireError::Rejected {
-                                reason: Some(Reason::PermissionsHeadMissing.as_str().to_owned()),
-                                message: "permissions_head_missing: no published permissions head"
-                                    .to_owned(),
-                            }),
-                            held: Vec::new(),
+                            outcome: Outcome::Refused {
+                                through: self.db.seq_high_water(),
+                                error: WireError::Rejected {
+                                    reason: Some(
+                                        Reason::PermissionsHeadMissing.as_str().to_owned(),
+                                    ),
+                                    message:
+                                        "permissions_head_missing: no published permissions head"
+                                            .to_owned(),
+                                },
+                            },
                             global: true,
                         });
                 }
@@ -1787,7 +1793,7 @@ impl Owner {
             else {
                 continue;
             };
-            tracing::warn!(%error, "closing sync session for a message it sent");
+            tracing::warn!(%error, "closing sync session");
             let _ = self.sessions[&id]
                 .output
                 .send((Err(session_closed_error(&error)), 0));
@@ -2000,7 +2006,7 @@ mod tests {
                 BTreeMap::new(),
                 output,
                 Arc::default(),
-            );
+            )?;
             let mut inbound = owner.sessions[&ServerSession(1)]
                 .queues
                 .inbound

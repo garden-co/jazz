@@ -46,6 +46,7 @@ import {
   sleep,
   TestCleanup,
   uniqueDbName,
+  waitForCondition,
   withTimeout,
 } from "./support.js";
 
@@ -68,6 +69,16 @@ const app = s.defineApp(
         { project: s.rel("projects", "projectId") },
       )
       .branchBy("branch"),
+    notes: s
+      .table(
+        {
+          branch: s.string(),
+          title: s.string(),
+          secret: s.boolean(),
+        },
+        {},
+      )
+      .branchBy("branch"),
   },
   { migrations: "none" },
 );
@@ -81,7 +92,14 @@ const permissions = s.definePermissions(app, ({ policy }) => [
   policy.documents.allowInsert.always(),
   policy.documents.allowUpdate.always(),
   policy.documents.allowDelete.always(),
+  policy.notes.allowRead.where({ secret: false }),
+  policy.notes.allowInsert.always(),
+  policy.notes.allowUpdate.always(),
+  policy.notes.allowDelete.always(),
 ]);
+
+/** The draft of the notes viewed over main. */
+const NOTES_VIEW = { branch: "draft", base: "main" } as const;
 
 // Keep the corrupt-open receipt deliberately small. The broader corpus above
 // exercises branches and large values; this isolates storage admission from
@@ -216,6 +234,35 @@ describe("browser Jazz storage compatibility corpus", () => {
     );
     expect(await db.all(app.documents, { tier: "remote", branch: "main" })).toHaveLength(1);
     expect(await db.all(app.documents, { tier: "remote", branch: "draft" })).toHaveLength(1);
+    // A note the draft overrides with a version this replica may not read:
+    // its view of the draft over main hides the note, and the replica keeps
+    // a marker of it (`_jazz_withheld`).
+    const note = db.insert(
+      app.notes,
+      { branch: "main", title: "shared note", secret: false },
+      { branch: "main" },
+    );
+    await withTimeout(note.wait({ tier: "global" }), 20_000, "corpus note did not settle");
+    let viewed: { title: string }[] | undefined;
+    const unsubscribe = db.subscribe(
+      app.notes,
+      (rows) => {
+        viewed = rows;
+      },
+      NOTES_VIEW,
+    );
+    await waitForCondition(async () => viewed?.length === 1, 20_000, "the notes view did not open");
+    await withTimeout(
+      db.update(app.notes, note.value.id, { secret: true }, NOTES_VIEW).wait({ tier: "global" }),
+      20_000,
+      "corpus secret note did not settle",
+    );
+    await waitForCondition(
+      async () => viewed?.length === 0,
+      20_000,
+      "the notes view did not hide the note",
+    );
+    unsubscribe();
     await shutdownTrackedDb(db, "producer");
     await sleep(100);
     const candidate = await rawBrowserStore(physicalDbName);
@@ -234,6 +281,7 @@ describe("browser Jazz storage compatibility corpus", () => {
       expect(
         await db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "draft" }),
       ).toMatchObject([{ branch: "draft", title: "draft override", body: LARGE_BODY }]);
+      expect(await db.all(app.notes, { tier: ReadTier.LocalFirst, ...NOTES_VIEW })).toEqual([]);
       await shutdownTrackedDb(db, "producer-reopen");
     } finally {
       await transport.unblock();
@@ -276,6 +324,8 @@ describe("browser Jazz storage compatibility corpus", () => {
     ]);
     const historicalProjects = await db.all(app.projects, { tier: ReadTier.LocalFirst });
     expect(historicalProjects).toMatchObject([{ name: "corpus project" }]);
+    // The draft's secret version still hides the note in the view.
+    expect(await db.all(app.notes, { tier: ReadTier.LocalFirst, ...NOTES_VIEW })).toEqual([]);
     await pinnedPhase("readonly-shutdown", () => shutdownTrackedDb(db, "pinned-readonly"));
     await sleep(100);
     const rawAfterReadOnly = await rawBrowserStore(physicalDbName);

@@ -282,7 +282,7 @@ fn author_codes_never_leave_their_database() {
     block_on(server.insert("notes", body("from 5"), as_user(5, row(1)))).unwrap();
     let (up, down) = duplex();
     let _upstream = block_on(client.connect_upstream(up));
-    server.accept_subscriber(down, user(7));
+    server.accept_subscriber(down, user(7)).unwrap();
     block_on(client.insert(
         "notes",
         body("from 7"),

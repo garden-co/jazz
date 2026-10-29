@@ -91,7 +91,9 @@ fn connect(client: &Db, server: &Db) {
     let (client_side, server_side) = duplex();
     block_on(client.connect_upstream(client_side));
     client.set_remote_link_hint(RemoteLinkHint::Live);
-    server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+    server
+        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
+        .unwrap();
 }
 
 fn docs(db: &Db) -> BTreeMap<[u8; 16], (String, String)> {
@@ -347,4 +349,70 @@ fn an_update_that_changes_nothing_records_no_upload() {
         ["kept", "next"],
         "both real commits reach the server"
     );
+}
+
+/// A store whose pending rows this build does not lay out that way (from
+/// another development build of format 1) is refused as another format,
+/// never misread or reported as a damaged store.
+#[test]
+fn pending_rows_in_another_layout_are_refused_as_another_format() {
+    for (case, edit) in [
+        (
+            "an unknown item part",
+            "UPDATE _jazz_pending_items SET part = 7",
+        ),
+        (
+            "a mergeable commit with reads",
+            "UPDATE _jazz_pending_items SET part = 1",
+        ),
+        (
+            "a row id that is not 16 bytes",
+            "UPDATE _jazz_pending_rows SET id = x'0102'",
+        ),
+        (
+            "a schema version that is not 16 bytes",
+            "UPDATE _jazz_pending_versions SET version = x'0102'",
+        ),
+        (
+            "a header that is not a commit",
+            "UPDATE _jazz_pending SET header = x'00'",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("replica.sqlite");
+        {
+            let server = block_on(Db::open_history_complete(config(0xee))).unwrap();
+            let client = open_file(&path);
+            connect(&client, &server);
+            // Offline: the write stays pending.
+            drop(server);
+            block_on(client.insert(
+                "docs",
+                BTreeMap::from([
+                    ("title".to_owned(), Value::String("doc".to_owned())),
+                    ("body".to_owned(), Value::String("short".to_owned())),
+                ]),
+                InsertOptions {
+                    row_id: Some(row(1)),
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        }
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let pending: i64 = conn
+            .query_row("SELECT count(*) FROM _jazz_pending", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(pending, 1, "{case}: the write is pending");
+        conn.execute_batch(edit).unwrap();
+        drop(conn);
+        let Err(error) = block_on(Db::open_at(config(0x61), &path, FileOptions::default())) else {
+            panic!("{case}: the store opened");
+        };
+        assert_eq!(
+            error.code,
+            ErrorCode::UnsupportedStorageCodecs,
+            "{case}: {error}"
+        );
+    }
 }

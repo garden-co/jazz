@@ -2728,6 +2728,18 @@ describe("broker worker context initialization", () => {
     expect(mocks.runtimes[0]?.acceptPeer).toHaveBeenCalledOnce();
   });
 
+  it("admits each tab as its own replica's author, so the runtime can refuse another user's", async () => {
+    const initOptions = options("tab-author-admission");
+    const first = await connect(initOptions, "first-tab");
+    const second = await connect({ ...initOptions, author: new Uint8Array([9]) }, "second-tab");
+    await initializeFollower(first.port, 1);
+    await initializeFollower(second.port, 2);
+    const acceptPeer = mocks.runtimes[0]?.acceptPeer;
+    expect(acceptPeer).toHaveBeenCalledTimes(2);
+    expect(acceptPeer?.mock.calls[0]?.[2]).toEqual(new Uint8Array([2]));
+    expect(acceptPeer?.mock.calls[1]?.[2]).toEqual(new Uint8Array([9]));
+  });
+
   it("keeps every tab attached after auth rejection so a sibling can refresh the session", async () => {
     const initOptions = {
       ...options("auth-recovery-owner"),

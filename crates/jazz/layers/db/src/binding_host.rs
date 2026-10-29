@@ -1699,21 +1699,23 @@ impl Binding {
     }
 
     /// Serve a subscriber (another replica) as `identity` with `claims`.
-    pub fn accept_subscriber(&self, identity: AuthorSubject, claims: Cells) -> Link {
-        self.db.set_identity_claims(identity, claims);
+    /// A store configured as a user refuses any other identity (see
+    /// [`Db::accept_subscriber`]).
+    pub fn accept_subscriber(&self, identity: AuthorSubject, claims: Cells) -> HostResult<Link> {
         let queues = WireQueues::default();
         let transport = Box::new(WireTransportAdapter::current(QueueTransport {
             queues: queues.clone(),
         }));
-        let subscriber = self.db.accept_subscriber(transport, identity);
-        Link {
+        let subscriber = self.db.accept_subscriber(transport, identity)?;
+        self.db.set_identity_claims(identity, claims);
+        Ok(Link {
             binding: self.clone(),
             queues,
             kind: LinkKind::Subscriber {
                 id: Some(subscriber),
                 identity,
             },
-        }
+        })
     }
 
     /// Close the database (a schema view leaves its owner open).

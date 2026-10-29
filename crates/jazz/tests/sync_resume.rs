@@ -198,7 +198,7 @@ fn a_resumed_subscription_ships_only_what_changed_and_converges() {
     let client = open(1, alice());
     let (client_side, server_side, shipped) = pipe();
     let upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice());
+    server.accept_subscriber(server_side, alice()).unwrap();
     let prepared = client.prepare_query(&Query::from("messages")).unwrap();
     let _stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
     pump(&server, &client);
@@ -235,7 +235,7 @@ fn a_resumed_subscription_ships_only_what_changed_and_converges() {
 
     let (client_side, server_side, shipped) = pipe();
     let _upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice());
+    server.accept_subscriber(server_side, alice()).unwrap();
     pump(&server, &client);
     // The edits and the insert, the deleted version (its table was
     // written, so the result as of the resume point says it left), and
@@ -264,7 +264,7 @@ fn a_resumed_subscription_ships_only_what_changed_and_converges() {
     );
     let (client_side, server_side, shipped) = pipe();
     let _upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice());
+    server.accept_subscriber(server_side, alice()).unwrap();
     pump(&server, &client);
     assert_eq!(ids(&client, None).len(), 2000);
     assert_eq!(ids(&client, None), ids(&server, Some(alice())));
@@ -311,7 +311,7 @@ fn caught_up_resume_cost() {
     let client = open(1, alice());
     let (client_side, server_side, _) = pipe();
     let mut upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice());
+    server.accept_subscriber(server_side, alice()).unwrap();
     let prepared = client.prepare_query(&Query::from("messages")).unwrap();
     let _stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
     pump(&server, &client);
@@ -321,7 +321,7 @@ fn caught_up_resume_cost() {
         let (client_side, server_side, shipped) = pipe();
         let started = std::time::Instant::now();
         upstream = block_on(client.connect_upstream(client_side));
-        server.accept_subscriber(server_side, alice());
+        server.accept_subscriber(server_side, alice()).unwrap();
         pump(&server, &client);
         times.push(started.elapsed());
         assert_eq!(*shipped.borrow(), 0);
@@ -363,7 +363,7 @@ fn a_deletion_reaches_a_cold_cached_row_once_a_subscription_covers_it_again() {
     };
     let (client_side, server_side, _) = pipe();
     let upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice());
+    server.accept_subscriber(server_side, alice()).unwrap();
     let prepared = client.prepare_query(&Query::from("rooms")).unwrap();
     let stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
     pump(&server, &client);
@@ -374,7 +374,7 @@ fn a_deletion_reaches_a_cold_cached_row_once_a_subscription_covers_it_again() {
     assert!(client.detach_connection(&upstream));
     let (client_side, server_side, _) = pipe();
     let _upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice());
+    server.accept_subscriber(server_side, alice()).unwrap();
     pump(&server, &client);
 
     block_on(server.delete("rooms", room, Default::default())).unwrap();
@@ -432,7 +432,7 @@ fn an_ended_subscription_leaves_its_rows_cold() {
     let client = open(1, alice());
     let (client_side, server_side, shipped) = pipe();
     let _upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice());
+    server.accept_subscriber(server_side, alice()).unwrap();
     let prepared = client.prepare_query(&Query::from("messages")).unwrap();
     let stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
     pump(&server, &client);
@@ -462,7 +462,7 @@ fn a_resumed_subscription_evicts_rows_whose_access_was_lost_while_away() {
     let client = open(1, alice());
     let (client_side, server_side, _) = pipe();
     let upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice());
+    server.accept_subscriber(server_side, alice()).unwrap();
     let prepared = client.prepare_query(&Query::from("messages")).unwrap();
     let _stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
     pump(&server, &client);
@@ -472,7 +472,7 @@ fn a_resumed_subscription_evicts_rows_whose_access_was_lost_while_away() {
     block_on(server.delete("memberships", id(2, 0), Default::default())).unwrap();
     let (client_side, server_side, shipped) = pipe();
     let _upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice());
+    server.accept_subscriber(server_side, alice()).unwrap();
     pump(&server, &client);
     assert_eq!(ids(&client, None), ids(&server, Some(alice())));
     assert!(
@@ -490,7 +490,7 @@ fn a_caught_up_subscription_resumes_without_shipping_rows() {
     let client = open(1, alice());
     let (client_side, server_side, _) = pipe();
     let upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice());
+    server.accept_subscriber(server_side, alice()).unwrap();
     let prepared = client.prepare_query(&Query::from("messages")).unwrap();
     let _stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
     pump(&server, &client);
@@ -505,7 +505,7 @@ fn a_caught_up_subscription_resumes_without_shipping_rows() {
     .unwrap();
     let (client_side, server_side, shipped) = pipe();
     let _upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice());
+    server.accept_subscriber(server_side, alice()).unwrap();
     pump(&server, &client);
     assert_eq!(*shipped.borrow(), 0);
     assert_eq!(ids(&client, None), ids(&server, Some(alice())));
@@ -521,7 +521,7 @@ fn a_row_evicted_and_readable_again_returns_when_an_older_subscription_resumes()
     let client = open(1, alice());
     let (client_side, server_side, _) = pipe();
     let _upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice());
+    server.accept_subscriber(server_side, alice()).unwrap();
     let q1 = client
         .prepare_query(
             &Query::from("messages").filter(eq(col("body"), lit(Value::String("m0".into())))),
@@ -574,7 +574,7 @@ fn a_row_a_listing_dropped_returns_when_an_older_subscription_resumes() {
     let client = open(1, alice());
     let (client_side, server_side, _) = pipe();
     let upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice());
+    server.accept_subscriber(server_side, alice()).unwrap();
     let q1 = client
         .prepare_query(
             &Query::from("messages").filter(eq(col("body"), lit(Value::String("m0".into())))),
@@ -591,7 +591,7 @@ fn a_row_a_listing_dropped_returns_when_an_older_subscription_resumes() {
     block_on(server.delete("memberships", id(2, 0), Default::default())).unwrap();
     let (client_side, server_side, _) = pipe();
     let _upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice());
+    server.accept_subscriber(server_side, alice()).unwrap();
     pump(&server, &client);
 
     let q2 = client.prepare_query(&Query::from("messages")).unwrap();
@@ -636,7 +636,7 @@ fn a_row_readable_through_a_commit_in_the_resumes_tick_ships() {
     let connect = |db: &Db, who: AuthorSubject| {
         let (client_side, server_side, _) = pipe();
         let upstream = block_on(db.connect_upstream(client_side));
-        server.accept_subscriber(server_side, who);
+        server.accept_subscriber(server_side, who).unwrap();
         upstream
     };
     let tick_all = || {

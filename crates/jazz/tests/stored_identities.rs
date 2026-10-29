@@ -169,7 +169,7 @@ fn pipe() -> (Box<dyn Transport>, Box<dyn Transport>) {
 fn link(client: &Db, server: &Db) -> jazz::db::Upstream {
     let (c, s) = pipe();
     let link = block_on(client.connect_upstream(c));
-    server.accept_subscriber(s, AuthorSubject::SYSTEM);
+    server.accept_subscriber(s, AuthorSubject::SYSTEM).unwrap();
     link
 }
 

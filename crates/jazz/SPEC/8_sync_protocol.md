@@ -57,6 +57,7 @@ source of truth and names each invariant's tests):
 - `INV-SYNC-50`: A non-durable client's local seqs MUST NOT collide with its relay's.
 - `INV-SYNC-51`: A store that committed writes before it became a replica MUST keep them and refuse every upstream, saying why.
 - `INV-SYNC-52`: A replica MUST upload each commit under the schema version of the view that wrote it, keeping it pending while offline; a server MUST refuse a commit under a version it has not deployed, at once, with reason `schema_version_not_deployed`.
+- `INV-SYNC-53`: The authority MUST NOT name a writer's own row as written (instead of shipping it) unless the commit applied unmerged over the very version the writer built on and that version is still current (§8.3); every other row ships, and a writer whose image differs from the digest asks for the row whole.
 - `INV-TX-2`, `INV-TX-11`, `INV-TX-23`: commit, seq and relay rules (ch. 3).
 - `INV-WIRE-1`, `INV-WIRE-2`: exact postcard frames and Hello version negotiation (§8.1.1).
 
@@ -218,9 +219,6 @@ The commit's other fields:
   writes only if every result and written row is unchanged since the snapshot.
   A stale or partial replica can only cause a conflict, never a
   non-serializable commit.
-- `expect`: a digest of each written row as the writer's replica holds it
-  afterwards. The authority does not echo a row whose new version matches;
-  the writer installs its own as that version (§8.3).
 - `acting`: who the writes are. `Own`: the sender's, checked and attributed as
   the link. `Attributed { author }`: provenance only, checked as the sender.
   `Session { author, claims }`: a session's writes with its claims. Over a
@@ -240,7 +238,10 @@ connection. It is stored a row per op, not as one encoded message:
   (`n`).
 - `_jazz_pending_rows (tx, n, tbl, id, key)`: the local rows it wrote.
 
-`expect` is not kept: after a reopen the server ships those rows. A row's
+What each commit wrote stays in the store at the commit's local seq (the
+row's current version, or history under a later pending write), so a
+reopened replica can still install what the authority holds back (§8.3). A
+row's
 values over the inline limit live in large-value storage, so a stored op is
 about the size of the row it writes, however large the commit. A store with
 a 2 MiB value limit (a Durable Object) therefore keeps any commit whose rows
@@ -276,21 +277,68 @@ read-your-writes end to end.
 
 ### 8.3 Fates downstream
 
-`Fate { tx, through, result, held, global }` answers a commit:
+`Fate { tx, outcome, global }` answers a commit. The `outcome` is one of:
 
-- `result`: `Ok`, or `Conflict`, `Rejected { reason, message }` (a `Reason`
-  by stable name; an unknown name arrives as a rejection without a reason) or
-  `Other`.
-- `through`: the server seq the session is complete through after the
-  commit's rows shipped. Applying a fate never moves the replica's settled seq
-  backward (`INV-SYNC-5`).
-- `held`: the `expect` rows the server did not ship, each with the
-  authority's `$createdAt`/`$updatedAt` stamps, so the writer can install its
-  own image as the accepted version. A keystroke-grade edit therefore costs
-  one `Fate` and one `Settled` downstream.
-- `global`: the fate is the global authority's (directly or relayed). A
-  non-global fate is the final word of a replica with no upstream, which
-  orders its sessions' commits but cannot make them `Global`.
+- `Accepted { seq, accepted_at, as_written }`: the commit landed at server seq
+  `seq`, which the replica records as where it settled; applying a fate never
+  moves its settled seq backward (`INV-SYNC-5`). `accepted_at` is the time
+  (Unix ms) the authority's clock stamped the commit's writes with: the
+  `$createdAt`/`$updatedAt` of every write without an explicit time. It is
+  absent only on a resend's recorded fate, which names no rows.
+  Its `as_written` lists the commit's rows the server did not ship, each named
+  as a base is (the commit's first op that writes it) with its branch key, and
+  carrying the authority's digest of its version, so the writer can install
+  its own image as the accepted version: stamped at `accepted_at` where its
+  own clock stamped it (a row's `$updatedAt`, and the `$createdAt` of a row
+  the commit created), and with the create stamp of the row's settled
+  versions over a row it did not. A keystroke-grade edit therefore costs one
+  `Fate` and one `Settled` downstream.
+- `Refused { through, error }`: the commit was refused and landed nowhere.
+  `error` is `Conflict`, `Rejected { reason, message }` (a `Reason` by
+  stable name; an unknown name arrives as a rejection without a reason) or
+  `Other`. The rows the commit wrote shipped back ahead of the fate as they
+  are, and the session is complete through server seq `through` with them: a
+  retry's snapshot reads at it, so a serializable retry sees what the commit
+  conflicted with.
+
+`global` says the fate is the global authority's (directly or relayed). A
+non-global fate is the final word of a replica with no upstream, which orders
+its sessions' commits but cannot make them `Global`.
+
+The authority infers, rather than compares, that a row's new version is
+likely the writer's image of it (`INV-SYNC-53`). It names a row as written
+only if all of these hold:
+
+1. The row's version just before the commit is the one the writer built on:
+   the version its base names (an accepted one, or the version the writer's
+   own earlier commit landed as); or, with no base, no version at all, and
+   every op on the row is an insert or an upsert of an unbranched row. (An
+   upsert into a branch may copy a parent branch's version, create stamp
+   included, which the writer may hold otherwise.)
+2. No text merge changed a value the commit sent (SPEC 4 §4.3), and no op of
+   the commit moves the row between branches.
+3. The version is still the row's current one when fan-out ships the
+   session's rows.
+4. The commit was sent under the schema version the session declared first,
+   the one the writer's store holds rows by (not through a view of another
+   version, whose images the writer cannot compare).
+
+The writer checks the inference on every such row: each carries the
+authority's 16-byte digest of its version (everything but its seq and the
+stamps). A row whose image matches is installed. One whose image differs, or
+that the writer holds no image of to compare (the commit was written under
+another schema version than the store's own, through a view of another
+version or before a reopen with a newer one, or a catalogue with new versions
+arrived while it was pending), or whose create stamp it lacks, is asked for
+with `ResendWhole` (§8.12), naming the fate's seq: the server ships the row
+whole and, if a later version superseded it, that seq's version too. The fate
+waits until those rows arrive, and every later fate waits behind it, so the
+commit stays pending meanwhile: its writes never drop out locally and later
+writes build on it as on any pending commit. A miss therefore costs one fetch
+of the row, never a divergent cache. A replica whose configured author is not
+the identity its link was accepted as has every row stamped otherwise, so each
+of its writes costs that fetch. Mismatches are counted per replica
+(`as_written_mismatches`); tests of honest writers assert there are none.
 
 `Stored { tx }` is durability progress from a relay to a non-durable session:
 the relay holds the commit in its store and uploads it, so it is `Local` for a
@@ -300,17 +348,71 @@ which is final.
 
 A fate lost to a disconnect is recovered on the next connection: the replica
 re-uploads its pending commits, and the authority answers a commit it already
-decided with the known fate.
+decided with the known fate, shipping the rows that commit wrote as they now
+are, and as the commit left them if since superseded (a resend's writer may
+not hold them either way).
 
 ### 8.4 Downstream: reads and rows
 
-`Read { id, query, binding, include_deleted, tier, wait, span }` asks for one
-query's result:
+`Read { id, query, binding, include_deleted, tier, wait, view, span }` asks
+for one query's result:
 
+- `view` is the read view the result is of: the current state, a branch view
+  (head over an optional live or frozen base), or a snapshot. It is part of
+  the read's identity (`INV-BVIEW-12`): the server keeps a live read in its
+  view, as ch. 11 §11.5 maintains it. A replica asks for a branch view as it is, over
+  a live or a frozen base; a snapshot read asks for the current rows and
+  applies the cut itself.
+- A base row can reach a replica through any of its reads, and a head
+  image the view's query would not match (a tombstone, a version outside
+  its filter) still masks it there. So for a branch view over a base the
+  server also ships, for each branched table the read reads, the head's
+  rows whose base row the reader may see through the view: of the root
+  table, base rows the query matches, read without its window on the base
+  alone (as of a frozen base's cut) and narrowed to the head's ids; of a
+  table it reads besides (a relation, a join, a policy's table), base rows
+  the reader may read. It ships all of them with a live read's opening (a
+  resumed one's too, since whether the reader may read one can change
+  without it changing) and with a one-shot read's answer, and one again
+  when the head or the base writes it, unless the reader already knows it
+  hidden (below) and still may not read it. A row whose base row the reader
+  may not see is never shipped or evicted for this, so a view tells the
+  reader nothing of rows it could not see anyway. The server follows these
+  rows for the read that masks with them, and stops when that read ends. These rows follow from the
+  view's query and the server's state, not from what the session shipped,
+  so they hold across reconnects.
+- A head row of these the reader may not read is **hidden**, not absent:
+  in the view its effective row is the head's version, which the reader's
+  policy denies, so the view leaves the row out, as the authority's own
+  evaluation of the view does. The server sends `AccessLost { hidden: true
+}` for it (§8.6) once: a later write to either version sends nothing
+  while the reader still may not read the head's, so the reader learns that
+  the row is hidden, not when it is edited. The replica keeps a marker of it in
+  `_jazz_withheld` that masks the base's row of the id in every branch view
+  over a base with that head; reads of any other view (the base itself,
+  the head alone, the current state) ignore it, and no read lists it, deleted
+  rows included. The marker reveals only what the eviction does: that a
+  version exists. A write through the view to a hidden row is refused
+  (`WriteRejected`): it would land over a version the replica cannot see,
+  as is a write to that version through any target.
+  An eviction is hidden only for the head of one of the session's branch
+  views over a base; any other read's access loss keeps no marker. It lifts when an image of the row arrives (the head
+  writes it readably again, or a policy input change grants access: the
+  server rechecks masking rows as it does supporting rows, §8.6), or when
+  an `AccessLost { hidden: false }` says the row is gone. A view opened or
+  resumed later re-derives it from the server's state, and a relay passes
+  its markers on to its sessions as hidden evictions. Known limit: the
+  replica evaluates a view's read policies over policy tables as their
+  current state, not in the view.
+- A listing judges only the rows the view holds. A cached row it leaves out
+  that the head supplies is evicted; one the live base supplies may be
+  another read's, so the replica asks for the head's and the base's row
+  whole (`ResendWhole`) instead, and the answer brings the head row that masks it
+  or the base row as it is now, or their evictions.
 - `span: Live { since }` keeps it current until `Unsubscribe` (§8.5);
   `since` resumes it (§8.11).
-- `span: Once { at, view }` answers it once, at the current state or as of
-  server seq `at`, in branch view `view`.
+- `span: Once { at }` answers it once, at the current state or as of
+  server seq `at`.
 - `tier` says how far the read reaches past a relay: `LocalOnly` is served
   from the relay's store, `LocalFirst` from it too while the relay asks its
   upstream, `Remote` once its upstream answered. An authority's store is the
@@ -390,8 +492,15 @@ image, supporting row or count (`INV-SYNC-13`), and ships accepted rows only,
 never another node's pending or refused writes (`INV-SYNC-12`).
 
 When a reader loses read access to a row it holds, through a write or a policy
-change, the server sends `AccessLost { table, id, key }` and the replica drops
-its copy (`INV-SYNC-14`). This includes a row the reader's own accepted commit
+change, the server sends `AccessLost { table, id, key, hidden }` and the
+replica drops its copy (`INV-SYNC-14`). `hidden` says the row still exists as
+a version the reader may not read, rather than being gone: in a branch view
+over a base it still overrides the base's row, so the replica keeps a marker
+that masks that row (§8.4). An eviction of a version that still exists keeps
+the session watching the row's id, since the replica may hold the row on
+another branch, and later writes that leave that version unreadable send
+nothing more, whichever of the session's reads watches the id; a version
+that becomes readable ships again. This includes a row the reader's own accepted commit
 wrote and cannot read (a write-only insert): the commit's fate reports its
 acceptance. Local copies are not a redaction boundary; eviction keeps the
 replica coherent, not secret.
@@ -542,7 +651,7 @@ type are never read as another's.
 
 A replica persists, per live read, the server seq its result last settled
 through, in `_jazz_watermarks` keyed by a digest of the query, binding,
-`include_deleted` flag and reader identity (not the tier or wait, and not the
+`include_deleted` flag, the view it asked for and reader identity (not the tier or wait, and not the
 schema version: the key is over stored names). On reconnect or reopen, it
 sends `Read { span: Live { since } }` with that seq.
 
@@ -574,8 +683,11 @@ that untrue for results the replica cannot name, so the replica forgets every
 watermark when either happens, and each read opens fresh until it settles
 again:
 
-- an `AccessLost`: a result settled earlier may have held the row, and a resume
-  from it would count the row as held after it became readable again;
+- an `AccessLost` for a row the replica held: a result settled earlier may
+  have held the row, and a resume from it would count the row as held after it
+  became readable again. One for a row it holds no image of changes no
+  result, so the watermarks stay (a hidden one still writes its marker, which
+  masks rows but holds none);
 - a row asked for whole (§8.12): until its whole image arrives the replica holds
   a stale version, so it also stores no watermark meanwhile.
 
@@ -593,7 +705,12 @@ chunks are present (`INV-SYNC-46`).
 Within a session the server ships later versions' chunked cells as deltas over
 the version it last shipped of that row. A replica that cannot apply a delta
 (it lacks that base version) sends `ResendWhole { rows }` for those rows, and
-the server ships each whole or evicts it. The replica sends the `ResendWhole`
+the server ships each whole or evicts it. A row also names a seq when the
+replica's own commit produced it there and the replica could not install it
+(§8.3): the server ships that version too, if superseded and still readable,
+but only if a commit by one of the session identity's nodes produced it. Any
+other seq is ignored: it could name a version the session could not read when
+it was current. The replica sends the `ResendWhole`
 again on every new connection until the whole image arrives, and stores no watermark
 meanwhile (§8.11). A live read's rows are never declared this way: its opening
 brings them up to date from `since`.

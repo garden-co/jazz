@@ -2384,6 +2384,91 @@ mod tests {
         assert!(!error.asks_reconnect_later(), "{error:?}");
     }
 
+    /// An untrusted peer's split message may grow only to its session
+    /// budget (`MAX_UNTRUSTED_MESSAGE_BYTES`), end to end: the part that
+    /// takes it past 8 MiB ends the link with a typed error that does not
+    /// ask for a retry, before the peer has sent the rest.
+    #[tokio::test]
+    async fn an_untrusted_split_message_over_its_budget_ends_the_link() {
+        let state = make_ws_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        // A backend session: served under its identity's policies, so
+        // untrusted (an admin link is served as the trusted system link).
+        let mut ws =
+            open_negotiated_ws_session(addr, &state, AuthorSubject::for_test_bytes([0x7c; 16]))
+                .await;
+        // Leading parts (0xff) of about 2 MiB each: the fifth takes the
+        // joined bytes past 8 MiB, the last never goes.
+        let part = {
+            let mut part = vec![0x42; MAX_WIRE_FRAME_BYTES - 128];
+            part[0] = 0xff;
+            part
+        };
+        let parts = jazz::protocol_limits::MAX_UNTRUSTED_MESSAGE_BYTES / (part.len() - 1) + 1;
+        assert_eq!(parts, 5);
+        for _ in 0..parts {
+            ws.send(WsMessage::Binary(ws_frame_batch(&[part.clone()]).into()))
+                .await
+                .expect("send a leading part");
+        }
+        let error = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let message = ws
+                    .next()
+                    .await
+                    .expect("websocket ended before an error frame")
+                    .expect("websocket result");
+                for frame in decode_ws_message(&message) {
+                    if let WireFrame::Error(error) = frame {
+                        return error;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("wait for the error frame");
+        assert_eq!(error.code, WireErrorCode::MalformedFrame, "{error:?}");
+        assert_eq!(error.retry, WireRetry::Never);
+        assert!(
+            error.message.contains("beyond the message ceiling"),
+            "{error:?}"
+        );
+
+        // A trusted link's split message may grow to the logical ceiling:
+        // the same parts leave it waiting for the rest, still open.
+        let mut trusted = open_negotiated_ws(addr, &state, AuthorSubject::SYSTEM).await;
+        for _ in 0..parts {
+            trusted
+                .send(WsMessage::Binary(ws_frame_batch(&[part.clone()]).into()))
+                .await
+                .expect("send a leading part");
+        }
+        let ping = vec![0x61, 0x62];
+        trusted
+            .send(WsMessage::Ping(ping.clone().into()))
+            .await
+            .expect("ping after the parts");
+        let pong = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match trusted.next().await {
+                    Some(Ok(WsMessage::Pong(payload))) => break payload,
+                    Some(Ok(message)) => {
+                        for frame in decode_ws_message(&message) {
+                            assert!(
+                                !matches!(frame, WireFrame::Error(_)),
+                                "the trusted link was refused: {frame:?}"
+                            );
+                        }
+                    }
+                    other => panic!("the trusted link ended: {other:?}"),
+                }
+            }
+        })
+        .await
+        .expect("wait for pong");
+        assert_eq!(pong.as_ref(), ping.as_slice());
+    }
+
     #[test]
     fn websocket_frame_batches_split_near_cap_frames() {
         let frame = vec![0x42; MAX_WIRE_FRAME_BYTES - 32];

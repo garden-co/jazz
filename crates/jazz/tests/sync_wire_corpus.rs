@@ -26,12 +26,13 @@ use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
 use jazz::db::{
-    Acting, CorpusReader, Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadSpan, ReadTier,
-    Reason, SyncMessage, Transport, UpdateOptions, WireError as SyncWireError, WriteIdentity,
-    block_on, encode_frames, validate_frame_batch_for_corpus,
+    Acting, CorpusReader, Db, DbConfig, DbIdentity, FrameJoiner, InsertOptions, Outcome, ReadOpts,
+    ReadSpan, ReadTier, Reason, SyncMessage, Transport, UpdateOptions, WireError as SyncWireError,
+    WriteIdentity, block_on, encode_frames, validate_frame_batch_for_corpus,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::model::transaction::OpenTransactionId;
+use jazz::protocol::{BranchSelector, BranchViewBase, ReadViewSourceSpec};
 use jazz::protocol::{LensOp, MigrationLens, PermissionAdviceAction, TableLens};
 use jazz::query::{Query, col, eq, lit};
 use jazz::records::Value;
@@ -39,7 +40,8 @@ use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::wire::{
     TransportError, WireError, WireErrorCode, WireFrame, WireHello, WirePeerRole, WireRetry,
-    current_wire_features, encode_frame, encode_websocket_frame_batch,
+    current_wire_features, decode_websocket_frame_batch, encode_frame,
+    encode_websocket_frame_batch,
 };
 use serde::{Deserialize, Serialize};
 
@@ -168,6 +170,32 @@ fn every_pinned_sync_frame_decodes_to_its_variant_and_reencodes_exactly() {
     }
 }
 
+/// A commit too large for one frame travels in parts: the pinned split
+/// commit joins back into exactly the pinned `Commit`.
+#[test]
+fn the_pinned_split_commit_joins_into_the_pinned_commit() {
+    let corpus = corpus();
+    let commit = corpus
+        .messages
+        .iter()
+        .find(|m| m.variant == "Commit")
+        .unwrap();
+    let split = corpus
+        .frames
+        .iter()
+        .find(|f| f.name == "a split commit in one batch")
+        .expect("a split commit is pinned");
+    let frames = decode_websocket_frame_batch(&unhex(&split.batch_hex)).unwrap();
+    assert_eq!(frames.len(), 2, "in two parts");
+    let mut joiner = FrameJoiner::default();
+    assert!(joiner.push(&frames[0]).unwrap().is_none(), "a leading part");
+    let joined = joiner.push(&frames[1]).unwrap().expect("the last part");
+    assert_eq!(
+        postcard::to_allocvec(&joined).unwrap(),
+        unhex(&commit.frame_hex)
+    );
+}
+
 /// The rejected-fate layout (a reason name beside the message) is pinned by
 /// real frames: each still decodes to a rejection with its reason name and
 /// re-encodes to the same bytes.
@@ -189,7 +217,11 @@ fn every_pinned_rejected_fate_decodes_with_its_reason_and_reencodes_exactly() {
             )
         });
         let SyncMessage::Fate {
-            result: Err(SyncWireError::Rejected { reason, message }),
+            outcome:
+                Outcome::Refused {
+                    error: SyncWireError::Rejected { reason, message },
+                    ..
+                },
             ..
         } = &decoded
         else {
@@ -293,7 +325,11 @@ impl Transport for Recording {
             );
             let mut recorded = self.recorded.borrow_mut();
             if let SyncMessage::Fate {
-                result: Err(SyncWireError::Rejected { reason, .. }),
+                outcome:
+                    Outcome::Refused {
+                        error: SyncWireError::Rejected { reason, .. },
+                        ..
+                    },
                 ..
             } = &decoded
             {
@@ -329,16 +365,23 @@ impl Transport for Recording {
 }
 
 /// Message shapes the one frame per variant leaves unpinned: a one-shot
-/// `Read` (its span carries a snapshot and a view), `Rows` carrying the
-/// commits behind history versions, a `Catalogue` carrying versions
-/// with their stored names and a lens's cells, and a trusted link's
-/// `Commit`s acting as an attributed author and as a session.
-const SHAPES: [&str; 5] = [
+/// `Read` (as of a seq or a snapshot), `Rows` carrying the commits behind
+/// history versions, a `Catalogue` carrying versions with their stored
+/// names and a lens's cells, a trusted link's `Commit`s acting as an
+/// attributed author and as a session, a live `Read` in a branch view
+/// over a live base, over a frozen base, and of a head alone, and a hidden
+/// `AccessLost` (a branch view's row whose head version the reader may not
+/// read).
+const SHAPES: [&str; 9] = [
     "Read/once",
     "Rows/tx_ids",
     "Catalogue/versions",
     "Commit/attributed",
     "Commit/session",
+    "Read/live-branch-view",
+    "Read/live-branch-view-frozen",
+    "Read/live-branch-head",
+    "AccessLost/hidden",
 ];
 
 fn shape(message: &SyncMessage) -> Option<&'static str> {
@@ -359,6 +402,33 @@ fn shape(message: &SyncMessage) -> Option<&'static str> {
             acting: Acting::Session { claims, .. },
             ..
         } if !claims.is_empty() => Some(SHAPES[4]),
+        SyncMessage::Read {
+            view,
+            span: ReadSpan::Live { .. },
+            ..
+        } if matches!(
+            **view,
+            ReadViewSourceSpec::BranchView {
+                base: Some(BranchViewBase::Current(_)),
+                ..
+            }
+        ) =>
+        {
+            Some(SHAPES[5])
+        }
+        SyncMessage::Read {
+            view,
+            span: ReadSpan::Live { .. },
+            ..
+        } => match **view {
+            ReadViewSourceSpec::BranchView {
+                base: Some(BranchViewBase::Snapshot { .. }),
+                ..
+            } => Some(SHAPES[6]),
+            ReadViewSourceSpec::BranchView { base: None, .. } => Some(SHAPES[7]),
+            _ => None,
+        },
+        SyncMessage::AccessLost { hidden: true, .. } => Some(SHAPES[8]),
         _ => None,
     }
 }
@@ -385,15 +455,17 @@ fn connect(client: &Db, server: &Db, author: AuthorSubject, recorded: &Recorded)
         peer: "server",
         recorded: recorded.clone(),
     })));
-    server.accept_subscriber(
-        Box::new(Recording {
-            outbound: down,
-            inbound: up,
-            peer: "client",
-            recorded: recorded.clone(),
-        }),
-        author,
-    );
+    server
+        .accept_subscriber(
+            Box::new(Recording {
+                outbound: down,
+                inbound: up,
+                peer: "client",
+                recorded: recorded.clone(),
+            }),
+            author,
+        )
+        .unwrap();
 }
 
 fn user(n: u8) -> AuthorSubject {
@@ -406,12 +478,21 @@ fn subject(n: u8) -> Value {
 
 const ME: [&str; 3] = ["user", "identity", "subject"];
 
-/// `notes(owner, body)`, readable by their owner. `draft` adds a column,
+/// `notes.kind`: an enum, which rows carry by variant name whatever tags a
+/// store keeps it as.
+fn kind() -> ColumnType {
+    ColumnType::Enum {
+        variants: vec!["note".to_owned(), "todo".to_owned()],
+    }
+}
+
+/// `notes(owner, body, kind)`, readable by their owner. `draft` adds a column,
 /// a schema version the server has not admitted.
 fn schema(draft: bool) -> JazzSchema {
     let mut notes = TableSchemaBuilder::new("notes")
         .column("owner", ColumnType::Text)
-        .column("body", ColumnType::Bytea);
+        .column("body", ColumnType::Bytea)
+        .column("kind", kind());
     if draft {
         notes = notes.column("title", ColumnType::Text);
     }
@@ -430,6 +511,7 @@ fn schema_with_copy() -> JazzSchema {
                 TableSchemaBuilder::new("notes")
                     .column("owner", ColumnType::Text)
                     .column("body", ColumnType::Bytea)
+                    .column("kind", kind())
                     .column("first_owner", ColumnType::Text)
                     .policies(read_and_allow_all_writes(session_eq("owner", &ME))),
             )
@@ -441,6 +523,7 @@ fn note(owner: u8, body: Vec<u8>) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("owner".to_owned(), subject(owner)),
         ("body".to_owned(), Value::Bytes(body)),
+        ("kind".to_owned(), Value::String("todo".to_owned())),
     ])
 }
 
@@ -515,6 +598,33 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     pump(&[&alice, &server, &alice]);
     let _ = block_on(alice.all(&notes, ReadOpts::default())).unwrap();
     pump(&[&alice, &server, &alice]);
+    // Read (live, in a branch view over a live base).
+    let selector = |byte: u8| {
+        BranchSelector::new([("branch", Value::Uuid(uuid::Uuid::from_bytes([byte; 16])))])
+    };
+    let in_draft = ReadOpts::default().branch_view(
+        selector(0xd1),
+        Some(BranchViewBase::Current(selector(0xd2))),
+    );
+    let drafted = block_on(alice.subscribe(&notes, in_draft)).unwrap();
+    pump(&[&alice, &server, &alice]);
+    drop(drafted);
+    // Read (live, in a branch view over a frozen base, and of a head alone).
+    let frozen = block_on(alice.capture_snapshot()).unwrap();
+    let over_frozen = ReadOpts::default().branch_view(
+        selector(0xd1),
+        Some(BranchViewBase::Snapshot {
+            branch: selector(0xd2),
+            snapshot: frozen,
+        }),
+    );
+    let drafted = block_on(alice.subscribe(&notes, over_frozen)).unwrap();
+    pump(&[&alice, &server, &alice]);
+    drop(drafted);
+    let head = ReadOpts::default().branch_view(selector(0xd1), None);
+    let drafted = block_on(alice.subscribe(&notes, head)).unwrap();
+    pump(&[&alice, &server, &alice]);
+    drop(drafted);
 
     // PushChunks, Commit, Fate: a write with a new large value.
     let mine = RowUuid::from_bytes([0x12; 16]);
@@ -691,18 +801,21 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
             include_deleted: false,
             tier: ReadTier::LocalFirst,
             wait: None,
+            view: Box::new(ReadViewSourceSpec::Current),
             span: ReadSpan::Live { since: None },
         },
     ])));
-    server.accept_subscriber(
-        Box::new(Recording {
-            outbound: Rc::default(),
-            inbound,
-            peer: "client",
-            recorded: recorded.clone(),
-        }),
-        user(3),
-    );
+    server
+        .accept_subscriber(
+            Box::new(Recording {
+                outbound: Rc::default(),
+                inbound,
+                peer: "client",
+                recorded: recorded.clone(),
+            }),
+            user(3),
+        )
+        .unwrap();
     pump(&[&server]);
 
     // ResendWhole: a replica asks for a row whole when a shipped delta does not
@@ -716,7 +829,69 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
         .borrow_mut()
         .insert("ResendWhole".to_owned(), ("server".to_owned(), frame));
 
+    hidden_in_a_view(&recorded);
     recorded.borrow().clone()
+}
+
+/// AccessLost (hidden): a draft's row over a base row alice reads, whose
+/// draft version she may not read, hides the row in her view of the draft.
+fn hidden_in_a_view(recorded: &Recorded) {
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("drafts")
+                    .column("branch_id", ColumnType::Uuid)
+                    .column("owner", ColumnType::Text)
+                    .branch_by("branch_id")
+                    .policies(read_and_allow_all_writes(session_eq("owner", &ME))),
+            )
+            .build(),
+    );
+    let config = |node: u8, author| {
+        DbConfig::new(
+            schema.clone(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([node; 16]),
+                author,
+            },
+        )
+    };
+    let server = block_on(Db::open(config(0x61, AuthorSubject::SYSTEM))).unwrap();
+    server.set_authority();
+    let selector = |byte: u8| {
+        BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([byte; 16])))])
+    };
+    let (base, head) = (selector(0xe1), selector(0xe2));
+    let row = RowUuid::from_bytes([0x13; 16]);
+    block_on(server.insert(
+        "drafts",
+        BTreeMap::from([("owner".to_owned(), subject(1))]),
+        InsertOptions {
+            row_id: Some(row),
+            target: jazz::db::ExactWriteTarget::Branch(base.clone()),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    block_on(server.update(
+        "drafts",
+        row,
+        BTreeMap::from([("owner".to_owned(), subject(2))]),
+        UpdateOptions {
+            target: jazz::db::WriteTarget::BranchView {
+                head: head.clone(),
+                base: Some(BranchViewBase::Current(base.clone())),
+            },
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    let alice = block_on(Db::open(config(0x62, user(1)))).unwrap();
+    connect(&alice, &server, user(1), recorded);
+    let drafts = alice.prepare_query(&Query::from("drafts")).unwrap();
+    let view = ReadOpts::default().branch_view(head, Some(BranchViewBase::Current(base)));
+    let _view = block_on(alice.subscribe(&drafts, view)).unwrap();
+    pump(&[&alice, &server, &alice]);
 }
 
 /// Writes `fixtures/sqlite_sync_wire_v1.json` when
@@ -788,7 +963,8 @@ fn produce_sqlite_sync_wire_corpus_v1() {
         })
         .collect();
     let rows = shapes[1].2.clone();
-    let mut commit = unhex(&messages[4].frame_hex);
+    let whole_commit = unhex(&messages[4].frame_hex);
+    let mut commit = whole_commit.clone();
     commit.truncate(commit.len() / 2);
     let subscribe = unhex(&messages[0].frame_hex);
     let unsubscribe = unhex(&messages[1].frame_hex);
@@ -841,6 +1017,11 @@ fn produce_sqlite_sync_wire_corpus_v1() {
                 "a split message in one batch",
                 "client",
                 batch(&split(&rows)),
+            ),
+            entry(
+                "a split commit in one batch",
+                "server",
+                batch(&split(&whole_commit)),
             ),
         ]
         .into_iter()

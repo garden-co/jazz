@@ -6,21 +6,22 @@ Once alpha.60 ships they are immutable: a change that a format-1 file would
 not read bumps `STORAGE_FORMAT` and adds a new corpus beside this one, and
 never rewrites these. Until then format 1 is still moving, so such a change
 re-runs the producer and re-pins the hashes here and in the test instead
-(for example: per-write timestamps on the wire changed how pending uploads
+(for example: enum columns stored as tags, per-write timestamps on the wire changed how pending uploads
 are stored, a rejection's reason name changed how fates are recorded, and
 pending uploads moved from one encoded message to a row per op).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `271487e48669ec33e3493b003462b565e2af6430648941bf2bc22e2f8b750149`.
+  the SQLite file `0bd49cd130a2a205eadac2356299665f49eb6569cd2caee8bfbe360b31dc69f3`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `9df7f5e5f6937247f679478b8197575a2125fc32071624ef12f7b2efae58f97f`.
+  `fcbd981b7c8e257e0c383fbeb37542c49cb720b9fcde1dda326479ab25c13034`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
 nodes and write times:
 
 - `projects`, `documents` (reference, indexed title, a 300 KiB chunked large
-  value, bytes, a defaulted column) and `drafts` (branched by `branch_id`);
+  value, bytes, a defaulted column, a defaulted enum stored as tags in
+  `_jazz_enum_tags`) and `drafts` (branched by `branch_id`);
 - two interned authors, updates (history versions), a soft delete and a row
   on a branch;
 - a client text edit to `documents.body` (text-merging) that the server
@@ -29,8 +30,13 @@ nodes and write times:
 - a client that synced `projects` and `documents`, wrote one row that
   settled, one stamped far ahead of the server's clock that the server
   rejected (so `_jazz_transactions` keeps a rejected fate with its reason name),
-  then two writes (an insert and an update) that never reached the
-  server: its pending uploads;
+  then two writes (an insert and an update) and a serializable transaction
+  that read one project and inserted two, none of which reached the
+  server: its pending uploads, the last one stored as two op rows and a
+  read row;
+- a row of `drafts` on a base branch that the draft branch overrides with a
+  version the client may not read: the client's view of the draft over that
+  base hides the row, so the client keeps a marker of it in `_jazz_withheld`;
 - then the server activated a second schema version that renames
   `documents.title` to `heading` (a stored-names lens) and wrote under it.
 
@@ -69,3 +75,18 @@ earlier layout is refused as an unsupported storage format, never misread.
 Merging `_jazz_applied` and `_jazz_settled` into one `_jazz_transactions`
 table keyed by an interned node code (`_jazz_nodes.n`) regenerated it the
 same way.
+
+Deleting a settled commit's pending rows in one statement (the
+`_jazz_pending_forget` trigger on `_jazz_pending`, with
+`_jazz_pending_versions` now created on open) regenerated it the same way,
+adding the serializable pending commit above so the per-op layout is
+pinned with more than one op and a read.
+
+Hiding branch-view rows whose head version the reader may not read added the
+client's `_jazz_withheld` table (created on the first hidden eviction) and
+gave `drafts` an `owner` column and a read policy, which regenerated it the
+same way, and re-pinned the browser corpus (whose producer hides a note the
+same way). A storage change re-pins this corpus and the browser corpus;
+`server-data-dir-v1` is re-pinned only when an authority's bytes change (an
+authority never writes `_jazz_withheld`, and that producer is not
+byte-deterministic).

@@ -690,6 +690,66 @@ This is how the SQLite engine meets `INV-LENS-24`: an identity is never
 reused for another column epoch, and only a compatible re-addition keeps its
 predecessor's.
 
+### 10.8 Enum tags (SQLite engine)
+
+An enum column (`s.enum(...)`, or an array of one) stores each variant as an
+INTEGER **tag**, kept per stored column in `_jazz_enum_tags (tbl, col, tag,
+name)` (`crates/jazz/layers/db/src/values.rs`, `EnumTags`). Tags are an
+interning optimisation private to each store. Values are variant names
+everywhere above SQLite: in writes, commits, row images on the wire, the
+catalogue, filters, policies and reads. Only a store's own cells hold tags,
+and no other store ever sees one.
+
+- **Every store tags its own variants.** A store tags each variant a version
+  declares when it admits the version, before any column is added, so an
+  added enum column's DDL default is a tag too. A new name takes the
+  column's next tag, one past its highest. A removed variant keeps a tag,
+  and every name a version ever declared for the stored column still reads
+  back. A name a row carries that no admitted version declares (a removed
+  variant, say) is tagged when it is stored. A store's memory of its tags
+  follows its file: a savepoint that rolls back puts back the tags it
+  interned or renumbered.
+- **The current schema's order is tag order.** When a store makes a version
+  current (activation, or opening under a version newer than any it
+  admitted), it renumbers each of that version's enum columns so its
+  declared variants are tags `0..n` in declaration order and every other
+  name follows in its previous tag order, rewriting the column's cells in
+  every row version in the same transaction. Appending a variant changes
+  no tag. A column added with a default keeps SQLite's `DEFAULT` tag; when
+  a renumbering gives that tag to another variant, the store records the
+  default by name (`_jazz_enum_defaults`), and a row inserted by a version
+  that does not name the column stores that name's tag.
+- **On the wire.** Row images carry enum cells as variant names (a JSON
+  array of names for an array column); the receiving store stores each as
+  its own tag. Two stores may tag a variant differently.
+- **Copies and renames.** A rename keeps the stored column, so it keeps the
+  tags. A copy lens's column is a stored column with tags of its own: it
+  starts with its source's tags, removed variants included, so its cells
+  are its source's and it sorts like its source; either may add variants
+  later.
+- **Order.** `ORDER BY`, `MIN`, `MAX` and range comparisons on an enum
+  column follow the declaration order of the query's schema version. For
+  the current version that is tag order, which an index on the column
+  serves. Another version (an older client during a rollout) reads each
+  cell as its rank in its own declaration order, a `CASE` no index serves,
+  with names it does not declare after its own. A range compared with a
+  name the column never held is refused as a query error. A `GROUP BY` on
+  an enum column identifies each group by its variant name, so a
+  renumbering keeps group identity.
+- **Comparisons.** A variant name compared with an enum column for
+  equality (`=`, `IN`, array containment, a policy literal or session
+  value) is bound as its tag. Anything else, such as text containment or a comparison with another
+  enum column's cells, reads the cell as its name.
+- **Type.** `_jazz_stored_columns` records an enum column as an enum
+  (whatever its variants), so a stored column never holds both tags and
+  another type's values: a column changed between enum and another type is
+  handled like any type change (10.7), as a new stored column or a refusal.
+  Writes are checked against the writing version's declared variants.
+  Enum columns are never large-capable (ch. 19).
+
+Raw SQL (an inspector, a debugging session) reads names by joining
+`_jazz_enum_tags` on the stored table, stored column and cell.
+
 ### 10.9 Subsumed schema-file and schema-subset notes
 
 The former schema manager and schema file notes are folded into the catalogue

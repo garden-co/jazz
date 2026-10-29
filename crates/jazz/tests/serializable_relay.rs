@@ -125,14 +125,18 @@ impl Net {
         }
         let (client_side, server_side) = duplex();
         block_on(net.direct.connect_upstream(client_side));
-        net.core.accept_subscriber(server_side, author(DIRECT));
+        net.core
+            .accept_subscriber(server_side, author(DIRECT))
+            .unwrap();
         for i in 0..tabs {
             let tab = open(WORKER + 1 + i as u8, author(WORKER));
             tab.set_non_durable_client();
             tab.set_remote_link_hint(RemoteLinkHint::Live);
             let (client_side, server_side) = duplex();
             block_on(tab.connect_upstream(client_side));
-            net.worker.accept_subscriber(server_side, author(WORKER));
+            net.worker
+                .accept_subscriber(server_side, author(WORKER))
+                .unwrap();
             net.tabs.push(tab);
         }
         net
@@ -141,7 +145,9 @@ impl Net {
     fn connect_worker(&mut self) {
         let (client_side, server_side) = duplex();
         self.worker_up = Some(block_on(self.worker.connect_upstream(client_side)));
-        self.core.accept_subscriber(server_side, author(WORKER));
+        self.core
+            .accept_subscriber(server_side, author(WORKER))
+            .unwrap();
     }
 
     fn worker_offline(&mut self) {
