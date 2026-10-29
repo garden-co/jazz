@@ -32,7 +32,7 @@ use jazz::db::{
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::model::transaction::OpenTransactionId;
-use jazz::protocol::ReadViewSourceSpec;
+use jazz::protocol::{BranchSelector, BranchViewBase, ReadViewSourceSpec};
 use jazz::protocol::{LensOp, MigrationLens, PermissionAdviceAction, TableLens};
 use jazz::query::{Query, col, eq, lit};
 use jazz::records::Value;
@@ -330,10 +330,16 @@ impl Transport for Recording {
 }
 
 /// Message shapes the one frame per variant leaves unpinned: a one-shot
-/// `Read` (its span carries a snapshot and a view), `Rows` carrying the
-/// commits behind history versions, and a `Catalogue` carrying versions
-/// with their stored names and a lens's cells.
-const SHAPES: [&str; 3] = ["Read/once", "Rows/origins", "Catalogue/versions"];
+/// `Read` (as of a seq or a snapshot), `Rows` carrying the commits behind
+/// history versions, a `Catalogue` carrying versions with their stored
+/// names and a lens's cells, and a live `Read` in a branch view over a
+/// live base.
+const SHAPES: [&str; 4] = [
+    "Read/once",
+    "Rows/origins",
+    "Catalogue/versions",
+    "Read/live-branch-view",
+];
 
 fn shape(message: &SyncMessage) -> Option<&'static str> {
     match message {
@@ -345,6 +351,20 @@ fn shape(message: &SyncMessage) -> Option<&'static str> {
         SyncMessage::Catalogue {
             versions, cells, ..
         } if !versions.is_empty() && !cells.is_empty() => Some(SHAPES[2]),
+        SyncMessage::Read {
+            view,
+            span: ReadSpan::Live { .. },
+            ..
+        } if matches!(
+            **view,
+            ReadViewSourceSpec::BranchView {
+                base: Some(BranchViewBase::Current(_)),
+                ..
+            }
+        ) =>
+        {
+            Some(SHAPES[3])
+        }
         _ => None,
     }
 }
@@ -501,6 +521,17 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     pump(&[&alice, &server, &alice]);
     let _ = block_on(alice.all(&notes, ReadOpts::default())).unwrap();
     pump(&[&alice, &server, &alice]);
+    // Read (live, in a branch view over a live base).
+    let selector = |byte: u8| {
+        BranchSelector::new([("branch", Value::Uuid(uuid::Uuid::from_bytes([byte; 16])))])
+    };
+    let in_draft = ReadOpts::default().branch_view(
+        selector(0xd1),
+        Some(BranchViewBase::Current(selector(0xd2))),
+    );
+    let drafted = block_on(alice.subscribe(&notes, in_draft)).unwrap();
+    pump(&[&alice, &server, &alice]);
+    drop(drafted);
 
     // PushChunks, Commit, Fate: a write with a new large value.
     let mine = RowUuid::from_bytes([0x12; 16]);

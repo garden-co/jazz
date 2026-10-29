@@ -1240,7 +1240,7 @@ pub(crate) struct Remote {
     query: Query,
     binding: BTreeMap<String, Value>,
     include_deleted: bool,
-    /// The view the server maintains it in (see [`upstream_view`]).
+    /// The view the server maintains it in (see [`upstream_read`]).
     view: ReadViewSourceSpec,
     /// How far it reaches (see `SyncMessage::Read`).
     reach: RemoteReach,
@@ -1422,27 +1422,43 @@ fn remote_key(
     format!("{query:?}{binding:?}{include_deleted}{view:?}{reach:?}")
 }
 
-/// The view a replica asks its upstream to keep a subscription in. A
-/// branch view's head and live base are maintained upstream. A frozen
-/// base is this replica's own capture: a durable replica asks only for
-/// the live head, while a non-durable one (a tab, whose memory store its
-/// worker fills) and a snapshot read take the current rows, as the cut is
-/// applied here.
-pub(crate) fn upstream_view(source: &ReadViewSourceSpec, non_durable: bool) -> ReadViewSourceSpec {
+/// What a replica asks its upstream to keep current for a live read of
+/// `query` in `source`: the query, its deletion flag and its view. A
+/// branch view's head and live base are maintained upstream as they are.
+/// A frozen base is this replica's own capture, so a durable replica asks
+/// for the head alone, deleted rows included and without a window: a head
+/// tombstone or version masks a base row however the query ranks it. A
+/// non-durable replica (a tab, whose memory store its worker fills) and a
+/// snapshot read take the current rows and apply the cut themselves.
+pub(crate) fn upstream_read<'q>(
+    query: &'q Query,
+    include_deleted: bool,
+    source: &ReadViewSourceSpec,
+    non_durable: bool,
+) -> (std::borrow::Cow<'q, Query>, bool, ReadViewSourceSpec) {
+    let query = remote_query(query);
     match source {
         ReadViewSourceSpec::BranchView {
             base: Some(BranchViewBase::Snapshot { .. }),
             ..
-        } if non_durable => ReadViewSourceSpec::Current,
+        } if non_durable => (query, include_deleted, ReadViewSourceSpec::Current),
         ReadViewSourceSpec::BranchView {
             head,
             base: Some(BranchViewBase::Snapshot { .. }),
-        } => ReadViewSourceSpec::BranchView {
-            head: head.clone(),
-            base: None,
-        },
-        ReadViewSourceSpec::Snapshot { .. } => ReadViewSourceSpec::Current,
-        view => view.clone(),
+        } => {
+            let mut head_rows = query.into_owned();
+            head_rows.limit = None;
+            head_rows.offset = 0;
+            let view = ReadViewSourceSpec::BranchView {
+                head: head.clone(),
+                base: None,
+            };
+            (std::borrow::Cow::Owned(head_rows), true, view)
+        }
+        ReadViewSourceSpec::Snapshot { .. } => {
+            (query, include_deleted, ReadViewSourceSpec::Current)
+        }
+        view => (query, include_deleted, view.clone()),
     }
 }
 
@@ -5031,15 +5047,21 @@ impl Db {
         }
         read.settled_only = true;
         read.cut = Some(crate::compile::Cut::at(through));
-        let (table, head) = {
+        let (table, head, base) = {
             let inner = self.inner.borrow();
             let schema = inner.schema.clone();
             let table = schema.table(&prepared.query.table)?;
-            let head = match &read.view {
-                Some(view) if !table.branch_by.is_empty() => Some(table.selector_key(&view.head)?),
-                _ => None,
+            let (head, base) = match &read.view {
+                Some(view) if !table.branch_by.is_empty() => (
+                    Some(table.selector_key(&view.head)?),
+                    view.base
+                        .as_ref()
+                        .map(|base| table.selector_key(base))
+                        .transpose()?,
+                ),
+                _ => (None, None),
             };
-            (table.stored.clone(), head)
+            (table.stored.clone(), head, base)
         };
         let mut previous = Vec::new();
         loop {
@@ -5059,6 +5081,7 @@ impl Db {
                 return Ok(());
             }
             let mut evict = Vec::new();
+            let mut ask = Vec::new();
             for &row in &stale {
                 let id = row.0.as_bytes().to_vec();
                 for image in inner.images_where(&table, false, "id = ?1", &[&id])? {
@@ -5067,9 +5090,22 @@ impl Db {
                             .baselines
                             .contains_key(&(table.clone(), row, image.key.clone()))
                     });
-                    let in_view = head.as_ref().is_none_or(|head| *head == image.key);
-                    if in_view && image.seq <= through && !overlaid {
+                    if image.seq > through || overlaid {
+                        continue;
+                    }
+                    if head.as_ref().is_none_or(|head| *head == image.key) {
                         evict.push((row, image.key));
+                    } else if let (Some(head), Some(base)) = (&head, &base)
+                        && *base == image.key
+                    {
+                        // An inherited row the answer leaves out: the head
+                        // masks it (a tombstone, or a version the read
+                        // leaves out) or the base row changed. The base row
+                        // may be another read's, so it is not evicted: the
+                        // upstream sends the head's and the base's row as
+                        // they are, or their evictions.
+                        ask.push((table.clone(), *row.0.as_bytes(), head.clone()));
+                        ask.push((table.clone(), *row.0.as_bytes(), image.key));
                     }
                 }
             }
@@ -5080,6 +5116,9 @@ impl Db {
             }
             for (row, key) in evict {
                 inner.evict(&table, row, &key)?;
+            }
+            for named in ask {
+                inner.ask_whole(named)?;
             }
             previous = stale;
         }
@@ -5353,9 +5392,9 @@ impl Db {
         Rc<RefCell<Option<Error>>>,
         Rc<StdCell<bool>>,
     )> {
-        let query = remote_query(&prepared.query);
         let mut inner = self.inner.borrow_mut();
-        let view = upstream_view(view, inner.non_durable);
+        let (query, include_deleted, view) =
+            upstream_read(&prepared.query, include_deleted, view, inner.non_durable);
         let client = inner.client.as_mut()?;
         let key = remote_key(&query, &prepared.binding, include_deleted, &view, reach);
         if let Some(remote) = client.remote.get_mut(&key) {
@@ -5436,11 +5475,12 @@ impl Inner {
         view: &ReadViewSourceSpec,
         reach: RemoteReach,
     ) {
-        let view = upstream_view(view, self.non_durable);
+        let (query, include_deleted, view) =
+            upstream_read(query, include_deleted, view, self.non_durable);
         let Some(client) = self.client.as_mut() else {
             return;
         };
-        let key = remote_key(&remote_query(query), binding, include_deleted, &view, reach);
+        let key = remote_key(&query, binding, include_deleted, &view, reach);
         let Some(remote) = client.remote.get_mut(&key) else {
             return;
         };

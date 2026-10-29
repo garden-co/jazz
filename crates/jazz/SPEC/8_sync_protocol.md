@@ -282,10 +282,19 @@ for one query's result:
   (head over an optional live or frozen base), or a snapshot. It is part of
   the read's identity (`INV-BVIEW-12`): the server keeps a live read in its
   view, as ch. 11 §11.5 maintains it. A replica asks for a branch view's head
-  and live base as they are; a durable replica asks for only the head of a
-  view over a frozen base, the base being its own capture, while a
-  non-durable one, whose store its relay fills, and a snapshot read ask for
-  the current rows and apply the cut themselves.
+  and live base as they are. For a view over a frozen base, the base being
+  its own capture, a durable replica asks for the head alone, deleted rows
+  included and unwindowed, since a head tombstone or version masks a base
+  row wherever the query would rank it. A non-durable one, whose store its
+  relay fills, and a snapshot read ask for the current rows and apply the cut
+  themselves; a non-durable replica refuses a windowed subscription over a
+  frozen base ("not supported yet"), as a window over every branch's rows
+  would cut the view's own.
+- A listing judges only the rows the view holds. A cached row it leaves out
+  that the head supplies is evicted; one the live base supplies may be
+  another read's, so the replica asks for the head's and the base's row
+  whole (`Hold`) instead, and the answer brings the head row that masks it
+  or the base row as it is now, or their evictions.
 - `span: Live { since }` keeps it current until `Unsubscribe` (§8.5);
   `since` resumes it (§8.11).
 - `span: Once { at }` answers it once, at the current state or as of

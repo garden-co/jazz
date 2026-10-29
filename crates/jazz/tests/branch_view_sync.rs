@@ -309,3 +309,163 @@ fn a_branch_view_subscription_resumes_in_its_view() {
     );
     assert_eq!(*shipped.borrow(), 1, "only the view's new row ships");
 }
+
+fn del(db: &Db, row: u8, head: &BranchSelector, base: Option<&BranchSelector>) {
+    block_on(db.delete(
+        "todos",
+        RowUuid::from_bytes([row; 16]),
+        jazz::db::DeleteOptions {
+            target: jazz::db::WriteTarget::BranchView {
+                head: head.clone(),
+                base: base.map(|b| BranchViewBase::Current(b.clone())),
+            },
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+}
+
+/// The draft deleted main's x before the replica subscribed. The replica
+/// holds main's x for a main-view read beside it, so the draft's opening
+/// must bring the head tombstone that masks x, though x is not in the
+/// draft's result; main's x stays for the main view.
+#[test]
+fn a_head_tombstone_masks_a_base_row_another_read_holds() {
+    let (server, client, _) = connected();
+    let (main, draft) = (branch(0xe1), branch(0xe2));
+    put(&server, &main, 0x70, "x", 1);
+    put(&server, &main, 0x71, "y", 2);
+    put(&server, &main, 0x72, "z", 3);
+    del(&server, 0x70, &draft, Some(&main));
+    let query = Query::from("todos").order_by("rank", OrderDirection::Asc);
+    let main_view = ReadOpts::default().branch_view(main.clone(), None);
+    let draft_view =
+        ReadOpts::default().branch_view(draft.clone(), Some(BranchViewBase::Current(main.clone())));
+    let prepared = client.prepare_query(&query).unwrap();
+    let _main = block_on(client.subscribe(&prepared, main_view.clone())).unwrap();
+    pump(&server, &client);
+    let windowed = client.prepare_query(&query.clone().limit(2)).unwrap();
+    let _draft = block_on(client.subscribe(&prepared, draft_view.clone())).unwrap();
+    let _window = block_on(client.subscribe(&windowed, draft_view.clone())).unwrap();
+    pump(&server, &client);
+    assert_eq!(titles(&client, &query, draft_view.clone()), ["y", "z"]);
+    assert_eq!(
+        titles(&client, &query.clone().limit(2), draft_view.clone()),
+        ["y", "z"],
+        "the masked row takes no place in the window"
+    );
+    assert_eq!(titles(&client, &query, main_view), ["x", "y", "z"]);
+}
+
+/// A windowed draft-over-main read opens fresh on reconnect (a window
+/// does not resume): a main row deleted meanwhile leaves the replica's
+/// window, though only the head's rows are this answer's to evict.
+#[test]
+fn a_windowed_view_reopening_drops_a_base_row_deleted_while_away() {
+    let server = open(0x01, AuthorSubject::SYSTEM);
+    server.set_authority();
+    let client = open(0x02, alice());
+    let (main, draft) = (branch(0xf1), branch(0xf2));
+    for (row, rank) in [(0x80, 1), (0x81, 2), (0x82, 3), (0x83, 4)] {
+        put(&server, &main, row, &format!("main {rank}"), rank);
+    }
+    put(&server, &draft, 0x84, "draft 10", 10);
+    let (upstream, _) = connect(&server, &client);
+    let view =
+        ReadOpts::default().branch_view(draft.clone(), Some(BranchViewBase::Current(main.clone())));
+    let prepared = client.prepare_query(&first_three()).unwrap();
+    let _stream = block_on(client.subscribe(&prepared, view.clone())).unwrap();
+    pump(&server, &client);
+    assert_eq!(
+        titles(&client, &first_three(), view.clone()),
+        ["main 1", "main 2", "main 3"]
+    );
+    assert!(client.detach_connection(&upstream));
+    del(&server, 0x80, &main, None);
+    let (_upstream, _) = connect(&server, &client);
+    pump(&server, &client);
+    assert_eq!(
+        titles(&client, &first_three(), view.clone()),
+        ["main 2", "main 3", "main 4"]
+    );
+}
+
+/// Another writer deletes an inherited row in the draft: a durable
+/// replica's view over a frozen base hides it, though the head alone
+/// never listed it.
+#[test]
+fn a_frozen_base_view_follows_a_head_tombstone_from_another_writer() {
+    let (server, client, _) = connected();
+    let (main, draft) = (branch(0xb5), branch(0xb6));
+    put(&client, &main, 0x45, "kept", 1);
+    put(&client, &main, 0x46, "dropped", 2);
+    pump(&server, &client);
+    let frozen = block_on(client.capture_snapshot()).unwrap();
+    let view = ReadOpts::default().branch_view(
+        draft.clone(),
+        Some(BranchViewBase::Snapshot {
+            branch: main.clone(),
+            snapshot: frozen,
+        }),
+    );
+    let query = Query::from("todos").order_by("rank", OrderDirection::Asc);
+    let prepared = client.prepare_query(&query).unwrap();
+    let _stream = block_on(client.subscribe(&prepared, view.clone())).unwrap();
+    pump(&server, &client);
+    assert_eq!(titles(&client, &query, view.clone()), ["kept", "dropped"]);
+    del(&server, 0x46, &draft, Some(&main));
+    pump(&server, &client);
+    assert_eq!(titles(&client, &query, view.clone()), ["kept"]);
+}
+
+/// A tab's worker fills its memory store with every branch's current rows
+/// for a view over a frozen base, so a window there would be wrong: the
+/// subscription is refused, not served wrong.
+#[test]
+fn a_tab_refuses_a_windowed_view_over_a_frozen_base() {
+    let server = open(0x01, AuthorSubject::SYSTEM);
+    server.set_authority();
+    let worker = open(0x02, alice());
+    std::mem::forget(connect(&server, &worker).0);
+    let tab = open(0x03, alice());
+    tab.set_non_durable_client();
+    std::mem::forget(connect(&worker, &tab).0);
+    let tick = || {
+        block_on(tab.tick()).unwrap();
+        block_on(worker.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+        block_on(worker.tick()).unwrap();
+        block_on(tab.tick()).unwrap();
+    };
+    let (main, draft) = (branch(0x91), branch(0x92));
+    put(&server, &main, 0xa0, "main 5", 5);
+    for _ in 0..6 {
+        tick();
+    }
+    // The capture waits on the worker: tick while polling it.
+    let mut capture = pin!(tab.capture_snapshot());
+    let mut context = Context::from_waker(Waker::noop());
+    let frozen = loop {
+        if let Poll::Ready(frozen) = capture.as_mut().poll(&mut context) {
+            break frozen.unwrap();
+        }
+        tick();
+    };
+    let view = ReadOpts::default().branch_view(
+        draft,
+        Some(BranchViewBase::Snapshot {
+            branch: main,
+            snapshot: frozen,
+        }),
+    );
+    let prepared = tab.prepare_query(&first_three()).unwrap();
+    let error = match block_on(tab.subscribe(&prepared, view)) {
+        Ok(_) => panic!("the subscription must be refused"),
+        Err(error) => error,
+    };
+    assert!(
+        error.message.contains("not supported yet"),
+        "{}",
+        error.message
+    );
+}

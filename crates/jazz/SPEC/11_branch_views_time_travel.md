@@ -455,9 +455,11 @@ not apply under a view yet, and one write to a base wakes every view over it.
 
 Across sync, a replica's live branch-view read carries its view
 (ch. 8 §8.4). The upstream keeps the result in that view, so the replica
-receives the view's own window and the supporting rows of its head and base,
-not other branch keys' rows. A resumed read diffs its view as of `since`
-(§8.11), the frozen base keeping its own cut.
+receives the view's own window rather than every branch key's matching rows.
+Other branch keys' rows can still arrive: a supporting row is followed by id
+under any branch key, a row leaving the result ships with all its branch
+keys' images, and so can a resumed read's prior diff. A resumed read diffs
+its view as of `since` (§8.11), the frozen base keeping its own cut.
 
 ### 11.6 Cross-branch-key merge helper
 
