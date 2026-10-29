@@ -40,6 +40,8 @@ CREATE TABLE IF NOT EXISTS _jazz_host_account_links (
     expires_at INTEGER NOT NULL,
     completed INTEGER NOT NULL
 ) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS _jazz_host_account_links_open_by_expiry
+    ON _jazz_host_account_links (expires_at) WHERE completed = 0;
 ";
 
 pub(crate) struct StoredAccountRegistry {
@@ -400,5 +402,30 @@ mod tests {
             }),
             Err(RegistryError::Decision(AccountError::InvalidIntent))
         ));
+    }
+
+    #[test]
+    fn pruning_keeps_accepted_links_so_a_repeat_accept_answers() {
+        let store = crate::runtime::AppStore::memory().unwrap();
+        let mut registry = StoredAccountRegistry::open(store.sql().unwrap()).unwrap();
+        let alice = principal("alice");
+        registry.login_or_register(&alice).unwrap();
+        let request = |nonce: u128, candidate: &str, now: u64| AccountCommand::RequestLink {
+            approver: alice.clone(),
+            candidate: principal(candidate),
+            nonce: Uuid::from_u128(nonce),
+            now,
+            expires_at: now + 10,
+        };
+        let accept = AccountCommand::AcceptLink {
+            candidate: principal("bob"),
+            nonce: Uuid::from_u128(1),
+            now: 5,
+        };
+        registry.execute(&request(1, "bob", 0)).unwrap();
+        let linked = registry.execute(&accept).unwrap();
+        // Long after the link expired, a request prunes expired links.
+        registry.execute(&request(2, "carol", 100)).unwrap();
+        assert_eq!(registry.execute(&accept).unwrap(), linked);
     }
 }

@@ -22,8 +22,8 @@ to the shared state; they do not implement independent authentication flows.
   existing active assignment. The explicit login-or-register operation resolves
   an active assignment or creates the first assignment in one serialized owner
   request. It never reactivates or reassigns a revoked principal. Concurrent
-  requests and retries converge on the same assignment; a storage failure
-  requires authoritative recovery rather than speculative success.
+  requests and retries converge on the same assignment; after a storage
+  failure the next lookup reads committed state rather than assuming success.
 - Local-first founding is deterministic from the application namespace and
   verified founding key identity. It is usable offline; arbitrary external
   assignment cannot be accepted offline.

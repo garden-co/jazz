@@ -73,6 +73,8 @@ CREATE TABLE _jazz_host_account_links (
     expires_at INTEGER NOT NULL,      -- Unix seconds, exclusive
     completed INTEGER NOT NULL        -- accepted; kept so a repeat answers
 ) WITHOUT ROWID;
+CREATE INDEX _jazz_host_account_links_open_by_expiry
+    ON _jazz_host_account_links (expires_at) WHERE completed = 0;
 ```
 
 A row per principal is permanent: revocation clears `active` and never
