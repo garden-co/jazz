@@ -808,11 +808,21 @@ and no other store ever sees one.
 
 - **Every store tags its own variants.** A store tags each variant a version
   declares when it admits the version, before any column is added, so an
-  added enum column's DDL default is a tag too. A column's next tag is one
-  past its highest, in declaration order, and a tag is never reused: a
-  removed variant keeps its tag, and every name a version ever declared for
-  the stored column still reads back. A name a row carries that no admitted
-  version declares (a removed variant, say) is tagged when it is stored.
+  added enum column's DDL default is a tag too. A new name takes the
+  column's next tag, one past its highest. A removed variant keeps a tag,
+  and every name a version ever declared for the stored column still reads
+  back. A name a row carries that no admitted version declares (a removed
+  variant, say) is tagged when it is stored.
+- **The current schema's order is tag order.** When a store makes a version
+  current (activation, or opening under a version newer than any it
+  admitted), it renumbers each of that version's enum columns so its
+  declared variants are tags `0..n` in declaration order and every other
+  name follows in its previous tag order, rewriting the column's cells in
+  every row version in the same transaction. Appending a variant changes
+  no tag. A column added with a default keeps SQLite's `DEFAULT` tag; when
+  a renumbering gives that tag to another variant, the store records the
+  default by name (`_jazz_enum_defaults`), and a row inserted by a version
+  that does not name the column stores that name's tag.
 - **On the wire.** Row images carry enum cells as variant names (a JSON
   array of names for an array column); the receiving store stores each as
   its own tag. Two stores may tag a variant differently.
@@ -822,11 +832,14 @@ and no other store ever sees one.
   are its source's and it sorts like its source; either may add variants
   later.
 - **Order.** `ORDER BY`, `MIN`, `MAX` and range comparisons on an enum
-  column follow tag order: the order the store admitted variants in, which
-  an index on the column serves.
-- **Comparisons.** A variant name compared with an enum column (`=`, `IN`,
-  array containment, a policy literal or session value) is bound as its
-  tag. Anything else, such as text containment or a comparison with another
+  column follow the declaration order of the query's schema version. For
+  the current version that is tag order, which an index on the column
+  serves. Another version (an older client during a rollout) reads each
+  cell as its rank in its own declaration order, a `CASE` no index serves,
+  with names it does not declare after its own.
+- **Comparisons.** A variant name compared with an enum column for
+  equality (`=`, `IN`, array containment, a policy literal or session
+  value) is bound as its tag. Anything else, such as text containment or a comparison with another
   enum column's cells, reads the cell as its name.
 - **Type.** `_jazz_column_types` records an enum column as an enum
   (whatever its variants), so a stored column never holds both tags and

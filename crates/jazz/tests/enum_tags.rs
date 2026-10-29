@@ -1,7 +1,8 @@
 //! Enum columns are stored as INTEGER tags, which each store keeps for
 //! itself in `_jazz_enum_tags`, numbering each stored column's variants in
-//! the order they were added. Everything above SQLite, sync included, uses
-//! variant names; a column sorts in tag order.
+//! the current schema's declaration order. Everything above SQLite, sync
+//! included, uses variant names; a column sorts in its query schema's
+//! declaration order.
 
 use crate::common;
 
@@ -16,7 +17,7 @@ use jazz::db::{
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::{LensOp, MigrationLens, TableLens};
-use jazz::query::{Operand, OrderDirection, Predicate, Query};
+use jazz::query::{Aggregate, Operand, OrderDirection, Predicate, Query};
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
@@ -284,7 +285,8 @@ fn integers(tags: &[i64]) -> Vec<(String, String)> {
 }
 
 /// Tags follow declaration order; cells hold tags, reads return names,
-/// filters take names, and ORDER BY follows tag order, not the alphabet.
+/// filters take names, and ORDER BY follows declaration order, not the
+/// alphabet.
 #[test]
 fn an_authority_stores_tags_in_declaration_order_and_reads_names() {
     let dir = tempfile::tempdir().unwrap();
@@ -363,20 +365,21 @@ fn an_authority_stores_tags_in_declaration_order_and_reads_names() {
 /// ones, wherever it is declared; a removed variant keeps its tag, which is
 /// never handed to another one.
 #[test]
-fn added_variants_sort_last_and_removed_tags_are_never_reused() {
+fn variants_sort_in_the_current_declaration_order_and_removed_ones_last() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("authority.sqlite");
     let db = authority_at(v1(), &path);
     insert(&db, 1, "done");
     insert(&db, 2, "todo");
+    // v2 declares `blocked` first: activating it renumbers the tags.
     block_on(db.activate_schema_with_lenses(v2(), &[lens(&v1(), &v2(), vec![])])).unwrap();
     insert(&db, 3, "blocked");
     assert_eq!(
         statuses(&db, by_status()),
         [
+            (3, "blocked".into()),
             (2, "todo".into()),
-            (1, "done".into()),
-            (3, "blocked".into())
+            (1, "done".into())
         ]
     );
 
@@ -384,17 +387,18 @@ fn added_variants_sort_last_and_removed_tags_are_never_reused() {
     let v3 = tasks(&["blocked", "todo", "review", "done"]);
     block_on(db.activate_schema_with_lenses(v3.clone(), &[lens(&v2(), &v3, vec![])])).unwrap();
     insert(&db, 4, "review");
+    // v3's variants are tags 0-3, and the removed `doing` follows them.
     assert_eq!(
         raw_tags(&path),
         [
-            (0, "todo".into()),
-            (1, "doing".into()),
-            (2, "done".into()),
-            (3, "blocked".into()),
-            (4, "review".into())
+            (0, "blocked".into()),
+            (1, "todo".into()),
+            (2, "review".into()),
+            (3, "done".into()),
+            (4, "doing".into())
         ]
     );
-    assert_eq!(raw_cells(&path), integers(&[0, 2, 3, 4]));
+    assert_eq!(raw_cells(&path), integers(&[0, 1, 2, 3]));
     // `doing` is no variant of v3 any more.
     let refused =
         try_insert(&db, 5, &[("title", name("t")), ("status", name("doing"))]).unwrap_err();
@@ -454,14 +458,15 @@ fn a_replica_tags_variants_itself_and_rows_travel_by_name() {
     )
     .unwrap();
     pump(&server, &[&client]);
-    assert_eq!(raw_cells(&client_path), integers(&[0, 2, 3]));
-    let added_last = [
+    // Opened under v2, the client numbers v2's variants in its order.
+    assert_eq!(raw_cells(&client_path), integers(&[0, 1, 3]));
+    let declared = [
+        (3, "blocked".into()),
         (2, "todo".into()),
         (1, "done".into()),
-        (3, "blocked".into()),
     ];
-    assert_eq!(statuses(ahead, by_status()), added_last);
-    assert_eq!(statuses(&server, by_status()), added_last);
+    assert_eq!(statuses(ahead, by_status()), declared);
+    assert_eq!(statuses(&server, by_status()), declared);
 }
 
 /// A write is checked against its version's variants, and an enum value
@@ -1151,16 +1156,20 @@ fn each_store_keeps_its_own_tags() {
     )
     .unwrap();
     pump(&server, &[&client]);
+    // Opened under a version declaring `y`, the client numbers it first;
+    // `x`, which only it ever stored, follows.
     let client_tags = raw_tags_named(&cp);
     assert!(
-        client_tags.contains(&("rank~2".to_owned(), 0, "x".to_owned())),
+        client_tags.contains(&("rank~2".to_owned(), 0, "y".to_owned())),
         "{client_tags:?}"
     );
     assert!(
-        client_tags.contains(&("rank~2".to_owned(), 1, "y".to_owned())),
+        client_tags.contains(&("rank~2".to_owned(), 1, "x".to_owned())),
         "{client_tags:?}"
     );
-    assert!(raw_tags_named(&sp2).contains(&("rank~2".to_owned(), 0, "y".to_owned())));
+    let server_tags = raw_tags_named(&sp2);
+    assert!(server_tags.contains(&("rank~2".to_owned(), 0, "y".to_owned())));
+    assert!(!server_tags.iter().any(|(_, _, name)| name == "x"));
     let read = |db: &Db| {
         column(
             db,
@@ -1173,6 +1182,164 @@ fn each_store_keeps_its_own_tags() {
     drop((_sub, _link, client));
     let client = open_at(with_rank("y"), 1, &cp);
     assert_eq!(read(&client), [(3, Some(some("y")))]);
+}
+
+/// `MIN` and `MAX` of `status`, as names.
+fn min_max(db: &Db) -> (Option<Value>, Option<Value>) {
+    let query = Query::from("tasks").aggregate([
+        Aggregate::min("status").alias("lo"),
+        Aggregate::max("status").alias("hi"),
+    ]);
+    let prepared = db.prepare_query(&query).unwrap();
+    let rows = block_on(db.all(&prepared, ReadOpts::default())).unwrap();
+    let cell = |name: &str| {
+        rows[0]
+            .cells()
+            .find(|(n, _)| *n == name)
+            .and_then(|(_, value)| value.cloned())
+    };
+    (cell("lo"), cell("hi"))
+}
+
+fn status_after(value: &str) -> Predicate {
+    Predicate::Gt(
+        Operand::Column("status".into()),
+        Operand::Literal(name(value)),
+    )
+}
+
+/// Making a reordering version current renumbers the tags to its order,
+/// rewriting the cells, so its sorts use the raw cell. A version declaring
+/// another order still sorts, compares and takes `MIN`/`MAX` in its own.
+#[test]
+fn a_reorder_renumbers_the_tags_and_older_versions_keep_their_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("authority.sqlite");
+    let db = authority_at(v1(), &path);
+    insert(&db, 1, "done");
+    insert(&db, 2, "todo");
+    insert(&db, 3, "doing");
+    let reversed = tasks(&["done", "doing", "todo"]);
+    block_on(db.activate_schema_with_lenses(reversed.clone(), &[lens(&v1(), &reversed, vec![])]))
+        .unwrap();
+    assert_eq!(
+        raw_tags(&path),
+        [(0, "done".into()), (1, "doing".into()), (2, "todo".into())]
+    );
+    // done 0, todo 2, doing 1.
+    assert_eq!(raw_cells(&path), integers(&[0, 1, 2]));
+    let current = [(1, "done".into()), (3, "doing".into()), (2, "todo".into())];
+    assert_eq!(statuses(&db, by_status()), current);
+    assert_eq!(
+        ids(&db, Query::from("tasks").filter(status_after("done"))),
+        [2, 3]
+    );
+    assert_eq!(min_max(&db), (Some(some("done")), Some(some("todo"))));
+
+    let old = block_on(db.register_schema_view(v1())).unwrap();
+    assert_eq!(
+        statuses(&old, by_status()),
+        [(2, "todo".into()), (3, "doing".into()), (1, "done".into())]
+    );
+    assert_eq!(
+        ids(&old, Query::from("tasks").filter(status_after("todo"))),
+        [1, 3]
+    );
+    assert_eq!(min_max(&old), (Some(some("todo")), Some(some("done"))));
+    // Equality still matches by tag in both.
+    assert_eq!(
+        ids(&old, Query::from("tasks").filter(status_is("doing"))),
+        [3]
+    );
+    assert_eq!(
+        ids(&db, Query::from("tasks").filter(status_is("doing"))),
+        [3]
+    );
+
+    // Reopened under the current version, the tags stay as they are.
+    drop((old, db));
+    let db = authority_at(reversed, &path);
+    assert_eq!(statuses(&db, by_status()), current);
+    assert_eq!(raw_cells(&path), integers(&[0, 1, 2]));
+}
+
+/// `tasks` as [`v1`] plus `priority: enum(variants) = low`.
+fn prioritized(variants: &[&str]) -> JazzSchema {
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("tasks")
+                    .column("title", ColumnType::Text)
+                    .column("status", enumeration(&["todo", "doing", "done"]))
+                    .nullable_column(
+                        "labels",
+                        ColumnType::Array {
+                            element: Box::new(enumeration(&["bug", "ui"])),
+                        },
+                    )
+                    .column_with_default(
+                        "priority",
+                        enumeration(variants),
+                        jazz::tools::Value::Text("low".into()),
+                    )
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    )
+}
+
+/// A column added with a default keeps SQLite's `DEFAULT` tag. Once a
+/// reorder gives that tag to another variant, a version not naming the
+/// column still inserts the default variant.
+#[test]
+fn a_reorder_keeps_the_default_of_a_column_added_later() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("authority.sqlite");
+    let db = authority_at(v1(), &path);
+    insert(&db, 1, "todo");
+    let low_first = prioritized(&["low", "high"]);
+    block_on(db.activate_schema_with_lenses(low_first.clone(), &[lens(&v1(), &low_first, vec![])]))
+        .unwrap();
+    let high_first = prioritized(&["high", "low"]);
+    block_on(
+        db.activate_schema_with_lenses(
+            high_first.clone(),
+            &[lens(&low_first, &high_first, vec![])],
+        ),
+    )
+    .unwrap();
+    // SQLite's default is `low`'s old tag, now `high`'s.
+    let defaults: Vec<(String, String)> = {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT col, name FROM _jazz_enum_defaults")
+            .unwrap();
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    assert_eq!(defaults, [("priority".to_owned(), "low".to_owned())]);
+    let old = block_on(db.register_schema_view(v1())).unwrap();
+    insert(&old, 2, "done");
+    let priorities = |db: &Db| column(db, Query::from("tasks"), "priority");
+    let mut read = priorities(&db);
+    read.sort_by_key(|(n, _)| *n);
+    assert_eq!(read, [(1, Some(name("low"))), (2, Some(name("low")))]);
+    drop((old, db));
+    let db = authority_at(high_first, &path);
+    let old = block_on(db.register_schema_view(v1())).unwrap();
+    insert(&old, 3, "done");
+    let mut read = priorities(&db);
+    read.sort_by_key(|(n, _)| *n);
+    assert_eq!(
+        read,
+        [
+            (1, Some(name("low"))),
+            (2, Some(name("low"))),
+            (3, Some(name("low")))
+        ]
+    );
 }
 
 /// Every `(stored column, tag, name)` in `_jazz_enum_tags`.

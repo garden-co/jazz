@@ -69,10 +69,10 @@ Sort results with `orderBy(...)`. Pass a column name and optionally `"asc"` or `
 
 ### Sorting by an enum
 
-An `s.enum(...)` column sorts its variants in the order they were added to the schema, not
-alphabetically. Variants declared together sort in declaration order, and a variant added in a
-later schema version sorts after every earlier one, wherever you declare it. Removing a variant
-does not change how the others sort.
+An `s.enum(...)` column sorts its variants in the order your schema declares them, not
+alphabetically. Reordering the variants, or adding one in the middle, changes the sort order
+from that schema version on. Clients still on an older schema version sort by their own
+declaration order. `min`, `max` and range filters such as `gt` follow the same order.
 
 ## Pagination
 

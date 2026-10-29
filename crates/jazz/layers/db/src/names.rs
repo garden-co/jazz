@@ -58,6 +58,13 @@ const ENUM_TAGS_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_enum_tags (tbl TEX
      col TEXT NOT NULL, tag INTEGER NOT NULL, name TEXT NOT NULL, PRIMARY KEY (tbl, col, tag)) \
      WITHOUT ROWID;";
 
+/// An enum column whose `ADD COLUMN ... DEFAULT` tag a renumbering
+/// ([`Names::align`]) gave another variant: the default's name. A row
+/// inserted by a version not naming the column stores this name's tag, not
+/// the stale one SQLite would fill in.
+const ENUM_DEFAULTS_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_enum_defaults (tbl TEXT NOT NULL, \
+     col TEXT NOT NULL, name TEXT NOT NULL, PRIMARY KEY (tbl, col)) WITHOUT ROWID;";
+
 /// The versions whose names this replica's authority confirmed, each with
 /// the [`names_digest`] it confirmed: a version is confirmed while its names
 /// still have that digest. An authority confirms every version it admits,
@@ -223,6 +230,9 @@ pub(crate) struct Names {
     confirmed: HashMap<SchemaVersionId, [u8; 16]>,
     /// Every stored enum column's tags.
     tags: TagRegistry,
+    /// By (stored table, stored column): an enum column's default by name,
+    /// where its `ADD COLUMN` default tag is stale (`_jazz_enum_defaults`).
+    enum_defaults: std::cell::RefCell<BTreeMap<(String, String), String>>,
 }
 
 fn schema_error(message: impl Into<String>) -> Error {
@@ -366,6 +376,24 @@ impl Names {
                     .insert(name, tag);
             }
         }
+        if table_exists(conn, "_jazz_enum_defaults")? {
+            let mut statement = conn
+                .prepare("SELECT tbl, col, name FROM _jazz_enum_defaults")
+                .map_err(storage)?;
+            let rows = statement
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                })
+                .map_err(storage)?;
+            for row in rows {
+                let (table, column, name) = row.map_err(storage)?;
+                names.enum_defaults.get_mut().insert((table, column), name);
+            }
+        }
         if has_cells {
             let mut statement = conn
                 .prepare("SELECT tbl, col, since, src, dflt FROM _jazz_lens_cells")
@@ -488,6 +516,14 @@ impl Names {
             .map(|(_, names)| names)
     }
 
+    /// The most recently admitted version.
+    pub(crate) fn latest_version(&self) -> Option<SchemaVersionId> {
+        self.versions
+            .iter()
+            .max_by_key(|(_, (n, _))| *n)
+            .map(|(version, _)| *version)
+    }
+
     pub(crate) fn get(&self, version: &SchemaVersionId) -> Option<&StoredNames> {
         self.versions.get(version).map(|(_, names)| names)
     }
@@ -543,6 +579,7 @@ impl Names {
                 ("_jazz_branch_columns", ["col"].as_slice()),
                 ("_jazz_column_types", ["col"].as_slice()),
                 ("_jazz_enum_tags", ["col"].as_slice()),
+                ("_jazz_enum_defaults", ["col"].as_slice()),
             ] {
                 let exists: bool = conn
                     .query_row(
@@ -619,6 +656,20 @@ impl Names {
                     _ => stored_column,
                 };
                 ((table_to.to_owned(), stored_column), ty)
+            })
+            .collect();
+        let defaults = std::mem::take(self.enum_defaults.get_mut());
+        *self.enum_defaults.get_mut() = defaults
+            .into_iter()
+            .map(|((table, stored_column), name)| {
+                if table != from {
+                    return ((table, stored_column), name);
+                }
+                let stored_column = match column {
+                    Some((old, new)) if stored_column == old => new.to_owned(),
+                    _ => stored_column,
+                };
+                ((table_to.to_owned(), stored_column), name)
             })
             .collect();
         match column {
@@ -797,8 +848,8 @@ impl Names {
 
     /// Tag every variant `schema` declares that its stored column has no
     /// tag for yet: each column's next tags, in declaration order. Every
-    /// store does this as it admits a version, so the order variants were
-    /// added is the order of their tags.
+    /// store does this as it admits a version; [`Self::align`] then puts
+    /// the current schema's in its order.
     pub(crate) fn mint(&self, conn: &Connection, schema: &Schema) -> Result<(), Error> {
         for table in schema.tables.values() {
             for column in &table.columns {
@@ -857,6 +908,92 @@ impl Names {
             tags.insert(name.to_owned(), tag);
         }
         Ok(())
+    }
+
+    /// Renumber stored column `column` of stored table `table`'s tags so
+    /// `declared` (the current schema's variants, all tagged) is in tag
+    /// order (see [`crate::values::EnumTags::in_order`]): each variant
+    /// takes its rank in `declared`'s order, in the file and in memory.
+    /// Returns each (old, new) tag that changed; the caller rewrites the
+    /// cells.
+    pub(crate) fn align(
+        &self,
+        conn: &Connection,
+        table: &str,
+        column: &str,
+        declared: &[String],
+    ) -> Result<Vec<(i64, i64)>, Error> {
+        let tags = self.tags.column(table, column);
+        let (renumbered, changed) = {
+            let tags = tags.borrow();
+            if tags.in_order(declared) {
+                return Ok(Vec::new());
+            }
+            let mut renumbered = crate::values::EnumTags::default();
+            let mut changed = Vec::new();
+            for (rank, tag) in tags.ranked(declared).into_iter().enumerate() {
+                let rank = rank as i64;
+                let name = tags.name(tag).expect("a ranked tag is a tag");
+                renumbered.insert(name.to_owned(), rank);
+                if rank != tag {
+                    changed.push((tag, rank));
+                }
+            }
+            (renumbered, changed)
+        };
+        // A column added with a default keeps SQLite's `DEFAULT` tag: if
+        // it now names another variant, inserts that leave the column out
+        // take the default by name instead (see `ENUM_DEFAULTS_DDL`).
+        let key = (table.to_owned(), column.to_owned());
+        let stale_default = match self.enum_defaults.borrow().contains_key(&key) {
+            true => None,
+            false => ddl_default(conn, table, column)?
+                .filter(|tag| changed.iter().any(|(old, _)| old == tag))
+                .and_then(|tag| tags.borrow().name(tag).map(str::to_owned)),
+        };
+        in_savepoint(conn, "jazz_tags", || {
+            if let Some(name) = &stale_default {
+                conn.execute_batch(ENUM_DEFAULTS_DDL).map_err(storage)?;
+                conn.execute(
+                    "INSERT INTO _jazz_enum_defaults (tbl, col, name) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![table, column, name],
+                )
+                .map_err(storage)?;
+            }
+            conn.execute_batch(ENUM_TAGS_DDL).map_err(storage)?;
+            conn.execute(
+                "DELETE FROM _jazz_enum_tags WHERE tbl = ?1 AND col = ?2",
+                rusqlite::params![table, column],
+            )
+            .map_err(storage)?;
+            let mut insert = conn
+                .prepare_cached(
+                    "INSERT INTO _jazz_enum_tags (tbl, col, tag, name) VALUES (?1, ?2, ?3, ?4)",
+                )
+                .map_err(storage)?;
+            for (tag, name) in renumbered.iter() {
+                insert
+                    .execute(rusqlite::params![table, column, tag, name])
+                    .map_err(storage)?;
+            }
+            Ok(())
+        })?;
+        *tags.borrow_mut() = renumbered;
+        if let Some(name) = stale_default {
+            self.enum_defaults.borrow_mut().insert(key, name);
+        }
+        Ok(changed)
+    }
+
+    /// The enum columns of stored table `table` whose default is by name
+    /// (see `ENUM_DEFAULTS_DDL`), with the name.
+    pub(crate) fn enum_defaults(&self, table: &str) -> Vec<(String, String)> {
+        self.enum_defaults
+            .borrow()
+            .iter()
+            .filter(|((t, _), _)| t == table)
+            .map(|((_, column), name)| (column.clone(), name.clone()))
+            .collect()
     }
 
     /// A new copy `copy` of stored column `source` of stored table `table`
@@ -1225,6 +1362,29 @@ impl Names {
             })
         })
     }
+}
+
+/// The tag stored column `column` of stored table `table` was added with
+/// (`ADD COLUMN ... DEFAULT`), if any.
+fn ddl_default(conn: &Connection, table: &str, column: &str) -> Result<Option<i64>, Error> {
+    let mut statement = conn
+        .prepare(&format!(
+            "PRAGMA table_info({})",
+            crate::values::quote(table)
+        ))
+        .map_err(storage)?;
+    let rows = statement
+        .query_map([], |r| {
+            Ok((r.get::<_, String>(1)?, r.get::<_, Option<String>>(4)?))
+        })
+        .map_err(storage)?;
+    for row in rows {
+        let (name, default) = row.map_err(storage)?;
+        if name == column {
+            return Ok(default.and_then(|default| default.trim().parse().ok()));
+        }
+    }
+    Ok(None)
 }
 
 fn table_exists(conn: &Connection, name: &str) -> Result<bool, Error> {

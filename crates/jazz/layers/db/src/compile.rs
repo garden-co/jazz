@@ -161,12 +161,20 @@ impl Term {
 struct EnumColumn {
     cell: String,
     tags: crate::values::ColumnTags,
+    /// The column as the query's schema declares it.
+    column: crate::values::Column,
 }
 
 impl EnumColumn {
     /// The cell read as its variant name.
     fn names(&self) -> Term {
         Term::Sql(self.tags.borrow().name_sql(&self.cell))
+    }
+
+    /// The cell as it orders: its rank in the query schema's declaration
+    /// order, or the cell itself where that is tag order.
+    fn ordered(&self) -> Option<String> {
+        self.column.rank_sql(&self.cell)
     }
 }
 
@@ -558,12 +566,18 @@ impl<'a> Ctx<'a> {
         let mut outputs = Vec::new();
         // The group cell. A chunked one groups only the rows naming that
         // cell (SPEC 19.5).
+        // Each output an `ORDER BY` names, as it orders (an enum's rank in
+        // the query schema's declaration order).
+        let mut ordered: BTreeMap<String, String> = BTreeMap::new();
         let group = match &aggregate.group_by {
             Some(column) => {
                 let sql = column_sql(table, alias, column)?;
                 let column = table.column(column).expect("checked");
                 projection.push((column.name.clone(), column.ty.clone(), column.tags.clone()));
                 outputs.push(sql.clone());
+                if let Some(rank) = column.rank_sql(&sql) {
+                    ordered.insert(column.name.clone(), rank);
+                }
                 Some(sql)
             }
             None => None,
@@ -586,13 +600,15 @@ impl<'a> Ctx<'a> {
                 };
                 Ok((column_sql(table, alias, column)?, ty))
             };
-            // MIN and MAX of an enum column are variants, in tag order.
-            let tags = output
+            // MIN and MAX of an enum column are variants, in the query
+            // schema's declaration order.
+            let enum_column = output
                 .column
                 .as_deref()
                 .and_then(|column| table.column(column))
-                .and_then(|column| column.tags.clone())
+                .filter(|column| column.tags.is_some())
                 .filter(|_| matches!(output.function, F::Min | F::Max));
+            let tags = enum_column.and_then(|column| column.tags.clone());
             let (sql, ty) = match output.function {
                 F::Count => match &output.column {
                     None => ("COUNT(*)".to_owned(), ValueType::U64),
@@ -625,10 +641,23 @@ impl<'a> Ctx<'a> {
                         F::Min => "MIN",
                         _ => "MAX",
                     };
-                    (
-                        format!("{name}({column})"),
-                        ValueType::Nullable(Box::new(ty)),
-                    )
+                    let rank = enum_column.and_then(|enum_column| {
+                        let rank = enum_column.rank_sql(&column)?;
+                        Some((enum_column, format!("{name}({rank})")))
+                    });
+                    match rank {
+                        Some((enum_column, rank)) => {
+                            ordered.insert(output.alias.clone(), rank.clone());
+                            (
+                                enum_column.unrank_sql(&rank),
+                                ValueType::Nullable(Box::new(ty)),
+                            )
+                        }
+                        None => (
+                            format!("{name}({column})"),
+                            ValueType::Nullable(Box::new(ty)),
+                        ),
+                    }
                 }
             };
             outputs.push(format!("{sql} AS {}", quote(&output.alias)));
@@ -640,7 +669,9 @@ impl<'a> Ctx<'a> {
                 OrderDirection::Asc => "ASC",
                 OrderDirection::Desc => "DESC",
             };
-            let term = if aggregate.group_by.as_deref() == Some(key.column.as_str()) {
+            let term = if let Some(rank) = ordered.get(&key.column) {
+                rank.clone()
+            } else if aggregate.group_by.as_deref() == Some(key.column.as_str()) {
                 group.clone().expect("grouped")
             } else if aggregate.aggregates.iter().any(|a| a.alias == key.column) {
                 quote(&key.column)
@@ -3058,6 +3089,10 @@ fn bool_sql(value: bool) -> String {
 /// Orderings and `IN` stay bare so SQLite can use an index for them: their
 /// SQL null means false, which AND, OR and WHERE already treat as false;
 /// only NOT (and a condition read as a value) coalesces it.
+fn is_range(op: &CmpOp) -> bool {
+    matches!(op, CmpOp::Lt | CmpOp::Le | CmpOp::Gt | CmpOp::Ge)
+}
+
 fn cmp_plain(op: &CmpOp, l: &str, r: &str) -> String {
     match op {
         CmpOp::Eq => format!("({l} IS {r})"),
@@ -3123,8 +3158,14 @@ impl Ctx<'_> {
     }
 
     fn large_term(&self, table: &Table, sql: String, column: &str) -> Term {
-        if let Some(tags) = table.column(column).and_then(|c| c.tags.clone()) {
-            return Term::Enum(EnumColumn { cell: sql, tags });
+        if let Some(col) = table.column(column)
+            && let Some(tags) = col.tags.clone()
+        {
+            return Term::Enum(EnumColumn {
+                cell: sql,
+                tags,
+                column: col.clone(),
+            });
         }
         match table.column(column) {
             Some(col)
@@ -3214,6 +3255,26 @@ impl Ctx<'_> {
         })
     }
 
+    /// A bound value an enum column's rank is compared with: a variant name
+    /// with a tag here, rebound as its rank (see [`EnumColumn::ordered`]).
+    fn ranked(&mut self, column: &EnumColumn, term: Term) -> Term {
+        let Term::Bound(placeholder, Sql::Text(name)) = &term else {
+            return term;
+        };
+        let rank = std::str::from_utf8(name)
+            .ok()
+            .and_then(|name| column.column.rank(name));
+        let Some(rank) = rank else {
+            return term;
+        };
+        let slot = placeholder[1..]
+            .parse::<usize>()
+            .expect("a numbered placeholder")
+            - 1;
+        self.params[slot] = Sql::Integer(rank);
+        Term::Bound(placeholder.clone(), Sql::Integer(rank))
+    }
+
     /// A bound value an enum column is compared with: a variant name with a
     /// tag here, rebound as the tag.
     fn tagged(&mut self, column: &EnumColumn, term: Term) -> Term {
@@ -3237,6 +3298,22 @@ impl Ctx<'_> {
     fn cmp(&mut self, op: CmpOp, left: Term, right: Term) -> Result<String, Error> {
         Ok(match (left, right) {
             (Term::Missing | Term::NaN, _) | (_, Term::Missing | Term::NaN) => "0".to_owned(),
+            // A range in a schema whose order is not tag order compares
+            // ranks.
+            (Term::Enum(column), right @ Term::Bound(..))
+                if is_range(&op) && column.ordered().is_some() =>
+            {
+                let right = self.ranked(&column, right);
+                let left = column.ordered().expect("checked");
+                cmp_plain(&op, &left, right.sql().expect("present"))
+            }
+            (left @ Term::Bound(..), Term::Enum(column))
+                if is_range(&op) && column.ordered().is_some() =>
+            {
+                let left = self.ranked(&column, left);
+                let right = column.ordered().expect("checked");
+                cmp_plain(&op, left.sql().expect("present"), &right)
+            }
             (Term::Enum(column), right @ Term::Bound(..)) => {
                 let right = self.tagged(&column, right);
                 cmp_plain(&op, &column.cell, right.sql().expect("present"))
@@ -3246,7 +3323,10 @@ impl Ctx<'_> {
                 cmp_plain(&op, left.sql().expect("present"), &column.cell)
             }
             (Term::Enum(a), Term::Enum(b)) if std::rc::Rc::ptr_eq(&a.tags, &b.tags) => {
-                cmp_plain(&op, &a.cell, &b.cell)
+                match (is_range(&op), a.ordered(), b.ordered()) {
+                    (true, Some(l), Some(r)) => cmp_plain(&op, &l, &r),
+                    _ => cmp_plain(&op, &a.cell, &b.cell),
+                }
             }
             // Two enum columns' tags differ: they compare by name, as
             // anything else does with one.
@@ -3487,7 +3567,11 @@ impl Ctx<'_> {
                     key.column
                 )));
             }
-            let sql = column_sql(table, alias, &key.column)?;
+            let mut sql = column_sql(table, alias, &key.column)?;
+            // An enum column orders by the query schema's declaration order.
+            if let Some(rank) = table.column(&key.column).and_then(|c| c.rank_sql(&sql)) {
+                sql = rank;
+            }
             terms.push(OrderTerm { sql, direction });
         }
         Ok(terms)

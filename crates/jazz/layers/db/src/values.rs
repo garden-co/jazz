@@ -436,6 +436,33 @@ impl Column {
         }
     }
 
+    /// SQL reading this enum column's `cell` as its rank in this schema's
+    /// declaration order, where that is not tag order (a schema other than
+    /// the current one, see [`EnumTags`]); `None` where the cell itself
+    /// sorts so. An array of enum values orders as its cell does.
+    pub(crate) fn rank_sql(&self, cell: &str) -> Option<String> {
+        let (Some(variants), Some(tags)) = (&self.variants, &self.tags) else {
+            return None;
+        };
+        let tags = tags.borrow();
+        (!is_array_type(&self.ty) && !tags.in_order(variants))
+            .then(|| tags.rank_sql(variants, cell))
+    }
+
+    /// SQL reading a rank [`Self::rank_sql`] made back as this column's tag.
+    pub(crate) fn unrank_sql(&self, rank: &str) -> String {
+        match (&self.variants, &self.tags) {
+            (Some(variants), Some(tags)) => tags.borrow().unrank_sql(variants, rank),
+            _ => rank.to_owned(),
+        }
+    }
+
+    /// Variant `name`'s rank in this schema's declaration order.
+    pub(crate) fn rank(&self, name: &str) -> Option<i64> {
+        let (variants, tags) = (self.variants.as_ref()?, self.tags.as_ref()?);
+        tags.borrow().rank(variants, name)
+    }
+
     /// A value as the cell this column stores: an enum variant as its tag
     /// (see [`EnumTags`]). A name with no tag (only a filter's can lack
     /// one: writes intern theirs first) stays a name and matches no cell.
@@ -475,9 +502,12 @@ pub(crate) fn is_array_type(ty: &ValueType) -> bool {
 /// Tags are a store's own, like interned strings: values travel and are
 /// compared by name everywhere above SQLite, and no other store sees a
 /// tag. A store gives each new variant the next tag when it admits a
-/// version declaring it, in declaration order, and never reuses one: a
-/// removed variant keeps its tag. Tags order the column: `ORDER BY` sorts
-/// variants in the order they were added.
+/// version declaring it, and renumbers a column's tags when a schema made
+/// current declares its variants in another order, so the current
+/// schema's declaration order is tag order: its `ORDER BY` and ranges
+/// use the raw cell (and its index). A schema declaring another order
+/// reads cells through its rank ([`Self::rank_sql`]), unindexed. A
+/// removed variant keeps its tag and sorts after every declared one.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EnumTags {
     by_name: BTreeMap<String, i64>,
@@ -506,6 +536,60 @@ impl EnumTags {
     /// Every (tag, name), in tag order.
     pub(crate) fn iter(&self) -> impl Iterator<Item = (i64, &str)> {
         self.by_tag.iter().map(|(tag, name)| (*tag, name.as_str()))
+    }
+
+    /// Whether `declared` is in tag order: each variant's tag is its
+    /// position, as the current schema's are.
+    pub(crate) fn in_order(&self, declared: &[String]) -> bool {
+        declared
+            .iter()
+            .enumerate()
+            .all(|(at, name)| self.tag(name) == Some(at as i64))
+    }
+
+    /// Every tag in `declared`'s order: its declared variants', then every
+    /// other tag's, in tag order. A tag's position is its rank.
+    pub(crate) fn ranked(&self, declared: &[String]) -> Vec<i64> {
+        let mut ranked: Vec<i64> = declared.iter().filter_map(|name| self.tag(name)).collect();
+        let rest: Vec<i64> = self
+            .by_tag
+            .keys()
+            .filter(|tag| !ranked.contains(tag))
+            .copied()
+            .collect();
+        ranked.extend(rest);
+        ranked
+    }
+
+    /// `name`'s rank in `declared`'s order (see [`Self::ranked`]).
+    pub(crate) fn rank(&self, declared: &[String], name: &str) -> Option<i64> {
+        let tag = self.tag(name)?;
+        let ranked = self.ranked(declared);
+        ranked.iter().position(|t| *t == tag).map(|at| at as i64)
+    }
+
+    /// SQL reading `cell` (this column's) as its rank in `declared`'s
+    /// order. A tag interned after the SQL was built ranks after every
+    /// other, by tag.
+    pub(crate) fn rank_sql(&self, declared: &[String], cell: &str) -> String {
+        let ranked = self.ranked(declared);
+        let arms: String = ranked
+            .iter()
+            .enumerate()
+            .map(|(rank, tag)| format!(" WHEN {tag} THEN {rank}"))
+            .collect();
+        format!("(CASE {cell}{arms} ELSE {cell} + {} END)", ranked.len())
+    }
+
+    /// SQL reading a rank ([`Self::rank_sql`]) back as its tag.
+    pub(crate) fn unrank_sql(&self, declared: &[String], rank: &str) -> String {
+        let ranked = self.ranked(declared);
+        let arms: String = ranked
+            .iter()
+            .enumerate()
+            .map(|(rank, tag)| format!(" WHEN {rank} THEN {tag}"))
+            .collect();
+        format!("(CASE {rank}{arms} ELSE {rank} - {} END)", ranked.len())
     }
 
     /// SQL reading `cell` (this column's) as its variant name: TEXT, as a
