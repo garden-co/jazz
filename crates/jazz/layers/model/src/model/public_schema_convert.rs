@@ -716,10 +716,20 @@ fn convert_column(
         // deliberately distinct from text.
         converted.large_value_kind = crate::schema::LargeValueSemanticKind::Json;
     }
+    converted.enum_variants = enum_variants(&column.column_type);
     if let Some(default) = &column.default {
         converted.default = Some(convert_column_default(table, column, default)?);
     }
     Ok(converted)
+}
+
+/// The variants of an enum column, or of an array of enum values.
+fn enum_variants(column_type: &ColumnType) -> Option<Vec<String>> {
+    match column_type {
+        ColumnType::Enum { variants } => Some(variants.clone()),
+        ColumnType::Array { element } => enum_variants(element),
+        _ => None,
+    }
 }
 
 fn convert_column_default(

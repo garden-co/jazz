@@ -55,7 +55,9 @@ fn config(node: u8, author: AuthorSubject) -> DbConfig {
 }
 
 fn server() -> Db {
-    block_on(Db::open_history_complete(config(0, AuthorSubject::SYSTEM))).unwrap()
+    let server = block_on(Db::open_history_complete(config(0, AuthorSubject::SYSTEM))).unwrap();
+    server.track_closed_subscribers();
+    server
 }
 
 fn client(node: u8, author: AuthorSubject) -> Db {
@@ -219,6 +221,28 @@ fn a_session_the_server_cannot_send_to_ends_with_why() {
         );
         assert_eq!(server.open_subscribers(), 0);
     }
+}
+
+/// A host that never takes the sessions the server ends keeps none of
+/// them: they are kept only once a host tracks them.
+#[test]
+fn closed_sessions_are_kept_only_for_a_host_that_tracks_them() {
+    let server = block_on(Db::open_history_complete(config(0, AuthorSubject::SYSTEM))).unwrap();
+    for _ in 0..3 {
+        let (_client, server_side, up, _) = pipe();
+        server.accept_subscriber(server_side, user(9)).unwrap();
+        up.borrow_mut().push_back(SyncMessage::Rows {
+            images: Vec::new(),
+            tx_ids: Vec::new(),
+        });
+        block_on(server.tick()).unwrap();
+    }
+    assert_eq!(server.open_subscribers(), 0, "each was closed");
+    server.track_closed_subscribers();
+    assert!(
+        server.take_closed_subscribers().is_empty(),
+        "none were kept"
+    );
 }
 
 #[test]

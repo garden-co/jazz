@@ -28,7 +28,7 @@ use jazz::tools::{
     TableName, TableSchema, TableSchemaBuilder, Value as PublicValue,
 };
 
-use common::{allow_all_policies, compile_schema};
+use common::{allow_all_policies, compile_schema, read_and_allow_all_writes, session_eq};
 
 const COLUMNS: [&str; 6] = [
     "title",
@@ -50,8 +50,23 @@ fn config(node: u8, author: AuthorSubject) -> DbConfig {
         .column("body", ColumnType::Text)
         .branch_by("branch_id")
         .policies(allow_all_policies());
+    // Readable by its `owner` only.
+    let owned = TableSchemaBuilder::new("owned")
+        .column("title", ColumnType::Text)
+        .column("body", ColumnType::Text)
+        .column("owner", ColumnType::Text)
+        .policies(read_and_allow_all_writes(session_eq(
+            "owner",
+            &["user", "identity", "subject"],
+        )));
     DbConfig::new(
-        compile_schema(&SchemaBuilder::new().table(docs).table(todos).build()),
+        compile_schema(
+            &SchemaBuilder::new()
+                .table(docs)
+                .table(todos)
+                .table(owned)
+                .build(),
+        ),
         DbIdentity {
             node: NodeUuid::from_bytes([node; 16]),
             author,
@@ -131,6 +146,16 @@ impl Transport for Pipe {
 type Down = Rc<RefCell<Vec<SyncMessage>>>;
 
 fn connect(server: &Db, client: &Db, identity: AuthorSubject) -> (Upstream, Down) {
+    let (upstream, down, _up) = connect_raw(server, client, identity);
+    (upstream, down)
+}
+
+/// [`connect`], with the queue of what the client sends up.
+fn connect_raw(
+    server: &Db,
+    client: &Db,
+    identity: AuthorSubject,
+) -> (Upstream, Down, Rc<RefCell<VecDeque<SyncMessage>>>) {
     let up = Rc::new(RefCell::new(VecDeque::new()));
     let down = Rc::new(RefCell::new(VecDeque::new()));
     let log = Rc::new(RefCell::new(Vec::new()));
@@ -143,13 +168,13 @@ fn connect(server: &Db, client: &Db, identity: AuthorSubject) -> (Upstream, Down
         .accept_subscriber(
             Box::new(Pipe {
                 out: down,
-                inbound: up,
+                inbound: up.clone(),
                 log: Some(log.clone()),
             }),
             identity,
         )
         .unwrap();
-    (upstream, log)
+    (upstream, log, up)
 }
 
 fn subscribe(client: &Db) -> jazz::db::SubscriptionStream {
@@ -908,4 +933,102 @@ fn a_mismatched_row_stays_until_its_whole_image_arrives() {
     assert!(settled[0].contains(&user(9).principal_parts().1));
     assert!(settled[0].contains("\"y\""), "{settled:?}");
     assert_eq!(snapshot(&client), settled);
+}
+
+#[test]
+fn a_resent_commit_ships_its_rows_though_superseded() {
+    // The writer closes before its fate arrives, and another writer
+    // supersedes the row. Reopened with no subscription, the resend's
+    // recorded fate comes with the row as it is now and as the commit left
+    // it, so the writer's store keeps the row.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("replica.sqlite");
+    let open_file = || {
+        block_on(Db::open_at(
+            config(1, user(1)),
+            &path,
+            FileOptions::default(),
+        ))
+        .unwrap()
+    };
+    let server = open(0, AuthorSubject::SYSTEM);
+    let other = open(2, user(2));
+    let (_other_up, _other_down) = connect(&server, &other, user(2));
+    let _other_live = subscribe(&other);
+    {
+        let client = open_file();
+        let (_upstream, _down) = connect(&server, &client, user(1));
+        block_on(client.insert(
+            "docs",
+            cells(&[("title", "Doc"), ("body", "")]),
+            InsertOptions {
+                row_id: Some(row(1)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        block_on(client.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+    }
+    pump(&server, &[&other]);
+    block_on(other.update("docs", row(1), cells(&[("body", "o")]), Default::default())).unwrap();
+    pump(&server, &[&other]);
+    let client = open_file();
+    let (_upstream, _down) = connect(&server, &client, user(1));
+    pump(&server, &[&client, &other]);
+    assert_eq!(client.pending_upload_count(), 0);
+    assert_eq!(snapshot(&client), snapshot(&server));
+}
+
+#[test]
+fn a_whole_ask_names_only_versions_the_sessions_own_commits_produced() {
+    // Version 1 of the row is user 7's and secret; version 2 is user 2's.
+    // User 2 asking for an earlier version by its seq gets the row as it is now,
+    // not the version it could not read.
+    let server = block_on(Db::open_history_complete(config(0, AuthorSubject::SYSTEM))).unwrap();
+    let owner = |n: u8| Value::String(user(n).principal_parts().1);
+    let mut secret = cells(&[("title", "T"), ("body", "SECRET")]);
+    secret.insert("owner".to_owned(), owner(7));
+    block_on(server.insert(
+        "owned",
+        secret,
+        InsertOptions {
+            row_id: Some(row(1)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    let mut given = cells(&[("body", "public")]);
+    given.insert("owner".to_owned(), owner(2));
+    block_on(server.update("owned", row(1), given, Default::default())).unwrap();
+    let reader = open(2, user(2));
+    let (_upstream, down, up) = connect_raw(&server, &reader, user(2));
+    let prepared = reader
+        .prepare_query(&Query::from("owned").select(["title", "body", "owner"]))
+        .unwrap();
+    let _live = block_on(reader.subscribe(&prepared, ReadOpts::default())).unwrap();
+    pump(&server, &[&reader]);
+    let shipped = |down: &Down| {
+        down.borrow().iter().find_map(|message| match message {
+            SyncMessage::Rows { images, .. } => images
+                .iter()
+                .find(|image| image.id == *row(1).0.as_bytes())
+                .cloned(),
+            _ => None,
+        })
+    };
+    let current = shipped(&down).expect("the row ships");
+    down.borrow_mut().clear();
+    for seq in 1..current.seq {
+        up.borrow_mut().push_back(SyncMessage::ResendWhole {
+            rows: vec![(current.table.clone(), current.id, current.key.clone(), seq)],
+        });
+    }
+    block_on(server.tick()).unwrap();
+    let leaked = down.borrow().iter().any(|message| {
+        matches!(message, SyncMessage::Rows { images, .. }
+            if images.iter().any(|image| image.id == current.id && image.seq < current.seq))
+    });
+    assert!(!leaked, "an unreadable version shipped");
+    assert_eq!(shipped(&down).map(|image| image.seq), Some(current.seq));
 }
