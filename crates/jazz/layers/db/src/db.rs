@@ -22,8 +22,8 @@ use rusqlite::{Connection, OptionalExtension, params_from_iter};
 
 pub use crate::options::{
     DbConfig, DbIdentity, DeleteOptions, Error, ErrorCode, ExactWriteTarget, InsertOptions,
-    Migrations, ReadOpts, ReadTier, Reason, RestoreOptions, RowIdSource, SeededRowIdSource, UpdateOptions,
-    UpsertOptions, WriteIdentity, WriteTarget, block_on,
+    Migrations, ReadOpts, ReadTier, Reason, RestoreOptions, RowIdSource, SeededRowIdSource,
+    UpdateOptions, UpsertOptions, WriteIdentity, WriteTarget, block_on,
 };
 
 use crate::compile::{Compiled, Ctx, Cut, Overlay as CutOverlay, Session, View};
@@ -1075,6 +1075,13 @@ impl Db {
             inner.schema = owner.clone();
             inner.owner = owner;
             inner.reset_everything();
+            // Pending writes upload under the version they were written
+            // in, and replay by the names of the one now current.
+            inner.client = None;
+            inner.load_client()?;
+            if inner.client.is_some() {
+                inner.raise_to_local_base();
+            }
         }
         Ok(db)
     }
@@ -2496,12 +2503,10 @@ impl Db {
 impl Inner {
     /// Admit an upstream's versions under the names it stores them by
     /// (see `SyncMessage::Catalogue`), so this replica stores rows as it
-    /// does. A version this store named otherwise while it did not know
-    /// the upstream's names (opened under it offline) has its columns
-    /// renamed to the upstream's; where the upstream's column is already
-    /// stored here (a renamed column), the one this store added stays
-    /// unused, and the rebase that follows replays pending writes into
-    /// the upstream's. A table named otherwise is not supported yet.
+    /// does. Stored names are derived alike on every store (SPEC 10.7), so
+    /// a version this store admitted has the upstream's names already; one
+    /// it names otherwise (admitted without the app's lenses) is not
+    /// supported yet, and nothing is renamed.
     ///
     /// It then keeps the authority's `namespace` (refusing an upstream of
     /// another app) and the versions the authority `confirmed`. Returns
@@ -2555,20 +2560,14 @@ impl Inner {
             self.names.clone(),
             self.admitted.clone(),
         );
-        let mut moved = Vec::new();
         begin_savepoint(&self.conn, "jazz_mirror")?;
-        let mirrored = self.mirror_versions_steps(versions, cells, &mut moved);
+        let mirrored = self.mirror_versions_steps(versions, cells);
         let ended = end_savepoint(&self.conn, "jazz_mirror", mirrored.is_ok());
         if let Err(error) = mirrored.and(ended) {
             self.physical = physical;
             self.names = names;
             self.admitted = admitted;
             return Err(error);
-        }
-        if let Some(client) = self.client.as_mut() {
-            for (ours, theirs) in &moved {
-                client.moved_table(ours, theirs);
-            }
         }
         let owner = Rc::new(self.named(&self.owner.jazz));
         self.schema = owner.clone();
@@ -2587,7 +2586,6 @@ impl Inner {
         &mut self,
         versions: Vec<sync::CatalogueVersion>,
         cells: Vec<sync::CatalogueCell>,
-        moved: &mut Vec<(String, String)>,
     ) -> Result<(), Error> {
         use crate::names::{LensCell, LensCellRule};
         let cells: Vec<LensCell> = cells
@@ -2621,17 +2619,15 @@ impl Inner {
                 (entry.schema.id, names, entry.schema.schema)
             })
             .collect();
-        // What this store named otherwise takes the upstream's names
-        // first, before a version it lacks stores a table under one of
-        // them.
         let mut fresh = std::collections::HashSet::new();
         for (version, names, _) in &entries {
-            match self.names.get(version).cloned() {
-                Some(local) if local == *names => {}
-                Some(local) => {
-                    self.rename_stored(&local, names, moved)?;
-                    let conn = &self.conn;
-                    self.names.rename(conn, *version, names.clone())?;
+            match self.names.get(version) {
+                Some(local) if local == names => {}
+                Some(_) => {
+                    return Err(unsupported(format!(
+                        "schema version {}, which this store stores otherwise than its upstream (it was opened without the app's lenses into it),",
+                        uuid::Uuid::from_bytes(*version.as_bytes())
+                    )));
                 }
                 None => {
                     fresh.insert(*version);
@@ -2666,56 +2662,6 @@ impl Inner {
         }
         let conn = &self.conn;
         self.names.record_lens_cells(conn, cells)
-    }
-
-    /// Rename the stored columns `local` names otherwise than `upstream`
-    /// does, where the upstream's is not stored here yet.
-    /// Tables it stores under another name are pushed to `moved`, as
-    /// (ours, theirs), for the pending queue to follow once it all holds.
-    fn rename_stored(
-        &mut self,
-        local: &crate::values::StoredNames,
-        upstream: &crate::values::StoredNames,
-        moved: &mut Vec<(String, String)>,
-    ) -> Result<(), Error> {
-        for (name, (stored, columns)) in &upstream.tables {
-            let Some((ours, our_columns)) = local.tables.get(name) else {
-                continue;
-            };
-            if ours != stored {
-                self.rename_stored_table(name, ours, stored)?;
-                moved.push((ours.clone(), stored.clone()));
-            }
-            for (column, theirs) in columns {
-                let Some(mine) = our_columns.get(column).filter(|mine| *mine != theirs) else {
-                    continue;
-                };
-                let Some(table) = self.physical.tables.get_mut(stored) else {
-                    continue;
-                };
-                if table.by_stored(theirs).is_some() {
-                    continue;
-                }
-                for on in [stored.clone(), format!("{stored}__h")] {
-                    self.conn
-                        .execute_batch(&format!(
-                            "ALTER TABLE {} RENAME COLUMN {} TO {}",
-                            quote(&on),
-                            quote(mine),
-                            quote(theirs)
-                        ))
-                        .map_err(storage)?;
-                }
-                for physical in table.columns.iter_mut().filter(|c| c.stored == *mine) {
-                    physical.name = theirs.clone();
-                    physical.stored = theirs.clone();
-                }
-                let conn = &self.conn;
-                self.names
-                    .moved(conn, stored, stored, Some((mine, theirs)))?;
-            }
-        }
-        Ok(())
     }
 
     /// `ops`, which name tables and columns as admitted `version` does,
@@ -2773,65 +2719,6 @@ impl Inner {
                 })
             })
             .collect()
-    }
-
-    /// Store table `ours` (with its history, indexes and triggers) as
-    /// `theirs`, the upstream's name for it. Both stored here is not
-    /// supported yet: their rows would have to merge.
-    fn rename_stored_table(&mut self, name: &str, ours: &str, theirs: &str) -> Result<(), Error> {
-        if self.physical.tables.contains_key(theirs) {
-            return Err(unsupported(format!(
-                "table `{name}`, stored here as `{ours}` beside the upstream's `{theirs}`"
-            )));
-        }
-        let Some(mut table) = self.physical.tables.remove(ours) else {
-            return Ok(());
-        };
-        for (from, to) in [
-            (ours.to_owned(), theirs.to_owned()),
-            (format!("{ours}__h"), format!("{theirs}__h")),
-        ] {
-            self.conn
-                .execute_batch(&format!(
-                    "ALTER TABLE {} RENAME TO {}",
-                    quote(&from),
-                    quote(&to)
-                ))
-                .map_err(storage)?;
-        }
-        // Indexes and triggers are named after their table: renamed along,
-        // so the upstream's DDL finds them under its names.
-        let objects: Vec<(String, String, String)> = self
-            .conn
-            .prepare(
-                "SELECT type, name, sql FROM sqlite_master \
-                 WHERE tbl_name IN (?1, ?2) AND type IN ('index', 'trigger') AND sql IS NOT NULL",
-            )
-            .and_then(|mut statement| {
-                statement
-                    .query_map([theirs.to_owned(), format!("{theirs}__h")], |r| {
-                        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-                    })?
-                    .collect::<Result<_, _>>()
-            })
-            .map_err(storage)?;
-        for (kind, object, sql) in objects {
-            let Some(rest) = object.strip_prefix(ours) else {
-                continue;
-            };
-            let renamed = format!("{theirs}{rest}");
-            let sql = sql.replacen(&quote(&object), &quote(&renamed), 1);
-            let drop = if kind == "index" { "INDEX" } else { "TRIGGER" };
-            self.conn
-                .execute_batch(&format!("DROP {drop} {}; {sql};", quote(&object)))
-                .map_err(storage)?;
-        }
-        table.name = theirs.to_owned();
-        table.stored = theirs.to_owned();
-        self.physical.tables.insert(theirs.to_owned(), table);
-        let conn = &self.conn;
-        self.names.moved(conn, ours, theirs, None)?;
-        self.rename_pending_rows(ours, theirs)
     }
 
     /// An upstream image as this store keeps it: `None` for a table it

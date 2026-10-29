@@ -97,7 +97,17 @@ fn rename_todos() -> MigrationLens {
     lens(&v2(), &v3(), "todos", "tasks", vec![])
 }
 
+/// `schema`'s config, shipping the app's versions and lenses as an app
+/// does (SPEC 10.7), so a store reaches any of them along its lenses.
 fn config(schema: JazzSchema, node: u8, author: AuthorSubject) -> DbConfig {
+    bare_config(schema, node, author).with_migrations(
+        vec![v1(), v2(), v3(), with_copy()],
+        vec![rename_title(), rename_todos(), copy_title()],
+    )
+}
+
+/// `schema`'s config without the app's lenses.
+fn bare_config(schema: JazzSchema, node: u8, author: AuthorSubject) -> DbConfig {
     DbConfig::new(
         schema,
         DbIdentity {
@@ -378,7 +388,7 @@ fn a_table_rename_holds_across_reopen_and_for_a_fresh_receiver() {
     {
         let db = open_at(before.clone(), &path);
         insert(&db, "notes", 1, "body", "a");
-        block_on(db.activate_schema_with_lenses(after.clone(), &[rename])).unwrap();
+        block_on(db.activate_schema_with_lenses(after.clone(), &[rename.clone()])).unwrap();
         let old = block_on(db.register_schema_view(before.clone())).unwrap();
         insert(&old, "notes", 2, "body", "b");
     }
@@ -408,7 +418,10 @@ fn a_table_rename_holds_across_reopen_and_for_a_fresh_receiver() {
 
     let server = open_at(after.clone(), &path);
     server.set_authority();
-    let fresh = block_on(Db::open(config(after, 2, user(2)))).unwrap();
+    let fresh = block_on(Db::open(
+        bare_config(after, 2, user(2)).with_migrations(vec![before], vec![rename]),
+    ))
+    .unwrap();
     let (client_side, server_side) = pipe();
     let _link = block_on(fresh.connect_upstream(client_side));
     server.accept_subscriber(server_side, user(2));
@@ -1084,7 +1097,8 @@ fn a_pending_write_staged_before_a_client_upgrade_uploads_and_reads_by_the_new_n
     let _link = block_on(client.connect_upstream(c));
     server.accept_subscriber(s, user(1));
     pump(&server, &[&client]);
-    assert!(client.take_upstream_rejections().is_empty());
+    let rejections = client.take_upstream_rejections();
+    assert!(rejections.is_empty(), "{rejections:?}");
     assert_eq!(read(&server, "todos", "name"), [text("offline v1 write")]);
     assert_eq!(column(&client, "name"), [Some(text("offline v1 write"))]);
 }
@@ -1152,11 +1166,16 @@ fn a_catalogue_the_store_cannot_mirror_refuses_remote_reads_and_keeps_local_ones
     let path = scratch("unmirrorable");
     {
         // Offline under v1, then v3 without the lenses between: `tasks` is
-        // stored here as itself, beside v1's `todos`.
+        // stored here as a new table, beside v1's `todos`.
         let client = open_at(v1(), &path);
         insert(&client, "todos", 2, "title", "v1 row");
     }
-    let client = open_at(v3(), &path);
+    let client = block_on(Db::open_at(
+        bare_config(v3(), 1, AuthorSubject::SYSTEM),
+        &path,
+        FileOptions::default(),
+    ))
+    .unwrap();
     insert(&client, "tasks", 3, "name", "local task");
     let (c, s) = pipe();
     let _link = block_on(client.connect_upstream(c));
@@ -1178,7 +1197,10 @@ fn a_catalogue_the_store_cannot_mirror_refuses_remote_reads_and_keeps_local_ones
     );
     let stored = stored(&path);
     assert!(
-        stored.contains_key("tasks") && stored.contains_key("todos"),
+        stored
+            .keys()
+            .any(|table| common::unhashed(table) == "tasks")
+            && stored.contains_key("todos"),
         "{stored:?}"
     );
 }

@@ -849,11 +849,11 @@ fn task_rows(db: &Db) -> Vec<(String, Option<Value>)> {
 }
 
 /// A replica writes before its first sync under a version whose column the
-/// authority stores elsewhere (its type changed there, a new stored column):
-/// mirroring the catalogue renames the replica's column, and its pending
-/// write still uploads, settles and reads back on both sides.
+/// authority stores in a new stored column (its type changed there). With
+/// the app's lenses it stores it there too, so its pending write uploads,
+/// settles and reads back on both sides with nothing renamed.
 #[test]
-fn a_pending_write_survives_the_catalogue_renaming_its_column() {
+fn a_pending_write_under_a_retyped_column_lands_where_the_authority_stores_it() {
     let server = authority(tasks(ColumnType::Boolean), 0);
     block_on(server.insert(
         "tasks",
@@ -867,12 +867,17 @@ fn a_pending_write_survives_the_catalogue_renaming_its_column() {
         Default::default(),
     ))
     .unwrap();
-    block_on(server.activate_schema(tasks(ColumnType::Text))).unwrap();
-    let client = block_on(Db::open(config(
-        tasks(ColumnType::Text),
-        1,
-        AuthorSubject::SYSTEM,
-    )))
+    let retype = rename(
+        &tasks(ColumnType::Boolean),
+        &tasks(ColumnType::Text),
+        vec![],
+    );
+    block_on(server.activate_schema_with_lenses(tasks(ColumnType::Text), &[retype.clone()]))
+        .unwrap();
+    let client = block_on(Db::open(
+        config(tasks(ColumnType::Text), 1, AuthorSubject::SYSTEM)
+            .with_migrations(vec![tasks(ColumnType::Boolean)], vec![retype]),
+    ))
     .unwrap();
     client.become_replica();
     let doing = Value::Nullable(Some(Box::new(text("doing"))));

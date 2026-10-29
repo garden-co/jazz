@@ -1190,20 +1190,6 @@ impl std::ops::Deref for PendingQueue {
 }
 
 impl PendingQueue {
-    /// Stored table `from` is stored as `to` now.
-    fn moved_table(&mut self, from: &str, to: &str) {
-        let commits = std::mem::take(&mut self.commits);
-        self.by_row.clear();
-        for mut pending in commits {
-            for row in &mut pending.rows {
-                if row.0 == from {
-                    row.0 = to.to_owned();
-                }
-            }
-            self.push(pending);
-        }
-    }
-
     fn push(&mut self, pending: Pending) {
         for row in &pending.rows {
             self.by_row
@@ -4049,17 +4035,6 @@ impl Inner {
         Ok(())
     }
 
-    /// The rows pending commits recorded in stored table `from`, which is
-    /// stored as `to` now.
-    pub(crate) fn rename_pending_rows(&self, from: &str, to: &str) -> Result<(), Error> {
-        self.exec(
-            "UPDATE _jazz_pending_rows SET tbl = ?2 WHERE tbl = ?1",
-            [from, to],
-        )
-        .map_err(storage)?;
-        Ok(())
-    }
-
     /// Pending commit `tx` as `persist_pending` stored it: its header
     /// with its lists filled from `_jazz_pending_items`.
     fn pending_commit(&self, tx: u64, header: &[u8]) -> Result<SyncMessage, Error> {
@@ -4770,29 +4745,6 @@ impl Inner {
 }
 
 impl Client {
-    /// Stored table `from` is stored as `to` now (a replica took its
-    /// upstream's name for it).
-    pub(crate) fn moved_table(&mut self, from: &str, to: &str) {
-        self.pending.moved_table(from, to);
-        self.baselines = std::mem::take(&mut self.baselines)
-            .into_iter()
-            .map(|((table, row, key), mut image)| {
-                if let Some(image) = image.as_mut().filter(|image| image.table == from) {
-                    image.table = to.to_owned();
-                }
-                let table = if table == from { to.to_owned() } else { table };
-                ((table, row, key), image)
-            })
-            .collect();
-        self.whole = std::mem::take(&mut self.whole)
-            .into_iter()
-            .map(|(table, id, key)| {
-                let table = if table == from { to.to_owned() } else { table };
-                (table, id, key)
-            })
-            .collect();
-    }
-
     /// Its host says there is no server: it is the last word on its store.
     fn no_server(&self) -> bool {
         let link = self.hint.get();
