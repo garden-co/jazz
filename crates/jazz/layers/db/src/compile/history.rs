@@ -3,9 +3,11 @@
 //! identity and acceptance time.
 //!
 //! Versions come from the table and its `__h` table. A version is listed
-//! when its commit wrote content (`_c`; deletes and restores without
-//! content are not versions) and the authority accepted it (`_seq` below
-//! [`crate::db::LOCAL_BASE`]: a replica's pending writes are not). Access
+//! when its commit wrote content (`_st` without
+//! [`crate::values::STATE_NO_CONTENT`]; deletes and restores without
+//! content are not versions), it is no merged text write's value as sent
+//! ([`crate::values::STATE_AS_SENT`]) and the authority accepted it (`_seq`
+//! below [`crate::db::LOCAL_BASE`]: a replica's pending writes are not). Access
 //! follows the current row: its read policy, in its branch, gates every
 //! version of it, and a deleted current row hides its history unless the
 //! read includes deleted rows.
@@ -105,7 +107,7 @@ impl Ctx<'_> {
         let offset = self.bind(Sql::Integer(query.offset as i64));
         let statement = |order: &str| {
             format!(
-                "SELECT {alias}.id, {alias}._seq, {alias}._del, {alias}.{} \
+                "SELECT {alias}.id, {alias}._seq, {alias}._st, {alias}.{} \
                  {columns} FROM {source} AS {alias} WHERE {} ORDER BY {order} LIMIT {limit} \
                  OFFSET {offset}",
                 quote(TRANSACTION_ID_COLUMN),
@@ -157,7 +159,7 @@ impl Ctx<'_> {
         let history = quote(&format!("{}__h", table.stored));
         let mut gate = vec!["a.id = v.id".to_owned(), "a._b = v._b".to_owned()];
         let mut keep = vec![
-            "v._c = 1".to_owned(),
+            format!("(v._st & {}) = 0", STATE_NO_CONTENT | STATE_AS_SENT),
             format!("v._seq < {}", crate::db::LOCAL_BASE),
         ];
         if let Some(view) = &self.view
@@ -167,7 +169,7 @@ impl Ctx<'_> {
             keep.push(format!("v._b = {head}"));
         }
         if !include_deleted {
-            gate.push("a._del = 0".to_owned());
+            gate.push(format!("(a._st & {STATE_DELETED}) = 0"));
         }
         if let Some(session) = self.policy {
             gate.push(self.read_policy(table, "a", session)?);
@@ -199,9 +201,9 @@ impl Ctx<'_> {
             ));
         }
         let source = format!(
-            "(SELECT v.id, v._b, v._seq, 0 AS _del{v_stored}, {transaction} AS {}, \
-             {accepted} AS {}{deletion} FROM (SELECT id, _b, _seq, _c{stored} FROM {name} AS c \
-             WHERE {current_bound} UNION ALL SELECT id, _b, _seq, _c{stored} FROM {history} AS h \
+            "(SELECT v.id, v._b, v._seq, 0 AS _st{v_stored}, {transaction} AS {}, \
+             {accepted} AS {}{deletion} FROM (SELECT id, _b, _seq, _st{stored} FROM {name} AS c \
+             WHERE {current_bound} UNION ALL SELECT id, _b, _seq, _st{stored} FROM {history} AS h \
              WHERE {history_bound}) AS v WHERE {})",
             quote(TRANSACTION_ID_COLUMN),
             quote(ACCEPTED_AT_COLUMN),

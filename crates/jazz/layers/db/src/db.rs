@@ -46,8 +46,8 @@ pub use crate::options::REMOTE_LINK_ATTEMPT_WINDOW;
 use crate::result_tree::{ResultNode, ResultRelation, ResultTree};
 pub use crate::values::CurrentRow;
 use crate::values::{
-    AuthorKey, Schema, Sql, Table, author_key, begin_savepoint, end_savepoint, from_sql,
-    in_savepoint, quote, storage, to_sql, unsupported,
+    AuthorKey, STATE_AS_SENT, STATE_DELETED, STATE_NO_CONTENT, Schema, Sql, Table, author_key,
+    begin_savepoint, end_savepoint, from_sql, in_savepoint, quote, storage, to_sql, unsupported,
 };
 pub use sync::{
     BuiltOn, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad, FrameJoiner, Image, LOCAL_BASE,
@@ -395,16 +395,11 @@ struct Inner {
     /// built on (SPEC 4 §4.6), by (stored table, row, branch key): a text
     /// merge reads its base from it. Empty otherwise.
     merge_bases: HashMap<(String, RowUuid, Vec<u8>), sync::Built>,
-    /// The edits back to the values as sent the upload's text writes made
-    /// (see [`crate::text_merge::encode_in`]), by row version, stored column
-    /// first; empty for a write left as sent, `None` for a clear (a NULL
-    /// write, never merged).
-    text_in: RefCell<
-        BTreeMap<
-            (String, RowUuid, Vec<u8>),
-            BTreeMap<String, Option<Vec<crate::text_merge::Edit>>>,
-        >,
-    >,
+    /// The values as sent of the upload's text writes, by row version and
+    /// stored column: for a write its merge changed, the value and its
+    /// bound cell (kept by [`Inner::record_as_sent`]); `None` for one left
+    /// as sent.
+    as_sent: RefCell<AsSent>,
     /// A transaction handle's staged writes left applied between its
     /// stages (see [`Db::in_overlay`]); undone by [`Store`] before any
     /// other use of the store.
@@ -697,12 +692,6 @@ pub(crate) fn execute_script(conn: &Connection, script: &str) -> Result<(), Erro
     Ok(())
 }
 
-/// Where the authority keeps, for a row version whose text merge changed
-/// its write's values, the edits back to the values as sent (SPEC 4 §4.3).
-const TEXT_IN_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_text_in (t TEXT NOT NULL, \
-     id BLOB NOT NULL, k BLOB NOT NULL, seq INTEGER NOT NULL, node BLOB NOT NULL, \
-     edits BLOB NOT NULL, PRIMARY KEY (t, id, k, seq)) WITHOUT ROWID;";
-
 pub(crate) fn rejected(message: impl Into<String>) -> Error {
     Error::new(ErrorCode::WriteRejected, message)
 }
@@ -751,6 +740,10 @@ enum Cells {
     Authored,
     Carried,
 }
+
+/// [`Inner::as_sent`]: per row version (stored table, row, branch key) and
+/// stored column, a merged write's value as sent and its bound cell.
+type AsSent = BTreeMap<(String, RowUuid, Vec<u8>), BTreeMap<String, Option<(Value, Sql)>>>;
 
 /// A mergeable commit that would move a row to another branch.
 fn branch_move() -> Error {
@@ -1137,7 +1130,7 @@ impl Db {
                 pending_nodes: Vec::new(),
                 merging: false,
                 merge_bases: HashMap::new(),
-                text_in: RefCell::new(BTreeMap::new()),
+                as_sent: RefCell::new(BTreeMap::new()),
                 overlay: None,
                 derived: Vec::new(),
                 possession: None,
@@ -3119,7 +3112,7 @@ impl Inner {
                 row.get(0).map_err(storage)?
             };
             let seq: i64 = row.get(1).map_err(storage)?;
-            let deleted: i64 = row.get(2).map_err(storage)?;
+            let state: i64 = row.get(2).map_err(storage)?;
             // A flat join: the root's version, then each joined row and
             // its version.
             let flat = compiled.joined > 0;
@@ -3194,7 +3187,7 @@ impl Inner {
                         .map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?,
                 ),
                 seq: seq as u64,
-                deleted: deleted != 0,
+                deleted: state & STATE_DELETED != 0,
                 cells: Arc::new(cells),
                 types: types.clone(),
                 joined,
@@ -3323,7 +3316,7 @@ impl Inner {
         key: &[u8],
     ) -> Result<Option<(u64, bool)>, Error> {
         let sql = format!(
-            "SELECT _seq, _del FROM {} WHERE id = ?1 AND _b = ?2",
+            "SELECT _seq, (_st & {STATE_DELETED}) <> 0 FROM {} WHERE id = ?1 AND _b = ?2",
             quote(table)
         );
         match self.conn.cached_row(
@@ -3359,7 +3352,7 @@ impl Inner {
             return Ok(None);
         };
         let sql = format!(
-            "SELECT _del FROM {} WHERE id = ?1 AND _b = ?2 AND _seq = ?3",
+            "SELECT (_st & {STATE_DELETED}) <> 0 FROM {} WHERE id = ?1 AND _b = ?2 AND _seq = ?3",
             quote(&format!("{table}__h"))
         );
         let deleted: i64 = self
@@ -3388,7 +3381,8 @@ impl Inner {
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!(
-            "SELECT MAX(_seq) FROM {} WHERE id = ?1 AND _b = ?2 AND (_seq <= ?3 OR _seq IN ({extra}))",
+            "SELECT MAX(_seq) FROM {} WHERE id = ?1 AND _b = ?2 AND (_st & {STATE_AS_SENT}) = 0 \
+             AND (_seq <= ?3 OR _seq IN ({extra}))",
             quote(&format!("{table}__h"))
         );
         let version: Option<i64> = self
@@ -3936,7 +3930,7 @@ impl Inner {
     /// Whether `row`'s current version on branch `key` is a tombstone.
     fn is_deleted_version(&self, table: &Table, row: RowUuid, key: &[u8]) -> Result<bool, Error> {
         let sql = format!(
-            "SELECT _del FROM {} WHERE id = ?1 AND _b = ?2",
+            "SELECT (_st & {STATE_DELETED}) <> 0 FROM {} WHERE id = ?1 AND _b = ?2",
             quote(&table.stored)
         );
         let deleted: Option<i64> = self
@@ -4423,10 +4417,9 @@ impl Inner {
     /// A text write merged on the authority (SPEC 4 §4.3): when a version
     /// its writer never saw authored the column, the merge of the value it
     /// was built on, the value held and its own; `None` keeps its value as
-    /// sent. Every text write of an upload notes the edits back from what is
-    /// stored to its value as sent (none when unmerged): a later write
-    /// built on it, in the same upload or a later one, was built on that
-    /// value.
+    /// sent. Every text write of an upload notes its value as sent (none
+    /// when unmerged): a later write built on it, in the same upload or a
+    /// later one, was built on that value.
     fn text_merged(
         &self,
         table: &Table,
@@ -4444,27 +4437,24 @@ impl Inner {
             return Ok(None);
         };
         let merged = self.text_merge(table, row, held, (key, seq), built, column, value)?;
-        let sent = match &merged {
-            Some((merged, incoming)) => Some(crate::text_merge::edits(
-                column.merge.text_format().expect("a text strategy"),
-                merged,
-                incoming,
-            )),
-            None if matches!(value, Value::Nullable(None)) => None,
-            None => Some(Vec::new()),
+        let (merged, sent) = match merged {
+            Some((merged, cell)) => (Some(merged), Some((value.clone(), cell))),
+            None => (None, None),
         };
-        self.text_in
+        self.as_sent
             .borrow_mut()
             .entry(version)
             .or_default()
             .insert(column.stored.clone(), sent);
-        Ok(merged.map(|(merged, _)| merged))
+        Ok(merged)
     }
 
-    /// [`Self::text_merged`]'s merge, with the write's value: `None` when
-    /// there is nothing to merge or the merge leaves the value as sent. The
-    /// fast path reads no value: whether to merge is decided first, from
-    /// the row's `_base` and `_cols` alone.
+    /// [`Self::text_merged`]'s merge, with the write's value bound as its
+    /// cell: `None` when there is nothing to merge or the merge leaves the
+    /// value as sent. The fast path reads no value: whether to merge is
+    /// decided first, from the row's `_base` and `_cols` alone. The write's
+    /// value is bound before it is read, so a descriptor naming chunks its
+    /// writer does not possess is refused (SPEC 19.4), merged or not.
     #[allow(clippy::too_many_arguments)]
     fn text_merge(
         &self,
@@ -4475,7 +4465,7 @@ impl Inner {
         built: sync::Built,
         column: &crate::values::Column,
         value: &Value,
-    ) -> Result<Option<(String, String)>, Error> {
+    ) -> Result<Option<(String, Sql)>, Error> {
         let Some(held) = held else {
             return Ok(None);
         };
@@ -4491,174 +4481,148 @@ impl Inner {
             })
         };
         let earlier = self
-            .text_in
+            .as_sent
             .borrow()
             .get(&(table.stored.clone(), row, key.to_vec()))
             .and_then(|columns| columns.get(&column.stored).cloned());
         let (base, current) = match earlier {
-            // Built on an earlier write of the same upload, as sent.
+            // Built on an earlier write of the same upload, as sent: what
+            // is held when that write was left as sent.
             Some(sent) => {
                 let Some(current) = current(self)? else {
                     return Ok(None);
                 };
                 match sent {
-                    Some(sent) => (crate::text_merge::apply(&current, &sent)?, current),
-                    // Built on its own clear: a NULL base, merged as "".
-                    None => (String::new(), current),
+                    Some((sent, _)) => (self.logical_text(&column.name, &sent)?, current),
+                    None => (current.clone(), current),
                 }
             }
             None => {
-                let Some((base, on)) =
+                let Some(base) =
                     self.merge_base((&table.stored, row, key), built, seq, &column.stored)?
                 else {
                     return Ok(None);
                 };
                 // A NULL base merges as "": additions to an empty optional
                 // column are all kept, as they are over an empty string.
-                let mut base = match from_sql(&column.ty, base.as_ref(), &self.chunks)? {
+                let base = match from_sql(&column.ty, base.as_ref(), &self.chunks)? {
                     Some(base) => self.optional_text(&column.name, &base)?.unwrap_or_default(),
                     None if column.nullable() => String::new(),
                     None => return Ok(None),
                 };
-                // A base on a commit is its value as sent, not as merged.
-                if let Some(on) = on {
-                    base = crate::text_merge::apply(
-                        &base,
-                        &self.sent_edits((&table.stored, row, key), on, &column.stored)?,
-                    )?;
-                }
                 let Some(current) = current(self)? else {
                     return Ok(None);
                 };
                 (base, current)
             }
         };
+        let cell = self.bind_cell(column, value, Cells::Authored)?;
         let incoming = self.logical_text(&column.name, value)?;
         let format = column.merge.text_format().expect("a text strategy");
         let merged = crate::text_merge::merge3(format, &base, &current, &incoming);
-        Ok((merged != incoming).then_some((merged, incoming)))
+        Ok((merged != incoming).then_some((merged, cell)))
     }
 
-    /// The edits back from stored column `column`'s value at version `seq`
-    /// of a row to the value its write sent; none when it was not merged.
-    fn sent_edits(
-        &self,
-        (table, row, key): (&str, RowUuid, &[u8]),
-        seq: u64,
-        column: &str,
-    ) -> Result<Vec<crate::text_merge::Edit>, Error> {
-        if !self.text_in_exists()? {
-            return Ok(Vec::new());
-        }
-        let sent: Option<Vec<u8>> = self
-            .conn
-            .cached_row(
-                "SELECT edits FROM _jazz_text_in WHERE t = ?1 AND id = ?2 AND k = ?3 AND seq = ?4",
-                rusqlite::params![table, row.0.as_bytes().to_vec(), key, seq as i64],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(storage)?;
-        let Some(sent) = sent else {
-            return Ok(Vec::new());
-        };
-        Ok(crate::text_merge::decode_in(&sent)?
-            .into_iter()
-            .find(|(name, _)| name == column)
-            .map(|(_, edits)| edits)
-            .unwrap_or_default())
-    }
-
-    /// Keep, for each row version the upload at `seq` wrote, the edits its
-    /// text merges made back to the values as sent (`_jazz_text_in`, made
-    /// on the first merge that changes a value), and drop the entries its
-    /// sender `node` can no longer build on.
+    /// Keep, for each row version the upload at `seq` wrote whose text
+    /// merge changed a value, that version as its writer sent it (SPEC 4
+    /// §4.3): in `__h` at `_seq` = `-seq` with [`STATE_AS_SENT`] set, its
+    /// merged columns holding their values as sent and every other cell
+    /// the version's. A later write chained on it merges over these values
+    /// ([`Inner::merge_base`]); no read takes it for a version.
     ///
-    /// Only a commit's own sender builds on it unsettled, and its commits
-    /// arrive in order. Once one of them writes a row over an accepted
-    /// version (or over none), every later one it sends is built on that
-    /// write or a newer one, and a chain walk stops at the first accepted
-    /// version: its older entries for the row are dead. So a row keeps
-    /// entries only for its writers' current unsettled chains.
-    pub(crate) fn record_text_in(
+    /// First drop the as-sent versions its sender `node` can no longer
+    /// build on. Only a commit's own sender builds on it unsettled, and its
+    /// commits arrive in order. Once one of them writes a row over an
+    /// accepted version (or over none), every later one it sends is built
+    /// on that write or a newer one, and a chain walk stops at the first
+    /// accepted version: the sender's older as-sent versions of the row
+    /// are dead. So a row keeps them only for its writers' current
+    /// unsettled chains.
+    pub(crate) fn record_as_sent(
         &self,
         seq: u64,
         node: [u8; 16],
         built: &HashMap<(String, RowUuid, Vec<u8>), sync::Built>,
         rows: &[(String, RowUuid, Vec<u8>)],
     ) -> Result<(), Error> {
-        let text_in = std::mem::take(&mut *self.text_in.borrow_mut());
-        let mut exists = self.text_in_exists()?;
-        if exists {
-            for row_key @ (table, row, key) in rows {
-                if matches!(built.get(row_key), Some(sync::Built::On(_))) {
-                    continue;
-                }
-                self.exec(
-                    "DELETE FROM _jazz_text_in WHERE t = ?1 AND id = ?2 AND k = ?3 AND node = ?4",
-                    rusqlite::params![table, row.0.as_bytes().to_vec(), key, node.to_vec()],
-                )
-                .map_err(storage)?;
-            }
-        }
-        for ((table, row, key), edits) in text_in {
-            let entries: Vec<_> = edits
-                .into_iter()
-                .filter_map(|(column, edits)| Some((column, edits?)))
-                .filter(|(_, edits)| !edits.is_empty())
-                .collect();
-            if entries.is_empty() {
+        for row_key @ (stored, row, key) in rows {
+            if matches!(built.get(row_key), Some(sync::Built::On(_))) {
                 continue;
             }
-            if !exists {
-                self.conn.execute_batch(TEXT_IN_DDL).map_err(storage)?;
-                exists = true;
-            }
             self.exec(
-                "INSERT OR REPLACE INTO _jazz_text_in (t, id, k, node, seq, edits) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                rusqlite::params![
-                    table,
-                    row.0.as_bytes().to_vec(),
-                    key,
-                    node.to_vec(),
-                    seq as i64,
-                    crate::text_merge::encode_in(&entries)
-                ],
+                &format!(
+                    "DELETE FROM {} WHERE id = ?1 AND _b = ?2 AND _seq < 0 \
+                     AND (_st & {STATE_AS_SENT}) <> 0 AND EXISTS (SELECT 1 FROM _jazz_settled AS s \
+                     WHERE s.seq = -_seq AND s.node = ?3)",
+                    quote(&format!("{stored}__h"))
+                ),
+                rusqlite::params![row.0.as_bytes().to_vec(), key, node.to_vec()],
             )
             .map_err(storage)?;
+        }
+        let as_sent = std::mem::take(&mut *self.as_sent.borrow_mut());
+        for ((stored, row, key), columns) in as_sent {
+            let Some(table) = self.physical.tables.get(&stored) else {
+                continue;
+            };
+            let mut values = vec![
+                Sql::Blob(row.0.as_bytes().to_vec()),
+                Sql::Blob(key),
+                Sql::Integer(seq as i64),
+            ];
+            let mut sent = BTreeMap::new();
+            for (name, value) in columns {
+                let Some((_, cell)) = value else {
+                    continue;
+                };
+                values.push(cell);
+                sent.insert(name, values.len());
+            }
+            if sent.is_empty() {
+                continue;
+            }
+            let columns = self.columns_list(table);
+            let cells: String = table
+                .stored()
+                .map(|c| match sent.get(&c.stored) {
+                    Some(at) => format!(", ?{at}"),
+                    None => format!(", {}", quote(&c.stored)),
+                })
+                .collect();
+            let sql = format!(
+                "INSERT INTO {} (id, _b, _seq, _st, _base, _cols{columns}) \
+                 SELECT id, _b, -_seq, _st | {STATE_AS_SENT}, NULL, NULL{cells} FROM {} \
+                 WHERE id = ?1 AND _b = ?2 AND _seq = ?3",
+                quote(&format!("{stored}__h")),
+                quote(&stored)
+            );
+            self.exec(&sql, params_from_iter(values.iter()))
+                .map_err(storage)?;
         }
         Ok(())
     }
 
-    /// Whether `_jazz_text_in` exists yet (it is made on the first merge
-    /// that changes a value).
-    fn text_in_exists(&self) -> Result<bool, Error> {
-        self.conn
-            .cached_row(
-                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = '_jazz_text_in'",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
-            .map(|n| n > 0)
-            .map_err(storage)
-    }
-
-    /// How many `_jazz_text_in` entries the store keeps.
+    /// How many as-sent versions ([`STATE_AS_SENT`]) the store keeps.
     #[cfg(feature = "testing")]
-    pub(crate) fn text_in_entries(&self) -> Result<u64, Error> {
-        if !self.text_in_exists()? {
-            return Ok(0);
+    pub(crate) fn as_sent_versions(&self) -> Result<u64, Error> {
+        let mut count = 0;
+        for stored in self.physical.tables.keys() {
+            let n: i64 = self
+                .conn
+                .cached_row(
+                    &format!(
+                        "SELECT count(*) FROM {} WHERE (_st & {STATE_AS_SENT}) <> 0",
+                        quote(&format!("{stored}__h"))
+                    ),
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(storage)?;
+            count += n as u64;
         }
-        self.conn
-            .cached_row("SELECT count(*) FROM _jazz_text_in", [], |r| {
-                r.get::<_, i64>(0)
-            })
-            .map(|n| n as u64)
-            .map_err(storage)
+        Ok(count)
     }
 
-    /// The whole string a text column's value holds.
     /// [`Self::logical_text`] of a cell that may be NULL (`None`).
     fn optional_text(&self, column: &str, value: &Value) -> Result<Option<String>, Error> {
         match value {
@@ -4667,6 +4631,7 @@ impl Inner {
         }
     }
 
+    /// The whole string a text column's value holds.
     fn logical_text(&self, column: &str, value: &Value) -> Result<String, Error> {
         match value {
             Value::String(text) => Ok(text.clone()),
@@ -4682,8 +4647,8 @@ impl Inner {
     fn snapshot(&self, table: &Table, row: RowUuid, key: &[u8], seq: u64) -> Result<(), Error> {
         let columns = self.columns_list(table);
         let sql = format!(
-            "INSERT INTO {} (id, _b, _seq, _del, _c, _base, _cols{columns}) \
-             SELECT id, _b, _seq, _del, _c, _base, _cols{columns} FROM {} WHERE id = ?1 AND _b = ?2 AND _seq <> ?3",
+            "INSERT INTO {} (id, _b, _seq, _st, _base, _cols{columns}) \
+             SELECT id, _b, _seq, _st, _base, _cols{columns} FROM {} WHERE id = ?1 AND _b = ?2 AND _seq <> ?3",
             quote(&format!("{}__h", table.stored)),
             quote(&table.stored)
         );
@@ -4732,8 +4697,10 @@ impl Inner {
                 table.name
             )));
         };
+        // The copy keeps the base's deletion and authored no content.
         let sql = format!(
-            "INSERT INTO {name} (id, _b, _seq, _del, _c{columns}) SELECT id, ?1, ?2, _del, 0{columns} \
+            "INSERT INTO {name} (id, _b, _seq, _st{columns}) \
+             SELECT id, ?1, ?2, _st | {STATE_NO_CONTENT}{columns} \
              FROM {source} WHERE id = ?3 AND _b = ?4",
             name = quote(&table.stored)
         );
@@ -4761,19 +4728,25 @@ impl Inner {
         // the previous version's.
         // What a new version was built on is the authority's to write
         // (SPEC 4 §4.6).
+        let mut values = vec![Sql::Integer(seq as i64)];
+        let deletion = match deleted {
+            Some(deleted) => {
+                values.push(Sql::Integer(if deleted { STATE_DELETED } else { 0 }));
+                format!("?{}", values.len())
+            }
+            None => format!("(_st & {STATE_DELETED})"),
+        };
+        // The no-content bit stays set only while no write of the commit
+        // authored content.
+        let no_content = if content { 0 } else { STATE_NO_CONTENT };
         let mut sets = vec![
             "_seq = ?1".to_owned(),
             "_base = NULL, _cols = NULL".to_owned(),
             format!(
-                "_c = CASE WHEN _seq = ?1 THEN max(_c, {content}) ELSE {content} END",
-                content = content as u8
+                "_st = (CASE WHEN _seq = ?1 THEN _st & {no_content} ELSE {no_content} END) \
+                 | {deletion}"
             ),
         ];
-        let mut values = vec![Sql::Integer(seq as i64)];
-        if let Some(deleted) = deleted {
-            values.push(Sql::Integer(deleted as i64));
-            sets.push(format!("_del = ?{}", values.len()));
-        }
         for (name, value) in cells {
             let cell = match table.column(name) {
                 Some(column) => self.bind_cell(column, value, source)?,
@@ -5601,7 +5574,7 @@ impl Inner {
                 continue;
             }
             let sql = format!(
-                "SELECT {} FROM {} WHERE id = ?1 AND _b = ?2 AND _del = 0",
+                "SELECT {} FROM {} WHERE id = ?1 AND _b = ?2 AND (_st & {STATE_DELETED}) = 0",
                 quote(&column.stored),
                 quote(&t.stored)
             );

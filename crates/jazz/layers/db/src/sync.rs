@@ -41,6 +41,7 @@
 use crate::schema::history::{history_source_table, is_history_table};
 use crate::values::CachedRow;
 use crate::values::query_error;
+use crate::values::{STATE_AS_SENT, STATE_DELETED, STATE_NO_CONTENT};
 use rusqlite::OptionalExtension;
 use std::cell::Cell as StdCell;
 use std::cell::RefCell;
@@ -486,7 +487,7 @@ pub struct Image {
     pub key: Vec<u8>,
     pub seq: u64,
     pub deleted: bool,
-    /// Whether the version's commit wrote content (see `_c`): history
+    /// Whether the version's commit wrote content (stored in `_st`): history
     /// reads list only content versions.
     pub content: bool,
     pub cells: Vec<(String, Cell)>,
@@ -2991,7 +2992,15 @@ impl Inner {
         } else {
             table.to_owned()
         };
-        let sql = format!("SELECT * FROM {} WHERE {filter}", quote(&name));
+        // An as-sent version is no image: it never syncs.
+        let sql = if history {
+            format!(
+                "SELECT * FROM (SELECT * FROM {} WHERE (_st & {STATE_AS_SENT}) = 0) WHERE {filter}",
+                quote(&name)
+            )
+        } else {
+            format!("SELECT * FROM {} WHERE {filter}", quote(&name))
+        };
         let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
         let names: Vec<String> = statement
             .column_names()
@@ -3015,8 +3024,11 @@ impl Inner {
                         "id" => image.id = r.get::<_, Vec<u8>>(i)?.try_into().unwrap_or([0; 16]),
                         "_b" => image.key = r.get(i)?,
                         "_seq" => image.seq = r.get::<_, i64>(i)? as u64,
-                        "_del" => image.deleted = r.get::<_, i64>(i)? != 0,
-                        "_c" => image.content = r.get::<_, i64>(i)? != 0,
+                        "_st" => {
+                            let state = r.get::<_, i64>(i)?;
+                            image.deleted = state & STATE_DELETED != 0;
+                            image.content = state & STATE_NO_CONTENT == 0;
+                        }
                         // The authority's record of what the version was
                         // built on; never replicated.
                         "_base" | "_cols" => {}
@@ -3269,15 +3281,16 @@ impl Inner {
             "id".to_owned(),
             "_b".to_owned(),
             "_seq".to_owned(),
-            "_del".to_owned(),
-            "_c".to_owned(),
+            "_st".to_owned(),
         ];
         let mut values = vec![
             Sql::Blob(image.id.to_vec()),
             Sql::Blob(image.key.clone()),
             Sql::Integer(image.seq as i64),
-            Sql::Integer(image.deleted as i64),
-            Sql::Integer(image.content as i64),
+            Sql::Integer(
+                if image.deleted { STATE_DELETED } else { 0 }
+                    | if image.content { 0 } else { STATE_NO_CONTENT },
+            ),
         ];
         for (column, value) in self.stored_cells(image)? {
             names.push(quote(&column));
@@ -8816,7 +8829,7 @@ impl Db {
             inner.merging = true;
             inner.possession = Some(possession);
             inner.merge_bases = std::mem::take(&mut built);
-            inner.text_in.borrow_mut().clear();
+            inner.as_sent.borrow_mut().clear();
             let applied = ops
                 .iter()
                 .try_for_each(|op| inner.apply_as(op, who, seq).map(drop))
@@ -8826,6 +8839,7 @@ impl Db {
             inner.merging = false;
             built = std::mem::take(&mut inner.merge_bases);
             if let Err(error) = applied {
+                inner.as_sent.borrow_mut().clear();
                 inner.abandon_checks();
                 inner.changed.borrow_mut().truncate(mark);
                 end_savepoint(&inner.conn, "upload", false).map_err(|e| (e, Vec::new()))?;
@@ -8866,7 +8880,7 @@ impl Db {
             if !relay {
                 let inner = self.inner.borrow();
                 inner.record_bases(&ops, &by_row, &built, seq, &rows)?;
-                inner.record_text_in(seq, origin.0, &built, &rows)?;
+                inner.record_as_sent(seq, origin.0, &built, &rows)?;
             }
             Ok(rows)
         });
@@ -8879,6 +8893,7 @@ impl Db {
                 Ok(rows)
             }
             Err(error) => {
+                inner.as_sent.borrow_mut().clear();
                 inner.changed.borrow_mut().truncate(mark);
                 end_savepoint(&inner.conn, "upload", false).map_err(|e| (e, Vec::new()))?;
                 inner.seq = seq - 1;

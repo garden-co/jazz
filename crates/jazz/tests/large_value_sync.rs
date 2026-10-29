@@ -10,15 +10,18 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 
 use jazz::db::{
-    CellDelta, Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadSpan, ReadTier,
-    RemoteLinkHint, SubscriptionStream, SyncCell, SyncMessage, Transport, TransportError,
+    BuiltOn, CellDelta, Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadSpan, ReadTier,
+    RemoteLinkHint, SubscriptionStream, SyncCell, SyncMessage, Transport, TransportError, WireBase,
     WireDelta, WireError, WireKind, WireOp, WirePull, WireTarget, block_on, encode_frames,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::ReadViewSourceSpec;
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::records::Value;
-use jazz::tools::{ColumnType, Operation, PolicyExpr, SchemaBuilder, TableSchemaBuilder};
+use jazz::tools::{
+    ColumnMergeStrategy, ColumnType, Operation, PolicyExpr, SchemaBuilder, TableName,
+    TableSchemaBuilder,
+};
 
 use common::{allow_all_policies, compile_schema};
 
@@ -57,17 +60,29 @@ fn open(node: u8, author: AuthorSubject) -> Db {
     let drafts = TableSchemaBuilder::new("drafts")
         .column("body", ColumnType::Text)
         .policies(allow_all_policies().with_select(PolicyExpr::False));
+    // Its `body` merges concurrent text edits (SPEC 4 §4.3).
+    let merged = TableSchemaBuilder::new("merged")
+        .column("body", ColumnType::Text)
+        .policies(allow_all_policies());
+    let mut schema = SchemaBuilder::new()
+        .table(docs)
+        .table(titled)
+        .table(notes)
+        .table(comments)
+        .table(links)
+        .table(drafts)
+        .table(merged)
+        .build();
+    for column in &mut schema
+        .get_mut(&TableName::new("merged"))
+        .unwrap()
+        .columns
+        .columns
+    {
+        *column = column.clone().merge_strategy(ColumnMergeStrategy::Text);
+    }
     let config = DbConfig::new(
-        compile_schema(
-            &SchemaBuilder::new()
-                .table(docs)
-                .table(titled)
-                .table(notes)
-                .table(comments)
-                .table(links)
-                .table(drafts)
-                .build(),
-        ),
+        compile_schema(&schema),
         DbIdentity {
             node: NodeUuid::from_bytes([node; 16]),
             author,
@@ -1194,6 +1209,90 @@ fn naming_a_hidden_trees_hash_reads_nothing() {
     assert_eq!(fates[0].1, fates[1].1, "{fates:?}");
     assert!(fates[0].1.contains("does not hold"), "{fates:?}");
     assert_eq!(local_cell(&server, "docs", 1, "body").unwrap(), None);
+}
+
+/// A text write the authority merges is checked like any other: its
+/// descriptor naming a hidden tree is refused before the merge reads it,
+/// so neither the merged value nor the write as sent takes in its text.
+#[test]
+fn a_merged_text_write_naming_a_hidden_tree_is_refused() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let mallory = open(9, user(9));
+    let (_, up, down) = connect_wires(&server, &mallory, user(9));
+    insert(
+        &server,
+        "drafts",
+        1,
+        vec![("body", Value::String(text(8, LARGE)))],
+    );
+    let hidden = jazz::large_values::prepare(
+        jazz::large_values::LargeValueKind::String,
+        text(8, LARGE).as_bytes(),
+    )
+    .unwrap()
+    .value_ref;
+    insert(
+        &server,
+        "merged",
+        2,
+        vec![("body", Value::String("hello".into()))],
+    );
+    let seed = server.write_conflicts("merged", row(2), None).unwrap()[0].seq;
+    block_on(server.update(
+        "merged",
+        row(2),
+        [("body".to_owned(), Value::String("hello there".into()))].into(),
+        Default::default(),
+    ))
+    .unwrap();
+    pump(&server, &[&mallory]);
+    // Mallory edits the doc over its first version, which the authority
+    // has to merge, naming the draft's tree as her value.
+    up.borrow_mut().push_back(SyncMessage::Commit {
+        node: [9; 16],
+        tx: 1,
+        kind: WireKind::Mergeable,
+        ops: vec![WireOp::Update {
+            table: "merged".to_owned(),
+            row: *row(2).0.as_bytes(),
+            cells: [("body".to_owned(), Value::Large(Box::new(hidden)))].into(),
+            target: WireTarget::Root,
+            at: None,
+        }],
+        author: None,
+        session: None,
+        expect: Vec::new(),
+        deltas: Vec::new(),
+        sources: Vec::new(),
+        bases: vec![WireBase {
+            op: 0,
+            key: Vec::new(),
+            on: BuiltOn::Seq(seed),
+        }],
+        origin: None,
+    });
+    for _ in 0..4 {
+        block_on(server.tick()).unwrap();
+    }
+    let fates: Vec<String> = down
+        .borrow()
+        .iter()
+        .filter_map(|message| match message {
+            SyncMessage::Fate {
+                result: Err(WireError::Rejected { message, .. }),
+                ..
+            } => Some(message.clone()),
+            SyncMessage::Fate { .. } => Some("accepted".to_owned()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(fates.len(), 1, "{fates:?}");
+    assert!(fates[0].contains("does not hold"), "{fates:?}");
+    assert_eq!(
+        local_cell(&server, "merged", 2, "body").unwrap(),
+        Some(Value::String("hello there".into()))
+    );
+    assert_eq!(server.as_sent_versions_for_test().unwrap(), 0);
 }
 
 #[test]
