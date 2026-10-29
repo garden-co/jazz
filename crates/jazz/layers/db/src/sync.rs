@@ -6999,6 +6999,7 @@ impl Db {
                         added,
                         updated,
                         removed,
+                        reset,
                         ..
                     } = event
                     else {
@@ -7017,9 +7018,12 @@ impl Db {
                         // of `since` that was in the result then. A row whose
                         // membership inputs changed may have entered the
                         // result without changing: its seq alone cannot say,
-                        // so the result as of `since` does.
+                        // so the result as of `since` does. Only the opening
+                        // snapshot is judged so: a row a later commit in
+                        // this tick added joined after that judgement.
                         let unchanged = resume.as_ref().is_some_and(|resume| {
-                            history.is_none()
+                            reset
+                                && history.is_none()
                                 && row.seq <= resume.since
                                 && resume
                                     .prior
