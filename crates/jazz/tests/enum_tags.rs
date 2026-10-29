@@ -1095,3 +1095,319 @@ fn raw_cells_of(path: &Path, table: &str) -> Vec<(String, String)> {
         .collect::<Result<_, _>>()
         .unwrap()
 }
+
+/// `tasks(title, status?, rank?)`.
+fn small_schema(status: ColumnType, rank: Option<ColumnType>) -> JazzSchema {
+    let mut t = TableSchemaBuilder::new("tasks")
+        .column("title", ColumnType::Text)
+        .nullable_column("status", status);
+    if let Some(rank) = rank {
+        t = t.nullable_column("rank", rank);
+    }
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(t.policies(allow_all_policies()))
+            .build(),
+    )
+}
+
+/// The authority keeps an old enum column under the stored name a replica
+/// moves its own column away from: each keeps its own tags, and the
+/// replica takes the authority's later ones.
+#[test]
+fn a_replica_never_folds_another_columns_tags_into_a_moved_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let sp = dir.path().join("server.sqlite");
+    let arr = |v: &[&str]| ColumnType::Array {
+        element: Box::new(enumeration(v)),
+    };
+    let server = authority_at(small_schema(enumeration(&["a", "b", "c"]), None), &sp);
+    try_insert(&server, 9, &[("title", name("t")), ("status", some("b"))]).unwrap();
+    drop(server);
+    let b = small_schema(arr(&["a"]), None);
+    let server = authority_at(b.clone(), &sp);
+    try_insert(
+        &server,
+        1,
+        &[("title", name("t")), ("status", labels(&["a"]))],
+    )
+    .unwrap();
+    let cp = dir.path().join("client.sqlite");
+    let client = open_at(b.clone(), 1, &cp);
+    let _link = link(&client, &server);
+    let q = client.prepare_query(&Query::from("tasks")).unwrap();
+    let _sub = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
+    pump(&server, &[&client]);
+    let c = small_schema(arr(&["a", "z"]), None);
+    block_on(server.activate_schema_with_lenses(c.clone(), &[lens(&b, &c, vec![])])).unwrap();
+    try_insert(
+        &server,
+        3,
+        &[("title", name("t")), ("status", labels(&["z"]))],
+    )
+    .unwrap();
+    pump(&server, &[&client]);
+    assert_eq!(ids(&client, Query::from("tasks")), [1, 3, 9]);
+}
+
+/// A catalogue refused after mirroring moved a stored column leaves the
+/// tags, in the file and in memory, as they were.
+#[test]
+fn a_catalogue_refused_after_a_move_leaves_the_tags_as_they_were() {
+    let dir = tempfile::tempdir().unwrap();
+    let sp = dir.path().join("server.sqlite");
+    let e = || enumeration(&["todo", "doing", "done"]);
+    let server = authority_at(small_schema(ColumnType::Boolean, None), &sp);
+    try_insert(
+        &server,
+        9,
+        &[
+            ("title", name("t")),
+            ("status", Value::Nullable(Some(Box::new(Value::Bool(true))))),
+        ],
+    )
+    .unwrap();
+    drop(server);
+    let server = authority_at(small_schema(e(), None), &sp);
+    try_insert(
+        &server,
+        1,
+        &[("title", name("t")), ("status", some("doing"))],
+    )
+    .unwrap();
+    drop(server);
+    let server = authority_at(small_schema(e(), Some(ColumnType::Boolean)), &sp);
+    let cp = dir.path().join("client.sqlite");
+    drop(open_at(small_schema(e(), None), 1, &cp));
+    let client = open_at(small_schema(e(), Some(ColumnType::Text)), 1, &cp);
+    let _link = link(&client, &server);
+    let q = client.prepare_query(&Query::from("tasks")).unwrap();
+    let _sub = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
+    pump(&server, &[&client]);
+    try_insert(
+        &client,
+        2,
+        &[("title", name("t")), ("status", some("done"))],
+    )
+    .unwrap();
+    drop(_sub);
+    drop(_link);
+    drop(client);
+    let client = open_at(small_schema(e(), Some(ColumnType::Text)), 1, &cp);
+    let got = column(&client, Query::from("tasks"), "status");
+    assert_eq!(got, [(2, Some(some("done")))]);
+}
+
+/// A replica whose column moved to the authority's stored name keeps a
+/// write made after the move, alongside the synced rows, across a reopen.
+#[test]
+fn a_moved_column_keeps_its_writes_across_a_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let sp = dir.path().join("server.sqlite");
+    let e = || enumeration(&["todo", "doing", "done"]);
+    let server = authority_at(small_schema(ColumnType::Boolean, None), &sp);
+    try_insert(
+        &server,
+        9,
+        &[
+            ("title", name("t")),
+            ("status", Value::Nullable(Some(Box::new(Value::Bool(true))))),
+        ],
+    )
+    .unwrap();
+    drop(server);
+    let server = authority_at(small_schema(e(), None), &sp);
+    try_insert(
+        &server,
+        1,
+        &[("title", name("t")), ("status", some("doing"))],
+    )
+    .unwrap();
+    drop(server);
+    let server = authority_at(small_schema(e(), Some(ColumnType::Boolean)), &sp);
+    let cp = dir.path().join("client.sqlite");
+    drop(open_at(small_schema(e(), None), 1, &cp));
+    let client = open_at(small_schema(e(), Some(ColumnType::Boolean)), 1, &cp);
+    let _link = link(&client, &server);
+    let q = client.prepare_query(&Query::from("tasks")).unwrap();
+    let _sub = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
+    pump(&server, &[&client]);
+    try_insert(
+        &client,
+        2,
+        &[("title", name("t")), ("status", some("done"))],
+    )
+    .unwrap();
+    drop(_sub);
+    drop(_link);
+    drop(client);
+    let client = open_at(small_schema(e(), Some(ColumnType::Boolean)), 1, &cp);
+    let got = column(&client, Query::from("tasks"), "status");
+    assert_eq!(
+        got,
+        [
+            (1, Some(some("doing"))),
+            (2, Some(some("done"))),
+            (9, Some(Value::Nullable(None))),
+        ]
+    );
+}
+
+/// A catalogue refused over a column the replica typed differently leaves
+/// the replica's own enum writes readable after a reopen.
+#[test]
+fn a_catalogue_refused_for_another_column_keeps_local_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let sp = dir.path().join("server.sqlite");
+    let e = || enumeration(&["todo", "doing", "done"]);
+    let server = authority_at(small_schema(ColumnType::Boolean, None), &sp);
+    try_insert(
+        &server,
+        9,
+        &[
+            ("title", name("t")),
+            ("status", Value::Nullable(Some(Box::new(Value::Bool(true))))),
+        ],
+    )
+    .unwrap();
+    drop(server);
+    let server = authority_at(small_schema(e(), None), &sp);
+    try_insert(
+        &server,
+        1,
+        &[("title", name("t")), ("status", some("doing"))],
+    )
+    .unwrap();
+    drop(server);
+    let server = authority_at(small_schema(e(), Some(ColumnType::Boolean)), &sp);
+    let cp = dir.path().join("client.sqlite");
+    drop(open_at(small_schema(e(), Some(ColumnType::Text)), 1, &cp));
+    let client = open_at(small_schema(e(), None), 1, &cp);
+    let _link = link(&client, &server);
+    let q = client.prepare_query(&Query::from("tasks")).unwrap();
+    let _sub = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
+    pump(&server, &[&client]);
+    try_insert(
+        &client,
+        2,
+        &[("title", name("t")), ("status", some("done"))],
+    )
+    .unwrap();
+    drop(_sub);
+    drop(_link);
+    drop(client);
+    let client = open_at(small_schema(e(), None), 1, &cp);
+    let got = column(&client, Query::from("tasks"), "status");
+    assert_eq!(got, [(2, Some(some("done")))]);
+}
+
+/// A replica with an enum column the authority doesn't have takes the
+/// authority's rows and keeps its own write across a reopen.
+#[test]
+fn a_replica_with_its_own_enum_column_keeps_local_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let sp = dir.path().join("server.sqlite");
+    let e = || enumeration(&["todo", "doing", "done"]);
+    let server = authority_at(
+        small_schema(ColumnType::Boolean, Some(ColumnType::Text)),
+        &sp,
+    );
+    try_insert(
+        &server,
+        9,
+        &[
+            ("title", name("t")),
+            ("status", Value::Nullable(Some(Box::new(Value::Bool(true))))),
+        ],
+    )
+    .unwrap();
+    drop(server);
+    let server = authority_at(small_schema(e(), Some(ColumnType::Text)), &sp);
+    try_insert(
+        &server,
+        1,
+        &[("title", name("t")), ("status", some("doing"))],
+    )
+    .unwrap();
+    let cp = dir.path().join("client.sqlite");
+    let cs = || small_schema(e(), Some(enumeration(&["x"])));
+    let client = open_at(cs(), 1, &cp);
+    let _link = link(&client, &server);
+    let q = client.prepare_query(&Query::from("tasks")).unwrap();
+    let _sub = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
+    pump(&server, &[&client]);
+    try_insert(
+        &client,
+        2,
+        &[("title", name("t")), ("status", some("done"))],
+    )
+    .unwrap();
+    drop(_sub);
+    drop(_link);
+    drop(client);
+    let client = open_at(cs(), 1, &cp);
+    let got = column(&client, Query::from("tasks"), "status");
+    assert_eq!(
+        got,
+        [
+            (1, Some(some("doing"))),
+            (2, Some(some("done"))),
+            (9, Some(Value::Nullable(None))),
+        ]
+    );
+}
+
+/// A copy lens's column sorts its variants like its source, removed
+/// variants included.
+#[test]
+fn a_copy_sorts_like_its_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let sp = dir.path().join("server.sqlite");
+    let server = authority_at(v1(), &sp);
+    insert(&server, 1, "done");
+    insert(&server, 2, "todo");
+    block_on(server.activate_schema_with_lenses(v2(), &[lens(&v1(), &v2(), vec![])])).unwrap();
+    insert(&server, 3, "blocked");
+    let vars = ["blocked", "todo", "doing", "done"];
+    let copied = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("tasks")
+                    .column("title", ColumnType::Text)
+                    .column("status", enumeration(&vars))
+                    .column("copy", enumeration(&vars))
+                    .nullable_column(
+                        "labels",
+                        ColumnType::Array {
+                            element: Box::new(enumeration(&["bug", "ui"])),
+                        },
+                    )
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    );
+    block_on(server.activate_schema_with_lenses(
+        copied.clone(),
+        &[lens(
+            &v2(),
+            &copied,
+            vec![LensOp::CopyColumn {
+                from: "status".into(),
+                to: "copy".into(),
+            }],
+        )],
+    ))
+    .unwrap();
+    let by = |c: &str| {
+        column(
+            &server,
+            Query::from("tasks").order_by(c, OrderDirection::Asc),
+            "title",
+        )
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect::<Vec<_>>()
+    };
+    let (s, c) = (by("status"), by("copy"));
+    assert_eq!(s, c);
+}

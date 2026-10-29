@@ -554,22 +554,36 @@ impl TagRegistry {
             .collect()
     }
 
-    /// What every column's tags are now, to put back with [`Self::restore`].
-    pub(crate) fn snapshot(&self) -> BTreeMap<(String, String), EnumTags> {
-        self.0
-            .borrow()
-            .iter()
-            .map(|(key, tags)| (key.clone(), tags.borrow().clone()))
-            .collect()
+    /// What every column's tags are now, and which entry holds them, to put
+    /// back with [`Self::restore`].
+    pub(crate) fn snapshot(&self) -> TagSnapshot {
+        TagSnapshot(
+            self.0
+                .borrow()
+                .iter()
+                .map(|(key, tags)| (key.clone(), tags.clone(), tags.borrow().clone()))
+                .collect(),
+        )
     }
 
-    /// Put the tags back as [`Self::snapshot`] took them, in the entries
-    /// schemas already hold.
-    pub(crate) fn restore(&self, snapshot: BTreeMap<(String, String), EnumTags>) {
-        let map = self.0.borrow();
-        for (key, tags) in map.iter() {
-            *tags.borrow_mut() = snapshot.get(key).cloned().unwrap_or_default();
+    /// Put the entries and their tags back as [`Self::snapshot`] took them.
+    /// An entry made or moved since keeps no tags: a schema still holding
+    /// it reads none it did not have.
+    pub(crate) fn restore(&self, snapshot: TagSnapshot) {
+        let mut map = self.0.borrow_mut();
+        for tags in map.values() {
+            if !snapshot.0.iter().any(|(_, kept, _)| Rc::ptr_eq(kept, tags)) {
+                *tags.borrow_mut() = EnumTags::default();
+            }
         }
+        *map = snapshot
+            .0
+            .into_iter()
+            .map(|(key, entry, tags)| {
+                *entry.borrow_mut() = tags;
+                (key, entry)
+            })
+            .collect();
     }
 
     /// Stored table `from` (with `column`, its stored column `column.0`) is
@@ -587,26 +601,13 @@ impl TagRegistry {
                 None => (to.to_owned(), key.1),
                 Some((_, new)) => (key.0, new.to_owned()),
             };
-            // Tags already kept under the new name (a replica mirroring its
-            // upstream learns them before it moves its own stored column
-            // there) stay; the moved ones join them, and schemas holding
-            // either entry see the same tags.
-            match map.get(&new) {
-                Some(kept) if !Rc::ptr_eq(kept, &tags) => {
-                    for (tag, name) in tags.borrow().iter() {
-                        if kept.borrow().name(tag).is_none() && kept.borrow().tag(name).is_none() {
-                            kept.borrow_mut().insert(name.to_owned(), tag);
-                        }
-                    }
-                    *tags.borrow_mut() = kept.borrow().clone();
-                }
-                _ => {
-                    map.insert(new, tags);
-                }
-            }
+            map.insert(new, tags);
         }
     }
 }
+
+/// A [`TagRegistry`]'s entries and their tags at one point.
+pub(crate) struct TagSnapshot(Vec<((String, String), ColumnTags, EnumTags)>);
 
 /// The variant names an enum column's `value` holds.
 pub(crate) fn enum_names(value: &Value) -> Vec<&str> {

@@ -589,45 +589,21 @@ impl Names {
                 if !exists {
                     continue;
                 }
-                // A replica learns its upstream's tags under the stored name
-                // before it moves its own column there: those rows stay, and
-                // the moved ones join them.
-                let (update, merge) = if ddl_table.starts_with("_jazz_enum_") {
-                    ("UPDATE OR IGNORE", true)
-                } else {
-                    ("UPDATE", false)
-                };
                 match column {
                     None => {
                         conn.execute(
-                            &format!("{update} {ddl_table} SET tbl = ?2 WHERE tbl = ?1"),
+                            &format!("UPDATE {ddl_table} SET tbl = ?2 WHERE tbl = ?1"),
                             [from, to],
                         )
                         .map_err(storage)?;
-                        if merge {
-                            conn.execute(
-                                &format!("DELETE FROM {ddl_table} WHERE tbl = ?1"),
-                                [from],
-                            )
-                            .map_err(storage)?;
-                        }
                     }
                     Some((old, new)) => {
                         for col in columns {
                             conn.execute(
-                                &format!("{update} {ddl_table} SET {col} = ?3 WHERE tbl = ?1 AND {col} = ?2"),
+                                &format!("UPDATE {ddl_table} SET {col} = ?3 WHERE tbl = ?1 AND {col} = ?2"),
                                 [from, old, new],
                             )
                             .map_err(storage)?;
-                            if merge {
-                                conn.execute(
-                                    &format!(
-                                        "DELETE FROM {ddl_table} WHERE tbl = ?1 AND {col} = ?2"
-                                    ),
-                                    [from, old],
-                                )
-                                .map_err(storage)?;
-                            }
                         }
                     }
                 }
@@ -925,6 +901,28 @@ impl Names {
         }
         self.record_tags(conn, &new)?;
         Ok(new)
+    }
+
+    /// A new copy `copy` of stored column `source` of stored table `table`
+    /// starts with its source's tags, removed variants' too: it sorts like
+    /// its source and every value it is filled with has a tag. Only the
+    /// authority calls this; replicas take the copy's tags from its
+    /// catalogue, since the source may have tagged more variants since.
+    pub(crate) fn copy_tags(
+        &mut self,
+        conn: &Connection,
+        table: &str,
+        source: &str,
+        copy: &str,
+    ) -> Result<Vec<Tag>, Error> {
+        let tags: Vec<Tag> = self
+            .tags
+            .column(table, source)
+            .borrow()
+            .iter()
+            .map(|(tag, name)| (table.to_owned(), copy.to_owned(), tag, name.to_owned()))
+            .collect();
+        self.learn(conn, &tags)
     }
 
     /// Record `tags`, in the file and then in memory.

@@ -2446,17 +2446,17 @@ impl Inner {
         versions: Vec<sync::CatalogueVersion>,
         cells: Vec<sync::CatalogueCell>,
     ) -> Result<(), Error> {
-        // Tags first: a version this store takes now stores an enum
-        // column's default as its tag.
+        // Versions first: the tags are keyed by the authority's stored
+        // names, which this store's own stored columns take only now. A
+        // column a version adds stores its default as TEXT until then, and
+        // a copy its source's names; both become tags below.
+        if !versions.is_empty() {
+            self.mirror_versions(versions, cells)?;
+        }
         let learned = {
             let conn = &self.conn;
             self.names.learn(conn, &tags)?
         };
-        if !versions.is_empty() {
-            self.mirror_versions(versions, cells)?;
-        }
-        // After the versions: a stored column they renamed holds its TEXT
-        // cells under the authority's name now.
         self.tags_learned(learned)
     }
 
@@ -2796,9 +2796,22 @@ impl Inner {
         cells: Vec<crate::names::LensCell>,
     ) -> Result<Vec<crate::names::Tag>, Error> {
         // An authority tags new variants first, so an enum column added
-        // with a default stores the default's tag.
+        // with a default stores the default's tag. A new copy starts with
+        // its source's tags.
         let minted = if self.publishes_catalogue() {
-            self.names.mint(&self.conn, target)?
+            let mut minted = Vec::new();
+            for cell in &cells {
+                if let crate::names::LensCellRule::Copy(source) = &cell.rule {
+                    minted.extend(self.names.copy_tags(
+                        &self.conn,
+                        &cell.table,
+                        source,
+                        &cell.column,
+                    )?);
+                }
+            }
+            minted.extend(self.names.mint(&self.conn, target)?);
+            minted
         } else {
             Vec::new()
         };
@@ -2822,9 +2835,11 @@ impl Inner {
     }
 
     /// Fill copy `column` of stored table `table`, in every row version,
-    /// from `source`. An enum copy has tags of its own (the source may tag
-    /// later variants otherwise), so it is filled with the variant names
-    /// and returns its tags, for those names to become them.
+    /// from `source`. An enum copy has tags of its own (it starts with its
+    /// source's, but either may add variants the other lacks, and a replica
+    /// may know more of the source's than the copy had), so it is filled
+    /// with the variant names and returns its tags, for those names to
+    /// become them.
     fn fill_copy(
         &mut self,
         target: &Schema,
