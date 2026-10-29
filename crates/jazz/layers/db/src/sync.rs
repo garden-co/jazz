@@ -3618,8 +3618,20 @@ fn encode<T: Serialize>(value: &T) -> Vec<u8> {
     postcard::to_allocvec(value).expect("encode sync state")
 }
 
+/// A stored sync record. One written in another layout is refused as an
+/// unsupported storage format rather than misread: it must decode exactly,
+/// with no bytes left over.
 fn decode_stored<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, Error> {
-    postcard::from_bytes(bytes).map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))
+    match postcard::take_from_bytes(bytes) {
+        Ok((value, [])) => Ok(value),
+        Ok((_, rest)) => Err(crate::format::unsupported(format_args!(
+            "a stored sync record has {} trailing bytes",
+            rest.len()
+        ))),
+        Err(error) => Err(crate::format::unsupported(format_args!(
+            "a stored sync record does not decode ({error})"
+        ))),
+    }
 }
 
 impl Inner {
@@ -9359,6 +9371,74 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ids::NodeUuid;
+
+    /// A pending `Commit` header in the layout before `acting` (separate
+    /// `author` and `session`), with its lists empty as `persist_pending`
+    /// stores them.
+    fn pre_acting_header(
+        author: Option<&str>,
+        session: Option<BTreeMap<String, Value>>,
+        origin: Option<([u8; 16], u64)>,
+    ) -> Vec<u8> {
+        const COMMIT: u32 = 4;
+        postcard::to_allocvec(&(
+            COMMIT,
+            [7u8; 16],
+            LOCAL_BASE + 1,
+            WireKind::Mergeable,
+            Vec::<WireOp>::new(),
+            author.map(str::to_owned),
+            session,
+            Vec::<Expect>::new(),
+            Vec::<CellDelta>::new(),
+            Vec::<WireSource>::new(),
+            Vec::<WireBase>::new(),
+            origin,
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_pending_header_from_before_acting_is_refused_not_misread() {
+        let author = AuthorSubject::system_at(NodeUuid::from_bytes([9; 16]));
+        let headers = [
+            pre_acting_header(None, None, None),
+            pre_acting_header(None, None, Some(([8; 16], 3))),
+            pre_acting_header(Some(author.canonical()), None, Some(([8; 16], 3))),
+            pre_acting_header(Some(author.canonical()), Some(BTreeMap::new()), None),
+        ];
+        for header in headers {
+            let error = decode_stored::<SyncMessage>(&header)
+                .expect_err("an old pending header must not decode");
+            assert_eq!(error.code, ErrorCode::UnsupportedStorageCodecs, "{error:?}");
+            assert!(error.message.contains("resync"), "{error:?}");
+        }
+    }
+
+    #[test]
+    fn a_current_pending_header_round_trips() {
+        let header = SyncMessage::Commit {
+            node: [7; 16],
+            tx: LOCAL_BASE + 1,
+            kind: WireKind::Mergeable,
+            ops: Vec::new(),
+            acting: Acting::Session {
+                author: AuthorSubject::system_at(NodeUuid::from_bytes([9; 16]))
+                    .canonical()
+                    .to_owned(),
+                claims: BTreeMap::from([("role".to_owned(), Value::String("admin".to_owned()))]),
+            },
+            expect: Vec::new(),
+            deltas: Vec::new(),
+            sources: Vec::new(),
+            bases: Vec::new(),
+            origin: Some(([8; 16], 3)),
+        };
+        let bytes = encode(&header);
+        let decoded: SyncMessage = decode_stored(&bytes).unwrap();
+        assert_eq!(encode(&decoded), bytes);
+    }
 
     fn image(id: u8, seq: u64, body: usize) -> Image {
         Image {

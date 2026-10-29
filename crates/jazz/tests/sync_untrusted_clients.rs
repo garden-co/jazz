@@ -420,3 +420,83 @@ fn a_reopened_replica_continues_after_a_pending_commit_that_left_no_rows() {
     }
     assert!(rows(&server).contains("after reopen"), "{}", rows(&server));
 }
+
+/// The subjects of who created each `messages` row, by body.
+fn creators(db: &Db) -> Vec<(String, String)> {
+    let prepared = db
+        .prepare_query(&Query::from("messages").select(["body", "$createdBy.identity.subject"]))
+        .unwrap();
+    let text = |cell: Option<&Value>| match cell {
+        Some(Value::String(v)) => v.clone(),
+        Some(Value::Nullable(Some(v))) => match &**v {
+            Value::String(v) => v.clone(),
+            other => panic!("{other:?}"),
+        },
+        other => panic!("{other:?}"),
+    };
+    let mut rows: Vec<_> = block_on(db.all(&prepared, ReadOpts::default()))
+        .unwrap()
+        .iter()
+        .map(|row| {
+            let cell = |name: &str| row.cells().find(|(n, _)| *n == name).unwrap().1;
+            (
+                text(cell("body")),
+                text(cell("$createdBy.identity.subject")),
+            )
+        })
+        .collect();
+    rows.sort();
+    rows
+}
+
+#[test]
+fn a_session_link_may_not_attribute_and_its_session_writes_are_its_own() {
+    let server = server();
+    let (_m_client, m_server, m_up, m_down) = pipe();
+    server.accept_subscriber(m_server, user(2));
+    let insert = |tx: u64, row: u8, body: &str, acting: Acting| SyncMessage::Commit {
+        node: [2; 16],
+        tx,
+        kind: WireKind::Mergeable,
+        ops: vec![WireOp::Insert {
+            table: "messages".to_owned(),
+            row: [row; 16],
+            cells: [("body".to_owned(), Value::String(body.to_owned()))].into(),
+            target: WireTarget::Root,
+            at: None,
+        }],
+        acting,
+        expect: Vec::new(),
+        deltas: Vec::new(),
+        sources: Vec::new(),
+        bases: Vec::new(),
+        origin: None,
+    };
+    let other = user(3).canonical().to_owned();
+    m_up.borrow_mut().extend([
+        insert(
+            LOCAL_BASE + 1,
+            1,
+            "attributed",
+            Acting::Attributed {
+                author: other.clone(),
+            },
+        ),
+        insert(
+            LOCAL_BASE + 2,
+            2,
+            "as a session",
+            Acting::Session {
+                author: other,
+                claims: BTreeMap::new(),
+            },
+        ),
+    ]);
+    block_on(server.tick()).unwrap();
+    assert_eq!(
+        fates(&m_down),
+        vec![(LOCAL_BASE + 1, false), (LOCAL_BASE + 2, true)]
+    );
+    let (_, link) = user(2).principal_parts();
+    assert_eq!(creators(&server), vec![("as a session".to_owned(), link)]);
+}

@@ -203,8 +203,9 @@ fields:
   the link. `Attributed { author }`: provenance only, checked as the sender.
   `Session { author, claims }`: a session's writes with its claims. Over a
   trusted link the authority checks them as that session; over a session link
-  it checks them as the link's own identity. Only a trusted link may name an
-  author other than its own identity.
+  it checks and attributes them as the link's own identity, whatever author
+  they name. A session link's `Attributed` commit naming another author is
+  refused.
 - `origin`: the session commit a relay uploads this one for.
 
 A replica keeps every unsettled commit and uploads it in order on each
