@@ -3325,7 +3325,7 @@ impl Inner {
         key: &[u8],
     ) -> Result<Option<(u64, bool)>, Error> {
         let sql = format!(
-            "SELECT _seq, _st >= 2 FROM {} WHERE id = ?1 AND _b = ?2",
+            "SELECT _seq, (_st & {STATE_DELETED}) <> 0 FROM {} WHERE id = ?1 AND _b = ?2",
             quote(table)
         );
         match self.conn.cached_row(
@@ -3361,7 +3361,7 @@ impl Inner {
             return Ok(None);
         };
         let sql = format!(
-            "SELECT _st >= 2 FROM {} WHERE id = ?1 AND _b = ?2 AND _seq = ?3",
+            "SELECT (_st & {STATE_DELETED}) <> 0 FROM {} WHERE id = ?1 AND _b = ?2 AND _seq = ?3",
             quote(&format!("{table}__h"))
         );
         let deleted: i64 = self
@@ -3938,7 +3938,7 @@ impl Inner {
     /// Whether `row`'s current version on branch `key` is a tombstone.
     fn is_deleted_version(&self, table: &Table, row: RowUuid, key: &[u8]) -> Result<bool, Error> {
         let sql = format!(
-            "SELECT _st >= 2 FROM {} WHERE id = ?1 AND _b = ?2",
+            "SELECT (_st & {STATE_DELETED}) <> 0 FROM {} WHERE id = ?1 AND _b = ?2",
             quote(&table.stored)
         );
         let deleted: Option<i64> = self
@@ -5584,7 +5584,7 @@ impl Inner {
                 continue;
             }
             let sql = format!(
-                "SELECT {} FROM {} WHERE id = ?1 AND _b = ?2 AND _st < 2",
+                "SELECT {} FROM {} WHERE id = ?1 AND _b = ?2 AND (_st & {STATE_DELETED}) = 0",
                 quote(&column.stored),
                 quote(&t.stored)
             );

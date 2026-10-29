@@ -158,7 +158,7 @@ impl Ctx<'_> {
         let history = quote(&format!("{}__h", table.stored));
         let mut gate = vec!["a.id = v.id".to_owned(), "a._b = v._b".to_owned()];
         let mut keep = vec![
-            "(v._st & 1) = 0".to_owned(),
+            format!("(v._st & {STATE_NO_CONTENT}) = 0"),
             format!("v._seq < {}", crate::db::LOCAL_BASE),
         ];
         if let Some(view) = &self.view
@@ -168,7 +168,7 @@ impl Ctx<'_> {
             keep.push(format!("v._b = {head}"));
         }
         if !include_deleted {
-            gate.push("a._st < 2".to_owned());
+            gate.push(format!("(a._st & {STATE_DELETED}) = 0"));
         }
         if let Some(session) = self.policy {
             gate.push(self.read_policy(table, "a", session)?);
