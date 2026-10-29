@@ -91,11 +91,21 @@ pub(super) struct Group {
     /// reads (its head, and its live base): a change on any other key of
     /// that table cannot move the result.
     branches: HashMap<String, Vec<Vec<u8>>>,
+    /// Under a branch view over a base (live or frozen), per branched
+    /// stored table it reads: (table, head key, base key). A replica
+    /// holding the base's row of an id needs the head's to mask it.
+    masks: Vec<(String, Vec<u8>, Vec<u8>)>,
 }
 
 type SortKey = Vec<(Sql, bool)>;
 
 impl Group {
+    /// Under a branch view over a base: (table, head key, base key) per
+    /// branched stored table it reads.
+    pub(super) fn masks(&self) -> &[(String, Vec<u8>, Vec<u8>)] {
+        &self.masks
+    }
+
     /// Whether the last run waits on large-value chunks still to arrive.
     pub(super) fn awaiting(&self) -> bool {
         self.awaiting
@@ -352,6 +362,13 @@ impl Inner {
             &read,
             &watches,
         );
+        let masks = view_masks(
+            prepared.schema.as_ref().unwrap_or(&self.owner),
+            &read,
+            watches
+                .iter()
+                .map(|(Watch::Table(table) | Watch::Key(table, ..))| table),
+        );
         let projected = order_projected(&prepared.query, &compiled);
         let includes = self.output_only_includes(prepared, identity, &read, &compiled)?;
         let queue: Queue = Rc::new(RefCell::new(if awaiting {
@@ -379,6 +396,7 @@ impl Inner {
             awaiting,
             opened: !awaiting,
             branches,
+            masks,
         }));
         self.read_keys(&mut handle.borrow_mut());
         let weak = Rc::downgrade(&handle);
@@ -431,10 +449,19 @@ impl Inner {
         prepared: &PreparedQuery,
         identity: Option<AuthorSubject>,
     ) -> Result<BTreeSet<String>, Error> {
-        let read = ReadSpec::default();
-        let (compiled, _) = self.compile_tracked(prepared, identity, &read)?;
+        self.read_dependencies_in(prepared, identity, &ReadSpec::default())
+    }
+
+    /// [`Self::read_dependencies`] of a read in `read`'s view.
+    pub(super) fn read_dependencies_in(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &ReadSpec,
+    ) -> Result<BTreeSet<String>, Error> {
+        let (compiled, _) = self.compile_tracked(prepared, identity, read)?;
         let mut tables = compiled.tables.clone();
-        for watch in self.watches(prepared, identity, &read, &compiled)? {
+        for watch in self.watches(prepared, identity, read, &compiled)? {
             match watch {
                 Watch::Table(table) | Watch::Key(table, ..) => {
                     tables.insert(table);
@@ -1440,6 +1467,36 @@ fn view_branches(
         }
         if !keys.is_empty() {
             out.insert(table.clone(), keys);
+        }
+    }
+    out
+}
+
+/// Under a branch view over a base, per branched stored table among
+/// `tables`: (table, head key, base key).
+pub(crate) fn view_masks<'t>(
+    schema: &Schema,
+    read: &ReadSpec,
+    tables: impl IntoIterator<Item = &'t String>,
+) -> Vec<(String, Vec<u8>, Vec<u8>)> {
+    let Some(view) = &read.view else {
+        return Vec::new();
+    };
+    let Some(base) = &view.base else {
+        return Vec::new();
+    };
+    let mut out: Vec<(String, Vec<u8>, Vec<u8>)> = Vec::new();
+    for table in tables {
+        if out.iter().any(|(t, ..)| t == table) {
+            continue;
+        }
+        let Some(t) = schema.by_stored(table).filter(|t| !t.branch_by.is_empty()) else {
+            continue;
+        };
+        if let (Ok(head), Ok(base)) = (t.selector_key(&view.head), t.selector_key(base))
+            && head != base
+        {
+            out.push((table.clone(), head, base));
         }
     }
     out

@@ -293,30 +293,21 @@ for one query's result:
 - `view` is the read view the result is of: the current state, a branch view
   (head over an optional live or frozen base), or a snapshot. It is part of
   the read's identity (`INV-BVIEW-12`): the server keeps a live read in its
-  view, as ch. 11 §11.5 maintains it. A replica asks for a branch view's head
-  and live base as they are. For a view over a frozen base, the base being
-  its own capture, a durable replica asks for the head alone, deleted rows
-  included and unwindowed, since a head tombstone or version masks a base
-  row wherever the query would rank it. A non-durable one, whose store its
-  relay fills, and a snapshot read ask for the current rows and apply the cut
-  themselves; a non-durable replica refuses a windowed subscription over a
-  frozen base ("not supported yet"), as a window over every branch's rows
-  would cut the view's own.
-- A replica with a read of a branch view over a base also reads the view's
-  whole head branch, deleted rows included and unfiltered, for every
-  branched table the read's query reads: live beside a live read (one
-  refcounted read per table and head, which the view's read holds until
-  it closes, is answered once they are, and is refused if one is), once
-  before a one-shot read. A base row can reach the replica through any
-  other read, and a head image the view's query would not match (a
-  tombstone, a version outside its filter) still masks it, so the replica
-  must hold every head image to answer the view locally. A head branch is
-  a draft's own writes, so this is usually small; a long-lived head makes
-  it grow with the head's history. A non-durable replica over a frozen
-  base skips it, its relay holding every current row. Known limits: a
-  head version the replica may not read never reaches it, so it does not
-  mask a base row the replica holds; and policy tables the read's
-  policies consult are read as the current state, not in the view.
+  view, as ch. 11 §11.5 maintains it. A replica asks for a branch view as it is, over
+  a live or a frozen base; a snapshot read asks for the current rows and
+  applies the cut itself.
+- A base row can reach a replica through any of its reads, and a head
+  image the view's query would not match (a tombstone, a version outside
+  its filter) still masks it there. So the server tracks, per session, the
+  row ids of branched tables the replica holds on each branch key (rows
+  shipped to it or written by it, until evicted), and for a branch view
+  over a base it also ships the head's image of each id the replica holds
+  on the base: at the view's opening, whenever a base row ships while the
+  view is live, and whenever the head writes such an id. A one-shot read
+  does the same for its answer. Known limits: a head version the replica
+  may not read ships as its eviction, so it does not mask the base row
+  the replica holds; and policy tables the read's policies consult are
+  read as the current state, not in the view.
 - A listing judges only the rows the view holds. A cached row it leaves out
   that the head supplies is evicted; one the live base supplies may be
   another read's, so the replica asks for the head's and the base's row

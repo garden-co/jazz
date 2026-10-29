@@ -1833,22 +1833,6 @@ impl Db {
         if reach.is_some() {
             self.remote_shape(&prepared.query)?;
         }
-        // A tab's worker fills its memory store with the current rows of
-        // a view over a frozen base (see `sync::upstream_read`): a window
-        // over every branch's rows would cut the view's own.
-        if non_durable
-            && reach.is_some()
-            && read
-                .view
-                .as_ref()
-                .is_some_and(|view| view.base_cut.is_some())
-            && is_windowed(&prepared.query)
-        {
-            return Err(crate::values::unsupported(
-                "a windowed subscription through a branch view over a frozen base \
-                 in a non-durable client",
-            ));
-        }
         let view = opts.read_view.source.clone();
         let remote = reach
             .and_then(|reach| self.attach_remote(prepared, read.include_deleted, &view, reach));

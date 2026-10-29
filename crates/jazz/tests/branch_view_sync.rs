@@ -422,7 +422,7 @@ fn a_frozen_base_view_follows_a_head_tombstone_from_another_writer() {
 /// for a view over a frozen base, so a window there would be wrong: the
 /// subscription is refused, not served wrong.
 #[test]
-fn a_tab_refuses_a_windowed_view_over_a_frozen_base() {
+fn a_tab_keeps_a_windowed_view_over_a_frozen_base() {
     let server = open(0x01, AuthorSubject::SYSTEM);
     server.set_authority();
     let worker = open(0x02, alice());
@@ -437,11 +437,21 @@ fn a_tab_refuses_a_windowed_view_over_a_frozen_base() {
         block_on(worker.tick()).unwrap();
         block_on(tab.tick()).unwrap();
     };
-    let (main, draft) = (branch(0x91), branch(0x92));
-    put(&server, &main, 0xa0, "main 5", 5);
+    let (main, draft, other) = (branch(0x91), branch(0x92), branch(0x93));
+    put(&server, &main, 0xa0, "a", 1);
+    put(&server, &main, 0xa1, "b", 2);
+    put(&server, &main, 0xa2, "c", 3);
+    put(&server, &main, 0xa3, "d", 4);
+    // Rows on another branch that a window over every branch would take.
+    put(&server, &other, 0xa4, "other 1", -2);
+    put(&server, &other, 0xa5, "other 2", -1);
+    let all = tab.prepare_query(&Query::from("todos")).unwrap();
+    let main_all =
+        block_on(tab.subscribe(&all, ReadOpts::default().branch_view(main.clone(), None))).unwrap();
     for _ in 0..6 {
         tick();
     }
+    drop(main_all);
     // The capture waits on the worker: tick while polling it.
     let mut capture = pin!(tab.capture_snapshot());
     let mut context = Context::from_waker(Waker::noop());
@@ -451,6 +461,7 @@ fn a_tab_refuses_a_windowed_view_over_a_frozen_base() {
         }
         tick();
     };
+    del(&server, 0xa0, &draft, Some(&main));
     let view = ReadOpts::default().branch_view(
         draft,
         Some(BranchViewBase::Snapshot {
@@ -459,15 +470,11 @@ fn a_tab_refuses_a_windowed_view_over_a_frozen_base() {
         }),
     );
     let prepared = tab.prepare_query(&first_three()).unwrap();
-    let error = match block_on(tab.subscribe(&prepared, view)) {
-        Ok(_) => panic!("the subscription must be refused"),
-        Err(error) => error,
-    };
-    assert!(
-        error.message.contains("not supported yet"),
-        "{}",
-        error.message
-    );
+    let _s = block_on(tab.subscribe(&prepared, view.clone())).unwrap();
+    for _ in 0..6 {
+        tick();
+    }
+    assert_eq!(titles(&tab, &first_three(), view), ["b", "c", "d"]);
 }
 
 fn set_rank(db: &Db, row: u8, head: &BranchSelector, base: &BranchSelector, rank: i32) {
@@ -677,30 +684,4 @@ fn a_one_shot_view_read_masks_a_held_base_row_with_its_head() {
     let mut opts = ReadOpts::default().branch_view(draft, Some(BranchViewBase::Current(main)));
     opts.tier = ReadTier::Remote;
     assert_eq!(read_once(&server, &client, &rank_one(), opts), ["y"]);
-}
-
-#[test]
-fn views_over_one_head_share_its_head_branch_read_until_the_last_closes() {
-    let (server, client, _) = connected();
-    let (main, draft) = (branch(0xdb), branch(0xdc));
-    put(&server, &main, 0x45, "x", 1);
-    let subscriptions = || server.runtime_stats_for_test().active_subscriptions;
-    let before = subscriptions();
-    let view = ReadOpts::default().branch_view(draft, Some(BranchViewBase::Current(main.clone())));
-    let filtered = client.prepare_query(&rank_one()).unwrap();
-    let all = client.prepare_query(&Query::from("todos")).unwrap();
-
-    // Each view, and one head-branch read of `todos` they share.
-    let a = block_on(client.subscribe(&filtered, view.clone())).unwrap();
-    pump(&server, &client);
-    assert_eq!(subscriptions() - before, 2);
-    let b = block_on(client.subscribe(&all, view.clone())).unwrap();
-    pump(&server, &client);
-    assert_eq!(subscriptions() - before, 3);
-    drop(a);
-    pump(&server, &client);
-    assert_eq!(subscriptions() - before, 2);
-    drop(b);
-    pump(&server, &client);
-    assert_eq!(subscriptions(), before);
 }

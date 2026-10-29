@@ -1281,13 +1281,6 @@ pub(crate) struct Remote {
     /// resumes from it too.
     through: Option<u64>,
     watermark: [u8; 32],
-    /// Whether the server answered this read itself; `answered` also
-    /// waits for its `companions`.
-    settled: bool,
-    /// The head-branch reads it holds (see `Inner::head_branch_reads`),
-    /// by key: it is answered once they are, refused if one is, and
-    /// releases them when it goes.
-    companions: Vec<String>,
 }
 
 /// The snapshot reference a read view is frozen at, if any.
@@ -1459,38 +1452,17 @@ fn remote_key(
 
 /// What a replica asks its upstream to keep current for a live read of
 /// `query` in `source`: the query, its deletion flag and its view. A
-/// branch view's head and live base are maintained upstream as they are.
-/// A frozen base is this replica's own capture, so a durable replica asks
-/// for the head alone, deleted rows included and without a window, so the
-/// head rows the query matches arrive whatever the window (the head's other
-/// rows arrive through `head_branch_reads`). A
-/// non-durable replica (a tab, whose memory store its worker fills) and a
-/// snapshot read take the current rows and apply the cut themselves.
+/// branch view is maintained upstream as it is, over a frozen base too, so
+/// the upstream also ships the head images that mask base rows this
+/// replica holds (ch. 8 §8.4). A snapshot read takes the current rows and
+/// applies the cut itself.
 pub(crate) fn upstream_read<'q>(
     query: &'q Query,
     include_deleted: bool,
     source: &ReadViewSourceSpec,
-    non_durable: bool,
 ) -> (std::borrow::Cow<'q, Query>, bool, ReadViewSourceSpec) {
     let query = remote_query(query);
     match source {
-        ReadViewSourceSpec::BranchView {
-            base: Some(BranchViewBase::Snapshot { .. }),
-            ..
-        } if non_durable => (query, include_deleted, ReadViewSourceSpec::Current),
-        ReadViewSourceSpec::BranchView {
-            head,
-            base: Some(BranchViewBase::Snapshot { .. }),
-        } => {
-            let mut head_rows = query.into_owned();
-            head_rows.limit = None;
-            head_rows.offset = 0;
-            let view = ReadViewSourceSpec::BranchView {
-                head: head.clone(),
-                base: None,
-            };
-            (std::borrow::Cow::Owned(head_rows), true, view)
-        }
         ReadViewSourceSpec::Snapshot { .. } => {
             (query, include_deleted, ReadViewSourceSpec::Current)
         }
@@ -1701,6 +1673,11 @@ pub(crate) struct Session {
     /// row it was shipped after the subscriptions that covered it end, so
     /// only an eviction drops it.
     shipped: HashMap<(String, [u8; 16], Vec<u8>), u64>,
+    /// The row ids of branched tables the replica holds, by (stored table,
+    /// branch key): rows shipped to it or written by it, until evicted. A
+    /// branch view over a base ships the head's image of each id the
+    /// replica holds on the base, as it masks it there (ch. 8 §8.4).
+    holds: HashMap<(String, Vec<u8>), HashSet<[u8; 16]>>,
     /// Resumed subscriptions whose opening is still to send.
     resume: BTreeMap<u64, Resume>,
     /// Supporting rows live subscriptions cover, per table, with whether
@@ -1780,6 +1757,7 @@ impl Session {
             support: BTreeMap::new(),
             watch: Watches::default(),
             shipped: HashMap::new(),
+            holds: HashMap::new(),
             resume: BTreeMap::new(),
             held: Kept::default(),
             open: true,
@@ -3359,6 +3337,64 @@ impl Inner {
         Ok(cells)
     }
 
+    /// The head rows that mask base rows session `index` holds, or is
+    /// shipped in `shipping`, under each branch view's `masks` (table, head
+    /// key, base key): for an `opening`, every head row whose id the base
+    /// holds there; otherwise the head rows of the base rows `shipping`
+    /// brings.
+    fn masking_rows(
+        &self,
+        index: usize,
+        masks: &[(String, Vec<u8>, Vec<u8>)],
+        opening: bool,
+        shipping: &[Image],
+    ) -> Result<Vec<(String, RowUuid, Vec<u8>)>, Error> {
+        let holds = &self.sessions[index].holds;
+        let mut out = Vec::new();
+        for (table, head, base) in masks {
+            let held = holds.get(&(table.clone(), base.clone()));
+            let brought: HashSet<[u8; 16]> = shipping
+                .iter()
+                .filter(|image| image.table == *table && image.key == *base)
+                .map(|image| image.id)
+                .collect();
+            if opening {
+                for image in self.images_where(table, false, "_b = ?1", &[head])? {
+                    if held.is_some_and(|held| held.contains(&image.id))
+                        || brought.contains(&image.id)
+                    {
+                        out.push((table.clone(), RowUuid::from_bytes(image.id), head.clone()));
+                    }
+                }
+            } else {
+                for id in brought {
+                    let row = RowUuid::from_bytes(id);
+                    if self.current_image(table, row, head)?.is_some() {
+                        out.push((table.clone(), row, head.clone()));
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Session `index` now holds `images`' rows of branched tables.
+    fn note_holds<'i>(&mut self, index: usize, images: impl IntoIterator<Item = &'i Image>) {
+        for image in images {
+            let branched = self
+                .owner
+                .by_stored(&image.table)
+                .is_some_and(|table| !table.branch_by.is_empty());
+            if branched {
+                self.sessions[index]
+                    .holds
+                    .entry((image.table.clone(), image.key.clone()))
+                    .or_default()
+                    .insert(image.id);
+            }
+        }
+    }
+
     fn current_image(&self, table: &str, row: RowUuid, key: &[u8]) -> Result<Option<Image>, Error> {
         let id = row.0.as_bytes().to_vec();
         Ok(self
@@ -4827,31 +4863,6 @@ impl Inner {
 }
 
 impl Client {
-    /// Recompute whether the read under `key`, and every read holding it
-    /// as a head-branch companion, is answered: by the server itself and
-    /// through all its companions.
-    fn refresh_answered(&mut self, key: &str) {
-        let holders: Vec<String> = self
-            .remote
-            .iter()
-            .filter(|(_, remote)| remote.companions.iter().any(|c| c == key))
-            .map(|(holder, _)| holder.clone())
-            .chain(std::iter::once(key.to_owned()))
-            .collect();
-        for holder in holders {
-            let Some(remote) = self.remote.get(&holder) else {
-                continue;
-            };
-            let answered = remote.settled
-                && remote.companions.iter().all(|companion| {
-                    self.remote
-                        .get(companion)
-                        .is_some_and(|companion| companion.settled)
-                });
-            remote.answered.set(answered);
-        }
-    }
-
     /// Stored table `from` is stored as `to` now (a replica took its
     /// upstream's name for it).
     pub(crate) fn moved_table(&mut self, from: &str, to: &str) {
@@ -5440,21 +5451,13 @@ impl Db {
     )> {
         let mut inner = self.inner.borrow_mut();
         inner.client.as_ref()?;
-        // A branch view's result is read here over every base row this
-        // replica holds, whichever read brought it: each needs the head's
-        // own row of it, a tombstone or a version the query leaves out, to
-        // be masked. So the replica also holds its head branch's rows of
-        // every branched table the read reads, deleted ones included.
-        let companions = inner.head_branch_reads(&prepared.query, view);
-        let (query, include_deleted, view) =
-            upstream_read(&prepared.query, include_deleted, view, inner.non_durable);
+        let (query, include_deleted, view) = upstream_read(&prepared.query, include_deleted, view);
         let (_, flags) = inner.attach_upstream_read(
             query.into_owned(),
             &prepared.binding,
             include_deleted,
             view,
             reach,
-            companions,
         );
         Some(flags)
     }
@@ -5478,56 +5481,7 @@ impl Db {
 }
 
 impl Inner {
-    /// The head-branch reads a branch view over a base needs beside it
-    /// (see `Db::attach_remote`): every row on the head's branch key of
-    /// each branched table the read reads.
-    fn head_branch_reads(
-        &self,
-        query: &Query,
-        view: &ReadViewSourceSpec,
-    ) -> Vec<(Query, ReadViewSourceSpec)> {
-        let ReadViewSourceSpec::BranchView {
-            head,
-            base: Some(_),
-        } = view
-        else {
-            return Vec::new();
-        };
-        // A non-durable replica over a frozen base takes every current row.
-        if self.non_durable && frozen_at(view).is_some() {
-            return Vec::new();
-        }
-        // Named as this store's schema names them, as release finds them.
-        let prepared = PreparedQuery {
-            query: query.clone(),
-            binding: BTreeMap::new(),
-            shape: Shape([0; 16]),
-            binding_id: Binding([0; 16]),
-            request_claims: None,
-            schema: None,
-        };
-        let Ok(tables) = self.read_dependencies(&prepared, None) else {
-            return Vec::new();
-        };
-        let schema = &self.owner;
-        tables
-            .iter()
-            .filter_map(|stored| schema.by_stored(stored))
-            .filter(|table| !table.branch_by.is_empty())
-            .map(|table| {
-                (
-                    Query::from(table.name.as_str()),
-                    ReadViewSourceSpec::BranchView {
-                        head: head.clone(),
-                        base: None,
-                    },
-                )
-            })
-            .collect()
-    }
-
-    /// Attach one upstream live read (refcounted by its key), and on its
-    /// first attach the head-branch `companions` it holds: its key, and
+    /// Attach one upstream live read (refcounted by its key): its key, and
     /// whether the server answered it, why it refused it, and whether the
     /// answer was the global authority's.
     fn attach_upstream_read(
@@ -5537,7 +5491,6 @@ impl Inner {
         include_deleted: bool,
         view: ReadViewSourceSpec,
         reach: RemoteReach,
-        companions: Vec<(Query, ReadViewSourceSpec)>,
     ) -> (
         String,
         (
@@ -5557,14 +5510,6 @@ impl Inner {
             );
             return (key, flags);
         }
-        let companions: Vec<String> = companions
-            .into_iter()
-            .map(|(query, view)| {
-                self.attach_upstream_read(query, &BTreeMap::new(), true, view, reach, Vec::new())
-                    .0
-            })
-            .collect();
-        let client = self.client.as_mut().expect("client");
         let id = client.next_id;
         client.next_id += 1;
         let answered = Rc::new(StdCell::new(false));
@@ -5600,8 +5545,6 @@ impl Inner {
                 global: global.clone(),
                 through,
                 watermark,
-                settled: false,
-                companions,
             },
         );
         client.remote_ids.insert(id, key.clone());
@@ -5620,12 +5563,9 @@ impl Inner {
         remote.refs -= 1;
         if remote.refs == 0 {
             let id = remote.id;
-            let remote = client.remote.remove(key).expect("remote");
+            client.remote.remove(key);
             client.remote_ids.remove(&id);
             client.outbox.push(SyncMessage::Unsubscribe { id });
-            for companion in &remote.companions {
-                self.release_upstream_read(companion);
-            }
         }
     }
 
@@ -5639,8 +5579,7 @@ impl Inner {
         view: &ReadViewSourceSpec,
         reach: RemoteReach,
     ) {
-        let (query, include_deleted, view) =
-            upstream_read(query, include_deleted, view, self.non_durable);
+        let (query, include_deleted, view) = upstream_read(query, include_deleted, view);
         let key = remote_key(&query, binding, include_deleted, &view, reach);
         self.release_upstream_read(&key);
     }
@@ -6226,10 +6165,8 @@ impl Db {
                             continue;
                         };
                         let remote = client.remote.get_mut(&key).expect("remote");
-                        remote.settled = true;
+                        remote.answered.set(true);
                         remote.global.set(global);
-                        client.refresh_answered(&key);
-                        let remote = client.remote.get_mut(&key).expect("remote");
                         // A row owed whole is stale here: this store does
                         // not hold the result as of `through`.
                         let resumable = client.whole.is_empty();
@@ -6271,17 +6208,10 @@ impl Db {
                             client.relayed_fetches.iter().any(|f| f.upstream == id);
                         if let Some(slot) = client.answers.get_mut(&id) {
                             *slot = Some(Err(error));
-                        } else if let Some(key) = client.remote_ids.get(&id) {
-                            // A refused head-branch read refuses the views
-                            // that hold it: they cannot be masked.
-                            for remote in client.remote.values() {
-                                if remote.companions.contains(key) {
-                                    *remote.refused.borrow_mut() = Some(error.clone());
-                                }
-                            }
-                            if let Some(remote) = client.remote.get(key) {
-                                *remote.refused.borrow_mut() = Some(error);
-                            }
+                        } else if let Some(key) = client.remote_ids.get(&id)
+                            && let Some(remote) = client.remote.get(key)
+                        {
+                            *remote.refused.borrow_mut() = Some(error);
                         }
                     }
                     SyncMessage::Stored { tx } => {
@@ -6656,8 +6586,7 @@ impl Inner {
         // Nothing settles at the server's tier while detached: a
         // subscription (or one opened meanwhile) is held until the next
         // upstream answers it again.
-        for remote in client.remote.values_mut() {
-            remote.settled = false;
+        for remote in client.remote.values() {
             remote.answered.set(false);
         }
     }
@@ -7522,7 +7451,31 @@ impl Db {
                     }
                 }
             }
+            // The session's branch views over a base: a head row written
+            // here whose id the replica holds on the base masks it there.
+            let masks: Vec<(String, Vec<u8>, Vec<u8>)> = inner.sessions[index]
+                .subs
+                .values()
+                .filter_map(|(_, group, ..)| group.upgrade())
+                .flat_map(|group| group.borrow().masks().to_vec())
+                .collect();
+            let masking: Vec<(String, RowUuid, Vec<u8>)> = written_keys
+                .iter()
+                .map(|(written, _)| written)
+                .filter(|(table, row, key)| {
+                    let holds = &inner.sessions[index].holds;
+                    masks.iter().any(|(t, head, base)| {
+                        t == table
+                            && head == key
+                            && holds
+                                .get(&(t.clone(), base.clone()))
+                                .is_some_and(|held| held.contains(row.0.as_bytes()))
+                    })
+                })
+                .cloned()
+                .collect();
             if recheck.is_empty()
+                && masking.is_empty()
                 && inner.sessions[index].idle()
                 && !inner.sessions[index].catalogue_owed
                 && !written_keys
@@ -7540,6 +7493,7 @@ impl Db {
             let mut echoes = std::mem::take(&mut inner.sessions[index].echoes);
             let mut watch = std::mem::take(&mut inner.sessions[index].watch);
             let mut held_rows = std::mem::take(&mut inner.sessions[index].held);
+            touched.extend(masking);
             for (table, row, key) in recheck {
                 let can = inner.current_image(&table, row, &key)?.is_some()
                     && readable(&inner, &table, row, &key, policy)?;
@@ -7575,10 +7529,20 @@ impl Db {
             let mut images = Vec::new();
             // Seqs of shipped history versions: their tx ids go first.
             let mut history_seqs = BTreeSet::new();
+            // Branch views opening (or reset) this tick: the head rows of
+            // base rows the replica already holds ship with them.
+            let mut opening_masks = Vec::new();
             for (id, queue, group, list) in subs {
                 let events: Vec<SubscriptionEvent> = queue.borrow_mut().drain(..).collect();
                 if events.is_empty() {
                     continue;
+                }
+                if events
+                    .iter()
+                    .any(|event| matches!(event, SubscriptionEvent::Delta { reset: true, .. }))
+                    && let Some(group) = group.upgrade()
+                {
+                    opening_masks.extend(group.borrow().masks().iter().cloned());
                 }
                 // A relay's result settles once its upstream answered.
                 let answered = events
@@ -7800,25 +7764,57 @@ impl Db {
                     }
                 }
             }
+            // A branch view's head rows of the base rows the replica holds
+            // (at its opening) or is shipped now.
+            touched.extend(inner.masking_rows(index, &opening_masks, true, &images)?);
+            touched.extend(inner.masking_rows(index, &masks, false, &images)?);
             // Rows that left a result, and rows a commit wrote: the current
             // image if the client may read it, else an eviction.
-            for (table, row, key) in touched {
-                match inner.current_image(&table, row, &key)? {
-                    Some(image) if readable(&inner, &table, row, &key, policy)? => {
-                        images.push(image)
+            let mut from = images.len();
+            while !touched.is_empty() {
+                for (table, row, key) in std::mem::take(&mut touched) {
+                    match inner.current_image(&table, row, &key)? {
+                        Some(image) if readable(&inner, &table, row, &key, policy)? => {
+                            images.push(image)
+                        }
+                        _ => evictions.push(SyncMessage::AccessLost {
+                            table,
+                            id: *row.0.as_bytes(),
+                            key,
+                        }),
                     }
-                    _ => evictions.push(SyncMessage::AccessLost {
-                        table,
-                        id: *row.0.as_bytes(),
-                        key,
-                    }),
                 }
+                // Base rows shipped so bring their head rows too.
+                touched.extend(
+                    inner
+                        .masking_rows(index, &masks, false, &images[from..])?
+                        .into_iter()
+                        .filter(|(table, row, key)| {
+                            !images.iter().any(|image| {
+                                image.table == *table
+                                    && image.id == *row.0.as_bytes()
+                                    && image.key == *key
+                            })
+                        }),
+                );
+                from = images.len();
             }
             // Rows the session's own commits wrote stay current for the
             // session, in a subscription or not: its pending writes sit on
             // them (see the fetch above).
-            for (table, row, ..) in &committed {
+            for (table, row, key, _) in &committed {
                 watch.hold(SESSION_OWNER, id_watch(table, *row.0.as_bytes()));
+                if inner
+                    .owner
+                    .by_stored(table)
+                    .is_some_and(|table| !table.branch_by.is_empty())
+                {
+                    inner.sessions[index]
+                        .holds
+                        .entry((table.clone(), key.clone()))
+                        .or_default()
+                        .insert(*row.0.as_bytes());
+                }
             }
             // Superseded versions of the client's own commits land in its
             // history, while the row stays readable.
@@ -7858,7 +7854,15 @@ impl Db {
                     !evicted.contains(&(image.table.as_str(), image.id, image.key.as_slice()))
                 });
             }
+            inner.note_holds(index, &images);
             for eviction in &evictions {
+                if let SyncMessage::AccessLost { table, id, key } = eviction
+                    && let Some(held) = inner.sessions[index]
+                        .holds
+                        .get_mut(&(table.clone(), key.clone()))
+                {
+                    held.remove(id);
+                }
                 if let SyncMessage::AccessLost { table, id, .. } = eviction {
                     watch.forget(wk((
                         table.clone(),
@@ -8581,6 +8585,22 @@ impl Db {
                     inner.follow_support(&support, image, None, &mut follow)?;
                 }
                 images.extend(extra);
+                // Under a branch view over a base, the head rows of the base
+                // rows the replica holds or is shipped now mask them.
+                let masks = if read.view.as_ref().is_some_and(|view| view.base.is_some()) {
+                    let tables = inner.read_dependencies_in(&prepared, policy, &read)?;
+                    fanout::view_masks(&inner.schema, &read, &tables)
+                } else {
+                    Vec::new()
+                };
+                for (table, row, key) in inner.masking_rows(index, &masks, true, &images)? {
+                    if let Some(image) = inner.current_image(&table, row, &key)?
+                        && readable(&inner, &table, row, &key, policy)?
+                    {
+                        images.push(image);
+                    }
+                }
+                inner.note_holds(index, &images);
                 for image in &images {
                     watch.hold(SESSION_OWNER, id_watch(&image.table, image.id));
                 }
@@ -9551,23 +9571,6 @@ impl Db {
             self.remote_shape(&prepared.query)?;
             // A Remote read waits for the server while offline.
             let strict = opts.tier == ReadTier::Remote;
-            // The view is read here over every base row this replica
-            // holds: the head branch's rows mask them (see `attach_remote`).
-            let companions = self
-                .inner()
-                .head_branch_reads(&prepared.query, &opts.read_view.source);
-            for (query, view) in companions {
-                let companion = PreparedQuery {
-                    query,
-                    binding: BTreeMap::new(),
-                    shape: Shape([0; 16]),
-                    binding_id: Binding([0; 16]),
-                    request_claims: None,
-                    schema: None,
-                };
-                self.fetch(&companion, None, true, reach, deadline, None, strict, &view)
-                    .await?;
-            }
             self.fetch(
                 &prepared,
                 None,
