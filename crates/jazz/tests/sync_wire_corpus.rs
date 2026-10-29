@@ -32,7 +32,7 @@ use jazz::db::{
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::model::transaction::OpenTransactionId;
-use jazz::protocol::PermissionAdviceAction;
+use jazz::protocol::{LensOp, MigrationLens, PermissionAdviceAction, TableLens};
 use jazz::query::{Query, col, eq, lit};
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
@@ -329,9 +329,10 @@ impl Transport for Recording {
 }
 
 /// Message shapes the one frame per variant leaves unpinned: a one-shot
-/// `Read` (its span carries a snapshot and a view) and `Rows` carrying the
-/// commits behind history versions.
-const SHAPES: [&str; 2] = ["Read/once", "Rows/origins"];
+/// `Read` (its span carries a snapshot and a view), `Rows` carrying the
+/// commits behind history versions, and a `Catalogue` carrying versions
+/// with their stored names and a lens's cells.
+const SHAPES: [&str; 3] = ["Read/once", "Rows/origins", "Catalogue/versions"];
 
 fn shape(message: &SyncMessage) -> Option<&'static str> {
     match message {
@@ -340,6 +341,9 @@ fn shape(message: &SyncMessage) -> Option<&'static str> {
             ..
         } => Some(SHAPES[0]),
         SyncMessage::Rows { origins, .. } if !origins.is_empty() => Some(SHAPES[1]),
+        SyncMessage::Catalogue {
+            versions, cells, ..
+        } if !versions.is_empty() && !cells.is_empty() => Some(SHAPES[2]),
         _ => None,
     }
 }
@@ -399,6 +403,21 @@ fn schema(draft: bool) -> JazzSchema {
     compile_schema(
         &SchemaBuilder::new()
             .table(notes.policies(read_and_allow_all_writes(session_eq("owner", &ME))))
+            .build(),
+    )
+}
+
+/// `schema(false)` with `first_owner`, a lens's copy of `owner`.
+fn schema_with_copy() -> JazzSchema {
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("owner", ColumnType::Text)
+                    .column("body", ColumnType::Bytea)
+                    .column("first_owner", ColumnType::Text)
+                    .policies(read_and_allow_all_writes(session_eq("owner", &ME))),
+            )
             .build(),
     )
 }
@@ -597,6 +616,25 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     connect(&mallory, &server, user(2), &recorded);
     block_on(mallory.insert("notes", note(2, vec![7]), InsertOptions::default())).unwrap();
     pump(&[&mallory, &server, &mallory]);
+
+    // Catalogue with versions and cells: the server admits a version whose
+    // lens copies a column while alice is connected.
+    let copied = schema_with_copy();
+    let lens = MigrationLens::new(
+        schema(false).version_id(),
+        copied.version_id(),
+        vec![TableLens {
+            source_table: "notes".into(),
+            target_table: "notes".into(),
+            ops: vec![LensOp::CopyColumn {
+                from: "owner".into(),
+                to: "first_owner".into(),
+            }],
+        }],
+    )
+    .unwrap();
+    block_on(server.activate_schema_with_lenses(copied, &[lens])).unwrap();
+    pump(&[&alice, &server, &alice]);
 
     // Refused: a subscription the server cannot serve. No replica sends
     // one (it prepares queries against the same schema), so a raw session
