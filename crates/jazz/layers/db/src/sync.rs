@@ -4867,11 +4867,6 @@ impl Client {
 
 // ---- client ---------------------------------------------------------------
 
-/// Why a store that committed writes before it became a replica refuses
-/// every upstream: those commits sit at seqs its upstream numbers its own
-/// versions by, and were never recorded for upload, so syncing would lose
-/// them to the upstream's rows (#4443). They stay local, and so does what
-/// it writes after.
 /// The refusal of a commit written under a schema version the server has
 /// not deployed (INV-SYNC-52).
 fn schema_version_not_deployed() -> Error {
@@ -4884,6 +4879,11 @@ fn schema_version_not_deployed() -> Error {
     }
 }
 
+/// Why a store that committed writes before it became a replica refuses
+/// every upstream: those commits sit at seqs its upstream numbers its own
+/// versions by, and were never recorded for upload, so syncing would lose
+/// them to the upstream's rows (#4443). They stay local, and so does what
+/// it writes after.
 fn stranded() -> Error {
     Error::new(
         ErrorCode::Protocol,
@@ -6549,6 +6549,9 @@ impl Inner {
             return;
         };
         client.transport = None;
+        // What the authority deployed is known again once the next
+        // upstream sends its catalogue.
+        client.catalogued = false;
         let mut link = client.hint.get();
         link.detached = true;
         client.hint.set(link);
@@ -6712,8 +6715,13 @@ impl Inner {
     /// Whether this store knows every version the authority deployed: it
     /// is the authority (it has no upstream), or its upstream sent its
     /// catalogue on this connection.
+    /// A store with no upstream link is the top of its tree: a worker
+    /// that will sync becomes a replica (or is given a link hint) before
+    /// its tabs write.
     fn knows_deployed(&self) -> bool {
-        self.client.as_ref().is_none_or(|client| client.catalogued)
+        self.client
+            .as_ref()
+            .is_none_or(|client| client.catalogued && client.transport.is_some())
     }
 
     /// Refuse each commit in `held`, messages of session `index` in the
@@ -8575,10 +8583,6 @@ impl Db {
                 // A commit written under a version this server has not
                 // deployed is refused at once, loudly: the app that wrote
                 // it was released ahead of its schema (INV-SYNC-52).
-                if self.inner.borrow().session_unadmitted(index) {
-                    self.inner.borrow_mut().refuse_undeployed_commit(index, tx);
-                    return Ok(());
-                }
                 // The session commit a relay's carries, when the link may
                 // write as its node (a trusted link, or one whose identity
                 // writes as that node too); otherwise the sender's own. The
@@ -8594,6 +8598,13 @@ impl Db {
                 };
                 // A resend after a reconnect gets the recorded fate.
                 let known = self.inner.borrow().applied_fate(node, tx)?;
+                // A commit written under a version this server has not
+                // deployed is refused at once, loudly: the app that wrote
+                // it was released ahead of its schema (INV-SYNC-52).
+                if known.is_none() && self.inner.borrow().session_unadmitted(index) {
+                    self.inner.borrow_mut().refuse_undeployed_commit(index, tx);
+                    return Ok(());
+                }
                 let (result, rows) = match known {
                     Some(result) => (result, Vec::new()),
                     None => match commit_who(policy, author.as_deref(), session.is_some())

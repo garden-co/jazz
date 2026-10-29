@@ -467,9 +467,11 @@ wrote it was released ahead of its schema, a deploy error that waiting would
 hide. The replica rolls it back like any refused write; the session goes on,
 and the commits after it upload. A server holding a session's reads behind an
 unadmitted version refuses the commits behind them the same way. A relay (a
-worker serving tabs) refuses only once its upstream sent its catalogue on the
-connection, so it knows every version the authority deployed; until then it
-holds such commits. Its `Holds` lists only the versions whose schema it holds
+worker serving tabs) refuses only while it is linked to an upstream that sent
+its catalogue on that connection, so it knows every version the authority
+deployed; until then, and while offline, it holds such commits. A store with no
+upstream at all is the top of its tree and refuses at once, so a worker that
+will sync becomes a replica (or is given a link hint) before its tabs write. Its `Holds` lists only the versions whose schema it holds
 in this process, so a version an earlier process mirrored is sent again and
 the relay serves it as before. A pending commit written under the version
 current until a newer one is made current uploads under the version it was

@@ -780,3 +780,36 @@ fn a_relayed_view_write_its_core_lacks_is_refused() {
     assert_eq!(ids(&core), vec![1, 3]);
     assert_eq!(ids(&tab), vec![1, 3]);
 }
+
+/// A worker that learned its core's catalogue, then went offline, does
+/// not refuse a tab's write through a version the core deployed meanwhile:
+/// it stays pending, and lands once the worker reconnects.
+#[test]
+fn an_offline_worker_keeps_a_view_write_pending() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = authority_at(v1(), &dir.path().join("core.sqlite"));
+    let worker = open_at(v1(), 0xa0, &dir.path().join("worker.sqlite"));
+    worker.become_replica();
+    let up = link(&worker, &core);
+    worker.set_remote_link_hint(RemoteLinkHint::Live);
+    let (tab, ahead, _tab_link) = tab_on(&worker);
+    let q = tab.prepare_query(&Query::from("notes")).unwrap();
+    let _sub = block_on(tab.subscribe(&q, ReadOpts::default())).unwrap();
+    pump3(&core, &worker, &tab);
+    assert!(worker.detach_connection(&up));
+    block_on(core.activate_schema_with_lenses(v2(), &[lens()])).unwrap();
+    let tx = insert(&ahead, 2, &[("title", "a"), ("tag", "t")]);
+    {
+        let mut wait = pin!(tab.wait_for_transaction(tx, DurabilityTier::Global));
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        for _ in 0..5 {
+            assert!(wait.as_mut().poll(&mut cx).is_pending(), "decided offline");
+            pump3(&core, &worker, &tab);
+        }
+    }
+    let _up = link(&worker, &core);
+    fate_by(&tab, tx, || pump3(&core, &worker, &tab)).expect("lands");
+    assert_eq!(ids(&core), vec![2]);
+    assert_eq!(tag(&core, 2), some("t"));
+}
