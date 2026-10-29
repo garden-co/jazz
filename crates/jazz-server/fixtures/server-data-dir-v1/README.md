@@ -3,7 +3,7 @@
 What an alpha.60 server has in its data directory: one `jazz.sqlite`
 (storage format 1, `jazz::format::STORAGE_FORMAT`), gzip-compressed and
 base64-encoded. It holds the app's rows and, as host tables, the server
-catalogue, the account journal and the runtime catalogue (see
+catalogue, the account registry and the runtime catalogue (see
 `dev/proofs/server-host-tables.md`).
 
 Once alpha.60 ships the file is immutable: a change it would not read bumps
@@ -12,7 +12,7 @@ this one. Until then format 1 is still moving, so such a change re-runs the
 producer and re-pins the hash and account here and in the test.
 
 - `jazz.sqlite.gz.base64`: SHA-256 of the SQLite file
-  `16282b9826f46b1ffbe3d7bcf846d6fbfcf258d6cf3d03e128cc2602d5eee1b0`.
+  `fe634477960156d1dec4f15da21e70772e5971f49a2683e45caead2bbc09f139`.
 
 Producer: `produce_server_data_dir_corpus_v1` in
 `crates/jazz-server/src/server/data_dir_corpus.rs` (ignored;
@@ -23,7 +23,7 @@ Producer: `produce_server_data_dir_corpus_v1` in
 - deployed `notes(title, body)` with a migration introducing `body` (default
   `(none)`), then written a second note with a body;
 - asked to register `alice` (issuer `https://issuer.example`), who got account
-  `44e1117f-1886-4155-8419-ccd9b1e10841`;
+  `db7fbe12-7054-4c8c-8243-a5f0fcd1ec21`;
 - shut down, which checkpoints the WAL into the file.
 
 Reader: `pinned_server_data_dir_reopens_and_accepts_current_writes`, run by
