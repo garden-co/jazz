@@ -1048,6 +1048,10 @@ pub enum SyncMessage {
         versions: Vec<CatalogueVersion>,
         cells: Vec<CatalogueCell>,
         confirmed: Vec<([u8; 16], [u8; 16])>,
+        /// Every enum variant tag the sender keeps, all of them its
+        /// authority's (a replica mints none): rows carry enum cells as
+        /// these tags, so a replica takes them before it takes rows.
+        tags: Vec<CatalogueTag>,
     },
 }
 
@@ -1088,6 +1092,16 @@ pub struct CatalogueCell {
     pub since: [u8; 16],
     pub source: Option<String>,
     pub default: Cell,
+}
+
+/// An enum variant's tag in stored column `column` of stored table `table`
+/// (see `crate::values::EnumTags`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogueTag {
+    pub table: String,
+    pub column: String,
+    pub tag: i64,
+    pub name: String,
 }
 
 impl SyncMessage {
@@ -1586,6 +1600,14 @@ impl SettledBy {
 /// An upstream subscription's identity: query, binding, include_deleted.
 type RemoteRead = (Query, BTreeMap<String, Value>, bool);
 
+/// What a session was last told of the catalogue: the authority's
+/// namespace, its confirmations and its tags.
+type Told = (
+    Option<[u8; 16]>,
+    Vec<([u8; 16], [u8; 16])>,
+    Vec<crate::names::Tag>,
+);
+
 pub(crate) struct Session {
     transport: Box<dyn Transport>,
     identity: AuthorSubject,
@@ -1660,7 +1682,7 @@ pub(crate) struct Session {
     holds: Option<HashMap<[u8; 16], [u8; 16]>>,
     catalogue_owed: bool,
     /// The namespace and confirmations the client was last sent.
-    told: Option<(Option<[u8; 16]>, Vec<([u8; 16], [u8; 16])>)>,
+    told: Option<Told>,
     /// On a relay, the upstream subscription each of the client's
     /// subscriptions holds (query, binding, include_deleted): its results
     /// settle once the upstream answers, never from the relay's store.
@@ -4446,7 +4468,7 @@ impl Inner {
             });
             sent.push((bytes, digest));
         }
-        let told = (namespace, confirmed);
+        let told = (namespace, confirmed, self.names.all_tags());
         if versions.is_empty() && self.sessions[index].told.as_ref() == Some(&told) {
             return Ok(None);
         }
@@ -4472,13 +4494,22 @@ impl Inner {
             .collect();
         let holds = self.sessions[index].holds.get_or_insert_with(HashMap::new);
         holds.extend(sent);
-        let (namespace, confirmed) = told.clone();
+        let (namespace, confirmed, tags) = told.clone();
         self.sessions[index].told = Some(told);
         Ok(Some(SyncMessage::Catalogue {
             namespace,
             versions,
             cells,
             confirmed,
+            tags: tags
+                .into_iter()
+                .map(|(table, column, tag, name)| CatalogueTag {
+                    table,
+                    column,
+                    tag,
+                    name,
+                })
+                .collect(),
         }))
     }
 
@@ -5950,8 +5981,13 @@ impl Db {
                         versions,
                         cells,
                         confirmed,
+                        tags,
                     } => {
-                        match inner.mirror_catalogue(namespace, versions, cells, &confirmed) {
+                        let tags = tags
+                            .into_iter()
+                            .map(|t| (t.table, t.column, t.tag, t.name))
+                            .collect();
+                        match inner.mirror_catalogue(namespace, versions, cells, &confirmed, tags) {
                             Ok(renamed) => rebase |= renamed,
                             // This store cannot store rows as its upstream
                             // does: it stops syncing with it, nothing that
@@ -6731,7 +6767,55 @@ impl Inner {
 
     /// Apply one server image; returns whether a rebase is needed (the row
     /// is overlaid by a pending write).
-    fn receive_image(&mut self, image: Image) -> Result<bool, Error> {
+    /// An upstream's enum cells hold names where it has no tag yet (a
+    /// relay's own writes): this store stores the tags it knows for them,
+    /// and notes the rest as its own TEXT cells, to rewrite once it learns
+    /// their tags.
+    fn tag_image_cells(&self, image: &mut Image) -> Result<(), Error> {
+        for (column, cell) in &mut image.cells {
+            let Cell::Text(text) = cell else {
+                continue;
+            };
+            let Some(ty) = self
+                .names
+                .stored_type(&image.table, column)
+                .filter(|ty| crate::values::is_enum_type(ty))
+            else {
+                continue;
+            };
+            let value = if crate::values::is_array_type(ty) {
+                let Ok(items) = serde_json::from_slice::<Vec<serde_json::Value>>(text) else {
+                    continue;
+                };
+                Value::Array(
+                    items
+                        .into_iter()
+                        .map(|item| match item {
+                            serde_json::Value::String(name) => Value::String(name),
+                            serde_json::Value::Number(tag) => {
+                                Value::I64(tag.as_i64().unwrap_or_default())
+                            }
+                            _ => Value::Nullable(None),
+                        })
+                        .collect(),
+                )
+            } else {
+                Value::String(String::from_utf8_lossy(text).into_owned())
+            };
+            let tags = self.names.tags().column(&image.table, column);
+            for name in crate::values::enum_names(&value) {
+                if tags.borrow().tag(name).is_none() {
+                    crate::names::Names::note_text(&self.conn, &image.table, column, name)?;
+                }
+            }
+            if let Some(tagged) = crate::values::enum_cell(&tags.borrow(), &value)? {
+                *cell = Cell::from(tagged);
+            }
+        }
+        Ok(())
+    }
+
+    fn receive_image(&mut self, mut image: Image) -> Result<bool, Error> {
         // Two tiers number local seqs: relays from `LOCAL_BASE`, the
         // non-durable foregrounds behind them from `NON_DURABLE_BASE`. An
         // upstream version in a foreground's own range would come from a
@@ -6743,6 +6827,7 @@ impl Inner {
                  client's own local range (only a durable store relays to it)",
             ));
         }
+        self.tag_image_cells(&mut image)?;
         let row = RowUuid::from_bytes(image.id);
         let client = self.client.as_mut().expect("client");
         let overlaid = (image.table.clone(), row, image.key.clone());

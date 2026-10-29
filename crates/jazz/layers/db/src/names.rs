@@ -17,7 +17,9 @@ use crate::options::{Error, ErrorCode};
 use crate::protocol::{LensOp, MigrationLens};
 use crate::records::{Value, ValueType};
 use crate::schema::JazzSchema;
-use crate::values::{Column, Schema, Sql, StoredNames, in_savepoint, storage, to_sql, unsupported};
+use crate::values::{
+    Column, Schema, Sql, StoredNames, TagRegistry, in_savepoint, storage, to_sql, unsupported,
+};
 
 /// One row per (version, table, column); `col` is '' for the table itself.
 /// `n` orders versions by admission.
@@ -47,6 +49,26 @@ const LENS_CELLS_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_lens_cells (tbl T
 /// only if its type is the one recorded here (see [`Names::resolve`]).
 const COLUMN_TYPES_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_column_types (tbl TEXT NOT NULL, \
      col TEXT NOT NULL, ty BLOB NOT NULL, PRIMARY KEY (tbl, col)) WITHOUT ROWID;";
+
+/// Each stored enum column's tags (see [`crate::values::EnumTags`]): one
+/// row per variant the authority tagged, with the name versions declare it
+/// by. A raw SQL read joins its enum cells here for their names.
+const ENUM_TAGS_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_enum_tags (tbl TEXT NOT NULL, \
+     col TEXT NOT NULL, tag INTEGER NOT NULL, name TEXT NOT NULL, PRIMARY KEY (tbl, col, tag)) \
+     WITHOUT ROWID;";
+
+/// One tag: (stored table, stored column, tag, variant name).
+pub(crate) type Tag = (String, String, i64, String);
+
+/// The variant names this store may hold as TEXT cells of an enum column,
+/// for want of a tag when it wrote them (see [`crate::values::EnumTags`]):
+/// once the tag arrives, those cells are rewritten to it. `ddl` 1: the
+/// column was added here with this name as its SQLite default, which rows
+/// inserted without the column read, so those inserts write the tag
+/// instead. Created with the first such cell.
+const ENUM_TEXT_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_enum_text (tbl TEXT NOT NULL, \
+     col TEXT NOT NULL, name TEXT NOT NULL, ddl INTEGER NOT NULL, PRIMARY KEY (tbl, col, name)) \
+     WITHOUT ROWID;";
 
 /// The versions whose names this replica's authority confirmed, each with
 /// the [`names_digest`] it confirmed: a version is confirmed while its names
@@ -211,6 +233,11 @@ pub(crate) struct Names {
     types: BTreeMap<(String, String), ValueType>,
     /// The digests this replica's authority confirmed, by version.
     confirmed: HashMap<SchemaVersionId, [u8; 16]>,
+    /// Every stored enum column's tags.
+    tags: TagRegistry,
+    /// By (stored table, stored column): the name its DDL default is, as
+    /// TEXT (see `_jazz_enum_text`).
+    text: BTreeMap<(String, String), BTreeSet<String>>,
 }
 
 fn schema_error(message: impl Into<String>) -> Error {
@@ -329,6 +356,48 @@ impl Names {
                 names
                     .confirmed
                     .insert(version, digest.try_into().map_err(|_| bad())?);
+            }
+        }
+        if table_exists(conn, "_jazz_enum_tags")? {
+            let mut statement = conn
+                .prepare("SELECT tbl, col, tag, name FROM _jazz_enum_tags")
+                .map_err(storage)?;
+            let rows = statement
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, String>(3)?,
+                    ))
+                })
+                .map_err(storage)?;
+            for row in rows {
+                let (table, column, tag, name) = row.map_err(storage)?;
+                names
+                    .tags
+                    .column(&table, &column)
+                    .borrow_mut()
+                    .insert(name, tag);
+            }
+        }
+        if table_exists(conn, "_jazz_enum_text")? {
+            let mut statement = conn
+                .prepare("SELECT tbl, col, name, ddl FROM _jazz_enum_text WHERE ddl = 1")
+                .map_err(storage)?;
+            let rows = statement
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, bool>(3)?,
+                    ))
+                })
+                .map_err(storage)?;
+            for row in rows {
+                let (table, column, name, _) = row.map_err(storage)?;
+                names.text.entry((table, column)).or_default().insert(name);
             }
         }
         if has_cells {
@@ -507,6 +576,8 @@ impl Names {
                 ("_jazz_lens_cells", ["col", "src"].as_slice()),
                 ("_jazz_branch_columns", ["col"].as_slice()),
                 ("_jazz_column_types", ["col"].as_slice()),
+                ("_jazz_enum_tags", ["col"].as_slice()),
+                ("_jazz_enum_text", ["col"].as_slice()),
             ] {
                 let exists: bool = conn
                     .query_row(
@@ -539,7 +610,21 @@ impl Names {
             }
             Ok(())
         })?;
+        self.tags.moved(from, to, column);
         let table_to = if column.is_none() { to } else { from };
+        self.text = std::mem::take(&mut self.text)
+            .into_iter()
+            .map(|((table, stored_column), names)| {
+                if table != from {
+                    return ((table, stored_column), names);
+                }
+                let stored_column = match column {
+                    Some((old, new)) if stored_column == old => new.to_owned(),
+                    _ => stored_column,
+                };
+                ((table_to.to_owned(), stored_column), names)
+            })
+            .collect();
         for (_, names) in self.versions.values_mut() {
             for (stored, columns) in names.tables.values_mut() {
                 if stored != from {
@@ -715,13 +800,14 @@ impl Names {
                 if self.types.contains_key(&key) {
                     continue;
                 }
-                let bytes = postcard::to_allocvec(&column.ty).map_err(|error| {
+                let ty = column.stored_type();
+                let bytes = postcard::to_allocvec(&ty).map_err(|error| {
                     Error::new(
                         ErrorCode::Storage,
                         format!("encoding a column type: {error}"),
                     )
                 })?;
-                new.push((key, column.ty.clone(), bytes));
+                new.push((key, ty, bytes));
             }
         }
         Ok(new)
@@ -734,7 +820,7 @@ impl Names {
             for column in &table.columns {
                 if self
                     .stored_type(&table.stored, &column.stored)
-                    .is_some_and(|ty| *ty != column.ty)
+                    .is_some_and(|ty| *ty != column.stored_type())
                 {
                     return Err(unsupported(format!(
                         "changing the type of {}.{}",
@@ -750,6 +836,225 @@ impl Names {
     /// once a version storing it was admitted.
     pub(crate) fn stored_type(&self, table: &str, column: &str) -> Option<&ValueType> {
         self.types.get(&(table.to_owned(), column.to_owned()))
+    }
+
+    /// Every stored enum column's tags.
+    pub(crate) fn tags(&self) -> &TagRegistry {
+        &self.tags
+    }
+
+    /// Tag every variant `schema` declares that its stored column has no
+    /// tag for yet, on a store whose catalogue is its own: each column's
+    /// next tags, in declaration order. Returns the new tags.
+    pub(crate) fn mint(&mut self, conn: &Connection, schema: &Schema) -> Result<Vec<Tag>, Error> {
+        let mut new = Vec::new();
+        for table in schema.tables.values() {
+            for column in &table.columns {
+                let (Some(variants), Some(tags)) = (&column.variants, &column.tags) else {
+                    continue;
+                };
+                let tags = tags.borrow();
+                let mut next = tags.next();
+                for variant in variants.iter() {
+                    if tags.tag(variant).is_some()
+                        || new.iter().any(|(t, c, _, name): &Tag| {
+                            *t == table.stored && *c == column.stored && name == variant
+                        })
+                    {
+                        continue;
+                    }
+                    new.push((
+                        table.stored.clone(),
+                        column.stored.clone(),
+                        next,
+                        variant.clone(),
+                    ));
+                    next += 1;
+                }
+            }
+        }
+        self.record_tags(conn, &new)?;
+        Ok(new)
+    }
+
+    /// Take the authority's `tags`. Returns the ones new here. A tag that
+    /// disagrees with one this store keeps is refused: tags never change.
+    pub(crate) fn learn(&mut self, conn: &Connection, tags: &[Tag]) -> Result<Vec<Tag>, Error> {
+        let mut new = Vec::new();
+        for tag @ (table, column, n, name) in tags {
+            let known = self.tags.column(table, column);
+            let known = known.borrow();
+            match (known.tag(name), known.name(*n)) {
+                (Some(m), _) if m == *n => continue,
+                (None, None) => new.push(tag.clone()),
+                _ => {
+                    return Err(Error::new(
+                        ErrorCode::Schema,
+                        format!(
+                            "the upstream tags variant `{name}` of {table}.{column} as {n}, \
+                             which this store keeps otherwise"
+                        ),
+                    ));
+                }
+            }
+        }
+        self.record_tags(conn, &new)?;
+        Ok(new)
+    }
+
+    /// Stored column `copy` of stored table `table` is a copy of its stored
+    /// column `source`, which it holds the cells of: it takes its tags.
+    pub(crate) fn copy_tags(
+        &mut self,
+        conn: &Connection,
+        table: &str,
+        source: &str,
+        copy: &str,
+    ) -> Result<(), Error> {
+        let tags: Vec<Tag> = self
+            .tags
+            .column(table, source)
+            .borrow()
+            .iter()
+            .map(|(tag, name)| (table.to_owned(), copy.to_owned(), tag, name.to_owned()))
+            .collect();
+        self.learn(conn, &tags)?;
+        // The copy holds the source's TEXT cells too.
+        if table_exists(conn, "_jazz_enum_text")? {
+            conn.execute(
+                "INSERT OR IGNORE INTO _jazz_enum_text (tbl, col, name, ddl) \
+                 SELECT tbl, ?3, name, 0 FROM _jazz_enum_text WHERE tbl = ?1 AND col = ?2",
+                rusqlite::params![table, source, copy],
+            )
+            .map_err(storage)?;
+        }
+        Ok(())
+    }
+
+    /// Record `tags`, in the file and then in memory.
+    fn record_tags(&mut self, conn: &Connection, tags: &[Tag]) -> Result<(), Error> {
+        if tags.is_empty() {
+            return Ok(());
+        }
+        in_savepoint(conn, "jazz_tags", || {
+            conn.execute_batch(ENUM_TAGS_DDL).map_err(storage)?;
+            let mut insert = conn
+                .prepare_cached(
+                    "INSERT INTO _jazz_enum_tags (tbl, col, tag, name) VALUES (?1, ?2, ?3, ?4)",
+                )
+                .map_err(storage)?;
+            for (table, column, tag, name) in tags {
+                insert
+                    .execute(rusqlite::params![table, column, tag, name])
+                    .map_err(storage)?;
+            }
+            Ok(())
+        })?;
+        for (table, column, tag, name) in tags {
+            self.tags
+                .column(table, column)
+                .borrow_mut()
+                .insert(name.clone(), *tag);
+        }
+        Ok(())
+    }
+
+    /// Stored column `column` of stored table `table` now holds `name` as
+    /// a TEXT cell, for want of a tag; an insert noting it many times costs
+    /// one statement each, so a writer notes each name once per write.
+    pub(crate) fn note_text(
+        conn: &Connection,
+        table: &str,
+        column: &str,
+        name: &str,
+    ) -> Result<(), Error> {
+        conn.execute_batch(ENUM_TEXT_DDL).map_err(storage)?;
+        conn.prepare_cached(
+            "INSERT OR IGNORE INTO _jazz_enum_text (tbl, col, name, ddl) VALUES (?1, ?2, ?3, 0)",
+        )
+        .and_then(|mut insert| insert.execute(rusqlite::params![table, column, name]))
+        .map_err(storage)?;
+        Ok(())
+    }
+
+    /// Stored column `column` of stored table `table` was added with `name`
+    /// as its DDL default, for want of a tag.
+    pub(crate) fn note_ddl_text(
+        &mut self,
+        conn: &Connection,
+        table: &str,
+        column: &str,
+        name: &str,
+    ) -> Result<(), Error> {
+        conn.execute_batch(ENUM_TEXT_DDL).map_err(storage)?;
+        conn.prepare_cached(
+            "INSERT OR REPLACE INTO _jazz_enum_text (tbl, col, name, ddl) VALUES (?1, ?2, ?3, 1)",
+        )
+        .and_then(|mut insert| insert.execute(rusqlite::params![table, column, name]))
+        .map_err(storage)?;
+        self.text
+            .entry((table.to_owned(), column.to_owned()))
+            .or_default()
+            .insert(name.to_owned());
+        Ok(())
+    }
+
+    /// The TEXT cells `tags` (just learned) let this store rewrite: each
+    /// (stored table, stored column, tag, name) noted as held as TEXT.
+    /// They are no longer noted, but for DDL defaults (see
+    /// [`Self::ddl_text`]).
+    pub(crate) fn untagged(conn: &Connection, tags: &[Tag]) -> Result<Vec<Tag>, Error> {
+        if tags.is_empty() || !table_exists(conn, "_jazz_enum_text")? {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        for tag @ (table, column, _, name) in tags {
+            let noted = conn
+                .prepare_cached(
+                    "SELECT count(*) > 0 FROM _jazz_enum_text WHERE tbl = ?1 AND col = ?2 AND name = ?3",
+                )
+                .and_then(|mut select| {
+                    select.query_row(rusqlite::params![table, column, name], |r| r.get(0))
+                })
+                .map_err(storage)?;
+            if noted {
+                out.push(tag.clone());
+                conn.execute(
+                    "DELETE FROM _jazz_enum_text WHERE tbl = ?1 AND col = ?2 AND name = ?3 AND ddl = 0",
+                    rusqlite::params![table, column, name],
+                )
+                .map_err(storage)?;
+            }
+        }
+        Ok(out)
+    }
+
+    /// The stored enum columns of stored table `table` whose DDL default is
+    /// a name, with it: an insert that does not write one writes the
+    /// name's tag instead, once there is one.
+    pub(crate) fn ddl_text(&self, table: &str) -> Vec<(&str, &str)> {
+        self.text
+            .range((table.to_owned(), String::new())..)
+            .take_while(|((t, _), _)| t == table)
+            .flat_map(|((_, column), names)| {
+                names
+                    .iter()
+                    .map(move |name| (column.as_str(), name.as_str()))
+            })
+            .collect()
+    }
+
+    /// Every tag, as the catalogue sends them.
+    pub(crate) fn all_tags(&self) -> Vec<Tag> {
+        self.tags
+            .all()
+            .into_iter()
+            .flat_map(|((table, column), tags)| {
+                tags.iter()
+                    .map(|(tag, name)| (table.clone(), column.clone(), tag, name.to_owned()))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
     }
 
     /// Whether `version`'s names are the ones this replica's authority
@@ -920,7 +1225,7 @@ impl Names {
     ) -> Result<Schema, Error> {
         let version = schema.version_id();
         if let Some(names) = self.get(&version) {
-            return Ok(Schema::stored_as(schema, names));
+            return Ok(Schema::stored_as(schema, names, &self.tags));
         }
         let into: Vec<&MigrationLens> = lenses.iter().filter(|l| l.target == version).collect();
         // The first lens whose source this store admitted; else the base.
@@ -934,7 +1239,7 @@ impl Names {
         let admitted_source = lens.and_then(|lens| self.get(&lens.source));
         let lineage = admitted_source.is_some();
         let source = admitted_source.or(base).unwrap_or(&empty);
-        let mut target = Schema::new(schema);
+        let mut target = Schema::new(schema, &self.tags);
         let mut names = StoredNames::default();
         // Tables with a source first, so a new table cannot take the stored
         // name a renamed one keeps.
@@ -982,7 +1287,7 @@ impl Names {
                         .and_then(|columns| columns.get(from))
                         .filter(|stored_column| {
                             self.stored_type(&stored, stored_column)
-                                .is_none_or(|ty| *ty == column.ty)
+                                .is_none_or(|ty| *ty == column.stored_type())
                         });
                 match source_column {
                     Some(stored_column) => {
@@ -1010,7 +1315,7 @@ impl Names {
                     .flatten()
                     .filter(|previous| {
                         !taken.contains(*previous)
-                            && self.stored_type(&stored, previous) == Some(&column.ty)
+                            && self.stored_type(&stored, previous) == Some(&column.stored_type())
                     });
                 let stored_column = match previous {
                     Some(previous) => previous.to_owned(),
@@ -1023,7 +1328,7 @@ impl Names {
             }
             names.tables.insert(name.clone(), (stored, columns));
         }
-        target = Schema::stored_as(schema, &names);
+        target = Schema::stored_as(schema, &names, &self.tags);
         Ok(target)
     }
 

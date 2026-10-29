@@ -619,11 +619,10 @@ impl Db {
         else {
             return Ok(None);
         };
-        let ty = &schema_table
+        let column = schema_table
             .column(column)
-            .ok_or_else(|| unknown_base("a column"))?
-            .ty;
-        crate::values::from_sql(ty, cell.as_ref(), &inner.chunks)
+            .ok_or_else(|| unknown_base("a column"))?;
+        crate::values::column_from_sql(column, cell.as_ref(), &inner.chunks)
     }
 
     /// How many `_jazz_text_in` entries this store keeps.

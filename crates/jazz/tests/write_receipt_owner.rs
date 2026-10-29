@@ -37,7 +37,7 @@ fn open(node: u8, path: Option<&Path>) -> Binding {
         None => block_on(Db::open(config)),
     }
     .unwrap();
-    db.set_authority();
+    db.set_authority().unwrap();
     Binding::new(db, identity, true)
 }
 

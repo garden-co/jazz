@@ -3493,7 +3493,7 @@ fn a_remote_branch_read_keeps_the_rows_of_other_branches() {
     };
     let author = AuthorSubject::for_test_bytes([0x63; 16]);
     let server = open(0x01, AuthorSubject::SYSTEM);
-    server.set_authority();
+    server.set_authority().unwrap();
     // A tab over its storage owner, as in a browser.
     let worker = open(0x02, author);
     let (worker_side, server_side) = jazz::db::duplex();

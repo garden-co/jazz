@@ -127,6 +127,8 @@ enum Term {
     Sql(String),
     /// A large-capable column's cell ([`LargeColumn`]).
     Large(LargeColumn),
+    /// An enum column's cell ([`EnumColumn`]).
+    Enum(EnumColumn),
     /// A bound value (literal, parameter, session or claim value): its
     /// placeholder and the value itself.
     Bound(String, Sql),
@@ -142,8 +144,27 @@ impl Term {
         match self {
             Term::Sql(sql) | Term::Bound(sql, _) => Some(sql),
             Term::Large(column) => Some(&column.cell),
+            Term::Enum(column) => Some(&column.cell),
             Term::Missing | Term::NaN => None,
         }
+    }
+}
+
+/// An enum column's cell: a variant's tag, or the name of one with no tag
+/// on this store yet (see [`crate::values::EnumTags`]). A variant name it is
+/// compared with is bound as its tag where it has one, so the comparison
+/// keeps the column's index and order; anything else reads the cell as its
+/// name.
+#[derive(Clone)]
+struct EnumColumn {
+    cell: String,
+    tags: crate::values::ColumnTags,
+}
+
+impl EnumColumn {
+    /// The cell read as its variant name.
+    fn names(&self) -> Term {
+        Term::Sql(self.tags.borrow().name_sql(&self.cell))
     }
 }
 
@@ -250,7 +271,9 @@ pub struct View {
 pub struct Compiled {
     pub sql: String,
     pub params: Vec<Sql>,
-    pub projection: Vec<(String, ValueType)>,
+    /// Each projected cell: its name, its type and, for an enum column, the
+    /// tags it holds.
+    pub projection: Vec<Projected>,
     pub tables: BTreeSet<String>,
     /// Rows are aggregate groups: column 0 is the group key, hashed to an id.
     pub aggregate: bool,
@@ -451,7 +474,7 @@ impl<'a> Ctx<'a> {
                 for column in table.stored() {
                     match head_cells.get(&column.name) {
                         Some(value) => {
-                            let term = match to_sql(value)? {
+                            let term = match column.cell_sql(value)? {
                                 Some(sql) => self.bind(sql),
                                 None => "NULL".to_owned(),
                             };
@@ -528,8 +551,8 @@ impl<'a> Ctx<'a> {
         let group = match &aggregate.group_by {
             Some(column) => {
                 let sql = column_sql(table, alias, column)?;
-                let ty = table.column(column).expect("checked").ty.clone();
-                projection.push((column.clone(), ty));
+                let column = table.column(column).expect("checked");
+                projection.push((column.name.clone(), column.ty.clone(), column.tags.clone()));
                 outputs.push(sql.clone());
                 Some(sql)
             }
@@ -553,6 +576,13 @@ impl<'a> Ctx<'a> {
                 };
                 Ok((column_sql(table, alias, column)?, ty))
             };
+            // MIN and MAX of an enum column are variants, in tag order.
+            let tags = output
+                .column
+                .as_deref()
+                .and_then(|column| table.column(column))
+                .and_then(|column| column.tags.clone())
+                .filter(|_| matches!(output.function, F::Min | F::Max));
             let (sql, ty) = match output.function {
                 F::Count => match &output.column {
                     None => ("COUNT(*)".to_owned(), ValueType::U64),
@@ -592,7 +622,7 @@ impl<'a> Ctx<'a> {
                 }
             };
             outputs.push(format!("{sql} AS {}", quote(&output.alias)));
-            projection.push((output.alias.clone(), ty));
+            projection.push((output.alias.clone(), ty, tags));
         }
         let mut keys = Vec::new();
         for key in &query.order_by {
@@ -711,7 +741,7 @@ impl<'a> Ctx<'a> {
         let order = self.order_sql(table, alias, &query.order_by)?;
         let columns = projection
             .iter()
-            .map(|(name, _)| Ok(format!(", {}", column_sql(table, alias, name)?)))
+            .map(|(name, ..)| Ok(format!(", {}", column_sql(table, alias, name)?)))
             .collect::<Result<String, Error>>()?;
         let limit = self.bind(Sql::Integer(query.limit.map_or(-1, |l| l as i64)));
         let offset = self.bind(Sql::Integer(query.offset as i64));
@@ -743,7 +773,7 @@ impl<'a> Ctx<'a> {
         &mut self,
         query: &Query,
         include_deleted: bool,
-    ) -> Result<(&'a Table, Vec<(String, ValueType)>, Vec<String>), Error> {
+    ) -> Result<(&'a Table, Vec<Projected>, Vec<String>), Error> {
         let table = self.table(&query.table)?;
         let projection = projection(table, query.select.as_deref())?;
         let alias = "t";
@@ -834,7 +864,7 @@ impl<'a> Ctx<'a> {
             let columns = arm_projection
                 .iter()
                 .enumerate()
-                .map(|(i, (name, _))| Ok(format!(", {} AS c{i}", column_sql(table, alias, name)?)))
+                .map(|(i, (name, ..))| Ok(format!(", {} AS c{i}", column_sql(table, alias, name)?)))
                 .collect::<Result<String, Error>>()?;
             let label = self.bind(Sql::Text(label.as_bytes().to_vec()));
             keys = self.order_terms(table, alias, &plan.order_by)?;
@@ -1120,12 +1150,12 @@ impl<'a> Ctx<'a> {
                     order.push(format!("{}._seq", source.alias));
                 }
             }
-            for (column, ty) in crate::compile::projection(&source.table, None)? {
+            for (column, ty, tags) in crate::compile::projection(&source.table, None)? {
                 columns.push_str(&format!(
                     ", {}",
                     column_sql(&source.table, &source.alias, &column)?
                 ));
-                projection.push((format!("{}.{column}", source.name), ty));
+                projection.push((format!("{}.{column}", source.name), ty, tags));
             }
         }
         let sql = format!(
@@ -1290,7 +1320,7 @@ impl<'a> Ctx<'a> {
         let order = self.order_sql(child, alias, &array.order_by)?;
         let columns = projection
             .iter()
-            .map(|(name, _)| Ok(format!(", {}", column_sql(child, alias, name)?)))
+            .map(|(name, ..)| Ok(format!(", {}", column_sql(child, alias, name)?)))
             .collect::<Result<String, Error>>()?;
         let limit = self.bind(Sql::Integer(array.limit.map_or(-1, |l| l as i64)));
         let offset = self.bind(Sql::Integer(array.offset as i64));
@@ -1338,7 +1368,15 @@ impl<'a> Ctx<'a> {
         table: &str,
         column: &str,
         id: RowUuid,
-    ) -> Result<(String, Vec<Sql>, ValueType), Error> {
+    ) -> Result<
+        (
+            String,
+            Vec<Sql>,
+            ValueType,
+            Option<crate::values::ColumnTags>,
+        ),
+        Error,
+    > {
         let table = self.table(table)?;
         let column = table
             .column(column)
@@ -1349,7 +1387,7 @@ impl<'a> Ctx<'a> {
             "SELECT t.{} FROM {source} AS t WHERE t.id = {id}",
             quote(&column.stored)
         );
-        Ok((sql, self.params, column.ty.clone()))
+        Ok((sql, self.params, column.ty.clone(), column.tags.clone()))
     }
 
     /// A junction traversal from the row of `table` at `alias`: some live
@@ -2529,20 +2567,23 @@ impl Rel {
     }
 }
 
-fn projection(table: &Table, select: Option<&[String]>) -> Result<Vec<(String, ValueType)>, Error> {
+/// A projected cell: its name, its type and an enum column's tags.
+pub type Projected = (String, ValueType, Option<crate::values::ColumnTags>);
+
+fn projected(column: &crate::values::Column) -> Projected {
+    (column.name.clone(), column.ty.clone(), column.tags.clone())
+}
+
+fn projection(table: &Table, select: Option<&[String]>) -> Result<Vec<Projected>, Error> {
     match select {
-        None => Ok(table
-            .columns
-            .iter()
-            .map(|column| (column.name.clone(), column.ty.clone()))
-            .collect()),
+        None => Ok(table.columns.iter().map(projected).collect()),
         Some(select) => select
             .iter()
             .filter(|name| name.as_str() != "id")
             .map(|name| {
                 table
                     .column(name)
-                    .map(|column| (column.name.clone(), column.ty.clone()))
+                    .map(projected)
                     .ok_or_else(|| query_error(format!("unknown column `{}.{name}`", table.name)))
             })
             .collect(),
@@ -3069,6 +3110,9 @@ impl Ctx<'_> {
     }
 
     fn large_term(&self, table: &Table, sql: String, column: &str) -> Term {
+        if let Some(tags) = table.column(column).and_then(|c| c.tags.clone()) {
+            return Term::Enum(EnumColumn { cell: sql, tags });
+        }
         match table.column(column) {
             Some(col)
                 if column != "id"
@@ -3157,9 +3201,44 @@ impl Ctx<'_> {
         })
     }
 
+    /// A bound value an enum column is compared with: a variant name with a
+    /// tag here, rebound as the tag.
+    fn tagged(&mut self, column: &EnumColumn, term: Term) -> Term {
+        let Term::Bound(placeholder, Sql::Text(name)) = &term else {
+            return term;
+        };
+        let tag = std::str::from_utf8(name)
+            .ok()
+            .and_then(|name| column.tags.borrow().tag(name));
+        let Some(tag) = tag else {
+            return term;
+        };
+        let slot = placeholder[1..]
+            .parse::<usize>()
+            .expect("a numbered placeholder")
+            - 1;
+        self.params[slot] = Sql::Integer(tag);
+        Term::Bound(placeholder.clone(), Sql::Integer(tag))
+    }
+
     fn cmp(&mut self, op: CmpOp, left: Term, right: Term) -> Result<String, Error> {
         Ok(match (left, right) {
             (Term::Missing | Term::NaN, _) | (_, Term::Missing | Term::NaN) => "0".to_owned(),
+            (Term::Enum(column), right @ Term::Bound(..)) => {
+                let right = self.tagged(&column, right);
+                cmp_plain(&op, &column.cell, right.sql().expect("present"))
+            }
+            (left @ Term::Bound(..), Term::Enum(column)) => {
+                let left = self.tagged(&column, left);
+                cmp_plain(&op, left.sql().expect("present"), &column.cell)
+            }
+            (Term::Enum(a), Term::Enum(b)) if std::rc::Rc::ptr_eq(&a.tags, &b.tags) => {
+                cmp_plain(&op, &a.cell, &b.cell)
+            }
+            // Two enum columns' tags differ: they compare by name, as
+            // anything else does with one.
+            (Term::Enum(column), other) => return self.cmp(op, column.names(), other),
+            (other, Term::Enum(column)) => return self.cmp(op, other, column.names()),
             (Term::Large(column), Term::Bound(sql, value)) => {
                 self.cmp_large(&op, &column, &sql, &value)?
             }
@@ -3229,6 +3308,25 @@ impl Ctx<'_> {
         if options.is_empty() || matches!(left, Term::Missing | Term::NaN) {
             return Ok("0".to_owned());
         }
+        // An enum column in a list of names: in their tags, else by name.
+        let (left, options) = match left {
+            Term::Enum(column) if options.iter().all(|o| matches!(o, Term::Bound(..))) => {
+                let options = options
+                    .into_iter()
+                    .map(|option| self.tagged(&column, option))
+                    .collect();
+                (Term::Enum(column), options)
+            }
+            Term::Enum(column) => (column.names(), options),
+            left => (left, options),
+        };
+        let options: Vec<Term> = options
+            .into_iter()
+            .map(|option| match option {
+                Term::Enum(column) => column.names(),
+                option => option,
+            })
+            .collect();
         if let Term::Large(column) = &left {
             // A chunked cell is in no list of inline values; a longer
             // literal is refused as `=` refuses it.
@@ -3276,6 +3374,19 @@ impl Ctx<'_> {
     /// An array cell (JSON text, see [`crate::values::to_sql`]) holding an
     /// element equal to `right`.
     fn array_contains(&mut self, left: Term, right: Term) -> String {
+        // An enum array holds its variants' tags (or names with none yet).
+        let right = match &left {
+            Term::Enum(column) => match self.tagged(column, right) {
+                Term::Bound(placeholder, Sql::Integer(_)) => {
+                    let array = left.sql().expect("present");
+                    return format!(
+                        "EXISTS (SELECT 1 FROM json_each({array}) WHERE value = {placeholder})"
+                    );
+                }
+                right => right,
+            },
+            _ => right,
+        };
         let (Some(array), Term::Bound(placeholder, needle)) = (left.sql(), right) else {
             return "0".to_owned();
         };
@@ -3290,6 +3401,12 @@ impl Ctx<'_> {
     }
 
     fn contains(&mut self, left: Term, right: Term) -> String {
+        // Text containment reads an enum cell as its name.
+        let names = |term: Term| match term {
+            Term::Enum(column) => column.names(),
+            term => term,
+        };
+        let (left, right) = (names(left), names(right));
         let (Some(l), Some(r)) = (left.sql(), right.sql()) else {
             return "0".to_owned();
         };
@@ -3721,7 +3838,7 @@ fn partial_projection(
         let Some(index) = compiled
             .projection
             .iter()
-            .position(|(name, _)| *name == column.name)
+            .position(|(name, ..)| *name == column.name)
         else {
             continue;
         };

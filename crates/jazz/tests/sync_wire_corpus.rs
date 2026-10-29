@@ -331,7 +331,7 @@ impl Transport for Recording {
 /// Message shapes the one frame per variant leaves unpinned: a one-shot
 /// `Read` (its span carries a snapshot and a view), `Rows` carrying the
 /// commits behind history versions, and a `Catalogue` carrying versions
-/// with their stored names and a lens's cells.
+/// with their stored names, a lens's cells and enum tags.
 const SHAPES: [&str; 3] = ["Read/once", "Rows/origins", "Catalogue/versions"];
 
 fn shape(message: &SyncMessage) -> Option<&'static str> {
@@ -342,8 +342,11 @@ fn shape(message: &SyncMessage) -> Option<&'static str> {
         } => Some(SHAPES[0]),
         SyncMessage::Rows { origins, .. } if !origins.is_empty() => Some(SHAPES[1]),
         SyncMessage::Catalogue {
-            versions, cells, ..
-        } if !versions.is_empty() && !cells.is_empty() => Some(SHAPES[2]),
+            versions,
+            cells,
+            tags,
+            ..
+        } if !versions.is_empty() && !cells.is_empty() && !tags.is_empty() => Some(SHAPES[2]),
         _ => None,
     }
 }
@@ -391,12 +394,20 @@ fn subject(n: u8) -> Value {
 
 const ME: [&str; 3] = ["user", "identity", "subject"];
 
-/// `notes(owner, body)`, readable by their owner. `draft` adds a column,
+/// `notes.kind`: stored as the authority's tags, which its catalogue sends.
+fn kind() -> ColumnType {
+    ColumnType::Enum {
+        variants: vec!["note".to_owned(), "todo".to_owned()],
+    }
+}
+
+/// `notes(owner, body, kind)`, readable by their owner. `draft` adds a column,
 /// a schema version the server has not admitted.
 fn schema(draft: bool) -> JazzSchema {
     let mut notes = TableSchemaBuilder::new("notes")
         .column("owner", ColumnType::Text)
-        .column("body", ColumnType::Bytea);
+        .column("body", ColumnType::Bytea)
+        .column("kind", kind());
     if draft {
         notes = notes.column("title", ColumnType::Text);
     }
@@ -415,6 +426,7 @@ fn schema_with_copy() -> JazzSchema {
                 TableSchemaBuilder::new("notes")
                     .column("owner", ColumnType::Text)
                     .column("body", ColumnType::Bytea)
+                    .column("kind", kind())
                     .column("first_owner", ColumnType::Text)
                     .policies(read_and_allow_all_writes(session_eq("owner", &ME))),
             )
@@ -426,6 +438,7 @@ fn note(owner: u8, body: Vec<u8>) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("owner".to_owned(), subject(owner)),
         ("body".to_owned(), Value::Bytes(body)),
+        ("kind".to_owned(), Value::String("todo".to_owned())),
     ])
 }
 

@@ -116,7 +116,7 @@ fn authority(schema: JazzSchema, node: u8) -> Db {
         AuthorSubject::SYSTEM,
     )))
     .unwrap();
-    db.set_authority();
+    db.set_authority().unwrap();
     db
 }
 
@@ -258,12 +258,12 @@ fn a_reopened_authority_keeps_its_identities() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("authority.sqlite");
     let db = open_at(notes("notes", "text"), 1, &path);
-    db.set_authority();
+    db.set_authority().unwrap();
     let table = db.table_identity("notes").unwrap();
     let column = db.column_identity("notes", "text").unwrap();
     drop(db);
     let db = open_at(notes("notes", "text"), 1, &path);
-    db.set_authority();
+    db.set_authority().unwrap();
     assert_eq!(db.table_identity("notes").unwrap(), table);
     assert_eq!(db.column_identity("notes", "text").unwrap(), column);
 }
@@ -366,7 +366,7 @@ fn an_attached_store_marked_authority_mints_nothing() {
     .unwrap();
     let (c, _s) = pipe();
     let _link = block_on(client.connect_upstream(c));
-    client.set_authority();
+    client.set_authority().unwrap();
     not_observed(client.table_identity("notes"));
 }
 
@@ -463,7 +463,7 @@ fn a_column_added_again_with_another_type_is_a_new_column() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.sqlite");
     let db = open_at(notes("notes", "text"), 1, &path);
-    db.set_authority();
+    db.set_authority().unwrap();
     insert(
         &db,
         1,
@@ -474,7 +474,7 @@ fn a_column_added_again_with_another_type_is_a_new_column() {
     drop(db);
     // Reopened, so only the file knows `rank` held integers.
     let db = open_at(without_rank(), 1, &path);
-    db.set_authority();
+    db.set_authority().unwrap();
     block_on(db.activate_schema(text_rank())).unwrap();
     let text = db.column_identity("notes", "rank").unwrap();
     assert!(text.is_some());
@@ -494,7 +494,7 @@ fn a_type_changed_in_place_is_a_new_column() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.sqlite");
     let db = open_at(notes("notes", "text"), 1, &path);
-    db.set_authority();
+    db.set_authority().unwrap();
     insert(
         &db,
         1,
@@ -503,7 +503,7 @@ fn a_type_changed_in_place_is_a_new_column() {
     let rank = db.column_identity("notes", "rank").unwrap();
     drop(db);
     let db = open_at(text_rank(), 1, &path);
-    db.set_authority();
+    db.set_authority().unwrap();
     let text = db.column_identity("notes", "rank").unwrap();
     assert!(text.is_some());
     assert_ne!(text, rank);
@@ -708,7 +708,7 @@ fn a_store_without_recorded_types_adds_a_column_again_as_a_new_one() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.sqlite");
     let db = open_at(notes("notes", "text"), 1, &path);
-    db.set_authority();
+    db.set_authority().unwrap();
     insert(
         &db,
         1,
@@ -722,7 +722,7 @@ fn a_store_without_recorded_types_adds_a_column_again_as_a_new_one() {
         .execute_batch("DROP TABLE _jazz_column_types")
         .unwrap();
     let db = open_at(without_rank(), 1, &path);
-    db.set_authority();
+    db.set_authority().unwrap();
     block_on(db.activate_schema(bigint_rank())).unwrap();
     let added = db.column_identity("notes", "rank").unwrap();
     assert!(added.is_some());

@@ -1,5 +1,6 @@
 //! Jazz values in SQLite cells, the schema as SQLite sees it, and rows.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -244,6 +245,29 @@ pub(crate) fn array_needle(sql: Sql) -> Sql {
     }
 }
 
+/// Decode column `column`'s cell (see [`cell_from_sql`]).
+pub(crate) fn column_from_sql(
+    column: &Column,
+    cell: ValueRef<'_>,
+    chunks: &crate::large::Chunks,
+) -> Result<Option<Value>, Error> {
+    cell_from_sql(&column.ty, column.tags.as_ref(), cell, chunks)
+}
+
+/// Decode a cell of type `ty`: an enum column's (with `tags`) as its
+/// variant names, any other as [`from_sql`] does.
+pub(crate) fn cell_from_sql(
+    ty: &ValueType,
+    tags: Option<&ColumnTags>,
+    cell: ValueRef<'_>,
+    chunks: &crate::large::Chunks,
+) -> Result<Option<Value>, Error> {
+    match tags {
+        Some(tags) => enum_value(&tags.borrow(), ty, cell),
+        None => from_sql(ty, cell, chunks),
+    }
+}
+
 /// Decode a SQLite cell by the column's declared type, reading a chunked
 /// large value's chunks. `None` is a NULL in a non-nullable column, which
 /// only an unwritten cell can hold.
@@ -369,6 +393,13 @@ pub struct Column {
     /// How a column that holds JSON (a JSON column or an array of them)
     /// checks the values written to it; `None` for any other column.
     pub json_type: Option<Rc<JsonCheck>>,
+    /// An enum column (or an array of enum values): the variants this
+    /// schema declares. Its values are variant names everywhere above
+    /// SQLite; its cells hold their tags (see [`EnumTags`]).
+    pub variants: Option<Rc<[String]>>,
+    /// The stored column's tags, shared by every schema storing it; set
+    /// with `variants`.
+    pub tags: Option<ColumnTags>,
     /// How concurrent writes to the column merge at the authority.
     pub merge: crate::schema::MergeStrategy,
 }
@@ -377,6 +408,294 @@ impl Column {
     pub fn nullable(&self) -> bool {
         matches!(self.ty, ValueType::Nullable(_))
     }
+
+    /// Whether the column holds enum values.
+    pub fn is_enum(&self) -> bool {
+        self.variants.is_some()
+    }
+
+    /// The type the store records for the stored column
+    /// (`_jazz_column_types`): an enum column's names are recorded as an
+    /// enum, so a stored column never changes between text and enum cells.
+    pub(crate) fn stored_type(&self) -> ValueType {
+        fn mark(ty: &ValueType) -> ValueType {
+            match ty {
+                ValueType::Nullable(inner) => ValueType::Nullable(Box::new(mark(inner))),
+                ValueType::Array(inner) => ValueType::Array(Box::new(mark(inner))),
+                ValueType::String => ValueType::EnumTag(
+                    crate::records::ScalarEnumSchema::new(ENUM_MARK, Vec::<String>::new())
+                        .expect("an empty enum schema is valid"),
+                ),
+                other => other.clone(),
+            }
+        }
+        if self.is_enum() {
+            mark(&self.ty)
+        } else {
+            self.ty.clone()
+        }
+    }
+
+    /// A value as the cell this column stores. An enum variant is stored
+    /// as its tag, or as its name while it has none here (see [`EnumTags`]).
+    pub(crate) fn cell_sql(&self, value: &Value) -> Result<Option<Sql>, Error> {
+        match &self.tags {
+            Some(tags) => enum_cell(&tags.borrow(), value),
+            None => to_sql(value),
+        }
+    }
+}
+
+/// The name an enum column's recorded type carries (see
+/// [`Column::stored_type`]).
+const ENUM_MARK: &str = "jazz.enum";
+
+/// Whether a recorded type ([`Column::stored_type`]) is an enum column's.
+pub(crate) fn is_enum_type(ty: &ValueType) -> bool {
+    match ty {
+        ValueType::Nullable(inner) | ValueType::Array(inner) => is_enum_type(inner),
+        ValueType::EnumTag(schema) => schema.name == ENUM_MARK,
+        _ => false,
+    }
+}
+
+/// Whether `ty` (or the type a nullable wraps) is an array.
+pub(crate) fn is_array_type(ty: &ValueType) -> bool {
+    match ty {
+        ValueType::Nullable(inner) => is_array_type(inner),
+        ValueType::Array(_) => true,
+        _ => false,
+    }
+}
+
+/// One stored enum column's tags: each variant name a version storing the
+/// column declared, with the integer its cells store it as (SPEC 10.8).
+///
+/// Tags are the authority's. It gives each new variant the next tag when it
+/// admits a version declaring it, in declaration order, and never reuses
+/// one: a removed variant keeps its tag. Replicas mirror them from the
+/// catalogue (see `_jazz_enum_tags`). A cell of a variant with no tag on
+/// this store holds the variant's name as TEXT until its tag arrives, when
+/// the store rewrites those cells to it. Tags order the column: `ORDER BY`
+/// sorts variants in the order they were added, and a name with no tag yet
+/// after every tagged one.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct EnumTags {
+    by_name: BTreeMap<String, i64>,
+    by_tag: BTreeMap<i64, String>,
+}
+
+impl EnumTags {
+    pub fn tag(&self, name: &str) -> Option<i64> {
+        self.by_name.get(name).copied()
+    }
+
+    pub fn name(&self, tag: i64) -> Option<&str> {
+        self.by_tag.get(&tag).map(String::as_str)
+    }
+
+    /// The tag the next new variant gets: tags are never reused.
+    pub(crate) fn next(&self) -> i64 {
+        self.by_tag.keys().next_back().map_or(0, |tag| tag + 1)
+    }
+
+    pub(crate) fn insert(&mut self, name: String, tag: i64) {
+        self.by_tag.insert(tag, name.clone());
+        self.by_name.insert(name, tag);
+    }
+
+    /// Every (tag, name), in tag order.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (i64, &str)> {
+        self.by_tag.iter().map(|(tag, name)| (*tag, name.as_str()))
+    }
+
+    /// SQL reading `cell` (this column's) as its variant name: TEXT, as a
+    /// string column reads.
+    pub(crate) fn name_sql(&self, cell: &str) -> String {
+        if self.by_tag.is_empty() {
+            return cell.to_owned();
+        }
+        let arms: String = self
+            .by_tag
+            .iter()
+            .map(|(tag, name)| format!(" WHEN {tag} THEN '{}'", name.replace('\'', "''")))
+            .collect();
+        format!("(CASE {cell}{arms} ELSE {cell} END)")
+    }
+}
+
+/// A stored enum column's tags, shared by the schemas storing it.
+pub type ColumnTags = Rc<RefCell<EnumTags>>;
+
+/// Every stored enum column's tags on a store, by (stored table, stored
+/// column). Schemas built for the store take their columns' entries from
+/// it, so a tag the store learns reaches every schema at once.
+#[derive(Clone, Debug, Default)]
+pub struct TagRegistry(Rc<RefCell<BTreeMap<(String, String), ColumnTags>>>);
+
+impl TagRegistry {
+    /// Stored column `column` of stored table `table`'s tags (none yet: an
+    /// empty entry).
+    pub(crate) fn column(&self, table: &str, column: &str) -> ColumnTags {
+        self.0
+            .borrow_mut()
+            .entry((table.to_owned(), column.to_owned()))
+            .or_default()
+            .clone()
+    }
+
+    /// Every stored enum column with tags, with them.
+    pub(crate) fn all(&self) -> Vec<((String, String), EnumTags)> {
+        self.0
+            .borrow()
+            .iter()
+            .filter(|(_, tags)| !tags.borrow().by_tag.is_empty())
+            .map(|(key, tags)| (key.clone(), tags.borrow().clone()))
+            .collect()
+    }
+
+    /// What every column's tags are now, to put back with [`Self::restore`].
+    pub(crate) fn snapshot(&self) -> BTreeMap<(String, String), EnumTags> {
+        self.0
+            .borrow()
+            .iter()
+            .map(|(key, tags)| (key.clone(), tags.borrow().clone()))
+            .collect()
+    }
+
+    /// Put the tags back as [`Self::snapshot`] took them, in the entries
+    /// schemas already hold.
+    pub(crate) fn restore(&self, snapshot: BTreeMap<(String, String), EnumTags>) {
+        let map = self.0.borrow();
+        for (key, tags) in map.iter() {
+            *tags.borrow_mut() = snapshot.get(key).cloned().unwrap_or_default();
+        }
+    }
+
+    /// Stored table `from` (with `column`, its stored column `column.0`) is
+    /// stored as `to` (`column.1`) now: its tags follow it.
+    pub(crate) fn moved(&self, from: &str, to: &str, column: Option<(&str, &str)>) {
+        let mut map = self.0.borrow_mut();
+        let keys: Vec<(String, String)> = map
+            .keys()
+            .filter(|(table, col)| table == from && column.is_none_or(|(old, _)| col == old))
+            .cloned()
+            .collect();
+        for key in keys {
+            let tags = map.remove(&key).expect("listed");
+            let new = match column {
+                None => (to.to_owned(), key.1),
+                Some((_, new)) => (key.0, new.to_owned()),
+            };
+            map.insert(new, tags);
+        }
+    }
+}
+
+/// The variant names an enum column's `value` holds.
+pub(crate) fn enum_names(value: &Value) -> Vec<&str> {
+    match value {
+        Value::Nullable(Some(inner)) => enum_names(inner),
+        Value::String(name) => vec![name.as_str()],
+        Value::Array(items) => items.iter().flat_map(enum_names).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// `value` as an enum column's cell: a variant (also inside an array) as
+/// its tag where it has one, else as its name.
+pub(crate) fn enum_cell(tags: &EnumTags, value: &Value) -> Result<Option<Sql>, Error> {
+    Ok(Some(match value {
+        Value::Nullable(None) => Sql::Null,
+        Value::Nullable(Some(inner)) => return enum_cell(tags, inner),
+        Value::String(name) => match tags.tag(name) {
+            Some(tag) => Sql::Integer(tag),
+            None => Sql::Text(name.as_bytes().to_vec()),
+        },
+        Value::Array(items) => {
+            let items = items
+                .iter()
+                .map(|item| enum_json(tags, item))
+                .collect::<Result<Vec<_>, _>>()?;
+            Sql::Text(serde_json::Value::Array(items).to_string().into_bytes())
+        }
+        other => return to_sql(other),
+    }))
+}
+
+fn enum_json(tags: &EnumTags, item: &Value) -> Result<serde_json::Value, Error> {
+    Ok(match item {
+        Value::Nullable(None) => serde_json::Value::Null,
+        Value::Nullable(Some(inner)) => enum_json(tags, inner)?,
+        Value::String(name) => match tags.tag(name) {
+            Some(tag) => tag.into(),
+            None => name.clone().into(),
+        },
+        other => element_json(other)?,
+    })
+}
+
+/// An enum column's cell back as its variant name (also inside an array).
+fn enum_value(tags: &EnumTags, ty: &ValueType, cell: ValueRef<'_>) -> Result<Option<Value>, Error> {
+    let unknown = |tag: i64| {
+        Error::new(
+            ErrorCode::Storage,
+            format!("enum tag {tag} names no variant this store knows"),
+        )
+    };
+    Ok(Some(match (ty, cell) {
+        (ValueType::Nullable(_), ValueRef::Null) => Value::Nullable(None),
+        (ValueType::Nullable(inner), cell) => {
+            return Ok(enum_value(tags, inner, cell)?.map(|v| Value::Nullable(Some(Box::new(v)))));
+        }
+        (ValueType::String, ValueRef::Integer(tag)) => {
+            Value::String(tags.name(tag).ok_or_else(|| unknown(tag))?.to_owned())
+        }
+        (ValueType::String, ValueRef::Text(name)) => match std::str::from_utf8(name) {
+            Ok(name) => Value::String(name.to_owned()),
+            Err(_) => return Ok(None),
+        },
+        (ValueType::Array(element), ValueRef::Text(cell)) => {
+            let json: serde_json::Value = serde_json::from_slice(cell)
+                .map_err(|e| Error::new(ErrorCode::Storage, format!("array cell: {e}")))?;
+            let serde_json::Value::Array(items) = json else {
+                return Ok(None);
+            };
+            fn item(
+                tags: &EnumTags,
+                ty: &ValueType,
+                json: &serde_json::Value,
+                unknown: &dyn Fn(i64) -> Error,
+            ) -> Result<Option<Value>, Error> {
+                Ok(Some(match (ty, json) {
+                    (ValueType::Nullable(_), serde_json::Value::Null) => Value::Nullable(None),
+                    (ValueType::Nullable(inner), json) => {
+                        return Ok(item(tags, inner, json, unknown)?
+                            .map(|v| Value::Nullable(Some(Box::new(v)))));
+                    }
+                    (ValueType::String, serde_json::Value::Number(tag)) => {
+                        let Some(tag) = tag.as_i64() else {
+                            return Ok(None);
+                        };
+                        Value::String(tags.name(tag).ok_or_else(|| unknown(tag))?.to_owned())
+                    }
+                    (ValueType::String, serde_json::Value::String(name)) => {
+                        Value::String(name.clone())
+                    }
+                    _ => return Ok(None),
+                }))
+            }
+            let mut values = Vec::with_capacity(items.len());
+            for json in &items {
+                let Some(value) = item(tags, element, json, &unknown)? else {
+                    return Ok(None);
+                };
+                values.push(value);
+            }
+            Value::Array(values)
+        }
+        _ => return Ok(None),
+    }))
 }
 
 /// One application table.
@@ -510,6 +829,8 @@ fn stored_provenance_columns() -> Vec<Column> {
             default: None,
             json: false,
             json_type: None,
+            variants: None,
+            tags: None,
             merge: Default::default(),
         })
         .collect()
@@ -540,6 +861,8 @@ fn provenance_columns() -> Vec<Column> {
             default: None,
             json: false,
             json_type: None,
+            variants: None,
+            tags: None,
             merge: Default::default(),
         })
         .collect()
@@ -636,7 +959,15 @@ pub struct Schema {
 }
 
 impl Schema {
-    pub fn new(jazz: &JazzSchema) -> Self {
+    /// `jazz` as this store sees it, its enum columns taking their tags
+    /// from `tags`.
+    pub fn new(jazz: &JazzSchema, tags: &TagRegistry) -> Self {
+        let mut schema = Self::unnamed(jazz);
+        schema.attach_tags(tags);
+        schema
+    }
+
+    fn unnamed(jazz: &JazzSchema) -> Self {
         let mut tables = BTreeMap::new();
         for table in jazz.tables() {
             let public = jazz
@@ -647,27 +978,34 @@ impl Schema {
             let columns = table
                 .columns
                 .iter()
-                .map(|column| Column {
-                    name: column.name.clone(),
-                    stored: column.name.clone(),
-                    ty: column.column_type.clone(),
-                    default: column.default.clone(),
-                    json: column.large_value_kind == crate::schema::LargeValueSemanticKind::Json,
-                    json_type: public
-                        .and_then(|public| {
-                            public
-                                .columns
-                                .columns
-                                .iter()
-                                .find(|declared| declared.name_str() == column.name)
-                        })
-                        .filter(|declared| holds_json(&declared.column_type))
-                        .map(|declared| Rc::new(JsonCheck::new(declared.column_type.clone()))),
-                    merge: table
-                        .merge_strategies
-                        .get(&column.name)
-                        .copied()
-                        .unwrap_or_default(),
+                .map(|column| {
+                    let declared = public.and_then(|public| {
+                        public
+                            .columns
+                            .columns
+                            .iter()
+                            .find(|declared| declared.name_str() == column.name)
+                    });
+                    Column {
+                        name: column.name.clone(),
+                        stored: column.name.clone(),
+                        ty: column.column_type.clone(),
+                        default: column.default.clone(),
+                        json: column.large_value_kind
+                            == crate::schema::LargeValueSemanticKind::Json,
+                        json_type: declared
+                            .filter(|declared| holds_json(&declared.column_type))
+                            .map(|declared| Rc::new(JsonCheck::new(declared.column_type.clone()))),
+                        variants: declared
+                            .and_then(|declared| enum_variants(&declared.column_type))
+                            .map(Rc::from),
+                        tags: None,
+                        merge: table
+                            .merge_strategies
+                            .get(&column.name)
+                            .copied()
+                            .unwrap_or_default(),
+                    }
                 })
                 .collect();
             let mut indexes: Vec<Vec<String>> = table
@@ -724,8 +1062,8 @@ impl Schema {
 
     /// `jazz` with each table and column stored under the name `names`
     /// gives it; ones `names` does not list are stored by their own names.
-    pub fn stored_as(jazz: &JazzSchema, names: &StoredNames) -> Self {
-        let mut schema = Self::new(jazz);
+    pub fn stored_as(jazz: &JazzSchema, names: &StoredNames, tags: &TagRegistry) -> Self {
+        let mut schema = Self::unnamed(jazz);
         for table in schema.tables.values_mut() {
             let Some((stored, columns)) = names.tables.get(&table.name) else {
                 continue;
@@ -737,7 +1075,19 @@ impl Schema {
                 }
             }
         }
+        schema.attach_tags(tags);
         schema
+    }
+
+    /// Give each enum column its stored column's tags.
+    fn attach_tags(&mut self, tags: &TagRegistry) {
+        for table in self.tables.values_mut() {
+            for column in &mut table.columns {
+                if column.is_enum() {
+                    column.tags = Some(tags.column(&table.stored, &column.stored));
+                }
+            }
+        }
     }
 
     /// Where this schema stores each of its tables and columns.
@@ -790,6 +1140,33 @@ impl Schema {
         Ok(&self.table(name)?.stored)
     }
 
+    /// The enum columns [`Self::union`] would add to `self` for `other`
+    /// whose default has no tag here, so is their DDL default as a name:
+    /// (stored table, stored column, name).
+    pub(crate) fn untagged_defaults(&self, other: &Schema) -> Vec<(String, String, String)> {
+        let mut out = Vec::new();
+        for table in other.tables.values() {
+            let Some(physical) = self.tables.get(&table.stored) else {
+                continue;
+            };
+            for column in &table.columns {
+                if !column.is_enum() || physical.columns.iter().any(|c| c.stored == column.stored) {
+                    continue;
+                }
+                if let Some(Ok(Some(Sql::Text(name)))) =
+                    column.default.as_ref().map(|value| column.cell_sql(value))
+                {
+                    out.push((
+                        table.stored.clone(),
+                        column.stored.clone(),
+                        String::from_utf8_lossy(&name).into_owned(),
+                    ));
+                }
+            }
+        }
+        out
+    }
+
     /// The physical store for `self` plus `other`: tables and columns are
     /// unioned by their stored names, so every schema view reads and writes
     /// one set of rows. `self` is keyed and named by stored names. Returns
@@ -816,10 +1193,14 @@ impl Schema {
                             // A reopened store knows a column by name only.
                             stored.ty = column.ty.clone();
                             stored.json = column.json;
+                            stored.variants = column.variants.clone();
+                            stored.tags = column.tags.clone();
                             continue;
                         }
+                        // An enum default is its tag here, or its name until
+                        // it has one (see [`EnumTags`]).
                         let default = match &column.default {
-                            Some(value) => sql_literal(value)?,
+                            Some(value) => sql_literal(column.cell_sql(value)?)?,
                             None => "NULL".to_owned(),
                         };
                         for target in [name.clone(), format!("{name}__h")] {
@@ -882,6 +1263,8 @@ impl Table {
                     default: None,
                     json: false,
                     json_type: None,
+                    variants: None,
+                    tags: None,
                     merge: Default::default(),
                 })
                 .collect(),
@@ -967,10 +1350,10 @@ pub(crate) fn column_def(column: &Column) -> String {
     quote(&column.stored)
 }
 
-/// A value as an SQL literal, for DDL defaults.
-pub(crate) fn sql_literal(value: &Value) -> Result<String, Error> {
+/// A cell as an SQL literal, for DDL defaults.
+pub(crate) fn sql_literal(cell: Option<Sql>) -> Result<String, Error> {
     let hex = |v: &[u8]| v.iter().map(|b| format!("{b:02x}")).collect::<String>();
-    Ok(match to_sql(value)? {
+    Ok(match cell {
         None => return Err(unsupported("a NaN default")),
         Some(Sql::Null) => "NULL".to_owned(),
         Some(Sql::Integer(v)) => v.to_string(),
@@ -1434,6 +1817,15 @@ fn coerce(value: &Value, ty: &ValueType) -> Result<Value, Error> {
         }
         (value, _) => value.clone(),
     })
+}
+
+/// The variants of an enum column, or of an array of enum values.
+fn enum_variants(ty: &crate::tools::ColumnType) -> Option<Vec<String>> {
+    match ty {
+        crate::tools::ColumnType::Enum { variants } => Some(variants.clone()),
+        crate::tools::ColumnType::Array { element } => enum_variants(element),
+        _ => None,
+    }
 }
 
 fn holds_json(ty: &crate::tools::ColumnType) -> bool {

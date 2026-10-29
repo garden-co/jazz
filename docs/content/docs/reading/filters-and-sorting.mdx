@@ -67,6 +67,17 @@ Sort results with `orderBy(...)`. Pass a column name and optionally `"asc"` or `
   </Tab>
 </Tabs>
 
+### Sorting by an enum
+
+An `s.enum(...)` column sorts its variants in the order they were added to the schema, not
+alphabetically. Variants declared together sort in declaration order, and a variant added in a
+later schema version sorts after every earlier one, wherever you declare it. Removing a variant
+does not change how the others sort.
+
+One exception is a variant the server has not seen yet, such as one added by a schema version the
+server has not received. On the client that wrote it, it sorts after every variant the server
+knows about until the server receives that version.
+
 ## Pagination
 
 `limit(n)` caps the number of rows returned; `offset(n)` skips that many rows. Combine them with a

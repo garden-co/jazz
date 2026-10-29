@@ -147,6 +147,19 @@ fn canon_value(value: &Value) -> Option<String> {
     to_sql(value).ok().flatten().map(|sql| canon(&sql))
 }
 
+/// A value's canonical form ([`canon_value`]) as column `column` stores it:
+/// an enum variant's name as its tag where it has one, so it matches the
+/// cells of a changed row's image.
+fn stored_canon(column: Option<&crate::values::Column>, value: String) -> String {
+    let Some(tags) = column.and_then(|column| column.tags.as_ref()) else {
+        return value;
+    };
+    let tags = tags.borrow();
+    tags.iter()
+        .find(|(_, name)| canon(&Sql::Text(name.as_bytes().to_vec())) == value)
+        .map_or(value, |(tag, _)| canon(&Sql::Integer(tag)))
+}
+
 impl Fanout {
     fn index(&mut self, gid: u64, watches: &[Watch]) {
         for watch in watches {
@@ -404,7 +417,7 @@ impl Inner {
             let target = schema.stored_table(target)?;
             if target != root.stored
                 && !others.contains(target)
-                && compiled.projection.iter().any(|(name, _)| name == column)
+                && compiled.projection.iter().any(|(name, ..)| name == column)
             {
                 out.push((target.to_owned(), column.to_owned()));
             }
@@ -553,11 +566,10 @@ impl Inner {
                 let governing = policies.by_stored(&root.stored)?;
                 // As for a query key: only an application column is in a
                 // changed row's image (`$createdBy.account` is not).
-                governing
-                    .columns
-                    .iter()
-                    .any(|c| c.name == column)
-                    .then(|| (governing.stored_name(&column).to_owned(), value))
+                governing.columns.iter().any(|c| c.name == column).then(|| {
+                    let value = stored_canon(governing.column(&column), value);
+                    (governing.stored_name(&column).to_owned(), value)
+                })
             });
         let mut watches = Vec::new();
         let root_key = if structural.contains(&root.stored) {
@@ -568,7 +580,10 @@ impl Inner {
                 // a key on anything else (`$createdBy.identity.subject`,
                 // `id`) would never be hit.
                 .filter(|(column, _)| root.columns.iter().any(|c| c.name == *column))
-                .map(|(column, value)| (root.stored_name(&column).to_owned(), value))
+                .map(|(column, value)| {
+                    let value = stored_canon(root.column(&column), value);
+                    (root.stored_name(&column).to_owned(), value)
+                })
                 .or(policy_root_key)
         }
         .filter(|(column, _)| keyable(&root.stored, column));
@@ -1014,7 +1029,10 @@ impl Inner {
             Some(crate::query::OrderDirection::Desc)
         );
         let id_key = |row: &CurrentRow| (Sql::Blob(row.id.0.as_bytes().to_vec()), tie_desc);
+        let schema = group.prepared.schema.as_ref().unwrap_or(&self.owner);
         if projected {
+            // Cells sort as stored: an enum variant by its tag.
+            let root = schema.tables.get(&group.prepared.query.table)?;
             let mut keys = Vec::with_capacity(rows.len());
             for row in rows {
                 let mut key = Vec::with_capacity(order.len() + 1);
@@ -1032,7 +1050,11 @@ impl Inner {
                             None => Sql::Null,
                             // A value over the inline threshold sorts by its
                             // chunked cell, which the row does not carry.
-                            Some(value) => match to_sql(value).ok()?? {
+                            Some(value) => match root
+                                .column(&by.column)
+                                .map_or_else(|| to_sql(value), |column| column.cell_sql(value))
+                                .ok()??
+                            {
                                 Sql::Text(bytes) | Sql::Blob(bytes)
                                     if bytes.len()
                                         > jazz_types::large_values::INLINE_VALUE_MAX_BYTES =>
@@ -1056,7 +1078,6 @@ impl Inner {
         if rows.is_empty() {
             return Some(Ok(Vec::new()));
         }
-        let schema = group.prepared.schema.as_ref().unwrap_or(&self.owner);
         let table = schema.tables.get(&group.prepared.query.table)?;
         // By id alone a branched table's row is ambiguous.
         if !table.branch_by.is_empty() {
@@ -1397,7 +1418,7 @@ fn order_projected(query: &Query, compiled: &Compiled) -> bool {
             || compiled
                 .projection
                 .iter()
-                .any(|(name, _)| *name == key.column)
+                .any(|(name, ..)| *name == key.column)
     })
 }
 
@@ -1720,7 +1741,10 @@ pub(super) fn stored_pins(
     pins.into_iter()
         .filter_map(|(table, pin)| {
             let table = schema.table(&table).ok()?;
-            let pin = pin.map(|(column, value)| (table.stored_name(&column).to_owned(), value));
+            let pin = pin.map(|(column, value)| {
+                let value = stored_canon(table.column(&column), value);
+                (table.stored_name(&column).to_owned(), value)
+            });
             Some((table.stored.clone(), pin))
         })
         .collect()

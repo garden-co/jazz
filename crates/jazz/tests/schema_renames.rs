@@ -406,7 +406,7 @@ fn a_table_rename_holds_across_reopen_and_for_a_fresh_receiver() {
     }
 
     let server = open_at(after.clone(), &path);
-    server.set_authority();
+    server.set_authority().unwrap();
     let fresh = block_on(Db::open(config(after, 2, user(2)))).unwrap();
     let (client_side, server_side) = pipe();
     let _link = block_on(fresh.connect_upstream(client_side));

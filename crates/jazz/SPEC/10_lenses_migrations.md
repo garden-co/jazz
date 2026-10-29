@@ -796,6 +796,52 @@ This is how the SQLite engine meets `INV-LENS-24`: an identity is never
 reused for another column epoch, and only a compatible re-addition keeps its
 predecessor's.
 
+### 10.8 Enum tags (SQLite engine)
+
+An enum column (`s.enum(...)`, or an array of one) stores each variant as an
+INTEGER **tag**, kept per stored column in `_jazz_enum_tags (tbl, col, tag,
+name)` (`crates/jazz/layers/db/src/values.rs`, `EnumTags`). Values are
+variant names everywhere above SQLite: in writes, commits, filters, policies
+and reads. Only stored cells hold tags.
+
+- **Tags are the authority's.** An authority with no upstream tags each
+  variant a version declares when it admits the version, before any column
+  is added, so an added enum column's DDL default is a tag too. A column's
+  next tag is one past its highest, in declaration order, and a tag is never
+  reused: a removed variant keeps its tag, and every name a version ever
+  declared for the stored column still reads back. A copy lens's column
+  takes its source's tags, because it holds the source's cells.
+- **Replicas mirror them.** `Catalogue.tags` carries every tag the sender
+  keeps, and a replica takes them before the catalogue's versions and rows.
+  Row images travel as stored cells, so they carry tags. Commits carry
+  variant names, which the authority binds as its tags. A replica never
+  mints a tag, and refuses a catalogue that tags a variant otherwise than it
+  does.
+- **A variant without a tag here** is stored as its TEXT name, and noted in
+  `_jazz_enum_text`. When its tag arrives, the store rewrites those cells
+  (row and history tables, inside arrays too) to the tag. An enum column a
+  store added while its default had no tag keeps that name as its SQLite
+  default, so a row inserted without the column writes the tag explicitly
+  once there is one.
+- **Order.** `ORDER BY`, `MIN`, `MAX` and range comparisons on an enum
+  column follow tag order: the order variants were added, which an index on
+  the column serves. TEXT cells sort after every tag, so on a replica a
+  variant it has no tag for yet sorts after the ones it has.
+- **Comparisons.** A variant name compared with an enum column (`=`, `IN`,
+  array containment, a policy literal or session value) is bound as its tag,
+  or as its name while it has none here. Anything else, such as text
+  containment or a comparison with another enum column's cells, reads the
+  cell as its name.
+- **Type.** `_jazz_column_types` records an enum column as an enum
+  (whatever its variants), so a stored column never holds both tags and
+  another type's values: a column changed between enum and another type is
+  handled like any type change (10.7), as a new stored column or a refusal.
+  Writes are checked against the writing version's declared variants.
+  Enum columns are never large-capable (ch. 19).
+
+Raw SQL (an inspector, a debugging session) reads names by joining
+`_jazz_enum_tags` on the stored table, stored column and cell.
+
 ### 10.9 Subsumed schema-file and schema-subset notes
 
 The former schema manager and schema file notes are folded into the catalogue

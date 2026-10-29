@@ -1646,7 +1646,8 @@ impl Owner {
         };
         let db = block_on(Db::open_file(config(genesis), file))
             .map_err(|error| format!("open server store: {error}"))?;
-        db.set_authority();
+        db.set_authority()
+            .map_err(|error| format!("tag the store's enum variants: {error}"))?;
         db.set_slow_query_threshold(slow_query_threshold());
         let mut owner = Self {
             db,
