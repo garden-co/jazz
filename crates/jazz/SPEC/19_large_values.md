@@ -209,10 +209,13 @@ verified, its lengths match, and the writer **possesses** it.
 
 A node held by the store proves nothing about the writer, since hashes are
 not secret: a writer possesses a tree when each node is either under the tree
-of a row version it may read that its op names (the version a delta extends,
-or its access proof: the version of the written row its pushes assumed,
-§19.8), or pushed by the writer itself under its own receipt with its
-children possessed in turn. A tree the writer does not possess is refused
+of a row version it may read that its commit names (the version one of its
+ops' deltas extends, or an op's access proof: the version of that op's row
+its pushes assumed, §19.8), or pushed by the writer itself under its own
+receipt with its children possessed in turn. The versions count for every op
+of the commit: each is content the writer may read, so one op's proof
+vouching for another op's tree copies only what the writer could copy anyway
+(item 7 below). A tree the writer does not possess is refused
 exactly as one with absent nodes, so a write never tells whether the store
 holds a tree, and never copies content the writer cannot read. A trusted
 link's writes are not checked. Relays check their sessions' writes the same

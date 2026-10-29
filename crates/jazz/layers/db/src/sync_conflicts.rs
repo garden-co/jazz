@@ -329,6 +329,33 @@ impl Inner {
             .collect()
     }
 
+    /// Refuse bases SPEC 8.2 does not allow: each travels on the commit's
+    /// first op that writes its row, and names a row and branch key no
+    /// other base names.
+    pub(super) fn check_bases(
+        &self,
+        ops: &[StagedOp],
+        by_row: &RowOps,
+        bases: &[(usize, WireBase)],
+    ) -> Result<(), Error> {
+        let misplaced =
+            |what: &str| Error::new(ErrorCode::Protocol, format!("a write's base {what}"));
+        let mut named = HashSet::new();
+        for (op, base) in bases {
+            let (table, row) = self.based_row(ops, *op)?;
+            let first = by_row
+                .get(&(table.to_owned(), row))
+                .and_then(|ops| ops.first());
+            if first != Some(op) {
+                return Err(misplaced("is not on the first op that writes its row"));
+            }
+            if !named.insert((table, row, base.key.as_slice())) {
+                return Err(misplaced("names a row another base of its commit names"));
+            }
+        }
+        Ok(())
+    }
+
     /// The stored table and row a base names, by the op it travels on.
     fn based_row(&self, ops: &[StagedOp], op: usize) -> Result<(&str, RowUuid), Error> {
         let op = ops.get(op).ok_or_else(|| unknown_base("an op"))?;

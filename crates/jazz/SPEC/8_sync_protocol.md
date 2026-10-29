@@ -187,9 +187,12 @@ writer knew of the row it writes:
 - `bases`: on the commit's first op that writes a row, for each branch key it
   writes the row under over an image the writer held, the base of that image
   (SPEC 4 §4.6). A move writes two. Only the authority's conflict derivation
-  reads them.
+  reads them. A base on any other op, or two naming one row and branch key,
+  refuse the commit.
 - `deltas`: the op's chunked cells travelling as edits over the writer's
-  newest settled version of the row (SPEC 19.8).
+  newest settled version of the row (SPEC 19.8). Each stands in for one
+  column whose cell holds NULL in its place; a second delta for a column, or
+  one over a cell that is not that NULL, refuses the commit.
 - `access_proof`: when the op's chunked values travel as trees, a version of
   the row the writer may read whose trees vouch for the nodes it did not push
   (SPEC 19.4).

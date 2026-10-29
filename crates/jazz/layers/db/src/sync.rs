@@ -594,8 +594,9 @@ pub struct WireBase {
 /// A version of the row an op writes that its writer may read, whose
 /// chunked values' trees vouch for the nodes the writer did not push
 /// (SPEC 19.4): the authority counts that version's trees as possessed by
-/// the writer only while the writer may still read the version, so naming
-/// a root never gets the writer a tree it could not read anyway.
+/// the writer, for every op of the commit, only while the writer may still
+/// read the version, so naming a root never gets the writer a tree it could
+/// not read anyway.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccessProof {
     /// The row's branch key (empty unbranched).
@@ -5183,9 +5184,15 @@ impl Db {
         let mut wire: Result<Vec<WireOp>, Error> = ops.iter().map(to_wire).collect();
         if let Ok(wire) = &mut wire {
             for (op, base) in bases {
-                if let Some(op) = wire.get_mut(op) {
-                    op.bases.push(base);
-                }
+                // A relay's bases come from `relay_bases`, which refused any
+                // naming no op of the commit.
+                let op = wire.get_mut(op).ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::Protocol,
+                        "a relayed base names no op of its commit",
+                    )
+                })?;
+                op.bases.push(base);
             }
             inner.commit_deltas(wire, &rows, &settled_images)?;
         }
@@ -8569,6 +8576,39 @@ impl Db {
                 "a large-value delta names no version of its row the writer may read",
             )
         };
+        // A delta stands in for its op's cell, which holds the NULL it
+        // replaces, once per column. Checked on the commit alone, before
+        // anything stored is read.
+        let malformed = |what: &str| {
+            Error::new(
+                ErrorCode::WriteRejected,
+                format!("a large-value delta {what}"),
+            )
+        };
+        for op in &mut ops {
+            let mut columns = BTreeSet::new();
+            for delta in &op.deltas {
+                if !columns.insert(delta.column.as_str()) {
+                    return Err(malformed("names a column another delta of its op names"));
+                }
+                let cell = match &mut op.write {
+                    WireWrite::Insert { cells, .. }
+                    | WireWrite::Update { cells, .. }
+                    | WireWrite::Upsert { cells, .. }
+                    | WireWrite::Restore {
+                        cells: Some(cells), ..
+                    } => cells.get_mut(&delta.column),
+                    _ => None,
+                };
+                let placeholder = cell.is_some_and(|cell| {
+                    let (inner, depth) = large_delta::unwrap(cell);
+                    matches!(inner, Value::Nullable(None)) && depth == delta.depth
+                });
+                if !placeholder {
+                    return Err(malformed("stands in for no NULL cell of its op"));
+                }
+            }
+        }
         let inner = self.inner();
         for op in &mut ops {
             let deltas = std::mem::take(&mut op.deltas);
@@ -8896,7 +8936,9 @@ impl Db {
         let by_row = self.inner().row_ops(&ops);
         let (bases, mut built) = {
             let inner = self.inner();
-            let resolved = if relay {
+            let resolved = if let Err(error) = inner.check_bases(&ops, &by_row, &bases) {
+                Err(error)
+            } else if relay {
                 inner
                     .relay_bases(origin, &ops, bases)
                     .map(|bases| (bases, HashMap::new()))
