@@ -51,12 +51,12 @@ use crate::values::{
     to_sql, unsupported,
 };
 pub use sync::{
-    BuiltOn, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad, FrameJoiner, Image, LOCAL_BASE,
-    NON_DURABLE_BASE, ReadSpan, RejectedTransaction, RelationSnapshot, RemoteLinkHint,
-    SerializedReadResult, SubscriberId, SyncMessage, Transport, TransportError, Upstream, WireBase,
-    WireChunk, WireChunkRef, WireDelta, WireError, WireKind, WireOp, WirePull, WireTarget,
-    WireTransport, WireTransportAdapter, WriteConflict, decode_message, duplex, encode_frames,
-    validate_frame_batch_for_corpus,
+    AccessProof, Acting, BuiltOn, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad,
+    FrameJoiner, Image, LOCAL_BASE, NON_DURABLE_BASE, ReadSpan, RejectedTransaction,
+    RelationSnapshot, RemoteLinkHint, SerializedReadResult, SubscriberId, SyncMessage, Transport,
+    TransportError, Upstream, WireBase, WireChunk, WireChunkRef, WireDelta, WireError, WireKind,
+    WireOp, WirePull, WireTarget, WireTransport, WireTransportAdapter, WireWrite, WriteConflict,
+    decode_message, duplex, encode_frames, validate_frame_batch_for_corpus,
 };
 
 /// Shape identity: equal for bindings of one query against one schema.
@@ -260,6 +260,9 @@ impl ReadSpec {
                 None
             }
         };
+        if opts.tier == ReadTier::Remote {
+            inner.check_not_stranded()?;
+        }
         Ok(Self {
             include_deleted: opts.read_view.include_deleted,
             settled_only: inner.client.is_some() && opts.tier == ReadTier::Remote,
@@ -414,6 +417,8 @@ struct Inner {
     /// Limits on local streaming uploads and on pushed nodes awaiting
     /// their commit.
     staging: LargeValueStagingPolicy,
+    /// Dropped uploads queue cleanup without recursively borrowing the owner.
+    upload_cleanup: Rc<RefCell<Vec<[u8; 32]>>>,
     /// The staging ingress window: (start ms, encoded bytes admitted).
     ingress: RefCell<(u64, u64)>,
     /// The schema the current operation runs under: the owner's, or the
@@ -484,8 +489,9 @@ struct Inner {
     accepted: u64,
     /// Rows written since the last server tick (only while serving).
     since_tick: Vec<(String, RowUuid, Vec<u8>)>,
-    /// Ops of the open local transaction, for upload.
-    capture: Vec<StagedOp>,
+    /// Ops of the open local transaction, for upload, each with the
+    /// schema version whose names it uses.
+    pub(crate) capture: Vec<(crate::ids::SchemaVersionId, StagedOp)>,
     /// Images a replica dropped since the last dispatch (evictions and
     /// rebases), for keyed invalidation.
     gone: RefCell<Vec<sync::Image>>,
@@ -666,6 +672,7 @@ fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> 
     Ok(Schema {
         tables,
         jazz: jazz.clone(),
+        version: jazz.version_id(),
         policies_from: None,
     })
 }
@@ -1064,6 +1071,9 @@ impl Db {
         // leaves the tags as they are.
         let version = config.schema.version_id();
         let newest = names.get(&version).is_none() || names.latest_version() == Some(version);
+        // Every version an earlier process admitted is admitted again, with
+        // the names it was stored under.
+        let mut admitted = crate::catalogue::admitted(&conn)?;
         let schema = names.resolve(&config.schema, &[], names.latest())?;
         names.check_branches(&schema)?;
         names.check_types(&schema)?;
@@ -1097,6 +1107,7 @@ impl Db {
             let mut physical = Schema {
                 tables: BTreeMap::new(),
                 jazz: config.schema.clone(),
+                version: config.schema.version_id(),
                 policies_from: None,
             };
             physical.union(&schema)?;
@@ -1145,12 +1156,18 @@ impl Db {
                 derived: Vec::new(),
                 possession: None,
                 staging: LargeValueStagingPolicy::default(),
+                upload_cleanup: Rc::default(),
                 ingress: RefCell::new((0, 0)),
                 schema: owner.clone(),
                 owner_version: owner.jazz.version_id(),
                 owner,
                 physical,
-                admitted: vec![(config.schema.version_id(), config.schema.clone())],
+                admitted: {
+                    let version = config.schema.version_id();
+                    admitted.retain(|(id, _)| *id != version);
+                    admitted.push((version, config.schema.clone()));
+                    admitted
+                },
                 names,
                 views: BTreeMap::new(),
                 batches: HashMap::new(),
@@ -1363,6 +1380,16 @@ impl Db {
                 .find(|c| c.name == column)
                 .map(|c| crate::names::identity(namespace, &table.stored, Some(&c.stored))),
         })
+    }
+
+    /// The schema version this handle writes under: its view's, else the
+    /// owner's. A replica uploads each commit under the version that
+    /// wrote it.
+    pub(crate) fn write_version(&self) -> crate::ids::SchemaVersionId {
+        match &self.view {
+            Some(view) => view.version,
+            None => self.inner.borrow().owner_version,
+        }
     }
 
     /// The shared state, set up to run under this handle's schema.
@@ -2057,7 +2084,15 @@ impl Db {
             // The upload record joins the write's SQLite transaction: if it
             // fails, `with_upload` rolls both back, and nobody has been told.
             if let Err(error) = committed
-                .then(|| self.record_upload(vec![op], handle.seq, sync::Kind::Mergeable, None))
+                .then(|| {
+                    self.record_upload(
+                        vec![op],
+                        handle.seq,
+                        sync::Kind::Mergeable,
+                        None,
+                        self.write_version(),
+                    )
+                })
                 .transpose()
             {
                 let mut inner = self.inner();
@@ -2190,7 +2225,18 @@ impl Db {
         let value = result?;
         let (seq, _) = changed.expect("committed");
         // The upload record joins the transaction's SQLite savepoint.
-        if let Err(error) = self.record_upload(captured, seq, sync::Kind::Mergeable, None) {
+        let recorded = self
+            .upload_version(captured.iter().map(|(version, _)| *version))
+            .and_then(|version| {
+                self.record_upload(
+                    captured.into_iter().map(|(_, op)| op).collect(),
+                    seq,
+                    sync::Kind::Mergeable,
+                    None,
+                    version,
+                )
+            });
+        if let Err(error) = recorded {
             let mut inner = self.inner();
             inner.seq = prior;
             inner.abandon_savepoint("tx")?;
@@ -2232,7 +2278,7 @@ impl Db {
             .find(|publication| publication.version.id == current.schema)
             .cloned()
             .ok_or_else(|| Error::new(ErrorCode::Schema, "schema version was not published"))?;
-        self.activate(publication.version.schema, &[publication.lens])
+        self.activate(publication.version.schema, &[publication.lens], None)
     }
 
     /// Make `schema` the current schema. The stored tables grow to hold it:
@@ -2241,7 +2287,7 @@ impl Db {
     /// keep their data. Changing a column's type is not supported yet, and a
     /// new required column needs a default.
     pub async fn activate_schema(&self, schema: JazzSchema) -> Result<(), Error> {
-        self.activate(schema, &[])
+        self.activate(schema, &[], None)
     }
 
     /// [`Db::activate_schema`], with the migration lenses into `schema`
@@ -2254,7 +2300,20 @@ impl Db {
         schema: JazzSchema,
         lenses: &[MigrationLens],
     ) -> Result<(), Error> {
-        self.activate(schema, lenses)
+        self.activate(schema, lenses, None)
+    }
+
+    /// [`Db::activate_schema_with_lenses`] as permissions revision
+    /// `revision` of the store's catalogue (see [`crate::catalogue`]): its
+    /// row records the schema and policies, and when they took effect. A
+    /// store without a server numbers its activations itself.
+    pub async fn activate_schema_at_revision(
+        &self,
+        revision: u64,
+        schema: JazzSchema,
+        lenses: &[MigrationLens],
+    ) -> Result<(), Error> {
+        self.activate(schema, lenses, Some(revision))
     }
 
     /// Admit `schema` without making it current: the stored tables grow to
@@ -2266,19 +2325,82 @@ impl Db {
         schema: JazzSchema,
         lenses: &[MigrationLens],
     ) -> Result<(), Error> {
-        self.admit(schema, lenses, false)
+        self.admit(schema, lenses, None)
     }
 
-    fn activate(&self, schema: JazzSchema, lenses: &[MigrationLens]) -> Result<(), Error> {
-        self.admit(schema, lenses, true)
+    fn activate(
+        &self,
+        schema: JazzSchema,
+        lenses: &[MigrationLens],
+        revision: Option<u64>,
+    ) -> Result<(), Error> {
+        self.admit(schema, lenses, Some(revision))
     }
 
+    /// Apply `change` to the store's catalogue in one transaction: publish
+    /// its rows, admit its versions in order, then make its schema current
+    /// at its revision. A change that fails anywhere leaves the file and
+    /// this database as they were.
+    pub async fn apply_catalogue(
+        &self,
+        change: crate::catalogue::CatalogueChange,
+    ) -> Result<(), Error> {
+        let saved = {
+            let inner = self.inner();
+            (
+                inner.physical.clone(),
+                inner.names.clone(),
+                inner.admitted.clone(),
+                inner.owner.clone(),
+                inner.owner_version,
+            )
+        };
+        begin_savepoint(&self.inner().conn, "jazz_catalogue")?;
+        let applied = (|| {
+            crate::catalogue::put(&self.inner().conn, &change.put)?;
+            for (schema, lenses) in change.admit {
+                self.admit(schema, &lenses, None)?;
+            }
+            if let Some((revision, schema, lenses)) = change.activate {
+                self.admit(schema, &lenses, Some(Some(revision)))?;
+            }
+            Ok(())
+        })();
+        let ended = end_savepoint(&self.inner().conn, "jazz_catalogue", applied.is_ok());
+        let result = applied.and(ended);
+        if result.is_err() {
+            let mut inner = self.inner();
+            let (physical, names, admitted, owner, owner_version) = saved;
+            inner.physical = physical;
+            inner.names = names;
+            inner.admitted = admitted;
+            inner.owner = owner;
+            inner.owner_version = owner_version;
+            inner.reset_everything();
+        }
+        result
+    }
+
+    /// The current schema, with its policies.
+    pub fn current_schema(&self) -> JazzSchema {
+        self.inner().owner.jazz.clone()
+    }
+
+    /// The store's catalogue: every schema, lens and permissions revision
+    /// it keeps (see [`crate::catalogue`]).
+    pub fn catalogue(&self) -> Result<crate::catalogue::CatalogueRows, Error> {
+        crate::catalogue::read(&self.inner().conn)
+    }
+
+    /// Admit `schema`; with `current`, also make it current, at that
+    /// permissions revision if one is given.
     fn admit(
         &self,
         schema: JazzSchema,
         lenses: &[MigrationLens],
-        make_current: bool,
+        current: Option<Option<u64>>,
     ) -> Result<(), Error> {
+        let make_current = current.is_some();
         {
             let mut inner = self.inner();
             let version = schema.version_id();
@@ -2353,6 +2475,12 @@ impl Db {
             }
             inner.write_admission(&target, cells, make_current)?;
             if make_current {
+                // Pending commits written under the version current until
+                // now keep uploading under it (INV-SYNC-52).
+                let previous = *inner.owner_version.as_bytes();
+                if let Some(client) = inner.client.as_mut() {
+                    client.keep_version(previous);
+                }
                 inner.owner_version = target.jazz.version_id();
                 inner.owner = Rc::new(target);
                 // Read policies that changed may read differently from
@@ -2363,11 +2491,13 @@ impl Db {
                 }
                 let digest =
                     u64::from_le_bytes(digest.finalize().as_bytes()[..8].try_into().unwrap());
-                if inner.meta(sync::POLICIES_META)? != Some(digest) {
-                    let seq = inner.seq;
-                    inner.persist_meta(sync::POLICIES_META, digest)?;
-                    inner.persist_meta(sync::ACTIVATED_META, seq)?;
-                }
+                crate::catalogue::record_activation(
+                    &inner.conn,
+                    current.flatten(),
+                    &inner.owner.jazz,
+                    digest,
+                    inner.seq,
+                )?;
             }
             if !inner
                 .admitted
@@ -4301,6 +4431,7 @@ impl Inner {
 
     /// Delete up to `budget` large-value nodes no cell or branch references.
     fn reclaim_large_values(&mut self, budget: usize) -> Result<usize, Error> {
+        self.release_dropped_uploads()?;
         in_savepoint(&self.conn, "reclaim", || {
             crate::large::reclaim(&self.conn, &self.chunks, budget)
         })
@@ -6124,6 +6255,29 @@ fn schema_error(message: impl Into<String>) -> Error {
     Error::new(ErrorCode::Schema, message)
 }
 
+impl Db {
+    /// The schema version a transaction's commit uploads under: the one
+    /// every write in it (each with its `versions` entry) names its tables
+    /// and columns by. A replica cannot upload one commit under several, so
+    /// a transaction written through views of different versions is
+    /// refused there; elsewhere nothing uploads.
+    fn upload_version(
+        &self,
+        versions: impl IntoIterator<Item = crate::ids::SchemaVersionId>,
+    ) -> Result<crate::ids::SchemaVersionId, Error> {
+        let mut versions = versions.into_iter();
+        let Some(first) = versions.next() else {
+            return Ok(self.write_version());
+        };
+        if self.is_client() && versions.any(|version| version != first) {
+            return Err(unsupported(
+                "a transaction writing through schema views of different versions on a replica",
+            ));
+        }
+        Ok(first)
+    }
+}
+
 /// The changes a schema view may make over the owner's schema without an
 /// explicit lens: add and drop columns, add tables. Everything else names
 /// what it changed (Jazz's `direct_schema_view_lens` rules).
@@ -6890,12 +7044,18 @@ impl Db {
         };
         // `commit_ops` holds the upload record and the commit in one SQLite
         // transaction and rolls both back on an error.
-        if let Err(error) = self.record_upload(
-            ops.iter().map(|(_, op)| op.clone()).collect(),
-            seq,
-            kind,
-            None,
-        ) {
+        let recorded = self
+            .upload_version(ops.iter().map(|(schema, _)| schema.version))
+            .and_then(|version| {
+                self.record_upload(
+                    ops.iter().map(|(_, op)| op.clone()).collect(),
+                    seq,
+                    kind,
+                    None,
+                    version,
+                )
+            });
+        if let Err(error) = recorded {
             let mut inner = self.inner();
             inner.seq = prior;
             inner.changed.borrow_mut().truncate(mark);

@@ -11,9 +11,9 @@ are stored, a rejection's reason name changed how fates are recorded, and
 pending uploads moved from one encoded message to a row per op).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `e4fd47809b657a3f582e8044106a5cfd02fbae80ab4de24da92cd857872562c0`.
+  the SQLite file `070721865b9ae7edcbaa63be398bdc1e1fe4a38b76a5823f39703fe0b6b86121`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `a852eb2bcd97b31b6607ea8d761eb24295af9f2518a5354848f0cc1a94a26d01`.
+  `6359816fa8caa095ccb22c2b5e90dec818ee68147561cb0496c005d35143f300`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
@@ -56,3 +56,19 @@ way.
 Replacing the authority's `_jazz_text_in` side table with as-sent history
 versions, when `documents.body` became text-merging, regenerated it the same
 way.
+
+Keeping the deploy catalogue as typed rows (`_jazz_versions` numbering the
+admitted versions, `_jazz_names` keyed by that number, `_jazz_stored_columns`,
+and `_jazz_schemas`, `_jazz_lenses` and `_jazz_permissions`) regenerated it
+the same way. A development store with the earlier layout (`_jazz_names`
+keyed by version id) is refused at open with "delete the local store and
+resync".
+
+Moving a commit's bases, access proofs (formerly sources) and deltas onto its
+ops, so each pending op is stored with them and `_jazz_pending_items` keeps
+only ops and serializable reads, regenerated it the same way.
+
+Replacing a pending commit's `author` and `session` fields with one `acting`
+enum (`Own`, `Attributed`, `Session`), which changes the encoded
+`_jazz_pending` header, regenerated it the same way. A pending row in the
+earlier layout is refused as an unsupported storage format, never misread.

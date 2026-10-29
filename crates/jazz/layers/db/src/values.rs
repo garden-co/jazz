@@ -415,7 +415,7 @@ impl Column {
     }
 
     /// The type the store records for the stored column
-    /// (`_jazz_column_types`): an enum column's names are recorded as an
+    /// (`_jazz_stored_columns`): an enum column's names are recorded as an
     /// enum, so a stored column never changes between text and enum cells.
     pub(crate) fn stored_type(&self) -> ValueType {
         fn mark(ty: &ValueType) -> ValueType {
@@ -1054,6 +1054,8 @@ impl Table {
 pub struct Schema {
     pub tables: BTreeMap<String, Table>,
     pub jazz: JazzSchema,
+    /// `jazz`'s version id.
+    pub version: crate::ids::SchemaVersionId,
     /// The schema whose policies govern this one's tables, when they are
     /// another's: a sync session on an older version is checked against
     /// the current schema's policies, compiled under its names (tables
@@ -1147,6 +1149,7 @@ impl Schema {
         Self {
             tables,
             jazz: jazz.clone(),
+            version: jazz.version_id(),
             policies_from: None,
         }
     }

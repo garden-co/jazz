@@ -999,6 +999,7 @@ fn a_client_tags_its_variants_before_it_ever_syncs() {
     let dir = tempfile::tempdir().unwrap();
     let client_path = dir.path().join("client.sqlite");
     let client = open_at(v1(), 1, &client_path);
+    client.become_replica();
     insert(&client, 1, "done");
     insert(&client, 2, "todo");
     insert(&client, 3, "doing");
@@ -1017,6 +1018,8 @@ fn a_client_tags_its_variants_before_it_ever_syncs() {
     pump(&server, &[&client]);
     assert_eq!(raw_cells(&client_path), integers(&[0, 1, 2]));
     assert_eq!(statuses(&client, by_status()), declared);
+    // The writes reach the server by name.
+    assert_eq!(statuses(&server, by_status()), declared);
 }
 
 /// The raw `status` cells of stored table `table`, as `(SQLite type, cell

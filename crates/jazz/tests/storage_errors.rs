@@ -332,7 +332,9 @@ fn a_reopened_replica_resumes_its_subscription_from_its_stored_watermark() {
     block_on(client.tick()).unwrap();
     let sent: Vec<SyncMessage> = sent.borrow_mut().drain(..).collect();
     assert!(
-        !sent.iter().any(|m| matches!(m, SyncMessage::Hold { .. })),
+        !sent
+            .iter()
+            .any(|m| matches!(m, SyncMessage::ResendWhole { .. })),
         "no held rows are declared: {sent:?}"
     );
     let since = sent.iter().find_map(|m| match m {

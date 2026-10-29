@@ -21,6 +21,8 @@ mod binding_host;
 mod branch_column_evolution;
 #[path = "../branch_views.rs"]
 mod branch_views;
+#[path = "../catalogue_rows.rs"]
+mod catalogue_rows;
 #[path = "../claims_change.rs"]
 mod claims_change;
 #[path = "../column_defaults.rs"]
@@ -85,6 +87,8 @@ mod pending_commit_reopen;
 mod permission_advice;
 #[path = "../policy_activation.rs"]
 mod policy_activation;
+#[path = "../pre_sync_writes.rs"]
+mod pre_sync_writes;
 #[path = "../prepared_claim_routing.rs"]
 mod prepared_claim_routing;
 #[path = "../provenance.rs"]
@@ -135,6 +139,8 @@ mod storage_corpus;
 mod storage_errors;
 #[path = "../stored_identities.rs"]
 mod stored_identities;
+#[path = "../streaming_upload_ownership.rs"]
+mod streaming_upload_ownership;
 #[path = "../structured_result_tree.rs"]
 mod structured_result_tree;
 #[path = "../sync_access_loss.rs"]
