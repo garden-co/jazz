@@ -13,7 +13,7 @@
 //! read includes deleted rows.
 //!
 //! `$transactionId` is the `(tx, node)` the writer committed under, as
-//! `_jazz_settled` records it for an upload. The authority's own commits
+//! `_jazz_transactions` records it for an upload. The authority's own commits
 //! are not recorded there: they are `(seq, authority node)`. A replica
 //! lists only versions whose transaction it knows. `$acceptedAt` is the
 //! authority's stamp for the commit (ms, distinct per commit) as an HLC
@@ -178,8 +178,9 @@ impl Ctx<'_> {
             "EXISTS (SELECT 1 FROM {name} AS a WHERE {})",
             and(&gate)
         ));
-        let recorded = "(SELECT unhex(printf('%016x', s.tx) || hex(s.node)) \
-                        FROM _jazz_settled AS s WHERE s.seq = v._seq)";
+        let recorded = "(SELECT unhex(printf('%016x', s.tx) || hex(n.node)) \
+                        FROM _jazz_transactions AS s JOIN _jazz_nodes AS n ON n.n = s.n \
+                        WHERE s.seq = v._seq)";
         let transaction = match self.history_origin {
             Some(node) => format!(
                 "COALESCE({recorded}, unhex(printf('%016x', v._seq) || '{}'))",

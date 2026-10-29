@@ -77,6 +77,12 @@ fn undo_key(conn: &rusqlite::Connection) -> usize {
     unsafe { conn.handle() as usize }
 }
 
+/// Drop `conn`'s undo logs as it closes: a savepoint left open dies with
+/// it, and a later connection may get its handle's address.
+pub(crate) fn forget_tag_undo(conn: &rusqlite::Connection) {
+    TAG_UNDO.with(|undo| undo.borrow_mut().remove(&undo_key(conn)));
+}
+
 /// Stored enum column `tags` is about to change on `conn`: the innermost
 /// open savepoint logs how it was, once, to put back if it rolls back.
 pub(crate) fn tags_changing(conn: &rusqlite::Connection, tags: &ColumnTags) {
@@ -149,8 +155,12 @@ pub(crate) fn end_savepoint(
             Ok(())
         }
         Err(error) => {
-            // In autocommit mode SQLite already rolled everything back.
-            close_tag_undo(conn, false, conn.is_autocommit());
+            // In autocommit mode SQLite already rolled everything back;
+            // otherwise the savepoint is still open (a busy RELEASE, say),
+            // and so is its log.
+            if conn.is_autocommit() {
+                close_tag_undo(conn, false, true);
+            }
             if !keep && conn.is_autocommit() {
                 Ok(())
             } else {
