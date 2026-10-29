@@ -456,7 +456,7 @@ impl Inner {
     ) -> Result<Vec<WriteConflict>, Error> {
         let history = self.accepted_versions(table, row, key)?;
         let writers: BTreeMap<u64, ([u8; 16], u64)> = self
-            .origins(&history.iter().map(|v| v.seq).collect())?
+            .tx_ids(&history.iter().map(|v| v.seq).collect())?
             .into_iter()
             .map(|(seq, node, tx)| (seq, (node, tx)))
             .collect();
