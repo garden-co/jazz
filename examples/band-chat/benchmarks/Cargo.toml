@@ -7,6 +7,9 @@ publish = false
 [dependencies]
 jazz = { workspace = true, features = ["testing"] }
 jazz-benchmark-guard = { path = "../../../crates/benchmark-guard" }
+# The memory receipt reads SQLite's own allocation counters: the bundled
+# library allocates with the system malloc, past the Rust allocator.
+libsqlite3-sys = "0.38"
 uuid = "1.18.1"
 
 [dev-dependencies]

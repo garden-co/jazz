@@ -159,7 +159,7 @@ bandChatBenchmarks.push(
 
 const nightlySource = "examples/band-chat/benchmarks/benches/nightly.rs";
 const band =
-  "200 members, 1,000 rooms: one room with 100,000 messages and 50 members, ten rooms of 10,000 and 989 rooms of 10–200 (303,695 messages). Every tenth message in the busy rooms has 1–3 reactions; every member has a read marker per room, and the deep and busy rooms carry a read journal (one entry per ~500 messages read). The reader is a member of 100 rooms. Membership read policies throughout; settled before timing.";
+  "200 members, 1,000 rooms: one room with 100,000 messages and 50 members, ten rooms of 10,000 and 989 rooms of 10–200 (303,695 messages). Every tenth message in the busy rooms has 1–3 reactions; every member has a read marker per room, and the deep and busy rooms carry a read journal (one entry per ~500 messages read). The reader is a member of 100 rooms. Declared indexes: messages (roomId, $createdAt) and readProgress (memberId, upToAt). Membership read policies throughout; settled before timing.";
 const bandStorage = "In-memory Jazz database; in-process authority, no network";
 const bandExcludes = [
   "Schema compilation, seeding and query preparation",
@@ -213,7 +213,7 @@ bandChatBenchmarks.push(
     "band_chat_search_room[100000]",
     "BandChat · search a room",
     "A one-shot read of the newest 50 messages in the 100,000-message room that contain a word, with senders. One message in 2,000 matches.",
-    "One all_for_identity read",
+    "One all_for_identity read, its relations nested as the client does",
     "searches/s",
     "One search per iteration, returning 50 hits.",
   ),
@@ -269,7 +269,7 @@ bandChatBenchmarks.push(
     "band_chat_read_by_sheet[50]",
     "BandChat · who read this message",
     '"Read by" on a recent message in the 50-member room: each membership with the first read-journal entry that reaches the message (`upToAt >= message`, oldest first, limit 1), keeping members who read it. One read.',
-    "One all_for_identity read",
+    "One all_for_identity read, its relations nested as the client does",
     "sheets/s",
     "One sheet per iteration; 20 of 50 members have read the message.",
   ),

@@ -1,7 +1,7 @@
 //! BandChat after years of use, measured by the nightly CodSpeed run on main,
 //! not on every merge: every case runs against a band of 303,695 messages (one
-//! room of 100,000), which takes 17 s to seed and seconds per read today, so the
-//! suite does not fit the per-merge budget. Run locally with
+//! room of 100,000), which takes about 3 s to seed, and the live cases seed a
+//! fresh band per sample, so the suite spends minutes seeding. Run locally with
 //! `cargo bench -p jazz-example-band-chat-benchmark --bench nightly`.
 //!
 //! Each timed input seeds its own band, so no sample sees another's writes or caches.

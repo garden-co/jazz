@@ -10,7 +10,9 @@
 //!
 //! Bytes are counted at the global allocator, so they are exact and per
 //! operation, which process RSS cannot be: the allocator keeps freed pages, and
-//! RSS includes everything else in the process. The counting slows every
+//! RSS includes everything else in the process. SQLite allocates with the
+//! system malloc, past that allocator, so its own counters are read beside it:
+//! its live bytes and its high-water mark. The counting slows every
 //! allocation, so the times printed here are indicative only; the walltime
 //! suite is the measurement of time.
 
@@ -77,9 +79,20 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
 
+/// SQLite's live bytes, and its high-water mark (reset to the live bytes when
+/// `reset`).
+fn sqlite_bytes(reset: bool) -> (isize, isize) {
+    // SAFETY: both are thread-safe status reads of the process-wide counters.
+    unsafe {
+        let peak = libsqlite3_sys::sqlite3_memory_highwater(reset.into()) as isize;
+        (libsqlite3_sys::sqlite3_memory_used() as isize, peak)
+    }
+}
+
 /// One measured stretch: the peak is relative to the live heap at its start.
 struct Window {
     base: usize,
+    sqlite_base: isize,
     started: Instant,
 }
 
@@ -87,8 +100,10 @@ impl Window {
     fn open() -> Self {
         let base = LIVE.load(Ordering::Relaxed);
         PEAK.store(base, Ordering::Relaxed);
+        let (sqlite_base, _) = sqlite_bytes(true);
         Self {
             base,
+            sqlite_base,
             started: Instant::now(),
         }
     }
@@ -99,6 +114,14 @@ impl Window {
 
     fn held(&self) -> isize {
         LIVE.load(Ordering::Relaxed) as isize - self.base as isize
+    }
+
+    fn sqlite_peak(&self) -> isize {
+        sqlite_bytes(false).1 - self.sqlite_base
+    }
+
+    fn sqlite_held(&self) -> isize {
+        sqlite_bytes(false).0 - self.sqlite_base
     }
 }
 
@@ -114,14 +137,18 @@ fn view<T>(room: &DeepRoom, name: &str, open: impl FnOnce() -> (T, usize)) {
     let (view, rows) = open();
     let elapsed = window.started.elapsed();
     let (peak, held) = (window.peak(), window.held());
+    let (sqlite_peak, sqlite_held) = (window.sqlite_peak(), window.sqlite_held());
     drop(view);
     room.settle();
     room.settle();
     println!(
-        "| {name} | {rows} | {} | {} | {} | {} |",
+        "| {name} | {rows} | {} | {} | {} | {} | {} | {} | {} |",
         mb(peak),
         mb(held),
         mb(window.held()),
+        mb(sqlite_peak),
+        mb(sqlite_held),
+        mb(window.sqlite_held()),
         elapsed.as_millis()
     );
 }
@@ -148,17 +175,22 @@ fn main() {
     let room = DeepRoom::seeded(shape);
     println!(
         "fixture: deep room {deep}, {} messages in {} rooms; the seeded store holds {} MB \
-         (in-memory storage, so this is the database itself), peak while seeding {} MB, \
-         {} s",
+         on the Rust heap and {} MB in SQLite (in-memory database, so this is the \
+         database itself), peak while seeding {} MB and {} MB, {} s",
         shape.total_messages(),
         shape.rooms,
         mb(seeding.held()),
+        mb(seeding.sqlite_held()),
         mb(seeding.peak()),
+        mb(seeding.sqlite_peak()),
         seeding.started.elapsed().as_secs()
     );
     println!();
-    println!("| read | rows | peak MB | held open MB | after close MB | ms (indicative) |");
-    println!("|---|---|---|---|---|---|");
+    println!(
+        "| read | rows | peak MB | held open MB | after close MB | SQLite peak MB \
+         | SQLite held open MB | SQLite after close MB | ms (indicative) |"
+    );
+    println!("|---|---|---|---|---|---|---|---|---|");
     view(&room, "open the room (newest page)", || {
         room.open_newest_page()
     });

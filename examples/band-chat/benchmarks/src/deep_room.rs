@@ -22,23 +22,20 @@ use std::time::Instant;
 
 use jazz::account_registry::AccountId;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, InsertOptions, LocalUpdates, MergeableTxOps, PreparedQuery,
-    Propagation, ReadOpts, SubscriptionEvent, SubscriptionStream, UpdateOptions, WriteIdentity,
-    block_on,
+    CurrentRow, Db, DbConfig, DbIdentity, InsertOptions, PreparedQuery, ReadOpts, ReadTier,
+    SubscriptionEvent, SubscriptionStream, UpdateOptions, WriteIdentity, block_on,
 };
-use jazz::groove::records::Value;
-use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{
     ArraySubquery, ArraySubqueryRequirement, OrderDirection, Query, col, contains, eq, gt, gte,
     lit, lt, lte, ne,
 };
+use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::policy_expr::{
     all_of, allowed_to_read, allowed_to_read_referencing, any_of, exists, session, table,
 };
 use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
-use jazz::tx::DurabilityTier;
 
 /// Profiles in the band. The reader is user 0.
 pub const USERS: usize = 200;
@@ -363,6 +360,8 @@ fn schema() -> JazzSchema {
                 .fk_column("memberId", "roomMembers")
                 .column("reader", ColumnType::Uuid)
                 .column("upToAt", ColumnType::Timestamp)
+                // "Read by": a member's first entry at or after a message.
+                .composite_index(["memberId", "upToAt"])
                 .policies(
                     TablePolicies::new()
                         .with_select(is_member_of("roomId"))
@@ -381,6 +380,8 @@ fn schema() -> JazzSchema {
                 .fk_column("roomId", "rooms")
                 .fk_column("senderId", "profiles")
                 .column("text", ColumnType::Text)
+                // A room's pages, newest first.
+                .composite_index(["roomId", "$createdAt"])
                 .policies(
                     TablePolicies::new()
                         .with_select(is_member_of("roomId"))
@@ -400,12 +401,8 @@ fn schema() -> JazzSchema {
 }
 
 fn open_db() -> Db {
-    let schema = schema();
-    let families = schema.column_families();
-    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(DbConfig::new(
-        schema,
-        MemoryStorage::new(&family_refs).expect("valid memory storage families"),
+        schema(),
         DbIdentity {
             node: NodeUuid::from_bytes([0xd0; 16]),
             author: AuthorSubject::SYSTEM,
@@ -465,7 +462,7 @@ enum Seed {
 }
 
 fn commit_batch(db: &Db, batch: &[Seed], shape: &Shape) {
-    let ((), tx_id) = block_on(db.transaction(async |tx| {
+    block_on(db.transaction(async |tx| {
         for seed in batch {
             match *seed {
                 Seed::Message { room, k, sender } => {
@@ -501,14 +498,12 @@ fn commit_batch(db: &Db, batch: &[Seed], shape: &Shape) {
         Ok(())
     }))
     .expect("seed BandChat history");
-    db.finalize_local_mergeable_commit_for_test(tx_id)
-        .expect("settle seeded history");
 }
 
 /// Seed profiles, rooms, memberships, history, reactions, markers and the
 /// read journal. Writes run as the database identity and are settled.
 fn seed(db: &Db, shape: &Shape) {
-    let ((), tx_id) = block_on(db.transaction(async |tx| {
+    block_on(db.transaction(async |tx| {
         for user in 0..USERS {
             tx.insert(
                 "profiles",
@@ -543,8 +538,6 @@ fn seed(db: &Db, shape: &Shape) {
         Ok(())
     }))
     .expect("seed BandChat profiles, rooms and memberships");
-    db.finalize_local_mergeable_commit_for_test(tx_id)
-        .expect("settle profiles, rooms and memberships");
 
     let mut batch = Vec::with_capacity(SEED_BATCH);
     for room in 0..shape.rooms {
@@ -569,7 +562,7 @@ fn seed(db: &Db, shape: &Shape) {
         commit_batch(db, &batch, shape);
     }
 
-    let ((), tx_id) = block_on(db.transaction(async |tx| {
+    block_on(db.transaction(async |tx| {
         for room in 0..shape.rooms {
             for (slot, &member) in shape.members(room).iter().enumerate() {
                 let up_to = shape.read_up_to(room, slot);
@@ -608,18 +601,10 @@ fn seed(db: &Db, shape: &Shape) {
         Ok(())
     }))
     .expect("seed BandChat markers and read journal");
-    db.finalize_local_mergeable_commit_for_test(tx_id)
-        .expect("settle markers and read journal");
 }
 
 fn local_opts() -> ReadOpts {
-    ReadOpts {
-        tier: DurabilityTier::Local,
-        local_updates: LocalUpdates::Immediate,
-        propagation: Propagation::LocalOnly,
-        include_deleted: false,
-        ..ReadOpts::default()
-    }
+    ReadOpts::for_read_tier(ReadTier::LocalOnly)
 }
 
 /// Drive the in-process runtime until the stream publishes.
@@ -637,21 +622,16 @@ fn next_event(db: &Db, stream: &mut SubscriptionStream) -> SubscriptionEvent {
     }
 }
 
-/// Rows a delta adds, changes, and removes. Structural edits inside rows
-/// already shown count as changes (for example, an included array gaining a child).
+/// Rows a delta adds, changes, and removes. An included array gaining a
+/// child arrives as its parent row updated.
 fn changed_rows(event: &SubscriptionEvent) -> (usize, usize, usize) {
     match event {
         SubscriptionEvent::Delta {
             added,
             updated,
             removed,
-            terminal_operations,
             ..
-        } => (
-            added.len(),
-            updated.len() + terminal_operations.len(),
-            removed.len(),
-        ),
+        } => (added.len(), updated.len(), removed.len()),
         other => panic!("BandChat subscription ended: {other:?}"),
     }
 }
@@ -809,9 +789,17 @@ impl DeepRoom {
     }
 
     fn read_once(&self, query: &PreparedQuery, author: AuthorSubject) -> usize {
-        block_on(self.db.all_for_identity(query, local_opts(), author))
-            .expect("BandChat one-shot read")
-            .len()
+        self.read_rows(query, author).len()
+    }
+
+    /// A one-shot read as the client makes it: the visible roots, then their
+    /// array relations nested in their cells.
+    fn read_rows(&self, query: &PreparedQuery, author: AuthorSubject) -> Vec<CurrentRow> {
+        let roots = block_on(self.db.all_for_identity(query, local_opts(), author))
+            .expect("BandChat one-shot read");
+        self.db
+            .nest_relations(query, roots)
+            .expect("nest BandChat relations")
     }
 
     /// A member opens the deep room: the newest page with senders and
@@ -867,22 +855,16 @@ impl DeepRoom {
     /// Untimed oracle: the room list's rows as the reader sees them, with
     /// the number of newest messages and markers each room carries.
     pub fn inbox_rows(&self) -> Vec<(usize, usize)> {
-        block_on(
-            self.db
-                .all_for_identity(&self.inbox, local_opts(), reader()),
-        )
-        .expect("read the room list")
-        .iter()
-        .map(|room| {
-            let (descriptor, raw) = room.encoded_record();
-            let record = descriptor.bind(raw);
-            let len = |field: &str| match record.get(field) {
-                Ok(Value::Array(rows)) => rows.len(),
-                other => panic!("expected {field} array, got {other:?}"),
-            };
-            (len("messagesViaRoom"), len("readMarkersViaRoom"))
-        })
-        .collect()
+        self.read_rows(&self.inbox, reader())
+            .iter()
+            .map(|room| {
+                let len = |field: &str| match room.cell(field) {
+                    Some(Value::Array(rows)) => rows.len(),
+                    other => panic!("expected {field} array, got {other:?}"),
+                };
+                (len("messagesViaRoom"), len("readMarkersViaRoom"))
+            })
+            .collect()
     }
 
     /// A member of the deep room sends a message as themselves; the
@@ -891,7 +873,7 @@ impl DeepRoom {
         let k = self.next_send;
         self.next_send += 1;
         let id = message_row(room, k);
-        let write = block_on(self.db.insert(
+        block_on(self.db.insert(
             "messages",
             cells([
                 ("roomId", uuid(room_row(room))),
@@ -907,16 +889,13 @@ impl DeepRoom {
             },
         ))
         .expect("member sends a message");
-        self.db
-            .finalize_local_mergeable_commit_for_test(write.mergeable_tx_id())
-            .expect("authority accepts the member's message");
         id
     }
 
     /// A member moves their marker to the newest message: the marker update
     /// and its journal row commit as one transaction.
     fn member_reads_to(&self, slot: usize, member: usize, at: u64, journal_entry: usize) {
-        let ((), tx_id) = block_on(self.db.transaction_for_identity(user(member), async |tx| {
+        block_on(self.db.transaction_for_identity(user(member), async |tx| {
             tx.update(
                 "readMarkers",
                 marker_row(DEEP_ROOM, slot),
@@ -944,9 +923,6 @@ impl DeepRoom {
             Ok(())
         }))
         .expect("member moves their marker");
-        self.db
-            .finalize_local_mergeable_commit_for_test(tx_id)
-            .expect("authority accepts the marker move");
     }
 }
 

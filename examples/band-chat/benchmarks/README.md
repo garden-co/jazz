@@ -74,9 +74,16 @@ Every page and count here is bounded (50, 25 + 25, limit 1, cap 100), so none
 of them should cost the room's or the table's size.
 
 These cases are the `nightly` bench target, measured by the nightly CodSpeed
-run on main rather than on every merge: each case seeds the band (17 s on an
-M-series laptop) and the reads take seconds today. Run them locally with
-`cargo bench -p jazz-example-band-chat-benchmark --bench nightly`.
+run on main rather than on every merge: each case seeds the band (about 3 s on
+an M-series laptop), and the live cases seed a fresh band for every sample, so
+a local run takes about 4 minutes, nearly all of it seeding. Run them locally
+with `cargo bench -p jazz-example-band-chat-benchmark --bench nightly`.
+
+The schema declares the two indexes these reads need, as an app developer
+would: `messages (roomId, $createdAt)` serves every page, the count and each
+room's newest message, and `readProgress (memberId, upToAt)` serves "Read by".
+Without them the pages sort the whole room (tens of milliseconds at 100,000),
+and a live update, which re-runs its query, costs as much.
 `tests/deep_room.rs` checks every case's result on a miniature of the same
 shape.
 
@@ -84,30 +91,31 @@ shape.
 
 `band-chat-memory-receipt` counts heap bytes at the global allocator while
 each read runs: the peak, what the open view holds, and what is left once the
-view is dropped and the engine has finalized it. Process RSS cannot answer
-this per read, because the allocator keeps freed pages.
+view is dropped and the engine has finalized it. SQLite allocates with the
+system malloc, past that allocator, so the receipt reads SQLite's own counters
+beside it. Process RSS cannot answer this per read, because the allocator
+keeps freed pages.
 
 ```sh
 cargo run --release -p jazz-example-band-chat-benchmark --bin band-chat-memory-receipt -- 100000
 ```
 
-At 100,000 messages the seeded store itself holds 1,253 MB (in-memory
-storage, so that is the whole database):
+At 100,000 messages the seeded database holds 117 MB in SQLite (in-memory, so
+that is the whole database) and 0.5 MB on the Rust heap. Every read, the Rust
+heap and SQLite together:
 
 | Read                | Rows | Peak MB | Held open MB | After close MB |
 | ------------------- | ---- | ------- | ------------ | -------------- |
-| Open the room       | 50   | 3,715   | 1,768        | 7              |
-| Scroll back         | 50   | 3,600   | 1,663        | 3              |
-| Jump to a message   | 50   | 5,145   | 1,783        | 5              |
-| Search the room     | 50   | 1,732   | 1            | 1              |
-| Unread count        | 5    | 3,235   | 1,309        | 1,309          |
-| Room list           | 100  | 5,004   | 2,377        | 1,736          |
-| Read by             | 20   | 1,280   | 2            | 2              |
-| Open the room again | 50   | 3,707   | 822          | 4              |
+| Open the room       | 50   | 0.1     | 0.1          | < 0.1          |
+| Scroll back         | 50   | 0.1     | 0.1          | < 0.1          |
+| Jump to a message   | 50   | 0.1     | 0.1          | < 0.1          |
+| Search the room     | 50   | < 0.1   | < 0.1        | < 0.1          |
+| Unread count        | 5    | < 0.1   | < 0.1        | < 0.1          |
+| Room list           | 100  | 0.1     | 0.1          | < 0.1          |
+| Read by             | 20   | < 0.1   | < 0.1        | < 0.1          |
+| Open the room again | 50   | 0.1     | 0.1          | < 0.1          |
 
-A 50-message page needs about three times the database while it opens and
-keeps more than the database while it stays open. The unread count and the
-room list keep most of what they held after they close.
+The whole receipt, seeding included, peaks at 127 MB of process footprint.
 
 ## Timeline, unread rooms and resume
 
