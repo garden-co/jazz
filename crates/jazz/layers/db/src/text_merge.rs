@@ -6,9 +6,9 @@
 //! last to author the column, it merges the base's value, the value it
 //! holds and the write's value: each side's changes are diffed against the
 //! base and both applied. For a write its merge changed, the authority
-//! keeps the edits back to its value as sent (`_jazz_text_in`, see
-//! [`encode_in`]), so a later write built on it merges over what its writer
-//! saw.
+//! also keeps the write as sent, a history version flagged
+//! [`crate::values::STATE_AS_SENT`] that no read lists, so a later write
+//! its writer chained on it merges over what its writer saw.
 //!
 //! Values are cut into tokens first (words, single whitespace and
 //! other characters; for markdown also delimiter runs and link destinations, for
@@ -23,7 +23,6 @@
 //! - otherwise (two replacements of overlapping spans) the incoming write,
 //!   which the authority sequences later, wins that span.
 
-use crate::options::{Error, ErrorCode};
 use crate::schema::TextFormat;
 use std::collections::HashMap;
 
@@ -32,161 +31,6 @@ use std::collections::HashMap;
 /// a fine-grained (if not minimal) one, and a heavily edited value costs
 /// time in proportion to its size times this bound, not its size squared.
 const MAX_EDIT_DISTANCE: usize = 256;
-
-fn malformed(message: impl std::fmt::Display) -> Error {
-    Error::new(
-        ErrorCode::Storage,
-        format!("malformed text edit: {message}"),
-    )
-}
-
-/// One replacement of `value[start..end]` (byte offsets) by `insert`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Edit {
-    pub start: usize,
-    pub end: usize,
-    pub insert: String,
-}
-
-/// The edits that turn `from` into `to`, token by token past their common
-/// prefix and suffix (none when they are equal), so a value changed in a few
-/// places keeps only those places.
-pub(crate) fn edits(format: TextFormat, from: &str, to: &str) -> Vec<Edit> {
-    if from == to {
-        return Vec::new();
-    }
-    let mut prefix = from
-        .bytes()
-        .zip(to.bytes())
-        .take_while(|(a, b)| a == b)
-        .count();
-    while !from.is_char_boundary(prefix) || !to.is_char_boundary(prefix) {
-        prefix -= 1;
-    }
-    let room = from.len().min(to.len()) - prefix;
-    let mut suffix = from
-        .bytes()
-        .rev()
-        .zip(to.bytes().rev())
-        .take(room)
-        .take_while(|(a, b)| a == b)
-        .count();
-    while !from.is_char_boundary(from.len() - suffix) || !to.is_char_boundary(to.len() - suffix) {
-        suffix -= 1;
-    }
-    let (old, new) = (
-        &from[prefix..from.len() - suffix],
-        &to[prefix..to.len() - suffix],
-    );
-    let (old_tokens, new_tokens) = (tokenize(format, old), tokenize(format, new));
-    let offsets = |tokens: &[&str]| {
-        let mut at = 0;
-        let mut offsets = Vec::with_capacity(tokens.len() + 1);
-        offsets.push(0);
-        for token in tokens {
-            at += token.len();
-            offsets.push(at);
-        }
-        offsets
-    };
-    let (old_at, new_at) = (offsets(&old_tokens), offsets(&new_tokens));
-    let Ok(hunks) = diff(&old_tokens, &new_tokens, &mut Work::new(MERGE_WORK_BUDGET)) else {
-        // Past the budget: the one edit over the whole differing middle.
-        return vec![Edit {
-            start: prefix,
-            end: from.len() - suffix,
-            insert: new.to_owned(),
-        }];
-    };
-    hunks
-        .into_iter()
-        .map(|hunk| Edit {
-            start: prefix + old_at[hunk.old.0],
-            end: prefix + old_at[hunk.old.1],
-            insert: new[new_at[hunk.new.0]..new_at[hunk.new.1]].to_owned(),
-        })
-        .collect()
-}
-
-/// `value` with `edits` (ordered, disjoint, at char boundaries) applied.
-pub(crate) fn apply(value: &str, edits: &[Edit]) -> Result<String, Error> {
-    let mut out = String::with_capacity(value.len());
-    let mut at = 0;
-    for edit in edits {
-        if edit.start < at || edit.end < edit.start || edit.end > value.len() {
-            return Err(malformed("edits out of order or out of range"));
-        }
-        if !value.is_char_boundary(edit.start) || !value.is_char_boundary(edit.end) {
-            return Err(malformed("an edit splits a character"));
-        }
-        out.push_str(&value[at..edit.start]);
-        out.push_str(&edit.insert);
-        at = edit.end;
-    }
-    out.push_str(&value[at..]);
-    Ok(out)
-}
-
-/// A version's `_jazz_text_in` entry: per stored column its merge changed,
-/// the edits from the merged value back to the write's value as sent.
-pub(crate) fn encode_in(entries: &[(String, Vec<Edit>)]) -> Vec<u8> {
-    fn put(out: &mut Vec<u8>, n: usize) {
-        out.extend_from_slice(&(n as u64).to_le_bytes());
-    }
-    let mut out = Vec::new();
-    put(&mut out, entries.len());
-    for (column, edits) in entries {
-        put(&mut out, column.len());
-        out.extend_from_slice(column.as_bytes());
-        put(&mut out, edits.len());
-        for edit in edits {
-            put(&mut out, edit.start);
-            put(&mut out, edit.end);
-            put(&mut out, edit.insert.len());
-            out.extend_from_slice(edit.insert.as_bytes());
-        }
-    }
-    out
-}
-
-/// The entries [`encode_in`] wrote.
-pub(crate) fn decode_in(mut bytes: &[u8]) -> Result<Vec<(String, Vec<Edit>)>, Error> {
-    fn take<'a>(bytes: &mut &'a [u8], n: usize) -> Result<&'a [u8], Error> {
-        if bytes.len() < n {
-            return Err(malformed("truncated"));
-        }
-        let (head, rest) = bytes.split_at(n);
-        *bytes = rest;
-        Ok(head)
-    }
-    fn number(bytes: &mut &[u8]) -> Result<usize, Error> {
-        let raw: [u8; 8] = take(bytes, 8)?.try_into().expect("eight bytes");
-        usize::try_from(u64::from_le_bytes(raw)).map_err(|_| malformed("offset too large"))
-    }
-    fn text(bytes: &mut &[u8]) -> Result<String, Error> {
-        let n = number(bytes)?;
-        String::from_utf8(take(bytes, n)?.to_vec()).map_err(|_| malformed("not UTF-8"))
-    }
-    let mut entries = Vec::new();
-    for _ in 0..number(&mut bytes)? {
-        let column = text(&mut bytes)?;
-        let mut edits = Vec::new();
-        for _ in 0..number(&mut bytes)? {
-            let start = number(&mut bytes)?;
-            let end = number(&mut bytes)?;
-            edits.push(Edit {
-                start,
-                end,
-                insert: text(&mut bytes)?,
-            });
-        }
-        entries.push((column, edits));
-    }
-    if !bytes.is_empty() {
-        return Err(malformed("trailing bytes"));
-    }
-    Ok(entries)
-}
 
 /// The merge of `held` and `incoming`, both made from `base`, within
 /// [`MERGE_WORK_BUDGET`].
@@ -805,23 +649,6 @@ mod tests {
     }
 
     #[test]
-    fn edits_round_trip() {
-        let cases = [
-            ("", "hello"),
-            ("hello", ""),
-            ("hello world", "hello brave new world"),
-            ("ünïcødé text", "ünïcødé tëxt!"),
-            ("a\nb\nc", "a\nB\nc\nd"),
-        ];
-        for (from, to) in cases {
-            let edits = edits(TextFormat::Plain, from, to);
-            assert_eq!(apply(from, &edits).unwrap(), to, "{from:?} -> {to:?}");
-            let entries = vec![("body".to_owned(), edits.clone())];
-            assert_eq!(decode_in(&encode_in(&entries)).unwrap(), entries);
-        }
-    }
-
-    #[test]
     fn markdown_delimiters_stay_whole() {
         let tokens = tokenize(TextFormat::Markdown, "**bold** and [a link](http://x.y/z)");
         assert!(tokens.contains(&"**"));
@@ -968,15 +795,6 @@ mod tests {
     }
 
     #[test]
-    fn stored_edits_keep_only_the_changed_places() {
-        let from = format!("start {} end", "middle ".repeat(10_000));
-        let to = format!("begin {} finish", "middle ".repeat(10_000));
-        let edits = edits(TextFormat::Plain, &from, &to);
-        assert_eq!(apply(&from, &edits).unwrap(), to);
-        assert!(edits.iter().map(|e| e.insert.len()).sum::<usize>() < 20);
-    }
-
-    #[test]
     fn heavily_edited_values_lose_no_edits() {
         // Distinct words, so every edit lands in a token of its own.
         let words: Vec<String> = (0..60_000).map(|i| format!("w{i}")).collect();
@@ -1066,7 +884,7 @@ mod tests {
     }
 
     #[test]
-    fn random_concurrent_inserts_all_survive_and_diffs_round_trip() {
+    fn random_concurrent_inserts_all_survive() {
         let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
         let mut checked = 0;
         for _ in 0..2000 {
@@ -1075,10 +893,6 @@ mod tests {
             let (held_deletes, incoming_deletes) = (rng.below(2) == 0, rng.below(2) == 0);
             let (held, held_inserts) = random_edit(&mut rng, &base, 'H', held_deletes);
             let (incoming, incoming_inserts) = random_edit(&mut rng, &base, 'I', incoming_deletes);
-            for (from, to) in [(&base, &held), (&base, &incoming), (&held, &incoming)] {
-                let edits = edits(TextFormat::Plain, from, to);
-                assert_eq!(&apply(from, &edits).unwrap(), to);
-            }
             let merged = merge(&base, &held, &incoming);
             // Deterministic, and merging a side with itself changes nothing.
             assert_eq!(merged, merge(&base, &held, &incoming));

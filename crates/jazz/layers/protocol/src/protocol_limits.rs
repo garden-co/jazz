@@ -28,6 +28,11 @@ pub const MAX_WIRE_BATCH_FRAMES: usize = MAX_COMMIT_UNIT_VERSIONS;
 /// span many physical frames. Deployments may make it configurable later.
 pub const MAX_LOGICAL_MESSAGE_BYTES: usize = 256 * 1024 * 1024;
 
+/// The largest message an untrusted session may send: a server joins its
+/// split messages only up to its connection's queue budget, and its
+/// client refuses a larger commit before sending it.
+pub const MAX_UNTRUSTED_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
+
 /// Resource ceiling for one encoded logical-message payload.
 ///
 /// The installed LZ4 encoder's worst-case bound is `floor(1.1 * D) + 20`

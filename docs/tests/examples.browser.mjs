@@ -71,8 +71,8 @@ try {
     releases: [],
     benchmarks: [
       {
-        id: "text-editor-open",
-        name: "text_editor_open_browser[100000]",
+        id: "band-book-reload",
+        name: "band_book_reload_browser",
         points: [point("main", 3, 1.5)],
       },
       {
@@ -122,12 +122,13 @@ try {
   assert.match(await card.innerText(), /−50%/);
 
   // Browser wall time must not inherit the native CPU /5 estimate.
-  const textEditor = page.locator("#text-editor");
-  const browserCard = textEditor.locator(".metric-card").first();
-  assert.equal(await browserCard.locator(".metric-headline").innerText(), formatTime(1.5));
-  assert.match(await browserCard.innerText(), /Measured browser wall time/);
-  await browserCard.hover();
-  const browserHistory = page.getByRole("dialog", { name: "History of Open 100,000 edits" });
+  const browserRow = page
+    .locator("#band-book .benchmark-median")
+    .filter({ hasText: formatTime(1.5) })
+    .first();
+  await browserRow.waitFor();
+  await browserRow.hover();
+  const browserHistory = page.getByRole("dialog", { name: "History of band_book_reload_browser" });
   await browserHistory.waitFor({ state: "visible" });
   assert.match(await browserHistory.innerText(), /no native CPU conversion/);
   assert.ok((await browserHistory.innerText()).includes(formatTime(1.5)));

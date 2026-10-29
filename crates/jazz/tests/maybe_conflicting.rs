@@ -21,7 +21,7 @@ use duplex_transport::duplex;
 use jazz::db::{
     BuiltOn, Db, DbConfig, DbIdentity, ExactWriteTarget, FileOptions, InsertOptions, LOCAL_BASE,
     ReadOpts, Reason, RemoteLinkHint, SubscriptionStream, SyncMessage, UpdateOptions, Upstream,
-    WireBase, WireKind, WireOp, WireTarget, WriteConflict, WriteTarget, block_on,
+    WireBase, WireKind, WireOp, WireTarget, WireWrite, WriteConflict, WriteTarget, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::BranchSelector;
@@ -735,23 +735,23 @@ fn a_relays_commit_a_write_was_built_on_is_what_its_writer_saw() {
         node: relay_node,
         tx,
         kind: WireKind::Mergeable,
-        ops: vec![WireOp::Update {
-            table: "todos".to_owned(),
-            row: target,
-            cells: cells(&[("title", title)]),
-            target: WireTarget::Root,
-            at: None,
+        ops: vec![WireOp {
+            bases: vec![WireBase {
+                key: Vec::new(),
+                on,
+            }],
+            ..WireWrite::Update {
+                table: "todos".to_owned(),
+                row: target,
+                cells: cells(&[("title", title)]),
+                target: WireTarget::Root,
+                at: None,
+            }
+            .into()
         }],
         author: None,
         session: None,
         expect: Vec::new(),
-        deltas: Vec::new(),
-        sources: Vec::new(),
-        bases: vec![WireBase {
-            op: 0,
-            key: Vec::new(),
-            on,
-        }],
         origin: Some(([0xa1; 16], LOCAL_BASE + tx)),
     };
     let tx = |n: u64| LOCAL_BASE + n;
@@ -1243,7 +1243,7 @@ fn behind_two_relays_a_write_over_the_upper_relays_version_is_kept_conservativel
 
 #[test]
 fn an_app_column_cannot_take_a_stored_row_columns_name() {
-    for column in ["_base", "_cols", "_del", "_b"] {
+    for column in ["_base", "_cols", "_st", "_b"] {
         let source = SchemaBuilder::new()
             .table(TableSchemaBuilder::new("todos").column(column, ColumnType::Text))
             .build();

@@ -12,13 +12,10 @@
 //! `typeof(cell) = 'integer'` is the chunked arm, so the schema, the
 //! refcount triggers and every compiled query use only SQL built-ins and
 //! run on any SQLite (vanilla builds such as Cloudflare D1 or Durable
-//! Objects included): no collation, no functions. A large-capable column
-//! that an index names also has a key column ([`key_column`]) holding a
-//! chunked value's sort prefix, so indexes, orderings and ranges read
-//! [`key_sql`]. The questions the key cannot answer (values sharing it,
-//! orderings of unindexed columns, `contains`, literals over the inline
-//! threshold) are answered in Rust before the statement runs and handed to
-//! it through `_jazz_lv_scratch`. Epochs and chunks live in the same
+//! Objects included): no collation, no functions. Queries never read a
+//! chunked value's bytes: such a cell equals only itself, takes part in no
+//! range or `contains`, and sorts before every inline value (SPEC 19.5).
+//! Epochs and chunks live in the same
 //! database, so a row, its epoch and the chunks they reference commit in
 //! one transaction; reference counts are kept by triggers on every table
 //! that has a large-capable column. With a chunk store
@@ -26,7 +23,6 @@
 //! file on tick; their metadata stays.
 
 use crate::values::CachedRow;
-use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 
@@ -55,17 +51,12 @@ pub fn full_materializations_for_test() -> usize {
     FULL_MATERIALIZATIONS.with(std::cell::Cell::get)
 }
 
-/// Logical bytes a chunked value's sort key holds (fewer for text, which
-/// is cut on a code-point boundary). Ranges against literals up to
-/// [`EXACT_RANGE_BYTES`] are answered by the key alone.
-pub(crate) const PREFIX_BYTES: usize = 256;
-pub(crate) const EXACT_RANGE_BYTES: usize = PREFIX_BYTES - 3;
 /// Cells of one epoch: a chunked cell is `epoch * SPAN + n`.
 const SPAN: i64 = epoch::EPOCH_CELL_SPAN;
 /// Unpinned epochs a file store keeps cached.
 const CACHE_EPOCHS: usize = 4096;
 
-/// Logical bytes read per step when two values are compared or scanned.
+/// Logical bytes read per step when a value is walked window by window.
 const WINDOW: u64 = 64 * 1024;
 /// Verified chunk bytes a file store keeps cached, beyond those pinned by
 /// the open transaction.
@@ -120,8 +111,6 @@ CREATE INDEX IF NOT EXISTS _jazz_lv_upload_node_hash ON _jazz_lv_upload_node (ha
 CREATE TABLE IF NOT EXISTS _jazz_lv_reclaim (root BLOB PRIMARY KEY) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS _jazz_lv_via (root BLOB PRIMARY KEY, tbl TEXT NOT NULL, \
  id BLOB NOT NULL, key BLOB NOT NULL, seq INTEGER NOT NULL) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS _jazz_lv_scratch (slot INTEGER NOT NULL, cell INTEGER NOT NULL, \
- v BLOB, k, PRIMARY KEY (slot, cell)) WITHOUT ROWID;
 CREATE TRIGGER IF NOT EXISTS _jazz_lv_root_unreferenced AFTER UPDATE OF refs ON _jazz_lv_root \
  WHEN NEW.refs = 0 BEGIN \
  INSERT INTO _jazz_lv_reclaim (root) SELECT NEW.root \
@@ -285,9 +274,10 @@ pub(crate) fn kind(column: &Column) -> LargeValueKind {
 }
 
 /// The triggers that count every chunked cell of `table`'s large-capable
-/// columns, in the current and history tables, against its epoch, and a
-/// partial index per column of the rows holding one. Plain SQL: a chunked
-/// cell is an integer naming its epoch.
+/// columns, in the current and history tables, against its epoch. Plain
+/// SQL: a chunked cell is an integer naming its epoch. They are also how a
+/// reopened store knows which stored columns are large-capable
+/// ([`stored_large_columns`]).
 ///
 /// One trigger per event and table covers every column: each schema
 /// object costs SQLite a scan of `sqlite_schema` when it is created, so a
@@ -326,14 +316,6 @@ pub(crate) fn triggers(table: &Table, columns: &[&Column], set: Option<&str>) ->
             None => quote(&format!("{target}__lv_{what}")),
             Some(set) => quote(&format!("{target}__lv_{what}_{set}")),
         };
-        for (column, name) in columns.iter().zip(&names) {
-            // Only chunked rows: what a prep scans, near-empty otherwise.
-            sql.push_str(&format!(
-                "CREATE INDEX IF NOT EXISTS {} ON {on} (id) WHERE {};\n",
-                quote(&format!("{target}__lv_{}", column.stored)),
-                chunked_sql(name)
-            ));
-        }
         let each = |statement: &dyn Fn(&str) -> String| -> String {
             names
                 .iter()
@@ -373,6 +355,79 @@ pub(crate) fn triggers(table: &Table, columns: &[&Column], set: Option<&str>) ->
     sql
 }
 
+/// The stored columns of `table` that the refcount triggers of
+/// [`triggers`] watch: its large-capable columns, under every schema
+/// version the store has held. Read from the `AFTER UPDATE OF` column
+/// list of each `__lv_upd` trigger.
+pub(crate) fn stored_large_columns(
+    conn: &Connection,
+    table: &str,
+) -> Result<BTreeSet<String>, Error> {
+    let prefix = format!("{table}__lv_upd");
+    let sqls: Vec<(String, String)> = conn
+        .prepare("SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ?1")
+        .and_then(|mut statement| {
+            statement
+                .query_map([table], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<_, _>>()
+        })
+        .map_err(storage)?;
+    let mut columns = BTreeSet::new();
+    for (name, sql) in sqls {
+        if !name.starts_with(&prefix) {
+            continue;
+        }
+        let watched = update_of_columns(&sql).ok_or_else(|| {
+            Error::new(
+                ErrorCode::Storage,
+                format!("large value: unreadable refcount trigger {name}"),
+            )
+        })?;
+        columns.extend(watched);
+    }
+    Ok(columns)
+}
+
+/// The column list of a trigger [`triggers`] wrote:
+/// `CREATE TRIGGER [IF NOT EXISTS] "name" AFTER UPDATE OF "a", "b" ON ...`.
+/// The quoted name is skipped as a whole, so no name can fake the list.
+fn update_of_columns(sql: &str) -> Option<Vec<String>> {
+    let rest = sql
+        .trim_start()
+        .strip_prefix("CREATE TRIGGER ")?
+        .trim_start();
+    let rest = rest.strip_prefix("IF NOT EXISTS ").unwrap_or(rest);
+    let (_name, rest) = quoted(rest)?;
+    let mut rest = rest.trim_start().strip_prefix("AFTER UPDATE OF ")?;
+    let mut columns = Vec::new();
+    loop {
+        let (column, after) = quoted(rest)?;
+        columns.push(column);
+        match after.trim_start().strip_prefix(',') {
+            Some(more) => rest = more,
+            None => return Some(columns),
+        }
+    }
+}
+
+/// A leading `"..."` identifier (doubled quotes escaped) and what follows.
+fn quoted(sql: &str) -> Option<(String, &str)> {
+    let mut rest = sql.trim_start().strip_prefix('"')?;
+    let mut name = String::new();
+    loop {
+        let end = rest.find('"')?;
+        name.push_str(&rest[..end]);
+        rest = &rest[end + 1..];
+        match rest.strip_prefix('"') {
+            Some(escaped) => {
+                name.push('"');
+                rest = escaped;
+            }
+            None => return Some((name, rest)),
+        }
+    }
+}
+
 /// SQL: whether the cell `cell` is chunked.
 pub(crate) fn chunked_sql(cell: &str) -> String {
     format!("(typeof({cell}) = 'integer')")
@@ -381,42 +436,6 @@ pub(crate) fn chunked_sql(cell: &str) -> String {
 /// SQL: a chunked cell's epoch; NULL for any other cell.
 pub(crate) fn epoch_sql(cell: &str) -> String {
     format!("(CASE WHEN {} THEN {cell} / {SPAN} END)", chunked_sql(cell))
-}
-
-/// The stored name of the key column of the stored column `stored`. `$`
-/// names are the engine's: no application column has one.
-pub(crate) fn key_column(stored: &str) -> String {
-    format!("$k:{stored}")
-}
-
-/// The stored column a key column keys.
-pub(crate) fn keyed_by(key: &str) -> Option<&str> {
-    key.strip_prefix("$k:")
-}
-
-/// SQL: the sort key of a large-capable cell with a key column, the
-/// expression its indexes, orderings and ranges use. An inline cell is its
-/// own key; a chunked cell's key is its sort prefix, which is a prefix of
-/// its logical value in the same storage class, so keys order as the values
-/// do except between values that share the whole prefix.
-pub(crate) fn key_sql(cell: &str, key: &str) -> String {
-    format!("COALESCE({key}, {cell})")
-}
-
-/// The sort prefix of a value of `kind` whose logical bytes start with
-/// `head` (at least [`PREFIX_BYTES`] of them, or all), as an inline cell.
-pub(crate) fn sort_prefix(kind: LargeValueKind, head: &[u8]) -> Sql {
-    let mut end = head.len().min(PREFIX_BYTES);
-    match kind {
-        LargeValueKind::Bytes => Sql::Blob(head[..end].to_vec()),
-        LargeValueKind::String | LargeValueKind::Json => {
-            // Text is valid UTF-8: back up to a code-point boundary.
-            while end < head.len() && end > 0 && (head[end] & 0xC0) == 0x80 {
-                end -= 1;
-            }
-            Sql::Text(head[..end].to_vec())
-        }
-    }
 }
 
 /// An inline cell of `kind`.
@@ -443,14 +462,6 @@ pub(crate) enum Logical<'a> {
 }
 
 impl Logical<'_> {
-    /// An inline value's bytes; empty for a chunked one.
-    fn bytes(&self) -> &[u8] {
-        match self {
-            Logical::Inline(bytes) => bytes,
-            Logical::Chunked(_) => &[],
-        }
-    }
-
     pub(crate) fn len(&self) -> u64 {
         match self {
             Logical::Inline(bytes) => bytes.len() as u64,
@@ -1048,16 +1059,6 @@ impl Chunks {
         }
     }
 
-    /// Logical bytes `range` of a value.
-    fn range(&self, value: &Logical<'_>, range: std::ops::Range<u64>) -> Result<Vec<u8>, Error> {
-        match value {
-            Logical::Inline(bytes) => Ok(bytes[range.start as usize..range.end as usize].to_vec()),
-            Logical::Chunked(value) => self.run_range(value, range.clone(), |inputs| {
-                lv::byte_range_attempt(value, range.clone(), inputs)
-            }),
-        }
-    }
-
     /// The whole logical value of a descriptor.
     pub(crate) fn value_bytes(&self, value: &LargeValueRef) -> Result<Vec<u8>, Error> {
         #[cfg(feature = "testing")]
@@ -1065,71 +1066,6 @@ impl Chunks {
         self.run_range(value, 0..value.byte_length, |inputs| {
             lv::materialize_attempt(value, inputs)
         })
-    }
-
-    /// The sort prefix of a chunked value, read from its first chunks.
-    pub(crate) fn prefix(&self, value: &LargeValueRef) -> Result<Sql, Error> {
-        // Three bytes past the prefix let text back up to a boundary.
-        let end = value.byte_length.min(PREFIX_BYTES as u64 + 3);
-        let head = self.range(&Logical::Chunked(Box::new(value.clone())), 0..end)?;
-        Ok(sort_prefix(value.kind, &head))
-    }
-
-    /// Compare two cells of one column by logical bytes, reading chunks
-    /// only up to the first difference.
-    pub(crate) fn compare(&self, a: ValueRef<'_>, b: ValueRef<'_>) -> Result<Ordering, Error> {
-        let chunked = |cell: &ValueRef<'_>| matches!(cell, ValueRef::Integer(_));
-        if !chunked(&a) && !chunked(&b) {
-            return Ok(self.logical(a)?.bytes().cmp(self.logical(b)?.bytes()));
-        }
-        if a == b {
-            return Ok(Ordering::Equal);
-        }
-        let (a, b) = (self.logical(a)?, self.logical(b)?);
-        if let (Logical::Chunked(x), Logical::Chunked(y)) = (&a, &b)
-            && x.root == y.root
-            && x.edit_tail == y.edit_tail
-        {
-            return Ok(Ordering::Equal);
-        }
-        let (len_a, len_b) = (a.len(), b.len());
-        let mut at = 0;
-        while at < len_a.min(len_b) {
-            let end = (at + WINDOW).min(len_a.min(len_b));
-            let ordering = self.range(&a, at..end)?.cmp(&self.range(&b, at..end)?);
-            if ordering != Ordering::Equal {
-                return Ok(ordering);
-            }
-            at = end;
-        }
-        Ok(len_a.cmp(&len_b))
-    }
-
-    /// Whether a value contains `needle` (logical bytes), scanning it
-    /// window by window.
-    pub(crate) fn contains(&self, haystack: ValueRef<'_>, needle: &[u8]) -> Result<bool, Error> {
-        let haystack = self.logical(haystack)?;
-        if let Logical::Inline(bytes) = haystack {
-            return Ok(find(bytes, needle));
-        }
-        let len = haystack.len();
-        if (needle.len() as u64) > len {
-            return Ok(false);
-        }
-        // Each window overlaps the last by one byte less than the needle,
-        // so a match across a window boundary is still found.
-        let overlap = needle.len().saturating_sub(1) as u64;
-        let mut at = 0;
-        loop {
-            let end = (at + WINDOW.max(overlap + 1)).min(len);
-            if find(&self.range(&haystack, at..end)?, needle) {
-                return Ok(true);
-            }
-            if end == len {
-                return Ok(false);
-            }
-            at = end - overlap;
-        }
     }
 }
 
@@ -1177,259 +1113,6 @@ impl State {
             self.bytes -= len;
         }
     }
-}
-
-fn find(haystack: &[u8], needle: &[u8]) -> bool {
-    needle.is_empty()
-        || haystack
-            .windows(needle.len())
-            .any(|window| window == needle)
-}
-
-/// The distinct chunked cells of `table.column`, current and history, with
-/// their keys when the column has a key column (`key`).
-fn chunked_cells(
-    conn: &Connection,
-    table: &str,
-    column: &str,
-    key: Option<&str>,
-) -> Result<Vec<(i64, Option<Sql>)>, Error> {
-    let cell = quote(column);
-    let key = key.map_or("NULL".to_owned(), quote);
-    let mut out = Vec::new();
-    for target in [table.to_owned(), format!("{table}__h")] {
-        let sql = format!(
-            "SELECT DISTINCT {cell}, {key} FROM {} WHERE {}",
-            quote(&target),
-            chunked_sql(&cell)
-        );
-        let mut statement = conn.prepare_cached(&sql).map_err(storage)?;
-        let rows = statement
-            .query_map([], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, Option<Sql>>(1)?))
-            })
-            .map_err(storage)?;
-        for row in rows {
-            out.push(row.map_err(storage)?);
-        }
-    }
-    out.sort_by_key(|(cell, _)| *cell);
-    out.dedup_by_key(|(cell, _)| *cell);
-    Ok(out)
-}
-
-/// The logical bytes of a key or inline cell.
-fn key_bytes(key: &Sql) -> &[u8] {
-    match key {
-        Sql::Text(bytes) | Sql::Blob(bytes) => bytes,
-        _ => &[],
-    }
-}
-
-/// `cell op literal` decided without reading chunks: a chunked value is
-/// longer than any literal it could equal only when the lengths differ.
-fn shortcut(value: &LargeValueRef, literal: &[u8], op: &crate::tools::CmpOp) -> Option<Ordering> {
-    use crate::tools::CmpOp;
-    let len = literal.len() as u64;
-    (matches!(op, CmpOp::Eq | CmpOp::Ne) && value.byte_length != len)
-        .then(|| value.byte_length.cmp(&len))
-}
-
-/// Orders `cells` that agree on their first `from` logical bytes into runs of
-/// equal values, reading each cell's next window once per level instead of
-/// once per comparison.
-fn order_runs(
-    chunks: &Chunks,
-    cells: Vec<i64>,
-    from: u64,
-    runs: &mut Vec<Vec<i64>>,
-) -> Result<(), Error> {
-    if cells.len() < 2 {
-        runs.push(cells);
-        return Ok(());
-    }
-    let to = from + from.max(8 * 1024);
-    let mut keyed = Vec::with_capacity(cells.len());
-    for cell in cells {
-        let value = chunks.logical(ValueRef::Integer(cell))?;
-        let len = value.len();
-        let piece = chunks.range(&value, from.min(len)..to.min(len))?;
-        keyed.push((piece, len <= to, cell));
-    }
-    // A value that ends inside the window is less than one that agrees on it
-    // and goes on.
-    keyed.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
-    let mut keyed = keyed.into_iter().peekable();
-    while let Some((piece, ended, cell)) = keyed.next() {
-        let mut run = vec![cell];
-        while let Some(next) = keyed.next_if(|next| next.0 == piece && next.1 == ended) {
-            run.push(next.2);
-        }
-        if ended {
-            runs.push(run);
-        } else {
-            order_runs(chunks, run, to, runs)?;
-        }
-    }
-    Ok(())
-}
-
-/// Answer one prep into `_jazz_lv_scratch`. Returns whether a rank prep
-/// found chunked values that share a sort key.
-pub(crate) fn answer(
-    conn: &Connection,
-    chunks: &Chunks,
-    prep: &crate::compile::Prep,
-) -> Result<bool, Error> {
-    use crate::compile::{MatchTest, Prep};
-    use crate::tools::CmpOp;
-    let mut insert = conn
-        .prepare_cached(
-            "INSERT OR REPLACE INTO _jazz_lv_scratch (slot, cell, v, k) VALUES (?1, ?2, ?3, ?4)",
-        )
-        .map_err(storage)?;
-    let slot = prep.slot();
-    match prep {
-        Prep::Match {
-            table,
-            column,
-            test,
-            ..
-        } => {
-            for (cell, _) in chunked_cells(conn, table, column, None)? {
-                let pass = match test {
-                    MatchTest::Contains(needle) => {
-                        chunks.contains(ValueRef::Integer(cell), needle)?
-                    }
-                    MatchTest::Cmp(op, literal) => {
-                        let value = chunks.descriptor(cell)?;
-                        let ordering = match shortcut(&value, literal, op) {
-                            Some(ordering) => ordering,
-                            None => {
-                                chunks.compare(ValueRef::Integer(cell), ValueRef::Blob(literal))?
-                            }
-                        };
-                        match op {
-                            CmpOp::Eq => ordering.is_eq(),
-                            CmpOp::Ne => ordering.is_ne(),
-                            CmpOp::Lt => ordering.is_lt(),
-                            CmpOp::Le => ordering.is_le(),
-                            CmpOp::Gt => ordering.is_gt(),
-                            CmpOp::Ge => ordering.is_ge(),
-                        }
-                    }
-                };
-                if pass {
-                    insert
-                        .execute(rusqlite::params![slot, cell, Sql::Null, Sql::Null])
-                        .map_err(storage)?;
-                }
-            }
-            Ok(false)
-        }
-        Prep::Rank {
-            table, column, key, ..
-        } => {
-            // Every chunked cell gets its sort key (read from the key
-            // column, or its first chunks), and cells sharing one their
-            // rank among the values that do.
-            let mut groups: HashMap<Vec<u8>, (Sql, Vec<i64>)> = HashMap::new();
-            for (cell, stored) in chunked_cells(conn, table, column, key.as_deref())? {
-                let key = match stored {
-                    Some(key @ (Sql::Text(_) | Sql::Blob(_))) => key,
-                    _ => chunks.prefix(&chunks.descriptor(cell)?)?,
-                };
-                groups
-                    .entry(key_bytes(&key).to_vec())
-                    .or_insert_with(|| (key, Vec::new()))
-                    .1
-                    .push(cell);
-            }
-            let mut ties = false;
-            for (_, (key, cells)) in groups {
-                if cells.len() < 2 {
-                    for cell in cells {
-                        insert
-                            .execute(rusqlite::params![slot, cell, Sql::Null, key])
-                            .map_err(storage)?;
-                    }
-                    continue;
-                }
-                ties = true;
-                let mut runs = Vec::new();
-                order_runs(chunks, cells, 0, &mut runs)?;
-                // Cells of one logical value share a rank.
-                for (rank, run) in runs.iter().enumerate() {
-                    for cell in run {
-                        insert
-                            .execute(rusqlite::params![slot, cell, rank as i64, key])
-                            .map_err(storage)?;
-                    }
-                }
-            }
-            Ok(ties)
-        }
-        Prep::Class { columns, .. } => {
-            for (table, column) in columns {
-                for (cell, _) in chunked_cells(conn, table, column, None)? {
-                    let class = blake3::hash(&chunks.materialize(ValueRef::Integer(cell))?);
-                    insert
-                        .execute(rusqlite::params![
-                            slot,
-                            cell,
-                            class.as_bytes().to_vec(),
-                            Sql::Null
-                        ])
-                        .map_err(storage)?;
-                }
-            }
-            Ok(false)
-        }
-    }
-}
-
-/// Fill the key columns of chunked cells that have none: cells stored
-/// before an index named their column, or that a replica stored before it
-/// held their first chunks. A cell whose chunks are not here yet keeps its
-/// NULL key until a later fill.
-pub(crate) fn fill_keys(
-    conn: &Connection,
-    chunks: &Chunks,
-    physical: &crate::values::Schema,
-) -> Result<(), Error> {
-    for table in physical.tables.values() {
-        for key in &table.keys {
-            let keyed = keyed_by(&key.stored).expect("a key column");
-            let (cell, key) = (quote(keyed), quote(&key.stored));
-            for target in [table.stored.clone(), format!("{}__h", table.stored)] {
-                let target = quote(&target);
-                let cells: Vec<i64> = conn
-                    .prepare_cached(&format!(
-                        "SELECT DISTINCT {cell} FROM {target} WHERE {} AND {key} IS NULL",
-                        chunked_sql(&cell)
-                    ))
-                    .and_then(|mut statement| {
-                        statement
-                            .query_map([], |r| r.get(0))?
-                            .collect::<Result<_, _>>()
-                    })
-                    .map_err(storage)?;
-                for chunked in cells {
-                    let prefix = match chunks.prefix(&chunks.descriptor(chunked)?) {
-                        Ok(prefix) => prefix,
-                        Err(error) if is_missing(&error) => continue,
-                        Err(error) => return Err(error),
-                    };
-                    conn.prepare_cached(&format!(
-                        "UPDATE {target} SET {key} = ?1 WHERE {cell} = ?2"
-                    ))
-                    .and_then(|mut statement| statement.execute(rusqlite::params![prefix, chunked]))
-                    .map_err(storage)?;
-                }
-            }
-        }
-    }
-    Ok(())
 }
 
 /// Store a prepared value's new nodes and cache them. A replica (`replica`)
@@ -2456,6 +2139,42 @@ mod tests {
         (conn, chunks)
     }
 
+    /// A reopened store learns its large-capable columns from the
+    /// refcount triggers, including a set a later schema added and names
+    /// that need quoting, even names that read like the column list.
+    #[test]
+    fn stored_large_columns_reads_every_trigger_set() {
+        use crate::records::ValueType;
+        let (conn, _chunks) = chunks();
+        let docs = "d AFTER UPDATE OF \"x\"";
+        let names = ["body", "odd \"name\", ON x", "count", "late"];
+        let mut table = Table::stored_only(
+            docs.to_owned(),
+            names[..3].iter().map(|name| name.to_string()).collect(),
+        );
+        for column in &mut table.columns[..2] {
+            column.ty = ValueType::String;
+        }
+        crate::db::execute_script(&conn, &table.ddl()).unwrap();
+        let mut late = Table::stored_only(docs.to_owned(), vec![names[3].to_owned()]).columns;
+        late[0].ty = ValueType::Bytes;
+        for target in [docs.to_owned(), format!("{docs}__h")] {
+            conn.execute_batch(&format!("ALTER TABLE {} ADD COLUMN late;", quote(&target)))
+                .unwrap();
+        }
+        crate::db::execute_script(&conn, &triggers(&table, &[&late[0]], Some("late"))).unwrap();
+        let expected: BTreeSet<String> = [names[0], names[1], names[3]].map(str::to_owned).into();
+        assert_eq!(stored_large_columns(&conn, docs).unwrap(), expected);
+
+        // A table without large-capable columns has no triggers.
+        let plain = Table::stored_only("plain".to_owned(), vec!["count".to_owned()]);
+        crate::db::execute_script(&conn, &plain.ddl()).unwrap();
+        assert_eq!(
+            stored_large_columns(&conn, "plain").unwrap(),
+            BTreeSet::new()
+        );
+    }
+
     fn chunked(conn: &Connection, chunks: &Chunks, kind: LargeValueKind, logical: &[u8]) -> Sql {
         let prepared = lv::prepare(kind, logical).unwrap();
         store(conn, chunks, &prepared, false).unwrap();
@@ -2483,77 +2202,23 @@ mod tests {
         forms
     }
 
-    /// Comparison must be a total order identical to `memcmp` over logical
-    /// bytes, and the SQL sort key must agree with it wherever two keys
-    /// differ, or indexes and orderings are wrong.
+    /// Queries compare chunked cells by identity (SPEC 19.5): every form
+    /// of a value reads back as it, a tree built twice from the same bytes
+    /// is one cell, and a base plus an edit tail is a different cell.
     #[test]
-    fn comparison_and_sort_keys_match_the_logical_oracle_across_forms() {
+    fn cells_of_one_value_are_one_cell_only_when_tail_free() {
         let (conn, chunks) = chunks();
         let big = text(1, 200 * 1024);
-        let mut deep = big.clone();
-        deep[150_000] = b'A';
-        let mut logical = [
-            Vec::new(),
-            b"a".to_vec(),
-            big[..9].to_vec(),
-            big[..70_000].to_vec(),
-            big.clone(),
-            deep,
-            [big.as_slice(), b"zz"].concat(),
-            text(2, 90_000),
-        ];
-        logical.sort();
         for kind in [LargeValueKind::String, LargeValueKind::Bytes] {
-            let cells: Vec<(usize, Sql)> = logical
-                .iter()
-                .enumerate()
-                .flat_map(|(rank, value)| {
-                    forms(&conn, &chunks, kind, value)
-                        .into_iter()
-                        .map(move |cell| (rank, cell))
-                })
-                .collect();
-            // A cell's sort key as SQL computes it from its key cell.
-            let key = |cell: &Sql| -> Sql {
-                let key = match cell {
-                    Sql::Integer(chunked) => chunks
-                        .prefix(&chunks.descriptor(*chunked).unwrap())
-                        .unwrap(),
-                    _ => Sql::Null,
-                };
-                conn.query_row(
-                    &format!("SELECT {}", key_sql("?1", "?2")),
-                    [cell, &key],
-                    |r| r.get(0),
-                )
-                .unwrap()
-            };
-            for (rank_a, a) in &cells {
-                for (rank_b, b) in &cells {
-                    assert_eq!(
-                        chunks.compare(a.as_ref(), b.as_ref()).unwrap(),
-                        rank_a.cmp(rank_b),
-                        "{kind:?}: values {rank_a} and {rank_b}"
-                    );
-                    // Stored cells are canonical: chunked exactly when the
-                    // value is over the inline threshold.
-                    let canonical = |rank: usize, cell: &Sql| {
-                        (logical[rank].len() > lv::INLINE_VALUE_MAX_BYTES)
-                            == matches!(cell, Sql::Integer(_))
-                    };
-                    if !canonical(*rank_a, a) || !canonical(*rank_b, b) {
-                        continue;
-                    }
-                    let (key_a, key_b) = (key(a), key(b));
-                    if key_a != key_b {
-                        assert_eq!(
-                            key_bytes(&key_a).cmp(key_bytes(&key_b)),
-                            rank_a.cmp(rank_b),
-                            "{kind:?}: keys of values {rank_a} and {rank_b}"
-                        );
-                    }
-                }
+            let cells = forms(&conn, &chunks, kind, &big);
+            for cell in &cells {
+                assert_eq!(chunks.materialize(cell.as_ref()).unwrap(), big, "{kind:?}");
             }
+            let [_, built, appended] = cells.as_slice() else {
+                panic!("three forms");
+            };
+            assert_eq!(*built, chunked(&conn, &chunks, kind, &big), "{kind:?}");
+            assert_ne!(built, appended, "{kind:?}");
         }
         assert!(chunks.take_demand().is_empty());
     }
@@ -2651,7 +2316,6 @@ mod tests {
             branch_by: Vec::new(),
             provenance: Vec::new(),
             stored_provenance: Vec::new(),
-            keys: Vec::new(),
         };
         let column = Column {
             name: "body".to_owned(),
@@ -2709,7 +2373,6 @@ mod tests {
             branch_by: Vec::new(),
             provenance: Vec::new(),
             stored_provenance: Vec::new(),
-            keys: Vec::new(),
         };
         let column = |name: &str| Column {
             name: name.to_owned(),
@@ -3024,7 +2687,6 @@ mod tests {
             branch_by: Vec::new(),
             provenance: Vec::new(),
             stored_provenance: Vec::new(),
-            keys: Vec::new(),
         };
         let column = Column {
             name: "body".to_owned(),

@@ -11,7 +11,9 @@ mod duplex_transport;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use jazz::db::{Db, DbConfig, DbIdentity, FileOptions, InsertOptions, ReadOpts, WireOp, block_on};
+use jazz::db::{
+    Db, DbConfig, DbIdentity, FileOptions, InsertOptions, ReadOpts, WireOp, WireWrite, block_on,
+};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{Query, col, eq, lit};
 use jazz::records::Value;
@@ -148,10 +150,14 @@ fn the_originating_store_keeps_a_refused_payload_until_it_is_reported() {
         rejected.error
     );
     let [
-        WireOp::Insert {
-            table,
-            row: written,
-            cells,
+        WireOp {
+            write:
+                WireWrite::Insert {
+                    table,
+                    row: written,
+                    cells,
+                    ..
+                },
             ..
         },
     ] = rejected.ops.as_slice()

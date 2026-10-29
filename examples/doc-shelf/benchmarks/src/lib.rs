@@ -6,6 +6,13 @@
 //! The workloads are what a writer notices: opening the shelf, searching the
 //! bodies, finding a pasted duplicate, sorting by body, typing into an open
 //! document, importing a long document, and a new device syncing the shelf.
+//!
+//! Queries never read a chunked body's content (SPEC 19.5): `contains` and
+//! ordering see only the inline notes' content, a chunked body compares by
+//! cell, and an equality literal over 64 KiB is refused. The workloads use the
+//! shapes that still answer: searching finds the needle in inline notes,
+//! duplicates are found by grouping on the body cell, and ordering puts the
+//! chunked bodies first.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
@@ -28,7 +35,8 @@ use jazz::tx::DurabilityTier;
 pub const DOCS: usize = 96;
 /// The phrase the search workload looks for.
 pub const NEEDLE: &str = "kumquat protocol";
-/// Documents whose body contains [`NEEDLE`].
+/// Documents whose body contains [`NEEDLE`]; only the inline ones are
+/// found by `contains` ([`needle_found`]).
 pub const NEEDLE_DOCS: [usize; 4] = [3, 6, 16, 41];
 /// The document pasted a second time onto the shelf.
 pub const PASTED: usize = 10;
@@ -148,6 +156,18 @@ pub fn body(n: usize) -> String {
     body
 }
 
+/// Whether shelf document `n`'s body is chunked: over the 64 KiB inline
+/// threshold.
+pub fn chunked(n: usize) -> bool {
+    body(n).len() > jazz::large_values::INLINE_VALUE_MAX_BYTES
+}
+
+/// The documents `contains(body, NEEDLE)` finds: those holding the needle in
+/// an inline body.
+pub fn needle_found() -> Vec<usize> {
+    NEEDLE_DOCS.into_iter().filter(|&n| !chunked(n)).collect()
+}
+
 pub fn doc_id(n: usize) -> RowUuid {
     let mut bytes = [0_u8; 16];
     bytes[0] = 0xd0;
@@ -248,10 +268,14 @@ impl Fixture {
                 .filter(contains(col("body"), lit(Value::String(NEEDLE.to_owned()))))
                 .select(["title"]),
         );
+        // Two bodies written whole with the same content share one cell, so
+        // grouping by the cell finds the pasted copy without reading bodies.
         let duplicate = prepare(
             Query::from("docs")
-                .filter(eq(col("body"), lit(Value::String(body(PASTED)))))
-                .select(["title"]),
+                .count()
+                .group_by("body")
+                .order_by("count", OrderDirection::Desc)
+                .limit(1),
         );
         let by_body = prepare(
             Query::from("docs")
@@ -281,12 +305,35 @@ impl Fixture {
         self.titles(&self.search)
     }
 
-    /// Finding the documents whose body equals a pasted long document.
-    pub fn find_duplicates(&self) -> Vec<String> {
-        self.titles(&self.duplicate)
+    /// Finding the most repeated body: its row count and its content.
+    pub fn find_duplicates(&self) -> (u64, String) {
+        let rows =
+            block_on(self.db.all(&self.duplicate, ReadOpts::default())).expect("read duplicates");
+        let count = match rows[0].cell("count") {
+            Some(Value::U64(count)) => count,
+            other => panic!("unexpected count cell: {other:?}"),
+        };
+        match rows[0].cell("body") {
+            Some(Value::String(body)) => (count, body),
+            other => panic!("unexpected body cell: {other:?}"),
+        }
     }
 
-    /// The first 20 titles ordered by body.
+    /// Looking a long document up by its full text, which queries refuse:
+    /// the error message.
+    pub fn find_by_long_literal(&self) -> String {
+        let query = Query::from("docs")
+            .filter(eq(col("body"), lit(Value::String(body(PASTED)))))
+            .select(["title"]);
+        self.db
+            .prepare_query(&query)
+            .and_then(|prepared| block_on(self.db.all(&prepared, ReadOpts::default())))
+            .map(|_| ())
+            .expect_err("a literal over 64 KiB is refused")
+            .message
+    }
+
+    /// The first 20 titles ordered by body: chunked bodies sort first.
     pub fn first_by_body(&self) -> Vec<String> {
         self.titles(&self.by_body)
     }
