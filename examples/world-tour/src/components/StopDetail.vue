@@ -69,7 +69,7 @@ import { useAll, useDb } from "jazz-tools/vue";
 import { app, type StopStatus, type StopWithVenue } from "../../schema.js";
 import { formatLongDate, fromDateInput, statusLabels, toDateInput } from "../lib/format.js";
 import { renderMarkdown } from "../lib/markdown.js";
-import { rebaseText } from "../lib/text-rebase.js";
+import { textToSave } from "../lib/text-rebase.js";
 import { reportWriteError } from "../lib/write-errors.js";
 import Button from "./ui/Button.vue";
 
@@ -106,12 +106,12 @@ function save() {
   day.setHours(date.getHours(), date.getMinutes());
   // A bandmate may have edited the texts while the form was open; keep
   // their edits rather than saving over them.
-  const description = rebaseText(
+  const description = textToSave(
     opened.description,
     draft.description,
     props.stop.publicDescription,
   );
-  const body = rebaseText(opened.notes, draft.notes, existing?.body ?? "").trim();
+  const body = textToSave(opened.notes, draft.notes, existing?.body ?? "");
   db.transaction((tx) => {
     tx.update(app.stops, id, {
       date: day,

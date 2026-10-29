@@ -72,3 +72,17 @@ export function rebaseText(base: string, local: string, remote: string): string 
     remote.slice(remote.length - after)
   );
 }
+
+/**
+ * A text as the stop form saves it: trailing whitespace dropped and one
+ * closing line break, or "" when empty. Two bandmates adding a first line at
+ * the same spot then keep two lines rather than one run-together line.
+ */
+export function asLines(text: string): string {
+  return text.trim() ? `${text.trimEnd()}\n` : "";
+}
+
+/** What the stop form saves: its edits since `opened`, carried over to `current`. */
+export function textToSave(opened: string, draft: string, current: string): string {
+  return asLines(rebaseText(opened, asLines(draft), current));
+}
