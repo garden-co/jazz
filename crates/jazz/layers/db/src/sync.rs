@@ -3665,6 +3665,20 @@ impl Inner {
         Ok(())
     }
 
+    /// Whether stored table `table` holds a version of `row` on any branch.
+    fn holds_id(&self, table: &str, row: RowUuid) -> Result<bool, Error> {
+        self.conn
+            .cached_row(
+                &format!(
+                    "SELECT EXISTS (SELECT 1 FROM {} WHERE id = ?1)",
+                    quote(table)
+                ),
+                [row.0.as_bytes().to_vec()],
+                |r| r.get::<_, bool>(0),
+            )
+            .map_err(storage)
+    }
+
     pub(super) fn is_withheld(&self, table: &str, row: RowUuid, key: &[u8]) -> Result<bool, Error> {
         if !self.withheld.get() {
             return Ok(false);
@@ -8726,10 +8740,11 @@ impl Db {
                 // A version that exists but is unreadable leaves the id
                 // watched: the replica may hold the row on another branch
                 // (a branch view's base, the main row under a draft). A
-                // relay's marker stands for such a version too.
-                if inner.current_image(&table, row, &key)?.is_some()
-                    || inner.is_withheld(&table, row, &key)?
-                {
+                // relay's marker stands for such a version too. A relay may
+                // not hold the version it evicts at all, while its session
+                // holds the row on another branch: any version of the id
+                // here keeps it watched (#4484).
+                if inner.is_withheld(&table, row, &key)? || inner.holds_id(&table, row)? {
                     unreadable.insert((table.clone(), row, key.clone()));
                 } else {
                     gone.push((table.clone(), *row.0.as_bytes()));
