@@ -152,7 +152,12 @@ export class BrowserWorkerTransportPump {
     this.outboundDrainScheduled = true;
     queueMicrotask(() => {
       this.outboundDrainScheduled = false;
-      if (!this.closed) this.drainOutboundFrames();
+      if (this.closed) return;
+      try {
+        this.drainOutboundFrames();
+      } catch (error) {
+        this.onError(error);
+      }
     });
   }
 

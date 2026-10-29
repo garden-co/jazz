@@ -4368,8 +4368,6 @@ dependencies = [
 [[package]]
 name = "sqlite-wasm-vfs"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f7a5c9ac229421d577bb5a9bb59048838509958b218dd4e0b3c1214a87c361e"
 dependencies = [
  "indexed_db_futures",
  "js-sys",
