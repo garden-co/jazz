@@ -1,12 +1,12 @@
 //! A writer's own rows are not echoed back: when the authority infers its
-//! new version of a row is exactly what the writer's commit produced there
-//! (the commit applied cleanly over the version it was built on, stamped as
-//! the writer stamped it), the Fate names the row `held` and the writer
-//! installs its own image at the seq it landed at, stamped at the time the
-//! authority accepted it.
-//! Anything else ships the image as before. Each held row carries the
+//! new version of a row is likely what the writer's commit produced there
+//! (the commit applied unmerged over the version it was built on, and that
+//! version is still current), the Fate names the row `as_written` and the
+//! writer installs its own image at the seq it landed at, stamped at the
+//! time the authority accepted it.
+//! Anything else ships the image as before. Each as-written row carries the
 //! authority's digest of its version: a writer whose image differs asks for
-//! the row whole (and under test panics, unless the test provokes it).
+//! the row whole, a counted round trip.
 
 use crate::common;
 
@@ -146,7 +146,21 @@ fn subscribe(client: &Db) -> jazz::db::SubscriptionStream {
     block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap()
 }
 
+/// Pump to quiescence. Every row the authority names as written must be
+/// the writer's own image of it: the inference never misses here.
 fn pump(server: &Db, clients: &[&Db]) {
+    pump_counting(server, clients);
+    for client in clients {
+        assert_eq!(
+            client.as_written_mismatches(),
+            0,
+            "an as-written row differed"
+        );
+    }
+}
+
+/// Pump to quiescence, as-written mismatches counted rather than failed.
+fn pump_counting(server: &Db, clients: &[&Db]) {
     for _ in 0..6 {
         for client in clients {
             block_on(client.tick()).unwrap();
@@ -173,22 +187,22 @@ fn snapshot(db: &Db) -> Vec<String> {
         .collect()
 }
 
-/// The images, and the held rows of each Fate, a log saw.
+/// The images, and the as-written rows of each Fate, a log saw.
 fn shipped(log: &Down) -> (usize, Vec<usize>) {
     let mut images = 0;
-    let mut held = Vec::new();
+    let mut as_written = Vec::new();
     for message in log.borrow().iter() {
         match message {
             SyncMessage::Rows { images: i, .. } => images += i.len(),
             SyncMessage::Fate {
-                outcome: Outcome::Accepted { held: h, .. },
+                outcome: Outcome::Accepted { as_written: w, .. },
                 ..
-            } => held.push(h.len()),
-            SyncMessage::Fate { .. } => held.push(0),
+            } => as_written.push(w.len()),
+            SyncMessage::Fate { .. } => as_written.push(0),
             _ => {}
         }
     }
-    (images, held)
+    (images, as_written)
 }
 
 /// Write on `client` and land it at the server a little later, so the
@@ -219,7 +233,11 @@ fn one_keystroke_sends_only_fate_and_settled() {
         .unwrap();
     });
     pump(&server, &[&client]);
-    assert_eq!(shipped(&down), (0, vec![1]), "a create is held too");
+    assert_eq!(
+        shipped(&down),
+        (0, vec![1]),
+        "a create ships as written too"
+    );
     let created = snapshot(&client);
     assert_eq!(created, snapshot(&server));
 
@@ -234,14 +252,14 @@ fn one_keystroke_sends_only_fate_and_settled() {
         .iter()
         .map(|m| match m {
             SyncMessage::Fate {
-                outcome: Outcome::Accepted { held, .. },
+                outcome: Outcome::Accepted { as_written, .. },
                 ..
-            } if held.len() == 1 => "fate+held",
+            } if as_written.len() == 1 => "fate+as_written",
             SyncMessage::Settled { .. } => "settled",
             _ => "other",
         })
         .collect();
-    assert_eq!(kinds[0], "fate+held", "{kinds:?}");
+    assert_eq!(kinds[0], "fate+as_written", "{kinds:?}");
     assert!(kinds[1..].iter().all(|k| *k == "settled"), "{kinds:?}");
     let typed = snapshot(&client);
     assert_eq!(typed, snapshot(&server), "the replica holds the version");
@@ -251,7 +269,11 @@ fn one_keystroke_sends_only_fate_and_settled() {
     assert!(client.detach_connection(&_upstream));
     let (_upstream, down) = connect(&server, &client, user(1));
     pump(&server, &[&client]);
-    assert_eq!(shipped(&down).0, 0, "the held row was already current");
+    assert_eq!(
+        shipped(&down).0,
+        0,
+        "the as-written row was already current"
+    );
     assert_eq!(snapshot(&client), snapshot(&server));
 }
 
@@ -285,10 +307,16 @@ fn a_concurrent_write_still_ships_the_image() {
     block_on(server.tick()).unwrap();
     pump(&server, &[&a, &b]);
 
-    let (a_images, a_held) = shipped(&a_down);
-    let (b_images, b_held) = shipped(&b_down);
-    assert!(a_images > 0 && a_held == vec![0], "{a_images} {a_held:?}");
-    assert!(b_images > 0 && b_held == vec![0], "{b_images} {b_held:?}");
+    let (a_images, a_as_written) = shipped(&a_down);
+    let (b_images, b_as_written) = shipped(&b_down);
+    assert!(
+        a_images > 0 && a_as_written == vec![0],
+        "{a_images} {a_as_written:?}"
+    );
+    assert!(
+        b_images > 0 && b_as_written == vec![0],
+        "{b_images} {b_as_written:?}"
+    );
     let settled = snapshot(&server);
     assert!(
         settled[0].contains("\"A\"") && settled[0].contains("\"B\""),
@@ -325,22 +353,24 @@ fn a_write_landing_between_ships_the_image() {
     block_on(a.update("docs", row(1), cells(&[("title", "A")]), Default::default())).unwrap();
     pump(&server, &[&a, &b]);
 
-    let (images, held) = shipped(&a_down);
+    let (images, as_written) = shipped(&a_down);
     assert!(images > 0, "a's base was stale");
-    assert_eq!(held, vec![0]);
+    assert_eq!(as_written, vec![0]);
     assert_eq!(snapshot(&a), snapshot(&server));
     assert_eq!(snapshot(&b), snapshot(&server));
 }
 
 #[test]
-fn a_write_stamped_as_another_author_still_ships() {
+fn a_write_stamped_as_another_author_is_asked_for_whole() {
     // The replica writes as the system at its node; its link is a user's,
-    // and the authority stamps that user as the writer.
+    // and the authority stamps that user as the writer. The authority does
+    // not compare authors: it names the rows as written, and the writer
+    // finds by the digest that its image is not the authority's version.
     let server = open(0, AuthorSubject::SYSTEM);
     let client = open(1, AuthorSubject::SYSTEM);
     let (_upstream, down) = connect(&server, &client, user(9));
     let _live = subscribe(&client);
-    pump(&server, &[&client]);
+    pump_counting(&server, &[&client]);
     block_on(client.insert(
         "docs",
         cells(&[("title", "Doc"), ("body", "")]),
@@ -350,55 +380,21 @@ fn a_write_stamped_as_another_author_still_ships() {
         },
     ))
     .unwrap();
-    pump(&server, &[&client]);
+    pump_counting(&server, &[&client]);
     block_on(client.update("docs", row(1), cells(&[("body", "x")]), Default::default())).unwrap();
-    pump(&server, &[&client]);
+    pump_counting(&server, &[&client]);
 
-    let (images, held) = shipped(&down);
-    assert_eq!(
-        held,
-        vec![0, 0],
-        "neither write is as the replica stamped it"
-    );
-    assert!(images >= 2, "{images}");
+    let (images, as_written) = shipped(&down);
+    assert_eq!(as_written, vec![1, 1]);
+    assert!(images >= 2, "each is asked for whole: {images}");
+    assert_eq!(client.as_written_mismatches(), 2);
     let settled = snapshot(&server);
     assert!(settled[0].contains(&user(9).principal_parts().1));
     assert_eq!(snapshot(&client), settled);
 }
 
 #[test]
-fn a_held_row_the_writer_stamped_otherwise_is_asked_for_whole() {
-    // The replica believes it writes as user 1; its link was accepted as
-    // user 9, whom the authority stamps. The authority cannot tell, and
-    // holds the rows: the writer finds its image is not the authority's
-    // version by the digest, and asks for each whole instead.
-    let server = open(0, AuthorSubject::SYSTEM);
-    let client = open(1, user(1));
-    client.tolerate_echo_mismatches();
-    let (_upstream, _down) = connect(&server, &client, user(9));
-    let _live = subscribe(&client);
-    pump(&server, &[&client]);
-    block_on(client.insert(
-        "docs",
-        cells(&[("title", "Doc"), ("body", "")]),
-        InsertOptions {
-            row_id: Some(row(1)),
-            ..Default::default()
-        },
-    ))
-    .unwrap();
-    pump(&server, &[&client]);
-    block_on(client.update("docs", row(1), cells(&[("body", "x")]), Default::default())).unwrap();
-    pump(&server, &[&client]);
-
-    assert_eq!(client.echo_mismatches(), 2);
-    let settled = snapshot(&server);
-    assert!(settled[0].contains(&user(9).principal_parts().1));
-    assert_eq!(snapshot(&client), settled);
-}
-
-#[test]
-fn a_chain_of_pending_writes_is_held() {
+fn a_chain_of_pending_writes_ships_as_written() {
     let server = open(0, AuthorSubject::SYSTEM);
     let client = open(1, user(1));
     let (_upstream, down) = connect(&server, &client, user(1));
@@ -465,9 +461,9 @@ fn a_chain_over_a_write_landing_between_ships() {
     .unwrap();
     pump(&server, &[&a, &b]);
 
-    let (images, held) = shipped(&a_down);
+    let (images, as_written) = shipped(&a_down);
     assert!(images > 0, "a's base was stale");
-    assert_eq!(held, vec![0, 0]);
+    assert_eq!(as_written, vec![0, 0]);
     let settled = snapshot(&server);
     assert!(settled[0].contains("\"AA\"") && settled[0].contains("\"B\""));
     assert_eq!(snapshot(&a), settled);
@@ -475,7 +471,7 @@ fn a_chain_over_a_write_landing_between_ships() {
 }
 
 #[test]
-fn an_upsert_of_a_new_row_is_held() {
+fn an_upsert_of_a_new_row_ships_as_written() {
     let server = open(0, AuthorSubject::SYSTEM);
     let client = open(1, user(1));
     let (_upstream, down) = connect(&server, &client, user(1));
@@ -496,7 +492,7 @@ fn an_upsert_of_a_new_row_is_held() {
 }
 
 #[test]
-fn a_serializable_commit_is_held() {
+fn a_serializable_commit_ships_as_written() {
     let server = open(0, AuthorSubject::SYSTEM);
     let client = open(1, user(1));
     let (_upstream, down) = connect(&server, &client, user(1));
@@ -555,12 +551,12 @@ fn a_lost_fate_resumes_correctly() {
 
     // The resend gets the recorded fate, which holds nothing: the image
     // ships.
-    let (images, held) = shipped(&down);
-    assert_eq!(held, vec![0]);
+    let (images, as_written) = shipped(&down);
+    assert_eq!(as_written, vec![0]);
     assert!(images > 0);
     assert_eq!(snapshot(&client), snapshot(&server));
 
-    // And later writes are held again.
+    // And later writes ship as written again.
     down.borrow_mut().clear();
     block_on(client.update("docs", row(1), cells(&[("body", "xy")]), Default::default())).unwrap();
     pump(&server, &[&client]);
@@ -608,8 +604,11 @@ fn a_text_merge_against_a_concurrent_edit_ships() {
     .unwrap();
     pump(&server, &[&a, &b]);
 
-    let (a_images, a_held) = shipped(&a_down);
-    assert!(a_images > 0 && a_held == vec![0], "{a_images} {a_held:?}");
+    let (a_images, a_as_written) = shipped(&a_down);
+    assert!(
+        a_images > 0 && a_as_written == vec![0],
+        "{a_images} {a_as_written:?}"
+    );
     assert_eq!(
         shipped(&b_down).1,
         vec![1],
@@ -622,7 +621,7 @@ fn a_text_merge_against_a_concurrent_edit_ships() {
 }
 
 #[test]
-fn a_commit_restored_after_a_reopen_is_held() {
+fn a_commit_restored_after_a_reopen_ships_as_written() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("replica.sqlite");
     let open_file = || {
@@ -659,7 +658,7 @@ fn a_commit_restored_after_a_reopen_is_held() {
     pump(&server, &[&client]);
 
     // The reopened store still holds what its commit left, at the
-    // commit's local seq: the row is held.
+    // commit's local seq: the row ships as written.
     assert_eq!(shipped(&down), (0, vec![1]));
     assert_eq!(snapshot(&client), snapshot(&server));
 }
@@ -700,7 +699,7 @@ fn explicit_timestamps_reach_the_authority_per_write() {
 }
 
 #[test]
-fn a_write_over_a_pending_create_is_held_with_the_authoritys_stamps() {
+fn a_write_over_a_pending_create_ships_as_written_with_the_authoritys_stamps() {
     // The create's fate has not arrived when the update is written: the
     // update's image holds the create stamp this replica's clock gave it,
     // and both landed later on the authority's clock.
@@ -731,7 +730,7 @@ fn a_write_over_a_pending_create_is_held_with_the_authoritys_stamps() {
 }
 
 #[test]
-fn a_commit_writing_rows_twice_is_held_with_each_writes_stamps() {
+fn a_commit_writing_rows_twice_ships_as_written_with_each_writes_stamps() {
     // One commit writes two rows twice each, the last write of one at an
     // explicit time and of the other on the clock, and creates a row at
     // an explicit time and one on the clock: each stamp is the one of the

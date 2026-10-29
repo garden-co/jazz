@@ -267,14 +267,14 @@ read-your-writes end to end.
 
 `Fate { tx, outcome, global }` answers a commit. The `outcome` is one of:
 
-- `Accepted { seq, accepted_at, held }`: the commit landed at server seq
+- `Accepted { seq, accepted_at, as_written }`: the commit landed at server seq
   `seq`, which the replica records as where it settled; applying a fate never
   moves its settled seq backward (`INV-SYNC-5`). `accepted_at` is the time
   (Unix ms) the authority's clock stamped the commit's writes with: the
   `$createdAt`/`$updatedAt` of every write without an explicit time. It is
-  absent only on a resend's recorded fate, which holds no rows.
-  Its `held` lists the commit's rows the server did not ship, each named as a
-  base is (the commit's first op that writes it) with its branch key, and
+  absent only on a resend's recorded fate, which names no rows.
+  Its `as_written` lists the commit's rows the server did not ship, each named
+  as a base is (the commit's first op that writes it) with its branch key, and
   carrying the authority's digest of its version, so the writer can install
   its own image as the accepted version: stamped at `accepted_at` where its
   own clock stamped it (a row's `$updatedAt`, and the `$createdAt` of a row
@@ -293,35 +293,29 @@ read-your-writes end to end.
 non-global fate is the final word of a replica with no upstream, which orders
 its sessions' commits but cannot make them `Global`.
 
-The authority infers, rather than compares, that a row's new version is the
-writer's image of it (`INV-SYNC-51`). It holds a row only if all of these
-hold:
+The authority infers, rather than compares, that a row's new version is
+likely the writer's image of it (`INV-SYNC-51`). It names a row as written
+only if all of these hold:
 
 1. The row's version just before the commit is the one the writer built on:
-   the accepted version its base names; or, for a base on the writer's own
-   earlier commit, the version that commit landed as, which this session
-   itself held for that commit; or, with no base, no version at all, and
-   every op on the row is an insert (or an upsert of an unbranched row).
+   the version its base names (an accepted one, or the version the writer's
+   own earlier commit landed as); or, with no base, no version at all.
 2. No text merge changed a value the commit sent (SPEC 4 §4.3), and no op of
    the commit moves the row between branches.
-3. The author the authority stamps is the one the writer declared: the
-   commit's `author`, or its link's identity for a writer's own writes.
-4. The version is still the row's current one when fan-out ships the
+3. The version is still the row's current one when fan-out ships the
    session's rows.
 
-Equal inputs then give an equal row: the ops apply the same way to the same
-image under the same schema, the stamps excepted. The inference is checked
-on every held row: each carries the authority's 16-byte digest of its
-version (everything but its seq and the stamps), and the writer asks for a
-row whose image differs whole (`Hold`, §19.8) instead of installing it. A
-miss therefore costs a round trip, never a divergent cache: a replica whose
-configured author is not the identity its link was accepted as, for one.
-A replica counts these mismatches (`echo_mismatches`); under the `testing`
-feature it panics on one, so the test suites guard the inference. A writer asks for a held row whole, without counting a mismatch, where it
-cannot vouch for its image: it stamped the row as another author than the
-commit declares (ops by several authors), the commit was written under an
-earlier schema version than the one it reopened with, or a catalogue with new
-versions arrived while the commit was pending.
+The writer checks the inference on every such row: each carries the
+authority's 16-byte digest of its version (everything but its seq and the
+stamps), and the writer asks for a row whose image differs whole (`Hold`,
+§19.8) instead of installing it. A miss costs one round trip, never a
+divergent cache: a replica whose configured author is not the identity its
+link was accepted as, for one, has every row stamped otherwise. Mismatches are
+a normal path, counted per replica (`as_written_mismatches`); tests of honest
+writers assert there are none. A writer also asks for a row whole when it
+holds no image to compare: the commit was written under an earlier schema
+version than the one it reopened with, or a catalogue with new versions
+arrived while the commit was pending.
 
 `Stored { tx }` is durability progress from a relay to a non-durable session:
 the relay holds the commit in its store and uploads it, so it is `Local` for a

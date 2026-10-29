@@ -550,7 +550,7 @@ fn rows_messages(
 const STAMPS: [&str; 2] = ["$createdAt", "$updatedAt"];
 
 /// What a writer and the authority must agree on for a row version the
-/// authority does not ship back (see [`Held`]): everything in an image but
+/// authority does not ship back (see [`AsWritten`]): everything in an image but
 /// its seq and [`STAMPS`].
 fn echo_digest(image: &Image) -> [u8; 16] {
     let mut cells: Vec<&(String, Cell)> = image
@@ -617,15 +617,15 @@ pub enum BuiltOn {
 /// authority's [`echo_digest`] of its version, which the writer checks its
 /// own image against.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Held {
+pub struct AsWritten {
     pub op: u32,
     pub key: Vec<u8>,
     pub digest: [u8; 16],
 }
 
-impl Held {
+impl AsWritten {
     fn of(op: u32, image: &Image) -> Self {
-        Held {
+        AsWritten {
             op,
             key: image.key.clone(),
             digest: echo_digest(image),
@@ -640,20 +640,19 @@ pub enum Outcome {
     /// (Unix ms) the authority's clock stamped its writes with: the
     /// `$createdAt`/`$updatedAt` of every write without an explicit time.
     /// `None` when the authority no longer knows it (a resend's recorded
-    /// fate), which `held` is then empty for.
+    /// fate), which `as_written` is then empty for.
     ///
-    /// `held`: the rows of the commit the authority did not ship because
-    /// their version at `seq` is the writer's own image of them: the
-    /// writer installs its image, stamped at `accepted_at` where its own
-    /// clock stamped it, as that version. The authority infers it rather
-    /// than compares (SPEC 4 §4.6): the commit applied cleanly over the
-    /// very version its writer built on (a [`WireBase`], or none for an
-    /// insert of a new row), and stamped the author the writer did, so
-    /// applying the same ops to the same image gave the same row.
+    /// `as_written`: the rows of the commit the authority did not ship
+    /// because their version at `seq` is likely the writer's own image of
+    /// them: the commit applied unmerged over the very version its writer
+    /// built on (a [`WireBase`], or none for an insert of a new row), and
+    /// that version is still current (SPEC 8 §8.3). The writer stamps its
+    /// image at `accepted_at` where its own clock stamped it and installs
+    /// it if its digest matches; otherwise it asks for the row whole.
     Accepted {
         seq: u64,
         accepted_at: Option<u64>,
-        held: Vec<Held>,
+        as_written: Vec<AsWritten>,
     },
     /// The commit was refused, for `error`, and landed nowhere. The rows
     /// it wrote shipped back ahead of the fate as they are, and the session
@@ -668,7 +667,7 @@ impl Outcome {
         Outcome::Accepted {
             seq,
             accepted_at,
-            held: Vec::new(),
+            as_written: Vec::new(),
         }
     }
 
@@ -1213,9 +1212,9 @@ struct Pending {
     ops: Vec<StagedOp>,
     rows: Vec<(String, RowUuid, Vec<u8>)>,
     /// The rows the commit wrote as stored here: the server may name them
-    /// `held` instead of shipping them. `None` once this store cannot
-    /// vouch for them: the commit was restored after a reopen, or the
-    /// upstream's catalogue changed the names it was applied under.
+    /// `as_written` instead of shipping them. `None` once this store cannot
+    /// name them as the upstream does: the commit was written under an
+    /// older schema version, or the upstream's catalogue changed since.
     expected: Option<Vec<Expected>>,
 }
 
@@ -1224,10 +1223,7 @@ struct Expected {
     /// The commit's first op that writes the row, and the row's branch key.
     op: u32,
     key: Vec<u8>,
-    /// `None` when the authority stamps it otherwise: this replica stamped
-    /// the row as another author than the commit declares (its ops are by
-    /// several), so it asks for the row whole if held.
-    image: Option<Image>,
+    image: Image,
     /// Where the row's `$createdAt` comes from.
     created: Created,
     /// The row's last write has no explicit time: this replica's clock
@@ -1236,7 +1232,7 @@ struct Expected {
     updated_clocked: bool,
 }
 
-/// Where a held row's `$createdAt` comes from: only a write that creates
+/// Where an as-written row's `$createdAt` comes from: only a write that creates
 /// the row stamps it, and it never changes after.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Created {
@@ -1255,8 +1251,8 @@ enum Created {
 impl Expected {
     /// The image as the authority holds it: accepted at `at`, over a row
     /// created at `created` if the commit did not create it.
-    fn accepted(&self, image: &Image, at: u64, created: Option<Cell>) -> Image {
-        let mut image = image.clone();
+    fn accepted(&self, at: u64, created: Option<Cell>) -> Image {
+        let mut image = self.image.clone();
         for (name, cell) in &mut image.cells {
             if name == STAMPS[0] {
                 match (self.created, &created) {
@@ -1342,7 +1338,7 @@ impl PendingQueue {
         self.commits.iter_mut().find(|p| p.tx == tx)
     }
 
-    /// No commit's images vouch for its result any more.
+    /// No commit's images are named as the upstream names them any more.
     fn forget_expected(&mut self) {
         for pending in &mut self.commits {
             pending.expected = None;
@@ -1355,36 +1351,8 @@ impl PendingQueue {
     }
 }
 
-/// The author an image's version is stamped with (`$updatedBy`, which an
-/// image carries as `$createdBy` on a row never updated), by its parts.
-fn stamped_author(image: &Image) -> Option<crate::values::AuthorKey> {
-    let cell = |part: &str| {
-        image
-            .cells
-            .iter()
-            .find(|(name, _)| name.strip_prefix("$updatedBy.") == Some(part))
-            .map(|(_, cell)| cell)
-    };
-    match (
-        cell("account")?,
-        cell("identity.issuer")?,
-        cell("identity.subject")?,
-    ) {
-        (Cell::Blob(account), Cell::Text(issuer), Cell::Text(subject)) => Some((
-            uuid::Uuid::from_slice(account).ok()?,
-            String::from_utf8(issuer.clone()).ok()?,
-            String::from_utf8(subject.clone()).ok()?,
-        )),
-        _ => None,
-    }
-}
-
-/// How many rows a session remembers its own commits left as their writer
-/// holds them (see `Session::faithful`).
-const FAITHFUL_ROWS: usize = 4096;
-
 /// A row an accepted commit wrote that its writer holds as the commit
-/// left it (see `SyncMessage::Fate`): fan-out names it `held` rather than
+/// left it (see `SyncMessage::Fate`): fan-out names it `as_written` rather than
 /// ship it, if that version is still current.
 struct Echo {
     tx: u64,
@@ -1395,18 +1363,13 @@ struct Echo {
     seq: u64,
 }
 
-/// A row an applied commit wrote, with what the authority needs to infer
-/// that its writer holds the new version as it is (see
-/// `SyncMessage::Fate`).
+/// A row an applied commit wrote over the very version its writer built
+/// it on, unmerged: its writer likely holds the new version as it is (see
+/// [`Outcome::Accepted`]).
 pub(crate) struct Echoable {
     pub(crate) row: RowKey,
     /// The commit's first op that writes the row.
     pub(crate) op: u32,
-    /// What the write was built on, resolved here: `None` for a row the
-    /// writer held no image of.
-    pub(crate) on: Option<Built>,
-    /// The row's version here just before the commit.
-    pub(crate) previous: Option<u64>,
 }
 
 /// One remote attachment: a client query the server maintains.
@@ -1682,7 +1645,7 @@ pub(crate) struct Gate {
     /// Whether the answer is the global authority's.
     pub(crate) global: Rc<StdCell<bool>>,
     pub(crate) hint: Rc<StdCell<Link>>,
-    /// Held on a live link: leaving it (even for a new attempt) releases.
+    /// AsWritten on a live link: leaving it (even for a new attempt) releases.
     pub(crate) live: bool,
     /// `None`: wait for the server however long (the Remote tier).
     pub(crate) deadline: Option<Instant>,
@@ -1787,13 +1750,6 @@ pub(crate) struct Session {
     /// them: the image of each is not shipped while it is the row's current
     /// version.
     echoes: Vec<Echo>,
-    /// Rows whose current version one of this session's commits left as
-    /// its writer holds it, by that version's seq: a later commit built on
-    /// that one (`BuiltOn::Own`) leaves the row as its writer holds it too.
-    /// Kept for this connection, and for at most [`FAITHFUL_ROWS`] rows
-    /// (the writer chains on its newest few): past that it starts over,
-    /// which only ships rows that could have been held.
-    faithful: HashMap<RowKey, u64>,
     /// Supporting rows each subscription needs besides its own result.
     support: BTreeMap<u64, Rc<Vec<Support>>>,
     /// The replica's coherence watches: `(table, column, value)` for every
@@ -1881,7 +1837,6 @@ impl Session {
             touched: BTreeSet::new(),
             committed: Vec::new(),
             echoes: Vec::new(),
-            faithful: HashMap::new(),
             support: BTreeMap::new(),
             watch: Watches::default(),
             shipped: HashMap::new(),
@@ -3609,18 +3564,15 @@ impl Inner {
     /// `tx` and by the commit's first op that writes it, for the authority
     /// to hold (see [`Expected`]). `over`: the rows this replica held a
     /// version of before (settled, or an own earlier pending commit's),
-    /// which the commit did not create. `author`: the one the commit
-    /// declares, or none for this store's own.
+    /// which the commit did not create.
     fn expected_rows(
         &self,
         tx: u64,
         ops: &[StagedOp],
         rows: &[RowKey],
         over: &HashSet<RowKey>,
-        author: Option<AuthorSubject>,
     ) -> Result<Vec<Expected>, Error> {
         let by_row = self.row_ops(ops);
-        let declared = crate::values::author_key(&author.unwrap_or_else(|| self.stamp_author()));
         let mut expected = Vec::new();
         for row_key @ (table, row, key) in rows {
             let Some(row_ops) = by_row.get(&(table.clone(), *row)) else {
@@ -3640,11 +3592,10 @@ impl Inner {
             } else {
                 Created::Explicit
             };
-            let vouched = stamped_author(&image).is_none_or(|stamped| stamped == declared);
             expected.push(Expected {
                 op: first as u32,
                 key: key.clone(),
-                image: vouched.then_some(image),
+                image,
                 created,
                 updated_clocked: clocked(last),
             });
@@ -3652,22 +3603,22 @@ impl Inner {
         Ok(expected)
     }
 
-    /// The rows of own commit `tx` the server did not ship (`held`): its
+    /// The rows of own commit `tx` the server did not ship (`as_written`): its
     /// version at `seq` is the one this replica wrote, stamped at
     /// `accepted_at`, so that becomes the settled image. A newer image
     /// already received stays. A row this store no longer has its own
     /// image of (its catalogue changed since), whose image is not the
     /// authority's version (its digest differs: the authority's inference
-    /// missed a difference), or whose create stamp it does not hold, is
-    /// asked for whole instead.
-    fn install_held(
+    /// missed a difference, such as a stamp by another author), or whose
+    /// create stamp it does not hold, is asked for whole instead.
+    fn install_as_written(
         &mut self,
         tx: u64,
         seq: u64,
         accepted_at: Option<u64>,
-        held: &[Held],
+        as_written: &[AsWritten],
     ) -> Result<(), Error> {
-        if held.is_empty() {
+        if as_written.is_empty() {
             return Ok(());
         }
         let client = self.client.as_mut().expect("client");
@@ -3678,39 +3629,37 @@ impl Inner {
         let mut installs = Vec::new();
         let mut whole = Vec::new();
         let mut mismatched = 0;
-        for held in held {
+        for written in as_written {
             let row = pending
                 .ops
-                .get(held.op as usize)
+                .get(written.op as usize)
                 .and_then(StagedOp::row)
                 .and_then(|row| {
                     pending
                         .rows
                         .iter()
-                        .find(|(_, r, key)| *r == row && *key == held.key)
+                        .find(|(_, r, key)| *r == row && *key == written.key)
                 });
             let Some((table, row, key)) = row else {
                 return Err(unsupported(format!(
                     "fate of commit {tx} holds a row of op {} it did not write",
-                    held.op
+                    written.op
                 )));
             };
             let entry = match &expected {
                 Some(expected) => {
                     let Some(entry) = expected
                         .iter()
-                        .find(|e| e.op == held.op && e.key == held.key)
+                        .find(|e| e.op == written.op && e.key == written.key)
                     else {
                         return Err(unsupported(format!(
                             "fate of commit {tx} holds a row of op {} it did not expect",
-                            held.op
+                            written.op
                         )));
                     };
-                    entry.image.as_ref().and_then(|image| {
-                        let same = echo_digest(image) == held.digest;
-                        mismatched += usize::from(!same);
-                        same.then_some((entry, image))
-                    })
+                    let same = echo_digest(&entry.image) == written.digest;
+                    mismatched += usize::from(!same);
+                    same.then_some(entry)
                 }
                 None => None,
             };
@@ -3719,16 +3668,10 @@ impl Inner {
         let mut images = Vec::new();
         for (entry, (table, row, key)) in installs {
             let image = match (entry, accepted_at) {
-                (Some((entry, image)), Some(at)) if entry.created == Created::Beneath => self
-                    .upstream_baseline(&table, row, &key)?
-                    .and_then(|beneath| {
-                        beneath
-                            .cells
-                            .into_iter()
-                            .find(|(name, _)| name == STAMPS[0])
-                    })
-                    .map(|(_, created)| entry.accepted(image, at, Some(created))),
-                (Some((entry, image)), Some(at)) => Some(entry.accepted(image, at, None)),
+                (Some(entry), Some(at)) if entry.created == Created::Beneath => self
+                    .settled_created(&table, row, &key)?
+                    .map(|created| entry.accepted(at, Some(created))),
+                (Some(entry), Some(at)) => Some(entry.accepted(at, None)),
                 _ => None,
             };
             match image {
@@ -3739,15 +3682,7 @@ impl Inner {
                 None => whole.push((table, *row.0.as_bytes(), key)),
             }
         }
-        if mismatched > 0 {
-            #[cfg(feature = "testing")]
-            assert!(
-                self.tolerate_echo_mismatches,
-                "the authority held {mismatched} row(s) of commit {tx} whose version is not this \
-                 replica's image of them"
-            );
-            self.echo_mismatches += mismatched as u64;
-        }
+        self.as_written_mismatches += mismatched as u64;
         for image in images {
             self.receive_image(image)?;
         }
@@ -3755,6 +3690,29 @@ impl Inner {
             self.ask_whole(row)?;
         }
         Ok(())
+    }
+
+    /// The `$createdAt` of a row's settled version beneath pending writes:
+    /// the cached baseline (which an earlier fate in the same batch may
+    /// just have installed), or the stored one.
+    fn settled_created(
+        &self,
+        table: &str,
+        row: RowUuid,
+        key: &[u8],
+    ) -> Result<Option<Cell>, Error> {
+        let client = self.client.as_ref().expect("client");
+        let beneath = match client.baselines.get(&(table.to_owned(), row, key.to_vec())) {
+            Some(Some(image)) => Some(image.clone()),
+            _ => self.upstream_baseline(table, row, key)?,
+        };
+        Ok(beneath.and_then(|beneath| {
+            beneath
+                .cells
+                .into_iter()
+                .find(|(name, _)| name == STAMPS[0])
+                .map(|(_, created)| created)
+        }))
     }
 
     /// The (stored table, id, key) of the rows a commit at `seq` wrote.
@@ -5035,8 +4993,8 @@ impl Inner {
             // Its rows as this store holds them, each at the commit's local
             // seq (the current version, or history under a later pending
             // write), as it held them when it sent it. One written under an
-            // earlier version is not vouched for: the authority applied it
-            // under that version's names.
+            // earlier schema version is not: the authority applied it under
+            // that version's names.
             let expected = if client.versions.contains_key(&tx) {
                 None
             } else {
@@ -5048,12 +5006,7 @@ impl Inner {
                         over.insert(row_key.clone());
                     }
                 }
-                let author = acting
-                    .author()
-                    .map(AuthorSubject::from_canonical)
-                    .transpose()
-                    .map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?;
-                Some(self.expected_rows(tx, &ops, &rows, &over, author)?)
+                Some(self.expected_rows(tx, &ops, &rows, &over)?)
             };
             client.pending.push(Pending {
                 tx,
@@ -5525,8 +5478,8 @@ impl Db {
         }
         // Each written row as this replica now holds it: the authority
         // does not echo a row it infers is exactly this, and names it
-        // `held` instead.
-        let expected = inner.expected_rows(seq, &ops, &rows, &over, author)?;
+        // `as_written` instead.
+        let expected = inner.expected_rows(seq, &ops, &rows, &over)?;
         let client = inner.client.as_mut().expect("client");
         let added: Vec<RowKey> = baselines.iter().map(|(key, _)| key.clone()).collect();
         client.baselines.extend(baselines);
@@ -5758,7 +5711,7 @@ impl Db {
         view: &ReadViewSourceSpec,
     ) -> Result<Option<u64>, Error> {
         let tier = reach.tier;
-        // Held on a live link: leaving it (even for a new attempt) releases
+        // AsWritten on a live link: leaving it (even for a new attempt) releases
         // the read, as it releases a gated opening.
         let live = self.inner.borrow().client.as_ref().is_some_and(|client| {
             let link = client.hint.get();
@@ -6390,9 +6343,9 @@ impl Db {
                             Outcome::Accepted {
                                 seq,
                                 accepted_at,
-                                held,
+                                as_written,
                             } => {
-                                inner.install_held(tx, *seq, *accepted_at, held)?;
+                                inner.install_as_written(tx, *seq, *accepted_at, as_written)?;
                                 *accepted_at
                             }
                             _ => None,
@@ -7210,19 +7163,13 @@ impl Db {
         }
     }
 
-    /// Rows the authority held for this replica's own commits that were
-    /// not this replica's image of them, and were asked for whole instead
-    /// (for tests and metrics): each is a case the authority's inference
-    /// that its writer holds the row missed (SPEC 8 §8.3).
-    pub fn echo_mismatches(&self) -> u64 {
-        self.inner.borrow().echo_mismatches
-    }
-
-    /// Count echo mismatches rather than panic on them, for a test that
-    /// provokes one (see [`Db::echo_mismatches`]).
-    #[cfg(feature = "testing")]
-    pub fn tolerate_echo_mismatches(&self) {
-        self.inner.borrow_mut().tolerate_echo_mismatches = true;
+    /// Rows the authority named as written for this replica's own commits
+    /// that were not this replica's image of them, and were asked for
+    /// whole instead (for tests and metrics): each is a case the
+    /// authority's inference that its writer holds the row missed, at the
+    /// cost of one round trip (SPEC 8 §8.3).
+    pub fn as_written_mismatches(&self) -> u64 {
+        self.inner.borrow().as_written_mismatches
     }
 
     /// Sessions currently served (for tests and metrics).
@@ -7607,7 +7554,7 @@ impl Db {
             if !inner.sessions[index].open {
                 continue;
             }
-            // Held supporting rows whose readability may have changed: their
+            // AsWritten supporting rows whose readability may have changed: their
             // table's read policy reads a written table, or the row itself
             // was written.
             let mut recheck: Vec<(String, RowUuid, Vec<u8>)> = Vec::new();
@@ -8013,7 +7960,7 @@ impl Db {
             });
             // The writer's own rows, still at the version its commit
             // produced and exactly as it holds them, settle by its Fate.
-            let mut held: BTreeMap<u64, Vec<Held>> = BTreeMap::new();
+            let mut as_written: BTreeMap<u64, Vec<AsWritten>> = BTreeMap::new();
             let fated: HashSet<u64> = session
                 .outbox
                 .iter()
@@ -8038,19 +7985,20 @@ impl Db {
                         return true;
                     };
                     let echo = echoes.swap_remove(at);
-                    held.entry(echo.tx)
+                    as_written
+                        .entry(echo.tx)
                         .or_default()
-                        .push(Held::of(echo.op, image));
+                        .push(AsWritten::of(echo.op, image));
                     hold_shipped(&mut session.shipped, image);
                     false
                 });
                 for message in &mut session.outbox {
                     if let SyncMessage::Fate {
                         tx,
-                        outcome: Outcome::Accepted { held: h, .. },
+                        outcome: Outcome::Accepted { as_written: h, .. },
                         ..
                     } = message
-                        && let Some(mut rows) = held.remove(tx)
+                        && let Some(mut rows) = as_written.remove(tx)
                     {
                         rows.sort_unstable_by(|a, b| (a.op, &a.key).cmp(&(b.op, &b.key)));
                         *h = rows;
@@ -8750,13 +8698,6 @@ impl Db {
                     }
                     _ => (node, tx),
                 };
-                // Whom the writer stamped its writes as: its own writes
-                // travel without an author, as its link's identity's.
-                let stamped = match acting.author().map(AuthorSubject::from_canonical) {
-                    Some(Ok(author)) => Some(author),
-                    Some(Err(_)) => None,
-                    None => policy,
-                };
                 // A resend after a reconnect gets the recorded fate.
                 let known = self.inner.borrow().applied_fate(node, tx)?;
                 let resent = known.is_some();
@@ -8788,7 +8729,6 @@ impl Db {
                                     (node, tx),
                                     writer,
                                     possession,
-                                    stamped,
                                 )
                             })
                         }) {
@@ -8854,37 +8794,12 @@ impl Db {
                         .outbox
                         .push(SyncMessage::Stored { tx });
                 } else {
-                    // The rows the writer holds as they now are need no
-                    // echo: fan-out drops their images if still current.
+                    // The rows the writer likely holds as they now are go
+                    // as written: fan-out drops their images if still
+                    // current, and the writer checks each by its digest.
                     let session = &mut inner.sessions[index];
                     if result.is_ok() {
-                        for candidate in echoable {
-                            let Echoable {
-                                row: row_key,
-                                op,
-                                on,
-                                previous,
-                            } = candidate;
-                            let held = match on {
-                                // Over its settled version, or (with no
-                                // base) a new row: as it was there.
-                                Some(Built::Seq(seq)) => previous == Some(seq),
-                                None => previous.is_none(),
-                                // Over its own earlier commit: one this
-                                // session found it holds as it landed.
-                                Some(Built::On(seq)) => {
-                                    previous == Some(seq)
-                                        && session.faithful.get(&row_key) == Some(&seq)
-                                }
-                            };
-                            if !held {
-                                session.faithful.remove(&row_key);
-                                continue;
-                            }
-                            if session.faithful.len() >= FAITHFUL_ROWS {
-                                session.faithful.clear();
-                            }
-                            session.faithful.insert(row_key.clone(), through);
+                        for Echoable { row: row_key, op } in echoable {
                             let (table, row, key) = row_key;
                             session.echoes.push(Echo {
                                 tx,
@@ -9212,7 +9127,6 @@ impl Db {
         origin: ([u8; 16], u64),
         writer: ([u8; 16], u64),
         possession: crate::large::Possession,
-        stamped: Option<AuthorSubject>,
     ) -> Result<(Vec<RowKey>, Vec<Echoable>), (Error, Vec<RowKey>)> {
         // Each base by the op it travels on; the ops apply without them.
         let bases: Vec<(usize, WireBase)> = ops
@@ -9454,19 +9368,8 @@ impl Db {
         match finished {
             Ok(rows) => {
                 end_savepoint(&inner.conn, "upload", true).map_err(|e| (e, Vec::new()))?;
-                // Whom the writer stamped its writes as, and whom they are
-                // stamped as here: the writer's own writes travel without
-                // an author, as its link's identity's.
-                let author = match who {
-                    Who::Session(author) | Who::Attributed(author) => author,
-                    Who::Local => inner.stamp_author(),
-                };
-                let echoable = if stamped == Some(author) {
-                    let on = if relay { &landed } else { &built };
-                    echoable(&ops, &by_row, &rows, on, &previous, &merged)
-                } else {
-                    Vec::new()
-                };
+                let on = if relay { &landed } else { &built };
+                let echoable = echoable(&ops, &by_row, &rows, on, &previous, &merged);
                 drop(inner);
                 self.notify();
                 Ok((rows, echoable))
@@ -9523,12 +9426,12 @@ fn vouched(
     }
 }
 
-/// The rows of an applied commit whose new version its writer holds as it
-/// is, as far as the commit itself tells (the session's own record of
-/// earlier commits decides the rest): rows written over the version their
-/// base names (`on`, by where it landed here) or, with no base, created
-/// where there was no version, with no text merge changing what was sent.
-/// A row a `Move` writes is not inferred (it spans two branches).
+/// The rows of an applied commit its writer likely holds as they now are:
+/// rows written over the version they were built on (`on`, by where it
+/// landed here) or, built on nothing, created where there was no version,
+/// with no text merge changing what was sent. The writer checks each by its
+/// digest, so a row it holds otherwise costs a round trip, never a wrong
+/// cache. A row a `Move` writes is not inferred (it spans two branches).
 fn echoable(
     ops: &[StagedOp],
     by_row: &conflicts::RowOps,
@@ -9547,26 +9450,12 @@ fn echoable(
             {
                 return None;
             }
-            let on = on.get(row_key).copied();
-            let previous = previous.get(row_key).copied();
-            // With no base, the writer held no image: inserts, or upserts
-            // of an unbranched row, made a new row from the ops alone. An
-            // upsert into a branch may take a parent branch's version,
-            // which the writer may hold otherwise. (Ops are by row, not
-            // branch key: every op on the row must qualify.)
-            let new_row = indexes.iter().all(|&i| match ops[i] {
-                StagedOp::Insert(..) => true,
-                StagedOp::Upsert(..) => row_key.2.is_empty(),
-                _ => false,
+            let built = on.get(row_key).map(|built| match built {
+                Built::Seq(seq) | Built::On(seq) => *seq,
             });
-            if on.is_none() && !(previous.is_none() && new_row) {
-                return None;
-            }
-            Some(Echoable {
+            (previous.get(row_key).copied() == built).then(|| Echoable {
                 row: row_key.clone(),
                 op: indexes[0] as u32,
-                on,
-                previous,
             })
         })
         .collect()
@@ -9670,7 +9559,7 @@ struct HeldWrites {
     tables: Option<BTreeSet<String>>,
     /// A commit is held: a snapshot read may name it.
     commits: bool,
-    /// Held reads, which their unsubscribes must not overtake.
+    /// AsWritten reads, which their unsubscribes must not overtake.
     reads: HashSet<u64>,
 }
 
