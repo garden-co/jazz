@@ -26,9 +26,9 @@ use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
 use jazz::db::{
-    Acting, CorpusReader, Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadSpan, ReadTier,
-    Reason, SyncMessage, Transport, UpdateOptions, WireError as SyncWireError, WriteIdentity,
-    block_on, encode_frames, validate_frame_batch_for_corpus,
+    Acting, CorpusReader, Db, DbConfig, DbIdentity, FrameJoiner, InsertOptions, ReadOpts, ReadSpan,
+    ReadTier, Reason, SyncMessage, Transport, UpdateOptions, WireError as SyncWireError,
+    WriteIdentity, block_on, encode_frames, validate_frame_batch_for_corpus,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::model::transaction::OpenTransactionId;
@@ -39,7 +39,8 @@ use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::wire::{
     TransportError, WireError, WireErrorCode, WireFrame, WireHello, WirePeerRole, WireRetry,
-    current_wire_features, encode_frame, encode_websocket_frame_batch,
+    current_wire_features, decode_websocket_frame_batch, encode_frame,
+    encode_websocket_frame_batch,
 };
 use serde::{Deserialize, Serialize};
 
@@ -166,6 +167,32 @@ fn every_pinned_sync_frame_decodes_to_its_variant_and_reencodes_exactly() {
             message.variant
         );
     }
+}
+
+/// A commit too large for one frame travels in parts: the pinned split
+/// commit joins back into exactly the pinned `Commit`.
+#[test]
+fn the_pinned_split_commit_joins_into_the_pinned_commit() {
+    let corpus = corpus();
+    let commit = corpus
+        .messages
+        .iter()
+        .find(|m| m.variant == "Commit")
+        .unwrap();
+    let split = corpus
+        .frames
+        .iter()
+        .find(|f| f.name == "a split commit in one batch")
+        .expect("a split commit is pinned");
+    let frames = decode_websocket_frame_batch(&unhex(&split.batch_hex)).unwrap();
+    assert_eq!(frames.len(), 2, "in two parts");
+    let mut joiner = FrameJoiner::default();
+    assert!(joiner.push(&frames[0]).unwrap().is_none(), "a leading part");
+    let joined = joiner.push(&frames[1]).unwrap().expect("the last part");
+    assert_eq!(
+        postcard::to_allocvec(&joined).unwrap(),
+        unhex(&commit.frame_hex)
+    );
 }
 
 /// The rejected-fate layout (a reason name beside the message) is pinned by
@@ -799,7 +826,8 @@ fn produce_sqlite_sync_wire_corpus_v1() {
         })
         .collect();
     let rows = shapes[1].2.clone();
-    let mut commit = unhex(&messages[4].frame_hex);
+    let whole_commit = unhex(&messages[4].frame_hex);
+    let mut commit = whole_commit.clone();
     commit.truncate(commit.len() / 2);
     let subscribe = unhex(&messages[0].frame_hex);
     let unsubscribe = unhex(&messages[1].frame_hex);
@@ -852,6 +880,11 @@ fn produce_sqlite_sync_wire_corpus_v1() {
                 "a split message in one batch",
                 "client",
                 batch(&split(&rows)),
+            ),
+            entry(
+                "a split commit in one batch",
+                "server",
+                batch(&split(&whole_commit)),
             ),
         ]
         .into_iter()

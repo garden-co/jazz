@@ -11,9 +11,9 @@ are stored, a rejection's reason name changed how fates are recorded, and
 pending uploads moved from one encoded message to a row per op).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `ff123c82a60fae12a8e558fc9d86b5364aeed87db9117ea8b705813bb7b70e08`.
+  the SQLite file `a281b45471f14aa24cfb4193fbba381d2d52dff76608eba55a6997de698d0e29`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `f259cc2666ac6362185388908b58f8fb42c3258494298870d742de3c1c84c7f6`.
+  `5fdc748c92cb1051cce51e2eb6c3f5018bf85b7e624474cc5d4511292e64cc7c`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
@@ -30,8 +30,10 @@ nodes and write times:
 - a client that synced `projects` and `documents`, wrote one row that
   settled, one stamped far ahead of the server's clock that the server
   rejected (so `_jazz_transactions` keeps a rejected fate with its reason name),
-  then two writes (an insert and an update) that never reached the
-  server: its pending uploads;
+  then two writes (an insert and an update) and a serializable transaction
+  that read one project and inserted two, none of which reached the
+  server: its pending uploads, the last one stored as two op rows and a
+  read row;
 - then the server activated a second schema version that renames
   `documents.title` to `heading` (a stored-names lens) and wrote under it.
 
@@ -78,3 +80,9 @@ earlier layout is refused as an unsupported storage format, never misread.
 Merging `_jazz_applied` and `_jazz_settled` into one `_jazz_transactions`
 table keyed by an interned node code (`_jazz_nodes.n`) regenerated it the
 same way.
+
+Deleting a settled commit's pending rows in one statement (the
+`_jazz_pending_forget` trigger on `_jazz_pending`, with
+`_jazz_pending_versions` now created on open) regenerated it the same way,
+adding the serializable pending commit above so the per-op layout is
+pinned with more than one op and a read.
