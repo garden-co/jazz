@@ -82,7 +82,7 @@ function typedResultKey(
   joined: readonly Uint8Array[],
   discriminators: ReadonlyArray<readonly [number, string]>,
 ): Uint8Array {
-  const bytes = [1, ...root];
+  const bytes = [2, ...root];
   pushU32Be(bytes, joined.length);
   for (const value of joined) bytes.push(...value);
   pushU32Be(bytes, discriminators.length);
@@ -92,11 +92,12 @@ function typedResultKey(
     pushU32Be(bytes, encoded.byteLength);
     bytes.push(...encoded);
   }
+  bytes.push(...Array.from({ length: joined.length + 1 }, () => 0));
   return Uint8Array.from(bytes);
 }
 
 function occurrenceKey(id: string): Uint8Array {
-  return Uint8Array.from([1, ...uuidBytes(id), 0, 0, 0, 0, 0, 0, 0, 0]);
+  return Uint8Array.from([2, ...uuidBytes(id), 0, 0, 0, 0, 0, 0, 0, 0, 0]);
 }
 
 function runtimeAddedRecord(
@@ -311,7 +312,7 @@ describe("SubscriptionManager", () => {
           emptyRuntimeDelta({ added: [runtimeAddedRecord(id, 0, "typed", 1, sidecar)] }),
           transform,
         ),
-      ).toThrow(/malformed or noncanonical ResultKey V1 terminal occurrence key/);
+      ).toThrow(/malformed or noncanonical ResultKey terminal occurrence key/);
       expect(manager.all()).toEqual([]);
     };
 
@@ -697,7 +698,7 @@ describe("SubscriptionManager", () => {
       index: 0,
       row: includedRootRow(rootId, title),
     });
-    // Groove's ordered root key for this occurrence: root UUID, then the
+    // The ordered root key for this occurrence: root UUID, then the
     // union-arm label ahead of the joined UUID it discriminates.
     const orderedRoot = [
       10,
@@ -843,7 +844,7 @@ describe("SubscriptionManager", () => {
         }),
         transformIncluded,
       ),
-    ).toThrow(/malformed or noncanonical ResultKey V1 terminal occurrence key/);
+    ).toThrow(/malformed or noncanonical ResultKey terminal occurrence key/);
     expect(manager.all()).toEqual(before);
 
     // A bulk frame (32+ changes) that removes, moves and adds, then fails.
@@ -1187,4 +1188,53 @@ describe("SubscriptionManager", () => {
     );
     expect(reduceDeltas(result).map((item) => item.id)).toEqual(["2"]);
   });
+});
+
+it("keeps equal history rows distinct and addresses updates by their full transaction", () => {
+  const manager = new SubscriptionManager<TestItem>();
+  const id = "11111111-1111-1111-1111-111111111111";
+  const node = uuidBytes("22222222-2222-2222-2222-222222222222");
+  const times = [0xfffffffffffffff0n, 0xfffffffffffffff1n];
+  const timeBytes = (time: bigint) => {
+    const bytes = new Uint8Array(8);
+    new DataView(bytes.buffer).setBigUint64(0, time);
+    return bytes;
+  };
+  const keys = times.map((time) =>
+    Uint8Array.from([...occurrenceKey(id).subarray(0, 25), 1, ...timeBytes(time), ...node]),
+  );
+  const first = manager.handleDelta(
+    emptyRuntimeDelta({
+      added: keys.map((key, index) => runtimeAddedRecord(id, index, "same", 1, key)),
+    }),
+    transform,
+  );
+  expect(first.all).toEqual([
+    { id, name: "same", count: 1 },
+    { id, name: "same", count: 1 },
+  ]);
+  const edited = manager.handleDelta(
+    emptyRuntimeDelta({
+      updated: [
+        {
+          sourceId: id,
+          occurrenceKey: keys[1]!,
+          index: 1,
+          row: makeRow(id, "changed", 2),
+        },
+      ],
+    }),
+    transform,
+  );
+  expect(edited.all).toEqual([
+    { id, name: "same", count: 1 },
+    { id, name: "changed", count: 2 },
+  ]);
+  const removed = manager.handleDelta(
+    emptyRuntimeDelta({
+      removed: [{ sourceId: id, occurrenceKey: keys[0]!, index: 0 }],
+    }),
+    transform,
+  );
+  expect(removed.all).toEqual([{ id, name: "changed", count: 2 }]);
 });

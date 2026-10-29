@@ -2,9 +2,10 @@
 
 use jazz::schema::JazzSchema;
 use jazz::tools::public_schema::{
-    PolicyExpr, RelColumnRef, RelExpr, RelJoinCondition, RelJoinKind, RelKeyRef, RelPredicateCmpOp,
-    RelPredicateExpr, RelProjectColumn, RelProjectExpr, RelRecursionBound, RelValueRef, RowIdRef,
-    Schema, TablePolicies, Value,
+    PolicyExpr, RecursionBound, RelationCmpOp, RelationColumnRef, RelationExpr,
+    RelationJoinCondition, RelationJoinKind, RelationKeyRef, RelationPredicate,
+    RelationProjectColumn, RelationProjectExpr, RelationRowIdRef, RelationValueRef, Schema,
+    TablePolicies, Value,
 };
 
 /// Compile a developer-authored schema while retaining its persistable source.
@@ -21,17 +22,17 @@ pub fn all_operation_policies(policy: PolicyExpr) -> TablePolicies {
         .with_delete(policy)
 }
 
-fn column(scope: &str, column: &str) -> RelColumnRef {
-    RelColumnRef {
+fn column(scope: &str, column: &str) -> RelationColumnRef {
+    RelationColumnRef {
         scope: Some(scope.to_owned()),
         column: column.to_owned(),
     }
 }
 
-fn equals(scope: &str, column_name: &str, right: RelValueRef) -> RelPredicateExpr {
-    RelPredicateExpr::Cmp {
+fn equals(scope: &str, column_name: &str, right: RelationValueRef) -> RelationPredicate {
+    RelationPredicate::Cmp {
         left: column(scope, column_name),
-        op: RelPredicateCmpOp::Eq,
+        op: RelationCmpOp::Eq,
         right,
     }
 }
@@ -57,16 +58,16 @@ pub fn seeded_recursive_access_policy(
     let edge_alias = "recursive_edge";
     let target_alias = "recursive_target";
     let access_alias = "access";
-    let seed = RelExpr::Project {
-        input: Box::new(RelExpr::Filter {
-            input: Box::new(RelExpr::TableScan {
+    let seed = RelationExpr::Project {
+        input: Box::new(RelationExpr::Filter {
+            input: Box::new(RelationExpr::TableScan {
                 table: seed_table.into(),
                 alias: Some(seed_alias.to_owned()),
             }),
             predicate: equals(
                 seed_alias,
                 seed_user_column,
-                RelValueRef::SessionRef(
+                RelationValueRef::SessionRef(
                     seed_claim_path
                         .iter()
                         .map(|segment| (*segment).to_owned())
@@ -74,80 +75,84 @@ pub fn seeded_recursive_access_policy(
                 ),
             ),
         }),
-        columns: vec![RelProjectColumn {
+        columns: vec![RelationProjectColumn {
             alias: "id".to_owned(),
-            expr: RelProjectExpr::Column(column(seed_alias, seed_team_column)),
+            expr: RelationProjectExpr::Column(column(seed_alias, seed_team_column)),
         }],
     };
     let mut edge_predicates = vec![equals(
         edge_alias,
         edge_member_column,
-        RelValueRef::RowId(RowIdRef::Frontier),
+        RelationValueRef::RowId(RelationRowIdRef::Frontier),
     )];
     edge_predicates.extend(edge_filters.iter().map(|(column_name, value)| {
-        equals(edge_alias, column_name, RelValueRef::Literal(value.clone()))
+        equals(
+            edge_alias,
+            column_name,
+            RelationValueRef::literal(value.clone()),
+        )
     }));
-    let step = RelExpr::Project {
-        input: Box::new(RelExpr::Join {
-            left: Box::new(RelExpr::Filter {
-                input: Box::new(RelExpr::TableScan {
+    let step = RelationExpr::Project {
+        input: Box::new(RelationExpr::Join {
+            left: Box::new(RelationExpr::Filter {
+                input: Box::new(RelationExpr::TableScan {
                     table: edge_table.into(),
                     alias: Some(edge_alias.to_owned()),
                 }),
-                predicate: RelPredicateExpr::And(edge_predicates),
+                predicate: RelationPredicate::And(edge_predicates),
             }),
-            right: Box::new(RelExpr::TableScan {
+            right: Box::new(RelationExpr::TableScan {
                 table: team_table.into(),
                 alias: Some(target_alias.to_owned()),
             }),
-            on: vec![RelJoinCondition {
+            on: vec![RelationJoinCondition {
                 left: column(edge_alias, edge_parent_column),
                 right: column(target_alias, "id"),
             }],
-            join_kind: RelJoinKind::Inner,
+            join_kind: RelationJoinKind::Inner,
         }),
-        columns: vec![RelProjectColumn {
+        columns: vec![RelationProjectColumn {
             alias: "id".to_owned(),
-            expr: RelProjectExpr::Column(column(target_alias, "id")),
+            expr: RelationProjectExpr::Column(column(target_alias, "id")),
         }],
     };
-    let reachable = RelExpr::Gather {
+    let reachable = RelationExpr::Gather {
         seed: Box::new(seed),
         step: Box::new(step),
-        frontier_key: RelKeyRef::RowId(RowIdRef::Current),
-        bound: RelRecursionBound::MaxDepth(8),
-        dedupe_key: vec![RelKeyRef::RowId(RowIdRef::Current)],
+        frontier_key: RelationKeyRef::RowId(RelationRowIdRef::Current),
+        bound: RecursionBound::MaxDepth(8),
+        dedupe_key: vec![RelationKeyRef::RowId(RelationRowIdRef::Current)],
     };
     let mut access_predicates = vec![equals(
         access_alias,
         access_row_column,
-        RelValueRef::RowId(RowIdRef::Outer),
+        RelationValueRef::RowId(RelationRowIdRef::Outer),
     )];
     access_predicates.extend(access_filters.iter().map(|(column_name, value)| {
         equals(
             access_alias,
             column_name,
-            RelValueRef::Literal(value.clone()),
+            RelationValueRef::literal(value.clone()),
         )
     }));
     PolicyExpr::ExistsRel {
-        rel: RelExpr::Filter {
-            input: Box::new(RelExpr::Join {
+        rel: RelationExpr::Filter {
+            input: Box::new(RelationExpr::Join {
                 left: Box::new(reachable),
-                right: Box::new(RelExpr::TableScan {
+                right: Box::new(RelationExpr::TableScan {
                     table: access_table.into(),
                     alias: Some(access_alias.to_owned()),
                 }),
-                on: vec![RelJoinCondition {
-                    left: RelColumnRef {
+                on: vec![RelationJoinCondition {
+                    left: RelationColumnRef {
                         scope: None,
                         column: "id".to_owned(),
                     },
                     right: column(access_alias, access_team_column),
                 }],
-                join_kind: RelJoinKind::Inner,
+                join_kind: RelationJoinKind::Inner,
             }),
-            predicate: RelPredicateExpr::And(access_predicates),
+            predicate: RelationPredicate::And(access_predicates),
         },
     }
 }

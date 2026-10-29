@@ -14,10 +14,8 @@ mod relay_topology {
     use std::collections::BTreeMap;
 
     use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, SubscriptionEvent, block_on};
-    use jazz::groove::records::Value;
-    use jazz::groove::storage::MemoryStorage;
     use jazz::ids::{AuthorSubject, NodeUuid};
-    use jazz::node::CommitUnitTrust;
+    use jazz::records::Value;
     use jazz::schema::JazzSchema;
     use jazz::tools::{ColumnType, SchemaBuilder, TableSchema};
     use jazz::tx::DurabilityTier;
@@ -34,14 +32,8 @@ mod relay_topology {
 
     fn open_db(node: u8, author: AuthorSubject) -> Db {
         let schema = schema();
-        let column_families = schema.column_families();
-        let refs = column_families
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
         block_on(Db::open(DbConfig::new(
             schema,
-            MemoryStorage::new(&refs).expect("valid memory storage families"),
             DbIdentity {
                 node: NodeUuid::from_bytes([node; 16]),
                 author,
@@ -52,14 +44,8 @@ mod relay_topology {
 
     fn open_authority(node: u8) -> Db {
         let schema = schema();
-        let column_families = schema.column_families();
-        let refs = column_families
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
         block_on(Db::open_history_complete(DbConfig::new(
             schema,
-            MemoryStorage::new(&refs).expect("valid memory storage families"),
             DbIdentity {
                 node: NodeUuid::from_bytes([node; 16]),
                 author: AuthorSubject::SYSTEM,
@@ -131,12 +117,8 @@ mod relay_topology {
         // Alice's immutable session binding inside its propagated
         // subscription; Core must not model the physical transport as Alice's
         // direct session link.
-        let _authority_subscriber = authority.accept_subscriber_with_claims_and_trust(
-            authority_transport,
-            AuthorSubject::SYSTEM,
-            BTreeMap::new(),
-            CommitUnitTrust::TrustedBackend,
-        );
+        let _authority_subscriber =
+            authority.accept_subscriber(authority_transport, AuthorSubject::SYSTEM);
 
         let documents = client
             .prepare_query(&client.table("documents"))
@@ -144,7 +126,7 @@ mod relay_topology {
         let mut subscription = block_on(client.subscribe(
             &documents,
             ReadOpts {
-                tier: DurabilityTier::Global,
+                tier: jazz::db::ReadTier::Remote,
                 ..ReadOpts::default()
             },
         ))
@@ -230,7 +212,7 @@ mod relay_topology {
         let mut subscription = block_on(client.subscribe(
             &documents,
             ReadOpts {
-                tier: DurabilityTier::Global,
+                tier: jazz::db::ReadTier::Remote,
                 ..ReadOpts::default()
             },
         ))
@@ -252,12 +234,8 @@ mod relay_topology {
         // session. Keeping the same admission model in the delayed-handshake
         // case proves that non-settlement is caused by the missing upstream
         // frontier, rather than rejected delegated policy context.
-        let _authority_subscriber = authority.accept_subscriber_with_claims_and_trust(
-            held_authority_transport,
-            AuthorSubject::SYSTEM,
-            BTreeMap::new(),
-            CommitUnitTrust::TrustedBackend,
-        );
+        let _authority_subscriber =
+            authority.accept_subscriber(held_authority_transport, AuthorSubject::SYSTEM);
         let mut events = premature;
         for _ in 0..4 {
             tick(&authority, "process the queued handshake");
@@ -357,7 +335,7 @@ mod relay_topology {
         let mut subscription = block_on(node.subscribe(
             &documents,
             ReadOpts {
-                tier: DurabilityTier::Global,
+                tier: jazz::db::ReadTier::Remote,
                 ..ReadOpts::default()
             },
         ))
@@ -372,9 +350,9 @@ mod relay_topology {
         let rows = node.read(&documents).expect("one-shot local read");
         assert_eq!(rows.len(), 1, "the local read must resolve immediately");
         assert_eq!(rows[0].row_uuid(), written.row_uuid());
-        let one = node.one(&documents).expect("one-shot local single read");
+        let one = node.read(&documents).expect("one-shot local single read");
         assert_eq!(
-            one.map(|row| row.row_uuid()),
+            one.first().map(|row| row.row_uuid()),
             Some(written.row_uuid()),
             "single-row local reads must also resolve immediately"
         );
@@ -400,7 +378,7 @@ mod relay_topology {
         let mut subscription = block_on(node.subscribe(
             &documents,
             ReadOpts {
-                tier: DurabilityTier::Global,
+                tier: jazz::db::ReadTier::Remote,
                 ..ReadOpts::default()
             },
         ))
@@ -493,7 +471,7 @@ mod relay_topology {
         let mut subscription = block_on(client.subscribe(
             &documents,
             ReadOpts {
-                tier: DurabilityTier::Global,
+                tier: jazz::db::ReadTier::Remote,
                 ..ReadOpts::default()
             },
         ))
@@ -565,7 +543,7 @@ mod relay_topology {
         let mut subscription = block_on(node.subscribe(
             &documents,
             ReadOpts {
-                tier: DurabilityTier::Global,
+                tier: jazz::db::ReadTier::Remote,
                 ..ReadOpts::default()
             },
         ))
@@ -872,7 +850,7 @@ mod client_transport {
                     .with_app_id(app_id)
                     .with_schema(schema.clone())
                     .with_data_dir(data_dir.path())
-                    .with_storage_factory(jazz_testkit::persistent_storage_factory())
+                    .with_persistent_storage()
                     .start()
                     .await
                     .expect("start test server");
@@ -933,7 +911,7 @@ mod client_transport {
                     .with_app_id(app_id)
                     .with_schema(schema.clone())
                     .with_data_dir(data_dir.path())
-                    .with_storage_factory(jazz_testkit::persistent_storage_factory())
+                    .with_persistent_storage()
                     .start()
                     .await
                     .expect("start test server");

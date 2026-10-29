@@ -10,8 +10,10 @@ name: Nightly tests
 #   runtime is measured. PR CI runs one bounded seed.
 # - browser-soak: the two JAZZ_BROWSER_SOAK worker-bridge tests, which no
 #   other workflow enables.
-# - benchmark-api: benchmark-smoke.sh --compile-ci, whose only other home is
-#   the realistic benchmark workflow on the self-hosted jazz-bench runner.
+# - benchmark-api: benchmark-smoke.sh --compile-ci, which checks every
+#   maintained benchmark API (including `cargo check -p jazz-sim --benches`).
+#   This is its only CI home since the realistic benchmark workflow was
+#   retired on 2026-10-15.
 #
 # Starters E2E is not part of the nightly: it runs only on release PRs
 # (see starters-e2e.yml).
@@ -37,7 +39,7 @@ jobs:
     runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 120
     container:
-      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:dcb4ec5e4f5507b258805617d58ee6976f7dcee2e9afe1b05ae3d41cc185ef35
+      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:457972f436c36e4d00c31d89fe13506e43afff95fe933e831c0efb4b6f492dba
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -52,9 +54,9 @@ jobs:
           sccache-s3: false
       - name: Run the 300-seed oracle
         env:
-          JAZZ_SEED_COUNT: "300"
+          JAZZ_DIFFERENTIAL_STEP_COUNT: "60"
           JAZZ_DIFFERENTIAL_CHURN_DEPTHS: "10,1000"
-        run: dev/t --exact node::tests::harness::m3_maintained_one_shot_differential_oracle -- --ignored
+        run: JAZZ_SEED="$(seq -s, 1 300)" dev/t --test maintained_differential --exact maintained_one_shot_differential_oracle -- --ignored
 
   browser-soak:
     name: Worker-bridge browser soak
@@ -62,7 +64,7 @@ jobs:
     runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 60
     container:
-      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:dcb4ec5e4f5507b258805617d58ee6976f7dcee2e9afe1b05ae3d41cc185ef35
+      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:457972f436c36e4d00c31d89fe13506e43afff95fe933e831c0efb4b6f492dba
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -96,7 +98,7 @@ jobs:
     runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 45
     container:
-      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:dcb4ec5e4f5507b258805617d58ee6976f7dcee2e9afe1b05ae3d41cc185ef35
+      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:457972f436c36e4d00c31d89fe13506e43afff95fe933e831c0efb4b6f492dba
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}

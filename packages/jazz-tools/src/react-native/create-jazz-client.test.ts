@@ -41,9 +41,7 @@ import {
   REACT_NATIVE_MEMORY_RUNTIME_UNSUPPORTED_ERROR,
   REACT_NATIVE_NATIVE_RELAY_MEMORY_ONLY_ERROR,
   REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR,
-  REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR,
   type JazzClient,
-  type ReactNativeSqliteStorageDriver,
   type JazzClientConfig,
   useLocalFirstAuth,
 } from "./index.js";
@@ -113,9 +111,6 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
   });
 
   it("exports the exact installed-package persistence boundary messages", () => {
-    expect(REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR).toBe(
-      "ReactNativeDbConfig.sqliteStorage is proposal-only and cannot be used by the v2 runtime; remove sqliteStorage (memory mode remains unverified scaffolding)",
-    );
     expect(REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR).toMatch(/JazzRelay native artifact/);
   });
 
@@ -217,11 +212,11 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
           return Uint8Array.from([23, ...new Uint8Array(16).fill(4), ...rowId]);
         }
         case 21:
-          return Uint8Array.of(16, 1, 0, 1);
+          return Uint8Array.of(16, 1, 0, 1, 0);
         case 22:
           return encodeNativeSession("reader");
-        case 24:
-          return Uint8Array.of(19, 2, 91, 93); // mutationErrors: "[]"
+        case 35:
+          return Uint8Array.of(26, 2, 91, 93, 0, 0); // tickEvents: "[]", no failures
         case 17:
           return Uint8Array.from([15, ...command.subarray(1, 17)]);
         default:
@@ -256,11 +251,11 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
       title: "Native note",
     });
     await expect(inserted.txId).resolves.toBe("04".repeat(16));
-    await expect(client.db.all(app.notes, { tier: "global" })).resolves.toMatchObject([
+    await expect(client.db.all(app.notes, { tier: "remote" })).resolves.toMatchObject([
       { title: "Native note" },
     ]);
-    expect(readOptions).toContainEqual({ tier: "global" });
-    expect(commandTags).toEqual(expect.arrayContaining([2, 3, 4, 5, 6, 17, 21, 22, 24, 31]));
+    expect(readOptions).toContainEqual(expect.objectContaining({ tier: "remote" }));
+    expect(commandTags).toEqual(expect.arrayContaining([2, 3, 4, 5, 6, 17, 21, 22, 31, 35]));
     // #3273: reads and subscriptions no longer tick (pump) the native relay
     // before their command; unsubscribe still drives its cleanup turn.
     expect(nativeForegroundTest.tick.mock.calls.length).toBeGreaterThanOrEqual(1);
@@ -296,9 +291,9 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
     ]);
     nativeForegroundTest.execute = (command) => {
       if (command[0] === 2) return encodeBytesResponse(2, rows);
-      if (command[0] === 21) return Uint8Array.of(16, 1, 0, 1);
+      if (command[0] === 21) return Uint8Array.of(16, 1, 0, 1, 0);
       if (command[0] === 22) return encodeNativeSession("old-reader");
-      if (command[0] === 24) return Uint8Array.of(19, 2, 91, 93);
+      if (command[0] === 35) return Uint8Array.of(26, 2, 91, 93, 0, 0);
       if (command[0] === 6) return Uint8Array.of(6, 1);
       if (command[0] === 7) return Uint8Array.of(7, 1);
       throw new Error(`unexpected foreground command ${command[0]}`);
@@ -340,41 +335,6 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
     expect((error as Error).message).toBe(REACT_NATIVE_NATIVE_RELAY_MEMORY_ONLY_ERROR);
   });
 
-  it("rejects an injected SQLite driver before opening it", async () => {
-    const open = vi.fn();
-    const sqliteStorage: ReactNativeSqliteStorageDriver = {
-      type: "react-native-sqlite",
-      open,
-      deleteDatabase: vi.fn(),
-    };
-
-    const error = await createDb({
-      ...(await accountConfig("react-native-persistent-boundary-test")),
-      sqliteStorage,
-    }).catch((error: unknown) => error);
-    expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toBe(REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR);
-    expect(open).not.toHaveBeenCalled();
-  });
-
-  it("rejects rather than ignores sqliteStorage combined with memory mode", async () => {
-    const open = vi.fn();
-    const sqliteStorage: ReactNativeSqliteStorageDriver = {
-      type: "react-native-sqlite",
-      open,
-      deleteDatabase: vi.fn(),
-    };
-
-    const error = await createDb({
-      ...(await accountConfig("react-native-memory-sqlite-ambiguity-test")),
-      driver: { type: "memory" },
-      sqliteStorage,
-    }).catch((error: unknown) => error);
-    expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toBe(REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR);
-    expect(open).not.toHaveBeenCalled();
-  });
-
   it("keeps the Node-only memory scaffold out of the React Native entrypoint", async () => {
     const config = {
       ...(await accountConfig("react-native-memory-reopen-test")),
@@ -407,7 +367,7 @@ function writeRowBatches(writer: PostcardWriter, rows: EncodedRow[]): void {
       encoded.bytes(row.rowId);
       encoded.bool(false);
       encoded.bytes(
-        createRecord(descriptor, [Uint8Array.from([2, ...new TextEncoder().encode(row.title)])]),
+        createRecord(descriptor, [Uint8Array.from([0, ...new TextEncoder().encode(row.title)])]),
       );
     }, tableRows.length);
   }, byTable.size);
@@ -419,7 +379,7 @@ function encodeSubscriptionDelta(delta: { added: EncodedRow[] }): Uint8Array {
   writeRowBatches(writer, []);
   writer.vec(() => undefined, 0);
   const occurrenceKeys = delta.added.map((row) =>
-    Uint8Array.from([1, ...row.rowId, 0, 0, 0, 0, 0, 0, 0, 0]),
+    Uint8Array.from([2, ...row.rowId, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
   );
   writer.vec((key, index) => key.bytes(occurrenceKeys[index]!), occurrenceKeys.length);
   writer.vec(() => undefined, 0);
@@ -427,6 +387,8 @@ function encodeSubscriptionDelta(delta: { added: EncodedRow[] }): Uint8Array {
   writer.vec((indexWriter, index) => indexWriter.u64(index), delta.added.length);
   writer.vec(() => undefined, 0);
   writer.vec(() => undefined, 0);
+  writer.vec(() => undefined, 0);
+  // No updated rows, so no splices.
   writer.vec(() => undefined, 0);
   return writer.finish();
 }

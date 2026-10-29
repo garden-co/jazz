@@ -1661,7 +1661,7 @@ describe("permissions DSL", () => {
           "child_team",
           "parent_team",
         )
-        .seeded_by("user_team_edges", "user_id", "sub", "team");
+        .seeded_by("user_team_edges", "user_id", session.claims["sub"], "team");
       return [];
     });
     if (!relation) {

@@ -1,4 +1,4 @@
-import { appScopedUrl } from "./url.js";
+import { appScopedUrl, fetchAdminJson } from "./url.js";
 
 export interface IntrospectionSubscriptionGroup {
   groupKey: string;
@@ -6,7 +6,6 @@ export interface IntrospectionSubscriptionGroup {
   table: string;
   query: string;
   branches: string[];
-  propagation: "full" | "local-only";
 }
 
 export interface IntrospectionSubscriptionResponse {
@@ -29,22 +28,11 @@ export async function fetchServerSubscriptions(
   );
   subscriptionsUrl.searchParams.set("appId", options.appId);
 
-  const response = await fetch(subscriptionsUrl.toString(), {
-    method: "GET",
-    headers: {
-      "X-Jazz-Admin-Secret": options.adminSecret,
-    },
-  });
-
-  if (!response.ok) {
-    const bodyText = await response.text().catch(() => "");
-    const detail = bodyText ? ` - ${bodyText}` : "";
-    throw new Error(
-      `Server subscriptions fetch failed: ${response.status} ${response.statusText}${detail}`,
-    );
-  }
-
-  const payload = (await response.json()) as Partial<IntrospectionSubscriptionResponse>;
+  const payload = (await fetchAdminJson(
+    subscriptionsUrl.toString(),
+    options.adminSecret,
+    "Server subscriptions",
+  )) as Partial<IntrospectionSubscriptionResponse>;
   return {
     appId: typeof payload.appId === "string" ? payload.appId : "",
     generatedAt: typeof payload.generatedAt === "number" ? payload.generatedAt : 0,

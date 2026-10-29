@@ -1,6 +1,7 @@
 import { statSync, watch, type FSWatcher } from "node:fs";
 import { basename, join } from "node:path";
 import { deploy } from "./catalogue-project.js";
+import { toError } from "../runtime/util.js";
 
 export interface SchemaWatcherOptions {
   schemaDir: string;
@@ -35,7 +36,7 @@ export function watchSchema(options: SchemaWatcherOptions): { close: () => void 
       });
       if (!closed) options.onPush?.(result.schema.hash);
     } catch (error) {
-      if (!closed) options.onError?.(error instanceof Error ? error : new Error(String(error)));
+      if (!closed) options.onError?.(toError(error));
     } finally {
       pushing = false;
       if (pendingRetry && !closed) {
@@ -81,7 +82,7 @@ export function watchSchema(options: SchemaWatcherOptions): { close: () => void 
         try {
           if (refreshMigrationWatcher()) schedulePush();
         } catch (error) {
-          options.onError?.(error instanceof Error ? error : new Error(String(error)));
+          options.onError?.(toError(error));
         }
       }
     });

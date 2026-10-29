@@ -93,8 +93,10 @@ Create `src/index.ts`. This quickstart puts everything in one file; a real app w
 - `app` is your typed schema export.
 - `permissions` is the server-side policy bundle.
 - `serverUrl` identifies the required reachable core; `initial: { backendSecret }` admits the backend account before opening its native client.
-- `jwksUrl` verifies external JWTs inside `await client.forRequest(req)`. Without it, the backend only accepts Jazz local-first tokens unless you set `allowLocalFirstAuth: false`. It does not currently accept anonymous bearer tokens.
+- `jwksUrl` verifies external JWTs inside `await client.forRequest(req)`. Without it or `jwtPublicKey`, the backend only accepts Jazz local-first tokens, provided `allowLocalFirstAuth` is enabled. That option defaults to `false` when `NODE_ENV` is `production` (case-insensitive) and `true` otherwise; explicit `true` or `false` overrides the default. It does not currently accept anonymous bearer tokens.
 - `dataPath` controls where local server state persists.
+
+The TypeScript example reads `JAZZ_ALLOW_LOCAL_FIRST_AUTH` as enabled for `true`, `1`, `yes`, `on` or `y` (case-insensitive). Any other set value disables it. Leave the variable unset to use the SDK default.
 
 For this TypeScript backend, use a direct HTTPS `jwksUrl`. HTTP is allowed for
 development only when the URL's WHATWG-canonical hostname is `localhost`,
@@ -222,9 +224,11 @@ curl -X DELETE http://localhost:3000/api/todos/<id> \
 
 <Callout type="info">
   `forRequest` verifies the caller's bearer token inside the backend context. The token above is a
-  Jazz self-signed dev token, which works because `allowLocalFirstAuth` defaults to `true`. If you
-  want to accept external JWTs from your auth provider, also set `jwksUrl` so the backend can verify
-  them via JWKS.
+  Jazz self-signed dev token. `allowLocalFirstAuth` defaults to `true` outside production. In
+  production, set `allowLocalFirstAuth: true` explicitly on the Node backend and enable local-first
+  authentication on the sync server, which still verifies the token and account. Existing production
+  backends that relied on the implicit default need this explicit setting. To accept external JWTs
+  from your auth provider, set `jwksUrl` so the backend can verify them via JWKS.
 </Callout>
 
 ## Authentication

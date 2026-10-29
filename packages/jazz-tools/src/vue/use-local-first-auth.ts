@@ -1,16 +1,6 @@
 import { getCurrentScope, onScopeDispose, ref, type Ref } from "vue";
 import { browserAuthSecretStore, type AuthSecretStore } from "../runtime/auth-secret-store.js";
-
-const listenersByStore = new WeakMap<AuthSecretStore, Set<() => void>>();
-
-function getListeners(store: AuthSecretStore): Set<() => void> {
-  let listeners = listenersByStore.get(store);
-  if (!listeners) {
-    listeners = new Set();
-    listenersByStore.set(store, listeners);
-  }
-  return listeners;
-}
+import { getLocalFirstAuthController } from "../runtime/local-first-auth-controller.js";
 
 export interface UseLocalFirstAuth {
   secret: Ref<string | null>;
@@ -67,46 +57,18 @@ export function useLocalFirstAuth(
 ): UseLocalFirstAuth {
   const secret = ref<string | null>(null);
   const isLoading = ref(true);
-  const listeners = getListeners(store);
+  const controller = getLocalFirstAuthController(store);
 
-  let cancelled = false;
-  let latestCallId = 0;
-
-  const refetch = () => {
-    const callId = ++latestCallId;
-    const stale = () => cancelled || callId !== latestCallId;
-    const onError = (err: unknown) => {
-      if (stale()) return;
-      console.warn("[useLocalFirstAuth] secret store failed:", err);
-      secret.value = null;
-      isLoading.value = false;
-    };
-
-    isLoading.value = true;
-    try {
-      store
-        .getOrCreateSecret()
-        .then((resolved) => {
-          if (stale()) return;
-          secret.value = resolved;
-          isLoading.value = false;
-        })
-        .catch(onError);
-    } catch (err) {
-      onError(err);
-    }
-  };
-
+  let unsubscribe = () => {};
   if (typeof window !== "undefined") {
-    refetch();
-    listeners.add(refetch);
+    unsubscribe = controller.watch((state) => {
+      secret.value = state.secret;
+      isLoading.value = state.isLoading;
+    }, "useLocalFirstAuth");
   }
 
   if (getCurrentScope()) {
-    onScopeDispose(() => {
-      cancelled = true;
-      listeners.delete(refetch);
-    });
+    onScopeDispose(unsubscribe);
   } else if (typeof window !== "undefined") {
     console.warn(
       "[useLocalFirstAuth] called outside an active effect scope; the secret-store listener will leak until the page unloads. " +
@@ -114,22 +76,5 @@ export function useLocalFirstAuth(
     );
   }
 
-  return {
-    secret,
-    isLoading,
-    async login(s: string) {
-      try {
-        await store.saveSecret(s);
-      } finally {
-        for (const fn of listeners) fn();
-      }
-    },
-    async signOut() {
-      try {
-        await store.clearSecret();
-      } finally {
-        for (const fn of listeners) fn();
-      }
-    },
-  };
+  return { secret, isLoading, login: controller.login, signOut: controller.signOut };
 }

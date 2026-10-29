@@ -502,21 +502,39 @@ fn relation_gather_to_query(expr: &RelationExpr) -> Result<Option<Query>, QueryE
         return Ok(None);
     };
 
-    if !matches!(
-        frontier_key,
-        RelationKeyRef::RowId(RelationRowIdRef::Current)
-    ) || !dedupe_key
-        .as_slice()
-        .eq(&[RelationKeyRef::RowId(RelationRowIdRef::Current)])
+    let shape = recognize_relation_gather(seed, step, frontier_key, bound, dedupe_key)
+        .map_err(|message| {
+            relation_unification_error(
+                message.replace("not supported yet", "not supported in queries yet"),
+            )
+        })?;
+    // A query returns rows of the table the walk visits: the seed hop's
+    // target, or else the seed table itself.
+    let (seed_table, seed_team_column) = match shape.seed.hop_table {
+        Some(hop_table) => (hop_table.to_owned(), shape.seed.team_column.clone()),
+        None if shape.seed.team_column == "id" => (shape.seed.table.to_owned(), "id".to_owned()),
+        None => {
+            return Err(relation_unification_error(
+                "Gather seeds projecting an FK without a hop are not supported in queries yet",
+            ));
+        }
+    };
+    if shape
+        .step
+        .output_table
+        .is_some_and(|output_table| output_table != seed_table)
     {
         return Err(relation_unification_error(
-            "gather requires current-row frontier and dedupe keys",
+            "Gather steps returning rows of another table are not supported in queries yet",
         ));
     }
-
-    let (seed_table, seed_filters) = relation_gather_seed(seed)?;
-    let (edge_table, edge_member_column, edge_parent_column, edge_filters) =
-        relation_gather_step(step, &seed_table)?;
+    let seed_filters = relation_gather_predicates_to_query(&shape.seed.filters)?;
+    let edge_filters = relation_gather_predicates_to_query(&shape.step.filters)?;
+    let (edge_table, edge_member_column, edge_parent_column) = (
+        shape.step.edge_table.to_owned(),
+        shape.step.member_column.clone(),
+        shape.step.parent_column.clone(),
+    );
 
     let mut query = Query::from(seed_table.clone());
     for filter in filters {
@@ -544,12 +562,12 @@ fn relation_gather_to_query(expr: &RelationExpr) -> Result<Option<Query>, QueryE
         edge_member_column,
         edge_parent_column,
         edge_filters,
-        bound: bound.clone(),
+        bound: shape.bound.clone(),
         seed: Some(ReachableSeed {
-            table: seed_table.clone(),
+            table: shape.seed.table.to_owned(),
             user_column: None,
             user_claim: None,
-            team_column: "id".to_owned(),
+            team_column: seed_team_column,
             filters: seed_filters,
         }),
     });
@@ -637,207 +655,19 @@ fn peel_relation_output_steps(
     Ok((current, filters, order_by, offset, limit))
 }
 
-fn relation_gather_seed(seed: &RelationExpr) -> Result<(String, Vec<Predicate>), QueryError> {
-    let mut filters = Vec::new();
-    let mut current = seed;
-    while let RelationExpr::Filter { input, predicate } = current {
-        let Some((scope, predicate)) = relation_predicate_to_query_predicate(predicate)? else {
-            current = input;
-            continue;
-        };
-        let RelationExpr::TableScan { table, alias } = input.as_ref() else {
-            return Err(relation_unification_error(
-                "gather seed filters must be directly over one table scan",
-            ));
-        };
-        let expected_scope = alias.as_deref().unwrap_or(table);
-        if scope != expected_scope {
-            return Err(relation_unification_error(
-                "gather seed filters must be scoped to the seed table",
-            ));
-        }
-        filters.push(predicate);
-        current = input;
+/// The gather recognizer already checked every column names its one table.
+fn relation_gather_predicates_to_query(
+    predicates: &[&RelationPredicate],
+) -> Result<Vec<Predicate>, QueryError> {
+    let mut lowered = Vec::new();
+    for predicate in predicates {
+        lowered.extend(
+            relation_query_conjuncts(predicate)?
+                .into_iter()
+                .map(|conjunct| conjunct.predicate),
+        );
     }
-    let RelationExpr::TableScan { table, alias } = current else {
-        return Err(relation_unification_error(
-            "gather seed must be a table scan with optional filters",
-        ));
-    };
-    if alias.is_some() {
-        return Err(relation_unification_error(
-            "gather seed aliases are not unified yet",
-        ));
-    }
-    Ok((table.clone(), filters))
-}
-
-fn relation_gather_step(
-    step: &RelationExpr,
-    seed_table: &str,
-) -> Result<(String, String, String, Vec<Predicate>), QueryError> {
-    let RelationExpr::Project { input, columns } = step else {
-        return Err(relation_unification_error(
-            "gather step must project its forward-hop target",
-        ));
-    };
-    let RelationExpr::Join {
-        left,
-        right,
-        on,
-        join_kind: RelationJoinKind::Inner,
-    } = input.as_ref()
-    else {
-        return Err(relation_unification_error(
-            "gather step must be an inner forward-hop join",
-        ));
-    };
-    let RelationExpr::TableScan {
-        table: edge_table,
-        alias: edge_alias,
-    } = relation_gather_step_scan(left)?
-    else {
-        unreachable!("relation_gather_step_scan only returns table scans")
-    };
-    let edge_scope = edge_alias.as_deref().unwrap_or(edge_table);
-    let RelationExpr::TableScan {
-        table: target_table,
-        alias: Some(target_alias),
-    } = right.as_ref()
-    else {
-        return Err(relation_unification_error(
-            "gather step target must use a scoped table scan",
-        ));
-    };
-    if target_table != seed_table {
-        return Err(relation_unification_error(
-            "gather step must return rows from the seed table",
-        ));
-    }
-    if on.len() != 1 {
-        return Err(relation_unification_error(
-            "gather step requires exactly one forward-hop join condition",
-        ));
-    }
-    let condition = &on[0];
-    if condition.left.scope.as_deref() != Some(edge_scope)
-        || condition.right.scope.as_deref() != Some(target_alias)
-        || condition.right.column != "id"
-    {
-        return Err(relation_unification_error(
-            "gather step join must connect its table FK to the target row id",
-        ));
-    }
-    if columns.iter().any(|column| match &column.expr {
-        RelationProjectExpr::Column(column) => column.scope.as_deref() != Some(target_alias),
-        RelationProjectExpr::RowId(RelationRowIdRef::Current) => true,
-        RelationProjectExpr::RowId(_) => true,
-    }) {
-        return Err(relation_unification_error(
-            "gather step must project only its forward-hop target",
-        ));
-    }
-
-    let filters = relation_gather_step_filters(left)?;
-    let frontier_filter = filters.iter().find_map(|predicate| match predicate {
-        RelationPredicate::Cmp {
-            left,
-            op: RelationCmpOp::Eq,
-            right: RelationValueRef::RowId(RelationRowIdRef::Frontier),
-        } if left.scope.as_deref() == Some(edge_scope) => Some(left.column.clone()),
-        _ => None,
-    });
-    let Some(edge_member_column) = frontier_filter else {
-        return Err(relation_unification_error(
-            "gather step must compare one edge column to the frontier row id",
-        ));
-    };
-    let edge_filters = filters
-        .into_iter()
-        .filter(|predicate| {
-            !matches!(
-                predicate,
-                RelationPredicate::Cmp {
-                    left: RelationColumnRef { scope: Some(scope), .. },
-                    op: RelationCmpOp::Eq,
-                    right: RelationValueRef::RowId(RelationRowIdRef::Frontier),
-                } if scope == edge_scope
-            )
-        })
-        .filter_map(|predicate| relation_predicate_to_query_predicate(&predicate).transpose())
-        .map(|result| {
-            result.and_then(|(scope, predicate)| {
-                if scope != edge_scope {
-                    return Err(relation_unification_error(
-                        "gather step filters must be scoped to the edge table",
-                    ));
-                }
-                Ok(predicate)
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok((
-        edge_table.clone(),
-        edge_member_column,
-        condition.left.column.clone(),
-        edge_filters,
-    ))
-}
-
-fn relation_gather_step_scan(input: &RelationExpr) -> Result<&RelationExpr, QueryError> {
-    let mut current = input;
-    while let RelationExpr::Filter { input, .. } = current {
-        current = input;
-    }
-    if matches!(current, RelationExpr::TableScan { .. }) {
-        Ok(current)
-    } else {
-        Err(relation_unification_error(
-            "gather step filters must be directly over one table scan",
-        ))
-    }
-}
-
-fn relation_gather_step_filters(
-    input: &RelationExpr,
-) -> Result<Vec<RelationPredicate>, QueryError> {
-    let mut filters = Vec::new();
-    let mut current = input;
-    while let RelationExpr::Filter { input, predicate } = current {
-        relation_gather_step_predicates(predicate, &mut filters)?;
-        current = input;
-    }
-    Ok(filters)
-}
-
-fn relation_gather_step_predicates(
-    predicate: &RelationPredicate,
-    filters: &mut Vec<RelationPredicate>,
-) -> Result<(), QueryError> {
-    match predicate {
-        RelationPredicate::And(predicates) => {
-            for predicate in predicates {
-                relation_gather_step_predicates(predicate, filters)?;
-            }
-            Ok(())
-        }
-        RelationPredicate::Cmp { .. }
-        | RelationPredicate::IsNull { .. }
-        | RelationPredicate::IsNotNull { .. }
-        | RelationPredicate::In { .. }
-        | RelationPredicate::Contains { .. }
-        | RelationPredicate::EnumMatch { .. }
-        | RelationPredicate::Or(_)
-        | RelationPredicate::Not(_) => {
-            filters.push(predicate.clone());
-            Ok(())
-        }
-        RelationPredicate::True => Ok(()),
-        RelationPredicate::False => {
-            filters.push(predicate.clone());
-            Ok(())
-        }
-    }
+    Ok(lowered)
 }
 
 fn relation_unification_error(message: impl Into<String>) -> QueryError {
@@ -1082,212 +912,55 @@ pub fn relation_scope(column: &RelationColumnRef) -> Result<String, QueryError> 
 fn relation_predicate_to_query_predicate(
     predicate: &RelationPredicate,
 ) -> Result<Option<(String, Predicate)>, QueryError> {
-    match predicate {
-        RelationPredicate::Cmp { left, op, right } => {
-            let scope = relation_scope(left)?;
-            let predicate = match op {
-                RelationCmpOp::Eq => Predicate::Eq(
-                    Operand::Column(left.column.clone()),
-                    relation_value_to_operand(right)?,
-                ),
-                RelationCmpOp::Ne => Predicate::Ne(
-                    Operand::Column(left.column.clone()),
-                    relation_value_to_operand(right)?,
-                ),
-                RelationCmpOp::Lt => Predicate::Lt(
-                    Operand::Column(left.column.clone()),
-                    relation_value_to_operand(right)?,
-                ),
-                RelationCmpOp::Le => Predicate::Lte(
-                    Operand::Column(left.column.clone()),
-                    relation_value_to_operand(right)?,
-                ),
-                RelationCmpOp::Gt => Predicate::Gt(
-                    Operand::Column(left.column.clone()),
-                    relation_value_to_operand(right)?,
-                ),
-                RelationCmpOp::Ge => Predicate::Gte(
-                    Operand::Column(left.column.clone()),
-                    relation_value_to_operand(right)?,
-                ),
-            };
-            Ok(Some((scope, predicate)))
-        }
-        RelationPredicate::IsNull { column } => Ok(Some((
-            relation_scope(column)?,
-            Predicate::IsNull(Operand::Column(column.column.clone())),
-        ))),
-        RelationPredicate::IsNotNull { column } => Ok(Some((
-            relation_scope(column)?,
-            Predicate::Not(Box::new(Predicate::IsNull(Operand::Column(
-                column.column.clone(),
-            )))),
-        ))),
-        RelationPredicate::In { left, values } => Ok(Some((
-            relation_scope(left)?,
-            Predicate::In(
-                Operand::Column(left.column.clone()),
-                values
-                    .iter()
-                    .map(relation_value_to_operand)
-                    .collect::<Result<Vec<_>, _>>()?,
-            ),
-        ))),
-        RelationPredicate::Contains { left, right } => Ok(Some((
-            relation_scope(left)?,
-            Predicate::Contains(
-                Operand::Column(left.column.clone()),
-                relation_value_to_operand(right)?,
-            ),
-        ))),
-        RelationPredicate::EnumMatch {
-            column,
-            case,
-            payload,
-        } => Ok(Some((
-            relation_scope(column)?,
-            Predicate::EnumMatch {
-                column: column.column.clone(),
-                case: case.clone(),
-                payload: Box::new(relation_payload_predicate_to_predicate(payload)?),
-            },
-        ))),
-        RelationPredicate::And(predicates) => relation_predicate_list(predicates, true),
-        RelationPredicate::Or(predicates) => relation_predicate_list(predicates, false),
-        RelationPredicate::Not(predicate) => {
-            let Some((scope, predicate)) = relation_predicate_to_query_predicate(predicate)? else {
-                return Ok(Some((String::new(), Predicate::Any(Vec::new()))));
-            };
-            if is_always_false(&predicate) {
-                return Ok(None);
-            }
-            Ok(Some((scope, Predicate::Not(Box::new(predicate)))))
-        }
-        RelationPredicate::True => Ok(None),
-        RelationPredicate::False => Ok(Some((String::new(), Predicate::Any(Vec::new())))),
-    }
-}
-
-fn relation_payload_predicate_to_predicate(
-    predicate: &RelationPredicate,
-) -> Result<Predicate, QueryError> {
-    let unscoped_column = |column: &RelationColumnRef| {
-        if column.scope.is_some() {
-            return Err(relation_unification_error(
-                "payload enum predicate fields must be unscoped",
-            ));
-        }
-        Ok(Operand::Column(column.column.clone()))
-    };
-    match predicate {
-        RelationPredicate::Cmp { left, op, right } => {
-            let left = unscoped_column(left)?;
-            let right = relation_value_to_operand(right)?;
-            Ok(match op {
-                RelationCmpOp::Eq => Predicate::Eq(left, right),
-                RelationCmpOp::Ne => Predicate::Ne(left, right),
-                RelationCmpOp::Lt => Predicate::Lt(left, right),
-                RelationCmpOp::Le => Predicate::Lte(left, right),
-                RelationCmpOp::Gt => Predicate::Gt(left, right),
-                RelationCmpOp::Ge => Predicate::Gte(left, right),
-            })
-        }
-        RelationPredicate::IsNull { column } => Ok(Predicate::IsNull(unscoped_column(column)?)),
-        RelationPredicate::IsNotNull { column } => Ok(Predicate::Not(Box::new(Predicate::IsNull(
-            unscoped_column(column)?,
-        )))),
-        RelationPredicate::In { left, values } => Ok(Predicate::In(
-            unscoped_column(left)?,
-            values
-                .iter()
-                .map(relation_value_to_operand)
-                .collect::<Result<Vec<_>, _>>()?,
-        )),
-        RelationPredicate::Contains { left, right } => Ok(Predicate::Contains(
-            unscoped_column(left)?,
-            relation_value_to_operand(right)?,
-        )),
-        RelationPredicate::And(children) => Ok(Predicate::All(
-            children
-                .iter()
-                .map(relation_payload_predicate_to_predicate)
-                .collect::<Result<Vec<_>, _>>()?,
-        )),
-        RelationPredicate::Or(children) => Ok(Predicate::Any(
-            children
-                .iter()
-                .map(relation_payload_predicate_to_predicate)
-                .collect::<Result<Vec<_>, _>>()?,
-        )),
-        RelationPredicate::Not(child) => Ok(Predicate::Not(Box::new(
-            relation_payload_predicate_to_predicate(child)?,
-        ))),
-        RelationPredicate::True => Ok(Predicate::All(Vec::new())),
-        RelationPredicate::False => Ok(Predicate::Any(Vec::new())),
-        RelationPredicate::EnumMatch { .. } => Err(relation_unification_error(
-            "nested payload enum matches are not supported",
-        )),
-    }
-}
-
-fn relation_predicate_list(
-    predicates: &[RelationPredicate],
-    is_and: bool,
-) -> Result<Option<(String, Predicate)>, QueryError> {
+    let conjuncts = relation_query_conjuncts(predicate)?;
+    // A query filter lands on one source, so every column must name the same one.
     let mut scope = None::<String>;
-    let mut items = Vec::new();
-    for predicate in predicates {
-        let Some((predicate_scope, predicate)) = relation_predicate_to_query_predicate(predicate)?
-        else {
-            if is_and {
-                continue;
+    let mut predicates = Vec::new();
+    for conjunct in conjuncts {
+        for column in &conjunct.columns {
+            let column_scope = relation_scope(column)?;
+            match &scope {
+                Some(existing) if *existing != column_scope => {
+                    return Err(relation_unification_error(
+                        "Relation predicates across scopes are not supported in queries yet",
+                    ));
+                }
+                Some(_) => {}
+                None => scope = Some(column_scope),
             }
-            return Ok(None);
-        };
-        if is_always_false(&predicate) {
-            if is_and {
-                return Ok(Some((String::new(), Predicate::Any(Vec::new()))));
-            }
-            continue;
         }
-        if predicate_scope.is_empty() {
-            items.push(predicate);
-            continue;
-        }
-        match &scope {
-            Some(existing) if existing != &predicate_scope => {
-                return Err(relation_unification_error(
-                    "relation predicate composition across scopes is not unified yet",
-                ));
-            }
-            Some(_) => {}
-            None => scope = Some(predicate_scope),
-        }
-        items.push(predicate);
+        predicates.push(conjunct.predicate);
     }
-    let Some(scope) = scope else {
-        return if is_and {
-            Ok(None)
-        } else {
-            Ok(Some((String::new(), Predicate::Any(Vec::new()))))
-        };
-    };
-    let predicate = if is_and {
-        Predicate::All(items)
-    } else {
-        Predicate::Any(items)
-    };
-    Ok(Some((scope, predicate)))
+    Ok(relation_conjunction(predicates).map(|predicate| (scope.unwrap_or_default(), predicate)))
 }
 
-fn is_always_false(predicate: &Predicate) -> bool {
-    matches!(predicate, Predicate::Any(predicates) if predicates.is_empty())
+fn relation_query_conjuncts(
+    predicate: &RelationPredicate,
+) -> Result<Vec<RelationConjunct<'_>>, QueryError> {
+    lower_relation_conjuncts(predicate, &mut |value| match relation_value_to_operand(value) {
+        Ok(operand) => Ok(RelationOperand::Operand(operand)),
+        Err(QueryError::UnsupportedRelationQuery(message)) => Err(message),
+        Err(error) => Err(error.to_string()),
+    })
+    .map_err(|message| {
+        relation_unification_error(message.replace("not supported yet", "not supported in queries yet"))
+    })
+}
+
+fn relation_conjunction(mut predicates: Vec<Predicate>) -> Option<Predicate> {
+    match predicates.len() {
+        0 => None,
+        1 => predicates.pop(),
+        _ => Some(Predicate::All(predicates)),
+    }
 }
 
 fn relation_value_to_operand(value: &RelationValueRef) -> Result<Operand, QueryError> {
     match value {
         RelationValueRef::Literal(value) => {
-            Ok(Operand::Literal(json_value_to_record_value(value)?))
+            Ok(Operand::Literal(
+                relation_literal_to_record_value(value).map_err(relation_unification_error)?,
+            ))
         }
         RelationValueRef::Param(name) => Ok(Operand::Param(name.clone())),
         RelationValueRef::SessionRef(path) => {
@@ -1312,157 +985,3 @@ fn relation_value_to_operand(value: &RelationValueRef) -> Result<Operand, QueryE
     }
 }
 
-fn json_value_to_record_value(value: &serde_json::Value) -> Result<Value, QueryError> {
-    match value {
-        serde_json::Value::Null => Ok(Value::Nullable(None)),
-        serde_json::Value::Bool(value) => Ok(Value::Bool(*value)),
-        serde_json::Value::Number(value) => {
-            if let Some(value) = value.as_u64() {
-                Ok(Value::U64(value))
-            } else if let Some(value) = value.as_i64() {
-                Ok(Value::I64(value))
-            } else if let Some(value) = value.as_f64() {
-                Ok(Value::F64(value))
-            } else {
-                Err(relation_unification_error("relation literal is not finite"))
-            }
-        }
-        serde_json::Value::String(value) => Ok(Value::String(value.clone())),
-        serde_json::Value::Array(values) => Ok(Value::Array(
-            values
-                .iter()
-                .map(json_value_to_record_value)
-                .collect::<Result<Vec<_>, _>>()?,
-        )),
-        serde_json::Value::Object(map) => runtime_value_object_to_record_value(map),
-    }
-}
-
-fn runtime_value_object_to_record_value(
-    map: &serde_json::Map<String, serde_json::Value>,
-) -> Result<Value, QueryError> {
-    let Some(serde_json::Value::String(value_type)) = map.get("type") else {
-        return Err(relation_unification_error(
-            "object relation literals must use the runtime value envelope",
-        ));
-    };
-    let value = map.get("value");
-    match value_type.as_str() {
-        "Null" => Ok(Value::Nullable(None)),
-        "Boolean" => Ok(Value::Bool(runtime_bool_value(value)?)),
-        "Text" => Ok(Value::String(runtime_string_value(value)?.to_owned())),
-        "Uuid" => uuid::Uuid::parse_str(runtime_string_value(value)?)
-            .map(Value::Uuid)
-            .map_err(|_| relation_unification_error("invalid Uuid relation literal")),
-        "Bytea" => Ok(Value::Bytes(runtime_bytea_value(value)?)),
-        "Integer" => Ok(Value::I32(runtime_i32_value(value)?)),
-        "Timestamp" => Ok(Value::U64(runtime_u64_value(value)?)),
-        "BigInt" => Ok(Value::I64(runtime_i64_value(value)?)),
-        "Double" => Ok(Value::F64(runtime_f64_value(value)?)),
-        "Array" => {
-            let Some(serde_json::Value::Array(values)) = value else {
-                return Err(relation_unification_error(
-                    "Array relation literal requires an array value",
-                ));
-            };
-            Ok(Value::Array(
-                values
-                    .iter()
-                    .map(json_value_to_record_value)
-                    .collect::<Result<Vec<_>, _>>()?,
-            ))
-        }
-        _ => Err(relation_unification_error(format!(
-            "unsupported runtime relation literal type {value_type}"
-        ))),
-    }
-}
-
-fn runtime_bool_value(value: Option<&serde_json::Value>) -> Result<bool, QueryError> {
-    match value {
-        Some(serde_json::Value::Bool(value)) => Ok(*value),
-        _ => Err(relation_unification_error(
-            "Boolean relation literal requires a boolean value",
-        )),
-    }
-}
-
-fn runtime_string_value(value: Option<&serde_json::Value>) -> Result<&str, QueryError> {
-    match value {
-        Some(serde_json::Value::String(value)) => Ok(value),
-        _ => Err(relation_unification_error(
-            "string relation literal requires a string value",
-        )),
-    }
-}
-
-fn runtime_bytea_value(value: Option<&serde_json::Value>) -> Result<Vec<u8>, QueryError> {
-    let Some(serde_json::Value::Array(values)) = value else {
-        return Err(relation_unification_error(
-            "Bytea relation literal requires an array value",
-        ));
-    };
-    values
-        .iter()
-        .map(|value| {
-            value
-                .as_u64()
-                .and_then(|value| u8::try_from(value).ok())
-                .ok_or_else(|| {
-                    relation_unification_error("Bytea relation literal values must be bytes")
-                })
-        })
-        .collect()
-}
-
-fn runtime_u64_value(value: Option<&serde_json::Value>) -> Result<u64, QueryError> {
-    match value {
-        Some(serde_json::Value::Number(value)) => value.as_u64().ok_or_else(|| {
-            relation_unification_error("integer relation literal must be non-negative")
-        }),
-        _ => Err(relation_unification_error(
-            "integer relation literal requires a numeric value",
-        )),
-    }
-}
-
-fn runtime_i32_value(value: Option<&serde_json::Value>) -> Result<i32, QueryError> {
-    match value {
-        Some(serde_json::Value::Number(value)) => value
-            .as_i64()
-            .and_then(|value| i32::try_from(value).ok())
-            .ok_or_else(|| {
-                relation_unification_error(
-                    "Integer relation literal requires a signed 32-bit integer",
-                )
-            }),
-        _ => Err(relation_unification_error(
-            "Integer relation literal requires an integer value",
-        )),
-    }
-}
-
-fn runtime_i64_value(value: Option<&serde_json::Value>) -> Result<i64, QueryError> {
-    match value {
-        Some(serde_json::Value::Number(value)) => value.as_i64().ok_or_else(|| {
-            relation_unification_error("BigInt relation literal requires a signed 64-bit integer")
-        }),
-        Some(serde_json::Value::String(value)) => value.parse::<i64>().map_err(|_| {
-            relation_unification_error("BigInt relation literal requires a signed 64-bit integer")
-        }),
-        _ => Err(relation_unification_error(
-            "BigInt relation literal requires an integer value",
-        )),
-    }
-}
-
-fn runtime_f64_value(value: Option<&serde_json::Value>) -> Result<f64, QueryError> {
-    match value {
-        Some(serde_json::Value::Number(value)) => value
-            .as_f64()
-            .ok_or_else(|| relation_unification_error("double relation literal must be finite")),
-        _ => Err(relation_unification_error(
-            "double relation literal requires a numeric value",
-        )),
-    }
-}

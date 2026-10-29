@@ -18,7 +18,7 @@ const fixture = JSON.parse(
 const encoded = Uint8Array.from(
   Buffer.from(
     fixture.subscription_deltas.find(
-      ({ name }) => name === "added_updated_removed_with_complete_v1_occurrence_keys",
+      ({ name }) => name === "added_updated_removed_with_complete_occurrence_keys",
     )!.payload_hex,
     "hex",
   ),
@@ -38,7 +38,7 @@ test("subscription observation inspects structured added and updated row identit
     nativeSubscriptionDeltaHasFieldBytes(
       encoded,
       "title",
-      Uint8Array.from([2, ...new TextEncoder().encode("first")]),
+      Uint8Array.from([0, ...new TextEncoder().encode("first")]),
     ),
     true,
   );
@@ -46,7 +46,7 @@ test("subscription observation inspects structured added and updated row identit
     nativeSubscriptionDeltaHasFieldBytes(
       encoded,
       "title",
-      Uint8Array.from([2, ...new TextEncoder().encode("absent")]),
+      Uint8Array.from([0, ...new TextEncoder().encode("absent")]),
     ),
     false,
   );

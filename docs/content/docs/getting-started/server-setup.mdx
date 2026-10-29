@@ -40,10 +40,10 @@ On Linux, the server samples its heap, about once per 512 KiB allocated; set
 names, for `go tool pprof` or a continuous profiler. The profile records the binary's build ID, so
 tools can add source lines from a matching unstripped build. Send the admin secret in
 `X-Jazz-Admin-Secret`, or scrape it from the diagnostics listener with its token. The profile
-covers memory the server allocates from Rust, not memory RocksDB allocates internally.
+covers memory the server allocates from Rust, not memory SQLite allocates internally.
 With sampling off the route answers `404 Not Found`; other platforms answer `501 Not Implemented`.
 
-Local-first auth is enabled by default in development and requires `--allow-local-first-auth` in production. External JWT auth requires either `--jwks-url` or `--jwt-public-key`, but not both.
+Local-first auth is disabled by default when `NODE_ENV` is `production` (case-insensitive) and enabled otherwise, including when `NODE_ENV` is unset. Enable it in production with `--allow-local-first-auth` or `JAZZ_ALLOW_LOCAL_FIRST_AUTH=true`. External JWT auth requires either `--jwks-url` or `--jwt-public-key`, but not both.
 The server runs Core directly. It owns the account registry, permission checks,
 and durable write confirmation. Browser workers and native local relays remain
 client-side persistence components.
@@ -87,7 +87,11 @@ The ready snapshot exposes `client.db` for backend-owned work. Backend accounts 
 
 Request scopes do not change the shared session's selected account, so concurrent requests retain separate policy contexts. Do not switch the shared owner to serve individual requests. When the application deliberately transitions the owner from backend to a user account, the old client shuts down and the replacement opens an ordinary native runtime without backend privilege. The shared lifecycle handles detach, sync, shutdown, retry, and logout; logout invalidates every issued handle. Backend selection is ephemeral across process restarts, while retained local-first signing roots remain available.
 
-`forRequest` reads standard HTTP headers from Express, Hono, Fastify, or a Web Fetch API `Request`. Configure `jwksUrl` or `jwtPublicKey` on `createJazzSession(...)` for external IdP tokens, but not both. Without either, it accepts only Jazz local-first tokens; `allowLocalFirstAuth: false` disables those too. Application cookies must first be resolved to an admitted account by your auth integration.
+`forRequest` reads standard HTTP headers from Express, Hono, Fastify, or a Web Fetch API `Request`. Configure `jwksUrl` or `jwtPublicKey` on `createJazzSession(...)` for external IdP tokens, but not both. Without either, it accepts only Jazz local-first tokens, provided `allowLocalFirstAuth` is enabled. Application cookies must first be resolved to an admitted account by your auth integration.
+
+On Node, `allowLocalFirstAuth` defaults to `false` when `NODE_ENV` is `production` (case-insensitive), and `true` otherwise, including when `NODE_ENV` is unset. Set it explicitly to `true` or `false` to override the default. Existing production backends that relied on the previous implicit `true` default must now set `allowLocalFirstAuth: true` to continue accepting local-first tokens.
+
+This option controls request verification in `forRequest` and `withAttributionForRequest`. It does not control whether the backend itself can create local-first accounts. The backend still sends the caller's token to the sync server to verify the account, so the sync server must also allow local-first authentication. For a self-hosted production sync server, enable `--allow-local-first-auth` or `JAZZ_ALLOW_LOCAL_FIRST_AUTH=true` as well as the Node option.
 
 The TypeScript backend's `jwksUrl` must use HTTPS, except for development HTTP
 with a WHATWG-canonical hostname of `localhost`, `[::1]`, or an IPv4 address in

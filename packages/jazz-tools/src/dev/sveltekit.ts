@@ -62,34 +62,17 @@ const runtime = new ManagedDevRuntime({
   telemetryCollectorUrl: "PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL",
 });
 
-interface PublicEnvSnapshot {
-  appId: string | undefined;
-  serverUrl: string | undefined;
-  telemetryCollectorUrl: string | undefined;
-}
-
 // Like the runtime, the PUBLIC_JAZZ_* baseline is process-wide: it is captured
 // by the first instance to start the runtime (before anything is injected) and
 // restored only by the final disposal, never by an instance handing over on a
 // Vite restart.
-let publicEnvBaseline: PublicEnvSnapshot | null = null;
-let injectedPublicEnv: PublicEnvSnapshot | null = null;
+let publicEnvBaseline: Record<string, string | undefined> | null = null;
+let injectedPublicEnv: Record<string, string> | null = null;
 
 function restoreInjectedPublicEnv() {
-  if (!injectedPublicEnv) return;
-
-  const envEntries = [
-    ["PUBLIC_JAZZ_APP_ID", injectedPublicEnv.appId, publicEnvBaseline?.appId],
-    ["PUBLIC_JAZZ_SERVER_URL", injectedPublicEnv.serverUrl, publicEnvBaseline?.serverUrl],
-    [
-      "PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL",
-      injectedPublicEnv.telemetryCollectorUrl,
-      publicEnvBaseline?.telemetryCollectorUrl,
-    ],
-  ] as const;
-
-  for (const [key, injectedValue, baselineValue] of envEntries) {
-    if (injectedValue === undefined || process.env[key] !== injectedValue) continue;
+  for (const [key, injectedValue] of Object.entries(injectedPublicEnv ?? {})) {
+    if (process.env[key] !== injectedValue) continue;
+    const baselineValue = publicEnvBaseline?.[key];
     if (baselineValue === undefined) {
       delete process.env[key];
     } else {
@@ -195,17 +178,11 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
     await owners.acquire(holder);
     try {
       await loadEnvFileIntoProcessEnv(envDir, mode);
-      publicEnvBaseline ??= {
-        appId: process.env.PUBLIC_JAZZ_APP_ID,
-        serverUrl: process.env.PUBLIC_JAZZ_SERVER_URL,
-        telemetryCollectorUrl: process.env.PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL,
-      };
+      publicEnvBaseline ??= Object.fromEntries(
+        Object.values(runtime.envKeys).map((key) => [key, process.env[key]]),
+      );
       const resolved = await runtime.initialize(buildInitOptions(serverConfig, root));
-      injectedPublicEnv ??= {
-        appId: resolved.appId,
-        serverUrl: resolved.serverUrl,
-        telemetryCollectorUrl: resolved.telemetryCollectorUrl,
-      };
+      injectedPublicEnv ??= runtime.clientEnv(resolved);
       managed = resolved;
       return resolved;
     } catch (error) {
@@ -264,13 +241,7 @@ export function jazzSvelteKit(options: JazzPluginOptions = {}) {
       }
       owners.attachServer(holder, viteServer);
 
-      viteServer.config.env ??= {};
-      viteServer.config.env.PUBLIC_JAZZ_APP_ID = resolvedRuntime.appId;
-      viteServer.config.env.PUBLIC_JAZZ_SERVER_URL = resolvedRuntime.serverUrl;
-      if (resolvedRuntime.telemetryCollectorUrl) {
-        viteServer.config.env.PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL =
-          resolvedRuntime.telemetryCollectorUrl;
-      }
+      Object.assign((viteServer.config.env ??= {}), runtime.clientEnv(resolvedRuntime));
       if (options.inspector !== false) wireInspectorOverlay(viteServer);
     },
     closeBundle: releasePluginRuntime,

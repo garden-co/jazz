@@ -62,7 +62,7 @@ the membership and invite rules let the creator bootstrap resources that match t
 ## Accepting an invite
 
 The invitee opens the link while signed in. The client posts the chat ID and code to a server route.
-The server uses one exclusive transaction to read the private invite, check whether the user is
+The server uses one serializable transaction to read the private invite, check whether the user is
 already a member, insert their membership, and consume a single-use invite. The route is
 idempotent&hairsp;—&hairsp;it skips the insert if the user already has a membership, so re-opening the
 link or retrying after a transient error won't create duplicate rows.
@@ -77,7 +77,7 @@ caller. An opaque admitted account handle can instead be passed to `await client
 
 The transaction is what makes redemption correct under concurrency. A multi-use invite stays in
 the table, so it is deliberately replayable by anyone holding the link. A single-use invite is
-deleted in the same exclusive transaction as the membership insert: two simultaneous redeems
+deleted in the same serializable transaction as the membership insert: two simultaneous redeems
 cannot both succeed. If the authority rejects the transaction because another redemption won the
 race, report that failure to the client and let it retry only if that remains appropriate for your
 UI.
@@ -93,7 +93,7 @@ The `client` referenced below is the ready backend Jazz client for your app&hair
 
 Pass `{ singleUse: true }` when creating a link to consume it atomically on successful redemption.
 For richer requirements (expiry, codes that grant specific roles, audit metadata), add those fields
-to the invite table and check them in the same exclusive transaction.
+to the invite table and check them in the same serializable transaction.
 
 The example uses the full `crypto.randomUUID()` value. Keep at least that much entropy for a link
 that is not single-use or expiring.

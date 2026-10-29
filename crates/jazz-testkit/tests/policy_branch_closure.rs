@@ -4,8 +4,9 @@ use std::time::Duration;
 
 use jazz::row_input;
 use jazz::tools::public_schema::{
-    RelColumnRef, RelExpr, RelJoinCondition, RelJoinKind, RelKeyRef, RelPredicateCmpOp,
-    RelPredicateExpr, RelRecursionBound, RelValueRef, RowIdRef, TablePolicies,
+    RecursionBound, RelationCmpOp, RelationColumnRef, RelationExpr, RelationJoinCondition,
+    RelationJoinKind, RelationKeyRef, RelationPredicate, RelationRowIdRef, RelationValueRef,
+    TablePolicies,
 };
 use jazz::tools::{ColumnType, JazzClient, PolicyExpr, Schema, SchemaBuilder, TableSchema, Value};
 use jazz_server::JazzServer;
@@ -76,97 +77,97 @@ fn policy_branch_closure_schema(order: BranchOrder) -> Schema {
 
 fn gathered_resource_access_policy() -> PolicyExpr {
     PolicyExpr::ExistsRel {
-        rel: RelExpr::Filter {
-            input: Box::new(RelExpr::Join {
-                left: Box::new(RelExpr::Gather {
-                    seed: Box::new(RelExpr::Filter {
-                        input: Box::new(RelExpr::TableScan {
+        rel: RelationExpr::Filter {
+            input: Box::new(RelationExpr::Join {
+                left: Box::new(RelationExpr::Gather {
+                    seed: Box::new(RelationExpr::Filter {
+                        input: Box::new(RelationExpr::TableScan {
                             table: "teams".into(),
                             alias: None,
                         }),
-                        predicate: RelPredicateExpr::Cmp {
-                            left: RelColumnRef {
+                        predicate: RelationPredicate::Cmp {
+                            left: RelationColumnRef {
                                 scope: Some("teams".to_owned()),
                                 column: "identity_key".to_owned(),
                             },
-                            op: RelPredicateCmpOp::Eq,
-                            right: RelValueRef::SessionRef(vec![
+                            op: RelationCmpOp::Eq,
+                            right: RelationValueRef::SessionRef(vec![
                                 "user".to_owned(),
                                 "identity".to_owned(),
                                 "subject".to_owned(),
                             ]),
                         },
                     }),
-                    step: Box::new(RelExpr::Project {
-                        input: Box::new(RelExpr::Join {
-                            left: Box::new(RelExpr::Filter {
-                                input: Box::new(RelExpr::TableScan {
+                    step: Box::new(RelationExpr::Project {
+                        input: Box::new(RelationExpr::Join {
+                            left: Box::new(RelationExpr::Filter {
+                                input: Box::new(RelationExpr::TableScan {
                                     table: "team_team_edges".into(),
                                     alias: None,
                                 }),
-                                predicate: RelPredicateExpr::Cmp {
-                                    left: RelColumnRef {
+                                predicate: RelationPredicate::Cmp {
+                                    left: RelationColumnRef {
                                         scope: Some("team_team_edges".to_owned()),
                                         column: "child_team".to_owned(),
                                     },
-                                    op: RelPredicateCmpOp::Eq,
-                                    right: RelValueRef::RowId(RowIdRef::Frontier),
+                                    op: RelationCmpOp::Eq,
+                                    right: RelationValueRef::RowId(RelationRowIdRef::Frontier),
                                 },
                             }),
-                            right: Box::new(RelExpr::TableScan {
+                            right: Box::new(RelationExpr::TableScan {
                                 table: "teams".into(),
                                 alias: Some("__recursive_hop_0".to_owned()),
                             }),
-                            on: vec![RelJoinCondition {
-                                left: RelColumnRef {
+                            on: vec![RelationJoinCondition {
+                                left: RelationColumnRef {
                                     scope: Some("team_team_edges".to_owned()),
                                     column: "parent_team".to_owned(),
                                 },
-                                right: RelColumnRef {
+                                right: RelationColumnRef {
                                     scope: Some("__recursive_hop_0".to_owned()),
                                     column: "id".to_owned(),
                                 },
                             }],
-                            join_kind: RelJoinKind::Inner,
+                            join_kind: RelationJoinKind::Inner,
                         }),
                         columns: Vec::new(),
                     }),
-                    frontier_key: RelKeyRef::RowId(RowIdRef::Current),
-                    bound: RelRecursionBound::MaxDepth(8),
-                    dedupe_key: vec![RelKeyRef::RowId(RowIdRef::Current)],
+                    frontier_key: RelationKeyRef::RowId(RelationRowIdRef::Current),
+                    bound: RecursionBound::MaxDepth(8),
+                    dedupe_key: vec![RelationKeyRef::RowId(RelationRowIdRef::Current)],
                 }),
-                right: Box::new(RelExpr::TableScan {
+                right: Box::new(RelationExpr::TableScan {
                     table: "resource_access_edges".into(),
                     alias: Some("access".to_owned()),
                 }),
-                on: vec![RelJoinCondition {
-                    left: RelColumnRef {
+                on: vec![RelationJoinCondition {
+                    left: RelationColumnRef {
                         scope: None,
                         column: "id".to_owned(),
                     },
-                    right: RelColumnRef {
+                    right: RelationColumnRef {
                         scope: Some("access".to_owned()),
                         column: "team".to_owned(),
                     },
                 }],
-                join_kind: RelJoinKind::Inner,
+                join_kind: RelationJoinKind::Inner,
             }),
-            predicate: RelPredicateExpr::And(vec![
-                RelPredicateExpr::Cmp {
-                    left: RelColumnRef {
+            predicate: RelationPredicate::And(vec![
+                RelationPredicate::Cmp {
+                    left: RelationColumnRef {
                         scope: Some("access".to_owned()),
                         column: "resource".to_owned(),
                     },
-                    op: RelPredicateCmpOp::Eq,
-                    right: RelValueRef::RowId(RowIdRef::Outer),
+                    op: RelationCmpOp::Eq,
+                    right: RelationValueRef::RowId(RelationRowIdRef::Outer),
                 },
-                RelPredicateExpr::Cmp {
-                    left: RelColumnRef {
+                RelationPredicate::Cmp {
+                    left: RelationColumnRef {
                         scope: Some("access".to_owned()),
                         column: "grant_role".to_owned(),
                     },
-                    op: RelPredicateCmpOp::Eq,
-                    right: RelValueRef::Literal(Value::Text("viewer".to_owned())),
+                    op: RelationCmpOp::Eq,
+                    right: RelationValueRef::literal(Value::Text("viewer".to_owned())),
                 },
             ]),
         },

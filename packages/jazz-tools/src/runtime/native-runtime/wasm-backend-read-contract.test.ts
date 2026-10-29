@@ -29,15 +29,19 @@ describe("WASM backend read capability parity", () => {
         ),
       );
       const query = queryFromTable("notes");
+      // The relation shape the query adapter sends: a full row projection.
       const relation = queryWithPredicates("notes", [], {
         relation: {
           Project: {
             input: { TableScan: { table: "notes" } },
-            columns: [{ alias: "text", expr: { Column: { scope: "notes", column: "text" } } }],
+            columns: ["id", "text", "folderId"].map((column) => ({
+              alias: column,
+              expr: { Column: { scope: "notes", column } },
+            })),
           },
         },
       });
-      const opts = { tier: "local" };
+      const opts = { tier: "local-first" };
       const txId = createOpenTransactionId();
       db.beginTransaction(txId, "mergeable");
       const reads = [

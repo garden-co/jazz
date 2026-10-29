@@ -89,13 +89,13 @@ describe("watchSchema", () => {
         await writeFile(
           migrationFile,
           `
-          import { schema as s } from "jazz-tools";
+          import { schema as s, migration as m } from "jazz-tools";
           const columns = { title: s.string(), done: s.boolean() };
-          export default s.defineMigration({
+          export default m.defineMigration({
             fromHash: "${initial.schema.hash}", toHash: "${targetHash}",
             from: { todos: s.table(columns, {}) },
             to: { todos: s.table({ ...columns, tags: s.array(s.string()) }, {}) },
-            migrate: { todos: { tags: s.add.array({ of: s.string(), default: [] }) } },
+            migrate: { todos: { tags: m.add.array({ of: s.string(), default: [] }) } },
           });
         `,
         );

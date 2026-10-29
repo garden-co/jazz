@@ -4,10 +4,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use uuid::Uuid;
-
 use jazz::tools::AppId;
-use jazz::tools::ObjectId;
 use jazz::tools::public_schema::{SchemaHash, TableName, TablePolicies};
 
 use super::http::PermissionsHeadView;
@@ -22,12 +19,6 @@ pub(super) fn parse_schema_hash_param(hash_text: &str) -> Result<SchemaHash, Str
     let mut hash_bytes = [0u8; 32];
     hash_bytes.copy_from_slice(&decoded_hash_bytes);
     Ok(SchemaHash::from_bytes(hash_bytes))
-}
-
-pub(super) fn parse_object_id_param(object_id_text: &str) -> Result<ObjectId, String> {
-    let uuid = Uuid::parse_str(object_id_text)
-        .map_err(|_| "invalid object id: expected UUID".to_string())?;
-    Ok(ObjectId::from_uuid(uuid))
 }
 
 pub(super) fn parse_app_id_param(app_id_text: &str) -> Result<AppId, String> {

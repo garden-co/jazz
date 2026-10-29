@@ -1,6 +1,17 @@
+import type * as Relay from "jazz-rn/relay";
 import type { MutationErrorEvent } from "../runtime/client.js";
+import { UnsupportedSnapshotError } from "../runtime/snapshot-ref.js";
+import { REACT_NATIVE_UNSUPPORTED_ERROR } from "./errors.js";
 
-type ForegroundMutationKind = "insert" | "update" | "upsert" | "delete" | "restore";
+// The foreground command vocabulary is owned by jazz-rn. This module is
+// internal: no public declaration of jazz-tools reaches it, so applications
+// never need the optional jazz-rn peer to type-check.
+type ForegroundCommand = Relay.NativeForegroundCommand;
+type ForegroundResponse = Relay.NativeForegroundResponse;
+type ForegroundMutationKind = Extract<ForegroundCommand, { type: "directMutation" }>["mutation"];
+type NativeConnectionStatus = Extract<ForegroundResponse, { type: "nativeConnectionStatus" }>;
+/** An upstream connection failure other than a refused credential (#4337). */
+export type NativeUpstreamFailure = { reason: string; retrying: boolean };
 type ForegroundMutationOptions = {
   rowId?: Uint8Array;
   branch?: unknown;
@@ -11,179 +22,14 @@ type ForegroundMutationOptions = {
   attribution?: Uint8Array;
 };
 
-type ForegroundPermissionAdviceAction =
-  | { type: "insert"; table: string; cells: Uint8Array }
-  | { type: "read" | "delete"; table: string; rowId: Uint8Array }
-  | { type: "update"; table: string; rowId: Uint8Array; patch: Uint8Array };
-
-type ForegroundCommand =
-  | { type: "permissionAdvice"; action: ForegroundPermissionAdviceAction }
-  | "tick"
-  | "close"
-  | { type: "disconnectNativeUpstream" }
-  | { type: "reconnectNativeUpstream" }
-  | { type: "nativeConnectionStatus" }
-  | { type: "nativeSessionMetadata" }
-  | {
-      type: "all";
-      query: Uint8Array;
-      optionsJson: string;
-      transaction?: number;
-    }
-  | { type: "localCurrentRow"; table: string; rowId: Uint8Array }
-  | {
-      type: "subscribe";
-      query: Uint8Array;
-      optionsJson: string;
-    }
-  | { type: "drainSubscription"; subscription: number }
-  | { type: "unsubscribe"; subscription: number }
-  | { type: "poll"; operation: number }
-  | { type: "cancel"; operation: number }
-  | { type: "beginTransaction"; kind: "mergeable" | "exclusive" }
-  | {
-      type: "insert";
-      transaction: number;
-      table: string;
-      cells: Uint8Array;
-      rowId?: Uint8Array;
-    }
-  | {
-      type: "update";
-      transaction: number;
-      table: string;
-      rowId: Uint8Array;
-      patch: Uint8Array;
-    }
-  | {
-      type: "upsert";
-      transaction: number;
-      table: string;
-      rowId: Uint8Array;
-      cells: Uint8Array;
-    }
-  | { type: "delete"; transaction: number; table: string; rowId: Uint8Array }
-  | { type: "commitTransaction"; transaction: number }
-  | { type: "rollbackTransaction"; transaction: number }
-  | { type: "waitForTransaction"; txId: Uint8Array; tier: string; observeOnly?: boolean }
-  | { type: "waitForPendingWrites"; tier: string }
-  | {
-      type: "stageMutation";
-      transaction: number;
-      mutation: ForegroundMutationKind;
-      table: string;
-      rowId?: Uint8Array;
-      cells: Uint8Array;
-      optionsJson: string;
-    }
-  | {
-      type: "directMutation";
-      mutation: ForegroundMutationKind;
-      table: string;
-      rowId?: Uint8Array;
-      cells: Uint8Array;
-      optionsJson: string;
-    }
-  | { type: "writeState"; txId: Uint8Array }
-  | { type: "drainMutationErrors" }
-  | {
-      type: "beginStreamingMutation";
-      mutation: "insert" | "update" | "upsert";
-      table: string;
-      rowId: Uint8Array;
-      cells: Uint8Array;
-      column: string;
-      optionsJson: string;
-    }
-  | { type: "pushStreamingMutation"; upload: number; chunk: Uint8Array }
-  | { type: "finishStreamingMutation" | "abortStreamingMutation"; upload: number }
-  | {
-      type: "updateLargeValues";
-      table: string;
-      rowId: Uint8Array;
-      patch: Uint8Array;
-      descriptorsJson: string;
-      updatedAtMs?: number;
-    };
-
-type ForegroundEvent =
-  | {
-      type: "delta";
-      reset: boolean;
-      settled: boolean;
-      tier: string;
-      delta: Uint8Array;
-      terminalOperations?: unknown[];
-    }
-  | { type: "rejected"; reason: string }
-  | { type: "closed" };
-
-type NativeConnectionStatus = {
-  type: "nativeConnectionStatus";
-  configured: boolean;
-  explicitlyOffline: boolean;
-  connected: boolean;
-};
-
-type ForegroundResponse =
-  | { type: "permissionAdvice"; advice: "allowed" | "denied" | "unknown" }
-  | {
-      type: "nativeSessionMetadata";
-      node: Uint8Array;
-      registryAuthority: string;
-      accountId: string | null;
-      issuer: string;
-      userId: string;
-    }
-  | NativeConnectionStatus
-  | { type: "ticked" }
-  | { type: "rows"; rows: Uint8Array }
-  | { type: "subscribed"; subscription: number }
-  | { type: "subscriptionEvents"; events: ForegroundEvent[] }
-  | { type: "unsubscribed"; closed: boolean }
-  | { type: "closed"; closed: boolean }
-  | { type: "pending"; operation: number }
-  | { type: "operationError"; reason: string; code?: string }
-  | { type: "cancelled"; cancelled: boolean }
-  | { type: "transactionOpened"; transaction: number }
-  | { type: "inserted"; rowId: Uint8Array }
-  | { type: "mutationStaged" }
-  | { type: "transactionCommitted"; txId: Uint8Array }
-  | { type: "transactionRolledBack"; rolledBack: boolean }
-  | { type: "transactionSettled"; txId: Uint8Array }
-  | { type: "writeState"; stateJson: string }
-  | { type: "mutationErrors"; eventsJson: string }
-  | { type: "streamingMutationOpened"; upload: number }
-  | { type: "streamingMutationPushed" }
-  | { type: "streamingMutationAborted"; aborted: boolean }
-  | { type: "mutationCommitted"; txId: Uint8Array; rowId: Uint8Array };
-
-export type NativeForegroundRuntime = {
-  execute(command: Uint8Array): Uint8Array;
-  tick(): void;
-  isClosed?(): boolean;
-  setTickScheduler?(callback: (urgency: string) => void): void;
-  close(): boolean;
-};
-
-export type NativeForegroundModule = {
-  installNativeForegroundRuntime(): NativeForegroundFactory;
-  encodeNativeForegroundCommand(command: ForegroundCommand): Uint8Array;
-  decodeNativeForegroundResponse(bytes: Uint8Array): ForegroundResponse;
-};
-
-export type NativeForegroundFactory = {
-  accountSecret?(): Uint8Array;
-  beginAccountSession?(requestJson: string): Uint8Array;
-  attachAccountSchema?(capability: Uint8Array, schemaJson: string): Uint8Array;
-  releaseAccountSession?(capability: Uint8Array): void;
-  refreshAccountSession?(capability: Uint8Array, requestJson: string): void;
-  readonly abiVersion: number;
-  openAttached(capability: Uint8Array): NativeForegroundRuntime;
-};
-
-export const REACT_NATIVE_UNSUPPORTED_ERROR =
-  "React Native native foreground does not support this operation yet";
+export type NativeForegroundRuntime = Relay.NativeForegroundRuntime;
+export type NativeForegroundFactory = Relay.NativeForegroundRuntimeFactory;
+export type NativeForegroundModule = Pick<
+  typeof Relay,
+  | "installNativeForegroundRuntime"
+  | "encodeNativeForegroundCommand"
+  | "decodeNativeForegroundResponse"
+>;
 
 /**
  * Narrow NativeDb consumer for the first JSI foreground slice.
@@ -205,7 +51,16 @@ export const REACT_NATIVE_UNSUPPORTED_ERROR =
 export class NativeForegroundDb {
   private closed = false;
   private mutationErrorCallback: ((event: MutationErrorEvent) => void) | undefined;
+  private authRejectedCallback: ((reason: string) => void) | undefined;
+  /** The sequence of the refusal last reported, so each is reported once. */
+  private reportedAuthRejection = 0;
+  private upstreamFailureCallback: ((failure: NativeUpstreamFailure | null) => void) | undefined;
+  /** The upstream failure last reported, so each change is reported once. */
+  private reportedUpstreamFailure: { sequence: number; retrying: boolean } | null = null;
   private readonly transactions = new Map<string, NativeForegroundTransaction>();
+  /** A native build without the (append-only) slow-query commands. */
+  private slowQueryLogUnsupported = false;
+  private pendingUploadCountUnsupported = false;
 
   constructor(
     private readonly runtime: NativeForegroundRuntime,
@@ -232,6 +87,27 @@ export class NativeForegroundDb {
     this.mutationErrorCallback = callback;
   }
 
+  /**
+   * Observe the upstream refusing the scope's credential. The refusal is auth
+   * state, not a failed tick: local ticks keep running, and the tick that
+   * first sees a refusal reports it once, so the app can renew the
+   * credential (#4248, #4296).
+   */
+  onAuthRejected(callback: (reason: string) => void): void {
+    this.assertOpen();
+    this.authRejectedCallback = callback;
+  }
+
+  /**
+   * Observe the scope's upstream connection failing for a reason other than
+   * its credential, and recovering (`null`). A failure is connection state,
+   * not a failed tick: local ticks keep running (#4337).
+   */
+  onUpstreamFailure(callback: (failure: NativeUpstreamFailure | null) => void): void {
+    this.assertOpen();
+    this.upstreamFailureCallback = callback;
+  }
+
   all(
     query: Uint8Array,
     opts: unknown,
@@ -254,6 +130,20 @@ export class NativeForegroundDb {
     if (response.type === "operationError") throw foregroundOperationError(response);
     if (response.type === "pending") return this.pendingRows(response.operation);
     return unexpected("all", response.type);
+  }
+
+  captureSnapshot(): Uint8Array | { poll(): Uint8Array | null; cancel(): void } {
+    this.assertOpen();
+    if (this.runtime.supportsSnapshotCapture !== true) {
+      throw new UnsupportedSnapshotError(
+        "Capturing snapshots requires a newer Jazz native build; rebuild the native app to use captureSnapshot()",
+      );
+    }
+    const response = this.execute({ type: "captureSnapshot" });
+    if (response.type === "operationError") throw foregroundOperationError(response);
+    if (response.type === "rows") return response.rows;
+    if (response.type === "pending") return this.pendingRows(response.operation);
+    return unexpected("captureSnapshot", response.type);
   }
 
   // The shared mutation adapter needs one exact local row, without coverage
@@ -280,17 +170,42 @@ export class NativeForegroundDb {
   tick(): void {
     this.assertOpen();
     this.runtime.tick();
-    if (this.mutationErrorCallback) {
-      const response = this.execute({ type: "drainMutationErrors" });
-      if (response.type === "operationError") throw foregroundOperationError(response);
-      if (response.type !== "mutationErrors")
-        return unexpected("drainMutationErrors", response.type);
-      const events = JSON.parse(response.eventsJson) as MutationErrorEvent[];
-      for (const event of events)
-        queueMicrotask(() => {
-          if (!this.closed) this.mutationErrorCallback?.(event);
-        });
+    if (!this.mutationErrorCallback && !this.authRejectedCallback && !this.upstreamFailureCallback)
+      return;
+    // One call drains everything a tick reports.
+    const response = this.execute({ type: "drainTickEvents" });
+    if (response.type === "operationError") throw foregroundOperationError(response);
+    if (response.type !== "tickEvents") return unexpected("drainTickEvents", response.type);
+    const rejection = response.authRejection;
+    if (rejection && rejection.sequence !== this.reportedAuthRejection) {
+      this.reportedAuthRejection = rejection.sequence;
+      queueMicrotask(() => {
+        if (!this.closed) this.authRejectedCallback?.(rejection.reason);
+      });
     }
+    const failure = response.upstreamFailure;
+    const reported = this.reportedUpstreamFailure;
+    if (
+      failure
+        ? failure.sequence !== reported?.sequence || failure.retrying !== reported.retrying
+        : reported
+    ) {
+      this.reportedUpstreamFailure = failure && {
+        sequence: failure.sequence,
+        retrying: failure.retrying,
+      };
+      const change = failure && { reason: failure.reason, retrying: failure.retrying };
+      queueMicrotask(() => {
+        if (!this.closed) this.upstreamFailureCallback?.(change);
+      });
+    }
+    // The drain claims mutation errors; with no observer they are dropped.
+    if (!this.mutationErrorCallback) return;
+    const events = JSON.parse(response.eventsJson) as MutationErrorEvent[];
+    for (const event of events)
+      queueMicrotask(() => {
+        if (!this.closed) this.mutationErrorCallback?.(event);
+      });
   }
 
   close(): boolean {
@@ -308,6 +223,61 @@ export class NativeForegroundDb {
       // platform logout revoked the capability just before this call).
       this.runtime.close();
     }
+  }
+
+  /**
+   * The slow-query report due now: one line per slow query shape, naming
+   * `app`. An older native build without the command reports nothing.
+   */
+  takeSlowQueryReport(app?: string): string[] {
+    if (this.slowQueryLogUnsupported || this.closed) return [];
+    let response: ForegroundResponse;
+    try {
+      response = this.execute({ type: "takeSlowQueryReport", app });
+    } catch {
+      this.slowQueryLogUnsupported = true;
+      return [];
+    }
+    if (response.type !== "slowQueryReport") {
+      this.slowQueryLogUnsupported = true;
+      return [];
+    }
+    return response.lines;
+  }
+
+  /**
+   * How many of this foreground's commits still wait for the server's
+   * verdict. An older native build without the command reports none.
+   */
+  pendingUploadCount(): number {
+    if (this.pendingUploadCountUnsupported || this.closed) return 0;
+    let response: ForegroundResponse;
+    try {
+      response = this.execute({ type: "pendingUploadCount" });
+    } catch (error) {
+      // An older host rejects the unknown command (InvalidCommand). A busy
+      // host or a revoked handle is transient and must not disable the count.
+      if (rejectsCommand(error)) this.pendingUploadCountUnsupported = true;
+      return 0;
+    }
+    if (response.type !== "pendingUploadCount") {
+      this.pendingUploadCountUnsupported = true;
+      return 0;
+    }
+    return response.count;
+  }
+
+  /** Report query runs of at least `ms` milliseconds; 0 turns the log off. */
+  setSlowQueryThresholdMs(ms: number): void {
+    if (this.slowQueryLogUnsupported || this.closed) return;
+    let response: ForegroundResponse;
+    try {
+      response = this.execute({ type: "setSlowQueryThresholdMs", ms: Math.round(ms) });
+    } catch {
+      this.slowQueryLogUnsupported = true;
+      return;
+    }
+    if (response.type !== "slowQueryThresholdSet") this.slowQueryLogUnsupported = true;
   }
 
   isNativeForegroundClosed(): boolean {
@@ -406,7 +376,7 @@ export class NativeForegroundDb {
     return this.requestPermissionAdvice({ type: "delete", table, rowId });
   }
 
-  private requestPermissionAdvice(action: ForegroundPermissionAdviceAction) {
+  private requestPermissionAdvice(action: Relay.NativeForegroundPermissionAdviceAction) {
     let response = this.execute({ type: "permissionAdvice", action });
     if (response.type === "permissionAdvice") return response.advice;
     if (response.type === "operationError") throw foregroundOperationError(response);
@@ -436,18 +406,42 @@ export class NativeForegroundDb {
     };
   }
 
-  async waitForPendingWrites(tier: string): Promise<Uint8Array> {
+  /**
+   * Resolve once every local write so far reached `tier`. A wait that does
+   * not settle at once is a pollable read, so a caller that stops waiting
+   * cancels it.
+   */
+  waitForPendingWrites(
+    tier: string,
+  ): Uint8Array | { poll(): Uint8Array | null; cancel(): boolean } {
     let response = this.execute({ type: "waitForPendingWrites", tier });
-    while (response.type === "pending") {
-      const operation = response.operation;
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
-      this.tick();
-      response = this.execute({ type: "poll", operation });
-    }
-    if (response.type === "operationError") throw foregroundOperationError(response);
-    if (response.type !== "rows" || response.rows.length !== 0)
-      return unexpected("waitForPendingWrites", response.type);
-    return response.rows;
+    const settle = (): Uint8Array => {
+      if (response.type === "operationError") throw foregroundOperationError(response);
+      if (response.type !== "rows" || response.rows.length !== 0)
+        return unexpected("waitForPendingWrites", response.type);
+      return response.rows;
+    };
+    if (response.type !== "pending") return settle();
+    const operation = response.operation;
+    let completed = false;
+    return {
+      poll: (): Uint8Array | null => {
+        if (completed || this.closed) throw new Error("waitForPendingWrites was cancelled");
+        this.tick();
+        response = this.execute({ type: "poll", operation });
+        if (response.type === "pending") return null;
+        completed = true;
+        return settle();
+      },
+      cancel: (): boolean => {
+        if (completed || this.closed) return false;
+        completed = true;
+        const cancelled = this.execute({ type: "cancel", operation });
+        if (cancelled.type !== "cancelled")
+          return unexpected("waitForPendingWrites cancellation", cancelled.type);
+        return cancelled.cancelled;
+      },
+    };
   }
 
   async waitForTransaction(txId: Uint8Array, tier: string, observeOnly = false): Promise<void> {
@@ -514,7 +508,7 @@ export class NativeForegroundDb {
     return this;
   }
 
-  beginTransaction(openTransactionId: string, kind: "mergeable" | "exclusive"): void {
+  beginTransaction(openTransactionId: string, kind: "mergeable" | "serializable"): void {
     this.assertOpen();
     if (this.transactions.has(openTransactionId)) {
       throw new Error(
@@ -887,7 +881,7 @@ export class NativeForegroundDb {
 
 type NativeForegroundTransaction = {
   handle: number;
-  kind: "mergeable" | "exclusive";
+  kind: "mergeable" | "serializable";
   closed: boolean;
 };
 
@@ -965,9 +959,15 @@ class NativeForegroundSubscription {
  * The error a failed foreground operation throws: the unchanged reason text as
  * the message, plus the stable core `code` when a core error caused it.
  */
-function foregroundOperationError(response: { reason: string; code?: string }): Error {
+function foregroundOperationError(response: {
+  reason: string;
+  code?: string;
+  reasonName?: string;
+}): Error {
   const error = new Error(response.reason);
-  return response.code === undefined ? error : Object.assign(error, { code: response.code });
+  if (response.code !== undefined) Object.assign(error, { code: response.code });
+  if (response.reasonName !== undefined) Object.assign(error, { reason: response.reasonName });
+  return error;
 }
 
 function unsupported(operation: string): never {
@@ -985,4 +985,10 @@ function formatTransactionId(bytes: Uint8Array<ArrayBufferLike>): string {
     throw new Error("React Native native foreground returned malformed transaction id");
   const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
   return hex;
+}
+
+/** Whether the native host refused a command it does not know. */
+function rejectsCommand(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("runtime failed during execute");
 }

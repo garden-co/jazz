@@ -1,4 +1,9 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+mod deployment;
+pub(crate) use deployment::DeploymentResponse;
+
+#[cfg(test)]
+use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -8,7 +13,7 @@ use crate::server::catalogue_entry::CatalogueEntry;
 use crate::server::catalogue_payload_codec::{
     decode_lens_transform, decode_permissions_bundle, decode_permissions_head, decode_schema,
     encode_lens_transform, encode_permissions_bundle, encode_permissions_head, encode_schema,
-    validate_permissions_relation_unions,
+    validate_permissions_relations,
 };
 use crate::server::catalogue_storage::{
     CatalogueStorage, CatalogueStorageError, DynCatalogueStorage,
@@ -19,7 +24,7 @@ use jazz::tools::metadata::{MetadataKey, ObjectType};
 use jazz::tools::public_schema::{Schema, SchemaHash, TableName, TablePolicies};
 use jazz::tools::schema_lens::Lens;
 #[cfg(test)]
-use jazz::tools::sync::DurabilityTier;
+use jazz::tx::DurabilityTier;
 
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -50,6 +55,25 @@ pub(crate) struct ActiveSchemaSummary {
 pub(crate) struct ActiveSchema {
     pub summary: ActiveSchemaSummary,
     pub permissions: HashMap<TableName, TablePolicies>,
+}
+
+/// HTTP graph inventory, captured under one catalogue index lock.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MigrationGraph {
+    active_schema_hash: Option<String>,
+    schemas: Vec<String>,
+    migrations: Vec<MigrationGraphEdge>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MigrationGraphEdge {
+    from_hash: String,
+    to_hash: String,
+    /// Derived capability, not persisted provenance: no migration file is needed.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    automatic: bool,
 }
 
 /// Errors from server-local catalogue operations.
@@ -100,24 +124,23 @@ impl std::error::Error for CatalogueError {}
 pub struct ServerCatalogue;
 
 pub(crate) trait CatalogueStore {
+    fn migration_graph(&self) -> Result<MigrationGraph, CatalogueError>;
     fn known_schema_hashes(&self) -> Result<Vec<SchemaHash>, CatalogueError>;
     fn known_schema(&self, schema_hash: &SchemaHash) -> Result<Option<Schema>, CatalogueError>;
     fn known_lenses(&self) -> Result<Vec<Lens>, CatalogueError>;
     fn schema_published_at(&self, schema_hash: &SchemaHash) -> Result<Option<u64>, CatalogueError>;
-    fn are_schema_hashes_connected(
-        &self,
-        from_hash: SchemaHash,
-        to_hash: SchemaHash,
-    ) -> Result<bool, CatalogueError>;
+    #[cfg(any(test, feature = "embedded-server"))]
     fn publish_schema(&self, schema: Schema) -> Result<ObjectId, CatalogueError>;
     fn active_schema_summary(&self) -> Result<Option<ActiveSchemaSummary>, CatalogueError>;
     fn active_schema(&self) -> Result<Option<ActiveSchema>, CatalogueError>;
+    #[cfg(test)]
     fn publish_permissions_bundle(
         &self,
         schema_hash: SchemaHash,
         permissions: HashMap<TableName, TablePolicies>,
         expected_parent_bundle_object_id: Option<ObjectId>,
     ) -> Result<Option<ObjectId>, CatalogueError>;
+    #[cfg(any(test, feature = "embedded-server"))]
     fn publish_lens(&self, lens: &Lens) -> Result<ObjectId, CatalogueError>;
     fn flush(&self) -> Result<(), CatalogueError>;
     fn close(&self) -> Result<(), CatalogueError>;
@@ -172,14 +195,6 @@ impl StoredCatalogue {
             .lock()
             .expect("durability tiers lock") = local_durability_tiers;
         Ok(store)
-    }
-
-    #[cfg(any(test, feature = "embedded-server"))]
-    #[allow(dead_code)]
-    pub(crate) fn add_known_schema(&self, schema: Schema) -> Result<(), CatalogueError> {
-        let mut index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
-        index.add_schema(schema);
-        Ok(())
     }
 
     #[cfg(test)]
@@ -269,7 +284,7 @@ fn unix_timestamp_millis() -> u64 {
         .min(u128::from(u64::MAX)) as u64
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq)]
 struct CatalogueIndex {
     schemas: HashMap<SchemaHash, Schema>,
     schema_published_at: HashMap<SchemaHash, u64>,
@@ -282,7 +297,8 @@ struct CatalogueIndex {
 impl CatalogueIndex {
     fn from_storage(storage: &dyn CatalogueStorage, app_id: AppId) -> Result<Self, CatalogueError> {
         let mut index = Self::default();
-        for entry in storage.scan_catalogue_entries()? {
+        let entries = storage.scan_catalogue_entries()?;
+        for entry in entries {
             if entry.metadata.get(MetadataKey::AppId.as_str()) != Some(&app_id.uuid().to_string()) {
                 continue;
             }
@@ -301,34 +317,6 @@ impl CatalogueIndex {
         let mut hashes = self.schemas.keys().copied().collect::<Vec<_>>();
         hashes.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
         hashes
-    }
-
-    fn are_schema_hashes_connected(&self, from_hash: SchemaHash, to_hash: SchemaHash) -> bool {
-        if !self.schemas.contains_key(&from_hash) || !self.schemas.contains_key(&to_hash) {
-            return false;
-        }
-        let mut seen = HashSet::from([from_hash]);
-        let mut queue = VecDeque::from([from_hash]);
-        while let Some(current) = queue.pop_front() {
-            if current == to_hash {
-                return true;
-            }
-            for &(source, target) in &self.lens_edges {
-                let next = if source == current {
-                    Some(target)
-                } else if target == current {
-                    Some(source)
-                } else {
-                    None
-                };
-                if let Some(next) = next
-                    && seen.insert(next)
-                {
-                    queue.push_back(next);
-                }
-            }
-        }
-        false
     }
 
     fn active_schema(&self) -> Option<ActiveSchema> {
@@ -415,12 +403,6 @@ impl CatalogueIndex {
                 let schema = decode_schema(&entry.content).map_err(|error| {
                     corrupt_catalogue_entry(entry, format!("decode schema payload: {error}"))
                 })?;
-                if schema.is_empty() {
-                    // Old servers could write the empty-schema sentinel before
-                    // initialization. It is a valid, forward-compatible value
-                    // that must remain invisible to rehydration.
-                    return Ok(());
-                }
                 let declared_hash = entry
                     .metadata
                     .get(MetadataKey::SchemaHash.as_str())
@@ -610,6 +592,38 @@ fn catalogue_metadata(app_id: AppId, object_type: ObjectType) -> HashMap<String,
 }
 
 impl CatalogueStore for StoredCatalogue {
+    fn migration_graph(&self) -> Result<MigrationGraph, CatalogueError> {
+        let index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
+        let mut schemas: Vec<_> = index.schemas.keys().map(ToString::to_string).collect();
+        schemas.sort();
+        let mut migrations: Vec<_> = index
+            .lenses
+            .values()
+            .map(|lens| MigrationGraphEdge {
+                from_hash: lens.source_hash.to_string(),
+                to_hash: lens.target_hash.to_string(),
+                automatic: lens.forward.ops.is_empty()
+                    && lens.backward.ops.is_empty()
+                    && !lens.is_draft()
+                    && index
+                        .schemas
+                        .get(&lens.source_hash)
+                        .zip(index.schemas.get(&lens.target_hash))
+                        .is_some_and(|(from, to)| {
+                            jazz::tools::deployment::schemas_are_compatible(from, to)
+                        }),
+            })
+            .collect();
+        migrations.sort_by(|a, b| (&a.from_hash, &a.to_hash).cmp(&(&b.from_hash, &b.to_hash)));
+        Ok(MigrationGraph {
+            active_schema_hash: index
+                .active_schema
+                .map(|active| active.schema_hash.to_string()),
+            schemas,
+            migrations,
+        })
+    }
+
     fn known_schema_hashes(&self) -> Result<Vec<SchemaHash>, CatalogueError> {
         let index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
         Ok(index.known_schema_hashes())
@@ -630,15 +644,7 @@ impl CatalogueStore for StoredCatalogue {
         Ok(index.schema_published_at.get(schema_hash).copied())
     }
 
-    fn are_schema_hashes_connected(
-        &self,
-        from_hash: SchemaHash,
-        to_hash: SchemaHash,
-    ) -> Result<bool, CatalogueError> {
-        let index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
-        Ok(index.are_schema_hashes_connected(from_hash, to_hash))
-    }
-
+    #[cfg(any(test, feature = "embedded-server"))]
     fn publish_schema(&self, schema: Schema) -> Result<ObjectId, CatalogueError> {
         let published_at = unix_timestamp_millis();
         let (schema_hash, entry) = schema_entry(self.app_id, schema, published_at);
@@ -661,13 +667,14 @@ impl CatalogueStore for StoredCatalogue {
         Ok(index.active_schema())
     }
 
+    #[cfg(test)]
     fn publish_permissions_bundle(
         &self,
         schema_hash: SchemaHash,
         permissions: HashMap<TableName, TablePolicies>,
         expected_parent_bundle_object_id: Option<ObjectId>,
     ) -> Result<Option<ObjectId>, CatalogueError> {
-        validate_permissions_relation_unions(&permissions)
+        validate_permissions_relations(&permissions)
             .map_err(|error| CatalogueError::WriteError(error.to_string()))?;
         // Catalogue mutations take storage before the in-memory index. Holding
         // both locks makes parent validation and head advancement linearizable
@@ -736,6 +743,7 @@ impl CatalogueStore for StoredCatalogue {
         Ok(Some(head_entry.object_id))
     }
 
+    #[cfg(any(test, feature = "embedded-server"))]
     fn publish_lens(&self, lens: &Lens) -> Result<ObjectId, CatalogueError> {
         if lens.is_draft() {
             return Err(CatalogueError::WriteError(
@@ -767,6 +775,13 @@ impl CatalogueStore for StoredCatalogue {
 }
 
 impl ServerCatalogue {
+    pub(crate) fn migration_graph(
+        &self,
+        store: &impl CatalogueStore,
+    ) -> Result<MigrationGraph, CatalogueError> {
+        store.migration_graph()
+    }
+
     pub(crate) fn known_schema_hashes(
         &self,
         store: &impl CatalogueStore,
@@ -797,15 +812,7 @@ impl ServerCatalogue {
         store.schema_published_at(schema_hash)
     }
 
-    pub(crate) fn are_schema_hashes_connected(
-        &self,
-        store: &impl CatalogueStore,
-        from_hash: SchemaHash,
-        to_hash: SchemaHash,
-    ) -> Result<bool, CatalogueError> {
-        store.are_schema_hashes_connected(from_hash, to_hash)
-    }
-
+    #[cfg(any(test, feature = "embedded-server"))]
     pub(crate) fn publish_schema(
         &self,
         store: &impl CatalogueStore,
@@ -828,6 +835,7 @@ impl ServerCatalogue {
         store.active_schema()
     }
 
+    #[cfg(test)]
     pub(crate) fn publish_permissions_bundle(
         &self,
         store: &impl CatalogueStore,
@@ -838,6 +846,7 @@ impl ServerCatalogue {
         store.publish_permissions_bundle(schema_hash, permissions, expected_parent_bundle_object_id)
     }
 
+    #[cfg(any(test, feature = "embedded-server"))]
     pub(crate) fn publish_lens(
         &self,
         store: &impl CatalogueStore,
@@ -861,11 +870,41 @@ mod tests {
     use std::time::Duration;
 
     use jazz::tools::public_schema::{
-        PolicyExpr, RelExpr, RelUnionArm, SchemaBuilder, TableName, TablePolicies,
+        PolicyExpr, RelationExpr, RelationUnionArm, SchemaBuilder, TableName, TablePolicies,
     };
 
     use super::{CatalogueStore, StoredCatalogue};
     use crate::server::catalogue_storage::CatalogueMemoryStorage;
+
+    /// Alice's unreferenced empty schema survives catalogue loading and must
+    /// carry valid metadata. This storage-boundary test exercises records that
+    /// the public publisher cannot create with malformed metadata.
+    #[test]
+    fn unreferenced_empty_schema_is_loaded_and_validated() {
+        use crate::server::catalogue_storage::CatalogueStorage;
+
+        let app_id = jazz::tools::AppId::from_name("empty-schema-catalogue");
+        let schema = SchemaBuilder::new().build();
+        let (hash, entry) = super::schema_entry(app_id, schema.clone(), 42);
+        let mut storage = CatalogueMemoryStorage::new();
+        storage.upsert_catalogue_entry(&entry).unwrap();
+        let index = super::CatalogueIndex::from_storage(&storage, app_id).unwrap();
+        assert_eq!(index.schemas.get(&hash), Some(&schema));
+        assert_eq!(index.schema_published_at.get(&hash), Some(&42));
+
+        for field in [
+            super::MetadataKey::SchemaHash,
+            super::MetadataKey::PublishedAt,
+        ] {
+            let mut malformed = entry.clone();
+            malformed.metadata.remove(field.as_str());
+            storage.upsert_catalogue_entry(&malformed).unwrap();
+            assert!(matches!(
+                super::CatalogueIndex::from_storage(&storage, app_id),
+                Err(super::CatalogueError::DecodeError { .. })
+            ));
+        }
+    }
 
     #[test]
     fn concurrent_permissions_publications_compare_and_swap_the_parent() {
@@ -933,8 +972,8 @@ mod tests {
             Box::new(CatalogueMemoryStorage::new()),
         )
         .expect("catalogue");
-        let leaf = || RelExpr::TableScan {
-            table: TableName::new("todos"),
+        let leaf = || RelationExpr::TableScan {
+            table: String::from("todos"),
             alias: None,
         };
         for labels in [
@@ -946,10 +985,10 @@ mod tests {
             let permissions = std::collections::HashMap::from([(
                 TableName::new("todos"),
                 TablePolicies::new().with_select(PolicyExpr::ExistsRel {
-                    rel: RelExpr::Union {
+                    rel: RelationExpr::Union {
                         inputs: labels
                             .into_iter()
-                            .map(|label| RelUnionArm {
+                            .map(|label| RelationUnionArm {
                                 label,
                                 input: leaf(),
                             })

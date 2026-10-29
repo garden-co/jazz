@@ -1,7 +1,13 @@
 import { intro, outro, text, select, spinner, log, isCancel } from "@clack/prompts";
 import pc from "picocolors";
 import * as path from "node:path";
-import { scaffold, validateAppName, type StarterName, type ScaffoldOptions } from "./scaffold.js";
+import {
+  isKnownStarter,
+  scaffold,
+  validateAppName,
+  type StarterName,
+  type ScaffoldOptions,
+} from "./scaffold.js";
 import { detectPackageManager } from "./detect-pm.js";
 import { runHostedInit } from "./cloud-init.js";
 import { writeBetterAuthSecret } from "./init-secret.js";
@@ -10,35 +16,21 @@ type Framework = "next" | "react" | "sveltekit" | "ts" | "effect";
 type Hosting = "hosted" | "selfhosted";
 type Auth = "localfirst" | "hybrid" | "betterauth";
 
-// Maps framework + auth choices to a starter directory under starters/.
-// `null` means "not shipped yet" — the CLI surfaces a helpful error.
-const STARTERS: Record<Framework, Record<Auth, StarterName | null>> = {
-  next: {
-    localfirst: "next-localfirst",
-    hybrid: "next-hybrid",
-    betterauth: "next-betterauth",
-  },
-  react: {
-    localfirst: "react-localfirst",
-    hybrid: "react-hybrid",
-    betterauth: "react-betterauth",
-  },
-  sveltekit: {
-    localfirst: "sveltekit-localfirst",
-    hybrid: "sveltekit-hybrid",
-    betterauth: "sveltekit-betterauth",
-  },
-  ts: {
-    localfirst: "ts-localfirst",
-    hybrid: "ts-hybrid",
-    betterauth: "ts-betterauth",
-  },
-  effect: {
-    localfirst: "ts-effect-localfirst",
-    hybrid: null,
-    betterauth: "ts-effect-betterauth",
-  },
+// Starter directory prefix (`${dir}-${auth}` under starters/) and client env
+// prefix for each framework.
+const FRAMEWORKS: Record<Framework, { dir: string; envPrefix: string }> = {
+  next: { dir: "next", envPrefix: "NEXT_PUBLIC_" },
+  react: { dir: "react", envPrefix: "VITE_" },
+  sveltekit: { dir: "sveltekit", envPrefix: "PUBLIC_" },
+  ts: { dir: "ts", envPrefix: "VITE_" },
+  effect: { dir: "ts-effect", envPrefix: "VITE_" },
 };
+
+// `null` means "not shipped yet" — the CLI surfaces a helpful error.
+function starterFor(framework: Framework, auth: Auth): StarterName | null {
+  const name = `${FRAMEWORKS[framework].dir}-${auth}`;
+  return isKnownStarter(name) ? name : null;
+}
 
 const VALID_HOSTING_VALUES: Hosting[] = ["hosted", "selfhosted"];
 const CLOUD_SYNC_URL = "https://v2.sync.jazz.tools/";
@@ -50,46 +42,15 @@ interface HostedEnvKeys {
   backendSecret: string;
 }
 
-const ENV_KEYS_BY_FRAMEWORK: Record<Framework, HostedEnvKeys> = {
-  next: {
-    appId: "NEXT_PUBLIC_JAZZ_APP_ID",
-    serverUrl: "NEXT_PUBLIC_JAZZ_SERVER_URL",
-    adminSecret: "JAZZ_ADMIN_SECRET",
-    backendSecret: "BACKEND_SECRET",
-  },
-  sveltekit: {
-    appId: "PUBLIC_JAZZ_APP_ID",
-    serverUrl: "PUBLIC_JAZZ_SERVER_URL",
-    adminSecret: "JAZZ_ADMIN_SECRET",
-    backendSecret: "BACKEND_SECRET",
-  },
-  react: {
-    appId: "VITE_JAZZ_APP_ID",
-    serverUrl: "VITE_JAZZ_SERVER_URL",
-    adminSecret: "JAZZ_ADMIN_SECRET",
-    backendSecret: "BACKEND_SECRET",
-  },
-  ts: {
-    appId: "VITE_JAZZ_APP_ID",
-    serverUrl: "VITE_JAZZ_SERVER_URL",
-    adminSecret: "JAZZ_ADMIN_SECRET",
-    backendSecret: "BACKEND_SECRET",
-  },
-  effect: {
-    appId: "VITE_JAZZ_APP_ID",
-    serverUrl: "VITE_JAZZ_SERVER_URL",
-    adminSecret: "JAZZ_ADMIN_SECRET",
-    backendSecret: "BACKEND_SECRET",
-  },
-};
-
 export function envKeysForStarter(starter: string): HostedEnvKeys | null {
-  if (starter.startsWith("next-")) return ENV_KEYS_BY_FRAMEWORK.next;
-  if (starter.startsWith("sveltekit-")) return ENV_KEYS_BY_FRAMEWORK.sveltekit;
-  if (starter.startsWith("react-")) return ENV_KEYS_BY_FRAMEWORK.react;
-  if (starter.startsWith("ts-effect-")) return ENV_KEYS_BY_FRAMEWORK.effect;
-  if (starter.startsWith("ts-")) return ENV_KEYS_BY_FRAMEWORK.ts;
-  return null;
+  const match = Object.values(FRAMEWORKS).find(({ dir }) => starter.startsWith(`${dir}-`));
+  if (!match) return null;
+  return {
+    appId: `${match.envPrefix}JAZZ_APP_ID`,
+    serverUrl: `${match.envPrefix}JAZZ_SERVER_URL`,
+    adminSecret: "JAZZ_ADMIN_SECRET",
+    backendSecret: "BACKEND_SECRET",
+  };
 }
 
 function readFlagValue(args: string[], name: string): string | undefined {
@@ -210,11 +171,11 @@ async function main() {
     const auth = await select<Auth>({
       message: "Auth",
       // Only offer the auth modes this framework ships a starter for.
-      options: authOptions.filter((option) => STARTERS[framework][option.value] !== null),
+      options: authOptions.filter((option) => starterFor(framework, option.value) !== null),
     });
     if (isCancel(auth)) process.exit(0);
 
-    const picked = STARTERS[framework][auth];
+    const picked = starterFor(framework, auth);
     if (!picked) {
       log.error(`No starter available for ${framework} + ${auth} yet.`);
       process.exit(1);

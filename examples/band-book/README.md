@@ -68,7 +68,7 @@ issue's page with its properties, a block with its children, and a page with
 its whole subtree, including the grants and invite links that point into it, so
 a link to a deleted page stops working.
 
-**Retry-safe bootstrap.** The demo band is written in one exclusive
+**Retry-safe bootstrap.** The demo band is written in one serializable
 transaction with ids derived from the account, so a retry, a double click or
 two tabs opening at once either finds the finished band or writes all of it.
 Rows get creation times a millisecond apart in tree order, which is what the

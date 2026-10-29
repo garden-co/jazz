@@ -40,12 +40,23 @@ const DEMO_TASKS: { title: string; status: TaskStatus; mine?: boolean; notes?: s
   },
 ];
 
+/**
+ * How long to wait for the server's copy of the profile before creating one.
+ * The wait ends as soon as the server answers or the link drops, and never
+ * applies offline, so it is only this long when the server is connected but
+ * slow. Giving up early would create a second profile for a returning account.
+ */
+const PROFILE_SERVER_WAIT_MS = 60_000;
+
 /** Finds or creates the crew profile for an account. */
 export async function ensureProfile(
   db: Db,
   account: string,
 ): Promise<{ profile: Crew; isNew: boolean }> {
-  const existing = await db.one(app.crew.where({ account }), { tier: "local-first-unless-empty" });
+  const existing = await db.one(app.crew.where({ account }), {
+    tier: "local-first",
+    firstLoadRemoteWaitMs: PROFILE_SERVER_WAIT_MS,
+  });
   if (existing) return { profile: existing, isNew: false };
   const profile = db.insert(app.crew, {
     account,

@@ -1,13 +1,6 @@
 //! Stable public schema and session vocabulary.
 
 pub use crate::model::public_api::policy::{CmpOp, Operation, PolicyExpr, PolicyValue};
-pub use crate::model::public_api::relation_ir::{
-    ColumnRef as RelColumnRef, JoinCondition as RelJoinCondition, JoinKind as RelJoinKind,
-    KeyRef as RelKeyRef, PredicateCmpOp as RelPredicateCmpOp, PredicateExpr as RelPredicateExpr,
-    ProjectColumn as RelProjectColumn, ProjectExpr as RelProjectExpr,
-    RecursionBound as RelRecursionBound, RelExpr, RowIdRef, UnionArm as RelUnionArm,
-    ValueRef as RelValueRef,
-};
 pub use crate::model::public_api::session::{AuthMode, Session, WriteContext};
 pub use crate::model::public_api::types::{
     ColumnDescriptor, ColumnMergeStrategy, ColumnName, ColumnType, EnumCaseDescriptor,
@@ -16,6 +9,12 @@ pub use crate::model::public_api::types::{
     Value, permissions, policy_expr,
 };
 pub use crate::model::transaction::{OpenTransactionId, TransactionId};
+/// Relation-backed policies (`PolicyExpr::ExistsRel`) use the query relation IR.
+pub use crate::query::{
+    RecursionBound, RelationCmpOp, RelationColumnRef, RelationExpr, RelationJoinCondition,
+    RelationJoinKind, RelationKeyRef, RelationPredicate, RelationProjectColumn,
+    RelationProjectExpr, RelationRowIdRef, RelationUnionArm, RelationValueRef,
+};
 
 use crate::model::json_schema::{self, JsonSchemaError};
 
@@ -37,17 +36,8 @@ pub fn validate_json_value(
             let Some(schema) = schema else {
                 return Ok(());
             };
-            json_schema::validate(schema, &instance).map_err(|error| match error {
-                JsonSchemaError::Mismatch(error) => {
-                    format!("JSON schema validation failed for column `{path}`: {error}")
-                }
-                JsonSchemaError::InvalidSchema(error) => format!(
-                    "JSON schema validation failed for column `{path}`: invalid declared schema: {error}"
-                ),
-                JsonSchemaError::Unavailable(error) => {
-                    format!("JSON schema validation unavailable for column `{path}`: {error}")
-                }
-            })
+            json_schema::validate(schema, &instance)
+                .map_err(|error| json_schema_failure(error, path))
         }
         (Value::Array(values), ColumnType::Array { element }) => {
             values.iter().enumerate().try_for_each(|(index, value)| {
@@ -74,6 +64,22 @@ pub fn validate_json_value(
                 })
         }
         _ => Ok(()),
+    }
+}
+
+/// Why a JSON value of column `path` failed its declared schema, worded as
+/// [`validate_json_value`] words it.
+pub fn json_schema_failure(error: JsonSchemaError, path: &str) -> String {
+    match error {
+        JsonSchemaError::Mismatch(error) => {
+            format!("JSON schema validation failed for column `{path}`: {error}")
+        }
+        JsonSchemaError::InvalidSchema(error) => format!(
+            "JSON schema validation failed for column `{path}`: invalid declared schema: {error}"
+        ),
+        JsonSchemaError::Unavailable(error) => {
+            format!("JSON schema validation unavailable for column `{path}`: {error}")
+        }
     }
 }
 

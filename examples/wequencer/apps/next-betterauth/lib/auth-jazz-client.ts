@@ -33,7 +33,6 @@ export async function authJazzClient(): Promise<JazzClient> {
       backendSecret: serverSecret("BACKEND_SECRET", "wequencer-development-backend-secret"),
     },
     env: JAZZ_ENV,
-    tier: "global",
   }));
   try {
     const session = await pending;

@@ -4,11 +4,14 @@
 
 use std::collections::BTreeMap;
 
-use groove::records::{RecordDescriptor, Value, ValueType};
+use jazz_types::records::{RecordDescriptor, Value, ValueType};
 
 use crate::ids::NodeUuid;
 use crate::time::{GlobalTime, TxTime};
 use crate::tx::{Snapshot, TxId};
+
+mod snapshot_ref;
+pub use snapshot_ref::SnapshotRefFormatError;
 
 /// Canonical named values for one schema-wide branch selector.
 #[derive(
@@ -64,27 +67,30 @@ pub enum BranchCodecError {
     /// The encoded scalar tag does not match the declared schema type.
     #[error("branch column encoding does not match its declared type")]
     TypeMismatch,
-    /// Groove rejected the declared-type payload.
-    #[error("invalid Groove branch column payload: {0}")]
-    Groove(#[from] groove::records::Error),
+    /// The payload is not a canonical value of the declared type.
+    #[error("invalid branch column payload: {0}")]
+    Record(#[from] jazz_types::records::Error),
 }
 
 const BRANCH_COLUMN_CODEC_VERSION: u8 = 1;
-const BRANCH_COLUMN_U8: u8 = 0;
-const BRANCH_COLUMN_U16: u8 = 1;
-const BRANCH_COLUMN_U32: u8 = 2;
-const BRANCH_COLUMN_U64: u8 = 3;
-const BRANCH_COLUMN_I32: u8 = 4;
-const BRANCH_COLUMN_I64: u8 = 5;
-const BRANCH_COLUMN_STRING: u8 = 6;
-const BRANCH_COLUMN_UUID: u8 = 7;
+/// Scalar branch column types; each type's codec tag is its index.
+const BRANCH_COLUMN_SCALARS: [ValueType; 8] = [
+    ValueType::U8,
+    ValueType::U16,
+    ValueType::U32,
+    ValueType::U64,
+    ValueType::I32,
+    ValueType::I64,
+    ValueType::String,
+    ValueType::Uuid,
+];
 const BRANCH_COLUMN_ENUM_TAG: u8 = 8;
 
 /// Canonical wire/storage encoding of one branch-column value.
 ///
 /// Byte zero is the codec version, byte one is a permanently assigned scalar
-/// tag, and the remainder is the canonical Groove encoding under the declared
-/// column type. Keeping the tag outside Groove lets a selector cross the wire
+/// tag, and the remainder is the canonical record encoding under the declared
+/// column type. Keeping the tag outside the record lets a selector cross the wire
 /// before a table is chosen while exact [`BranchKey`] construction still
 /// re-encodes and validates the payload against that table's schema.
 #[derive(
@@ -121,7 +127,7 @@ impl From<Value> for BranchColumnValue {
 }
 
 impl BranchColumnValue {
-    /// Encode one value using its schema-declared Groove column type.
+    /// Encode one value using its schema-declared column type.
     pub fn encode_typed(value: &Value, value_type: &ValueType) -> Result<Self, BranchCodecError> {
         let tag = branch_column_tag(value_type).ok_or(BranchCodecError::UnsupportedType)?;
         let descriptor = RecordDescriptor::new([("value", value_type.clone())]);
@@ -168,32 +174,17 @@ impl BranchColumnValue {
 }
 
 fn branch_column_tag(value_type: &ValueType) -> Option<u8> {
-    match value_type {
-        ValueType::U8 => Some(BRANCH_COLUMN_U8),
-        ValueType::U16 => Some(BRANCH_COLUMN_U16),
-        ValueType::U32 => Some(BRANCH_COLUMN_U32),
-        ValueType::U64 => Some(BRANCH_COLUMN_U64),
-        ValueType::I32 => Some(BRANCH_COLUMN_I32),
-        ValueType::I64 => Some(BRANCH_COLUMN_I64),
-        ValueType::String => Some(BRANCH_COLUMN_STRING),
-        ValueType::Uuid => Some(BRANCH_COLUMN_UUID),
-        ValueType::EnumTag(_) => Some(BRANCH_COLUMN_ENUM_TAG),
-        _ => None,
+    if let ValueType::EnumTag(_) = value_type {
+        return Some(BRANCH_COLUMN_ENUM_TAG);
     }
+    let tag = BRANCH_COLUMN_SCALARS
+        .iter()
+        .position(|scalar| scalar == value_type)?;
+    Some(tag as u8)
 }
 
 fn branch_column_type(tag: u8) -> Option<ValueType> {
-    match tag {
-        BRANCH_COLUMN_U8 => Some(ValueType::U8),
-        BRANCH_COLUMN_U16 => Some(ValueType::U16),
-        BRANCH_COLUMN_U32 => Some(ValueType::U32),
-        BRANCH_COLUMN_U64 => Some(ValueType::U64),
-        BRANCH_COLUMN_I32 => Some(ValueType::I32),
-        BRANCH_COLUMN_I64 => Some(ValueType::I64),
-        BRANCH_COLUMN_STRING => Some(ValueType::String),
-        BRANCH_COLUMN_UUID => Some(ValueType::Uuid),
-        _ => None,
-    }
+    BRANCH_COLUMN_SCALARS.get(usize::from(tag)).cloned()
 }
 
 const BRANCH_KEY_CODEC_VERSION: u8 = 1;
@@ -326,9 +317,7 @@ pub enum BranchViewBase {
 }
 
 /// Dotted snapshot ref used by historic read views.
-#[derive(
-    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
 pub struct SnapshotRef {
     /// Node that owns the local snapshot prefix.
     pub owner: NodeUuid,

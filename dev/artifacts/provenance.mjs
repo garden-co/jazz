@@ -321,6 +321,7 @@ const sharedInputs = [
   "dev/artifacts/stage-napi-loader.mjs",
   "dev/artifacts/stage-native-fingerprints.mjs",
   "dev/artifacts/stage-napi-manifests.mjs",
+  "dev/artifacts/wasm-names.mjs",
   "dev/artifacts/linux-napi/Dockerfile",
   "dev/artifacts/linux-napi/build.sh",
 ];

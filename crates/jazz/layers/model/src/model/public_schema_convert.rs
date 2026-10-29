@@ -1,10 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use crate::groove::records::{
-    EnumCase, EnumSchema, EnumValue, RecordDescriptor, ScalarEnumSchema, Value as GrooveValue,
-};
-use crate::groove::schema::ColumnType as GrooveColumnType;
 use crate::query::{
     InheritsOperation, JoinCorrelation, JoinSourceLookup, JoinTarget, JoinVia, Operand,
     PolicyBranch, Predicate, Query,
@@ -13,17 +9,22 @@ use crate::schema::{
     ColumnSchema as CoreColumnSchema, JazzSchema, MergeStrategy, RuntimeSchema,
     TableSchema as CoreTableSchema, WritePolicies,
 };
+use jazz_types::column_schema::ColumnType as StorageColumnType;
+use jazz_types::records::{
+    EnumCase, EnumSchema, EnumValue, RecordDescriptor, ScalarEnumSchema, Value as RecordValue,
+};
 
 use crate::model::public_api::policy::{CmpOp, PolicyValue};
-use crate::model::public_api::relation_ir::{
-    ColumnRef, JoinKind as RelJoinKind, PredicateCmpOp as RelPredicateCmpOp,
-    PredicateExpr as RelPredicateExpr, ProjectExpr as RelProjectExpr,
-    RecursionBound as RelRecursionBound, RelExpr, RowIdRef, ValueRef as RelValueRef,
-};
 use crate::model::public_schema::{
     ColumnDescriptor, ColumnMergeStrategy, ColumnType, Operation, PolicyExpr, Schema, TableName,
     TableSchema, Value,
 };
+use crate::query::{
+    RecursionBound, RelationColumnRef, RelationExpr, RelationJoinKind, RelationPredicate,
+    RelationRowIdRef, RelationValueRef,
+};
+#[cfg(test)]
+use crate::query::{RelationCmpOp, RelationJoinCondition, RelationKeyRef, RelationProjectExpr};
 
 const DIRECT_USER_CLAIM: &str = "user";
 #[cfg(test)]
@@ -32,6 +33,12 @@ const PUBLIC_USER_SESSION_PATHS: &[&str] = &["user"];
 const DIRECT_AUTH_MODE_CLAIM: &str = "authMode";
 const PUBLIC_AUTH_MODE_SESSION_PATHS: &[&str] = &["authMode", "auth_mode"];
 const RESERVED_AGGREGATE_OUTPUT_PREFIX: &str = "__jazz_aggregate_";
+
+/// The columns every stored row table keeps beside the app's: its row key,
+/// branch, seq, deletion and content flags, and what the authority keeps of
+/// an accepted upload (SPEC 4 §4.6). An app column cannot take their names.
+pub const RESERVED_ROW_COLUMNS: [&str; 8] =
+    ["id", "rid", "_b", "_seq", "_del", "_c", "_base", "_cols"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Error produced while compiling a developer-authored schema for the runtime.
@@ -83,7 +90,7 @@ fn validate_converted_schema(tables: &[CoreTableSchema]) -> Result<(), SchemaCon
     };
     validate_converted_references(tables)?;
 
-    let mut branch_column_types = BTreeMap::<String, GrooveColumnType>::new();
+    let mut branch_column_types = BTreeMap::<String, StorageColumnType>::new();
     for table in tables {
         let mut bound = std::collections::BTreeSet::new();
         for branch_column in &table.branch_by {
@@ -103,7 +110,7 @@ fn validate_converted_schema(tables: &[CoreTableSchema]) -> Result<(), SchemaCon
                     format!("branch column {branch_column:?} is listed more than once"),
                 ));
             }
-            if matches!(column.column_type, GrooveColumnType::Nullable(_)) {
+            if matches!(column.column_type, StorageColumnType::Nullable(_)) {
                 return Err(err(
                     format!("$.{}.branchBy", table.name),
                     format!("branch column {branch_column:?} must be non-null"),
@@ -111,15 +118,15 @@ fn validate_converted_schema(tables: &[CoreTableSchema]) -> Result<(), SchemaCon
             }
             if !matches!(
                 column.column_type,
-                GrooveColumnType::String
-                    | GrooveColumnType::Uuid
-                    | GrooveColumnType::U8
-                    | GrooveColumnType::U16
-                    | GrooveColumnType::U32
-                    | GrooveColumnType::U64
-                    | GrooveColumnType::I32
-                    | GrooveColumnType::I64
-                    | GrooveColumnType::EnumTag(_)
+                StorageColumnType::String
+                    | StorageColumnType::Uuid
+                    | StorageColumnType::U8
+                    | StorageColumnType::U16
+                    | StorageColumnType::U32
+                    | StorageColumnType::U64
+                    | StorageColumnType::I32
+                    | StorageColumnType::I64
+                    | StorageColumnType::EnumTag(_)
             ) {
                 return Err(err(
                     format!("$.{}.branchBy", table.name),
@@ -193,19 +200,30 @@ fn validate_converted_references(tables: &[CoreTableSchema]) -> Result<(), Schem
     Ok(())
 }
 
-fn is_uuid_reference_type(column_type: &GrooveColumnType) -> bool {
+fn is_uuid_reference_type(column_type: &StorageColumnType) -> bool {
     match column_type {
-        GrooveColumnType::Nullable(inner) => is_uuid_reference_type(inner),
-        GrooveColumnType::Uuid => true,
-        GrooveColumnType::Array(inner) => matches!(inner.as_ref(), GrooveColumnType::Uuid),
+        StorageColumnType::Nullable(inner) => is_uuid_reference_type(inner),
+        StorageColumnType::Uuid => true,
+        StorageColumnType::Array(inner) => matches!(inner.as_ref(), StorageColumnType::Uuid),
         _ => false,
     }
 }
 
 #[derive(Clone)]
 enum TypedLiteralTarget {
-    Core(GrooveColumnType),
+    Core(StorageColumnType),
     PublicEnum,
+}
+
+/// Literal-coercion target of every column, by table then column name.
+type ColumnTypes = BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>;
+
+fn column_target<'a>(
+    column_types: &'a ColumnTypes,
+    table: &str,
+    column: &str,
+) -> Option<&'a TypedLiteralTarget> {
+    column_types.get(table)?.get(column)
 }
 
 fn coerce_typed_literals(schema: &Schema, tables: &mut [CoreTableSchema]) {
@@ -242,24 +260,32 @@ fn coerce_typed_literals(schema: &Schema, tables: &mut [CoreTableSchema]) {
     }
 }
 
-fn coerce_optional_query_typed_literals(
-    query: &mut Option<Query>,
-    column_types: &BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
-) {
+fn coerce_optional_query_typed_literals(query: &mut Option<Query>, column_types: &ColumnTypes) {
     if let Some(query) = query {
         coerce_query_typed_literals(query, column_types);
     }
 }
 
-fn coerce_query_typed_literals(
-    query: &mut Query,
-    column_types: &BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
-) {
+fn coerce_query_typed_literals(query: &mut Query, column_types: &ColumnTypes) {
     coerce_predicates_typed_literals(&query.table, &mut query.filters, column_types);
     for join in &mut query.joins {
         coerce_join_typed_literals(join, column_types);
     }
-    for reachable in &mut query.reachable {
+    coerce_reachable_typed_literals(&mut query.reachable, column_types);
+    for branch in &mut query.policy_branches {
+        coerce_predicates_typed_literals(&query.table, &mut branch.filters, column_types);
+        for join in &mut branch.joins {
+            coerce_join_typed_literals(join, column_types);
+        }
+        coerce_reachable_typed_literals(&mut branch.reachable, column_types);
+    }
+}
+
+fn coerce_reachable_typed_literals(
+    reachable: &mut [crate::query::ReachableVia],
+    column_types: &ColumnTypes,
+) {
+    for reachable in reachable {
         coerce_predicates_typed_literals(
             &reachable.access_table,
             &mut reachable.access_filters,
@@ -274,33 +300,9 @@ fn coerce_query_typed_literals(
             coerce_predicates_typed_literals(&seed.table, &mut seed.filters, column_types);
         }
     }
-    for branch in &mut query.policy_branches {
-        coerce_predicates_typed_literals(&query.table, &mut branch.filters, column_types);
-        for join in &mut branch.joins {
-            coerce_join_typed_literals(join, column_types);
-        }
-        for reachable in &mut branch.reachable {
-            coerce_predicates_typed_literals(
-                &reachable.access_table,
-                &mut reachable.access_filters,
-                column_types,
-            );
-            coerce_predicates_typed_literals(
-                &reachable.edge_table,
-                &mut reachable.edge_filters,
-                column_types,
-            );
-            if let Some(seed) = &mut reachable.seed {
-                coerce_predicates_typed_literals(&seed.table, &mut seed.filters, column_types);
-            }
-        }
-    }
 }
 
-fn coerce_join_typed_literals(
-    join: &mut JoinVia,
-    column_types: &BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
-) {
+fn coerce_join_typed_literals(join: &mut JoinVia, column_types: &ColumnTypes) {
     coerce_predicates_typed_literals(&join.table, &mut join.filters, column_types);
     for nested in &mut join.nested_joins {
         coerce_join_typed_literals(nested, column_types);
@@ -310,7 +312,7 @@ fn coerce_join_typed_literals(
 fn coerce_predicates_typed_literals(
     table: &str,
     predicates: &mut [Predicate],
-    column_types: &BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
+    column_types: &ColumnTypes,
 ) {
     for predicate in predicates {
         coerce_predicate_typed_literals(table, predicate, column_types);
@@ -320,7 +322,7 @@ fn coerce_predicates_typed_literals(
 fn coerce_predicate_typed_literals(
     table: &str,
     predicate: &mut Predicate,
-    column_types: &BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
+    column_types: &ColumnTypes,
 ) {
     match predicate {
         Predicate::All(predicates) | Predicate::Any(predicates) => {
@@ -364,7 +366,7 @@ fn coerce_operand_pair_typed_literal(
     table: &str,
     column_operand: &Operand,
     literal_operand: &mut Operand,
-    column_types: &BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
+    column_types: &ColumnTypes,
 ) -> bool {
     let Operand::Column(column) = column_operand else {
         return false;
@@ -377,7 +379,7 @@ fn coerce_operand_pair_typed_literal(
     if let Some(discriminant) =
         column_enum_literal_discriminant(table, column, literal_operand, column_types)
     {
-        *literal_operand = Operand::Literal(GrooveValue::EnumTag(discriminant));
+        *literal_operand = Operand::Literal(RecordValue::EnumTag(discriminant));
         return false;
     }
     if column_is_enum(table, column, column_types) {
@@ -386,8 +388,8 @@ fn coerce_operand_pair_typed_literal(
     if !column_is_string(table, column, column_types) {
         return false;
     }
-    if let Operand::Literal(GrooveValue::Uuid(uuid)) = literal_operand {
-        *literal_operand = Operand::Literal(GrooveValue::String(uuid.to_string()));
+    if let Operand::Literal(RecordValue::Uuid(uuid)) = literal_operand {
+        *literal_operand = Operand::Literal(RecordValue::String(uuid.to_string()));
     }
     false
 }
@@ -395,65 +397,64 @@ fn coerce_operand_pair_typed_literal(
 fn column_type_for_operand(
     table: &str,
     column: &str,
-    column_types: &BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
+    column_types: &ColumnTypes,
 ) -> Option<TypedLiteralTarget> {
     if let Some(ty) = crate::ids::AuthorSubject::metadata_type(column) {
         return Some(TypedLiteralTarget::Core(ty.clone()));
     }
     match column {
-        "id" => Some(TypedLiteralTarget::Core(GrooveColumnType::Uuid)),
-        "$createdAt" | "$updatedAt" => Some(TypedLiteralTarget::Core(GrooveColumnType::U64)),
-        _ => column_types
-            .get(table)
-            .and_then(|columns| columns.get(column))
-            .cloned(),
+        "id" => Some(TypedLiteralTarget::Core(StorageColumnType::Uuid)),
+        "$createdAt" | "$updatedAt" | "$deletedAt" => {
+            Some(TypedLiteralTarget::Core(StorageColumnType::U64))
+        }
+        _ => column_target(column_types, table, column).cloned(),
     }
 }
 
-fn coerce_literal_for_target(value: GrooveValue, target: &TypedLiteralTarget) -> GrooveValue {
+fn coerce_literal_for_target(value: RecordValue, target: &TypedLiteralTarget) -> RecordValue {
     match target {
         TypedLiteralTarget::Core(column_type) => coerce_literal_for_column_type(value, column_type),
         TypedLiteralTarget::PublicEnum => match value {
-            GrooveValue::String(value) => uuid::Uuid::parse_str(&value)
-                .map(GrooveValue::Uuid)
-                .unwrap_or(GrooveValue::String(value)),
+            RecordValue::String(value) => uuid::Uuid::parse_str(&value)
+                .map(RecordValue::Uuid)
+                .unwrap_or(RecordValue::String(value)),
             value => value,
         },
     }
 }
 
 fn coerce_literal_for_column_type(
-    value: GrooveValue,
-    column_type: &GrooveColumnType,
-) -> GrooveValue {
+    value: RecordValue,
+    column_type: &StorageColumnType,
+) -> RecordValue {
     match (value, column_type) {
-        (GrooveValue::Uuid(value), GrooveColumnType::String) => {
-            GrooveValue::String(value.to_string())
+        (RecordValue::Uuid(value), StorageColumnType::String) => {
+            RecordValue::String(value.to_string())
         }
-        (GrooveValue::String(value), GrooveColumnType::Uuid) => uuid::Uuid::parse_str(&value)
-            .map(GrooveValue::Uuid)
-            .unwrap_or(GrooveValue::String(value)),
-        (GrooveValue::U64(value), GrooveColumnType::I64) => i64::try_from(value)
-            .map(GrooveValue::I64)
-            .unwrap_or(GrooveValue::U64(value)),
-        (GrooveValue::U64(value), GrooveColumnType::I32) => i32::try_from(value)
-            .map(GrooveValue::I32)
-            .unwrap_or(GrooveValue::U64(value)),
-        (GrooveValue::Nullable(Some(value)), GrooveColumnType::Nullable(inner)) => {
-            GrooveValue::Nullable(Some(Box::new(coerce_literal_for_column_type(
+        (RecordValue::String(value), StorageColumnType::Uuid) => uuid::Uuid::parse_str(&value)
+            .map(RecordValue::Uuid)
+            .unwrap_or(RecordValue::String(value)),
+        (RecordValue::U64(value), StorageColumnType::I64) => i64::try_from(value)
+            .map(RecordValue::I64)
+            .unwrap_or(RecordValue::U64(value)),
+        (RecordValue::U64(value), StorageColumnType::I32) => i32::try_from(value)
+            .map(RecordValue::I32)
+            .unwrap_or(RecordValue::U64(value)),
+        (RecordValue::Nullable(Some(value)), StorageColumnType::Nullable(inner)) => {
+            RecordValue::Nullable(Some(Box::new(coerce_literal_for_column_type(
                 *value, inner,
             ))))
         }
-        (GrooveValue::Array(values), GrooveColumnType::Array(inner)) => GrooveValue::Array(
+        (RecordValue::Array(values), StorageColumnType::Array(inner)) => RecordValue::Array(
             values
                 .into_iter()
                 .map(|value| coerce_literal_for_column_type(value, inner))
                 .collect(),
         ),
-        (GrooveValue::Tuple(values), GrooveColumnType::Tuple(types))
+        (RecordValue::Tuple(values), StorageColumnType::Tuple(types))
             if values.len() == types.len() =>
         {
-            GrooveValue::Tuple(
+            RecordValue::Tuple(
                 values
                     .into_iter()
                     .zip(types)
@@ -461,10 +462,10 @@ fn coerce_literal_for_column_type(
                     .collect(),
             )
         }
-        (GrooveValue::Nullable(Some(value)), column_type) => GrooveValue::Nullable(Some(Box::new(
+        (RecordValue::Nullable(Some(value)), column_type) => RecordValue::Nullable(Some(Box::new(
             coerce_literal_for_column_type(*value, column_type),
         ))),
-        (value, GrooveColumnType::Nullable(inner)) => coerce_literal_for_column_type(value, inner),
+        (value, StorageColumnType::Nullable(inner)) => coerce_literal_for_column_type(value, inner),
         (value, _) => value,
     }
 }
@@ -473,64 +474,49 @@ fn column_enum_literal_discriminant(
     table: &str,
     column: &str,
     literal_operand: &Operand,
-    column_types: &BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
+    column_types: &ColumnTypes,
 ) -> Option<u8> {
-    let Operand::Literal(GrooveValue::String(value)) = literal_operand else {
+    let Operand::Literal(RecordValue::String(value)) = literal_operand else {
         return None;
     };
     column_enum_schema(table, column, column_types)
         .and_then(|schema| schema.discriminant(value).ok())
 }
 
-fn column_is_enum(
-    table: &str,
-    column: &str,
-    column_types: &BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
-) -> bool {
+fn column_is_enum(table: &str, column: &str, column_types: &ColumnTypes) -> bool {
     column_enum_schema(table, column, column_types).is_some()
 }
 
 fn column_enum_schema<'a>(
     table: &str,
     column: &str,
-    column_types: &'a BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
+    column_types: &'a ColumnTypes,
 ) -> Option<&'a ScalarEnumSchema> {
-    let column_type = match column_types
-        .get(table)
-        .and_then(|columns| columns.get(column))?
-    {
-        TypedLiteralTarget::Core(column_type) => column_type,
-        TypedLiteralTarget::PublicEnum => return None,
+    let TypedLiteralTarget::Core(column_type) = column_target(column_types, table, column)? else {
+        return None;
     };
-    groove_column_type_enum_schema(column_type)
+    column_type_enum_schema(column_type)
 }
 
-fn groove_column_type_enum_schema(column_type: &GrooveColumnType) -> Option<&ScalarEnumSchema> {
+fn column_type_enum_schema(column_type: &StorageColumnType) -> Option<&ScalarEnumSchema> {
     match column_type {
-        GrooveColumnType::EnumTag(schema) => Some(schema),
-        GrooveColumnType::Nullable(inner) => groove_column_type_enum_schema(inner),
+        StorageColumnType::EnumTag(schema) => Some(schema),
+        StorageColumnType::Nullable(inner) => column_type_enum_schema(inner),
         _ => None,
     }
 }
 
-fn column_is_string(
-    table: &str,
-    column: &str,
-    column_types: &BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
-) -> bool {
-    let Some(TypedLiteralTarget::Core(column_type)) = column_types
-        .get(table)
-        .and_then(|columns| columns.get(column))
-    else {
-        return false;
-    };
-    groove_column_type_is_string(column_type)
+fn column_is_string(table: &str, column: &str, column_types: &ColumnTypes) -> bool {
+    matches!(
+        column_target(column_types, table, column),
+        Some(TypedLiteralTarget::Core(column_type)) if column_type_is_string(column_type)
+    )
 }
 
-fn groove_column_type_is_string(column_type: &GrooveColumnType) -> bool {
+fn column_type_is_string(column_type: &StorageColumnType) -> bool {
     match column_type {
-        GrooveColumnType::String => true,
-        GrooveColumnType::Nullable(inner) => groove_column_type_is_string(inner),
+        StorageColumnType::String => true,
+        StorageColumnType::Nullable(inner) => column_type_is_string(inner),
         _ => false,
     }
 }
@@ -540,6 +526,12 @@ fn convert_table(
     name: &TableName,
     table: &TableSchema,
 ) -> Result<CoreTableSchema, SchemaConversionError> {
+    if crate::schema::history::is_history_table(&name.as_str()) {
+        return Err(err(
+            format!("$.{}", name.as_str()),
+            "table names starting with \"history.\" are reserved for virtual history relations",
+        ));
+    }
     let mut references = BTreeMap::new();
     let mut columns = Vec::with_capacity(table.columns.columns.len());
     let mut merge_strategies = BTreeMap::new();
@@ -549,6 +541,12 @@ fn convert_table(
             return Err(err(
                 format!("$.{}.columns.id", name.as_str()),
                 "column name \"id\" is reserved for the automatically generated UUID row ID",
+            ));
+        }
+        if column.name.as_str() != "id" && RESERVED_ROW_COLUMNS.contains(&column.name.as_str()) {
+            return Err(err(
+                format!("$.{}.columns.{}", name.as_str(), column.name.as_str()),
+                "column name is reserved for the store's own row columns",
             ));
         }
         if column
@@ -617,10 +615,14 @@ fn convert_table(
         let mut seen = BTreeSet::new();
         for column in group {
             let column_name = column.as_str();
-            if !column_names.contains(column_name) || !seen.insert(column_name) {
+            // Provenance timestamps are stored on every row, so they can
+            // order an index too (e.g. a chat's messages by `$createdAt`).
+            let declared = column_names.contains(column_name)
+                || matches!(column_name, "$createdAt" | "$updatedAt");
+            if !declared || !seen.insert(column_name) {
                 return Err(err(
                     format!("$.{}.composite_indexes.{index}", name.as_str()),
-                    "composite index columns must be distinct declared columns",
+                    "composite index columns must be distinct declared columns or provenance timestamps",
                 ));
             }
             if table.columns.column(column_name).is_some_and(|descriptor| {
@@ -701,16 +703,15 @@ fn convert_column(
     table: &TableName,
     column: &ColumnDescriptor,
 ) -> Result<CoreColumnSchema, SchemaConversionError> {
-    let path = format!("$.{}.{}", table.as_str(), column.name.as_str());
     crate::model::public_schema::validate_json_schemas(&column.column_type, column.name.as_str())
-        .map_err(|message| err(path, message))?;
+        .map_err(|message| column_err(table, column.name.as_str(), message))?;
     let mut column_type = convert_column_type(table, column.name.as_str(), &column.column_type)?;
     if column.nullable {
         column_type = column_type.nullable();
     }
     let mut converted = CoreColumnSchema::new(column.name.as_str(), column_type);
     if matches!(column.column_type, ColumnType::Json { .. }) {
-        // JSON is logically represented as Groove's canonical string value,
+        // JSON is logically represented as the canonical string value,
         // but its physical large-scalar interpretation is schema-derived and
         // deliberately distinct from text.
         converted.large_value_kind = crate::schema::LargeValueSemanticKind::Json;
@@ -725,33 +726,29 @@ fn convert_column_default(
     table: &TableName,
     column: &ColumnDescriptor,
     value: &Value,
-) -> Result<GrooveValue, SchemaConversionError> {
+) -> Result<RecordValue, SchemaConversionError> {
     crate::model::public_schema::validate_json_value(
         value,
         &column.column_type,
         column.name.as_str(),
     )
-    .map_err(|message| {
-        err(
-            format!("$.{}.{}", table.as_str(), column.name.as_str()),
-            message,
-        )
-    })?;
+    .map_err(|message| column_err(table, column.name.as_str(), message))?;
     if matches!(value, Value::Null) {
         if !column.nullable {
-            return Err(err(
-                format!("$.{}.{}", table.as_str(), column.name.as_str()),
+            return Err(column_err(
+                table,
+                column.name.as_str(),
                 "null default requires a nullable column",
             ));
         }
-        return Ok(GrooveValue::Nullable(None));
+        return Ok(RecordValue::Nullable(None));
     }
-    // Record cells carry logical signed values. Groove applies its separate
-    // order-preserving transform only when those values become ordered keys.
+    // Record cells carry logical signed values. The record encoding applies its
+    // separate order-preserving transform only when they become ordered keys.
     let default =
         convert_default_for_column_type(table, column.name.as_str(), &column.column_type, value)?;
     if column.nullable {
-        Ok(GrooveValue::Nullable(Some(Box::new(default))))
+        Ok(RecordValue::Nullable(Some(Box::new(default))))
     } else {
         Ok(default)
     }
@@ -762,20 +759,21 @@ fn convert_default_for_column_type(
     column: &str,
     column_type: &ColumnType,
     value: &Value,
-) -> Result<GrooveValue, SchemaConversionError> {
+) -> Result<RecordValue, SchemaConversionError> {
     match (column_type, value) {
-        (ColumnType::Boolean, Value::Boolean(value)) => Ok(GrooveValue::Bool(*value)),
+        (ColumnType::Boolean, Value::Boolean(value)) => Ok(RecordValue::Bool(*value)),
         (ColumnType::Text | ColumnType::Json { .. }, Value::Text(value)) => {
-            Ok(GrooveValue::String(value.clone()))
+            Ok(RecordValue::String(value.clone()))
         }
         (ColumnType::Enum { variants }, Value::Text(value)) => {
             if !variants.contains(value) {
-                return Err(err(
-                    format!("$.{}.{}", table.as_str(), column),
+                return Err(column_err(
+                    table,
+                    column,
                     format!("enum default value {value:?} is not declared"),
                 ));
             }
-            Ok(GrooveValue::String(value.clone()))
+            Ok(RecordValue::String(value.clone()))
         }
         (
             ColumnType::EnumPayload { cases } | ColumnType::CatalogueEnumPayload { cases, .. },
@@ -786,14 +784,16 @@ fn convert_default_for_column_type(
                 .enumerate()
                 .find(|(_, entry)| entry.name == *case)
                 .ok_or_else(|| {
-                    err(
-                        format!("$.{}.{}", table.as_str(), column),
+                    column_err(
+                        table,
+                        column,
                         format!("payload enum default case {case:?} is not declared"),
                     )
                 })?;
             if entry.fields.len() != values.len() {
-                return Err(err(
-                    format!("$.{}.{}", table.as_str(), column),
+                return Err(column_err(
+                    table,
+                    column,
                     "payload enum default field count does not match its case",
                 ));
             }
@@ -812,7 +812,7 @@ fn convert_default_for_column_type(
                             "payload enum default cannot use null for a required field",
                         ));
                     }
-                    GrooveValue::Nullable(None)
+                    RecordValue::Nullable(None)
                 } else {
                     let inner = convert_default_for_column_type(
                         table,
@@ -821,7 +821,7 @@ fn convert_default_for_column_type(
                         value,
                     )?;
                     if field.nullable {
-                        GrooveValue::Nullable(Some(Box::new(inner)))
+                        RecordValue::Nullable(Some(Box::new(inner)))
                     } else {
                         inner
                     }
@@ -829,43 +829,36 @@ fn convert_default_for_column_type(
                 fields.push((field.name.as_str().to_owned(), value_type));
                 converted.push(value);
             }
-            let case_tag = u32::try_from(case_index).map_err(|_| {
-                err(
-                    format!("$.{}.{}", table.as_str(), column),
-                    "payload enum case index exceeds u32",
-                )
-            })?;
+            let case_tag = u32::try_from(case_index)
+                .map_err(|_| column_err(table, column, "payload enum case index exceeds u32"))?;
             EnumValue::create(case_tag, RecordDescriptor::new(fields), &converted)
-                .map(GrooveValue::Enum)
-                .map_err(|error| {
-                    err(
-                        format!("$.{}.{}", table.as_str(), column),
-                        error.to_string(),
-                    )
-                })
+                .map(RecordValue::Enum)
+                .map_err(|error| column_err(table, column, error.to_string()))
         }
-        (ColumnType::Timestamp, Value::Timestamp(value)) => Ok(GrooveValue::U64(*value)),
-        (ColumnType::Double, Value::Double(value)) => Ok(GrooveValue::F64(*value)),
-        (ColumnType::Uuid, Value::Uuid(value)) => Ok(GrooveValue::Uuid(*value.uuid())),
-        (ColumnType::Bytea, Value::Bytea(value)) => Ok(GrooveValue::Bytes(value.clone())),
-        (ColumnType::Integer, Value::Integer(value)) => Ok(GrooveValue::I32(*value)),
+        (ColumnType::Timestamp, Value::Timestamp(value)) => Ok(RecordValue::U64(*value)),
+        (ColumnType::Double, Value::Double(value)) => Ok(RecordValue::F64(*value)),
+        (ColumnType::Uuid, Value::Uuid(value)) => Ok(RecordValue::Uuid(*value.uuid())),
+        (ColumnType::Bytea, Value::Bytea(value)) => Ok(RecordValue::Bytes(value.clone())),
+        (ColumnType::Integer, Value::Integer(value)) => Ok(RecordValue::I32(*value)),
         (ColumnType::Integer, Value::BigInt(value)) => {
-            i32::try_from(*value).map(GrooveValue::I32).map_err(|_| {
-                err(
-                    format!("$.{}.{}", table.as_str(), column),
+            i32::try_from(*value).map(RecordValue::I32).map_err(|_| {
+                column_err(
+                    table,
+                    column,
                     format!("BIGINT default {value} is outside INTEGER range"),
                 )
             })
         }
-        (ColumnType::BigInt, Value::Integer(value)) => Ok(GrooveValue::I64(i64::from(*value))),
-        (ColumnType::BigInt, Value::BigInt(value)) => Ok(GrooveValue::I64(*value)),
+        (ColumnType::BigInt, Value::Integer(value)) => Ok(RecordValue::I64(i64::from(*value))),
+        (ColumnType::BigInt, Value::BigInt(value)) => Ok(RecordValue::I64(*value)),
         (ColumnType::Array { element }, Value::Array(values)) => values
             .iter()
             .map(|value| convert_default_for_column_type(table, column, element.as_ref(), value))
             .collect::<Result<Vec<_>, _>>()
-            .map(GrooveValue::Array),
-        _ => Err(err(
-            format!("$.{}.{}", table.as_str(), column),
+            .map(RecordValue::Array),
+        _ => Err(column_err(
+            table,
+            column,
             format!("default {value:?} does not match column type {column_type:?}"),
         )),
     }
@@ -875,33 +868,25 @@ fn convert_column_type(
     table: &TableName,
     column: &str,
     column_type: &ColumnType,
-) -> Result<GrooveColumnType, SchemaConversionError> {
+) -> Result<StorageColumnType, SchemaConversionError> {
     match column_type {
-        ColumnType::Boolean => Ok(GrooveColumnType::Bool),
-        ColumnType::Text => Ok(GrooveColumnType::String),
-        ColumnType::Timestamp => Ok(GrooveColumnType::U64),
-        ColumnType::Double => Ok(GrooveColumnType::F64),
-        ColumnType::Uuid => Ok(GrooveColumnType::Uuid),
-        ColumnType::Bytea => Ok(GrooveColumnType::Bytes),
-        ColumnType::Enum { .. } => Ok(GrooveColumnType::String),
+        ColumnType::Boolean => Ok(StorageColumnType::Bool),
+        ColumnType::Text => Ok(StorageColumnType::String),
+        ColumnType::Timestamp => Ok(StorageColumnType::U64),
+        ColumnType::Double => Ok(StorageColumnType::F64),
+        ColumnType::Uuid => Ok(StorageColumnType::Uuid),
+        ColumnType::Bytea => Ok(StorageColumnType::Bytes),
+        ColumnType::Enum { .. } => Ok(StorageColumnType::String),
         ColumnType::ScalarEnum { name, variants } => {
-            groove::records::ScalarEnumSchema::new(name.clone(), variants.iter().cloned())
-                .map(GrooveColumnType::EnumTag)
-                .map_err(|error| {
-                    err(
-                        format!("$.{}.{}", table.as_str(), column),
-                        error.to_string(),
-                    )
-                })
+            jazz_types::records::ScalarEnumSchema::new(name.clone(), variants.iter().cloned())
+                .map(StorageColumnType::EnumTag)
+                .map_err(|error| column_err(table, column, error.to_string()))
         }
         ColumnType::EnumPayload { cases } | ColumnType::CatalogueEnumPayload { cases, .. } => {
             let mut converted_cases = Vec::with_capacity(cases.len());
             for case in cases {
                 if case.name.is_empty() {
-                    return Err(err(
-                        format!("$.{}.{}", table.as_str(), column),
-                        "enum case names cannot be empty",
-                    ));
+                    return Err(column_err(table, column, "enum case names cannot be empty"));
                 }
                 let mut fields = Vec::with_capacity(case.fields.len());
                 for field in &case.fields {
@@ -923,28 +908,25 @@ fn convert_column_type(
                 _ => format!("{}_{}", table.as_str(), column),
             };
             EnumSchema::new(enum_name, converted_cases)
-                .map(|schema| GrooveColumnType::Enum(Box::new(schema)))
-                .map_err(|error| {
-                    err(
-                        format!("$.{}.{}", table.as_str(), column),
-                        error.to_string(),
-                    )
-                })
+                .map(|schema| StorageColumnType::Enum(Box::new(schema)))
+                .map_err(|error| column_err(table, column, error.to_string()))
         }
         ColumnType::Array { element } => {
             Ok(convert_column_type(table, column, element.as_ref())?.array_of())
         }
         // Public INTEGER follows PostgreSQL semantics: signed 32-bit integer.
-        ColumnType::Integer => Ok(GrooveColumnType::I32),
+        ColumnType::Integer => Ok(StorageColumnType::I32),
         // Public BIGINT follows PostgreSQL semantics: signed 64-bit integer.
-        ColumnType::BigInt => Ok(GrooveColumnType::I64),
-        ColumnType::TransactionId => Err(err(
-            format!("$.{}.{}", table.as_str(), column),
+        ColumnType::BigInt => Ok(StorageColumnType::I64),
+        ColumnType::TransactionId => Err(column_err(
+            table,
+            column,
             "TransactionId columns are not supported by core schema conversion yet",
         )),
-        ColumnType::Json { .. } => Ok(GrooveColumnType::String),
-        ColumnType::Row { .. } => Err(err(
-            format!("$.{}.{}", table.as_str(), column),
+        ColumnType::Json { .. } => Ok(StorageColumnType::String),
+        ColumnType::Row { .. } => Err(column_err(
+            table,
+            column,
             "nested Row columns are not supported by core schema conversion yet",
         )),
     }
@@ -1009,16 +991,16 @@ fn convert_merge_strategy(
     column: &ColumnDescriptor,
     strategy: ColumnMergeStrategy,
 ) -> Result<MergeStrategy, SchemaConversionError> {
-    column.validate_merge_strategy().map_err(|message| {
-        err(
-            format!("$.{}.{}", table.as_str(), column.name.as_str()),
-            message,
-        )
-    })?;
+    column
+        .validate_merge_strategy()
+        .map_err(|message| column_err(table, column.name.as_str(), message))?;
 
     match strategy {
         ColumnMergeStrategy::Counter => Ok(MergeStrategy::Counter),
         ColumnMergeStrategy::GSet => Ok(MergeStrategy::GSet),
+        ColumnMergeStrategy::Text => Ok(MergeStrategy::Text),
+        ColumnMergeStrategy::Markdown => Ok(MergeStrategy::Markdown),
+        ColumnMergeStrategy::Html => Ok(MergeStrategy::Html),
     }
 }
 
@@ -1070,7 +1052,7 @@ fn convert_expanded_inherited_policy(
             .collect::<Vec<_>>()
             .join(" -> ");
         return Err(err(
-            format!("$.{}.{path}", table.as_str()),
+            policy_path(table, path),
             format!("cyclic policy expansion under INHERITS_REFERENCING is unsupported: {cycle}"),
         ));
     }
@@ -1105,109 +1087,18 @@ fn convert_policy_with_native_select_inherits(
     // nested below a boolean operator must not escape this validation merely
     // because that operator is rejected by a later lowering stage.
     validate_exists_rel_policy_join_conditions(table, path, expr)?;
-    match expr {
-        PolicyExpr::And(exprs) => {
-            if !exprs.iter().any(is_core_policy_clause) {
-                return query_with_predicate_filters(
-                    table.as_str(),
-                    predicate_filters_for_expr(table, path, expr)?,
-                );
-            }
-            let mut query = Query::from(table.as_str());
-            for (index, expr) in exprs.iter().enumerate() {
-                query = append_policy_clause(
-                    schema,
-                    table_schema,
-                    table,
-                    &format!("{path}.And[{index}]"),
-                    query,
-                    expr,
-                    native_select_inherits,
-                    expansion_path,
-                )?;
-            }
-            Ok(query)
-        }
-        PolicyExpr::Or(exprs) if exprs.iter().any(policy_requires_branch) => {
-            let mut query = Query::from(table.as_str()).filter(Predicate::Any(Vec::new()));
-            for (index, expr) in exprs.iter().enumerate() {
-                let branch = convert_policy_with_native_select_inherits(
-                    schema,
-                    table_schema,
-                    table,
-                    &format!("{path}.Or[{index}]"),
-                    expr,
-                    native_select_inherits,
-                    expansion_path,
-                )?;
-                for branch in PolicyBranch::alternatives_from_query(branch) {
-                    query = query.policy_branch(branch);
-                }
-            }
-            Ok(query)
-        }
-        PolicyExpr::Inherits {
-            operation,
-            via_column,
-            max_depth,
-        } => append_inherited_policy(
-            schema,
-            table_schema,
-            table,
-            path,
-            Query::from(table.as_str()),
-            *operation,
-            via_column,
-            *max_depth,
-            native_select_inherits,
-            expansion_path,
-        ),
-        PolicyExpr::InheritsReferencing {
-            operation,
-            source_table,
-            via_column,
-            max_depth: _,
-        } => append_inherited_referencing_policy(
-            schema,
-            table,
-            path,
-            Query::from(table.as_str()),
-            *operation,
-            source_table,
-            via_column,
-            expansion_path,
-        ),
-        PolicyExpr::Exists {
-            table: exists_table,
-            condition,
-        } => append_exists_policy_clause(
-            schema,
-            table,
-            path,
-            Query::from(table.as_str()),
-            exists_table,
-            condition,
-        ),
-        PolicyExpr::ExistsRel { rel } => {
-            append_exists_rel_policy_clause(schema, table, path, Query::from(table.as_str()), rel)
-        }
-        _ => query_with_predicate_filters(
-            table.as_str(),
-            predicate_filters_for_expr(table, path, expr)?,
-        ),
-    }
-}
-
-fn is_core_policy_clause(expr: &PolicyExpr) -> bool {
-    match expr {
-        PolicyExpr::Inherits { max_depth: _, .. }
-        | PolicyExpr::InheritsReferencing { .. }
-        | PolicyExpr::Exists { .. }
-        | PolicyExpr::ExistsRel { .. } => true,
-        PolicyExpr::And(exprs) | PolicyExpr::Or(exprs) => exprs.iter().any(is_core_policy_clause),
-        PolicyExpr::Not(expr) => is_core_policy_clause(expr),
-        _ => false,
-    }
+    // A fresh query has no earlier alternatives, so appending the policy as
+    // its only clause is exactly its standalone conversion.
+    append_policy_clause(
+        schema,
+        table_schema,
+        table,
+        path,
+        Query::from(table.as_str()),
+        expr,
+        native_select_inherits,
+        expansion_path,
+    )
 }
 
 fn policy_requires_branch(expr: &PolicyExpr) -> bool {
@@ -1369,13 +1260,6 @@ fn append_policy_clause(
     }
 }
 
-fn query_with_predicate_filters(
-    table: &str,
-    filters: Vec<Predicate>,
-) -> Result<Query, SchemaConversionError> {
-    Ok(append_predicate_filters(Query::from(table), filters))
-}
-
 fn append_predicate_filters(mut query: Query, filters: Vec<Predicate>) -> Query {
     for filter in filters {
         query = query.filter(filter);
@@ -1419,7 +1303,7 @@ fn append_inherited_referencing_policy(
     let source_table_name = TableName::new(source_table.to_owned());
     let source_schema = schema.get(&source_table_name).ok_or_else(|| {
         err(
-            format!("$.{}.{}", table.as_str(), path),
+            policy_path(table, path),
             format!("INHERITS_REFERENCING source_table '{source_table}' was not found"),
         )
     })?;
@@ -1429,9 +1313,7 @@ fn append_inherited_referencing_policy(
         .iter()
         .find(|column| column.name.as_str() == via_column)
         .ok_or_else(|| {
-            err(
-                format!("$.{}.{}", table.as_str(), path),
-                format!(
+            err(policy_path(table, path), format!(
                     "INHERITS_REFERENCING via_column '{via_column}' was not found on source_table '{source_table}'"
                 ),
             )
@@ -1440,7 +1322,7 @@ fn append_inherited_referencing_policy(
         Some(target) if target == table => {}
         Some(target) => {
             return Err(err(
-                format!("$.{}.{}", table.as_str(), path),
+                policy_path(table, path),
                 format!(
                     "INHERITS_REFERENCING via_column '{via_column}' references '{target}', expected '{}'",
                     table.as_str()
@@ -1449,7 +1331,7 @@ fn append_inherited_referencing_policy(
         }
         None => {
             return Err(err(
-                format!("$.{}.{}", table.as_str(), path),
+                policy_path(table, path),
                 format!("INHERITS_REFERENCING via_column '{via_column}' has no FK reference"),
             ));
         }
@@ -1457,7 +1339,7 @@ fn append_inherited_referencing_policy(
 
     let source_policy = source_operation_policy(source_schema, operation).ok_or_else(|| {
         err(
-            format!("$.{}.{}", table.as_str(), path),
+            policy_path(table, path),
             format!(
                 "INHERITS_REFERENCING source_table '{source_table}' has no {operation:?} policy"
             ),
@@ -1553,7 +1435,7 @@ fn append_exists_policy_clause(
     let exists_table_name = TableName::new(exists_table.to_owned());
     if !schema.contains_key(&exists_table_name) {
         return Err(err(
-            format!("$.{}.{}", table.as_str(), path),
+            policy_path(table, path),
             format!("EXISTS references unknown table '{exists_table}'"),
         ));
     }
@@ -1677,12 +1559,17 @@ struct LoweredRelPredicate {
     value: Option<LoweredRelValue>,
 }
 
-#[derive(Clone)]
-enum LoweredRelValue {
-    Operand(Operand),
-    OuterRow(String),
-    FrontierRow,
+impl LoweredRelPredicate {
+    fn bare(predicate: Predicate) -> Self {
+        Self {
+            predicate,
+            column: None,
+            value: None,
+        }
+    }
 }
+
+use crate::query::RelationOperand as LoweredRelValue;
 
 #[derive(Clone)]
 struct PendingReachable {
@@ -1692,7 +1579,7 @@ struct PendingReachable {
     edge_member_column: String,
     edge_parent_column: String,
     edge_filters: Vec<Predicate>,
-    max_depth: usize,
+    bound: RecursionBound,
 }
 
 struct LoweredRel {
@@ -1703,6 +1590,10 @@ struct LoweredRel {
     table: Option<String>,
     filters: Vec<LoweredRelPredicate>,
     joins: Vec<JoinVia>,
+    /// Correlations sourced from `OuterRow` filters, keyed by their path into
+    /// `joins`. `JoinVia::correlated_filters` also carries local compound ON
+    /// equalities, so this provenance must stay separate during rewrites.
+    outer_correlations: BTreeMap<Vec<usize>, Vec<JoinCorrelation>>,
     reachable: Vec<crate::query::ReachableVia>,
     pending_reachable: Option<PendingReachable>,
 }
@@ -1710,14 +1601,18 @@ struct LoweredRel {
 fn validate_exists_rel_join_conditions(
     table: &TableName,
     path: &str,
-    rel: &RelExpr,
+    rel: &RelationExpr,
 ) -> Result<(), SchemaConversionError> {
     match rel {
-        RelExpr::TableScan { .. } => Ok(()),
-        RelExpr::Filter { input, .. } | RelExpr::Project { input, .. } => {
+        RelationExpr::TableScan { .. } => Ok(()),
+        RelationExpr::Filter { input, .. } | RelationExpr::Project { input, .. } => {
             validate_exists_rel_join_conditions(table, path, input)
         }
-        RelExpr::Union { inputs } => {
+        RelationExpr::Distinct { .. }
+        | RelationExpr::OrderBy { .. }
+        | RelationExpr::Offset { .. }
+        | RelationExpr::Limit { .. } => Err(unsupported_exists_rel_output_step(table, path)),
+        RelationExpr::Union { inputs } => {
             let mut labels = BTreeSet::new();
             for arm in inputs {
                 if arm.label.is_empty()
@@ -1726,7 +1621,7 @@ fn validate_exists_rel_join_conditions(
                     || !labels.insert(&arm.label)
                 {
                     return Err(err(
-                        format!("$.{}.{}", table.as_str(), path),
+                        policy_path(table, path),
                         "core schema ExistsRel union labels must be unique, NUL-free, and 1..=4096 bytes",
                     ));
                 }
@@ -1734,19 +1629,19 @@ fn validate_exists_rel_join_conditions(
             }
             Ok(())
         }
-        RelExpr::Join {
+        RelationExpr::Join {
             left, right, on, ..
         } => {
-            if on.len() > 1 {
+            if on.is_empty() {
                 return Err(err(
-                    format!("$.{}.{}", table.as_str(), path),
-                    "core schema ExistsRel joins support exactly one column equality",
+                    policy_path(table, path),
+                    "core schema ExistsRel joins require at least one column equality",
                 ));
             }
             validate_exists_rel_join_conditions(table, path, left)?;
             validate_exists_rel_join_conditions(table, path, right)
         }
-        RelExpr::Gather { seed, step, .. } => {
+        RelationExpr::Gather { seed, step, .. } => {
             validate_exists_rel_join_conditions(table, path, seed)?;
             validate_exists_rel_join_conditions(table, path, step)
         }
@@ -1783,52 +1678,55 @@ fn validate_exists_rel_policy_join_conditions(
         PolicyExpr::Not(expr) => {
             validate_exists_rel_policy_join_conditions(table, &format!("{path}.Not"), expr)
         }
+        PolicyExpr::Exists { condition, .. } => {
+            validate_exists_rel_policy_join_conditions(table, &format!("{path}.Exists"), condition)
+        }
         _ => Ok(()),
     }
 }
 
 // Outer references inside boolean predicates must not be mistaken for an
 // independent proof merely because no top-level equality could be extracted.
-fn rel_has_outer_references(rel: &RelExpr) -> bool {
-    fn value_is_outer(value: &RelValueRef) -> bool {
+fn rel_has_outer_references(rel: &RelationExpr) -> bool {
+    fn value_is_outer(value: &RelationValueRef) -> bool {
         matches!(
             value,
-            RelValueRef::OuterColumn(_) | RelValueRef::RowId(RowIdRef::Outer)
+            RelationValueRef::OuterColumn(_) | RelationValueRef::RowId(RelationRowIdRef::Outer)
         )
     }
-    fn predicate_has_outer(predicate: &RelPredicateExpr) -> bool {
+    fn predicate_has_outer(predicate: &RelationPredicate) -> bool {
         match predicate {
-            RelPredicateExpr::Cmp { right, .. } | RelPredicateExpr::Contains { right, .. } => {
+            RelationPredicate::Cmp { right, .. } | RelationPredicate::Contains { right, .. } => {
                 value_is_outer(right)
             }
-            RelPredicateExpr::In { values, .. } => values.iter().any(value_is_outer),
-            RelPredicateExpr::And(children) | RelPredicateExpr::Or(children) => {
+            RelationPredicate::In { values, .. } => values.iter().any(value_is_outer),
+            RelationPredicate::And(children) | RelationPredicate::Or(children) => {
                 children.iter().any(predicate_has_outer)
             }
-            RelPredicateExpr::Not(child) | RelPredicateExpr::EnumMatch { payload: child, .. } => {
+            RelationPredicate::Not(child) | RelationPredicate::EnumMatch { payload: child, .. } => {
                 predicate_has_outer(child)
             }
             _ => false,
         }
     }
     match rel {
-        RelExpr::TableScan { .. } => false,
-        RelExpr::Filter { input, predicate } => {
+        RelationExpr::TableScan { .. } => false,
+        RelationExpr::Filter { input, predicate } => {
             rel_has_outer_references(input) || predicate_has_outer(predicate)
         }
-        RelExpr::Project { input, .. } => rel_has_outer_references(input),
-        RelExpr::Join { left, right, .. } => {
+        RelationExpr::Project { input, .. }
+        | RelationExpr::Distinct { input, .. }
+        | RelationExpr::OrderBy { input, .. }
+        | RelationExpr::Offset { input, .. }
+        | RelationExpr::Limit { input, .. } => rel_has_outer_references(input),
+        RelationExpr::Join { left, right, .. } => {
             rel_has_outer_references(left) || rel_has_outer_references(right)
         }
-        RelExpr::Union { inputs } => inputs
+        RelationExpr::Union { inputs } => inputs
             .iter()
             .any(|arm| rel_has_outer_references(&arm.input)),
-        RelExpr::Gather { .. } => true,
+        RelationExpr::Gather { .. } => true,
     }
-}
-
-fn join_has_outer_correlations(join: &JoinVia) -> bool {
-    !join.correlated_filters.is_empty() || join.nested_joins.iter().any(join_has_outer_correlations)
 }
 
 fn uncorrelated_exists_join(
@@ -1865,22 +1763,52 @@ fn root_exists_rel_at_correlation(
         .iter()
         .any(|filter| matches!(filter.value, Some(LoweredRelValue::OuterRow(_))))
     {
-        let Some(index) = lowered.joins.iter().position(join_has_outer_correlations) else {
+        let Some(index) = (0..lowered.joins.len()).find(|index| {
+            lowered
+                .outer_correlations
+                .keys()
+                .any(|route| route.first() == Some(index))
+        }) else {
             break;
         };
         let mut next = lowered.joins.remove(index);
+        let direct_outer = lowered
+            .outer_correlations
+            .remove(&vec![index])
+            .unwrap_or_default();
         let source_column = next.source_column.take().ok_or_else(|| {
             err(
-                format!("$.{}.{path}", table.as_str()),
+                policy_path(table, path),
                 "core schema ExistsRel nested join is missing its source column",
             )
         })?;
         let previous_table = lowered.table.replace(next.table).ok_or_else(|| {
             err(
-                format!("$.{}.{path}", table.as_str()),
+                policy_path(table, path),
                 "core schema ExistsRel correlation requires a row-producing relation",
             )
         })?;
+        let reverse_index = next.nested_joins.len();
+        let mut forward_correlations = next.correlated_filters;
+        for correlation in &direct_outer {
+            let Some(position) = forward_correlations
+                .iter()
+                .position(|candidate| candidate == correlation)
+            else {
+                return Err(err(
+                    policy_path(table, path),
+                    "core schema ExistsRel lost an outer correlation during root orientation",
+                ));
+            };
+            forward_correlations.remove(position);
+        }
+        let reverse_correlations = forward_correlations
+            .into_iter()
+            .map(|correlation| JoinCorrelation {
+                join_column: correlation.source_column,
+                source_column: correlation.join_column,
+            })
+            .collect();
         let reverse = JoinVia {
             table: previous_table,
             target: if source_column == "id" {
@@ -1889,25 +1817,36 @@ fn root_exists_rel_at_correlation(
                 JoinTarget::Column
             },
             on_column: source_column,
-            source_column: Some(next.on_column),
+            source_column: Some(next.on_column.clone()),
             source_lookup: None,
-            correlated_filters: Vec::new(),
+            correlated_filters: reverse_correlations,
             filters: std::mem::take(&mut lowered.filters)
                 .into_iter()
                 .map(|filter| filter.predicate)
                 .collect(),
             nested_joins: std::mem::take(&mut lowered.joins),
         };
+        let old_outer_correlations = std::mem::take(&mut lowered.outer_correlations);
+        for (route, correlations) in old_outer_correlations {
+            if route.first() == Some(&index) {
+                if route.len() > 1 {
+                    lowered
+                        .outer_correlations
+                        .insert(route[1..].to_vec(), correlations);
+                }
+            } else {
+                lowered.outer_correlations.insert(
+                    rebase_sibling_route(&route, index, reverse_index),
+                    correlations,
+                );
+            }
+        }
         lowered.filters = next
             .filters
             .into_iter()
-            .map(|predicate| LoweredRelPredicate {
-                predicate,
-                column: None,
-                value: None,
-            })
+            .map(LoweredRelPredicate::bare)
             .chain(
-                next.correlated_filters
+                direct_outer
                     .into_iter()
                     .map(|correlation| LoweredRelPredicate {
                         predicate: Predicate::All(Vec::new()),
@@ -1924,12 +1863,28 @@ fn root_exists_rel_at_correlation(
     Ok(())
 }
 
+/// Moves a route through a sibling of the join removed at `removed_index`
+/// under the reversed edge at `reverse_index`. Siblings after the removed join
+/// shift down one position in the reversed edge's `nested_joins`.
+fn rebase_sibling_route(route: &[usize], removed_index: usize, reverse_index: usize) -> Vec<usize> {
+    let mut rebased = vec![reverse_index];
+    if let Some((&first, rest)) = route.split_first() {
+        rebased.push(if first > removed_index {
+            first - 1
+        } else {
+            first
+        });
+        rebased.extend_from_slice(rest);
+    }
+    rebased
+}
+
 fn append_exists_rel_policy_clause(
     schema: &Schema,
     table: &TableName,
     path: &str,
     mut query: Query,
-    rel: &RelExpr,
+    rel: &RelationExpr,
 ) -> Result<Query, SchemaConversionError> {
     let mut lowered = lower_exists_rel(schema, table, path, rel)?;
     root_exists_rel_at_correlation(table, path, &mut lowered)?;
@@ -1950,16 +1905,16 @@ fn append_exists_rel_policy_clause(
         if rel_has_outer_references(rel)
             || !lowered.reachable.is_empty()
             || lowered.pending_reachable.is_some()
-            || lowered.joins.iter().any(join_has_outer_correlations)
+            || !lowered.outer_correlations.is_empty()
         {
             return Err(err(
-                format!("$.{}.{}", table.as_str(), path),
+                policy_path(table, path),
                 "uncorrelated ExistsRel cannot contain unresolved outer references or reachability",
             ));
         }
         let proof_table = lowered.table.ok_or_else(|| {
             err(
-                format!("$.{}.{}", table.as_str(), path),
+                policy_path(table, path),
                 "uncorrelated ExistsRel requires a table relation",
             )
         })?;
@@ -1977,13 +1932,13 @@ fn append_exists_rel_policy_clause(
     let correlation = lowered.filters.remove(correlation_index);
     let Some(correlation_column) = correlation.column.clone() else {
         return Err(err(
-            format!("$.{}.{}", table.as_str(), path),
+            policy_path(table, path),
             "core schema ExistsRel policies must correlate a concrete column",
         ));
     };
     let Some(LoweredRelValue::OuterRow(source_column)) = correlation.value.clone() else {
         return Err(err(
-            format!("$.{}.{}", table.as_str(), path),
+            policy_path(table, path),
             "core schema ExistsRel policies must correlate to an outer row reference",
         ));
     };
@@ -2006,6 +1961,17 @@ fn append_exists_rel_policy_clause(
         }
     }
 
+    // A walk's access rows join the protected row through one key column;
+    // `ReachableVia` has nowhere to carry a second correlation or an access-side
+    // join, and dropping either would widen the policy.
+    if (!lowered.reachable.is_empty() || lowered.pending_reachable.is_some())
+        && (!correlated_filters.is_empty() || !lowered.joins.is_empty())
+    {
+        return Err(err(
+            policy_path(table, path),
+            "Gather access rows correlated with the protected row more than once, or joined to further tables, are not supported in policies yet",
+        ));
+    }
     for reachable in &mut lowered.reachable {
         if reachable.access_row_column == "__pending_outer_row" {
             reachable.access_row_column = correlation_column.clone();
@@ -2013,6 +1979,15 @@ fn append_exists_rel_policy_clause(
         }
     }
     if let Some(pending) = lowered.pending_reachable.take() {
+        // The walk's rows are keyed by a column of the protected row, which
+        // stands in as the access table here; any other filter on the walk's
+        // rows would be evaluated against the protected row instead.
+        if !remaining_filters.is_empty() {
+            return Err(err(
+                policy_path(table, path),
+                "Filters on the rows a scalar Gather reaches are not supported in policies yet",
+            ));
+        }
         lowered.reachable.push(crate::query::ReachableVia {
             access_table: table.as_str().to_owned(),
             access_row_column: "id".to_owned(),
@@ -2028,7 +2003,7 @@ fn append_exists_rel_policy_clause(
             edge_member_column: pending.edge_member_column,
             edge_parent_column: pending.edge_parent_column,
             edge_filters: pending.edge_filters,
-            bound: crate::query::RecursionBound::MaxDepth(pending.max_depth),
+            bound: pending.bound,
             seed: pending.seed,
         });
     }
@@ -2041,7 +2016,7 @@ fn append_exists_rel_policy_clause(
 
     let lowered_table = lowered.table.ok_or_else(|| {
         err(
-            format!("$.{}.{}", table.as_str(), path),
+            policy_path(table, path),
             "core schema scalar Gather output must be consumed by an access join",
         )
     })?;
@@ -2054,35 +2029,61 @@ fn append_exists_rel_policy_clause(
         // Lift outer correlations on a nested join through its equality edge,
         // so `member.workspace = outer.workspace` constrains the root block's
         // workspace without publishing any proof carrier.
-        for nested in &mut lowered.joins {
-            if nested
-                .nested_joins
-                .iter()
-                .any(|child| !child.correlated_filters.is_empty())
+        for (index, nested) in lowered.joins.iter_mut().enumerate() {
+            if lowered
+                .outer_correlations
+                .keys()
+                .any(|route| route.first() == Some(&index) && route.len() > 1)
             {
                 return Err(err(
-                    format!("$.{}.{}", table.as_str(), path),
+                    policy_path(table, path),
                     "core schema ExistsRel does not yet support outer correlations beyond one nested join",
                 ));
             }
+            let outer = lowered
+                .outer_correlations
+                .remove(&vec![index])
+                .unwrap_or_default();
+            if outer.is_empty() {
+                continue;
+            }
             let source_column = nested.source_column.clone().ok_or_else(|| {
                 err(
-                    format!("$.{}.{}", table.as_str(), path),
+                    policy_path(table, path),
                     "core schema ExistsRel nested join is missing its source column",
                 )
             })?;
-            for correlation in std::mem::take(&mut nested.correlated_filters) {
+            for correlation in &outer {
                 if correlation.join_column != nested.on_column {
                     return Err(err(
-                        format!("$.{}.{}", table.as_str(), path),
+                        policy_path(table, path),
                         "core schema ExistsRel nested outer correlation must use its join key",
                     ));
                 }
                 correlated_filters.push(JoinCorrelation {
                     join_column: source_column.clone(),
-                    source_column: correlation.source_column,
+                    source_column: correlation.source_column.clone(),
                 });
             }
+            for correlation in &outer {
+                let Some(position) = nested
+                    .correlated_filters
+                    .iter()
+                    .position(|candidate| candidate == correlation)
+                else {
+                    return Err(err(
+                        policy_path(table, path),
+                        "core schema ExistsRel lost an outer correlation during lowering",
+                    ));
+                };
+                nested.correlated_filters.remove(position);
+            }
+        }
+        if !lowered.outer_correlations.is_empty() {
+            return Err(err(
+                policy_path(table, path),
+                "core schema ExistsRel has an unresolved outer correlation after lowering",
+            ));
         }
         query.joins.push(JoinVia {
             table: lowered_table.clone(),
@@ -2099,6 +2100,13 @@ fn append_exists_rel_policy_clause(
             nested_joins: lowered.joins,
         });
         return Ok(query);
+    }
+
+    if !lowered.outer_correlations.is_empty() {
+        return Err(err(
+            policy_path(table, path),
+            "core schema ExistsRel has an unresolved outer correlation after lowering",
+        ));
     }
 
     let filters = lowered
@@ -2129,7 +2137,7 @@ fn resolve_rel_column_route(
     table: &TableName,
     path: &str,
     lowered: &LoweredRel,
-    column: &ColumnRef,
+    column: &RelationColumnRef,
 ) -> Result<Vec<usize>, SchemaConversionError> {
     let Some(scope) = column.scope.as_deref() else {
         return Ok(Vec::new());
@@ -2137,11 +2145,11 @@ fn resolve_rel_column_route(
     match lowered.scope_paths.get(scope) {
         Some(Some(route)) => Ok(route.clone()),
         Some(None) => Err(err(
-            format!("$.{}.{path}", table.as_str()),
+            policy_path(table, path),
             format!("ExistsRel column scope '{scope}' is ambiguous; use distinct aliases"),
         )),
         None => Err(err(
-            format!("$.{}.{path}", table.as_str()),
+            policy_path(table, path),
             format!("ExistsRel column references unknown scope '{scope}'"),
         )),
     }
@@ -2154,9 +2162,9 @@ fn append_scoped_rel_predicate(
     table: &TableName,
     path: &str,
     lowered: &mut LoweredRel,
-    predicate: &RelPredicateExpr,
+    predicate: &RelationPredicate,
 ) -> Result<(), SchemaConversionError> {
-    if let RelPredicateExpr::And(children) = predicate {
+    if let RelationPredicate::And(children) = predicate {
         for child in children {
             append_scoped_rel_predicate(table, path, lowered, child)?;
         }
@@ -2171,7 +2179,7 @@ fn append_scoped_rel_predicate(
     }
     if routes.len() > 1 {
         return Err(err(
-            format!("$.{}.{path}", table.as_str()),
+            policy_path(table, path),
             "ExistsRel Boolean filters spanning multiple sources are not supported",
         ));
     }
@@ -2187,10 +2195,16 @@ fn append_scoped_rel_predicate(
                 for filter in filters {
                     match (filter.column, filter.value) {
                         (Some(join_column), Some(LoweredRelValue::OuterRow(source_column))) => {
-                            join.correlated_filters.push(JoinCorrelation {
+                            let correlation = JoinCorrelation {
                                 join_column,
                                 source_column,
-                            });
+                            };
+                            join.correlated_filters.push(correlation.clone());
+                            lowered
+                                .outer_correlations
+                                .entry(route.clone())
+                                .or_default()
+                                .push(correlation);
                         }
                         _ => join.filters.push(filter.predicate),
                     }
@@ -2204,24 +2218,24 @@ fn append_scoped_rel_predicate(
 }
 
 fn collect_rel_predicate_columns<'a>(
-    predicate: &'a RelPredicateExpr,
-    columns: &mut Vec<&'a ColumnRef>,
+    predicate: &'a RelationPredicate,
+    columns: &mut Vec<&'a RelationColumnRef>,
 ) {
     match predicate {
-        RelPredicateExpr::And(children) | RelPredicateExpr::Or(children) => {
+        RelationPredicate::And(children) | RelationPredicate::Or(children) => {
             for child in children {
                 collect_rel_predicate_columns(child, columns);
             }
         }
-        RelPredicateExpr::Not(child) => collect_rel_predicate_columns(child, columns),
-        RelPredicateExpr::Cmp { left, .. }
-        | RelPredicateExpr::Contains { left, .. }
-        | RelPredicateExpr::In { left, .. } => columns.push(left),
+        RelationPredicate::Not(child) => collect_rel_predicate_columns(child, columns),
+        RelationPredicate::Cmp { left, .. }
+        | RelationPredicate::Contains { left, .. }
+        | RelationPredicate::In { left, .. } => columns.push(left),
         // Enum payload fields are relative to the matched record, not relation sources.
-        RelPredicateExpr::IsNull { column }
-        | RelPredicateExpr::IsNotNull { column }
-        | RelPredicateExpr::EnumMatch { column, .. } => columns.push(column),
-        RelPredicateExpr::True | RelPredicateExpr::False => {}
+        RelationPredicate::IsNull { column }
+        | RelationPredicate::IsNotNull { column }
+        | RelationPredicate::EnumMatch { column, .. } => columns.push(column),
+        RelationPredicate::True | RelationPredicate::False => {}
     }
 }
 
@@ -2229,10 +2243,10 @@ fn lower_exists_rel(
     schema: &Schema,
     table: &TableName,
     path: &str,
-    rel: &RelExpr,
+    rel: &RelationExpr,
 ) -> Result<LoweredRel, SchemaConversionError> {
     match rel {
-        RelExpr::TableScan { table, alias } => Ok(LoweredRel {
+        RelationExpr::TableScan { table, alias } => Ok(LoweredRel {
             scope_paths: BTreeMap::from([(
                 alias.clone().unwrap_or_else(|| table.as_str().to_owned()),
                 Some(Vec::new()),
@@ -2240,64 +2254,129 @@ fn lower_exists_rel(
             table: Some(table.as_str().to_owned()),
             filters: Vec::new(),
             joins: Vec::new(),
+            outer_correlations: BTreeMap::new(),
             reachable: Vec::new(),
             pending_reachable: None,
         }),
-        RelExpr::Filter { input, predicate } => {
+        RelationExpr::Filter { input, predicate } => {
             let mut lowered = lower_exists_rel(schema, table, path, input)?;
             append_scoped_rel_predicate(table, path, &mut lowered, predicate)?;
             Ok(lowered)
         }
-        RelExpr::Project { input, .. } => lower_exists_rel(schema, table, path, input),
-        RelExpr::Gather {
-            seed, step, bound, ..
-        } => lower_gather_rel(schema, table, path, seed, step, bound),
-        RelExpr::Join {
+        RelationExpr::Project { input, .. } => lower_exists_rel(schema, table, path, input),
+        RelationExpr::Gather {
+            seed,
+            step,
+            frontier_key,
+            bound,
+            dedupe_key,
+        } => {
+            let shape = crate::query::recognize_relation_gather(
+                seed,
+                step,
+                frontier_key,
+                bound,
+                dedupe_key,
+            )
+            .map_err(|message| {
+                err(
+                    policy_path(table, path),
+                    message.replace("not supported yet", "not supported in policies yet"),
+                )
+            })?;
+            lower_gather_rel(schema, table, path, &shape)
+        }
+        RelationExpr::Join {
             left,
             right,
             on,
             join_kind,
         } => {
-            if *join_kind != RelJoinKind::Inner {
+            if *join_kind != RelationJoinKind::Inner {
                 return Err(err(
-                    format!("$.{}.{}", table.as_str(), path),
+                    policy_path(table, path),
                     "core schema ExistsRel policies only support inner joins",
                 ));
             }
             let mut left = lower_exists_rel(schema, table, path, left)?;
             let right = lower_exists_rel(schema, table, path, right)?;
-            let Some(on) = on.first() else {
+            // Only a Gather on the left feeds the access join below; one on the
+            // right would otherwise be dropped, leaving a plain join that
+            // authorizes without the reachability check.
+            if right.pending_reachable.is_some() {
                 return Err(err(
-                    format!("$.{}.{}", table.as_str(), path),
-                    "core schema ExistsRel joins require a column equality",
-                ));
-            };
-            let source_route = resolve_rel_column_route(table, path, &left, &on.left)?;
-            let target_route = resolve_rel_column_route(table, path, &right, &on.right)?;
-            if !target_route.is_empty() {
-                return Err(err(
-                    format!("$.{}.{path}", table.as_str()),
-                    "core schema ExistsRel join target must be the right relation's root source",
+                    policy_path(table, path),
+                    "Gather on the right side of a join is not supported in policies yet",
                 ));
             }
-            if let Some(pending) = left.pending_reachable.take() {
-                if on.left.column != "id" {
+            let Some(primary_on) = on.first() else {
+                return Err(err(
+                    policy_path(table, path),
+                    "core schema ExistsRel joins require at least one column equality",
+                ));
+            };
+            let source_route = resolve_rel_column_route(table, path, &left, &primary_on.left)?;
+            for condition in on {
+                let condition_source_route =
+                    resolve_rel_column_route(table, path, &left, &condition.left)?;
+                if condition_source_route != source_route {
                     return Err(err(
-                        format!("$.{}.{}", table.as_str(), path),
+                        policy_path(table, path),
+                        "core schema ExistsRel join equalities must use one left-side source",
+                    ));
+                }
+                let target_route = resolve_rel_column_route(table, path, &right, &condition.right)?;
+                if !target_route.is_empty() {
+                    return Err(err(
+                        policy_path(table, path),
+                        "core schema ExistsRel join target must be the right relation's root source",
+                    ));
+                }
+            }
+            if let Some(pending) = left.pending_reachable.take() {
+                if on.len() > 1 {
+                    return Err(err(
+                        policy_path(table, path),
+                        "compound joins from Gather are not supported in policies yet",
+                    ));
+                }
+                if primary_on.left.column != "id" {
+                    return Err(err(
+                        policy_path(table, path),
                         "core schema ExistsRel reachable joins must join from reachable id",
                     ));
                 }
                 let right_table = right.table.clone().ok_or_else(|| {
                     err(
-                        format!("$.{}.{}", table.as_str(), path),
+                        policy_path(table, path),
                         "core schema ExistsRel reachable access must be a row-producing relation",
                     )
                 })?;
+                // The protected row is correlated above this join, where the
+                // access rows are keyed; a correlation here would be lowered as
+                // its placeholder `true`, and an access-side join would be lost.
+                if left
+                    .filters
+                    .iter()
+                    .chain(&right.filters)
+                    .any(|filter| matches!(filter.value, Some(LoweredRelValue::OuterRow(_))))
+                {
+                    return Err(err(
+                        policy_path(table, path),
+                        "Gather access rows correlated with the protected row below their join are not supported in policies yet",
+                    ));
+                }
+                if !right.joins.is_empty() || !left.joins.is_empty() {
+                    return Err(err(
+                        policy_path(table, path),
+                        "Gather access rows joined to further tables are not supported in policies yet",
+                    ));
+                }
                 let mut reachable = crate::query::ReachableVia {
                     access_table: right_table,
                     access_row_column: "__pending_outer_row".to_owned(),
-                    access_team_column: on.right.column.clone(),
-                    access_team_target: if on.right.column == "id" {
+                    access_team_column: primary_on.right.column.clone(),
+                    access_team_target: if primary_on.right.column == "id" {
                         JoinTarget::RowId
                     } else {
                         JoinTarget::Column
@@ -2312,7 +2391,7 @@ fn lower_exists_rel(
                     edge_member_column: pending.edge_member_column,
                     edge_parent_column: pending.edge_parent_column,
                     edge_filters: pending.edge_filters,
-                    bound: crate::query::RecursionBound::MaxDepth(pending.max_depth),
+                    bound: pending.bound,
                     seed: pending.seed,
                 };
                 reachable
@@ -2325,6 +2404,7 @@ fn lower_exists_rel(
                     table: left.table,
                     filters: Vec::new(),
                     joins: left.joins,
+                    outer_correlations: left.outer_correlations,
                     reachable: {
                         let mut reachables = left.reachable;
                         reachables.extend(right.reachable);
@@ -2335,16 +2415,26 @@ fn lower_exists_rel(
                 });
             }
 
-            let mut correlated_filters = Vec::new();
+            let mut correlated_filters = on
+                .iter()
+                .skip(1)
+                .map(|condition| JoinCorrelation {
+                    join_column: condition.right.column.clone(),
+                    source_column: condition.left.column.clone(),
+                })
+                .collect::<Vec<_>>();
+            let mut direct_outer_correlations = Vec::new();
             let filters = right
                 .filters
                 .into_iter()
                 .filter_map(|filter| match (filter.column, filter.value) {
                     (Some(join_column), Some(LoweredRelValue::OuterRow(source_column))) => {
-                        correlated_filters.push(JoinCorrelation {
+                        let correlation = JoinCorrelation {
                             join_column,
                             source_column,
-                        });
+                        };
+                        correlated_filters.push(correlation.clone());
+                        direct_outer_correlations.push(correlation);
                         None
                     }
                     _ => Some(filter.predicate),
@@ -2352,31 +2442,53 @@ fn lower_exists_rel(
                 .collect();
             let right_table = right.table.ok_or_else(|| {
                 err(
-                    format!("$.{}.{}", table.as_str(), path),
+                    policy_path(table, path),
                     "core schema ExistsRel joins require a row-producing right relation",
                 )
             })?;
+            let mut join_route = source_route;
+            let join_index = {
+                let mut joins = &mut left.joins;
+                for index in &join_route {
+                    joins = &mut joins[*index].nested_joins;
+                }
+                joins.len()
+            };
+            join_route.push(join_index);
+            let mut right_outer_correlations = right
+                .outer_correlations
+                .into_iter()
+                .map(|(route, correlations)| {
+                    let mut full_route = join_route.clone();
+                    full_route.extend(route);
+                    (full_route, correlations)
+                })
+                .collect::<Vec<_>>();
+            if !direct_outer_correlations.is_empty() {
+                right_outer_correlations.push((join_route.clone(), direct_outer_correlations));
+            }
             let join = JoinVia {
                 table: right_table,
-                on_column: on.right.column.clone(),
-                target: if on.right.column == "id" {
+                on_column: primary_on.right.column.clone(),
+                target: if primary_on.right.column == "id" {
                     JoinTarget::RowId
                 } else {
                     JoinTarget::Column
                 },
-                source_column: Some(on.left.column.clone()),
+                source_column: Some(primary_on.left.column.clone()),
                 source_lookup: None,
                 correlated_filters,
                 filters,
                 nested_joins: right.joins,
             };
-            let mut joins = &mut left.joins;
-            for index in &source_route {
-                joins = &mut joins[*index].nested_joins;
+            {
+                let mut joins = &mut left.joins;
+                for index in &join_route[..join_route.len() - 1] {
+                    joins = &mut joins[*index].nested_joins;
+                }
+                joins.push(join);
             }
-            let mut join_route = source_route;
-            join_route.push(joins.len());
-            joins.push(join);
+            left.outer_correlations.extend(right_outer_correlations);
             for (scope, route) in right.scope_paths {
                 let route = route.map(|route| {
                     let mut full_route = join_route.clone();
@@ -2391,35 +2503,56 @@ fn lower_exists_rel(
             left.reachable.extend(right.reachable);
             Ok(left)
         }
-        RelExpr::Union { .. } => Err(err(
-            format!("$.{}.{}", table.as_str(), path),
+        RelationExpr::Union { .. } => Err(err(
+            policy_path(table, path),
             "core schema ExistsRel policies do not support Union yet",
         )),
+        RelationExpr::Distinct { .. }
+        | RelationExpr::OrderBy { .. }
+        | RelationExpr::Offset { .. }
+        | RelationExpr::Limit { .. } => Err(unsupported_exists_rel_output_step(table, path)),
     }
 }
 
+/// Existence ignores row order and multiplicity, and a row window has no
+/// meaning without an order, so these query output steps are not policy syntax.
+fn unsupported_exists_rel_output_step(table: &TableName, path: &str) -> SchemaConversionError {
+    err(
+        policy_path(table, path),
+        "core schema ExistsRel policies do not support Distinct, OrderBy, Offset or Limit",
+    )
+}
+
+/// Policy relation literals are typed public values in their JSON envelope.
 fn lower_gather_rel(
     schema: &Schema,
     table: &TableName,
     path: &str,
-    seed: &RelExpr,
-    step: &RelExpr,
-    bound: &RelRecursionBound,
+    shape: &crate::query::RelationGatherShape<'_>,
 ) -> Result<LoweredRel, SchemaConversionError> {
-    let (from, seed) = lower_gather_seed(table, path, seed)?;
-    let (edge_table, output_table, edge_member_column, edge_parent_column, edge_filters) =
-        lower_gather_step(table, path, step)?;
+    let (from, seed) = lower_gather_seed(table, path, &shape.seed)?;
+    let step = &shape.step;
+    let edge_filters = uncorrelated_gather_filters(
+        table,
+        path,
+        rel_predicates_to_policy(table, path, &step.filters)?,
+        "Gather edge filters",
+    )?
+    .into_iter()
+    .map(|filter| filter.predicate)
+    .collect();
+    let output_table = step.output_table.map(str::to_owned);
     // A scalar frontier has no materialized output table, but its projected
     // FK still identifies the logical source used by scoped joins from Gather.
     // Keep this separate from `table`: setting that would turn the key-only
     // frontier into a row-producing relation and change reachability semantics.
     let output_scope = output_table.clone().or_else(|| {
         schema
-            .get(&TableName::new(edge_table.clone()))?
+            .get(&TableName::new(step.edge_table))?
             .columns
             .columns
             .iter()
-            .find(|column| column.name.as_str() == edge_parent_column)?
+            .find(|column| column.name.as_str() == step.parent_column)?
             .references
             .as_ref()
             .map(|table| table.as_str().to_owned())
@@ -2433,15 +2566,6 @@ fn lower_gather_rel(
     } else {
         Some(seed)
     };
-    let max_depth = match bound {
-        RelRecursionBound::MaxDepth(depth) => *depth,
-        RelRecursionBound::Fixpoint => {
-            return Err(err(
-                format!("$.{}.{}", table.as_str(), path),
-                "server shell public schema conversion does not support Gather Fixpoint yet",
-            ));
-        }
-    };
     Ok(LoweredRel {
         scope_paths: output_scope
             .as_ref()
@@ -2451,66 +2575,59 @@ fn lower_gather_rel(
         table: output_table,
         filters: Vec::new(),
         joins: Vec::new(),
+        outer_correlations: BTreeMap::new(),
         reachable: Vec::new(),
         pending_reachable: Some(PendingReachable {
             from,
             seed,
-            edge_table,
-            edge_member_column,
-            edge_parent_column,
+            edge_table: step.edge_table.to_owned(),
+            edge_member_column: step.member_column.clone(),
+            edge_parent_column: step.parent_column.clone(),
             edge_filters,
-            max_depth,
+            bound: shape.bound.clone(),
         }),
     })
 }
 
+/// Policy seeds start from the session: one seed filter compares a seed
+/// column to a claim, and that claim keys the walk.
 fn lower_gather_seed(
     table: &TableName,
     path: &str,
-    seed: &RelExpr,
+    seed: &crate::query::RelationGatherSeed<'_>,
 ) -> Result<(Operand, crate::query::ReachableSeed), SchemaConversionError> {
-    let (input, projected_team_column, projected_filters) =
-        unwrap_seed_projection(table, path, seed)?;
-    let (input, filters) = unwrap_rel_filter(input);
-    let filters = filters
-        .into_iter()
-        .chain(projected_filters)
-        .collect::<Vec<_>>();
-    let RelExpr::TableScan {
-        table: seed_table, ..
-    } = input
-    else {
-        return Err(err(
-            format!("$.{}.{}", table.as_str(), path),
-            "Gather seeded reachability requires a filtered seed table scan",
-        ));
-    };
-    let lowered_filters = rel_predicates_to_policy(table, path, &filters)?;
+    let lowered_filters = uncorrelated_gather_filters(
+        table,
+        path,
+        rel_predicates_to_policy(table, path, &seed.filters)?,
+        "Gather seed filters",
+    )?;
     let seed_index = lowered_filters
         .iter()
         .position(|filter| {
-            matches!(
-                filter.value,
-                Some(LoweredRelValue::Operand(Operand::Claim(_)))
-            )
+            matches!(filter.predicate, Predicate::Eq(..))
+                && matches!(
+                    filter.value,
+                    Some(LoweredRelValue::Operand(Operand::Claim(_)))
+                )
         })
         .ok_or_else(|| {
             err(
-                format!("$.{}.{}", table.as_str(), path),
+                policy_path(table, path),
                 "Gather same-table seeds require one claim-keyed equality filter",
             )
         })?;
     let seed_filter = &lowered_filters[seed_index];
     let Some(user_column) = seed_filter.column.clone() else {
         return Err(err(
-            format!("$.{}.{}", table.as_str(), path),
+            policy_path(table, path),
             "Gather seed claim filter must name a seed-table column",
         ));
     };
     let Some(LoweredRelValue::Operand(Operand::Claim(user_claim))) = seed_filter.value.clone()
     else {
         return Err(err(
-            format!("$.{}.{}", table.as_str(), path),
+            policy_path(table, path),
             "Gather seed claim filter must compare against a claim",
         ));
     };
@@ -2522,381 +2639,59 @@ fn lower_gather_seed(
     Ok((
         Operand::Claim(user_claim.clone()),
         crate::query::ReachableSeed {
-            table: seed_table.as_str().to_owned(),
+            table: seed.table.to_owned(),
             user_column: Some(user_column),
             user_claim: Some(user_claim),
-            team_column: projected_team_column.unwrap_or_else(|| "id".to_owned()),
+            team_column: seed.team_column.clone(),
             filters,
         },
     ))
 }
 
-fn unwrap_seed_projection<'a>(
+/// A walk's seed and edge filters cannot join the protected row: lowering
+/// such a correlation as its placeholder `true` would drop the restriction
+/// and widen the policy, so it is rejected.
+fn uncorrelated_gather_filters(
     table: &TableName,
     path: &str,
-    seed: &'a RelExpr,
-) -> Result<(&'a RelExpr, Option<String>, Vec<&'a RelPredicateExpr>), SchemaConversionError> {
-    let RelExpr::Project { input, columns } = seed else {
-        return Ok((seed, None, Vec::new()));
-    };
-    let Some(column) = columns.iter().find(|column| column.alias == "id") else {
-        return Err(err(
-            format!("$.{}.{}", table.as_str(), path),
-            "Gather projected seed must expose an id column",
-        ));
-    };
-    let RelProjectExpr::Column(projected) = &column.expr else {
-        return Err(err(
-            format!("$.{}.{}", table.as_str(), path),
-            "Gather projected seed id must be a column projection",
-        ));
-    };
-    let (project_input, filters) = unwrap_rel_filter(input);
-    if let RelExpr::Join {
-        left, right, on, ..
-    } = project_input
-    {
-        let (left, team_column) =
-            unwrap_joined_seed_projection(table, path, left, right, on, projected)?;
-        return Ok((left, team_column, filters));
-    }
-    Ok((input.as_ref(), Some(projected.column.clone()), Vec::new()))
-}
-
-fn unwrap_joined_seed_projection<'a>(
-    table: &TableName,
-    path: &str,
-    left: &'a RelExpr,
-    right: &RelExpr,
-    on: &[crate::model::public_api::relation_ir::JoinCondition],
-    projected: &ColumnRef,
-) -> Result<(&'a RelExpr, Option<String>), SchemaConversionError> {
-    let RelExpr::TableScan {
-        alias: right_alias, ..
-    } = right
-    else {
-        return Err(err(
-            format!("$.{}.{}", table.as_str(), path),
-            "Gather projected seed hop must join to a table scan",
-        ));
-    };
-    let Some(join) = on.first() else {
-        return Err(err(
-            format!("$.{}.{}", table.as_str(), path),
-            "Gather projected seed hop requires a join condition",
-        ));
-    };
-    if projected.scope.as_ref() != right_alias.as_ref() || projected.column != "id" {
-        return Err(err(
-            format!("$.{}.{}", table.as_str(), path),
-            "Gather projected seed id must come from the hop target row id",
-        ));
-    }
-    Ok((left, Some(join.left.column.clone())))
-}
-
-fn lower_gather_step(
-    table: &TableName,
-    path: &str,
-    step: &RelExpr,
-) -> Result<(String, Option<String>, String, String, Vec<Predicate>), SchemaConversionError> {
-    let RelExpr::Project { input, columns } = step else {
-        return Err(err(
-            format!("$.{}.{}", table.as_str(), path),
-            "Gather policies require projected recursive hops",
-        ));
-    };
-
-    // General relation gathers return rows by joining the edge parent to an
-    // output table. Policy reachability instead carries only the projected
-    // parent key; accepting that canonical scalar form avoids requiring every
-    // reachable parent to have another row in the seed-membership table.
-    let (edge_rel, output_table, edge_parent_column, projected_scope) =
-        if let RelExpr::Join {
-            left, right, on, ..
-        } = input.as_ref()
-        {
-            let RelExpr::TableScan {
-                table: output_table,
-                ..
-            } = right.as_ref()
-            else {
-                return Err(err(
-                    format!("$.{}.{}", table.as_str(), path),
-                    "Gather recursive hop must join to the output table",
-                ));
-            };
-            let Some(on) = on.first() else {
-                return Err(err(
-                    format!("$.{}.{}", table.as_str(), path),
-                    "Gather recursive hop join requires a column equality",
-                ));
-            };
-            (
-                left.as_ref(),
-                Some(output_table.as_str().to_owned()),
-                on.left.column.clone(),
-                None,
-            )
-        } else {
-            let Some(projected) = columns.iter().find(|column| column.alias == "id") else {
-                return Err(err(
-                    format!("$.{}.{}", table.as_str(), path),
-                    "Gather scalar recursive hop must project its parent key as id",
-                ));
-            };
-            let RelProjectExpr::Column(projected) = &projected.expr else {
-                return Err(err(
-                    format!("$.{}.{}", table.as_str(), path),
-                    "Gather scalar recursive hop id must be a column projection",
-                ));
-            };
-            (
-                input.as_ref(),
-                None,
-                projected.column.clone(),
-                projected.scope.clone(),
-            )
-        };
-
-    let (edge_input, filters) = unwrap_rel_filter(edge_rel);
-    let RelExpr::TableScan {
-        table: edge_table,
-        alias: edge_alias,
-    } = edge_input
-    else {
-        return Err(err(
-            format!("$.{}.{}", table.as_str(), path),
-            "Gather recursive hop must start from an edge table scan",
-        ));
-    };
-    let edge_scope = edge_alias.as_deref().unwrap_or_else(|| edge_table.as_str());
-    if projected_scope
-        .as_deref()
-        .is_some_and(|scope| scope != edge_scope)
-    {
-        return Err(err(
-            format!("$.{}.{}", table.as_str(), path),
-            "Gather scalar recursive hop id must project an edge-table column",
-        ));
-    }
-
-    let lowered_filters = rel_predicates_to_policy(table, path, &filters)?;
-    let frontier_index = lowered_filters
+    filters: Vec<LoweredRelPredicate>,
+    what: &str,
+) -> Result<Vec<LoweredRelPredicate>, SchemaConversionError> {
+    if filters
         .iter()
-        .position(|filter| matches!(filter.value, Some(LoweredRelValue::FrontierRow)))
-        .ok_or_else(|| {
-            err(
-                format!("$.{}.{}", table.as_str(), path),
-                "Gather recursive hop requires a frontier equality",
-            )
-        })?;
-    let frontier = &lowered_filters[frontier_index];
-    let Some(edge_member_column) = frontier.column.clone() else {
+        .any(|filter| matches!(filter.value, Some(LoweredRelValue::OuterRow(_))))
+    {
         return Err(err(
-            format!("$.{}.{}", table.as_str(), path),
-            "Gather frontier equality must name an edge column",
+            policy_path(table, path),
+            format!("{what} correlated with the protected row are not supported in policies yet"),
         ));
-    };
-    let edge_filters = lowered_filters
-        .into_iter()
-        .enumerate()
-        .filter_map(|(index, filter)| (index != frontier_index).then_some(filter.predicate))
-        .collect();
-    Ok((
-        edge_table.as_str().to_owned(),
-        output_table,
-        edge_member_column,
-        edge_parent_column,
-        edge_filters,
-    ))
-}
-
-fn unwrap_rel_filter(rel: &RelExpr) -> (&RelExpr, Vec<&RelPredicateExpr>) {
-    match rel {
-        RelExpr::Filter { input, predicate } => (input.as_ref(), vec![predicate]),
-        other => (other, Vec::new()),
     }
+    Ok(filters)
 }
 
 fn rel_predicate_to_policy(
     table: &TableName,
     path: &str,
-    predicate: &RelPredicateExpr,
+    predicate: &RelationPredicate,
 ) -> Result<Vec<LoweredRelPredicate>, SchemaConversionError> {
-    match predicate {
-        RelPredicateExpr::True => Ok(Vec::new()),
-        RelPredicateExpr::False => Ok(vec![LoweredRelPredicate {
-            predicate: Predicate::Any(Vec::new()),
-            column: None,
-            value: None,
-        }]),
-        RelPredicateExpr::And(children) => {
-            let mut lowered = Vec::new();
-            for child in children {
-                lowered.extend(rel_predicate_to_policy(table, path, child)?);
-            }
-            Ok(lowered)
-        }
-        RelPredicateExpr::Or(children) => {
-            let predicates = children
-                .iter()
-                .map(|child| {
-                    rel_predicate_to_policy(table, path, child).map(|parts| {
-                        Predicate::All(parts.into_iter().map(|part| part.predicate).collect())
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(vec![LoweredRelPredicate {
-                predicate: Predicate::Any(predicates),
-                column: None,
-                value: None,
-            }])
-        }
-        RelPredicateExpr::Not(child) => {
-            let predicates = rel_predicate_to_policy(table, path, child)?
-                .into_iter()
-                .map(|part| part.predicate)
-                .collect::<Vec<_>>();
-            Ok(vec![LoweredRelPredicate {
-                predicate: Predicate::Not(Box::new(Predicate::All(predicates))),
-                column: None,
-                value: None,
-            }])
-        }
-        RelPredicateExpr::Cmp { left, op, right } => {
-            if matches!(right, RelValueRef::Literal(Value::Null)) {
-                let predicate = match op {
-                    RelPredicateCmpOp::Eq => {
-                        Predicate::IsNull(Operand::Column(left.column.clone()))
-                    }
-                    RelPredicateCmpOp::Ne => Predicate::Not(Box::new(Predicate::IsNull(
-                        Operand::Column(left.column.clone()),
-                    ))),
-                    RelPredicateCmpOp::Lt
-                    | RelPredicateCmpOp::Le
-                    | RelPredicateCmpOp::Gt
-                    | RelPredicateCmpOp::Ge => {
-                        return Err(err(
-                            format!("$.{}.{}", table.as_str(), path),
-                            "core schema ExistsRel NULL comparisons only support equality and inequality",
-                        ));
-                    }
-                };
-                return Ok(vec![LoweredRelPredicate {
-                    predicate,
-                    column: Some(left.column.clone()),
-                    value: None,
-                }]);
-            }
-            let value = rel_value_to_policy_operand(table, path, right)?;
-            let predicate = match (&value, op) {
-                (LoweredRelValue::Operand(operand), RelPredicateCmpOp::Eq) => {
-                    Predicate::Eq(Operand::Column(left.column.clone()), operand.clone())
-                }
-                (LoweredRelValue::Operand(operand), RelPredicateCmpOp::Ne) => {
-                    Predicate::Ne(Operand::Column(left.column.clone()), operand.clone())
-                }
-                (LoweredRelValue::Operand(operand), RelPredicateCmpOp::Lt) => {
-                    Predicate::Lt(Operand::Column(left.column.clone()), operand.clone())
-                }
-                (LoweredRelValue::Operand(operand), RelPredicateCmpOp::Le) => {
-                    Predicate::Lte(Operand::Column(left.column.clone()), operand.clone())
-                }
-                (LoweredRelValue::Operand(operand), RelPredicateCmpOp::Gt) => {
-                    Predicate::Gt(Operand::Column(left.column.clone()), operand.clone())
-                }
-                (LoweredRelValue::Operand(operand), RelPredicateCmpOp::Ge) => {
-                    Predicate::Gte(Operand::Column(left.column.clone()), operand.clone())
-                }
-                (
-                    LoweredRelValue::OuterRow(_) | LoweredRelValue::FrontierRow,
-                    RelPredicateCmpOp::Eq,
-                ) => Predicate::All(Vec::new()),
-                _ => {
-                    return Err(err(
-                        format!("$.{}.{}", table.as_str(), path),
-                        "core schema ExistsRel special row-id comparisons only support equality",
-                    ));
-                }
-            };
-            Ok(vec![LoweredRelPredicate {
-                predicate,
-                column: Some(left.column.clone()),
-                value: Some(value),
-            }])
-        }
-        RelPredicateExpr::IsNull { column } => Ok(vec![LoweredRelPredicate {
-            predicate: Predicate::IsNull(Operand::Column(column.column.clone())),
-            column: Some(column.column.clone()),
-            value: None,
-        }]),
-        RelPredicateExpr::IsNotNull { column } => Ok(vec![LoweredRelPredicate {
-            predicate: Predicate::Not(Box::new(Predicate::IsNull(Operand::Column(
-                column.column.clone(),
-            )))),
-            column: Some(column.column.clone()),
-            value: None,
-        }]),
-        RelPredicateExpr::Contains { left, right } => {
-            let LoweredRelValue::Operand(operand) =
-                rel_value_to_policy_operand(table, path, right)?
-            else {
-                return Err(err(
-                    format!("$.{}.{}", table.as_str(), path),
-                    "core schema ExistsRel Contains does not support row-id operands",
-                ));
-            };
-            Ok(vec![LoweredRelPredicate {
-                predicate: Predicate::Contains(Operand::Column(left.column.clone()), operand),
-                column: Some(left.column.clone()),
-                value: None,
-            }])
-        }
-        RelPredicateExpr::EnumMatch {
-            column,
-            case,
-            payload,
-        } => {
-            let payload = rel_predicate_to_policy(table, path, payload)?;
-            Ok(vec![LoweredRelPredicate {
-                predicate: Predicate::EnumMatch {
-                    column: column.column.clone(),
-                    case: case.clone(),
-                    payload: Box::new(Predicate::All(
-                        payload.into_iter().map(|part| part.predicate).collect(),
-                    )),
-                },
-                column: Some(column.column.clone()),
-                value: None,
-            }])
-        }
-        RelPredicateExpr::In { left, values } => {
-            let values = values
-                .iter()
-                .map(
-                    |value| match rel_value_to_policy_operand(table, path, value)? {
-                        LoweredRelValue::Operand(operand) => Ok(operand),
-                        _ => Err(err(
-                            format!("$.{}.{}", table.as_str(), path),
-                            "core schema ExistsRel In does not support row-id operands",
-                        )),
-                    },
-                )
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(vec![LoweredRelPredicate {
-                predicate: Predicate::In(Operand::Column(left.column.clone()), values),
-                column: Some(left.column.clone()),
-                value: None,
-            }])
-        }
-    }
+    let conjuncts = crate::query::lower_relation_conjuncts(predicate, &mut |value| {
+        rel_value_to_policy_operand(table, path, value).map_err(|error| error.message)
+    })
+    .map_err(|message| policy_error(table, path, message))?;
+    Ok(conjuncts
+        .into_iter()
+        .map(|conjunct| LoweredRelPredicate {
+            predicate: conjunct.predicate,
+            column: conjunct.column.map(|column| column.column.clone()),
+            value: conjunct.value,
+        })
+        .collect())
 }
 
 fn rel_predicates_to_policy(
     table: &TableName,
     path: &str,
-    predicates: &[&RelPredicateExpr],
+    predicates: &[&RelationPredicate],
 ) -> Result<Vec<LoweredRelPredicate>, SchemaConversionError> {
     let mut lowered = Vec::new();
     for predicate in predicates {
@@ -2908,23 +2703,39 @@ fn rel_predicates_to_policy(
 fn rel_value_to_policy_operand(
     table: &TableName,
     path: &str,
-    value: &RelValueRef,
+    value: &RelationValueRef,
 ) -> Result<LoweredRelValue, SchemaConversionError> {
     match value {
-        RelValueRef::Literal(value) => Ok(LoweredRelValue::Operand(Operand::Literal(
-            convert_policy_literal(table, path, value)?,
+        RelationValueRef::Literal(literal) => Ok(LoweredRelValue::Operand(Operand::Literal(
+            crate::query::relation_literal_to_record_value(literal)
+                .map_err(|message| policy_error(table, path, message))?,
         ))),
-        RelValueRef::SessionRef(path_segments) => Ok(LoweredRelValue::Operand(
+        RelationValueRef::SessionRef(path_segments) => Ok(LoweredRelValue::Operand(
             convert_session_path_operand(table, path, path_segments)?,
         )),
-        RelValueRef::OuterColumn(ColumnRef { column, .. }) => {
+        RelationValueRef::OuterColumn(RelationColumnRef { column, .. }) => {
             Ok(LoweredRelValue::OuterRow(column.clone()))
         }
-        RelValueRef::RowId(RowIdRef::Outer) => Ok(LoweredRelValue::OuterRow("id".to_owned())),
-        RelValueRef::RowId(RowIdRef::Frontier) => Ok(LoweredRelValue::FrontierRow),
-        RelValueRef::RowId(RowIdRef::Current) => Err(err(
-            format!("$.{}.{}", table.as_str(), path),
+        RelationValueRef::RowId(RelationRowIdRef::Outer) => {
+            Ok(LoweredRelValue::OuterRow("id".to_owned()))
+        }
+        // A gather step's one frontier equality is consumed by the gather
+        // recognizer; any other frontier read has no walk to bind to.
+        RelationValueRef::RowId(RelationRowIdRef::Frontier) => Err(err(
+            policy_path(table, path),
+            "Frontier row-id references outside a gather step are not supported in policies yet",
+        )),
+        RelationValueRef::RowId(RelationRowIdRef::Current) => Err(err(
+            policy_path(table, path),
             "core schema ExistsRel policies do not support Current row-id operands here",
+        )),
+        RelationValueRef::Param(_) => Err(err(
+            policy_path(table, path),
+            "core schema ExistsRel policies do not support query parameters",
+        )),
+        RelationValueRef::FrontierColumn(_) => Err(err(
+            policy_path(table, path),
+            "core schema ExistsRel policies do not support frontier column operands yet",
         )),
     }
 }
@@ -2949,26 +2760,24 @@ fn append_inherited_policy(
         .find(|column| column.name.as_str() == via_column)
         .ok_or_else(|| {
             err(
-                format!("$.{}.{}", table.as_str(), path),
+                policy_path(table, path),
                 format!("INHERITS via_column '{via_column}' was not found"),
             )
         })?;
     let parent_table = column.references.as_ref().ok_or_else(|| {
         err(
-            format!("$.{}.{}", table.as_str(), path),
+            policy_path(table, path),
             format!("INHERITS via_column '{via_column}' has no FK reference"),
         )
     })?;
     let parent_schema = schema.get(parent_table).ok_or_else(|| {
         err(
-            format!("$.{}.{}", table.as_str(), path),
+            policy_path(table, path),
             format!("INHERITS via_column '{via_column}' references unknown table '{parent_table}'"),
         )
     })?;
     let parent_policy = source_operation_policy(parent_schema, operation).ok_or_else(|| {
-        err(
-            format!("$.{}.{}", table.as_str(), path),
-            format!("INHERITS via_column '{via_column}' references table '{parent_table}' without a {operation:?} policy"),
+        err(policy_path(table, path), format!("INHERITS via_column '{via_column}' references table '{parent_table}' without a {operation:?} policy"),
         )
     })?;
     // A top-level SELECT inherit lowers through derivation collapse. When its
@@ -2978,7 +2787,7 @@ fn append_inherited_policy(
     if operation == Operation::Select && !native_select_inherits {
         if max_depth.is_some() {
             return Err(err(
-                format!("$.{}.{}", table.as_str(), path),
+                policy_path(table, path),
                 "bounded SELECT INHERITS under INHERITS_REFERENCING is unsupported because its expanded join chain cannot preserve max_depth",
             ));
         }
@@ -3267,7 +3076,7 @@ fn convert_policy_predicate(
                 CmpOp::Ne => Predicate::Ne(left, right),
                 CmpOp::Lt | CmpOp::Le | CmpOp::Gt | CmpOp::Ge => {
                     return Err(err(
-                        format!("$.{}.{}", table.as_str(), path),
+                        policy_path(table, path),
                         "core schema policies only support Eq/Ne SessionCmp operators yet",
                     ));
                 }
@@ -3325,7 +3134,7 @@ fn convert_policy_predicate(
                     .map(|operand| Predicate::In(operand, values))
             }),
         other => Err(err(
-            format!("$.{}.{}", table.as_str(), path),
+            policy_path(table, path),
             format!("core schema policies do not support {other:?} yet"),
         )),
     }
@@ -3368,7 +3177,7 @@ fn convert_session_path_operand(
         ));
     }
     Err(err(
-        format!("$.{}.{}", table.as_str(), path),
+        policy_path(table, path),
         format!(
             "core schema policies only support session.user, session.authMode, and provider claims through session.claims; got session.{}",
             path_segments.join(".")
@@ -3380,53 +3189,65 @@ fn convert_policy_literal(
     table: &TableName,
     path: &str,
     value: &Value,
-) -> Result<GrooveValue, SchemaConversionError> {
-    match value {
-        Value::Null => Ok(GrooveValue::Nullable(None)),
-        Value::Boolean(value) => Ok(GrooveValue::Bool(*value)),
-        Value::Text(value) => Ok(GrooveValue::String(value.clone())),
-        Value::Integer(value) => Ok(GrooveValue::I32(*value)),
-        Value::BigInt(value) => Ok(GrooveValue::I64(*value)),
-        Value::Double(value) if value.is_finite() => Ok(GrooveValue::F64(*value)),
-        Value::Double(_) => Err(err(
-            format!("$.{}.{}", table.as_str(), path),
-            "core schema policy floating-point literals must be finite numbers",
-        )),
-        Value::Timestamp(value) => Ok(GrooveValue::U64(*value)),
-        Value::Uuid(value) => Ok(GrooveValue::Uuid(*value.uuid())),
-        Value::Bytea(value) => Ok(GrooveValue::Bytes(value.clone())),
-        Value::Array(values) => values
+) -> Result<RecordValue, SchemaConversionError> {
+    // Recurse here so an error names the offending array element's path.
+    if let Value::Array(values) = value {
+        return values
             .iter()
             .enumerate()
             .map(|(index, value)| {
                 convert_policy_literal(table, &format!("{path}.Array[{index}]"), value)
             })
             .collect::<Result<Vec<_>, _>>()
-            .map(GrooveValue::Array),
-        other => Err(err(
-            format!("$.{}.{}", table.as_str(), path),
-            format!("core schema policies do not support {other:?} literals yet"),
-        )),
+            .map(RecordValue::Array);
     }
+    crate::query::public_value_to_record_value(value)
+        .map_err(|message| policy_error(table, path, message))
+}
+
+/// A shared relation error, worded for policies.
+fn policy_error(table: &TableName, path: &str, message: String) -> SchemaConversionError {
+    err(
+        policy_path(table, path),
+        message.replace("not supported yet", "not supported in policies yet"),
+    )
 }
 
 fn err(path: impl Into<String>, message: impl Into<String>) -> SchemaConversionError {
     SchemaConversionError::new(path, message)
 }
 
+/// The error path of `path` within `table`'s policies.
+fn policy_path(table: &TableName, path: &str) -> String {
+    format!("$.{}.{path}", table.as_str())
+}
+
+/// An error about `column` of `table`, reported at `$.<table>.<column>`.
+fn column_err(
+    table: &TableName,
+    column: &str,
+    message: impl Into<String>,
+) -> SchemaConversionError {
+    err(format!("$.{}.{column}", table.as_str()), message)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::public_api::policy::{CmpOp, PolicyValue};
-    use crate::model::public_api::relation_ir::{
-        ColumnRef as RelColumnRef, JoinCondition as RelJoinCondition, JoinKind as RelJoinKind,
-        KeyRef as RelKeyRef, PredicateCmpOp as RelPredicateCmpOp,
-        PredicateExpr as RelPredicateExpr, RecursionBound as RelRecursionBound,
-        RelExpr as PublicRelExpr, RowIdRef as RelRowIdRef, ValueRef as RelValueRef,
-    };
     use crate::object::ObjectId;
+    use crate::query::RelationProjectColumn;
     use crate::query::provider_claim_operand_key;
     use crate::query::{InheritsOperation, JoinTarget, Operand, Predicate};
+
+    #[test]
+    fn rebasing_sibling_routes_accounts_for_the_removed_join() {
+        // Joins [a, b, c] with b (index 1) re-rooted: the reversed edge holds [a, c].
+        assert_eq!(rebase_sibling_route(&[0], 1, 4), vec![4, 0]);
+        assert_eq!(rebase_sibling_route(&[2], 1, 4), vec![4, 1]);
+        assert_eq!(rebase_sibling_route(&[2, 3], 1, 4), vec![4, 1, 3]);
+    }
+
     #[test]
     fn rejects_user_columns_in_the_compiler_aggregate_namespace() {
         let schema = SchemaBuilder::new()
@@ -3481,8 +3302,8 @@ mod tests {
         let compiled =
             JazzSchema::new(&schema).expect("column names may be reused in different tables");
         for (name, column_type) in [
-            ("items", GrooveColumnType::String),
-            ("counts", GrooveColumnType::I32),
+            ("items", StorageColumnType::String),
+            ("counts", StorageColumnType::I32),
         ] {
             let table = compiled
                 .tables()
@@ -3764,7 +3585,7 @@ mod tests {
                 .find(|column| column.name == "done")
                 .unwrap()
                 .column_type,
-            GrooveColumnType::Bool
+            StorageColumnType::Bool
         );
     }
 
@@ -3787,7 +3608,7 @@ mod tests {
                 .find(|column| column.name == "count")
                 .unwrap()
                 .column_type,
-            GrooveColumnType::I32
+            StorageColumnType::I32
         );
 
         let integer_array_schema = SchemaBuilder::new()
@@ -3812,7 +3633,7 @@ mod tests {
                 .find(|column| column.name == "partSizes")
                 .unwrap()
                 .column_type,
-            GrooveColumnType::I32.array_of()
+            StorageColumnType::I32.array_of()
         );
 
         let numeric_default_schema = SchemaBuilder::new()
@@ -3844,14 +3665,14 @@ mod tests {
                 .map(|column| (column.name.as_str(), &column.default))
                 .collect::<Vec<_>>(),
             vec![
-                ("integer", &Some(GrooveValue::I32(-7))),
-                ("bigint", &Some(GrooveValue::I64(-7))),
-                ("bigint_literal", &Some(GrooveValue::I64(-7))),
+                ("integer", &Some(RecordValue::I32(-7))),
+                ("bigint", &Some(RecordValue::I64(-7))),
+                ("bigint_literal", &Some(RecordValue::I64(-7))),
                 (
                     "integers",
-                    &Some(GrooveValue::Array(vec![
-                        GrooveValue::I32(-7),
-                        GrooveValue::I32(8),
+                    &Some(RecordValue::Array(vec![
+                        RecordValue::I32(-7),
+                        RecordValue::I32(8),
                     ])),
                 ),
             ]
@@ -3880,7 +3701,7 @@ mod tests {
                 .find(|column| column.name == "title")
                 .unwrap()
                 .column_type,
-            GrooveColumnType::String
+            StorageColumnType::String
         );
         assert_eq!(
             default_table
@@ -3889,7 +3710,7 @@ mod tests {
                 .find(|column| column.name == "title")
                 .unwrap()
                 .default,
-            Some(GrooveValue::String("x".to_owned()))
+            Some(RecordValue::String("x".to_owned()))
         );
     }
 
@@ -3919,7 +3740,7 @@ mod tests {
     }
 
     #[test]
-    fn converts_declared_scalar_enum_text_default_as_groove_string() {
+    fn converts_declared_scalar_enum_text_default_as_string() {
         let schema = SchemaBuilder::new()
             .table(TableSchema::builder("items").column_with_default(
                 "status",
@@ -3943,10 +3764,10 @@ mod tests {
             .find(|column| column.name == "status")
             .expect("status column must be present");
 
-        assert_eq!(status.column_type, GrooveColumnType::String);
+        assert_eq!(status.column_type, StorageColumnType::String);
         assert_eq!(
             status.default,
-            Some(GrooveValue::String("published".to_owned()))
+            Some(RecordValue::String("published".to_owned()))
         );
     }
 
@@ -4003,7 +3824,7 @@ mod tests {
             .iter()
             .find(|column| column.name == "nullable_status")
             .expect("nullable enum column must be present");
-        assert_eq!(nullable_status.default, Some(GrooveValue::Nullable(None)));
+        assert_eq!(nullable_status.default, Some(RecordValue::Nullable(None)));
 
         let required_schema = Schema::from([(
             TableName::new("items"),
@@ -4063,15 +3884,15 @@ mod tests {
             .find(|column| column.name == "event")
             .and_then(|column| column.default.as_ref())
             .unwrap();
-        let GrooveValue::Enum(value) = default else {
+        let RecordValue::Enum(value) = default else {
             panic!("expected a payload enum default");
         };
         assert_eq!(value.tag(), 0);
         assert_eq!(
             value.record().to_values().unwrap(),
             vec![
-                GrooveValue::String("hello".to_owned()),
-                GrooveValue::Nullable(None),
+                RecordValue::String("hello".to_owned()),
+                RecordValue::Nullable(None),
             ]
         );
     }
@@ -4086,9 +3907,11 @@ mod tests {
                         cases: (0..257)
                             .map(|ordinal| EnumCaseDescriptor {
                                 name: format!("case-{ordinal}"),
-                                fields: (ordinal == 256)
-                                    .then(|| vec![ColumnDescriptor::new("text", ColumnType::Text)])
-                                    .unwrap_or_default(),
+                                fields: if ordinal == 256 {
+                                    vec![ColumnDescriptor::new("text", ColumnType::Text)]
+                                } else {
+                                    Vec::new()
+                                },
                             })
                             .collect(),
                     },
@@ -4111,7 +3934,7 @@ mod tests {
             .iter()
             .find(|column| column.name == "event")
             .unwrap();
-        let GrooveColumnType::Enum(payload_enum) = &event.column_type else {
+        let StorageColumnType::Enum(payload_enum) = &event.column_type else {
             panic!("payload enum column expected");
         };
 
@@ -4119,15 +3942,15 @@ mod tests {
         assert_eq!(payload_enum.tag("case-256").unwrap(), 256);
         assert_eq!(
             &payload_enum.cases[256].payload.fields()[0].value_type,
-            &GrooveColumnType::String
+            &StorageColumnType::String
         );
-        let Some(GrooveValue::Enum(default)) = &event.default else {
+        let Some(RecordValue::Enum(default)) = &event.default else {
             panic!("payload enum default expected");
         };
         assert_eq!(default.tag(), 256);
         assert_eq!(
             default.record().to_values().unwrap(),
-            vec![GrooveValue::String("wide default".to_owned())]
+            vec![RecordValue::String("wide default".to_owned())]
         );
     }
 
@@ -4274,7 +4097,7 @@ mod tests {
         let values = descriptor
             .fields()
             .iter()
-            .map(|field| sample_groove_value(&field.value_type))
+            .map(|field| sample_record_value(&field.value_type))
             .collect::<Vec<_>>();
         let record = descriptor.create(&values).unwrap();
         let score_idx = descriptor.field_index("_app_score").unwrap();
@@ -4282,52 +4105,55 @@ mod tests {
 
         assert_eq!(
             descriptor.bind(&record).get_idx(score_idx).unwrap(),
-            GrooveValue::Nullable(Some(Box::new(GrooveValue::I32(-5))))
+            RecordValue::Nullable(Some(Box::new(RecordValue::I32(-5))))
         );
         assert_eq!(score_span.end - score_span.start, 5);
         assert_eq!(score_span.end - score_span.start - 1, 4);
     }
 
-    fn sample_groove_value(value_type: &crate::groove::records::ValueType) -> GrooveValue {
+    fn sample_record_value(value_type: &jazz_types::records::ValueType) -> RecordValue {
         match value_type {
-            crate::groove::records::ValueType::U8 => GrooveValue::U8(1),
-            crate::groove::records::ValueType::U16 => GrooveValue::U16(2),
-            crate::groove::records::ValueType::U32 => GrooveValue::U32(3),
-            crate::groove::records::ValueType::U64 => GrooveValue::U64(4),
-            crate::groove::records::ValueType::I32 => GrooveValue::I32(-5),
-            crate::groove::records::ValueType::I64 => GrooveValue::I64(-6),
-            crate::groove::records::ValueType::F64 => GrooveValue::F64(7.0),
-            crate::groove::records::ValueType::Bool => GrooveValue::Bool(true),
-            crate::groove::records::ValueType::String => GrooveValue::String("value".to_owned()),
-            crate::groove::records::ValueType::Bytes => GrooveValue::Bytes(vec![8]),
-            crate::groove::records::ValueType::Internal(_) => {
-                panic!("public schemas must not contain Groove internal storage types")
+            jazz_types::records::ValueType::U8 => RecordValue::U8(1),
+            jazz_types::records::ValueType::U16 => RecordValue::U16(2),
+            jazz_types::records::ValueType::U32 => RecordValue::U32(3),
+            jazz_types::records::ValueType::U64 => RecordValue::U64(4),
+            jazz_types::records::ValueType::U48 => RecordValue::U48(4),
+            jazz_types::records::ValueType::I32 => RecordValue::I32(-5),
+            jazz_types::records::ValueType::I64 => RecordValue::I64(-6),
+            jazz_types::records::ValueType::F64 => RecordValue::F64(7.0),
+            jazz_types::records::ValueType::Bool => RecordValue::Bool(true),
+            jazz_types::records::ValueType::String => RecordValue::String("value".to_owned()),
+            jazz_types::records::ValueType::Bytes => RecordValue::Bytes(vec![8]),
+            // Author columns hold dictionary codes.
+            value_type if value_type.as_interned().is_some() => RecordValue::U32(0),
+            jazz_types::records::ValueType::Internal(_) => {
+                panic!("public schemas must not contain internal storage types")
             }
-            crate::groove::records::ValueType::Uuid => GrooveValue::Uuid(Uuid::from_bytes([9; 16])),
-            crate::groove::records::ValueType::EnumTag(_) => GrooveValue::EnumTag(0),
-            crate::groove::records::ValueType::Tuple(members) => {
-                GrooveValue::Tuple(members.iter().map(sample_groove_value).collect::<Vec<_>>())
+            jazz_types::records::ValueType::Uuid => RecordValue::Uuid(Uuid::from_bytes([9; 16])),
+            jazz_types::records::ValueType::EnumTag(_) => RecordValue::EnumTag(0),
+            jazz_types::records::ValueType::Tuple(members) => {
+                RecordValue::Tuple(members.iter().map(sample_record_value).collect::<Vec<_>>())
             }
-            crate::groove::records::ValueType::Array(_) => GrooveValue::Array(Vec::new()),
-            crate::groove::records::ValueType::Nullable(inner) => {
-                GrooveValue::Nullable(Some(Box::new(sample_groove_value(inner))))
+            jazz_types::records::ValueType::Array(_) => RecordValue::Array(Vec::new()),
+            jazz_types::records::ValueType::Nullable(inner) => {
+                RecordValue::Nullable(Some(Box::new(sample_record_value(inner))))
             }
-            crate::groove::records::ValueType::Record(descriptor) => {
-                GrooveValue::Record(crate::groove::records::OwnedRecord::new(
+            jazz_types::records::ValueType::Record(descriptor) => {
+                RecordValue::Record(jazz_types::records::OwnedRecord::new(
                     descriptor
                         .create(
                             &descriptor
                                 .fields()
                                 .iter()
-                                .map(|field| sample_groove_value(&field.value_type))
+                                .map(|field| sample_record_value(&field.value_type))
                                 .collect::<Vec<_>>(),
                         )
                         .unwrap(),
                     **descriptor,
                 ))
             }
-            crate::groove::records::ValueType::Enum(_) => {
-                panic!("Jazz public schema conversion must not receive whole-row Groove enums")
+            jazz_types::records::ValueType::Enum(_) => {
+                panic!("public schema conversion must not receive whole-row enums")
             }
         }
     }
@@ -4367,7 +4193,7 @@ mod tests {
                 .find(|column| column.name == "payload")
                 .unwrap()
                 .column_type,
-            GrooveColumnType::String
+            StorageColumnType::String
         );
         assert_eq!(
             table
@@ -4386,7 +4212,7 @@ mod tests {
                 .find(|column| column.name == "metadata")
                 .unwrap()
                 .column_type,
-            GrooveColumnType::String.nullable()
+            StorageColumnType::String.nullable()
         );
         assert_eq!(
             table
@@ -4419,7 +4245,7 @@ mod tests {
                 .find(|column| column.name == "count")
                 .unwrap()
                 .column_type,
-            GrooveColumnType::I64
+            StorageColumnType::I64
         );
     }
 
@@ -4512,7 +4338,7 @@ mod tests {
                 ),
                 Predicate::Not(Box::new(Predicate::Eq(
                     Operand::Column("archived".to_owned()),
-                    Operand::Literal(GrooveValue::Bool(false)),
+                    Operand::Literal(RecordValue::Bool(false)),
                 ))),
                 Predicate::Any(vec![
                     Predicate::IsNull(Operand::Column("deleted_at".to_owned())),
@@ -4534,7 +4360,7 @@ mod tests {
             todos.write_policies.insert_check.as_ref().unwrap().filters,
             vec![Predicate::Eq(
                 Operand::Column("token_id".to_owned()),
-                Operand::Literal(GrooveValue::Uuid(Uuid::nil())),
+                Operand::Literal(RecordValue::Uuid(Uuid::nil())),
             )]
         );
     }
@@ -4581,21 +4407,21 @@ mod tests {
             vec![
                 Predicate::Eq(
                     Operand::Column("occurred_at".to_owned()),
-                    Operand::Literal(GrooveValue::U64(1_767_323_045_000)),
+                    Operand::Literal(RecordValue::U64(1_767_323_045_000)),
                 ),
                 Predicate::Eq(
                     Operand::Column("ratio".to_owned()),
-                    Operand::Literal(GrooveValue::F64(1.5)),
+                    Operand::Literal(RecordValue::F64(1.5)),
                 ),
                 Predicate::Eq(
                     Operand::Column("digest".to_owned()),
-                    Operand::Literal(GrooveValue::Bytes(vec![1, 2, 3])),
+                    Operand::Literal(RecordValue::Bytes(vec![1, 2, 3])),
                 ),
                 Predicate::Eq(
                     Operand::Column("roles".to_owned()),
-                    Operand::Literal(GrooveValue::Array(vec![
-                        GrooveValue::String("owner".to_owned()),
-                        GrooveValue::String("editor".to_owned()),
+                    Operand::Literal(RecordValue::Array(vec![
+                        RecordValue::String("owner".to_owned()),
+                        RecordValue::String("editor".to_owned()),
                     ])),
                 ),
             ]
@@ -4630,7 +4456,7 @@ mod tests {
             );
             assert_eq!(
                 error.message,
-                "core schema policy floating-point literals must be finite numbers"
+                "floating-point literals must be finite numbers"
             );
         }
     }
@@ -4660,7 +4486,7 @@ mod tests {
             messages.read_policy.as_ref().unwrap().filters,
             vec![Predicate::Eq(
                 Operand::Claim("authMode".to_owned()),
-                Operand::Literal(GrooveValue::String("external".to_owned())),
+                Operand::Literal(RecordValue::String("external".to_owned())),
             )]
         );
     }
@@ -4671,19 +4497,19 @@ mod tests {
         let mut filters = vec![
             Predicate::Eq(
                 Operand::Column("id".to_owned()),
-                Operand::Literal(GrooveValue::String(
+                Operand::Literal(RecordValue::String(
                     "00000000-0000-4000-8000-000000000001".to_owned(),
                 )),
             ),
             Predicate::Eq(
                 Operand::Column("$createdBy".to_owned()),
-                Operand::Literal(GrooveValue::String(
+                Operand::Literal(RecordValue::String(
                     r#"["https://issuer.example","alice"]"#.to_owned(),
                 )),
             ),
             Predicate::Eq(
                 Operand::Column("$updatedBy".to_owned()),
-                Operand::Literal(GrooveValue::String(
+                Operand::Literal(RecordValue::String(
                     r#"["https://issuer.example","alice"]"#.to_owned(),
                 )),
             ),
@@ -4696,19 +4522,19 @@ mod tests {
             vec![
                 Predicate::Eq(
                     Operand::Column("id".to_owned()),
-                    Operand::Literal(GrooveValue::Uuid(
+                    Operand::Literal(RecordValue::Uuid(
                         Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap()
                     )),
                 ),
                 Predicate::Eq(
                     Operand::Column("$createdBy".to_owned()),
-                    Operand::Literal(GrooveValue::String(
+                    Operand::Literal(RecordValue::String(
                         r#"["https://issuer.example","alice"]"#.to_owned(),
                     )),
                 ),
                 Predicate::Eq(
                     Operand::Column("$updatedBy".to_owned()),
-                    Operand::Literal(GrooveValue::String(
+                    Operand::Literal(RecordValue::String(
                         r#"["https://issuer.example","alice"]"#.to_owned(),
                     )),
                 ),
@@ -4744,7 +4570,7 @@ mod tests {
         let Err(bare_sub) = rel_value_to_policy_operand(
             &table,
             path,
-            &RelValueRef::SessionRef(vec!["sub".to_owned()]),
+            &RelationValueRef::SessionRef(vec!["sub".to_owned()]),
         ) else {
             panic!("relation policies must not expose JWT sub");
         };
@@ -4754,7 +4580,7 @@ mod tests {
         let user_id = rel_value_to_policy_operand(
             &table,
             path,
-            &RelValueRef::SessionRef(vec!["claims".to_owned(), "sub".to_owned()]),
+            &RelationValueRef::SessionRef(vec!["claims".to_owned(), "sub".to_owned()]),
         )
         .expect("raw provider sub is supported through session.claims");
         assert!(matches!(
@@ -4765,7 +4591,7 @@ mod tests {
         let user = rel_value_to_policy_operand(
             &table,
             path,
-            &RelValueRef::SessionRef(vec!["user".to_owned()]),
+            &RelationValueRef::SessionRef(vec!["user".to_owned()]),
         )
         .expect("user is a supported canonical provenance session field");
         assert!(matches!(
@@ -4777,7 +4603,9 @@ mod tests {
             rel_value_to_policy_operand(
                 &table,
                 path,
-                &RelValueRef::SessionRef(path_segments.into_iter().map(str::to_owned).collect()),
+                &RelationValueRef::SessionRef(
+                    path_segments.into_iter().map(str::to_owned).collect(),
+                ),
             )
             .expect("documented public session aliases are supported");
         }
@@ -4785,7 +4613,7 @@ mod tests {
         let nested_user = rel_value_to_policy_operand(
             &table,
             path,
-            &RelValueRef::SessionRef(vec!["claims".to_owned(), "user".to_owned()]),
+            &RelationValueRef::SessionRef(vec!["claims".to_owned(), "user".to_owned()]),
         )
         .expect("provider claim `user` coexists under the claims namespace");
         assert!(matches!(nested_user,
@@ -4795,7 +4623,7 @@ mod tests {
         let claim = rel_value_to_policy_operand(
             &table,
             path,
-            &RelValueRef::SessionRef(vec!["claims".to_owned(), "role".to_owned()]),
+            &RelationValueRef::SessionRef(vec!["claims".to_owned(), "role".to_owned()]),
         )
         .expect("one-level session claims are supported");
         assert!(matches!(
@@ -5027,7 +4855,7 @@ mod tests {
             join.filters,
             vec![Predicate::Eq(
                 Operand::Column("isPublic".to_owned()),
-                Operand::Literal(GrooveValue::Bool(true)),
+                Operand::Literal(RecordValue::Bool(true)),
             )]
         );
     }
@@ -5245,7 +5073,7 @@ mod tests {
             policy.policy_branches[0].filters,
             vec![Predicate::Eq(
                 Operand::Column("visibility".to_owned()),
-                Operand::Literal(GrooveValue::String("public".to_owned())),
+                Operand::Literal(RecordValue::String("public".to_owned())),
             )]
         );
         assert_eq!(policy.policy_branches[0].joins.len(), 0);
@@ -5364,7 +5192,7 @@ mod tests {
             policy.filters,
             vec![Predicate::Eq(
                 Operand::Column("published".to_owned()),
-                Operand::Literal(GrooveValue::Bool(true)),
+                Operand::Literal(RecordValue::Bool(true)),
             )]
         );
         assert_eq!(policy.inherits.len(), 1);
@@ -5480,8 +5308,8 @@ mod tests {
             vec![Predicate::In(
                 Operand::Claim(provider_claim_operand_key("role")),
                 vec![
-                    Operand::Literal(GrooveValue::String(legacy_role_id.uuid().to_string())),
-                    Operand::Literal(GrooveValue::String("member".to_owned())),
+                    Operand::Literal(RecordValue::String(legacy_role_id.uuid().to_string())),
+                    Operand::Literal(RecordValue::String("member".to_owned())),
                 ],
             )]
         );
@@ -5512,7 +5340,7 @@ mod tests {
             policy.filters,
             vec![Predicate::Eq(
                 Operand::Claim(provider_claim_operand_key("role")),
-                Operand::Literal(GrooveValue::String("admin".to_owned())),
+                Operand::Literal(RecordValue::String("admin".to_owned())),
             )]
         );
     }
@@ -5557,8 +5385,8 @@ mod tests {
             vec![Predicate::In(
                 Operand::Column("grant_role".to_owned()),
                 vec![
-                    Operand::Literal(GrooveValue::String("VIEWER".to_owned())),
-                    Operand::Literal(GrooveValue::Uuid(*legacy_role_id.uuid())),
+                    Operand::Literal(RecordValue::String("VIEWER".to_owned())),
+                    Operand::Literal(RecordValue::Uuid(*legacy_role_id.uuid())),
                 ],
             )]
         );
@@ -5566,49 +5394,79 @@ mod tests {
 
     #[test]
     fn lowers_projected_gather_seed_from_membership_hop() {
-        let seed = PublicRelExpr::Project {
-            input: Box::new(PublicRelExpr::Join {
-                left: Box::new(PublicRelExpr::Filter {
-                    input: Box::new(PublicRelExpr::TableScan {
+        let seed = RelationExpr::Project {
+            input: Box::new(RelationExpr::Join {
+                left: Box::new(RelationExpr::Filter {
+                    input: Box::new(RelationExpr::TableScan {
                         table: "team_entry".into(),
                         alias: None,
                     }),
-                    predicate: RelPredicateExpr::Cmp {
-                        left: RelColumnRef {
+                    predicate: RelationPredicate::Cmp {
+                        left: RelationColumnRef {
                             scope: None,
                             column: "team_id".to_owned(),
                         },
-                        op: RelPredicateCmpOp::Eq,
-                        right: RelValueRef::SessionRef(vec!["claims".to_owned(), "sub".to_owned()]),
+                        op: RelationCmpOp::Eq,
+                        right: RelationValueRef::SessionRef(vec![
+                            "claims".to_owned(),
+                            "sub".to_owned(),
+                        ]),
                     },
                 }),
-                right: Box::new(PublicRelExpr::TableScan {
+                right: Box::new(RelationExpr::TableScan {
                     table: "teams".into(),
                     alias: Some("target".to_owned()),
                 }),
-                on: vec![RelJoinCondition {
-                    left: RelColumnRef {
+                on: vec![RelationJoinCondition {
+                    left: RelationColumnRef {
                         scope: None,
                         column: "target".to_owned(),
                     },
-                    right: RelColumnRef {
+                    right: RelationColumnRef {
                         scope: Some("target".to_owned()),
                         column: "id".to_owned(),
                     },
                 }],
-                join_kind: RelJoinKind::Inner,
+                join_kind: RelationJoinKind::Inner,
             }),
-            columns: vec![crate::model::public_api::relation_ir::ProjectColumn {
+            columns: vec![RelationProjectColumn {
                 alias: "id".to_owned(),
-                expr: RelProjectExpr::Column(RelColumnRef {
+                expr: RelationProjectExpr::Column(RelationColumnRef {
                     scope: Some("target".to_owned()),
                     column: "id".to_owned(),
                 }),
             }],
         };
 
+        let step = RelationExpr::Project {
+            input: Box::new(RelationExpr::Filter {
+                input: Box::new(RelationExpr::TableScan {
+                    table: "teams".into(),
+                    alias: None,
+                }),
+                predicate: RelationPredicate::Cmp {
+                    left: RelationColumnRef::unscoped("id"),
+                    op: RelationCmpOp::Eq,
+                    right: RelationValueRef::RowId(RelationRowIdRef::Frontier),
+                },
+            }),
+            columns: vec![RelationProjectColumn {
+                alias: "id".to_owned(),
+                expr: RelationProjectExpr::Column(RelationColumnRef::unscoped("parent")),
+            }],
+        };
+        let current_row = RelationKeyRef::RowId(RelationRowIdRef::Current);
+        let bound = RecursionBound::MaxDepth(4);
+        let shape = crate::query::recognize_relation_gather(
+            &seed,
+            &step,
+            &current_row,
+            &bound,
+            std::slice::from_ref(&current_row),
+        )
+        .unwrap();
         let (_from, lowered) =
-            lower_gather_seed(&TableName::new("resources"), "policy", &seed).unwrap();
+            lower_gather_seed(&TableName::new("resources"), "policy", &shape.seed).unwrap();
         assert_eq!(lowered.table, "team_entry");
         assert_eq!(lowered.user_column.as_deref(), Some("team_id"));
         assert_eq!(lowered.user_claim.as_deref(), Some(DIRECT_USER_ID_CLAIM));
@@ -5749,101 +5607,104 @@ mod tests {
             )
             .build();
 
-        let seed = PublicRelExpr::Project {
-            input: Box::new(PublicRelExpr::Filter {
-                input: Box::new(PublicRelExpr::TableScan {
+        let seed = RelationExpr::Project {
+            input: Box::new(RelationExpr::Filter {
+                input: Box::new(RelationExpr::TableScan {
                     table: "teams".into(),
                     alias: None,
                 }),
-                predicate: RelPredicateExpr::Cmp {
-                    left: RelColumnRef {
+                predicate: RelationPredicate::Cmp {
+                    left: RelationColumnRef {
                         scope: None,
                         column: "identity_key".to_owned(),
                     },
-                    op: RelPredicateCmpOp::Eq,
-                    right: RelValueRef::SessionRef(vec!["claims".to_owned(), "sub".to_owned()]),
+                    op: RelationCmpOp::Eq,
+                    right: RelationValueRef::SessionRef(vec![
+                        "claims".to_owned(),
+                        "sub".to_owned(),
+                    ]),
                 },
             }),
-            columns: vec![crate::model::public_api::relation_ir::ProjectColumn {
+            columns: vec![RelationProjectColumn {
                 alias: "id".to_owned(),
-                expr: RelProjectExpr::Column(RelColumnRef {
+                expr: RelationProjectExpr::Column(RelationColumnRef {
                     scope: None,
                     column: "id".to_owned(),
                 }),
             }],
         };
-        let step = PublicRelExpr::Project {
-            input: Box::new(PublicRelExpr::Join {
-                left: Box::new(PublicRelExpr::Filter {
-                    input: Box::new(PublicRelExpr::TableScan {
+        let step = RelationExpr::Project {
+            input: Box::new(RelationExpr::Join {
+                left: Box::new(RelationExpr::Filter {
+                    input: Box::new(RelationExpr::TableScan {
                         table: "team_team_edges".into(),
                         alias: None,
                     }),
-                    predicate: RelPredicateExpr::Cmp {
-                        left: RelColumnRef {
+                    predicate: RelationPredicate::Cmp {
+                        left: RelationColumnRef {
                             scope: None,
                             column: "child_team".to_owned(),
                         },
-                        op: RelPredicateCmpOp::Eq,
-                        right: RelValueRef::RowId(RelRowIdRef::Frontier),
+                        op: RelationCmpOp::Eq,
+                        right: RelationValueRef::RowId(RelationRowIdRef::Frontier),
                     },
                 }),
-                right: Box::new(PublicRelExpr::TableScan {
+                right: Box::new(RelationExpr::TableScan {
                     table: "teams".into(),
                     alias: None,
                 }),
-                on: vec![RelJoinCondition {
-                    left: RelColumnRef {
+                on: vec![RelationJoinCondition {
+                    left: RelationColumnRef {
                         scope: None,
                         column: "parent_team".to_owned(),
                     },
-                    right: RelColumnRef {
+                    right: RelationColumnRef {
                         scope: None,
                         column: "id".to_owned(),
                     },
                 }],
-                join_kind: RelJoinKind::Inner,
+                join_kind: RelationJoinKind::Inner,
             }),
-            columns: vec![crate::model::public_api::relation_ir::ProjectColumn {
+            columns: vec![RelationProjectColumn {
                 alias: "id".to_owned(),
-                expr: RelProjectExpr::Column(RelColumnRef {
-                    scope: None,
+                expr: RelationProjectExpr::Column(RelationColumnRef {
+                    scope: Some("teams".to_owned()),
                     column: "id".to_owned(),
                 }),
             }],
         };
-        let access_rel = PublicRelExpr::Filter {
-            input: Box::new(PublicRelExpr::Join {
-                left: Box::new(PublicRelExpr::Gather {
+        let access_rel = RelationExpr::Filter {
+            input: Box::new(RelationExpr::Join {
+                left: Box::new(RelationExpr::Gather {
                     seed: Box::new(seed),
                     step: Box::new(step),
-                    frontier_key: RelKeyRef::RowId(RelRowIdRef::Current),
-                    bound: RelRecursionBound::MaxDepth(8),
-                    dedupe_key: vec![RelKeyRef::RowId(RelRowIdRef::Current)],
+                    frontier_key: RelationKeyRef::RowId(RelationRowIdRef::Current),
+                    bound: RecursionBound::MaxDepth(8),
+                    dedupe_key: vec![RelationKeyRef::RowId(RelationRowIdRef::Current)],
                 }),
-                right: Box::new(PublicRelExpr::TableScan {
+                right: Box::new(RelationExpr::TableScan {
                     table: "resource_access_edges".into(),
                     alias: Some("access".to_owned()),
                 }),
-                on: vec![RelJoinCondition {
-                    left: RelColumnRef {
+                on: vec![RelationJoinCondition {
+                    left: RelationColumnRef {
                         scope: None,
                         column: "id".to_owned(),
                     },
-                    right: RelColumnRef {
+                    right: RelationColumnRef {
                         scope: Some("access".to_owned()),
                         column: "team".to_owned(),
                     },
                 }],
-                join_kind: RelJoinKind::Inner,
+                join_kind: RelationJoinKind::Inner,
             }),
-            predicate: RelPredicateExpr::Cmp {
-                left: RelColumnRef {
+            predicate: RelationPredicate::Cmp {
+                left: RelationColumnRef {
                     scope: Some("access".to_owned()),
                     column: "resource".to_owned(),
                 },
-                op: RelPredicateCmpOp::Eq,
-                right: RelValueRef::RowId(RelRowIdRef::Outer),
+                op: RelationCmpOp::Eq,
+                right: RelationValueRef::RowId(RelationRowIdRef::Outer),
             },
         };
 
@@ -6147,112 +6008,112 @@ mod tests {
                 TableSchemaBuilder::new("resources")
                     .column("label", ColumnType::Text)
                     .policies(TablePolicies::new().with_select(PolicyExpr::ExistsRel {
-                        rel: PublicRelExpr::Filter {
-                            input: Box::new(PublicRelExpr::Join {
-                                left: Box::new(PublicRelExpr::Gather {
-                                    seed: Box::new(PublicRelExpr::Project {
-                                        input: Box::new(PublicRelExpr::Filter {
-                                            input: Box::new(PublicRelExpr::TableScan {
+                        rel: RelationExpr::Filter {
+                            input: Box::new(RelationExpr::Join {
+                                left: Box::new(RelationExpr::Gather {
+                                    seed: Box::new(RelationExpr::Project {
+                                        input: Box::new(RelationExpr::Filter {
+                                            input: Box::new(RelationExpr::TableScan {
                                                 table: "user_team_edges".into(),
                                                 alias: None,
                                             }),
-                                            predicate: RelPredicateExpr::Cmp {
-                                                left: RelColumnRef {
+                                            predicate: RelationPredicate::Cmp {
+                                                left: RelationColumnRef {
                                                     scope: Some("user_team_edges".to_owned()),
                                                     column: "user_id".to_owned(),
                                                 },
-                                                op: RelPredicateCmpOp::Eq,
-                                                right: RelValueRef::SessionRef(vec![
+                                                op: RelationCmpOp::Eq,
+                                                right: RelationValueRef::SessionRef(vec![
                                                     "claims".to_owned(),
                                                     "sub".to_owned(),
                                                 ]),
                                             },
                                         }),
-                                        columns: vec![
-                                            crate::model::public_api::relation_ir::ProjectColumn {
-                                                alias: "id".to_owned(),
-                                                expr: RelProjectExpr::Column(RelColumnRef {
-                                                    scope: Some("user_team_edges".to_owned()),
-                                                    column: "team".to_owned(),
-                                                }),
-                                            },
-                                        ],
+                                        columns: vec![RelationProjectColumn {
+                                            alias: "id".to_owned(),
+                                            expr: RelationProjectExpr::Column(RelationColumnRef {
+                                                scope: Some("user_team_edges".to_owned()),
+                                                column: "team".to_owned(),
+                                            }),
+                                        }],
                                     }),
-                                    step: Box::new(PublicRelExpr::Project {
-                                        input: Box::new(PublicRelExpr::Filter {
-                                            input: Box::new(PublicRelExpr::TableScan {
+                                    step: Box::new(RelationExpr::Project {
+                                        input: Box::new(RelationExpr::Filter {
+                                            input: Box::new(RelationExpr::TableScan {
                                                 table: "team_team_edges".into(),
                                                 alias: None,
                                             }),
-                                            predicate: RelPredicateExpr::And(vec![
-                                                RelPredicateExpr::Cmp {
-                                                    left: RelColumnRef {
+                                            predicate: RelationPredicate::And(vec![
+                                                RelationPredicate::Cmp {
+                                                    left: RelationColumnRef {
                                                         scope: Some("team_team_edges".to_owned()),
                                                         column: "child_team".to_owned(),
                                                     },
-                                                    op: RelPredicateCmpOp::Eq,
-                                                    right: RelValueRef::RowId(
-                                                        RelRowIdRef::Frontier,
+                                                    op: RelationCmpOp::Eq,
+                                                    right: RelationValueRef::RowId(
+                                                        RelationRowIdRef::Frontier,
                                                     ),
                                                 },
-                                                RelPredicateExpr::Cmp {
-                                                    left: RelColumnRef {
+                                                RelationPredicate::Cmp {
+                                                    left: RelationColumnRef {
                                                         scope: Some("team_team_edges".to_owned()),
                                                         column: "enabled".to_owned(),
                                                     },
-                                                    op: RelPredicateCmpOp::Eq,
-                                                    right: RelValueRef::Literal(Value::Boolean(
-                                                        true,
-                                                    )),
+                                                    op: RelationCmpOp::Eq,
+                                                    right: RelationValueRef::literal(
+                                                        Value::Boolean(true),
+                                                    ),
                                                 },
                                             ]),
                                         }),
-                                        columns: vec![
-                                            crate::model::public_api::relation_ir::ProjectColumn {
-                                                alias: "id".to_owned(),
-                                                expr: RelProjectExpr::Column(RelColumnRef {
-                                                    scope: Some("team_team_edges".to_owned()),
-                                                    column: "parent_team".to_owned(),
-                                                }),
-                                            },
-                                        ],
+                                        columns: vec![RelationProjectColumn {
+                                            alias: "id".to_owned(),
+                                            expr: RelationProjectExpr::Column(RelationColumnRef {
+                                                scope: Some("team_team_edges".to_owned()),
+                                                column: "parent_team".to_owned(),
+                                            }),
+                                        }],
                                     }),
-                                    frontier_key: RelKeyRef::RowId(RelRowIdRef::Current),
-                                    bound: RelRecursionBound::MaxDepth(8),
-                                    dedupe_key: vec![RelKeyRef::RowId(RelRowIdRef::Current)],
+                                    frontier_key: RelationKeyRef::RowId(RelationRowIdRef::Current),
+                                    bound: RecursionBound::MaxDepth(8),
+                                    dedupe_key: vec![RelationKeyRef::RowId(
+                                        RelationRowIdRef::Current,
+                                    )],
                                 }),
-                                right: Box::new(PublicRelExpr::TableScan {
+                                right: Box::new(RelationExpr::TableScan {
                                     table: "resource_access_edges".into(),
                                     alias: Some("access".to_owned()),
                                 }),
-                                on: vec![RelJoinCondition {
-                                    left: RelColumnRef {
+                                on: vec![RelationJoinCondition {
+                                    left: RelationColumnRef {
                                         scope: None,
                                         column: "id".to_owned(),
                                     },
-                                    right: RelColumnRef {
+                                    right: RelationColumnRef {
                                         scope: Some("access".to_owned()),
                                         column: "team".to_owned(),
                                     },
                                 }],
-                                join_kind: RelJoinKind::Inner,
+                                join_kind: RelationJoinKind::Inner,
                             }),
-                            predicate: RelPredicateExpr::And(vec![
-                                RelPredicateExpr::Cmp {
-                                    left: RelColumnRef {
+                            predicate: RelationPredicate::And(vec![
+                                RelationPredicate::Cmp {
+                                    left: RelationColumnRef {
                                         scope: Some("access".to_owned()),
                                         column: "resource".to_owned(),
                                     },
-                                    op: RelPredicateCmpOp::Eq,
-                                    right: RelValueRef::RowId(RelRowIdRef::Outer),
+                                    op: RelationCmpOp::Eq,
+                                    right: RelationValueRef::RowId(RelationRowIdRef::Outer),
                                 },
-                                RelPredicateExpr::Cmp {
-                                    left: RelColumnRef {
+                                RelationPredicate::Cmp {
+                                    left: RelationColumnRef {
                                         scope: Some("access".to_owned()),
                                         column: "grant_role".to_owned(),
                                     },
-                                    op: RelPredicateCmpOp::Eq,
-                                    right: RelValueRef::Literal(Value::Text("viewer".to_owned())),
+                                    op: RelationCmpOp::Eq,
+                                    right: RelationValueRef::literal(Value::Text(
+                                        "viewer".to_owned(),
+                                    )),
                                 },
                             ]),
                         },
@@ -6295,7 +6156,7 @@ mod tests {
             reachable.edge_filters,
             vec![Predicate::Eq(
                 Operand::Column("enabled".to_owned()),
-                Operand::Literal(crate::groove::records::Value::Bool(true)),
+                Operand::Literal(jazz_types::records::Value::Bool(true)),
             )]
         );
         assert_eq!(reachable.bound, crate::query::RecursionBound::MaxDepth(8));
@@ -6303,7 +6164,7 @@ mod tests {
             reachable.access_filters,
             vec![Predicate::Eq(
                 Operand::Column("grant_role".to_owned()),
-                Operand::Literal(crate::groove::records::Value::String("viewer".to_owned())),
+                Operand::Literal(jazz_types::records::Value::String("viewer".to_owned())),
             )]
         );
         let seed = reachable.seed.as_ref().unwrap();

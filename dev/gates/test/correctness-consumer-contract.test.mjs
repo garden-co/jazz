@@ -158,25 +158,6 @@ test("performance benchmarks remain on their explicit release-artifact boundary"
     assert.doesNotMatch(pkg.scripts[name], /run-correctness-consumer\.mjs/);
     assert.match(pkg.scripts[name], /vitest run/);
   }
-  const workflow = read(".github/workflows/benchmarks.yml");
-  assert.match(
-    workflow,
-    /name: Build jazz-tools server binary[\s\S]*cargo build -p jazz-cli --bin jazz-tools/,
-  );
-  assert.match(
-    workflow,
-    /name: Build jazz-napi package[\s\S]*pnpm --dir crates\/jazz-napi run build/,
-  );
-  assert.match(
-    workflow,
-    /name: Build jazz-wasm package[\s\S]*pnpm --dir crates\/jazz-wasm run build/,
-  );
-  assert.match(workflow, /name: Run browser benchmark suite/);
-  assert.ok(
-    workflow.indexOf("name: Build jazz-wasm package") <
-      workflow.indexOf("name: Run browser benchmark suite"),
-    "browser benchmarks must run after their explicit release WASM build",
-  );
   const browserConfig = read("packages/jazz-tools/vitest.config.browser.ts");
   assert.match(browserConfig, /performanceArtifactRun/);
   assert.match(browserConfig, /sealedWasmPackage \|\| performanceArtifactRun/);

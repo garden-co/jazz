@@ -86,24 +86,14 @@ export type BrowserWebSocket = {
  * The sole Jazz wire-protocol version. This is distinct from independently
  * versioned v1 storage, catalogue, and binding formats.
  */
-export const WIRE_PROTOCOL_VERSION = 3;
+export const WIRE_PROTOCOL_VERSION = 6;
 export const MIN_WIRE_PROTOCOL_VERSION = WIRE_PROTOCOL_VERSION;
 export const MAX_WIRE_PROTOCOL_VERSION = WIRE_PROTOCOL_VERSION;
-export const FEATURE_SYNC_MESSAGE_PAYLOAD = 1 << 0;
-export const FEATURE_STRUCTURED_ERRORS = 1 << 2;
 export const FEATURE_PAYLOAD_ZSTD = 1 << 4;
-export const FEATURE_MESSAGE_FRAGMENTATION = 1 << 5;
-export const FEATURE_AUTHORIZATION_SCOPE_RECEIPTS = 1 << 6;
 export const FEATURE_AUTHORIZATION_SCOPE_VIEWS = 1 << 7;
 export const FEATURE_AUXILIARY_CHUNKS = 1 << 8;
 export const CLIENT_WIRE_FEATURES =
-  FEATURE_SYNC_MESSAGE_PAYLOAD |
-  FEATURE_STRUCTURED_ERRORS |
-  FEATURE_PAYLOAD_ZSTD |
-  FEATURE_MESSAGE_FRAGMENTATION |
-  FEATURE_AUTHORIZATION_SCOPE_RECEIPTS |
-  FEATURE_AUTHORIZATION_SCOPE_VIEWS |
-  FEATURE_AUXILIARY_CHUNKS;
+  FEATURE_PAYLOAD_ZSTD | FEATURE_AUTHORIZATION_SCOPE_VIEWS | FEATURE_AUXILIARY_CHUNKS;
 
 // The server route accepts WebSocket messages up to one MiB. Reserve enough
 // postcard framing bytes that a burst of otherwise-valid wire frames remains
@@ -182,27 +172,25 @@ export function encodeWireClientHello(features = CLIENT_WIRE_FEATURES): Uint8Arr
   return writer.finish();
 }
 
+/**
+ * Classify a `Hello`. Only the tag and version range are shared across wire
+ * versions; the rest of the body is read exactly when the range is this
+ * version's, and a foreign-version Hello is left to `decodeServerHello` to
+ * report as a version mismatch (SPEC 8 §8.1.1).
+ */
 export function isWireHello(frame: Uint8Array): boolean {
   const reader = new PostcardReader(frame);
   if (reader.u64() !== 0) return false;
-  readWireHelloBodyExact(reader);
-  return true;
-}
-
-export function isWireMessage(frame: Uint8Array): boolean {
-  const reader = new PostcardReader(frame);
-  if (reader.u64() !== 1) return false;
-  reader.u64(); // protocol_version
-  reader.u64(); // features
-  reader.option(readWireSession);
-  reader.bytes(); // semantic payload
-  assertReaderDone(reader, "WireFrame::Message");
+  const { min, max } = readWireHelloVersionRange(reader);
+  if (min === WIRE_PROTOCOL_VERSION && max === WIRE_PROTOCOL_VERSION) {
+    readWireHelloBodyAfterRangeExact(reader);
+  }
   return true;
 }
 
 export function isWireError(frame: Uint8Array): boolean {
   const reader = new PostcardReader(frame);
-  if (reader.u64() !== 2) return false;
+  if (reader.u64() !== 1) return false;
   readWireErrorBodyExact(reader);
   return true;
 }
@@ -210,7 +198,7 @@ export function isWireError(frame: Uint8Array): boolean {
 export function decodeWireError(frame: Uint8Array): WireError {
   const reader = new PostcardReader(frame);
   const tag = reader.u64();
-  if (tag !== 2) throw new Error(`expected WireFrame::Error, got tag ${tag}`);
+  if (tag !== 1) throw new Error(`expected WireFrame::Error, got tag ${tag}`);
   return readWireErrorBodyExact(reader);
 }
 
@@ -435,13 +423,15 @@ function decodeServerHello(
 ): WebSocketNegotiation {
   const reader = new PostcardReader(frame);
   if (reader.u64() !== 0) throw new Error("expected WireFrame::Hello");
-  const hello = readWireHelloBodyExact(reader);
-  const { min, max, features, role, authority } = hello;
+  // The version range comes first in every wire version; the rest of the
+  // body is version-scoped, so check the range before reading it.
+  const { min, max } = readWireHelloVersionRange(reader);
   if (min !== WIRE_PROTOCOL_VERSION || max !== WIRE_PROTOCOL_VERSION) {
     throw new Error(
       `server must advertise exactly wire protocol ${WIRE_PROTOCOL_VERSION}, got ${min}..=${max}`,
     );
   }
+  const { features, role, authority } = readWireHelloBodyAfterRangeExact(reader);
   const unsupportedFeatures = features & ~BigInt(localFeatures);
   if (unsupportedFeatures !== 0n) {
     throw new Error(
@@ -458,15 +448,15 @@ function assertWireFeatures(features: number, label: string): void {
   }
 }
 
-function readWireHelloBodyExact(reader: PostcardReader): {
-  min: number;
-  max: number;
+function readWireHelloVersionRange(reader: PostcardReader): { min: number; max: number } {
+  return { min: reader.u64(), max: reader.u64() };
+}
+
+function readWireHelloBodyAfterRangeExact(reader: PostcardReader): {
   features: bigint;
   role: number;
   authority?: { node: Uint8Array; epoch: bigint };
 } {
-  const min = reader.u64();
-  const max = reader.u64();
   const features = reader.u64BigInt();
   const role = reader.u64();
   const authority = reader.option((value) => {
@@ -477,13 +467,7 @@ function readWireHelloBodyExact(reader: PostcardReader): {
     return { node, epoch: value.u64BigInt() };
   });
   assertReaderDone(reader, "WireFrame::Hello");
-  return { min, max, features, role, authority };
-}
-
-function readWireSession(reader: PostcardReader): void {
-  reader.string(); // session_id
-  reader.u64BigInt(); // epoch
-  reader.option((identity) => identity.string()); // canonical AuthorSubject
+  return { features, role, authority };
 }
 
 function assertReaderDone(reader: PostcardReader, payload: string): void {
@@ -663,14 +647,6 @@ function canonicalAuthorForWebSocketAuth(auth: Record<string, unknown>): string 
 
 function canonicalAuthorSubjectPart(author: string): string | null {
   return parseCanonicalAuthorSubject(author)?.user_id ?? null;
-}
-
-export async function connectWebSocketCarrier(
-  options: WebSocketCarrierOptions,
-): Promise<WebSocketCarrier> {
-  const carrier = new WebSocketCarrier(options);
-  await carrier.ready();
-  return carrier;
 }
 
 export async function bytesFromWebSocketMessage(data: unknown): Promise<Uint8Array> {

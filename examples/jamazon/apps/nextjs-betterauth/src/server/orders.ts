@@ -9,7 +9,7 @@ import type { PaymentProvider, PaymentResolution, SandboxOutcome } from "./payme
  * authority and is safe to call more than once with the same input:
  *
  * - an order's id is derived from (shopper account, idempotency key), and the
- *   exclusive transaction that creates it first looks for that id;
+ *   serializable transaction that creates it first looks for that id;
  * - a payment's id is derived from its order, and the provider call carries an
  *   idempotency key derived from the order as well;
  * - status events have one deterministic id per (order, status).
@@ -38,7 +38,7 @@ export async function placeOrder(
   const cartId = ids.cart(account);
 
   return await retryConflicts(async () => {
-    const write = await db.exclusiveTransaction(async (tx) => {
+    const write = await db.serializableTransaction(async (tx) => {
       // A retry of an accepted checkout returns the order it already made.
       if (await tx.one(app.orders.where({ id: orderId }))) return { orderId, created: false };
 
@@ -149,9 +149,9 @@ export async function startPayment(
   orderId: string,
 ): Promise<Payment> {
   const paymentId = ids.payment(orderId);
-  const existing = await db.one(app.payments.where({ id: paymentId }), { tier: "global" });
+  const existing = await db.one(app.payments.where({ id: paymentId }), { tier: "remote" });
   if (existing) return existing;
-  const order = await db.one(app.orders.where({ id: orderId }), { tier: "global" });
+  const order = await db.one(app.orders.where({ id: orderId }), { tier: "remote" });
   if (!order) throw new CheckoutError("Order not found", 404);
 
   // The provider sees the same key on every attempt: Stripe returns the same
@@ -164,7 +164,7 @@ export async function startPayment(
     idempotencyKey: `jamazon-payment-${orderId}`,
   });
   return await retryConflicts(async () => {
-    const write = await db.exclusiveTransaction(async (tx) => {
+    const write = await db.serializableTransaction(async (tx) => {
       const raced = await tx.one(app.payments.where({ id: paymentId }));
       if (raced) return raced;
       return tx.insert(
@@ -191,7 +191,7 @@ export async function settlePayment(
   input: { orderId: string; sandboxOutcome?: SandboxOutcome; now?: Date },
 ): Promise<OrderStatus> {
   const payment = await db.one(app.payments.where({ id: ids.payment(input.orderId) }), {
-    tier: "global",
+    tier: "remote",
   });
   if (!payment) throw new CheckoutError("Payment not started", 404);
   if (payment.status === "succeeded") return currentStatus(db, input.orderId);
@@ -212,7 +212,7 @@ export async function recordPayment(
 ): Promise<OrderStatus> {
   if (resolution.status === "pending") return currentStatus(db, orderId);
   return await retryConflicts(async () => {
-    const write = await db.exclusiveTransaction(async (tx) => {
+    const write = await db.serializableTransaction(async (tx) => {
       const [order, payment] = await Promise.all([
         tx.one(app.orders.where({ id: orderId })),
         tx.one(app.payments.where({ id: ids.payment(orderId) })),
@@ -239,7 +239,7 @@ export async function recordPayment(
 /** Mark a paid order shipped. Called by the fulfilment worker. */
 export async function shipOrder(db: Db, orderId: string, now = new Date()): Promise<boolean> {
   return await retryConflicts(async () => {
-    const write = await db.exclusiveTransaction(async (tx) => {
+    const write = await db.serializableTransaction(async (tx) => {
       const order = await tx.one(app.orders.where({ id: orderId }));
       if (!order || order.status !== "paid") return false;
       tx.update(app.orders, orderId, { status: "shipped" });
@@ -250,7 +250,7 @@ export async function shipOrder(db: Db, orderId: string, now = new Date()): Prom
   });
 }
 
-type Tx = Parameters<Parameters<Db["exclusiveTransaction"]>[0]>[0];
+type Tx = Parameters<Parameters<Db["serializableTransaction"]>[0]>[0];
 
 async function addEvent(tx: Tx, order: Order, status: OrderStatus, note: string, at: Date) {
   const id = ids.orderEvent(order.id, status);
@@ -260,20 +260,16 @@ async function addEvent(tx: Tx, order: Order, status: OrderStatus, note: string,
 }
 
 async function currentStatus(db: Db, orderId: string): Promise<OrderStatus> {
-  const order = await db.one(app.orders.where({ id: orderId }), { tier: "global" });
+  const order = await db.one(app.orders.where({ id: orderId }), { tier: "remote" });
   if (!order) throw new CheckoutError("Order not found", 404);
   return order.status;
 }
 
-const RETRYABLE_CONFLICTS = new Set([
-  "exclusive_conflict",
-  "transaction_conflict",
-  "cascade_rejected",
-]);
+const RETRYABLE_CONFLICTS = new Set(["serialization_conflict", "transaction_conflict"]);
 const MAX_ATTEMPTS = 8;
 
 /**
- * Exclusive transactions are rejected when a concurrent write touched what
+ * Serializable transactions are rejected when a concurrent write touched what
  * they read. Re-running is safe: every function above re-reads first. Retries
  * back off exponentially with jitter so racing writers spread out.
  */
@@ -291,8 +287,8 @@ async function retryConflicts<T>(run: () => Promise<T>): Promise<T> {
 
 /**
  * A conflict that re-running the transaction can resolve: a local
- * `transaction_conflict` (another write in this runtime got there first), an
- * authority `exclusive_conflict`, or a `cascade_rejected` follow-on.
+ * `transaction_conflict` (another write in this runtime got there first) or an
+ * authority `serialization_conflict`.
  */
 export function isRetryableConflict(error: unknown): boolean {
   // The backend client is loaded outside the Next bundle (see backend.ts), so

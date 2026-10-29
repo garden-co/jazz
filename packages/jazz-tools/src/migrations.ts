@@ -2,6 +2,7 @@ import { columnTypeSignature } from "./runtime/schema-metadata.js";
 import { structuralValuesEqual } from "./runtime/structural-values.js";
 import { sqlTypeToWasm } from "./codegen/schema-reader.js";
 import { toValue } from "./runtime/value-converter.js";
+import { isComputedColumn } from "./dsl.js";
 import type {
   AnyTypedColumnBuilder,
   ColumnBuilderOptional,
@@ -34,12 +35,18 @@ import {
 
 type SchemaLike = SchemaDefinition | AppSchema<any>;
 
-type NormalizedSchema<TSchema extends SchemaLike> =
+type StoredSchema<S> = {
+  [T in keyof S]: {
+    [K in keyof S[T] as S[T][K] extends AnyTypedColumnBuilder ? K : never]: S[T][K];
+  };
+};
+type NormalizedSchema<TSchema extends SchemaLike> = StoredSchema<
   TSchema extends AppSchema<infer TDefinition>
     ? CompactSchema<TDefinition>
     : TSchema extends SchemaDefinition
       ? CompactSchema<TSchema>
-      : never;
+      : never
+>;
 
 type TableName<TSchema extends SchemaLike> = Extract<keyof NormalizedSchema<TSchema>, string>;
 type AddedTableName<TFrom extends SchemaLike, TTo extends SchemaLike> = Exclude<
@@ -165,16 +172,25 @@ type RemovedColumnName<
   TTable extends MigratedTableName<TFrom, TTo, TRenameTables> & TableName<TTo>,
 > = Exclude<SourceColumnName<TFrom, TTo, TRenameTables, TTable>, ColumnName<TTo, TTable>>;
 
-type BuilderIdentity<TBuilder extends AnyTypedColumnBuilder> = readonly [
+type SourceReferenceFor<TReference, TRenameTables> =
+  TReference extends keyof RenameTables<TRenameTables>
+    ? RenameTables<TRenameTables>[TReference] extends RenameTableFromOp<infer TOldName>
+      ? TOldName
+      : TReference
+    : TReference;
+
+type BuilderIdentity<TBuilder extends AnyTypedColumnBuilder, TRenameTables = undefined> = readonly [
   ColumnBuilderSqlType<TBuilder>,
   ColumnBuilderOptional<TBuilder>,
-  ColumnBuilderReferences<TBuilder>,
+  SourceReferenceFor<ColumnBuilderReferences<TBuilder>, TRenameTables>,
 ];
 
-type BuildersEqual<TLeft extends AnyTypedColumnBuilder, TRight extends AnyTypedColumnBuilder> = [
-  BuilderIdentity<TLeft>,
-] extends [BuilderIdentity<TRight>]
-  ? [BuilderIdentity<TRight>] extends [BuilderIdentity<TLeft>]
+type BuildersEqual<
+  TLeft extends AnyTypedColumnBuilder,
+  TRight extends AnyTypedColumnBuilder,
+  TRenameTables,
+> = [BuilderIdentity<TLeft>] extends [BuilderIdentity<TRight, TRenameTables>]
+  ? [BuilderIdentity<TRight, TRenameTables>] extends [BuilderIdentity<TLeft>]
     ? true
     : false
   : false;
@@ -182,8 +198,9 @@ type BuildersEqual<TLeft extends AnyTypedColumnBuilder, TRight extends AnyTypedC
 type SharedBuildersCompatible<
   TLeft extends AnyTypedColumnBuilder,
   TRight extends AnyTypedColumnBuilder,
+  TRenameTables,
 > =
-  BuildersEqual<TLeft, TRight> extends true
+  BuildersEqual<TLeft, TRight, TRenameTables> extends true
     ? true
     : ColumnBuilderReferences<TLeft> extends undefined
       ? [ColumnBuilderSqlType<TLeft>, ColumnBuilderOptional<TLeft>] extends [
@@ -340,7 +357,7 @@ type ValidateAddedColumnOperation<
       ? {
           readonly table: TTable;
           readonly column: TColumn;
-          readonly problem: "Added columns must use col.add.*(...) or col.renameFrom(...)";
+          readonly problem: "Added columns must use m.add.*(...) or m.renameFrom(...)";
         }
       : TOperation extends AddOperationForBuilder<BuilderForTargetColumn<TTo, TTable, TColumn>>
         ? never
@@ -348,25 +365,26 @@ type ValidateAddedColumnOperation<
           ? TOldName extends RemovedColumnName<TFrom, TTo, TRenameTables, TTable>
             ? BuildersEqual<
                 BuilderForSourceColumn<TFrom, TTo, TRenameTables, TTable, TOldName>,
-                BuilderForTargetColumn<TTo, TTable, TColumn>
+                BuilderForTargetColumn<TTo, TTable, TColumn>,
+                TRenameTables
               > extends true
               ? never
               : {
                   readonly table: TTable;
                   readonly column: TColumn;
                   readonly renameFrom: TOldName;
-                  readonly problem: "col.renameFrom(...) must point at a removed column with the same type";
+                  readonly problem: "m.renameFrom(...) must point at a removed column with the same type";
                 }
             : {
                 readonly table: TTable;
                 readonly column: TColumn;
                 readonly renameFrom: TOldName;
-                readonly problem: "col.renameFrom(...) must point at a removed column in the same table";
+                readonly problem: "m.renameFrom(...) must point at a removed column in the same table";
               }
           : {
               readonly table: TTable;
               readonly column: TColumn;
-              readonly problem: "Added columns must use col.add.*(...) or col.renameFrom(...)";
+              readonly problem: "Added columns must use m.add.*(...) or m.renameFrom(...)";
             }
     : never;
 
@@ -408,7 +426,7 @@ type ValidateRemovedColumnOperation<
       ? {
           readonly table: TTable;
           readonly column: TColumn;
-          readonly problem: "Removed columns must use col.drop.*(...) or be referenced by col.renameFrom(...)";
+          readonly problem: "Removed columns must use m.drop.*(...) or be referenced by m.renameFrom(...)";
         }
       : [TableOpFor<TMigrate, TTable, TColumn>] extends [
             DropOperationForBuilder<
@@ -419,7 +437,7 @@ type ValidateRemovedColumnOperation<
         : {
             readonly table: TTable;
             readonly column: TColumn;
-            readonly problem: "Removed columns must use col.drop.*(...) or be referenced by col.renameFrom(...)";
+            readonly problem: "Removed columns must use m.drop.*(...) or be referenced by m.renameFrom(...)";
           };
 
 type RemovedColumnOperationErrors<
@@ -450,7 +468,8 @@ type UnsupportedSharedColumnChanges<
       SourceColumnName<TFrom, TTo, TRenameTables, TTable>
     >]: SharedBuildersCompatible<
       BuilderForSourceColumn<TFrom, TTo, TRenameTables, TTable, TColumn>,
-      BuilderForTargetColumn<TTo, TTable, TColumn>
+      BuilderForTargetColumn<TTo, TTable, TColumn>,
+      TRenameTables
     > extends true
       ? never
       : {
@@ -559,10 +578,6 @@ function normalizeSchemaDefinition(
   );
 }
 
-function definitionToSchema(definition: SchemaDefinition): SchemaAst {
-  return compileSchemaDefinition(definition);
-}
-
 export function renameTableFrom<const TOldName extends string>(
   oldName: TOldName,
 ): RenameTableFromOp<TOldName> {
@@ -612,80 +627,56 @@ function buildRenameTableMap(
   return map;
 }
 
-function buildAddedTableSet(
-  createTables: Record<string, true> | undefined,
-  fromDefinition: Record<string, TableDefinition>,
-  toDefinition: Record<string, TableDefinition>,
-  renameTableMap: ReadonlyMap<string, string>,
+// createTables names target-only tables and dropTables source-only ones; neither
+// may also be part of a rename.
+function buildMarkedTableSet(
+  kind: "createTables" | "dropTables",
+  markers: Record<string, true> | undefined,
+  present: Record<string, TableDefinition>,
+  absent: Record<string, TableDefinition>,
+  renamed: { has(tableName: string): boolean },
 ): Set<string> {
+  const create = kind === "createTables";
   const set = new Set<string>();
-
-  if (!createTables) {
-    return set;
-  }
-
-  for (const [tableName, marker] of Object.entries(createTables)) {
+  for (const [tableName, marker] of Object.entries(markers ?? {})) {
     if (marker !== true) {
-      throw new Error(`createTables.${tableName} must be true.`);
+      throw new Error(`${kind}.${tableName} must be true.`);
     }
-    if (!(tableName in toDefinition)) {
-      throw new Error(`createTables references unknown target table ${tableName}.`);
-    }
-    if (tableName in fromDefinition) {
+    if (!(tableName in present)) {
       throw new Error(
-        `createTables only supports target-only tables; ${tableName} already exists in the source schema.`,
+        `${kind} references unknown ${create ? "target" : "source"} table ${tableName}.`,
       );
     }
-    if (renameTableMap.has(tableName)) {
-      throw new Error(`Table ${tableName} cannot be both added and renamed.`);
+    if (tableName in absent) {
+      throw new Error(
+        create
+          ? `createTables only supports target-only tables; ${tableName} already exists in the source schema.`
+          : `dropTables only supports source-only tables; ${tableName} still exists in the target schema.`,
+      );
     }
-
+    if (renamed.has(tableName)) {
+      throw new Error(
+        `Table ${tableName} cannot be both ${create ? "added" : "removed"} and renamed.`,
+      );
+    }
     set.add(tableName);
   }
-
   return set;
 }
 
-function buildRemovedTableSet(
-  dropTables: Record<string, true> | undefined,
-  fromDefinition: Record<string, TableDefinition>,
-  toDefinition: Record<string, TableDefinition>,
-  renamedSources: ReadonlySet<string>,
-): Set<string> {
-  const set = new Set<string>();
-
-  if (!dropTables) {
-    return set;
-  }
-
-  for (const [tableName, marker] of Object.entries(dropTables)) {
-    if (marker !== true) {
-      throw new Error(`dropTables.${tableName} must be true.`);
-    }
-    if (!(tableName in fromDefinition)) {
-      throw new Error(`dropTables references unknown source table ${tableName}.`);
-    }
-    if (tableName in toDefinition) {
-      throw new Error(
-        `dropTables only supports source-only tables; ${tableName} still exists in the target schema.`,
-      );
-    }
-    if (renamedSources.has(tableName)) {
-      throw new Error(`Table ${tableName} cannot be both removed and renamed.`);
-    }
-
-    set.add(tableName);
-  }
-
-  return set;
-}
-
-function columnShapeSignature(builder: AnyTypedColumnBuilder, omitReference = false): string {
+function columnShapeSignature(
+  builder: AnyTypedColumnBuilder,
+  omitReference = false,
+  tableRenames?: ReadonlyMap<string, string>,
+): string {
   const column = builder._build("__migration_shape__");
   return JSON.stringify({
     sqlType: columnTypeSignature(sqlTypeToWasm(column.sqlType)),
     nullable: column.nullable,
-    references: omitReference ? null : (column.references ?? null),
+    references:
+      omitReference || !column.references
+        ? null
+        : (tableRenames?.get(column.references) ?? column.references),
   });
 }
 
@@ -710,6 +701,7 @@ function tableMatchesAfterApplyingColumnOperations(
   sourceTable: Record<string, AnyTypedColumnBuilder>,
   targetTable: Record<string, AnyTypedColumnBuilder>,
   tableOps: Record<string, AddOp | DropOp | RenameOp>,
+  tableRenames: ReadonlyMap<string, string>,
   allowReferenceAdditions = false,
 ): boolean {
   const transformed = new Map<string, AnyTypedColumnBuilder>(Object.entries(sourceTable));
@@ -758,8 +750,12 @@ function tableMatchesAfterApplyingColumnOperations(
     if (allowReferenceAdditions && !columnMetadataEqual(sourceBuilder, targetBuilder)) return false;
     const omitReference = allowReferenceAdditions && !sourceBuilder._build(columnName).references;
     if (
-      columnShapeSignature(sourceBuilder, omitReference) !==
-      columnShapeSignature(targetBuilder, omitReference)
+      columnShapeSignature(
+        sourceBuilder,
+        omitReference,
+        // Added columns already use the destination witness's reference names.
+        tableOps[columnName]?._type === "add" ? tableRenames : undefined,
+      ) !== columnShapeSignature(targetBuilder, omitReference, tableRenames)
     ) {
       return false;
     }
@@ -781,7 +777,8 @@ function unwrapSchemaTables<TSchema extends SchemaLike>(
       return [
         tableName,
         Object.fromEntries(
-          Object.entries(columns).map(([name, builder]) => {
+          Object.entries(columns).flatMap(([name, builder]) => {
+            if (isComputedColumn(builder)) return [];
             const references = lowered.columns.find((column) => column.name === name)?.references;
             // Preserve the caller's builder and methods while presenting its effective stored reference
             // metadata to the existing column-shape comparison (including renamed columns).
@@ -790,7 +787,7 @@ function unwrapSchemaTables<TSchema extends SchemaLike>(
               ...builder._build(columnName),
               references,
             });
-            return [name, effective];
+            return [[name, effective]];
           }),
         ),
       ];
@@ -812,22 +809,26 @@ function buildForwardLenses<
   fromDefinition: NormalizedSchema<TFrom>,
   toDefinition: NormalizedSchema<TTo>,
 ): Lens[] {
+  const from = fromDefinition as Record<string, TableDefinition>;
+  const to = toDefinition as Record<string, TableDefinition>;
   const renameTableMap = buildRenameTableMap(
     renameTables as Record<string, RenameTableFromOp<string>> | undefined,
-    fromDefinition as Record<string, TableDefinition>,
-    toDefinition as Record<string, TableDefinition>,
+    from,
+    to,
   );
   const renamedSources = new Set(renameTableMap.values());
-  const addedTableSet = buildAddedTableSet(
+  const addedTableSet = buildMarkedTableSet(
+    "createTables",
     createTables as Record<string, true> | undefined,
-    fromDefinition as Record<string, TableDefinition>,
-    toDefinition as Record<string, TableDefinition>,
+    to,
+    from,
     renameTableMap,
   );
-  const removedTableSet = buildRemovedTableSet(
+  const removedTableSet = buildMarkedTableSet(
+    "dropTables",
     dropTables as Record<string, true> | undefined,
-    fromDefinition as Record<string, TableDefinition>,
-    toDefinition as Record<string, TableDefinition>,
+    from,
+    to,
     renamedSources,
   );
 
@@ -850,7 +851,10 @@ function buildForwardLenses<
       if (!sourceBuilder) continue;
       const source = sourceBuilder._build(sourceColumn);
       const target = targetBuilder._build(columnName);
-      if (source.references === target.references) continue;
+      const targetReference = target.references
+        ? (renameTableMap.get(target.references) ?? target.references)
+        : target.references;
+      if (source.references === targetReference) continue;
       if (
         !source.references &&
         target.references &&
@@ -991,6 +995,7 @@ function buildForwardLenses<
         sourceTables[sourceTableName]!,
         targetTables[tableName]!,
         tableOps,
+        renameTableMap,
         true,
       )
     ) {
@@ -1009,7 +1014,14 @@ function buildForwardLenses<
         );
       }
 
-      if (!tableMatchesAfterApplyingColumnOperations(sourceTable, targetTable, tableOps)) {
+      if (
+        !tableMatchesAfterApplyingColumnOperations(
+          sourceTable,
+          targetTable,
+          tableOps,
+          renameTableMap,
+        )
+      ) {
         throw new Error(
           `Table rename ${sourceTableName} -> ${tableName} does not match the target table after applying its column migrations.`,
         );
@@ -1037,7 +1049,7 @@ function buildForwardLenses<
 }
 
 export function schemaDefinitionToAst(definition: SchemaDefinition | AppSchema<any>): SchemaAst {
-  return definitionToSchema(definition as SchemaDefinition);
+  return compileSchemaDefinition(definition as SchemaDefinition);
 }
 
 /**
@@ -1050,10 +1062,12 @@ export function schemaDefinitionToAst(definition: SchemaDefinition | AppSchema<a
  *
  * @example
  * ```typescript
- * export default s.defineMigration({
+ * import { schema as s, migration as m } from "jazz-tools";
+ *
+ * export default m.defineMigration({
  *   migrate: {
  *     todos: {
- *       priority: s.add.enum("low", "medium", "high", { default: "medium" }),
+ *       priority: m.add.enum("low", "medium", "high", { default: "medium" }),
  *     },
  *   },
  *   fromHash: "aaaaaaaaaaaa",

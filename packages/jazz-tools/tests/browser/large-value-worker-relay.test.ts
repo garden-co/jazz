@@ -39,7 +39,7 @@ const permissions = s.definePermissions(app, ({ policy }) => [
   policy.values.allowDelete.always(),
 ]);
 
-// This deliberately keeps the ordinary write API: `body` crosses Groove's
+// This deliberately keeps the ordinary write API: `body` crosses the
 // automatic 64 KiB promotion boundary during one user transaction which also
 // authors a referenced project. It is distinct from the streaming receipts
 // below, which each create one row in their own transaction.
@@ -158,7 +158,7 @@ describe("browser persistent-worker large-value relay", () => {
       (rows) => rows.length === 3 && rows.some((row) => row.name === "control"),
       "direct-memory reader did not receive the persistent-worker receipt",
       20_000,
-      "global",
+      "remote",
     );
     expect(directValues.find((row) => row.name === "streamed-text")?.text).toBe(text);
     expect(directValues.find((row) => row.name === "streamed-bytes")?.bytes).toEqual(bytes);
@@ -169,7 +169,7 @@ describe("browser persistent-worker large-value relay", () => {
       (rows) => rows.length === 3 && rows.some((row) => row.name === "control"),
       "persistent reader did not receive a direct-memory-verified streamed receipt",
       20_000,
-      "global",
+      "remote",
     );
     const receivedText = values.find((row) => row.name === "streamed-text");
     const receivedBytes = values.find((row) => row.name === "streamed-bytes");
@@ -232,7 +232,7 @@ describe("browser persistent-worker large-value relay", () => {
     );
 
     const documents = await withTimeout(
-      writer.all(transactionApp.documents, { branch: "main", tier: "global" }),
+      writer.all(transactionApp.documents, { branch: "main", tier: "remote" }),
       20_000,
       "writer could not read its globally settled large document",
     );
@@ -250,7 +250,7 @@ describe("browser persistent-worker large-value relay", () => {
       "reopened writer did not attach to persisted IndexedDB storage",
     );
     const reopenedDocuments = await withTimeout(
-      reopened.all(transactionApp.documents, { branch: "main", tier: "global" }),
+      reopened.all(transactionApp.documents, { branch: "main", tier: "remote" }),
       20_000,
       "reopened writer could not hydrate the settled large document",
     );

@@ -428,7 +428,7 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.some((row) => row.userId === bobUserId),
         "Bob should read the camelCase chat member list after joining",
         15_000,
-        "global",
+        "remote",
       ),
     ).resolves.toBeDefined();
 
@@ -456,7 +456,7 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.some((row) => row.id === bobMessage.id),
         "Bob should read his camelCase member message after global-confirmed membership",
         15_000,
-        "global",
+        "remote",
       ),
     ).resolves.toBeDefined();
 
@@ -467,7 +467,7 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.length === 0,
         "Bob should settle reaction reads that inherit through camelCase message membership",
         15_000,
-        "global",
+        "remote",
       ),
     ).resolves.toBeDefined();
 
@@ -478,7 +478,7 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.some((row) => row.id === bobProfile.id),
         "Bob should read the sender profile mounted by rendered chat messages",
         15_000,
-        "global",
+        "remote",
       ),
     ).resolves.toBeDefined();
 
@@ -519,7 +519,7 @@ describe("raw websocket private read gate", () => {
             predicate as (rows: unknown[]) => boolean,
             `Bob subscription should settle: ${label}`,
             15_000,
-            { tier: "global" },
+            { tier: "remote" },
           ).then((unsubscribe) => {
             unsubscribeSubscriptions.push(unsubscribe);
           }),
@@ -553,7 +553,7 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.some((row) => row.id === bobPendingMessage.value.id),
         "Alice should receive Bob's fire-and-forget member message through websocket sync",
         15_000,
-        { tier: "global" },
+        { tier: "remote" },
       ),
       bobPendingMessageGlobalWait,
     ]).then(([unsubscribe]) => unsubscribe);
@@ -664,7 +664,7 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.some((row) => row.id === chat.id),
         "Bob should query the private chat through the invite-authenticated connection",
         15_000,
-        "global",
+        "remote",
       ),
     ).resolves.toBeDefined();
 
@@ -674,7 +674,7 @@ describe("raw websocket private read gate", () => {
       (rows) => rows.some((row) => row.id === chat.id),
       "Bob should subscribe to the private chat through the invite claim",
       15_000,
-      { tier: "global" },
+      { tier: "remote" },
       inviteSession,
     );
     unsubscribeInviteRead();
@@ -698,7 +698,7 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.some((row) => row.id === chat.id),
         "Bob should read the private chat through normal membership after accepting invite",
         15_000,
-        "global",
+        "remote",
       ),
     ).resolves.toBeDefined();
 
@@ -709,7 +709,7 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.some((row) => row.userId === bobUserId),
         "Bob should read his confirmed private chat membership",
         15_000,
-        "global",
+        "remote",
       ),
     ).resolves.toBeDefined();
 
@@ -720,7 +720,7 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.some((row) => row.id === seedMessage.id),
         "Bob should read private seed messages without include/order after accepting invite",
         15_000,
-        "global",
+        "remote",
       ),
     ).resolves.toBeDefined();
 
@@ -734,7 +734,7 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.some((row) => row.id === seedMessage.id),
         "Bob should read private seed messages through normal membership after accepting invite",
         15_000,
-        "global",
+        "remote",
       ),
     ).resolves.toBeDefined();
 
@@ -748,7 +748,7 @@ describe("raw websocket private read gate", () => {
       (rows) => rows.some((row) => row.id === seedMessage.id),
       "Bob should subscribe to private seed messages through normal membership",
       15_000,
-      { tier: "global" },
+      { tier: "remote" },
     );
     unsubscribeBobMessages();
 
@@ -772,7 +772,7 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.some((row) => row.id === bobMessage.id),
         "Bob should read his own private invite message after global wait",
         15_000,
-        "global",
+        "remote",
       ),
     ).resolves.toBeDefined();
 
@@ -786,7 +786,7 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.some((row) => row.id === bobMessage.id),
         "Alice should receive Bob's private invite message",
         15_000,
-        "global",
+        "remote",
       ),
     ).resolves.toBeDefined();
 
@@ -809,7 +809,7 @@ describe("raw websocket private read gate", () => {
         (rows) => !rows.some((row) => row.id === bobMessage.id),
         "Alice should observe Bob's own message deletion",
         15_000,
-        "global",
+        "remote",
       ),
     ).resolves.toBeDefined();
   }, 60_000);
@@ -854,7 +854,7 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.some((row) => row.id === publicChat.id),
         "Bob should read the public chat dependency",
         15_000,
-        "global",
+        "remote",
       ),
     ).resolves.toBeDefined();
 
@@ -865,7 +865,7 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.some((row) => row.id === publicMessage.id),
         "Bob should read a public-chat message through the message read policy",
         15_000,
-        "global",
+        "remote",
       ),
     ).resolves.toBeDefined();
 
@@ -891,7 +891,7 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.some((row) => row.id === bobMessage.id),
         "Bob should read his member message after a global-confirmed membership",
         15_000,
-        "global",
+        "remote",
       ),
     ).resolves.toBeDefined();
   }, 60_000);
@@ -967,7 +967,7 @@ describe("raw websocket private read gate", () => {
       (rows) => rows.some((row) => row.id === publicAnnouncement.id),
       "Bob should see the public control row from the server",
       15_000,
-      "global",
+      "remote",
     );
 
     const afterPublicAnnouncement = await snapshotBobLocalExposure(
@@ -981,14 +981,14 @@ describe("raw websocket private read gate", () => {
       privateMessageVisibleToBob: false,
     });
 
-    const bobChats = await bob.all(app.chats, { tier: "global" });
+    const bobChats = await bob.all(app.chats, { tier: "remote" });
     const afterChatsGlobalQuery = await snapshotBobLocalExposure(
       bob,
       "after private chats global query",
       privateChat.id,
       privateMessage.id,
     );
-    const bobMessages = await bob.all(app.messages, { tier: "global" });
+    const bobMessages = await bob.all(app.messages, { tier: "remote" });
     const afterMessagesGlobalQuery = await snapshotBobLocalExposure(
       bob,
       "after private messages global query",
@@ -1035,7 +1035,7 @@ describe("raw websocket private read gate", () => {
         (rows) => {
           chatSnapshots.push(rows);
         },
-        { tier: "global" },
+        { tier: "remote" },
       ),
     );
     const unsubscribeMessages = ctx.trackSubscription(
@@ -1044,7 +1044,7 @@ describe("raw websocket private read gate", () => {
         (rows) => {
           messageSnapshots.push(rows);
         },
-        { tier: "global" },
+        { tier: "remote" },
       ),
     );
 
@@ -1134,7 +1134,7 @@ async function waitForSubscription<T extends { id: string }>(
   predicate: (rows: T[]) => boolean,
   label: string,
   timeoutMs = 15_000,
-  options?: { tier?: "local" | "global" },
+  options?: { tier?: "local-first" | "remote" },
   session?: {
     issuer: string;
     user_id: string;

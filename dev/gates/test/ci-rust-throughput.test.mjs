@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -47,16 +46,8 @@ const bandChatWalltime = fs.readFileSync(
   path.join(root, "examples/band-chat/benchmarks/benches/walltime.rs"),
   "utf8",
 );
-const realisticWorkflow = fs.readFileSync(
-  path.join(root, ".github/workflows/benchmarks.yml"),
-  "utf8",
-);
-const rustShadowWorkflow = fs.readFileSync(
-  path.join(root, ".github/workflows/ci-rust-shadow.yml"),
-  "utf8",
-);
-const rustShadowLauncher = fs.readFileSync(
-  path.join(root, "dev/gates/rust-shadow-matrix.mjs"),
+const nightlyWorkflow = fs.readFileSync(
+  path.join(root, ".github/workflows/nightly-tests.yml"),
   "utf8",
 );
 const rnNativeArtifactsWorkflow = fs.readFileSync(
@@ -73,8 +64,8 @@ const toolBundleValidator = fs.readFileSync(
   path.join(root, "dev/ci/validate-tool-bundle.mjs"),
   "utf8",
 );
-const m3Differential = fs.readFileSync(
-  path.join(root, "crates/jazz/layers/node/src/node/tests/m3_differential.rs"),
+const differentialOracle = fs.readFileSync(
+  path.join(root, "crates/jazz/tests/maintained_differential.rs"),
   "utf8",
 );
 const jobs = (() => {
@@ -121,13 +112,10 @@ const assertUsesBlacksmithRunner = (jobName, jobSource) => {
 const rnNativeArtifactPushPaths = [
   "Cargo.lock",
   "Cargo.toml",
-  "crates/groove/**",
-  "crates/idb-tree/**",
   "crates/jazz/**",
   "crates/jazz-compression/**",
   "crates/jazz-native-relay/**",
   "crates/jazz-native-transport/**",
-  "crates/jazz-storage-sqlite/**",
   "crates/jazz-rn/**",
 ];
 const assertRnNativeArtifactPushPaths = (paths) =>
@@ -157,9 +145,14 @@ const assertIntegrationCheckIsGating = (lintJob) => {
 };
 const trustedCachePullRequest =
   'github.event_name == \'pull_request\' && github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON(\'["OWNER","MEMBER","COLLABORATOR"]\'), github.event.pull_request.author_association)';
+// merge-group/** pushes are trusted: a ruleset limits who can push them.
 const trustedCacheCondition =
-  "github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/release') || " +
-  trustedCachePullRequest;
+  "(github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/release' || startsWith(github.ref, 'refs/heads/merge-group/')) || " +
+  trustedCachePullRequest +
+  ")";
+// A main push a green merge group already covered skips the trusted suite.
+const trustedCallerCondition =
+  "!cancelled() && needs.main-coverage.outputs.covered != 'true' && " + trustedCacheCondition;
 const untrustedCacheCondition = "github.event_name != 'push' && !(" + trustedCachePullRequest + ")";
 const sccacheWriter =
   "inputs.trusted-cache && inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != ''";
@@ -216,21 +209,29 @@ const cacheAccessFor = ({ eventName, ref, sameRepository = false, authorAssociat
     eventName === "pull_request" &&
     sameRepository &&
     ["OWNER", "MEMBER", "COLLABORATOR"].includes(authorAssociation);
+  const mergeGroupPush = eventName === "push" && ref.startsWith("refs/heads/merge-group/");
   const trusted =
     (eventName === "push" && ["refs/heads/main", "refs/heads/release"].includes(ref)) ||
+    mergeGroupPush ||
     trustedPullRequest;
-  const credentialedCache = trusted && (eventName !== "push" || ref === "refs/heads/main");
+  const credentialedCache =
+    trusted && (eventName !== "push" || ref === "refs/heads/main" || mergeGroupPush);
   return {
     invocation: trusted ? "trusted" : "untrusted",
     idToken: trusted ? "write" : "none",
     sccache: credentialedCache
-      ? eventName === "push" && ref === "refs/heads/main"
+      ? (eventName === "push" && ref === "refs/heads/main") || mergeGroupPush
         ? "writer"
         : "reader"
       : "none",
     turbo: credentialedCache,
   };
 };
+// Ready PRs get the fast lint partition; the full suite runs on pushes
+// (main, release and the Review Loop's merge-group/**), dispatches and release
+// PRs.
+const ciScope =
+  "${{ github.event_name != 'pull_request' && 'full' || github.base_ref == 'release' && 'full' || github.event.pull_request.draft && 'none' || 'fast' }}";
 const workflowDocumentFor = (source) => {
   const document = parse(source);
   assert.equal(typeof document, "object", "CI entry workflow must be a YAML mapping");
@@ -242,7 +243,14 @@ const assertEntryCacheTrustBoundary = (source) => {
   const entryJobs = document.jobs;
   assert.deepEqual(
     Object.keys(entryJobs).sort(),
-    ["report-dispatched-test-rust", "test-rust", "trusted", "untrusted"],
+    [
+      "main-coverage",
+      "report-dispatched-test-rust",
+      "report-full-suite",
+      "test-rust",
+      "trusted",
+      "untrusted",
+    ],
     "the credential boundary must account for every entry-workflow job",
   );
   const {
@@ -250,6 +258,8 @@ const assertEntryCacheTrustBoundary = (source) => {
     trusted,
     "test-rust": aggregate,
     "report-dispatched-test-rust": dispatchedStatus,
+    "report-full-suite": fullSuiteStatus,
+    "main-coverage": mainCoverage,
   } = entryJobs;
   assert.deepEqual(
     Object.keys(untrusted).sort(),
@@ -264,16 +274,18 @@ const assertEntryCacheTrustBoundary = (source) => {
   });
   assert.equal(untrusted.uses, "./.github/workflows/ci-suite.yml");
   assert.deepEqual(untrusted.with, {
+    scope: ciScope,
     "sccache-write": false,
     "trusted-cache": false,
   });
 
   assert.deepEqual(
     Object.keys(trusted).sort(),
-    ["if", "permissions", "secrets", "uses", "with"],
+    ["if", "needs", "permissions", "secrets", "uses", "with"],
     "trusted caller credential surface must stay explicit",
   );
-  assert.equal(trusted.if, trustedCacheCondition);
+  assert.equal(trusted.if, trustedCallerCondition);
+  assert.deepEqual(trusted.needs, ["main-coverage"]);
   assert.deepEqual(trusted.permissions, {
     contents: "read",
     "id-token": "write",
@@ -281,8 +293,11 @@ const assertEntryCacheTrustBoundary = (source) => {
   });
   assert.equal(trusted.uses, "./.github/workflows/ci-suite.yml");
   assert.deepEqual(trusted.with, {
-    "sccache-write": "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}",
-    "trusted-cache": "${{ github.event_name != 'push' || github.ref == 'refs/heads/main' }}",
+    "sccache-write":
+      "${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/merge-group/')) }}",
+    scope: ciScope,
+    "trusted-cache":
+      "${{ github.event_name != 'push' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/merge-group/') }}",
   });
   assert.equal(trusted.secrets, "inherit");
 
@@ -295,8 +310,41 @@ const assertEntryCacheTrustBoundary = (source) => {
     "timeout-minutes",
   ]);
   assert.equal(aggregate.if, "always()");
-  assert.deepEqual(aggregate.needs, ["untrusted", "trusted"]);
+  assert.deepEqual(aggregate.needs, ["main-coverage", "untrusted", "trusted"]);
   assert.deepEqual(aggregate.permissions, { contents: "read" });
+  // Both callers may be skipped only for drafts and covered main pushes.
+  assert.match(
+    aggregate.steps[0].run,
+    /if \[ "\$\{DRAFT\}" = true \] \|\| \[ "\$\{COVERED\}" = true \]; then\n\s+test "\$\{UNTRUSTED_RESULT\}:\$\{TRUSTED_RESULT\}" = "skipped:skipped" && exit 0/,
+  );
+  assert.equal(
+    aggregate.steps[0].env.COVERED,
+    "${{ needs.main-coverage.outputs.covered == 'true' }}",
+  );
+
+  // The main-push skip reads git and commit statuses, nothing more, and runs
+  // only for main pushes.
+  assert.deepEqual(Object.keys(mainCoverage).sort(), [
+    "if",
+    "outputs",
+    "permissions",
+    "runs-on",
+    "steps",
+    "timeout-minutes",
+  ]);
+  assert.equal(mainCoverage.if, "github.event_name == 'push' && github.ref == 'refs/heads/main'");
+  assert.deepEqual(mainCoverage.permissions, {
+    contents: "read",
+    statuses: "read",
+  });
+  assert.equal(mainCoverage.steps.length, 2);
+  assert.equal(
+    mainCoverage.steps[0].uses,
+    "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+  );
+  assert.equal(mainCoverage.steps[0].with["persist-credentials"], false);
+  assert.match(mainCoverage.steps[1].run, /dev\/ci\/main-push-coverage\.sh /);
+  assert.match(mainCoverage.steps[1].run, /echo "covered=true" >> "\$\{GITHUB_OUTPUT\}"/);
 
   // Only dispatched runs may write a commit status, and only test-rust's own.
   assert.deepEqual(Object.keys(dispatchedStatus).sort(), [
@@ -313,9 +361,48 @@ const assertEntryCacheTrustBoundary = (source) => {
   assert.equal(dispatchedStatus.steps.length, 1);
   assert.equal(dispatchedStatus.steps[0].uses, undefined);
   assert.match(dispatchedStatus.steps[0].run, /-f context=test-rust /);
+
+  // full-suite coverage (#4091) is posted only after test-rust passed, and only
+  // by runs that executed the full suite with a write-capable token.
+  assert.deepEqual(Object.keys(fullSuiteStatus).sort(), [
+    "if",
+    "needs",
+    "permissions",
+    "runs-on",
+    "steps",
+    "timeout-minutes",
+  ]);
+  assert.match(fullSuiteStatus.if, /^always\(\) && needs\.test-rust\.result == 'success' && \(/);
+  assert.match(
+    fullSuiteStatus.if,
+    /github\.event_name == 'pull_request' && needs\.trusted\.result == 'success' && github\.base_ref == 'release'\n/,
+  );
+  assert.doesNotMatch(fullSuiteStatus.if, /head_ref/);
+  assert.doesNotMatch(fullSuiteStatus.if, /needs\.untrusted/);
+  assert.deepEqual(fullSuiteStatus.needs, ["trusted", "test-rust"]);
+  assert.deepEqual(fullSuiteStatus.permissions, { contents: "read", statuses: "write" });
+  assert.equal(fullSuiteStatus.steps.length, 2);
+  assert.equal(
+    fullSuiteStatus.steps[0].uses,
+    "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+  );
+  assert.equal(fullSuiteStatus.steps[1].uses, undefined);
+  assert.match(fullSuiteStatus.steps[1].run, /dev\/ci\/full-suite-coverage\.sh origin\/main /);
+  assert.equal(
+    fullSuiteStatus.steps[1].env.IS_GROUP,
+    "${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/merge-group/') }}",
+  );
+  assert.match(fullSuiteStatus.steps[1].run, /-f context=full-suite /);
+  assert.match(fullSuiteStatus.steps[1].run, /-f state=success /);
   assert.equal(document.on.pull_request_target, undefined);
-  assert.equal(document.on.pull_request, null, "stacked PR bases must not be branch-filtered");
-  assert.deepEqual(document.on.push, { branches: ["main", "release"] });
+  assert.deepEqual(
+    document.on.pull_request,
+    { types: ["opened", "synchronize", "reopened", "ready_for_review"] },
+    "stacked PR bases must not be branch-filtered, and marking a draft ready must run CI",
+  );
+  assert.deepEqual(document.on.push, {
+    branches: ["main", "release", "merge-group/**"],
+  });
 };
 const assertTurboSigningKeyTrustBoundary = (typescriptJob) => {
   assert.doesNotMatch(
@@ -378,7 +465,7 @@ test("continuous soak precompiles outside seed watchdogs and preserves failure a
     assert.match(run, /timeout --kill-after=30s "\$\{PRECOMPILE_TIMEOUT_SECONDS\}s"/);
     assert.match(
       run,
-      /cargo test -p jazz-node --lib --no-default-features \\\n\s+--features testing,transport-compression-zstd --no-run \\\n/,
+      /cargo test -p jazz --no-default-features \\\n\s+--features testing,transport-compression-zstd --no-run \\\n\s+--test integration --test maintained_differential \\\n/,
     );
     assert.doesNotMatch(run, /--no-exec/);
   };
@@ -642,7 +729,7 @@ test("Rust CI keeps the bounded real differential oracle in its shared command p
 
   assert.match(workspace, /local-ci-equivalent\.mjs --ci-partition rust-workspace/);
   assert.match(storageCompat, /local-ci-equivalent\.mjs --ci-partition storage-compat/);
-  // The oracle reuses the lib-test unit the native corpus just built, and it
+  // The oracle links the jazz library the native corpus just built, and it
   // still reports when the corpus step fails.
   assert.match(
     storageCompat,
@@ -654,16 +741,16 @@ test("Rust CI keeps the bounded real differential oracle in its shared command p
   );
   assert.match(
     localCi,
-    /cargo test -p jazz-node --lib --no-default-features --features testing,transport-compression-zstd --no-run --message-format=json/,
+    /cargo test -p jazz --test maintained_differential --no-default-features --features testing,transport-compression-zstd --no-run --message-format=json/,
   );
-  assert.match(localCi, /message\.target\.name === "jazz_node"/);
+  assert.match(localCi, /message\.target\.name === "maintained_differential"/);
   assert.match(
     localCi,
-    /timeout 60s env[\s\S]*JAZZ_SEED=11[\s\S]*JAZZ_DIFFERENTIAL_CHURN_DEPTHS=10,1000[\s\S]*JAZZ_DIFFERENTIAL_STEP_COUNT=3[\s\S]*m3_maintained_one_shot_differential_oracle --exact --ignored/,
+    /timeout 60s env[\s\S]*JAZZ_SEED=11[\s\S]*JAZZ_DIFFERENTIAL_CHURN_DEPTHS=10,1000[\s\S]*JAZZ_DIFFERENTIAL_STEP_COUNT=60[\s\S]*maintained_one_shot_differential_oracle --exact --ignored/,
   );
   assert.match(
-    m3Differential,
-    /#\[ignore = "#\d+: manual randomized differential soak; bounded seed 11 runs in CI"\]\n(?:pub )?fn m3_maintained_one_shot_differential_oracle/,
+    differentialOracle,
+    /#\[ignore = "#\d+: manual randomized differential soak; bounded seed 11 runs in CI"\]\n(?:pub )?fn maintained_one_shot_differential_oracle\(/,
   );
   assert.match(aggregate, /if: always\(\)/);
   assert.match(aggregate, /needs: \[test-rust-workspace, test-storage-compat\]/);
@@ -673,477 +760,6 @@ test("Rust CI keeps the bounded real differential oracle in its shared command p
     () => assert.match(localCi.replace("--exact --ignored", "--ignored"), /--exact --ignored/),
     /exact/,
   );
-});
-
-test("the non-required Rust throughput shadow proves two exact hash partitions and folds M3 once", () => {
-  const document = parse(rustShadowWorkflow);
-  const shard = document.jobs.shard;
-  const aggregate = document.jobs.aggregate;
-  assert.deepEqual(document.permissions, {
-    contents: "read",
-    packages: "read",
-  });
-  assert.deepEqual(
-    document.on.pull_request,
-    { types: ["opened", "reopened", "synchronize", "labeled", "unlabeled"] },
-    "adding benchmark must start its shadow without a new push, while removing it cancels queued work",
-  );
-  assert.deepEqual(document.on.push, { branches: ["main"] });
-  assert.equal(document.on.workflow_dispatch, null);
-  assert.match(
-    shard.if,
-    /github\.event_name != 'pull_request' \|\| contains\(github\.event\.pull_request\.labels\.\*\.name, 'benchmark'\)/,
-    "the expensive non-required shadow must run on PRs only when deliberately labelled",
-  );
-  assert.deepEqual(shard.strategy.matrix.index, [1, 2]);
-  assert.equal(shard.strategy["max-parallel"], 2);
-  assert.equal(shard["runs-on"], "blacksmith-8vcpu-ubuntu-2404");
-  assert.equal(aggregate.needs[0], "shard");
-  assert.match(aggregate.if, /always/);
-  assert.match(
-    aggregate.if,
-    /github\.event_name != 'pull_request' \|\| contains\(github\.event\.pull_request\.labels\.\*\.name, 'benchmark'\)/,
-    "the aggregate must not fail when intentionally unlabelled PR shards are skipped",
-  );
-  assert.equal(
-    aggregate.steps[0].uses,
-    "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
-    "aggregate checkout must precede artifact download because checkout cleans the worktree",
-  );
-  assert.equal(
-    aggregate.steps[1].uses,
-    "actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0",
-  );
-  assert.match(
-    aggregate.steps[2].run,
-    /node dev\/gates\/rust-shadow-matrix\.mjs aggregate rust-shadow-receipts 2/,
-  );
-  assert.match(
-    rustShadowWorkflow,
-    /node dev\/gates\/rust-shadow-matrix\.mjs shard \$\{\{ matrix\.index \}\} 2/,
-  );
-  assert.match(
-    rustShadowWorkflow,
-    /node dev\/gates\/rust-shadow-matrix\.mjs aggregate rust-shadow-receipts 2 rust-shadow-receipts\/aggregate\.json "\$\{\{ github\.sha \}\}"/,
-  );
-  assert.match(rustShadowWorkflow, /merge-multiple: true/);
-  assert.match(rustShadowLauncher, /--require-nextest/);
-  assert.match(rustShadowLauncher, /RUST_MIN_STACK.*4 \* 1024 \* 1024/);
-  assert.match(rustShadowLauncher, /"--workspace",\s*"--lib",\s*"--bins",\s*"--tests"/);
-  assert.match(rustShadowLauncher, /"--kill-after=30s",\s*"60s",\s*"env"/);
-  assert.match(rustShadowLauncher, /JAZZ_SEED: "11"/);
-  const exactM3Invocation = /testBinary,\s*m3TestName,\s*"--exact",\s*"--ignored"/;
-  assert.match(rustShadowLauncher, exactM3Invocation);
-  assert.match(rustShadowLauncher, /"--no-run",\s*"--message-format=json"/);
-  assert.match(rustShadowLauncher, /runner: "compiled-libtest"/);
-  assert.match(rustShadowLauncher, /m3\.length !== 1[\s\S]*m3\[0\]\.shard\.index !== 1/);
-  assert.match(rustShadowLauncher, /test belongs to more than one shard/);
-  assert.match(rustShadowLauncher, /hash shards do not cover the exact executable inventory/);
-  assert.match(rustShadowLauncher, /sourceIdentity\(root\)/);
-  assert.match(rustShadowLauncher, /clean-source-baseline RECEIPT EXPECTED_COMMIT/);
-  assert.match(
-    rustShadowLauncher,
-    /dependency setup changed the checked-out source after the shadow baseline/,
-  );
-  assert.match(
-    rustShadowLauncher,
-    /shadow execution changed the checked-out source after the baseline/,
-  );
-  assert.match(rustShadowWorkflow, /Seal clean checked-out source baseline/);
-  const preCheckout = shard.steps.find(
-    (step) => step.name === "Reject pre-checkout source residue",
-  );
-  const safeDirectory = shard.steps.find(
-    (step) => step.name === "Trust checked-out workspace for Git diagnostics",
-  );
-  const normalizeCheckout = shard.steps.find(
-    (step) => step.name === "Record checkout source state",
-  );
-  const sealBaseline = shard.steps.find(
-    (step) => step.name === "Seal clean checked-out source baseline",
-  );
-  const runShard = shard.steps.find(
-    (step) => step.name === "Run exact-inventory Rust shadow shard",
-  );
-  const checkout = shard.steps.find((step) => step.uses?.startsWith("actions/checkout@"));
-  assert.equal(
-    checkout?.with?.clean,
-    false,
-    "shadow checkout must preserve residue for the source-baseline receipt",
-  );
-  assert.ok(
-    preCheckout,
-    "shadow must inspect its inherited workspace before checkout can mutate it",
-  );
-  assert.match(preCheckout.run, /git -C "\$workspace" status --short --untracked-files=all/);
-  assert.match(preCheckout.run, /pre-checkout workspace contains source residue/);
-  assert.ok(
-    shard.steps.indexOf(preCheckout) < shard.steps.indexOf(checkout),
-    "pre-checkout inspection must run before actions/checkout",
-  );
-  assert.ok(safeDirectory, "shadow must trust its exact container checkout before Git diagnostics");
-  assert.match(
-    safeDirectory.run,
-    /git config --global --add safe\.directory "\$\{GITHUB_WORKSPACE:\?GITHUB_WORKSPACE is required\}"/,
-    "the ownership exception must name only the Actions workspace",
-  );
-  assert.ok(
-    shard.steps.indexOf(checkout) < shard.steps.indexOf(safeDirectory) &&
-      shard.steps.indexOf(safeDirectory) < shard.steps.indexOf(normalizeCheckout),
-    "the safe-directory setup must follow checkout and precede the first Git diagnostic",
-  );
-  assert.ok(normalizeCheckout, "shadow must record checkout state before sealing source identity");
-  assert.match(normalizeCheckout.run, /git status --short --untracked-files=all/);
-  assert.doesNotMatch(normalizeCheckout.run, /git reset|git clean/);
-  assert.ok(
-    shard.steps.indexOf(normalizeCheckout) < shard.steps.indexOf(sealBaseline),
-    "checkout inspection must precede the sealed baseline",
-  );
-  assert.equal(
-    shard.env?.RUST_SHADOW_SOURCE_BASELINE,
-    undefined,
-    "runner context is not available in jobs.<job_id>.env before a runner is assigned",
-  );
-  assert.equal(
-    sealBaseline.env.RUST_SHADOW_SOURCE_BASELINE,
-    "${{ runner.temp }}/rust-shadow-source.json",
-    "the source baseline must resolve runner.temp at step scope",
-  );
-  assert.equal(
-    runShard?.env?.RUST_SHADOW_SOURCE_BASELINE,
-    "${{ runner.temp }}/rust-shadow-source.json",
-    "the exact partition producer must consume the sealed source baseline",
-  );
-  assert.match(
-    rustShadowWorkflow,
-    /RUST_SHADOW_SOURCE_BASELINE: \$\{\{ runner\.temp \}\}\/rust-shadow-source\.json/,
-  );
-  assert.match(rustShadowLauncher, /shards disagree on the checked-out source identity/);
-  assert.match(rustShadowLauncher, /workflow event commit/);
-  assert.match(
-    rustShadowLauncher,
-    /partition test receipt command does not match the exact shard selector/,
-  );
-  assert.throws(
-    () => assert.match(rustShadowLauncher.replace("JAZZ_SEED=11", "JAZZ_SEED=12"), /JAZZ_SEED=11/),
-    /JAZZ_SEED/,
-  );
-  assert.throws(
-    () =>
-      assert.match(
-        rustShadowLauncher.replace("--require-nextest", "--nextest-optional"),
-        /--require-nextest/,
-      ),
-    /require-nextest/,
-  );
-  assert.throws(
-    () =>
-      assert.match(
-        rustShadowLauncher.replace(
-          "testBinary,\n            m3TestName,",
-          '"cargo",\n            "test",',
-        ),
-        exactM3Invocation,
-      ),
-    /m3_maintained_one_shot_differential_oracle/,
-  );
-
-  const source = {
-    commit: "a".repeat(40),
-    headTree: "b".repeat(40),
-    indexTree: "b".repeat(40),
-    staged: "e".repeat(64),
-    unstaged: "c".repeat(64),
-    untracked: "d".repeat(64),
-    dirty: false,
-  };
-  const sourceFingerprint = (value) =>
-    crypto
-      .createHash("sha256")
-      .update(
-        ["headTree", "indexTree", "staged", "unstaged", "untracked"]
-          .map((field) => `${field}\0${value[field]}\0`)
-          .join(""),
-      )
-      .digest("hex");
-  source.fingerprint = sourceFingerprint(source);
-  const expectedCommand = (index) => [
-    "cargo",
-    "nextest",
-    "run",
-    "--profile",
-    "jazz-ci",
-    "--no-fail-fast",
-    "--partition",
-    `hash:${index}/2`,
-    "--workspace",
-    "--lib",
-    "--bins",
-    "--tests",
-    "--features",
-    "jazz/testing,jazz/transport-compression-zstd,jazz-server/test,jazz-cli/test",
-  ];
-  const shardReceipt = (index) => ({
-    kind: "rust-shadow-shard-receipt",
-    status: "passed",
-    shard: { index, count: 2, partition: `hash:${index}/2` },
-    testArgs: expectedCommand(index).slice(8),
-    source: structuredClone(source),
-    inventory: {
-      all: ["binary\\0one", "binary\\0two"],
-      selected: [index === 1 ? "binary\\0one" : "binary\\0two"],
-    },
-    testReceipt: {
-      status: "passed",
-      runner: "cargo-nextest",
-      nextestProfile: "jazz-ci",
-      shard: { index, count: 2 },
-      command: expectedCommand(index),
-      source: structuredClone(source),
-      environment: { rustMinStack: String(4 * 1024 * 1024) },
-    },
-    m3:
-      index === 1
-        ? {
-            seed: 11,
-            status: "passed",
-            runner: "compiled-libtest",
-            testName: "node::tests::harness::m3_maintained_one_shot_differential_oracle",
-            testArgs: ["--exact", "--ignored"],
-            environment: {
-              JAZZ_SEED: "11",
-              JAZZ_DIFFERENTIAL_CHURN_DEPTHS: "10,1000",
-              JAZZ_DIFFERENTIAL_STEP_COUNT: "3",
-            },
-          }
-        : { status: "not-assigned" },
-  });
-  const runAggregate = (mutate) => {
-    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-shadow-receipts-"));
-    const shards = [shardReceipt(1), shardReceipt(2)];
-    mutate?.(shards);
-    for (const [index, receipt] of shards.entries())
-      fs.writeFileSync(path.join(directory, `shard-${index + 1}.json`), JSON.stringify(receipt));
-    const result = spawnSync(
-      "node",
-      [
-        rustShadowLauncherPath,
-        "aggregate",
-        directory,
-        "2",
-        path.join(directory, "aggregate.json"),
-        source.commit,
-      ],
-      { encoding: "utf8" },
-    );
-    fs.rmSync(directory, { recursive: true, force: true });
-    return result;
-  };
-  const rustShadowLauncherPath = path.join(root, "dev/gates/rust-shadow-matrix.mjs");
-  assert.equal(runAggregate().status, 0);
-  {
-    const directory = path.join(os.tmpdir(), `jazz-shadow-missing-${crypto.randomUUID()}`);
-    const aggregatePath = path.join(directory, "aggregate.json");
-    const result = spawnSync(
-      "node",
-      [rustShadowLauncherPath, "aggregate", directory, "2", aggregatePath, source.commit],
-      { encoding: "utf8" },
-    );
-    assert.notEqual(result.status, 0, "missing downloaded shard receipts must fail closed");
-    assert.match(result.stderr, /expected 2 shard receipts, found 0/);
-    const missing = JSON.parse(fs.readFileSync(aggregatePath, "utf8"));
-    assert.equal(missing.status, "failed");
-    assert.equal(missing.shardCount, 2);
-    assert.equal(missing.expectedCommit, source.commit);
-    assert.match(missing.error, /expected 2 shard receipts, found 0/);
-    fs.rmSync(directory, { recursive: true, force: true });
-  }
-  for (const [name, mutate, message] of [
-    ["runner", (shards) => (shards[0].testReceipt.runner = "cargo-fallback"), /Nextest shard/],
-    [
-      "source fingerprint",
-      (shards) => (shards[0].testReceipt.source.fingerprint = "f".repeat(64)),
-      /source fingerprint/,
-    ],
-    [
-      "receipt profile",
-      (shards) => (shards[0].testReceipt.nextestProfile = "jazz"),
-      /Nextest shard/,
-    ],
-    [
-      "command profile",
-      (shards) => (shards[0].testReceipt.command[4] = "jazz"),
-      /exact shard selector/,
-    ],
-    [
-      "no-fail-fast",
-      (shards) => (shards[0].testReceipt.command[5] = "--fail-fast"),
-      /exact shard selector/,
-    ],
-    [
-      "partition",
-      (shards) => (shards[0].testReceipt.command[7] = "hash:1\/3"),
-      /exact shard selector/,
-    ],
-    ["test arguments", (shards) => shards[0].testArgs.pop(), /test arguments/],
-    [
-      "M3 receipt semantics",
-      (shards) => (shards[0].m3.runner = "cargo-test"),
-      /maintained M3 seed 11/,
-    ],
-    [
-      "nested receipt staged source identity",
-      (shards) => {
-        shards[0].testReceipt.source.staged = "f".repeat(64);
-        shards[0].testReceipt.source.fingerprint = sourceFingerprint(shards[0].testReceipt.source);
-      },
-      /partition test receipt source staged does not match its inventory receipt/,
-    ],
-    [
-      "nested receipt source identity",
-      (shards) => {
-        shards[0].testReceipt.source.untracked = "e".repeat(64);
-        shards[0].testReceipt.source.fingerprint = sourceFingerprint(shards[0].testReceipt.source);
-      },
-      /partition test receipt source untracked does not match its inventory receipt/,
-    ],
-    [
-      "cross-shard source identity",
-      (shards) => {
-        shards[1].source.untracked = "e".repeat(64);
-        shards[1].source.fingerprint = sourceFingerprint(shards[1].source);
-        shards[1].testReceipt.source = structuredClone(shards[1].source);
-      },
-      /shards disagree on the checked-out source identity/,
-    ],
-    [
-      "workflow event commit",
-      (shards) => {
-        shards[0].source.commit = "f".repeat(40);
-        shards[0].testReceipt.source = structuredClone(shards[0].source);
-      },
-      /workflow event commit/,
-    ],
-  ]) {
-    const result = runAggregate(mutate);
-    assert.notEqual(result.status, 0, `planted ${name} mismatch must fail`);
-    assert.match(
-      result.stderr,
-      message,
-      `planted ${name} mismatch must identify the violated binding`,
-    );
-  }
-});
-
-test("a clean checkout seals a Rust shadow source baseline", () => {
-  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-rust-shadow-source-"));
-  const receipt = path.join(
-    os.tmpdir(),
-    `jazz-rust-shadow-receipt-${process.pid}-${Date.now()}.json`,
-  );
-  try {
-    const gates = path.join(fixture, "dev/gates");
-    fs.mkdirSync(gates, { recursive: true });
-    for (const file of ["rust-shadow-matrix.mjs", "source-identity.mjs"])
-      fs.copyFileSync(path.join(root, "dev/gates", file), path.join(gates, file));
-    fs.writeFileSync(path.join(fixture, "synthetic-source.txt"), "committed fixture source\n");
-    for (const args of [
-      ["init", "--quiet"],
-      ["config", "user.email", "test@example.invalid"],
-      ["config", "user.name", "Test"],
-      ["add", "."],
-      ["commit", "--quiet", "-m", "fixture"],
-      ["rev-parse", "HEAD"],
-    ]) {
-      const result = spawnSync("git", args, { cwd: fixture, encoding: "utf8" });
-      assert.equal(result.status, 0, result.stderr);
-      if (args[0] === "rev-parse") {
-        const baseline = spawnSync(
-          "node",
-          [
-            path.join(gates, "rust-shadow-matrix.mjs"),
-            "clean-source-baseline",
-            receipt,
-            result.stdout.trim(),
-          ],
-          { cwd: fixture, encoding: "utf8" },
-        );
-        assert.equal(baseline.status, 0, baseline.stderr);
-        const source = JSON.parse(fs.readFileSync(receipt, "utf8"));
-        assert.equal(source.commit, result.stdout.trim());
-        assert.equal(source.dirty, false);
-        assert.match(source.staged, /^[0-9a-f]{64}$/);
-      }
-    }
-  } finally {
-    fs.rmSync(fixture, { recursive: true, force: true });
-    fs.rmSync(receipt, { force: true });
-  }
-});
-
-test("the exact pre-checkout shadow receipt logs and rejects tracked and untracked residue", () => {
-  const shard = parse(rustShadowWorkflow).jobs.shard;
-  const preCheckout = shard.steps.find(
-    (step) => step.name === "Reject pre-checkout source residue",
-  );
-  assert.ok(preCheckout?.run, "missing executable pre-checkout receipt");
-  for (const [name, contaminate, expectedStatus] of [
-    [
-      "tracked",
-      (workspace) => fs.writeFileSync(path.join(workspace, "tracked.txt"), "residue\n"),
-      /^ M tracked\.txt$/m,
-    ],
-    [
-      "untracked",
-      (workspace) => fs.writeFileSync(path.join(workspace, "residue.txt"), "residue\n"),
-      /^\?\? residue\.txt$/m,
-    ],
-  ]) {
-    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-shadow-pre-checkout-"));
-    try {
-      for (const args of [
-        ["init", "--quiet"],
-        ["config", "user.email", "test@example.invalid"],
-        ["config", "user.name", "Test"],
-      ]) {
-        const initialized = spawnSync("git", args, {
-          cwd: workspace,
-          encoding: "utf8",
-        });
-        assert.equal(initialized.status, 0, initialized.stderr);
-      }
-      fs.writeFileSync(path.join(workspace, "tracked.txt"), "clean\n");
-      let result = spawnSync("git", ["add", "tracked.txt"], {
-        cwd: workspace,
-        encoding: "utf8",
-      });
-      assert.equal(result.status, 0, result.stderr);
-      result = spawnSync("git", ["commit", "--quiet", "-m", "fixture"], {
-        cwd: workspace,
-        encoding: "utf8",
-      });
-      assert.equal(result.status, 0, result.stderr);
-      contaminate(workspace);
-
-      const receipt = spawnSync("bash", ["-c", preCheckout.run], {
-        cwd: workspace,
-        encoding: "utf8",
-        env: { ...process.env, GITHUB_WORKSPACE: workspace },
-      });
-      assert.notEqual(receipt.status, 0, `${name} residue must fail before checkout`);
-      assert.match(receipt.stderr, /pre-checkout workspace contains source residue/);
-      assert.match(receipt.stderr, expectedStatus);
-
-      const after = spawnSync("git", ["status", "--short", "--untracked-files=all"], {
-        cwd: workspace,
-        encoding: "utf8",
-      });
-      assert.equal(after.status, 0, after.stderr);
-      assert.match(after.stdout, expectedStatus, `${name} residue must survive to be logged`);
-    } finally {
-      fs.rmSync(workspace, { recursive: true, force: true });
-    }
-  }
 });
 
 test("Blacksmith setup can exclude nondeterministic jobs from the Rust artifact cache", () => {
@@ -1229,7 +845,7 @@ test("Turbo cache uses its pinned OIDC policy only inside the trusted suite invo
     );
 });
 
-test("shared Rust cache writes are main-only while trusted PRs receive read access", () => {
+test("shared Rust cache writes are main and merge-group only while trusted PRs receive read access", () => {
   for (const name of ["lint", "test-rust-workspace", "test-storage-compat", "test-ts"]) {
     const source = job(name);
     assert.match(source, /role-to-assume: \$\{\{ vars\.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN \}\}/);
@@ -1246,7 +862,7 @@ test("shared Rust cache writes are main-only while trusted PRs receive read acce
   assert.match(setupBlacksmithAction, /SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY=l0/);
 });
 
-test("entry workflow grants credentialed cross-ref caches only to main and trusted stacked PRs", () => {
+test("entry workflow grants credentialed cross-ref caches only to main, merge groups and trusted stacked PRs", () => {
   const cases = [
     [
       "main push",
@@ -1266,6 +882,16 @@ test("entry workflow grants credentialed cross-ref caches only to main and trust
         idToken: "write",
         sccache: "none",
         turbo: false,
+      },
+    ],
+    [
+      "merge-group push",
+      { eventName: "push", ref: "refs/heads/merge-group/4" },
+      {
+        invocation: "trusted",
+        idToken: "write",
+        sccache: "writer",
+        turbo: true,
       },
     ],
     [
@@ -1702,17 +1328,17 @@ test("React Native artifact builds are explicit same-repository label opt-ins", 
   }, /label removal/);
 });
 
-test("benchmark correctness stays on ordinary CI while API compilation uses realistic benchmarks", () => {
+test("benchmark correctness stays on ordinary CI while API compilation runs nightly", () => {
   const workspace = job("test-rust-workspace");
   const localCi = fs.readFileSync(path.join(root, "dev/gates/local-ci-equivalent.mjs"), "utf8");
   const scenarioMode = benchmarkSmokeMode("ci");
   const compileMode = benchmarkSmokeMode("compile-ci");
   const requiredSmokeTests = [
-    "jazz::legacy_benchmark_smoke=cold_subscription_correctness_smoke",
-    "jazz::legacy_benchmark_smoke=sync_correctness_smoke",
-    "jazz::legacy_benchmark_smoke=validation_correctness_smoke",
-    "jazz::legacy_benchmark_smoke=relation_include_delivery_correctness_smoke",
-    "jazz::legacy_benchmark_smoke=route_subscription_curve_correctness_smoke",
+    "jazz-sim::core_benchmark_smoke=cold_subscription_correctness_smoke",
+    "jazz-sim::core_benchmark_smoke=sync_correctness_smoke",
+    "jazz-sim::core_benchmark_smoke=validation_correctness_smoke",
+    "jazz-sim::core_benchmark_smoke=relation_include_delivery_correctness_smoke",
+    "jazz-sim::core_benchmark_smoke=route_subscription_curve_correctness_smoke",
     "jazz-sim::scenario_smoke=s1_saas_smoke",
     "jazz-sim::scenario_smoke=micro_correctness_smoke",
     "jazz-sim::scenario_smoke=s1_saas_db_surface_smoke",
@@ -1726,9 +1352,9 @@ test("benchmark correctness stays on ordinary CI while API compilation uses real
   ];
   assert.match(workspace, /local-ci-equivalent\.mjs --ci-partition rust-workspace/);
   assert.deepEqual(
-    [
-      ...localCi.matchAll(/"(?:jazz|jazz-sim)::(?:legacy_benchmark_smoke|scenario_smoke)=[^"]+"/g),
-    ].map((match) => match[0].slice(1, -1)),
+    [...localCi.matchAll(/"jazz-sim::(?:core_benchmark_smoke|scenario_smoke)=[^"]+"/g)].map(
+      (match) => match[0].slice(1, -1),
+    ),
     requiredSmokeTests,
   );
   assert.doesNotMatch(
@@ -1744,7 +1370,7 @@ test("benchmark correctness stays on ordinary CI while API compilation uses real
     /s4_order_processing_smoke_debug_profile/,
   );
   assert.match(
-    realisticWorkflow,
+    nightlyWorkflow,
     /name: Compile maintained benchmark APIs\s+run: dev\/gates\/benchmark-smoke\.sh --compile-ci/,
   );
   assert.match(
@@ -1756,7 +1382,7 @@ test("benchmark correctness stays on ordinary CI while API compilation uses real
   assert.doesNotMatch(compileMode, /cargo test -p (?:jazz|jazz-sim)/);
   assert.match(benchmarkSmokeGate, /cargo metadata --no-deps --format-version 1/);
   assert.match(benchmarkSmokeGate, /required-features/);
-  assert.match(scenarioMode, /cargo test -p jazz --features testing --test legacy_benchmark_smoke/);
+  assert.match(scenarioMode, /cargo test -p jazz-sim --test core_benchmark_smoke/);
   assert.match(scenarioMode, /cargo test -p jazz-sim --test scenario_smoke/);
   assert.match(benchmarkSmokeGate, /benchmark-smoke phase=%s duration_seconds=%s status=%s/);
   assert.throws(
@@ -1783,84 +1409,6 @@ test("benchmark correctness stays on ordinary CI while API compilation uses real
         /required-features/,
       ),
     /required-features/,
-  );
-});
-
-test("realistic benchmark compilation has an explicit guarded trigger matrix", () => {
-  const document = parse(realisticWorkflow);
-  assert.deepEqual(document.on.pull_request, {
-    branches: ["main", "release"],
-    types: ["opened", "reopened", "synchronize", "labeled"],
-  });
-  assert.deepEqual(document.on.push, { branches: ["main"] });
-  assert.deepEqual(document.on.schedule, [{ cron: "0 5 * * *" }]);
-  assert.equal(document.on.workflow_dispatch.inputs.profile.default, "s");
-  assert.equal(document.on.workflow_dispatch.inputs.include_browser.type, "boolean");
-  assert.deepEqual(document.permissions, { contents: "read", issues: "write" });
-
-  const native = document.jobs.native;
-  assert.deepEqual(native["runs-on"], ["self-hosted", "linux", "x64", "jazz-bench"]);
-  assert.equal(native["timeout-minutes"], 180);
-  const expectedNativeCondition =
-    "${{ (github.event_name != 'push' || github.actor != 'github-actions[bot]') && ( github.event_name != 'pull_request' || ( contains(github.event.pull_request.labels.*.name, 'benchmark') && github.event.pull_request.head.repo.full_name == github.repository ) ) }}";
-  const normalizeCondition = (condition) => condition.replace(/\s+/g, " ").trim();
-  assert.equal(normalizeCondition(native.if), expectedNativeCondition);
-
-  assert.throws(() => {
-    const unsafe = parse(realisticWorkflow.replace('  schedule:\n    - cron: "0 5 * * *"\n', ""));
-    assert.ok(unsafe.on.schedule, "nightly schedule must remain");
-  }, /nightly schedule/);
-  assert.throws(() => {
-    const unsafe = parse(
-      realisticWorkflow.replace(
-        "github.event.pull_request.head.repo.full_name == github.repository",
-        "true",
-      ),
-    );
-    assert.equal(normalizeCondition(unsafe.jobs.native.if), expectedNativeCondition);
-  }, /true/);
-  assert.throws(() => {
-    const unsafe = parse(
-      realisticWorkflow.replace(
-        "        )\n      }}\n    runs-on:",
-        "        ) || true\n      }}\n    runs-on:",
-      ),
-    );
-    assert.equal(normalizeCondition(unsafe.jobs.native.if), expectedNativeCondition);
-  }, /true/);
-});
-
-test("realistic timing retains every retired legacy smoke suite", () => {
-  for (const bench of [
-    "cold_subscription",
-    "sync",
-    "validation",
-    "relation_include_delivery",
-    "route_subscription_curve",
-    "micro",
-    "s8_branch_views",
-  ]) {
-    assert.match(realisticWorkflow, new RegExp(`--bench ${bench}(?: |\\n|$)`));
-  }
-  assert.match(realisticWorkflow, /Run legacy Jazz timing suites/);
-  assert.match(realisticWorkflow, /status_file=bench-out\/native\/legacy-jazz\/status\.tsv/);
-  assert.match(realisticWorkflow, /status: statuses\.get\(name\) \?\? "failed"/);
-  assert.match(realisticWorkflow, /exit "\$failed"/);
-  assert.throws(
-    () =>
-      assert.match(
-        realisticWorkflow.replaceAll("--bench route_subscription_curve", ""),
-        /--bench route_subscription_curve/,
-      ),
-    /route_subscription_curve/,
-  );
-  assert.throws(
-    () =>
-      assert.match(
-        realisticWorkflow.replace('status: statuses.get(name) ?? "failed"', 'status: "passed"'),
-        /statuses\.get\(name\)/,
-      ),
-    /statuses/,
   );
 });
 
@@ -1945,15 +1493,14 @@ test("the jazz-tools launcher reports Windows as unsupported instead of a missin
   assert.doesNotMatch(probe.stderr, /Bundled binary missing/);
 });
 
-test("Windows NAPI release builds provision libclang for RocksDB bindgen", () => {
-  const windowsNapiSetup =
-    /name: Install libclang for Windows bindgen[\s\S]*if: matrix\.platform == 'win32-x64-msvc'[\s\S]*choco install llvm --version=21\.1\.8 --yes --no-progress --limit-output[\s\S]*Test-Path \(Join-Path \$libclangPath "libclang\.dll"\)[\s\S]*LIBCLANG_PATH=\$libclangPath[\s\S]*\$env:GITHUB_PATH/;
-  assert.match(packageBuild, windowsNapiSetup);
-  assert.throws(
-    () =>
-      assert.match(packageBuild.replace('"LIBCLANG_PATH=$libclangPath" | ', ""), windowsNapiSetup),
-    /LIBCLANG_PATH/,
-  );
+test("native release builds need no libclang because no Rust dependency uses bindgen", () => {
+  // RocksDB's sys crates pulled in bindgen, which needed libclang on every
+  // build host. If bindgen returns, provision libclang where it is needed
+  // (Windows MSVC runners, the Bullseye NAPI image, Vercel) before updating this.
+  const lockfile = fs.readFileSync(path.join(root, "Cargo.lock"), "utf8");
+  for (const crate of ["bindgen", "clang-sys", "rust-librocksdb-sys"])
+    assert.doesNotMatch(lockfile, new RegExp(`^name = "${crate}"$`, "m"), crate);
+  assert.doesNotMatch(packageBuild, /libclang|LIBCLANG_PATH/);
 });
 
 test("pkg.pr.new previews omit Windows while release package builds retain it", () => {
@@ -2504,4 +2051,181 @@ test("CI rejects inherited live-log timing overrides", () => {
   });
   assert.equal(result.status, 1);
   assert.match(result.stderr, /JAZZ_TEST_LOG_INTERVAL_SECONDS.*forbidden/);
+});
+
+test("ready PRs run only the lint partition and drafts run nothing", () => {
+  const suite = parse(workflowSuite);
+  assert.deepEqual(suite.on.workflow_call.inputs.scope, {
+    description: "Which partitions to run, full, fast or none.",
+    required: false,
+    type: "string",
+    default: "full",
+  });
+  assert.equal(suite.jobs.lint.if, "inputs.scope != 'none'");
+  for (const name of ["test-rust-workspace", "test-storage-compat", "test-ts", "test-react-native"])
+    assert.equal(
+      suite.jobs[name].if,
+      "inputs.scope == 'full'",
+      `${name} must run only in the full scope`,
+    );
+  assert.equal(suite.jobs["test-rust"].if, "always() && inputs.scope == 'full'");
+  assert.deepEqual(
+    Object.keys(suite.jobs).sort(),
+    [
+      "lint",
+      "test-react-native",
+      "test-rust",
+      "test-rust-workspace",
+      "test-storage-compat",
+      "test-ts",
+    ],
+    "a new suite job must declare which scope runs it",
+  );
+});
+
+test("full-suite coverage credits merge-group PR heads only through clean merges", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "full-suite-coverage-"));
+  const git = (...args) => {
+    const result = spawnSync("git", args, { cwd: repo, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  const commitFile = (name) => {
+    fs.writeFileSync(path.join(repo, name), `${name}\n`);
+    git("add", name);
+    git("commit", "-qm", name);
+    return git("rev-parse", "HEAD");
+  };
+  const coverage = (base, head) => {
+    const result = spawnSync(
+      "bash",
+      [path.join(root, "dev/ci/full-suite-coverage.sh"), base, head],
+      { cwd: repo, encoding: "utf8" },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim().split("\n").sort();
+  };
+  try {
+    git("init", "-q", "-b", "main");
+    git("config", "user.email", "ci@example.com");
+    git("config", "user.name", "CI");
+    git("config", "core.hooksPath", "/dev/null");
+    const main = commitFile("base");
+    git("checkout", "-qb", "pr-a");
+    const prA = commitFile("a");
+    git("checkout", "-qb", "pr-b", main);
+    const prB = commitFile("b");
+    git("checkout", "-qb", "merge-group/1", main);
+    git("merge", "-q", "--no-ff", "-m", "merge a", prA);
+    git("merge", "-q", "--no-ff", "-m", "merge b", prB);
+    const group = git("rev-parse", "HEAD");
+    assert.deepEqual(coverage(main, group), [group, prA, prB].sort());
+
+    // A plain commit on the group changes the tested tree for every PR.
+    const fixup = commitFile("fixup");
+    assert.deepEqual(coverage(main, fixup), [fixup]);
+
+    // So does a merge whose tree is not git's own merge of its parents.
+    const dirty = git(
+      "commit-tree",
+      `${fixup}^{tree}`,
+      "-p",
+      `${group}^1`,
+      "-p",
+      prB,
+      "-m",
+      "hand-resolved",
+    );
+    assert.deepEqual(coverage(main, dirty), [dirty]);
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("main pushes skip the full suite only for trees a green merge group tested", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "main-push-coverage-"));
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), "main-push-coverage-bin-"));
+  const git = (...args) => {
+    const result = spawnSync("git", args, { cwd: repo, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  const commitFile = (name) => {
+    fs.writeFileSync(path.join(repo, name), `${name}\n`);
+    git("add", name);
+    git("commit", "-qm", name);
+    return git("rev-parse", "HEAD");
+  };
+  // Stands in for `gh api repos/<repo>/commits/<sha>/statuses --jq <expr>`:
+  // applies the script's own jq filter to the statuses STATUSES gives that SHA.
+  fs.writeFileSync(
+    path.join(bin, "gh"),
+    '#!/usr/bin/env bash\nsha="$(sed -E "s#.*/commits/([0-9a-f]+)/statuses.*#\\1#" <<<"$2")"\n' +
+      'jq -c --arg sha "${sha}" \'.[$sha] // []\' <<<"${STATUSES}" | jq -r "$4"\n',
+    { mode: 0o755 },
+  );
+  const status = (state, login = "github-actions[bot]") => ({
+    context: "full-suite",
+    state,
+    creator: { login },
+  });
+  const coverage = (head, statuses = {}) =>
+    spawnSync("bash", [path.join(root, "dev/ci/main-push-coverage.sh"), head], {
+      cwd: repo,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        REPO: "garden-co/jazz",
+        STATUSES: JSON.stringify(statuses),
+      },
+    });
+  try {
+    git("init", "-q", "-b", "main");
+    git("config", "user.email", "ci@example.com");
+    git("config", "user.name", "CI");
+    git("config", "core.hooksPath", "/dev/null");
+    const base = commitFile("base");
+    git("checkout", "-qb", "pr-a");
+    const prA = commitFile("a");
+    git("checkout", "-qb", "pr-b", base);
+    const prB = commitFile("b");
+    git("checkout", "-qb", "group", base);
+    git("merge", "-q", "--no-ff", "-m", "merge a", prA);
+    git("merge", "-q", "--no-ff", "-m", "merge b", prB);
+    const tip = git("rev-parse", "HEAD");
+    git("update-ref", "refs/remotes/origin/merge-group/4", tip);
+
+    // The queue then merges each PR into main on its own.
+    git("checkout", "-q", "main");
+    git("merge", "-q", "--no-ff", "-m", "Merge pull request a", prA);
+    const mainA = git("rev-parse", "HEAD");
+    git("merge", "-q", "--no-ff", "-m", "Merge pull request b", prB);
+    const mainB = git("rev-parse", "HEAD");
+
+    const green = { [tip]: [status("success")] };
+    for (const head of [mainA, mainB]) {
+      const result = coverage(head, green);
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stdout.trim(), `merge-group/4 ${tip}`);
+    }
+    // Without a green full-suite status from Actions on the group's tip,
+    // nothing is covered.
+    assert.equal(coverage(mainB).status, 1);
+    assert.equal(
+      coverage(mainB, { [prA]: [status("success")], [prB]: [status("success")] }).status,
+      1,
+    );
+    assert.equal(coverage(mainB, { [tip]: [status("success", "aeplay")] }).status, 1);
+    // The latest status from Actions decides.
+    assert.equal(coverage(mainB, { [tip]: [status("failure"), status("success")] }).status, 1);
+
+    // A main commit with any other tree runs the suite.
+    git("checkout", "-q", "main");
+    const other = commitFile("hotfix");
+    assert.equal(coverage(other, green).status, 1);
+  } finally {
+    fs.rmSync(repo, { recursive: true, force: true });
+    fs.rmSync(bin, { recursive: true, force: true });
+  }
 });

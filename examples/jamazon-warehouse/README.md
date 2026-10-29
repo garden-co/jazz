@@ -9,11 +9,11 @@ What an operator does in the console:
 - **Dashboard**: orders entered today, pending deliveries and low-stock items for the warehouse,
   plus the next orders to deliver in the selected district. Every number updates live.
 - **New order** (TPC-C "new order"): pick a customer and up to 15 item lines. Checkout is two
-  exclusive transactions (see [Two-phase checkout](#two-phase-checkout)). Each attempt carries a
+  serializable transactions (see [Two-phase checkout](#two-phase-checkout)). Each attempt carries a
   request key, so a retry (or "submit the same request again") returns the first receipt instead
   of taking stock twice.
 - **Pending orders**: the district's delivery queue, oldest first, one bounded page.
-- **Delivery** (TPC-C "delivery"): one exclusive batch delivers the oldest pending order in every
+- **Delivery** (TPC-C "delivery"): one serializable batch delivers the oldest pending order in every
   district.
 - **Payment** (TPC-C "payment"): credit a customer's balance, once per request key.
 - **Order status** (TPC-C "order status"): a customer's recent orders, or one order by number,
@@ -56,7 +56,7 @@ secrets. A deployment also sets `NEXT_PUBLIC_JAZZ_APP_ID` and `NEXT_PUBLIC_JAZZ_
 
 ## Two-phase checkout
 
-`purchase()` in `src/warehouse.ts` runs in two exclusive transactions:
+`purchase()` in `src/warehouse.ts` runs in two serializable transactions:
 
 1. **Reserve.** Stock for every line, the district's order counter, the customer's balance and a
    `draft` order are accepted together or not at all. This is where two operators racing for the

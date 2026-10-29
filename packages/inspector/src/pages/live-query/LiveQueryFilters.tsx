@@ -11,8 +11,9 @@ interface LiveQueryFiltersProps {
 
 const TIER_OPTIONS = [
   { value: "", label: "All tiers" },
-  { value: "local", label: "local" },
-  { value: "global", label: "global" },
+  { value: "local-only", label: "local-only" },
+  { value: "local-first", label: "local-first" },
+  { value: "remote", label: "remote" },
 ] as const;
 
 export function LiveQueryFilters({

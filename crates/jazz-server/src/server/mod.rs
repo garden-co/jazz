@@ -5,16 +5,19 @@ use std::thread;
 
 use crate::middleware::AuthConfig;
 use crate::middleware::auth::JwtVerifier;
-use jazz::serving::StorageConfig;
 use jazz::tools::AppId;
 
+mod account_store;
 mod accounts;
 mod builder;
 mod catalogue;
 mod catalogue_entry;
 mod catalogue_payload_codec;
 mod catalogue_storage;
-pub use jazz::serving::{ServerRuntimeActivity, ServerRuntimeFrameStream, ServerRuntimeHandle};
+#[cfg(test)]
+mod data_dir_corpus;
+pub use crate::runtime::{ServerRuntimeActivity, ServerRuntimeFrameStream, ServerRuntimeHandle};
+pub(crate) mod deployment;
 pub mod routes;
 pub(crate) mod runtime_catalogue;
 mod shutdown;
@@ -28,7 +31,7 @@ pub(crate) use catalogue_storage::CatalogueStorage;
 pub(crate) use catalogue_storage::{
     CatalogueKvStorage, CatalogueMemoryStorage, DynCatalogueStorage,
 };
-pub use shutdown::{ShutdownController, ShutdownPhase};
+pub use shutdown::{ShutdownController, ShutdownPhase, WebSocketEntryRefused};
 #[cfg(feature = "embedded-server")]
 pub use testing::{
     JazzServer, JazzServerBuilder, ServerDataDir, TEST_JWT_AUDIENCE, TEST_JWT_ISSUER,
@@ -44,6 +47,7 @@ pub async fn push_catalogue_in_memory(
     schemas: &[jazz::tools::Schema],
     lenses: &[jazz::tools::Lens],
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let _publication = state.runtime_catalogue_publication.lock().await;
     for schema in schemas {
         state
             .catalogue
@@ -56,7 +60,7 @@ pub async fn push_catalogue_in_memory(
             .publish_lens(&state.catalogue_store, lens)
             .map_err(|error| format!("publish lens to server catalogue: {error}"))?;
     }
-    runtime_catalogue::publish_runtime_catalogue(&state, schemas, lenses)
+    runtime_catalogue::publish_runtime_catalogue_locked(&state, schemas, lenses)
         .await
         .map_err(|error| format!("bridge catalogue into server runtime: {error}"))?;
     state
@@ -76,6 +80,13 @@ pub async fn push_catalogue_in_memory(
 /// small amount of slack for unusual topologies) without giving an
 /// attacker meaningful amplification before the cap bites.
 pub(crate) const PER_CLIENT_CONNECTION_CAP: usize = 4;
+/// Default cap on live WebSocket connections per server process.
+///
+/// Every connection may hold up to its per-session ingress and egress
+/// budgets, so an uncapped listener lets connection count alone exhaust the
+/// process. Upgrades beyond the cap get `503 Service Unavailable` with
+/// `Retry-After`, and clients reconnect with backoff.
+pub const DEFAULT_MAX_WEBSOCKET_CONNECTIONS: usize = 1024;
 pub(crate) const MAX_CATALOGUE_REQUEST_BODY_BYTES: usize = 8 << 20;
 /// Server state shared across request handlers.
 pub struct ServerState {
@@ -95,8 +106,12 @@ pub struct ServerState {
     /// The owner is shared by every router and connection task that clones
     /// this `ServerState`, while independently built states remain isolated.
     pub(crate) websocket_admissions: Arc<routes::WebSocketAdmissionState>,
-    pub(crate) core_server_shell_storage_config: Option<StorageConfig>,
-    pub(crate) storage_factory: Option<Arc<dyn jazz::groove::storage::StorageFactory>>,
+    /// Live WebSocket connections this process admits before refusing
+    /// upgrades with `503`.
+    pub(crate) max_websocket_connections: usize,
+    /// The app's store: the one file (and thread) the catalogue, the account
+    /// journal and, once started, the runtime share.
+    pub(crate) store: Option<crate::runtime::AppStore>,
     /// Serializes durable-catalogue reconciliation into the local runtime shell.
     ///
     /// Catalogue storage can advance while a previous bridge is in flight, but
@@ -201,19 +216,15 @@ impl ServerState {
             return Ok(core_server_shell);
         }
 
-        let storage_config = self
-            .core_server_shell_storage_config
-            .clone()
+        let store = self
+            .store
+            .as_ref()
             .ok_or_else(|| "server shell storage is not configured".to_owned())?;
         let mut core_server_shell = self.core_server_shell.write().unwrap();
         if let Some(existing) = core_server_shell.clone() {
             return Ok(existing);
         }
-        let started = ServerRuntimeHandle::start_with_storage(
-            schema,
-            storage_config,
-            self.storage_factory.clone(),
-        )?;
+        let started = store.start_runtime(schema, crate::runtime::NodeRole::Core, false, true)?;
         *core_server_shell = Some(started.clone());
         Ok(started)
     }
@@ -297,6 +308,20 @@ impl ServerState {
             tracing::error!(%error, "shutdown catalogue storage close failed");
             failed = true;
         }
+        // The store outlives the shell's sessions but not the server: join
+        // its thread (already joined if the shell started) so the file is
+        // closed before the data dir can be reopened.
+        if let Some(store) = &self.store {
+            let store = store.clone();
+            let closed = tokio::task::spawn_blocking(move || store.close())
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|closed| closed);
+            if let Err(error) = closed {
+                tracing::error!(%error, "shutdown store close failed");
+                failed = true;
+            }
+        }
 
         if failed {
             self.shutdown.set_phase(ShutdownPhase::Failed);
@@ -365,6 +390,13 @@ mod tests {
             Ok(())
         }
 
+        fn upsert_catalogue_entries(
+            &mut self,
+            _entries: &[crate::server::catalogue_entry::CatalogueEntry],
+        ) -> CatalogueStorageResult<()> {
+            Ok(())
+        }
+
         fn flush(&self) -> CatalogueStorageResult<()> {
             Ok(())
         }
@@ -389,6 +421,13 @@ mod tests {
         fn upsert_catalogue_entry(
             &mut self,
             _entry: &crate::server::catalogue_entry::CatalogueEntry,
+        ) -> CatalogueStorageResult<()> {
+            Ok(())
+        }
+
+        fn upsert_catalogue_entries(
+            &mut self,
+            _entries: &[crate::server::catalogue_entry::CatalogueEntry],
         ) -> CatalogueStorageResult<()> {
             Ok(())
         }
@@ -437,17 +476,15 @@ mod tests {
                 std::collections::HashSet::new(),
             )
             .expect("build shutdown test catalogue"),
-            accounts: Some(
-                accounts::AccountRegistryOwner::open(None).expect("account test registry"),
-            ),
+            accounts: Some(accounts::AccountRegistryOwner::in_memory_for_test()),
             catalogue: ServerCatalogue,
             app_id,
             auth_config: AuthConfig::default(),
             jwt_verifier: None,
             core_server_shell: StdRwLock::new(None),
             websocket_admissions: Arc::new(routes::WebSocketAdmissionState::default()),
-            core_server_shell_storage_config: None,
-            storage_factory: None,
+            max_websocket_connections: DEFAULT_MAX_WEBSOCKET_CONNECTIONS,
+            store: None,
             runtime_catalogue_publication: tokio::sync::Mutex::new(()),
             runtime_catalogue_before_publication_hook: StdMutex::new(None),
             runtime_catalogue_after_permissions_read_hook: StdMutex::new(None),

@@ -7,6 +7,7 @@ import {
   Badge,
   Banner,
   Button,
+  Center,
   ChatLayout,
   ChatMessage,
   ChatMessageBubble,
@@ -19,6 +20,7 @@ import {
   HStack,
   MobileNavToggle,
   MoreMenu,
+  Spinner,
   StackItem,
   Timestamp,
   VStack,
@@ -100,6 +102,19 @@ export function mergeHistoryPages(...pages: ShownMessage[][]) {
   return [...byId.values()].reverse();
 }
 
+export const roomMembersQuery = (roomId: string) => app.roomMembers.where({ roomId });
+
+/**
+ * Opens a room's queries before its view mounts. Queries are shared by key,
+ * so when the room id is already known (from the URL) the room's messages
+ * load alongside the profile and room list instead of after them.
+ */
+export function usePrefetchRoom(roomId: string | null) {
+  // The live window as the view first opens it: the newest page.
+  useAll(roomId ? historyQuery(roomId, {}) : undefined);
+  useAll(roomId ? roomMembersQuery(roomId) : undefined);
+}
+
 export function RoomView({ summary, author }: { summary: RoomSummary; author: string }) {
   const db = useDb();
   const directory = useDirectory();
@@ -109,7 +124,10 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
   // every message from its oldest one on, so nothing falls between it and
   // the first older page when new messages arrive.
   const [pinnedFrom, setPinnedFrom] = useState<Date | undefined>(undefined);
-  const { data: newestFirst = [] } = useAll(historyQuery(roomId, { from: pinnedFrom }));
+  const { data: liveWindow } = useAll(historyQuery(roomId, { from: pinnedFrom }));
+  // Undefined until the first result: "No messages yet" only for a room that has none.
+  const isLoadingMessages = liveWindow === undefined;
+  const newestFirst = useMemo(() => liveWindow ?? [], [liveWindow]);
   const [olderCursors, setOlderCursors] = useState<HistoryCursor[]>([]);
   const [olderPages, setOlderPages] = useState<ReadonlyMap<string, ShownMessage[]>>(new Map());
   const onOlderPage = useCallback((cursor: HistoryCursor, rows: ShownMessage[]) => {
@@ -134,7 +152,7 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
     ).length;
     setOlderCursors((cursors) => [...cursors, { at, offset }]);
   }
-  const { data: loadedMembers } = useAll(app.roomMembers.where({ roomId }));
+  const { data: loadedMembers } = useAll(roomMembersQuery(roomId));
   const members = loadedMembers ?? [];
   const { data: requests = [] } = useAll(
     isCreator ? app.joinRequests.where({ roomId }) : undefined,
@@ -239,6 +257,8 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
         {isCreator ? (
           <Button
             label="Invite"
+            // The badge's count runs into the label's text otherwise.
+            aria-label={requests.length > 0 ? `Invite ${requests.length}` : undefined}
             size="sm"
             onClick={() => setMembersOpen(true)}
             endContent={
@@ -279,19 +299,25 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
             />
           }
           emptyState={
-            <EmptyState
-              title="No messages yet"
-              description={
-                isCreator
-                  ? "Say hello, or invite bandmates with the room link."
-                  : "Say hello to the band."
-              }
-              actions={
-                isCreator ? (
-                  <Button label="Invite bandmates" onClick={() => setMembersOpen(true)} />
-                ) : undefined
-              }
-            />
+            isLoadingMessages ? (
+              <Center axis="both" padding={4}>
+                <Spinner label="Loading messages…" />
+              </Center>
+            ) : (
+              <EmptyState
+                title="No messages yet"
+                description={
+                  isCreator
+                    ? "Say hello, or invite bandmates with the room link."
+                    : "Say hello to the band."
+                }
+                actions={
+                  isCreator ? (
+                    <Button label="Invite bandmates" onClick={() => setMembersOpen(true)} />
+                  ) : undefined
+                }
+              />
+            )
           }
         >
           {olderCursors.map((cursor) => (

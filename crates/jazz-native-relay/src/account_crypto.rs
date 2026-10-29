@@ -1,17 +1,10 @@
 //! Stateless native account crypto; no database, registry, or network ownership.
 
-use crate::{JazzNativeRelayBytes, JazzNativeRelayStatus};
+use crate::{
+    JazzNativeRelayBytes, JazzNativeRelayStatus, bounded_bytes_arg, ffi_call, require_arg,
+    reset_out, write_bytes_out,
+};
 use jazz::tools::identity::{LOCAL_FIRST_ISSUER, mint_jazz_self_signed_token_at};
-
-unsafe fn export_bytes(out: *mut JazzNativeRelayBytes, bytes: Vec<u8>) {
-    let bytes = bytes.into_boxed_slice();
-    unsafe {
-        *out = JazzNativeRelayBytes {
-            len: bytes.len(),
-            data: Box::into_raw(bytes).cast(),
-        };
-    }
-}
 
 /// Generate a 32-byte local-first signing root using the operating system RNG.
 /// The caller must retain it securely before opening a context.
@@ -23,16 +16,13 @@ unsafe fn export_bytes(out: *mut JazzNativeRelayBytes, bytes: Vec<u8>) {
 pub unsafe extern "C" fn jazz_native_relay_account_secret(
     out: *mut JazzNativeRelayBytes,
 ) -> JazzNativeRelayStatus {
-    if out.is_null() {
-        return JazzNativeRelayStatus::InvalidArgument;
-    }
-    unsafe { *out = JazzNativeRelayBytes::EMPTY };
-    let mut seed = vec![0; 32];
-    if getrandom::fill(&mut seed).is_err() {
-        return JazzNativeRelayStatus::LifecycleFailure;
-    }
-    unsafe { export_bytes(out, seed) };
-    JazzNativeRelayStatus::Ok
+    ffi_call(|| {
+        unsafe { reset_out(out, JazzNativeRelayBytes::EMPTY)? };
+        let mut seed = vec![0; 32];
+        getrandom::fill(&mut seed).map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+        unsafe { write_bytes_out(out, seed) };
+        Ok(())
+    })
 }
 
 /// Mint the same local-first proof as WASM/NAPI, without loading a database.
@@ -52,38 +42,25 @@ pub unsafe extern "C" fn jazz_native_relay_mint_local_first_token(
     now_seconds: u64,
     out: *mut JazzNativeRelayBytes,
 ) -> JazzNativeRelayStatus {
-    if out.is_null() {
-        return JazzNativeRelayStatus::InvalidArgument;
-    }
-    unsafe { *out = JazzNativeRelayBytes::EMPTY };
-    if seed.is_null()
-        || seed_len != 32
-        || audience.is_null()
-        || audience_len == 0
-        || audience_len > 16 * 1024
-        || ttl_seconds == 0
-        || now_seconds.checked_add(ttl_seconds).is_none()
-    {
-        return JazzNativeRelayStatus::InvalidArgument;
-    }
-    let seed: &[u8; 32] = unsafe { &*seed.cast::<[u8; 32]>() };
-    let audience =
-        match std::str::from_utf8(unsafe { std::slice::from_raw_parts(audience, audience_len) }) {
-            Ok(value) => value,
-            Err(_) => return JazzNativeRelayStatus::InvalidArgument,
-        };
-    let token = match mint_jazz_self_signed_token_at(
-        seed,
-        LOCAL_FIRST_ISSUER,
-        audience,
-        ttl_seconds,
-        now_seconds,
-    ) {
-        Ok(token) => token,
-        Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
-    };
-    unsafe { export_bytes(out, token.into_bytes()) };
-    JazzNativeRelayStatus::Ok
+    ffi_call(|| {
+        unsafe { reset_out(out, JazzNativeRelayBytes::EMPTY)? };
+        require_arg(!seed.is_null() && seed_len == 32)?;
+        let audience = unsafe { bounded_bytes_arg(audience, audience_len, 16 * 1024)? };
+        require_arg(ttl_seconds != 0 && now_seconds.checked_add(ttl_seconds).is_some())?;
+        let seed: &[u8; 32] = unsafe { &*seed.cast::<[u8; 32]>() };
+        let audience =
+            std::str::from_utf8(audience).map_err(|_| JazzNativeRelayStatus::InvalidArgument)?;
+        let token = mint_jazz_self_signed_token_at(
+            seed,
+            LOCAL_FIRST_ISSUER,
+            audience,
+            ttl_seconds,
+            now_seconds,
+        )
+        .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+        unsafe { write_bytes_out(out, token.into_bytes()) };
+        Ok(())
+    })
 }
 
 #[cfg(test)]

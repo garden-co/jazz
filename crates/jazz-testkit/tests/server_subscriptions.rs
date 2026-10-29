@@ -6,8 +6,9 @@ use jazz::query::OrderDirection;
 use jazz::row_input;
 use jazz::tools::Operation;
 use jazz::tools::public_schema::{
-    RelColumnRef, RelExpr, RelJoinCondition, RelJoinKind, RelKeyRef, RelPredicateCmpOp,
-    RelPredicateExpr, RelRecursionBound, RelValueRef, RowIdRef, TablePolicies,
+    RecursionBound, RelationCmpOp, RelationColumnRef, RelationExpr, RelationJoinCondition,
+    RelationJoinKind, RelationKeyRef, RelationPredicate, RelationRowIdRef, RelationValueRef,
+    TablePolicies,
 };
 use jazz::tools::{
     AppId, ColumnType, DurabilityTier, JazzClient, ObjectId, PolicyExpr, Schema, SchemaBuilder,
@@ -496,6 +497,88 @@ async fn public_subscription_stream_yields_delta_items_for_normal_changes() {
         .await;
 }
 
+async fn next_delta(stream: &mut jazz::tools::SubscriptionStream) -> jazz::tools::OrderedRowDelta {
+    match tokio::time::timeout(Duration::from_secs(10), stream.next())
+        .await
+        .expect("subscription item arrives")
+        .expect("subscription stays open")
+    {
+        SubscriptionStreamItem::Delta(delta) => delta,
+        SubscriptionStreamItem::Rejected { reason } => {
+            panic!("subscription was rejected: {reason:?}")
+        }
+    }
+}
+
+/// A `JazzClient` subscription that opts a column into splices gets, on each
+/// updated row, the splices from the value the previous delta showed.
+#[tokio::test(flavor = "current_thread")]
+async fn public_subscription_stream_carries_opted_in_splices() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = todo_schema();
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
+            let client = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema)
+                .with_user_id("00000000-0000-4000-8000-000000000102")
+                .ready_on("todos", Duration::from_secs(30))
+                .connect()
+                .await;
+            let (todo_id, _, transaction_id) = client
+                .insert("todos", row_input!("title" => "draft", "done" => false))
+                .expect("insert todo");
+            support::wait_for_global_txs(&client, &[transaction_id.unwrap()]).await;
+
+            let opts = jazz::db::ReadOpts::for_read_tier(jazz::tools::ReadTier::LocalOnly)
+                .with_splices(["title"]);
+            let mut stream = client
+                .subscribe_with_opts(jazz::query::Query::from("todos"), opts)
+                .await
+                .expect("subscription with splices opens");
+            loop {
+                if next_delta(&mut stream)
+                    .await
+                    .added
+                    .iter()
+                    .any(|row| row.id == todo_id)
+                {
+                    break;
+                }
+            }
+
+            let tx = client
+                .update(
+                    "todos",
+                    todo_id,
+                    vec![("title".into(), Value::Text("final".into()))],
+                )
+                .expect("update todo");
+            support::wait_for_global_txs(&client, &[tx.unwrap()]).await;
+            let updated = loop {
+                let delta = next_delta(&mut stream).await;
+                if let Some(row) = delta.updated.into_iter().find(|row| row.id == todo_id) {
+                    break row;
+                }
+            };
+            assert_eq!(updated.splices.len(), 1);
+            let (column, splices) = &updated.splices[0];
+            assert_eq!(column, "title");
+            let mut title = b"draft".to_vec();
+            for splice in splices {
+                let at = splice.at as usize;
+                title.splice(
+                    at..at + splice.delete as usize,
+                    splice.insert.iter().copied(),
+                );
+            }
+            assert_eq!(title, b"final");
+        })
+        .await;
+}
+
 fn policy_graph_policy_schema() -> Schema {
     SchemaBuilder::new()
         .table(
@@ -576,96 +659,96 @@ fn policy_graph_policy_schema() -> Schema {
 
 fn resource_access_policy() -> PolicyExpr {
     PolicyExpr::ExistsRel {
-        rel: RelExpr::Filter {
-            input: Box::new(RelExpr::Join {
-                left: Box::new(RelExpr::Gather {
-                    seed: Box::new(RelExpr::Filter {
-                        input: Box::new(RelExpr::TableScan {
+        rel: RelationExpr::Filter {
+            input: Box::new(RelationExpr::Join {
+                left: Box::new(RelationExpr::Gather {
+                    seed: Box::new(RelationExpr::Filter {
+                        input: Box::new(RelationExpr::TableScan {
                             table: "teams".into(),
                             alias: None,
                         }),
-                        predicate: RelPredicateExpr::Cmp {
-                            left: RelColumnRef {
+                        predicate: RelationPredicate::Cmp {
+                            left: RelationColumnRef {
                                 scope: Some("teams".to_owned()),
                                 column: "identity_key".to_owned(),
                             },
-                            op: RelPredicateCmpOp::Eq,
-                            right: RelValueRef::SessionRef(vec![
+                            op: RelationCmpOp::Eq,
+                            right: RelationValueRef::SessionRef(vec![
                                 "claims".to_owned(),
                                 "sub".to_owned(),
                             ]),
                         },
                     }),
-                    step: Box::new(RelExpr::Project {
-                        input: Box::new(RelExpr::Join {
-                            left: Box::new(RelExpr::Filter {
-                                input: Box::new(RelExpr::TableScan {
+                    step: Box::new(RelationExpr::Project {
+                        input: Box::new(RelationExpr::Join {
+                            left: Box::new(RelationExpr::Filter {
+                                input: Box::new(RelationExpr::TableScan {
                                     table: "team_team_edges".into(),
                                     alias: None,
                                 }),
-                                predicate: RelPredicateExpr::Cmp {
-                                    left: RelColumnRef {
+                                predicate: RelationPredicate::Cmp {
+                                    left: RelationColumnRef {
                                         scope: Some("team_team_edges".to_owned()),
                                         column: "child_team".to_owned(),
                                     },
-                                    op: RelPredicateCmpOp::Eq,
-                                    right: RelValueRef::RowId(RowIdRef::Frontier),
+                                    op: RelationCmpOp::Eq,
+                                    right: RelationValueRef::RowId(RelationRowIdRef::Frontier),
                                 },
                             }),
-                            right: Box::new(RelExpr::TableScan {
+                            right: Box::new(RelationExpr::TableScan {
                                 table: "teams".into(),
                                 alias: Some("__recursive_hop_0".to_owned()),
                             }),
-                            on: vec![RelJoinCondition {
-                                left: RelColumnRef {
+                            on: vec![RelationJoinCondition {
+                                left: RelationColumnRef {
                                     scope: Some("team_team_edges".to_owned()),
                                     column: "parent_team".to_owned(),
                                 },
-                                right: RelColumnRef {
+                                right: RelationColumnRef {
                                     scope: Some("__recursive_hop_0".to_owned()),
                                     column: "id".to_owned(),
                                 },
                             }],
-                            join_kind: RelJoinKind::Inner,
+                            join_kind: RelationJoinKind::Inner,
                         }),
                         columns: Vec::new(),
                     }),
-                    frontier_key: RelKeyRef::RowId(RowIdRef::Current),
-                    bound: RelRecursionBound::MaxDepth(8),
-                    dedupe_key: vec![RelKeyRef::RowId(RowIdRef::Current)],
+                    frontier_key: RelationKeyRef::RowId(RelationRowIdRef::Current),
+                    bound: RecursionBound::MaxDepth(8),
+                    dedupe_key: vec![RelationKeyRef::RowId(RelationRowIdRef::Current)],
                 }),
-                right: Box::new(RelExpr::TableScan {
+                right: Box::new(RelationExpr::TableScan {
                     table: "resource_access_edges".into(),
                     alias: Some("access".to_owned()),
                 }),
-                on: vec![RelJoinCondition {
-                    left: RelColumnRef {
+                on: vec![RelationJoinCondition {
+                    left: RelationColumnRef {
                         scope: None,
                         column: "id".to_owned(),
                     },
-                    right: RelColumnRef {
+                    right: RelationColumnRef {
                         scope: Some("access".to_owned()),
                         column: "team".to_owned(),
                     },
                 }],
-                join_kind: RelJoinKind::Inner,
+                join_kind: RelationJoinKind::Inner,
             }),
-            predicate: RelPredicateExpr::And(vec![
-                RelPredicateExpr::Cmp {
-                    left: RelColumnRef {
+            predicate: RelationPredicate::And(vec![
+                RelationPredicate::Cmp {
+                    left: RelationColumnRef {
                         scope: Some("access".to_owned()),
                         column: "resource".to_owned(),
                     },
-                    op: RelPredicateCmpOp::Eq,
-                    right: RelValueRef::RowId(RowIdRef::Outer),
+                    op: RelationCmpOp::Eq,
+                    right: RelationValueRef::RowId(RelationRowIdRef::Outer),
                 },
-                RelPredicateExpr::Cmp {
-                    left: RelColumnRef {
+                RelationPredicate::Cmp {
+                    left: RelationColumnRef {
                         scope: Some("access".to_owned()),
                         column: "grant_role".to_owned(),
                     },
-                    op: RelPredicateCmpOp::Eq,
-                    right: RelValueRef::Literal(Value::Text("viewer".to_owned())),
+                    op: RelationCmpOp::Eq,
+                    right: RelationValueRef::literal(Value::Text("viewer".to_owned())),
                 },
             ]),
         },
@@ -674,96 +757,96 @@ fn resource_access_policy() -> PolicyExpr {
 
 fn mapping_rule_access_policy() -> PolicyExpr {
     PolicyExpr::ExistsRel {
-        rel: RelExpr::Filter {
-            input: Box::new(RelExpr::Join {
-                left: Box::new(RelExpr::Gather {
-                    seed: Box::new(RelExpr::Filter {
-                        input: Box::new(RelExpr::TableScan {
+        rel: RelationExpr::Filter {
+            input: Box::new(RelationExpr::Join {
+                left: Box::new(RelationExpr::Gather {
+                    seed: Box::new(RelationExpr::Filter {
+                        input: Box::new(RelationExpr::TableScan {
                             table: "teams".into(),
                             alias: None,
                         }),
-                        predicate: RelPredicateExpr::Cmp {
-                            left: RelColumnRef {
+                        predicate: RelationPredicate::Cmp {
+                            left: RelationColumnRef {
                                 scope: Some("teams".to_owned()),
                                 column: "identity_key".to_owned(),
                             },
-                            op: RelPredicateCmpOp::Eq,
-                            right: RelValueRef::SessionRef(vec![
+                            op: RelationCmpOp::Eq,
+                            right: RelationValueRef::SessionRef(vec![
                                 "claims".to_owned(),
                                 "sub".to_owned(),
                             ]),
                         },
                     }),
-                    step: Box::new(RelExpr::Project {
-                        input: Box::new(RelExpr::Join {
-                            left: Box::new(RelExpr::Filter {
-                                input: Box::new(RelExpr::TableScan {
+                    step: Box::new(RelationExpr::Project {
+                        input: Box::new(RelationExpr::Join {
+                            left: Box::new(RelationExpr::Filter {
+                                input: Box::new(RelationExpr::TableScan {
                                     table: "team_team_edges".into(),
                                     alias: None,
                                 }),
-                                predicate: RelPredicateExpr::Cmp {
-                                    left: RelColumnRef {
+                                predicate: RelationPredicate::Cmp {
+                                    left: RelationColumnRef {
                                         scope: Some("team_team_edges".to_owned()),
                                         column: "child_team".to_owned(),
                                     },
-                                    op: RelPredicateCmpOp::Eq,
-                                    right: RelValueRef::RowId(RowIdRef::Frontier),
+                                    op: RelationCmpOp::Eq,
+                                    right: RelationValueRef::RowId(RelationRowIdRef::Frontier),
                                 },
                             }),
-                            right: Box::new(RelExpr::TableScan {
+                            right: Box::new(RelationExpr::TableScan {
                                 table: "teams".into(),
                                 alias: Some("__recursive_hop_0".to_owned()),
                             }),
-                            on: vec![RelJoinCondition {
-                                left: RelColumnRef {
+                            on: vec![RelationJoinCondition {
+                                left: RelationColumnRef {
                                     scope: Some("team_team_edges".to_owned()),
                                     column: "parent_team".to_owned(),
                                 },
-                                right: RelColumnRef {
+                                right: RelationColumnRef {
                                     scope: Some("__recursive_hop_0".to_owned()),
                                     column: "id".to_owned(),
                                 },
                             }],
-                            join_kind: RelJoinKind::Inner,
+                            join_kind: RelationJoinKind::Inner,
                         }),
                         columns: Vec::new(),
                     }),
-                    frontier_key: RelKeyRef::RowId(RowIdRef::Current),
-                    bound: RelRecursionBound::MaxDepth(8),
-                    dedupe_key: vec![RelKeyRef::RowId(RowIdRef::Current)],
+                    frontier_key: RelationKeyRef::RowId(RelationRowIdRef::Current),
+                    bound: RecursionBound::MaxDepth(8),
+                    dedupe_key: vec![RelationKeyRef::RowId(RelationRowIdRef::Current)],
                 }),
-                right: Box::new(RelExpr::TableScan {
+                right: Box::new(RelationExpr::TableScan {
                     table: "mapping_rule_access_edges".into(),
                     alias: Some("access".to_owned()),
                 }),
-                on: vec![RelJoinCondition {
-                    left: RelColumnRef {
+                on: vec![RelationJoinCondition {
+                    left: RelationColumnRef {
                         scope: None,
                         column: "id".to_owned(),
                     },
-                    right: RelColumnRef {
+                    right: RelationColumnRef {
                         scope: Some("access".to_owned()),
                         column: "team".to_owned(),
                     },
                 }],
-                join_kind: RelJoinKind::Inner,
+                join_kind: RelationJoinKind::Inner,
             }),
-            predicate: RelPredicateExpr::And(vec![
-                RelPredicateExpr::Cmp {
-                    left: RelColumnRef {
+            predicate: RelationPredicate::And(vec![
+                RelationPredicate::Cmp {
+                    left: RelationColumnRef {
                         scope: Some("access".to_owned()),
                         column: "mapping_rule".to_owned(),
                     },
-                    op: RelPredicateCmpOp::Eq,
-                    right: RelValueRef::RowId(RowIdRef::Outer),
+                    op: RelationCmpOp::Eq,
+                    right: RelationValueRef::RowId(RelationRowIdRef::Outer),
                 },
-                RelPredicateExpr::Cmp {
-                    left: RelColumnRef {
+                RelationPredicate::Cmp {
+                    left: RelationColumnRef {
                         scope: Some("access".to_owned()),
                         column: "grant_role".to_owned(),
                     },
-                    op: RelPredicateCmpOp::Eq,
-                    right: RelValueRef::Literal(Value::Text("viewer".to_owned())),
+                    op: RelationCmpOp::Eq,
+                    right: RelationValueRef::literal(Value::Text("viewer".to_owned())),
                 },
             ]),
         },
@@ -963,20 +1046,6 @@ async fn dynamic_server_publishes_seeded_reachable_policy_and_serves_member_rows
         .run_until(async {
             let server = JazzServer::start().await.expect("start test server");
             let schema = policy_graph_policy_schema();
-            let app_id = server.app_id();
-            let response = reqwest::Client::new()
-                .post(format!("{}/apps/{app_id}/admin/schemas", server.base_url()))
-                .header("X-Jazz-Admin-Secret", server.admin_secret())
-                .json(&json!({ "schema": schema }))
-                .send()
-                .await
-                .expect("publish policy graph-shaped schema");
-            let status = response.status();
-            if !status.is_success() {
-                let body = response.text().await.expect("schema publish error body");
-                panic!("policy graph-shaped schema publish failed: {status} {body}");
-            }
-
             publish_permissions(
                 &server.base_url(),
                 server.app_id(),
@@ -986,7 +1055,6 @@ async fn dynamic_server_publishes_seeded_reachable_policy_and_serves_member_rows
                     .iter()
                     .map(|(table_name, table_schema)| (*table_name, table_schema.policies.clone()))
                     .collect::<Vec<_>>(),
-                None,
             )
             .await;
 
@@ -1052,7 +1120,7 @@ async fn fixed_schema_data_dir_reopen_bootstraps_policy_graph_policy_serving_sta
                 let server = JazzServer::builder()
                     .with_schema(schema.clone())
                     .with_data_dir(data_dir.path())
-                    .with_storage_factory(jazz_testkit::persistent_storage_factory())
+                    .with_persistent_storage()
                     .start()
                     .await
                     .expect("start test server");
@@ -1072,7 +1140,7 @@ async fn fixed_schema_data_dir_reopen_bootstraps_policy_graph_policy_serving_sta
             let reopened = JazzServer::builder()
                 .with_schema(schema.clone())
                 .with_data_dir(data_dir.path())
-                .with_storage_factory(jazz_testkit::persistent_storage_factory())
+                .with_persistent_storage()
                 .start()
                 .await
                 .expect("start test server");

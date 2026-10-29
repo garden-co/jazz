@@ -1,10 +1,19 @@
 /**
  * A real-Chromium, public-Jazz compatibility receipt for a durable browser
- * replica.  The companion raw-page receipt proves the adapter's epoch/page
- * framing; this file deliberately drives that adapter through `createDb`, the
- * SharedWorker, and the released WASM runtime instead.
+ * replica. A browser store is two IndexedDB databases: the page store (its
+ * epoch manifest, owner, replica node and leases) named by the physical
+ * root, and the worker's SQLite file, which the IndexedDB VFS keeps as
+ * 64 KiB blocks in the `jazz-idb` database. This file drives both through
+ * `createDb`, the SharedWorker and the released WASM runtime.
  *
- * Keep this corpus on the canonical browser test project.  It is intentionally
+ * - The pinned SQLite storage-format-1 corpus reopens offline with every
+ *   row, branch and large value, accepts current writes, and reopens again.
+ * - A damaged SQLite file is refused with a storage error, not rewritten.
+ * - Every Groove-era root (published alpha.54, the last Groove format, and
+ *   the pre-linear one) is refused with the typed storage-format error,
+ *   naming the codec families it declares, without rewriting a record.
+ *
+ * Keep this corpus on the canonical browser test project. It is intentionally
  * not a second fake-IDB or MemoryPageStore harness: a durable fixture must be
  * readable by the same public path an application uses.
  */
@@ -12,11 +21,14 @@
 import { afterEach, describe, expect, it } from "vitest";
 import historicalCorpus from "../../fixtures/epoch-1-browser-jazz-corpus.json?raw";
 import publishedAlpha54Corpus from "../../fixtures/published-alpha54-browser-jazz-corpus.json?raw";
-import currentCorpus from "../../fixtures/current-browser-jazz-corpus.json?raw";
+import lastGrooveCorpus from "../../fixtures/groove-linear-history-browser-jazz-corpus.json?raw";
+import preLinearCorpus from "../../fixtures/pre-linear-browser-jazz-corpus.json?raw";
+import sqliteCorpus from "../../fixtures/sqlite-v1-browser-jazz-corpus.json?raw";
 import { jazzStorageCorpusBrowserCommands } from "./browser-commands.js";
 import { createAccountManager, ReadTier, schema as s, type DbConfig } from "../../src/index.js";
 import { deploy } from "../../src/dev/catalogue.js";
 import { accountRegistryUrl } from "../../src/accounts/context.js";
+import { createBrowserPhysicalDatabaseName } from "../../src/runtime/browser-worker-config.js";
 import { type Db } from "../../src/runtime/db.js";
 import {
   INDEXEDDB_BROWSER_RUNTIME_OWNER_KEY,
@@ -28,11 +40,7 @@ import {
   INDEXEDDB_STORAGE_MANIFEST_STORE,
   IndexedDbPageStore,
 } from "../../src/runtime/indexeddb-page-store.js";
-import {
-  blockJazzServerNetwork,
-  getJazzServerInfo,
-  unblockJazzServerNetwork,
-} from "./testing-server.js";
+import { createJazzServerTransportControl, getJazzServerInfo } from "./testing-server.js";
 import {
   createBrowserTestDb as createDb,
   sleep,
@@ -85,6 +93,11 @@ const corruptionApp = s.defineApp({
   ),
 });
 
+/** The producer's account; every pinned corpus was written under it. */
+const CORPUS_SECRET = "jazz-auth-v1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
+const CORPUS_APP_ID = "ba96582c-7167-5f52-ba63-3ebefe1c2b96";
+const LARGE_BODY = "large value ".repeat(20_000);
+
 describe("browser Jazz storage compatibility corpus", () => {
   // `driver.dbName` is a caller-selected logical base. Browser persistence
   // deliberately derives a distinct physical root for the complete auth
@@ -92,6 +105,7 @@ describe("browser Jazz storage compatibility corpus", () => {
   // root that the public Db actually opened.
   const databaseNames = new Set<string>();
   const openDbs: Db[] = [];
+  const transportCleanup = new TestCleanup();
   const openDbLabels = new Map<Db, string>();
   let pinnedCorpusPhase = "not started";
 
@@ -123,6 +137,7 @@ describe("browser Jazz storage compatibility corpus", () => {
     await withTimeout(db.shutdown(), 5_000, `browser corpus shutdown ${label} stalled`);
     receipt(`shutdown:${label}:done; pinned-phase=${pinnedCorpusPhase}`);
     openDbLabels.delete(db);
+    openDbs.splice(openDbs.indexOf(db), 1);
   }
 
   afterEach(async () => {
@@ -132,62 +147,24 @@ describe("browser Jazz storage compatibility corpus", () => {
         .join(",")}`,
     );
     await Promise.all(
-      openDbs
-        .splice(0)
+      [...openDbs]
         .reverse()
         .map((db) => shutdownTrackedDb(db, openDbLabels.get(db) ?? "unlabeled")),
     );
+    await transportCleanup.cleanup();
     receipt(`cleanup:dbs-done; pinned-phase=${pinnedCorpusPhase}`);
-    await Promise.all([...databaseNames].map((name) => IndexedDbPageStore.destroy(name)));
+    await Promise.all(
+      [...databaseNames].map(async (name) => {
+        await IndexedDbPageStore.destroy(name);
+        await deleteSqliteBlocks(await sqliteFilePath(name));
+      }),
+    );
     databaseNames.clear();
     receipt(`cleanup:done; pinned-phase=${pinnedCorpusPhase}`);
   });
 
-  it("opens, extends, and reopens the published alpha.54 browser corpus", async () => {
-    const digest = Array.from(
-      new Uint8Array(
-        await crypto.subtle.digest("SHA-256", new TextEncoder().encode(publishedAlpha54Corpus)),
-      ),
-    )
-      .map((byte) => byte.toString(16).padStart(2, "0"))
-      .join("");
-    expect(digest).toBe("e1aa237f375db4d060c2a3fe13fa443659fba55c8695f99993e17e200c897b00");
-    const publishedApp = s.defineApp({ notes: s.table({ body: s.string() }, {}) });
-    const appId = "00000000-0000-4000-8000-000000000054";
-    const accounts = await createAccountManager({ appId, serverUrl: "http://127.0.0.1:1" });
-    const dbName = uniqueDbName("published-alpha54-compat");
-    const config: DbConfig = {
-      appId,
-      account: accounts.restoreLocalFirst(
-        "jazz-auth-v1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
-      ),
-      driver: { type: "persistent", dbName },
-    };
-    let db = await openPersistentDb(config);
-    const physicalDbName = await trackPhysicalDatabase(dbName);
-    await db.shutdown();
-    openDbs.splice(openDbs.indexOf(db), 1);
-    await IndexedDbPageStore.destroy(physicalDbName);
-    await installRawRecords(physicalDbName, JSON.parse(publishedAlpha54Corpus));
-    expect(await rawRecords(physicalDbName)).toEqual(JSON.parse(publishedAlpha54Corpus));
-    db = await openPersistentDb(config);
-    expect(await db.all(publishedApp.notes, { tier: ReadTier.LocalFirst })).toMatchObject([
-      { body: "published alpha.54 current" },
-    ]);
-    await db
-      .insert(publishedApp.notes, { body: "current main browser writer" })
-      .wait({ tier: "local" });
-    await db.shutdown();
-    openDbs.splice(openDbs.indexOf(db), 1);
-    db = await openPersistentDb(config);
-    const bodies = (await db.all(publishedApp.notes, { tier: ReadTier.LocalFirst }))
-      .map((row) => row.body)
-      .sort();
-    expect(bodies).toEqual(["current main browser writer", "published alpha.54 current"]);
-  }, 30_000);
-
-  it("produces the current catalogue/history/branch/large-value corpus through public WasmDb", async () => {
-    const server = await getJazzServerInfo("ba96582c-7167-5f52-ba63-3ebefe1c2b96");
+  it("produces the SQLite catalogue/history/branch/large-value corpus through public WasmDb", async () => {
+    const server = await getJazzServerInfo(CORPUS_APP_ID);
     await deploy({
       appId: server.appId,
       serverUrl: server.serverUrl,
@@ -195,35 +172,26 @@ describe("browser Jazz storage compatibility corpus", () => {
       schema: app.wasmSchema,
       permissions,
     });
-    const dbName = uniqueDbName("browser-storage-current-producer");
-    const config = await persistentConfig(
-      dbName,
-      "jazz-auth-v1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
-      server,
+    const transport = transportCleanup.trackTransport(
+      await createJazzServerTransportControl(server.serverUrl),
     );
-    let db = await openPersistentDb(config);
+    const dbName = uniqueDbName("browser-storage-sqlite-producer");
+    const config = await persistentConfig(dbName, CORPUS_SECRET, {
+      ...server,
+      serverUrl: transport.url,
+    });
+    let db = await openPersistentDb(config, "producer");
     const physicalDbName = await trackPhysicalDatabase(dbName);
-    const body = "large value ".repeat(20_000);
     const initial = await db.transaction((tx) => {
       const project = tx.insert(app.projects, { name: "corpus project" });
       const main = tx.insert(
         app.documents,
-        {
-          branch: "main",
-          title: "original title",
-          projectId: project.id,
-          body,
-        },
+        { branch: "main", title: "original title", projectId: project.id, body: LARGE_BODY },
         { branch: "main" },
       );
       tx.insert(
         app.documents,
-        {
-          branch: "draft",
-          title: "draft override",
-          projectId: project.id,
-          body,
-        },
+        { branch: "draft", title: "draft override", projectId: project.id, body: LARGE_BODY },
         { branch: "draft" },
       );
       return main.id;
@@ -240,177 +208,90 @@ describe("browser Jazz storage compatibility corpus", () => {
       20_000,
       "corpus history update did not settle",
     );
-    expect(await db.all(app.documents, { tier: "global", branch: "main" })).toHaveLength(1);
-    expect(await db.all(app.documents, { tier: "global", branch: "draft" })).toHaveLength(1);
-    await db.shutdown();
-    openDbs.splice(openDbs.indexOf(db), 1);
+    expect(await db.all(app.documents, { tier: "remote", branch: "main" })).toHaveLength(1);
+    expect(await db.all(app.documents, { tier: "remote", branch: "draft" })).toHaveLength(1);
+    await shutdownTrackedDb(db, "producer");
     await sleep(100);
-    const candidate = await rawRecords(physicalDbName);
+    const candidate = await rawBrowserStore(physicalDbName);
     expect(
       rawManifest(candidate).find(([key]) => key === INDEXEDDB_STORAGE_MANIFEST_KEY)?.[1],
     ).toEqual(INDEXEDDB_STORAGE_MANIFEST);
-    await blockJazzServerNetwork(server.serverUrl);
+    expect(JSON.parse(candidate[SQLITE_BLOCKS]!)).not.toHaveLength(0);
+    // Validate the raw candidate through a real offline reopen before export.
+    await transport.block();
     try {
-      db = await openPersistentDb(config);
+      db = await openPersistentDb(config, "producer-reopen");
       await db.disconnect();
       expect(
         await db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "main" }),
-      ).toMatchObject([{ branch: "main", title: "current title", body }]);
+      ).toMatchObject([{ branch: "main", title: "current title", body: LARGE_BODY }]);
       expect(
         await db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "draft" }),
-      ).toMatchObject([{ branch: "draft", title: "draft override", body }]);
-      await db.shutdown();
-      openDbs.splice(openDbs.indexOf(db), 1);
+      ).toMatchObject([{ branch: "draft", title: "draft override", body: LARGE_BODY }]);
+      await shutdownTrackedDb(db, "producer-reopen");
     } finally {
-      await unblockJazzServerNetwork(server.serverUrl);
+      await transport.unblock();
     }
-    // Export only after actual public reopen has validated the raw candidate.
     await jazzStorageCorpusBrowserCommands().writeBrowserStorageCorpus(candidate);
   }, 90_000);
 
-  it("opens the pinned catalogue/history/branch/large-value corpus through public WasmDb", async () => {
+  // `sqlite-v1-browser-jazz-corpus.json` is real output of the producer test
+  // above: the page store's records plus the SQLite file's blocks, written in
+  // Jazz SQLite storage format 1. Once alpha.60 ships it is immutable;
+  // until then a format change re-runs the producer (JAZZ_BROWSER_CORPUS_OUT
+  // set to a new path) and checks in the exported candidate.
+  it("opens the pinned SQLite corpus offline, accepts current writes and reopens", async () => {
     pinnedCorpusPhase = "pinned-test:start";
     receipt(pinnedCorpusPhase);
-    const rawBeforeReadOnlyInspection = JSON.parse(currentCorpus) as Record<string, string>;
-    const owner = JSON.parse(
-      rawManifest(rawBeforeReadOnlyInspection).find(
-        ([key]) => key === INDEXEDDB_BROWSER_RUNTIME_OWNER_KEY,
-      )![1] as string,
+    const pinned = JSON.parse(sqliteCorpus) as Record<string, string>;
+    const { config, physicalDbName, dbName } = await pinnedCorpusConfig(
+      pinned,
+      "browser-storage-compat-sqlite-v1",
     );
-    expect(owner).toMatchObject({
-      version: 1,
-      appId: "ba96582c-7167-5f52-ba63-3ebefe1c2b96",
-      env: "dev",
-      auth: { kind: "account" },
-    });
-    const registry = new URL(owner.auth.registry);
-    const registrySuffix = `/apps/${owner.appId}/accounts`;
-    expect(registry.pathname.endsWith(registrySuffix)).toBe(true);
-    const serverBase = new URL(registry);
-    serverBase.pathname = registry.pathname.slice(0, -registrySuffix.length);
-    expect(accountRegistryUrl(serverBase.href, owner.appId)).toBe(owner.auth.registry);
-    // Registry authority is part of the stored owner. Reopen under the exact
-    // producer authority, even though that test server no longer exists. A
-    // newly allocated test-server port is a different account namespace.
-    const accounts = await createAccountManager({
-      appId: owner.appId,
-      serverUrl: serverBase.href,
-    });
-    const dbName = "browser-storage-compat-historical-root-v1";
-    const secret = "jazz-auth-v1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
-    const account = accounts.restoreLocalFirst(secret);
-    expect(account.id).toBe(owner.auth.account);
-    // Omit serverUrl on the context: every pinned read and append is local,
-    // including the first open, so upstream cannot repair a missing page.
-    const config: DbConfig = {
-      appId: owner.appId,
-      account,
-      driver: { type: "persistent", dbName },
-    };
-    // Prepare the real key-bound account before creating a context. Provision
-    // once through the public path to identify its account-scoped physical root
-    // before installing the pinned receipt.
-    const bootstrap = await pinnedPhase("bootstrap-open", () =>
-      openPersistentDb(config, "pinned-bootstrap"),
-    );
-    const physicalDbName = await pinnedPhase("physical-root", () => trackPhysicalDatabase(dbName));
-    await pinnedPhase("bootstrap-shutdown", () => shutdownTrackedDb(bootstrap, "pinned-bootstrap"));
-    openDbs.splice(openDbs.indexOf(bootstrap), 1);
-    await pinnedPhase("bootstrap-settle", () => sleep(100));
-    await pinnedPhase("install-pinned-records", () =>
-      installRawRecords(physicalDbName, rawBeforeReadOnlyInspection),
-    );
-    expect(await pinnedPhase("read-installed-records", () => rawRecords(physicalDbName))).toEqual(
-      rawBeforeReadOnlyInspection,
-    );
+    await pinnedPhase("install-pinned-records", () => installBrowserStore(physicalDbName, pinned));
+    expect(await rawBrowserStore(physicalDbName)).toEqual(pinned);
 
     let db = await pinnedPhase("readonly-open", () => openPersistentDb(config, "pinned-readonly"));
-    // The persistent replica lives in the worker. Use the public local-first
-    // read across that hop. With no serverUrl, the worker cannot contact Core.
-    // Inspector LocalOnly reads only the foreground's in-memory rows.
-    const rawWhileReopened = await pinnedPhase("read-open-records", () =>
-      rawRecords(physicalDbName),
-    );
-    // Reopen must materialize the durable local replica without depending on
-    // a fresh remote-coverage round trip. The earlier global read proves the
-    // synced fixture; this is specifically the offline persistence boundary.
+    expect(await trackPhysicalDatabase(dbName)).toBe(physicalDbName);
+    const rawWhileReopened = await rawBrowserStore(physicalDbName);
+    // No serverUrl: every read and append is local, so no server can repair
+    // a missing page.
     const reopenedMain = await pinnedPhase("readonly-main-query", () =>
       db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "main" }),
     );
     const reopenedDraft = await pinnedPhase("readonly-draft-query", () =>
       db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "draft" }),
     );
-    expect(reopenedMain).toHaveLength(1);
-    expect(reopenedDraft).toHaveLength(1);
-    expect(reopenedMain).toMatchObject({
-      0: { branch: "main", title: "current title", body: "large value ".repeat(20_000) },
-    });
-    expect(reopenedDraft).toMatchObject({
-      0: { branch: "draft", title: "draft override", body: "large value ".repeat(20_000) },
-    });
+    expect(reopenedMain).toMatchObject([
+      { branch: "main", title: "current title", body: LARGE_BODY },
+    ]);
+    expect(reopenedDraft).toMatchObject([
+      { branch: "draft", title: "draft override", body: LARGE_BODY },
+    ]);
+    const historicalProjects = await db.all(app.projects, { tier: ReadTier.LocalFirst });
+    expect(historicalProjects).toMatchObject([{ name: "corpus project" }]);
     await pinnedPhase("readonly-shutdown", () => shutdownTrackedDb(db, "pinned-readonly"));
-    openDbs.splice(openDbs.indexOf(db), 1);
-    await pinnedPhase("readonly-settle", () => sleep(100));
-    const rawAfterReadOnlyInspection = await pinnedPhase("read-post-readonly-records", () =>
-      rawRecords(physicalDbName),
+    await sleep(100);
+    const rawAfterReadOnly = await rawBrowserStore(physicalDbName);
+    expectForegroundLeaseLifecycle(pinned, rawWhileReopened, rawAfterReadOnly);
+    // Reading changes nothing durable but the opaque lease token.
+    expect(normalizeRuntimeLeaseRecords(rawAfterReadOnly)).toEqual(
+      normalizeRuntimeLeaseRecords(pinned),
     );
-    expectForegroundLeaseLifecycle(
-      rawBeforeReadOnlyInspection,
-      rawWhileReopened,
-      rawAfterReadOnlyInspection,
-    );
-    // The approved JPFK -> JSIR upgrade discards only derived scope caches and
-    // resume cursors. That first open intentionally changes B-tree pages; the
-    // storage manifest and native row semantics above must remain intact.
     expect(
-      normalizeRuntimeLeaseRecords(rawAfterReadOnlyInspection)[INDEXEDDB_STORAGE_MANIFEST_STORE],
-    ).toEqual(
-      normalizeRuntimeLeaseRecords(rawBeforeReadOnlyInspection)[INDEXEDDB_STORAGE_MANIFEST_STORE],
-    );
-    expect(rawAfterReadOnlyInspection[INDEXEDDB_BTREE_PAGES_STORE]).not.toEqual(
-      rawBeforeReadOnlyInspection[INDEXEDDB_BTREE_PAGES_STORE],
-    );
+      normalizeRuntimeLeaseRecords(corruptReusableLeaseHighWater(rawAfterReadOnly)),
+    ).not.toEqual(normalizeRuntimeLeaseRecords(rawAfterReadOnly));
 
-    // Once the disposable cache generation is gone, a second read-only open
-    // must preserve the complete raw receipt, not merely decoded query rows.
-    db = await pinnedPhase("post-upgrade-readonly-open", () =>
-      openPersistentDb(config, "pinned-post-upgrade-readonly"),
-    );
-    expect(await db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "main" })).toEqual(
-      reopenedMain,
-    );
-    expect(await db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "draft" })).toEqual(
-      reopenedDraft,
-    );
-    await pinnedPhase("post-upgrade-readonly-shutdown", () =>
-      shutdownTrackedDb(db, "pinned-post-upgrade-readonly"),
-    );
-    openDbs.splice(openDbs.indexOf(db), 1);
-    await pinnedPhase("post-upgrade-readonly-settle", () => sleep(100));
-    expect(normalizeRuntimeLeaseRecords(await rawRecords(physicalDbName))).toEqual(
-      normalizeRuntimeLeaseRecords(rawAfterReadOnlyInspection),
-    );
-
-    // This planted high-water regression must remain visible through the raw
-    // receipt. In particular, normalization may hide a fresh opaque lease
-    // token, but never a node identity, retired set, or HLC floor.
-    const plantedLeaseRegression = corruptReusableLeaseHighWater(rawAfterReadOnlyInspection);
-    expect(normalizeRuntimeLeaseRecords(plantedLeaseRegression)).not.toEqual(
-      normalizeRuntimeLeaseRecords(rawAfterReadOnlyInspection),
-    );
-
-    // Append with today's writer only after the historical read-only/raw-byte
-    // receipt above. Both generations must survive a fresh public open of
-    // this same authenticated principal root.
+    // Append with today's writer; both generations survive a fresh open.
     db = await pinnedPhase("writer-open", () => openPersistentDb(config, "pinned-writer"));
-    const historicalProjects = await pinnedPhase("writer-projects-query", () =>
-      db.all(app.projects, { tier: ReadTier.LocalFirst }),
-    );
+    expect(
+      await db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "main" }),
+    ).toMatchObject([{ title: "current title" }]);
     const currentBody = "current writer large value ".repeat(12_000);
     const currentWrite = await pinnedPhase("writer-transaction", () =>
       db.transaction((tx) => {
         const project = tx.insert(app.projects, { name: "current writer project" });
-        const document = tx.insert(
+        tx.insert(
           app.documents,
           {
             branch: "main",
@@ -420,7 +301,12 @@ describe("browser Jazz storage compatibility corpus", () => {
           },
           { branch: "main" },
         );
-        return { project, document };
+        tx.update(
+          app.documents,
+          reopenedMain[0]!.id,
+          { title: "reopened writer" },
+          { branch: "main" },
+        );
       }),
     );
     await pinnedPhase("writer-local-settlement", () =>
@@ -431,72 +317,111 @@ describe("browser Jazz storage compatibility corpus", () => {
       ),
     );
     await pinnedPhase("writer-shutdown", () => shutdownTrackedDb(db, "pinned-writer"));
-    openDbs.splice(openDbs.indexOf(db), 1);
-    await pinnedPhase("writer-settle", () => sleep(100));
-    const rawAfterCurrentWrite = await pinnedPhase("read-post-writer-records", () =>
-      rawRecords(physicalDbName),
-    );
-    expect(rawAfterCurrentWrite[INDEXEDDB_BTREE_PAGES_STORE]).not.toEqual(
-      rawAfterReadOnlyInspection[INDEXEDDB_BTREE_PAGES_STORE],
-    );
+    await sleep(100);
+    const rawAfterWrite = await rawBrowserStore(physicalDbName);
+    expect(rawAfterWrite[SQLITE_BLOCKS]).not.toEqual(pinned[SQLITE_BLOCKS]);
 
-    // Network isolation makes this a persistence receipt: the server cannot
-    // repair lost current pages before the post-reopen assertions.
-    await pinnedPhase("block-network", () => blockJazzServerNetwork(registry.origin));
-    try {
-      db = await pinnedPhase("offline-open", () => openPersistentDb(config, "pinned-offline"));
-      expect(await pinnedPhase("offline-physical-root", () => trackPhysicalDatabase(dbName))).toBe(
-        physicalDbName,
-      );
-      const mixedMain = await pinnedPhase("offline-main-query", () =>
-        db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "main" }),
-      );
-      const mixedDraft = await pinnedPhase("offline-draft-query", () =>
-        db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "draft" }),
-      );
-      const mixedProjects = await pinnedPhase("offline-projects-query", () =>
-        db.all(app.projects, { tier: ReadTier.LocalFirst }),
-      );
-      expect(mixedMain).toHaveLength(2);
-      expect(mixedMain).toEqual(expect.arrayContaining(reopenedMain));
-      expect(mixedMain).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            title: "current writer document",
-            branch: "main",
-            body: currentBody,
-          }),
-        ]),
-      );
-      expect(mixedDraft).toEqual(reopenedDraft);
-      expect(mixedProjects).toHaveLength(historicalProjects.length + 1);
-      expect(mixedProjects).toEqual(expect.arrayContaining(historicalProjects));
-      const currentProject = mixedProjects.find(
-        (project) => project.name === "current writer project",
-      );
-      expect(currentProject).toBeDefined();
-      expect(
-        mixedMain.find((document) => document.title === "current writer document")?.projectId,
-      ).toBe(currentProject!.id);
-    } finally {
-      await pinnedPhase("unblock-network", () => unblockJazzServerNetwork(registry.origin));
-    }
+    db = await pinnedPhase("offline-open", () => openPersistentDb(config, "pinned-offline"));
+    const mixedMain = await db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "main" });
+    expect(mixedMain).toHaveLength(2);
+    expect(mixedMain).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ title: "reopened writer", body: LARGE_BODY }),
+        expect.objectContaining({ title: "current writer document", body: currentBody }),
+      ]),
+    );
+    expect(await db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "draft" })).toEqual(
+      reopenedDraft,
+    );
+    const mixedProjects = await db.all(app.projects, { tier: ReadTier.LocalFirst });
+    expect(mixedProjects).toHaveLength(2);
+    expect(mixedProjects).toEqual(expect.arrayContaining(historicalProjects));
     pinnedCorpusPhase = "pinned-test:complete";
     receipt(pinnedCorpusPhase);
   }, 90_000);
 
-  it("rejects the historical retired-result codec profile without rewriting its pages", async () => {
-    const server = await getJazzServerInfo("ba96582c-7167-5f52-ba63-3ebefe1c2b96");
-    const dbName = uniqueDbName("browser-storage-retired-profile");
-    const config = await persistentConfig(
-      dbName,
-      "jazz-auth-v1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
-      server,
+  // Damage in the SQLite file is a storage error, never rows read from a
+  // corrupt page, and the refused open rewrites nothing.
+  it("refuses the pinned SQLite corpus with a damaged file header without rewriting it", async () => {
+    const pinned = JSON.parse(sqliteCorpus) as Record<string, string>;
+    const blocks = JSON.parse(pinned[SQLITE_BLOCKS]!) as [number, string][];
+    const header = blocks.find(([offset]) => offset === 0)!;
+    const damagedHeader = base64ToBytes(header[1]);
+    // "SQLite format 3\0" becomes something SQLite does not open.
+    damagedHeader.fill(0x55, 0, 16);
+    const damaged = {
+      ...pinned,
+      [SQLITE_BLOCKS]: JSON.stringify(
+        blocks.map(([offset, data]) =>
+          offset === 0 ? [offset, bytesToBase64(damagedHeader)] : [offset, data],
+        ),
+      ),
+    };
+    const { config, physicalDbName } = await pinnedCorpusConfig(
+      pinned,
+      "browser-storage-compat-sqlite-v1-damaged",
     );
-    const bootstrap = await openPersistentDb(config);
+    await installBrowserStore(physicalDbName, damaged);
+    // The worker opens the file with the first schema it serves, so the
+    // first read is where the damage surfaces.
+    const db = await openPersistentDb(config, "damaged");
+    await expect(
+      withTimeout(
+        db.all(app.documents, { tier: ReadTier.LocalFirst, branch: "main" }),
+        5_000,
+        "damaged SQLite read did not reject",
+      ),
+    ).rejects.toThrow("Storage: file is not a database");
+    await shutdownTrackedDb(db, "damaged");
+    await sleep(100);
+    expect((await rawBrowserStore(physicalDbName))[SQLITE_BLOCKS]).toEqual(damaged[SQLITE_BLOCKS]);
+  }, 30_000);
+
+  // Every Groove-era browser root declares Groove's codec families. The
+  // SQLite build reads none of them: opening is refused at manifest
+  // admission with the typed storage-format error, before the worker opens a
+  // SQLite file, and no record is rewritten.
+  for (const [label, corpus, digest] of [
+    [
+      "the published alpha.54 corpus",
+      publishedAlpha54Corpus,
+      "e1aa237f375db4d060c2a3fe13fa443659fba55c8695f99993e17e200c897b00",
+    ],
+    ["the last Groove (linear-history) corpus", lastGrooveCorpus, undefined],
+    ["the pre-linear corpus", preLinearCorpus, undefined],
+  ] as const) {
+    it(`refuses ${label} with a typed storage-format error`, async () => {
+      if (digest) expect(await sha256Hex(corpus)).toBe(digest);
+      const pinned = JSON.parse(corpus) as Record<string, string>;
+      const declared = (
+        rawManifest(pinned).find(([key]) => key === INDEXEDDB_STORAGE_MANIFEST_KEY)![1] as {
+          requiredCodecIds: string[];
+        }
+      ).requiredCodecIds;
+      expect(declared.some((codec) => codec.startsWith("groove."))).toBe(true);
+      const { config, physicalDbName } = await pinnedCorpusConfig(
+        pinned,
+        uniqueDbName("browser-storage-compat-groove"),
+      );
+      await installRawRecords(physicalDbName, pinned);
+      expect(await rawRecords(physicalDbName)).toEqual(pinned);
+      await expect(
+        withTimeout(createDb(config), 5_000, `${label} open did not reject`),
+      ).rejects.toThrow(
+        `unsupported storage format: this epoch-1 root lacks codec families ["jazz.sqlite-storage.v1"] required by this build and declares ${JSON.stringify(declared)} that this build does not read`,
+      );
+      expect(await rawRecords(physicalDbName)).toEqual(pinned);
+      expect(JSON.parse((await rawBrowserStore(physicalDbName))[SQLITE_BLOCKS]!)).toEqual([]);
+    }, 30_000);
+  }
+
+  it("rejects the historical retired-result codec profile without rewriting its pages", async () => {
+    const server = await getJazzServerInfo(CORPUS_APP_ID);
+    const dbName = uniqueDbName("browser-storage-retired-profile");
+    const config = await persistentConfig(dbName, CORPUS_SECRET, server);
+    const bootstrap = await openPersistentDb(config, "retired-bootstrap");
     const physicalDbName = await trackPhysicalDatabase(dbName);
-    await bootstrap.shutdown();
-    openDbs.splice(openDbs.indexOf(bootstrap), 1);
+    await shutdownTrackedDb(bootstrap, "retired-bootstrap");
     await sleep(100);
     const historical = JSON.parse(historicalCorpus) as Record<string, string>;
     await installRawRecords(physicalDbName, historical);
@@ -508,7 +433,7 @@ describe("browser Jazz storage compatibility corpus", () => {
 
   it("rejects a corrupt durable epoch before handing a public Jazz handle to the app", async () => {
     const cleanup = new TestCleanup();
-    const dbName = databaseName();
+    const dbName = uniqueDbName("jazz-storage-compat");
     const appId = "browser-storage-compat-corruption";
     const accounts = await createAccountManager({
       appId,
@@ -533,7 +458,7 @@ describe("browser Jazz storage compatibility corpus", () => {
     await sleep(100);
 
     await replaceManifest(physicalDbName, { ...INDEXEDDB_STORAGE_MANIFEST, storageEpoch: 2 });
-    const rawBeforeRejectedRead = await rawRecords(physicalDbName);
+    const rawBeforeRejectedRead = await rawBrowserStore(physicalDbName);
     // Schema selection is lazy, but persistent construction must first obtain
     // a foreground-node lease. Its worker opens the physical root before it
     // can mint a transaction identity, making createDb the durable admission
@@ -543,15 +468,56 @@ describe("browser Jazz storage compatibility corpus", () => {
       await expect(
         withTimeout(createDb(config), 5_000, "corrupt epoch open did not reject"),
       ).rejects.toThrow("Missing or invalid IndexedDB storage epoch manifest");
-      expect(await rawRecords(physicalDbName)).toEqual(rawBeforeRejectedRead);
+      expect(await rawBrowserStore(physicalDbName)).toEqual(rawBeforeRejectedRead);
     } finally {
       await cleanup.cleanup();
     }
   }, 90_000);
 
-  function databaseName(): string {
-    const name = uniqueDbName("jazz-storage-compat");
-    return name;
+  /**
+   * A config for the pinned corpus's owner under a fresh logical base, and
+   * the physical root it resolves to. Registry authority is part of the
+   * stored owner, so the account is restored under the producer's
+   * authority, even though that test server no longer exists. The config
+   * has no serverUrl: nothing upstream can repair a pinned page. The base is
+   * new per test, so its SQLite file has never been opened by this worker.
+   */
+  async function pinnedCorpusConfig(
+    records: Record<string, string>,
+    dbName: string,
+  ): Promise<{ config: DbConfig; physicalDbName: string; dbName: string }> {
+    const owner = JSON.parse(
+      rawManifest(records).find(
+        ([key]) => key === INDEXEDDB_BROWSER_RUNTIME_OWNER_KEY,
+      )![1] as string,
+    );
+    expect(owner).toMatchObject({ version: 1, env: "dev", auth: { kind: "account" } });
+    const registry = new URL(owner.auth.registry);
+    const registrySuffix = `/apps/${owner.appId}/accounts`;
+    expect(registry.pathname.endsWith(registrySuffix)).toBe(true);
+    const serverBase = new URL(registry);
+    serverBase.pathname = registry.pathname.slice(0, -registrySuffix.length);
+    expect(accountRegistryUrl(serverBase.href, owner.appId)).toBe(owner.auth.registry);
+    const accounts = await createAccountManager({
+      appId: owner.appId,
+      serverUrl: serverBase.href,
+    });
+    const account = accounts.restoreLocalFirst(CORPUS_SECRET);
+    expect(account.id).toBe(owner.auth.account);
+    const base = uniqueDbName(dbName);
+    const config: DbConfig = {
+      appId: owner.appId,
+      account,
+      driver: { type: "persistent", dbName: base },
+    };
+    // The root is named by the scope createDb resolves the account to,
+    // which the owner record stores.
+    const physicalDbName = createBrowserPhysicalDatabaseName(
+      { ...config, accountId: owner.auth.account, accountRegistryAuthority: owner.auth.registry },
+      base,
+    );
+    databaseNames.add(physicalDbName);
+    return { config, physicalDbName, dbName: base };
   }
 
   async function trackPhysicalDatabase(logicalBase: string): Promise<string> {
@@ -594,6 +560,105 @@ describe("browser Jazz storage compatibility corpus", () => {
     return db;
   }
 });
+
+// ---- the SQLite file on the IndexedDB VFS -----------------------------------
+
+/** Where the IndexedDB VFS (`jazz-wasm`'s `jazz-idb`) keeps file blocks. */
+const SQLITE_VFS_DATABASE = "jazz-idb";
+const SQLITE_VFS_STORE = "blocks";
+/** The corpus key holding the SQLite file's blocks, as `[offset, base64]`. */
+const SQLITE_BLOCKS = "jazz-idb/blocks";
+
+/**
+ * The SQLite file the worker keeps for a physical root: named by a hash of
+ * the root's name (see `StoreSpec::from_js` in crates/jazz-wasm/src/browser.rs).
+ */
+async function sqliteFilePath(physicalDbName: string): Promise<string> {
+  const digest = new Uint8Array(
+    await crypto.subtle.digest("SHA-256", new TextEncoder().encode(physicalDbName)),
+  );
+  return `/jazz-${Array.from(digest.slice(0, 16), (byte) => byte.toString(16).padStart(2, "0")).join("")}.sqlite`;
+}
+
+function openSqliteVfsDatabase(): Promise<IDBDatabase> {
+  const request = indexedDB.open(SQLITE_VFS_DATABASE, 1);
+  request.onupgradeneeded = () => {
+    request.result.createObjectStore(SQLITE_VFS_STORE, { keyPath: ["path", "offset"] });
+  };
+  return requestResult(request);
+}
+
+function fileBlocks(path: string): IDBKeyRange {
+  return IDBKeyRange.bound([path, 0], [path, Number.POSITIVE_INFINITY]);
+}
+
+async function rawSqliteBlocks(path: string): Promise<string> {
+  const database = await openSqliteVfsDatabase();
+  const transaction = database.transaction(SQLITE_VFS_STORE, "readonly");
+  const blocks = (await requestResult(
+    transaction.objectStore(SQLITE_VFS_STORE).getAll(fileBlocks(path)),
+  )) as { offset: number; data: Uint8Array }[];
+  await transactionDone(transaction);
+  database.close();
+  return JSON.stringify(
+    blocks
+      .map((block) => [block.offset, bytesToBase64(new Uint8Array(block.data))] as const)
+      .sort(([left], [right]) => left - right),
+  );
+}
+
+async function installSqliteBlocks(path: string, blocks: string): Promise<void> {
+  const database = await openSqliteVfsDatabase();
+  const transaction = database.transaction(SQLITE_VFS_STORE, "readwrite");
+  const store = transaction.objectStore(SQLITE_VFS_STORE);
+  store.delete(fileBlocks(path));
+  for (const [offset, data] of JSON.parse(blocks) as [number, string][]) {
+    store.put({ path, offset, data: base64ToBytes(data) });
+  }
+  await transactionDone(transaction);
+  database.close();
+}
+
+async function deleteSqliteBlocks(path: string): Promise<void> {
+  await installSqliteBlocks(path, "[]");
+}
+
+/** The page store's records plus the SQLite file's blocks. */
+async function rawBrowserStore(physicalDbName: string): Promise<Record<string, string>> {
+  return {
+    ...(await rawRecords(physicalDbName)),
+    [SQLITE_BLOCKS]: await rawSqliteBlocks(await sqliteFilePath(physicalDbName)),
+  };
+}
+
+async function installBrowserStore(
+  physicalDbName: string,
+  records: Record<string, string>,
+): Promise<void> {
+  const { [SQLITE_BLOCKS]: blocks = "[]", ...pageStore } = records;
+  await installRawRecords(physicalDbName, pageStore);
+  await installSqliteBlocks(await sqliteFilePath(physicalDbName), blocks);
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (let index = 0; index < bytes.length; index += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+  }
+  return btoa(binary);
+}
+
+function base64ToBytes(base64: string): Uint8Array {
+  return Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
+}
+
+async function sha256Hex(text: string): Promise<string> {
+  return Array.from(
+    new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text))),
+  )
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
 
 /**
  * Snapshot the production adapter's complete physical surface after it has

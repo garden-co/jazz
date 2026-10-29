@@ -9,6 +9,7 @@ import {
 import { parseJson, withPlainNumbers } from "./json-schema-json.js";
 import { META_SCHEMAS } from "./json-schema-metaschemas.js";
 import { RegexSyntaxError, UnsupportedRegexError, compileRegex } from "./json-schema-regex.js";
+import { isRecord } from "./util.js";
 
 /**
  * JSON Schema validation for the browser WASM runtime.
@@ -256,7 +257,7 @@ function base32Pattern(
 class InvalidSchemaError extends Error {}
 
 function dialectOf(schema: unknown): Dialect {
-  if (!isObject(schema)) return "2020-12";
+  if (!isRecord(schema)) return "2020-12";
   const declared = schema.$schema;
   if (typeof declared !== "string") return "2020-12";
   const uri = declared.replace(/#+$/, "").replace(/^https?:\/\//, "");
@@ -265,10 +266,6 @@ function dialectOf(schema: unknown): Dialect {
     throw new InvalidSchemaError(`unknown JSON Schema dialect "${declared}"`);
   }
   return dialect;
-}
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**
@@ -283,7 +280,7 @@ function normalizeSchema(
   allowed: readonly string[] = [],
 ): unknown {
   if (typeof schema === "boolean") return schema;
-  if (!isObject(schema)) return {};
+  if (!isRecord(schema)) return {};
   const vocabulary = VOCABULARIES[dialect];
   const defined = new Set([
     ...vocabulary.single,
@@ -306,7 +303,7 @@ function normalizeSchema(
     }
     // Patterns are compiled when the schema is, as natively.
     if (keyword === "pattern" && typeof value === "string") compilePattern(value);
-    if (keyword === "patternProperties" && isObject(value)) {
+    if (keyword === "patternProperties" && isRecord(value)) {
       for (const pattern of Object.keys(value)) compilePattern(pattern);
     }
     if (keyword === "format" && typeof value === "string") {
@@ -321,7 +318,7 @@ function normalizeSchema(
       entries.push([keyword, value.map((entry) => normalizeSchema(entry, dialect, allowed))]);
     } else if (vocabulary.single.includes(keyword)) {
       entries.push([keyword, normalizeSchema(value, dialect, allowed)]);
-    } else if (vocabulary.map.includes(keyword) && isObject(value)) {
+    } else if (vocabulary.map.includes(keyword) && isRecord(value)) {
       entries.push([keyword, normalizeMap(value, dialect, allowed)]);
     } else {
       entries.push([keyword, value]);
@@ -390,7 +387,7 @@ function checkReferences(validator: CompiledSchema): void {
  */
 function withRecursiveRefs(schema: unknown): unknown {
   if (Array.isArray(schema)) return schema.map(withRecursiveRefs);
-  if (!isObject(schema)) return schema;
+  if (!isRecord(schema)) return schema;
   const entries: [string, unknown][] = [];
   for (const [keyword, value] of Object.entries(schema)) {
     if (keyword === "$dynamicAnchor") entries.push(["$recursiveAnchor", true]);

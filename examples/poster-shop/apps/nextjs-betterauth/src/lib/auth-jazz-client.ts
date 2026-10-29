@@ -37,7 +37,6 @@ export async function authJazzClient(): Promise<JazzClient> {
     jwksUrl: `${configuredIssuer}/api/auth/jwks`,
     jwtIssuer: configuredIssuer,
     jwtAudience: configuredIssuer,
-    tier: "global",
   }));
   try {
     const session = await pending;

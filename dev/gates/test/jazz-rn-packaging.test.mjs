@@ -7,6 +7,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { cp, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 import {
   materializeJazzRnConsumerManifest,
@@ -38,7 +39,10 @@ async function packPrebuildPayloadFixtures(directory) {
     await mkdir(source, { recursive: true });
     await writeFile(
       join(source, "package.json"),
-      JSON.stringify({ name: `jazz-rn-${platform}`, version: packageJson.version }),
+      JSON.stringify({
+        name: `jazz-rn-${platform}`,
+        version: packageJson.version,
+      }),
     );
     await mkdir(join(source, platform), { recursive: true });
     await writeFile(join(source, platform, "jazz-native-relay.manifest.json"), "{}\n");
@@ -76,6 +80,47 @@ function assertRelayAndroidArchitectures(gradleProperties, label) {
     `${label} must request exactly the three sealed relay ABIs`,
   );
 }
+
+test("native header staging preserves every relay function used by the JSI bridge", async () => {
+  const repository = new URL("../../../", import.meta.url);
+  const directory = await mkdtemp(join(tmpdir(), "jazz-rn-header-staging-"));
+  try {
+    const script = await readFile(
+      new URL("crates/jazz-rn/scripts/build-relay-artifacts.sh", repository),
+      "utf8",
+    );
+    const stageHeader = script.match(/^stage_header\(\) \{[\s\S]*?^\}/m)?.[0];
+    assert.ok(stageHeader, "the platform build must expose its header staging step");
+    execFileSync("bash", [
+      "-c",
+      'set -eu\nroot="$1"\npackage="$2"\n' + stageHeader + "\nstage_header\n",
+      "stage-native-header",
+      fileURLToPath(repository),
+      directory,
+    ]);
+    const staged = await readFile(join(directory, "native/include/jazz_native_relay.h"), "utf8");
+    assert.equal(
+      staged,
+      await readFile(
+        new URL("crates/jazz-rn/native/include/jazz_native_relay.h", repository),
+        "utf8",
+      ),
+      "the checked-in header must match the canonical header copied by platform builds",
+    );
+    const bridge = await readFile(
+      new URL("crates/jazz-rn/native/foreground-runtime.cpp", repository),
+      "utf8",
+    );
+    const functions = new Set(
+      [...bridge.matchAll(/\b(jazz_native_relay_[a-z_0-9]+)\s*\(/g)].map((match) => match[1]),
+    );
+    assert.ok(functions.has("jazz_native_relay_supports_snapshot_capture"));
+    for (const name of functions)
+      assert.match(staged, new RegExp("\\b" + name + "\\s*\\("), `${name} must survive staging`);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test("machine JSON accepts structured tool info but no arbitrary stdout", () => {
   assert.deepEqual(
@@ -178,8 +223,9 @@ test("jazz-rn relay production builds are SQLite-only on every artifact target",
       }),
     );
     const dependencies = productionDependencyNames(metadata, "jazz-native-relay");
-    assert.ok(dependencies.has("jazz-storage-sqlite"), `${target} relay must retain SQLite`);
-    for (const forbidden of ["jazz-storage-rocksdb", "jazz-benchmark-guard", "tempfile"])
+    assert.ok(dependencies.has("jazz-db"), `${target} relay must run on jazz-db`);
+    assert.ok(dependencies.has("libsqlite3-sys"), `${target} relay must retain SQLite`);
+    for (const forbidden of ["jazz-benchmark-guard", "tempfile"])
       assert.ok(!dependencies.has(forbidden), `${target} relay must exclude ${forbidden}`);
   }
 });
@@ -2391,13 +2437,10 @@ test("relay verification rejects a manifest-sealed XCFramework without its devic
       "--",
       "Cargo.lock",
       "Cargo.toml",
-      "crates/groove",
-      "crates/idb-tree",
       "crates/jazz",
       "crates/jazz-compression",
       "crates/jazz-native-relay",
       "crates/jazz-native-transport",
-      "crates/jazz-storage-sqlite",
       "crates/jazz-rn/scripts/build-relay-artifacts.sh",
     ],
     { cwd: sourceRoot, encoding: "utf8" },
@@ -2533,7 +2576,14 @@ ${
     await writeFile(
       destination,
       `${JSON.stringify(
-        { format: 2, nativeRelayAbi, sourceRevision, nativeSourceFingerprint, ...extra, files },
+        {
+          format: 2,
+          nativeRelayAbi,
+          sourceRevision,
+          nativeSourceFingerprint,
+          ...extra,
+          files,
+        },
         null,
         2,
       )}\n`,
@@ -2577,7 +2627,10 @@ ${
             process.execPath,
             [verifier.pathname, "--package-root", packageRoot, "android"],
             {
-              env: { ...environment, JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION: expectedCargoNdk },
+              env: {
+                ...environment,
+                JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION: expectedCargoNdk,
+              },
               stdio: "pipe",
             },
           ),
@@ -2586,7 +2639,7 @@ ${
     }
 
     for (const transitiveInput of [
-      "crates/idb-tree/",
+      "crates/jazz/layers/db/",
       "crates/jazz-compression/",
       "crates/jazz-native-transport/",
     ]) {
@@ -3049,13 +3102,10 @@ test("release, preview, and labeled platform gates seal and link the staged rela
   for (const nativeInput of [
     "Cargo.lock",
     "Cargo.toml",
-    "crates/groove",
-    "crates/idb-tree",
     "crates/jazz",
     "crates/jazz-compression",
     "crates/jazz-native-relay",
     "crates/jazz-native-transport",
-    "crates/jazz-storage-sqlite",
   ]) {
     assert.ok(artifactScript.includes(nativeInput), `artifact fingerprint omits ${nativeInput}`);
     assert.ok(verifier.includes(nativeInput), `artifact verifier omits ${nativeInput}`);

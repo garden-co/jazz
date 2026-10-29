@@ -3,31 +3,118 @@
 //! This module provides deterministic binary serialization for Schema and LensTransform,
 //! enabling content-addressed storage in the catalogue.
 //!
-//! Storage-epoch-one schema and lens payloads retain their frozen `v1` bytes.
-//! Their `v2` form adds ordered composite indexes only when needed.
+//! Schema and lens payloads use version 2, including an empty composite-index
+//! list for tables without composite indexes. Version 1 payloads are rejected.
 
 use std::collections::{BTreeSet, HashMap};
 
-use jazz::protocol_limits::{
-    MAX_POLICY_EXPRESSION_DEPTH, MAX_POLICY_EXPRESSION_NODES, PolicyExpressionLimitError,
-};
+use jazz::protocol_limits::PolicyExpressionLimitError;
+use jazz::query::policy_limits::PolicyExpressionBudget;
 use jazz::tools::ObjectId;
-use jazz::tools::public_schema::{CmpOp, Operation, PolicyExpr, PolicyValue};
+use jazz::tools::public_schema::{CmpOp, Operation, OperationPolicy, PolicyExpr, PolicyValue};
 use jazz::tools::public_schema::{
     ColumnDescriptor, ColumnMergeStrategy, ColumnName, ColumnType, EnumCaseDescriptor,
-    RelColumnRef, RelExpr, RelJoinCondition, RelJoinKind, RelKeyRef, RelPredicateCmpOp,
-    RelPredicateExpr, RelProjectColumn, RelProjectExpr, RelRecursionBound, RelUnionArm,
-    RelValueRef, RowDescriptor, RowIdRef, Schema, SchemaHash, TableName, TablePolicies,
-    TableSchema, Value,
+    RecursionBound, RelationCmpOp, RelationColumnRef, RelationExpr, RelationJoinCondition,
+    RelationJoinKind, RelationKeyRef, RelationPredicate, RelationProjectColumn,
+    RelationProjectExpr, RelationRowIdRef, RelationUnionArm, RelationValueRef, RowDescriptor,
+    Schema, SchemaHash, TableName, TablePolicies, TableSchema, Value,
 };
 
 use jazz::tools::schema_lens::{LensOp, LensTransform};
 
-/// Frozen storage-epoch-one outer envelope versions.
-const SCHEMA_VERSION: u8 = 1;
-const SCHEMA_COMPOSITE_VERSION: u8 = 2;
-const LENS_VERSION: u8 = 1;
-const LENS_COMPOSITE_VERSION: u8 = 2;
+/// Describes a struct once, as its fields' codecs in wire order, and derives
+/// both its writer and its reader (a [`Wire`] impl) from that description.
+/// An optional `(param: Type)` works as for [`wire_enum!`].
+macro_rules! wire_struct {
+    ($name:ident $(($param:ident: $param_ty:ty))?: $ty:ident {
+        $($field:ident: $codec:expr),+ $(,)?
+    }) => {
+        struct $name$(($param_ty))?;
+
+        impl Wire<$ty> for $name {
+            fn put(&self, buf: &mut Vec<u8>, value: &$ty) {
+                $(let $param: $param_ty = self.0;)?
+                $(Wire::put(&$codec, buf, &value.$field);)+
+            }
+
+            fn get(&self, data: &[u8], offset: &mut usize) -> Result<$ty, CatalogueEncodingError> {
+                $(let $param: $param_ty = self.0;)?
+                Ok($ty { $($field: Wire::get(&$codec, data, offset)?),+ })
+            }
+        }
+    };
+}
+
+/// Describes an enum once, as a tag byte → variant table listing each
+/// variant's field codecs in wire order (`Unit`, `Tuple(binding: codec)` or
+/// `Struct { field: codec, .. }`), and derives both its writer and its reader.
+///
+/// With a context string the table is complete: it implements [`Wire`] and an
+/// unknown tag decodes to `InvalidTypeTag` with that context. With `partial`
+/// it covers only the listed variants, and `get_variant` returns `None` for the
+/// rest, which the caller codes by hand. The caller's encoder matches every
+/// variant exhaustively and names the listed ones in the arm that calls
+/// `put_variant`, so a new variant fails to build until it is placed.
+/// An optional `(param: Type)` makes the codec a value carrying a parameter
+/// that the field codecs can use.
+macro_rules! wire_enum {
+    (partial $($rest:tt)*) => {
+        wire_enum!(@impl [_ => unreachable!("encoder arm names a variant missing from the table"),] $($rest)*);
+    };
+    (@impl [$($fallback:tt)*] $name:ident $(($param:ident: $param_ty:ty))?: $ty:ident
+        $(, $context:literal)? {
+        $($tag:tt => $variant:ident $(($binding:ident: $codec:expr))?
+            $({ $($field:ident: $field_codec:expr),* $(,)? })?),+ $(,)?
+    }) => {
+        struct $name$(($param_ty))?;
+
+        impl $name {
+            fn put_variant(&self, buf: &mut Vec<u8>, value: &$ty) {
+                $(let $param: $param_ty = self.0;)?
+                match value {
+                    $($ty::$variant $(($binding))? $({ $($field),* })? => {
+                        buf.push($tag);
+                        $(Wire::put(&$codec, buf, $binding);)?
+                        $($(Wire::put(&$field_codec, buf, $field);)*)?
+                    })+
+                    $($fallback)*
+                }
+            }
+
+            #[allow(unused_variables)]
+            fn get_variant(
+                &self,
+                tag: u8,
+                data: &[u8],
+                offset: &mut usize,
+            ) -> Result<Option<$ty>, CatalogueEncodingError> {
+                $(let $param: $param_ty = self.0;)?
+                Ok(Some(match tag {
+                    $($tag => $ty::$variant $((Wire::get(&$codec, data, offset)?))?
+                        $({ $($field: Wire::get(&$field_codec, data, offset)?),* })?,)+
+                    _ => return Ok(None),
+                }))
+            }
+        }
+
+        $(impl Wire<$ty> for $name {
+            fn put(&self, buf: &mut Vec<u8>, value: &$ty) {
+                self.put_variant(buf, value);
+            }
+
+            fn get(&self, data: &[u8], offset: &mut usize) -> Result<$ty, CatalogueEncodingError> {
+                let tag = read_u8(data, offset)?;
+                self.get_variant(tag, data, offset)?
+                    .ok_or(CatalogueEncodingError::InvalidTypeTag { tag, context: $context })
+            }
+        })?
+    };
+    ($($rest:tt)*) => { wire_enum!(@impl [] $($rest)*); };
+}
+
+/// Current catalogue payload encoding versions.
+const SCHEMA_VERSION: u8 = 2;
+const LENS_VERSION: u8 = 2;
 const PERMISSIONS_VERSION: u8 = 1;
 const PERMISSIONS_BUNDLE_VERSION: u8 = 1;
 const PERMISSIONS_HEAD_VERSION: u8 = 1;
@@ -74,6 +161,12 @@ impl std::fmt::Display for CatalogueEncodingError {
 
 impl std::error::Error for CatalogueEncodingError {}
 
+impl From<PolicyExpressionLimitError> for CatalogueEncodingError {
+    fn from(error: PolicyExpressionLimitError) -> Self {
+        Self::ProtocolLimit(error)
+    }
+}
+
 // ============================================================================
 // Schema Encoding
 // ============================================================================
@@ -88,87 +181,90 @@ impl std::error::Error for CatalogueEncodingError {}
 /// Tables are sorted by name for deterministic encoding. Column order within a
 /// table is preserved exactly as declared.
 pub fn encode_schema(schema: &Schema) -> Vec<u8> {
-    let mut buf = Vec::new();
-    let version = if schema
-        .values()
-        .any(|table| !table.composite_indexes.is_empty())
-    {
-        SCHEMA_COMPOSITE_VERSION
-    } else {
-        SCHEMA_VERSION
-    };
-    buf.push(version);
+    let mut buf = vec![SCHEMA_VERSION];
 
     // Sort tables by name for deterministic ordering
     let mut tables: Vec<_> = schema.iter().collect();
     tables.sort_by_key(|(name, _)| name.as_str());
 
-    write_u32(&mut buf, tables.len() as u32);
-
-    for (name, table_schema) in tables {
-        encode_table_entry(&mut buf, name, table_schema, version);
-    }
+    write_seq(&mut buf, &tables, |buf, (name, table_schema)| {
+        write_string(buf, name.as_str());
+        SCHEMA_TABLE.put(buf, table_schema);
+    });
 
     buf
 }
 
-/// Decode a Schema from binary format.
-pub fn decode_schema(data: &[u8]) -> Result<Schema, CatalogueEncodingError> {
-    if data.is_empty() {
+/// Read a top-level payload's leading format-version byte. `accepted` lists
+/// the versions this decoder understands, current first; a rejected version
+/// is reported against that current one.
+fn read_format_version(data: &[u8], accepted: &[u8]) -> Result<u8, CatalogueEncodingError> {
+    let Some(&version) = data.first() else {
         return Err(CatalogueEncodingError::TruncatedData {
             expected: 1,
             actual: 0,
         });
-    }
-
-    if data[0] != SCHEMA_VERSION && data[0] != SCHEMA_COMPOSITE_VERSION {
+    };
+    if !accepted.contains(&version) {
         return Err(CatalogueEncodingError::UnsupportedVersion {
-            found: data[0],
-            expected: SCHEMA_VERSION,
+            found: version,
+            expected: accepted[0],
         });
     }
+    Ok(version)
+}
 
+/// Decode a Schema from binary format.
+pub fn decode_schema(data: &[u8]) -> Result<Schema, CatalogueEncodingError> {
+    read_format_version(data, &[SCHEMA_VERSION])?;
     let schema = decode_current_schema(data)?;
     ensure_canonical_payload(data, &encode_schema(&schema), "schema")?;
     Ok(schema)
 }
 
-fn encode_table_entry(buf: &mut Vec<u8>, name: &TableName, schema: &TableSchema, version: u8) {
-    write_string(buf, name.as_str());
-    encode_row_descriptor(buf, &schema.columns);
-    encode_indexed_columns(buf, schema.indexed_columns.as_deref());
-    encode_branch_bindings(buf, &schema.branch_by);
-    if version >= SCHEMA_COMPOSITE_VERSION {
-        encode_composite_indexes(buf, &schema.composite_indexes);
-    }
+/// A table's schema as catalogue payloads store it. Schema payloads also carry
+/// the indexed-column set. Composite indexes follow, validated against the
+/// columns decoded before them.
+struct TableWire {
+    indexed: bool,
 }
 
-fn decode_table_entry(
-    data: &[u8],
-    offset: &mut usize,
-    schema_version: u8,
-) -> Result<(TableName, TableSchema), CatalogueEncodingError> {
-    let name = read_string(data, offset, "table_name")?;
-    let descriptor = decode_row_descriptor(data, offset, schema_version)?;
-    let indexed_columns = decode_indexed_columns(data, offset)?;
-    let branch_by = decode_branch_bindings(data, offset)?;
-    let composite_indexes = if schema_version >= SCHEMA_COMPOSITE_VERSION {
-        decode_composite_indexes(data, offset, &descriptor)?
-    } else {
-        Vec::new()
-    };
+/// A schema payload's table schema carries its indexed-column set.
+const SCHEMA_TABLE: TableWire = TableWire { indexed: true };
 
-    Ok((
-        TableName::new(name),
-        TableSchema {
-            columns: descriptor,
+impl Wire<TableSchema> for TableWire {
+    fn put(&self, buf: &mut Vec<u8>, table: &TableSchema) {
+        RowWire.put(buf, &table.columns);
+        if self.indexed {
+            encode_indexed_columns(buf, table.indexed_columns.as_deref());
+        }
+        BRANCH_BINDINGS.put(buf, &table.branch_by);
+        encode_composite_indexes(buf, &table.composite_indexes);
+    }
+
+    fn get(&self, data: &[u8], offset: &mut usize) -> Result<TableSchema, CatalogueEncodingError> {
+        let columns = RowWire.get(data, offset)?;
+        let indexed_columns = if self.indexed {
+            decode_indexed_columns(data, offset)?
+        } else {
+            None
+        };
+        let branch_by = BRANCH_BINDINGS.get(data, offset)?;
+        let composite_indexes = decode_composite_indexes(data, offset, &columns)?;
+        Ok(TableSchema {
+            columns,
             indexed_columns,
             composite_indexes,
             policies: TablePolicies::default(),
             branch_by,
-        },
-    ))
+        })
+    }
 }
+
+const BRANCH_BINDINGS: Unique<Seq<Str>> = Unique(
+    Seq("branch_bindings", Str("branch_column")),
+    "branch binding",
+);
 
 fn encode_composite_indexes(buf: &mut Vec<u8>, indexes: &[Vec<ColumnName>]) {
     let mut sorted = indexes
@@ -181,13 +277,9 @@ fn encode_composite_indexes(buf: &mut Vec<u8>, indexes: &[Vec<ColumnName>]) {
         })
         .collect::<Vec<_>>();
     sorted.sort_unstable();
-    write_u32(buf, sorted.len() as u32);
-    for group in sorted {
-        write_u32(buf, group.len() as u32);
-        for column in group {
-            write_string(buf, column);
-        }
-    }
+    write_seq(buf, &sorted, |buf, group| {
+        write_seq(buf, group, |buf, column| write_string(buf, column))
+    });
 }
 
 fn decode_composite_indexes(
@@ -214,9 +306,11 @@ fn decode_composite_indexes(
         let mut seen_columns = BTreeSet::new();
         for _ in 0..width {
             let column = read_string(data, offset, "composite_index_column")?;
-            if !declared.contains(column.as_str()) || !seen_columns.insert(column.clone()) {
+            let indexable = declared.contains(column.as_str())
+                || matches!(column.as_str(), "$createdAt" | "$updatedAt");
+            if !indexable || !seen_columns.insert(column.clone()) {
                 return Err(CatalogueEncodingError::DecodeError {
-                    message: "composite index columns must be distinct declared columns".to_owned(),
+                    message: "composite index columns must be distinct declared columns or provenance timestamps".to_owned(),
                 });
             }
             group.push(ColumnName::new(column));
@@ -236,39 +330,13 @@ fn decode_composite_indexes(
     Ok(groups)
 }
 
-fn encode_branch_bindings(buf: &mut Vec<u8>, bindings: &[ColumnName]) {
-    write_u32(buf, bindings.len() as u32);
-    for binding in bindings {
-        write_string(buf, binding.as_str());
-    }
-}
-
-fn decode_branch_bindings(
-    data: &[u8],
-    offset: &mut usize,
-) -> Result<Vec<ColumnName>, CatalogueEncodingError> {
-    let count = read_count(data, offset, "branch_bindings")?;
-    let mut bindings = Vec::with_capacity(count);
-    for _ in 0..count {
-        bindings.push(ColumnName::new(read_string(data, offset, "branch_column")?));
-    }
-    ensure_unique_names(
-        bindings.iter().map(|binding| binding.as_str()),
-        "branch binding",
-    )?;
-    Ok(bindings)
-}
-
 fn encode_indexed_columns(buf: &mut Vec<u8>, indexed_columns: Option<&[ColumnName]>) {
     match indexed_columns {
         None => write_u32(buf, u32::MAX),
         Some(columns) => {
-            write_u32(buf, columns.len() as u32);
             let mut columns: Vec<_> = columns.iter().map(|column| column.as_str()).collect();
             columns.sort_unstable();
-            for column in columns {
-                write_string(buf, column);
-            }
+            write_seq(buf, &columns, |buf, column| write_string(buf, column));
         }
     }
 }
@@ -303,299 +371,104 @@ fn decode_indexed_columns(
 
 fn decode_current_schema(data: &[u8]) -> Result<Schema, CatalogueEncodingError> {
     let mut offset = 1;
-    let schema_version = data[0];
     let table_count = read_count(data, &mut offset, "schema_tables")?;
 
     let mut schema = Schema::new();
     for _ in 0..table_count {
-        let (name, table_schema) = decode_table_entry(data, &mut offset, schema_version)?;
-        schema.insert(name, table_schema);
+        let name = Str("table_name").get(data, &mut offset)?;
+        schema.insert(name, SCHEMA_TABLE.get(data, &mut offset)?);
     }
 
     ensure_consumed(data, offset)?;
     Ok(schema)
 }
 
-fn encode_row_descriptor(buf: &mut Vec<u8>, desc: &RowDescriptor) {
-    write_u32(buf, desc.columns.len() as u32);
-    for col in &desc.columns {
-        encode_column_descriptor(buf, col);
+wire_struct! {
+    RowWire: RowDescriptor { columns: COLUMNS }
+}
+
+const COLUMNS: Unique<Seq<ColumnWire>> = Unique(
+    Seq("row_descriptor_columns", ColumnWire),
+    "row descriptor column",
+);
+
+wire_struct! {
+    ColumnWire: ColumnDescriptor {
+        name: Str("column_name"),
+        column_type: ColumnTypeWire,
+        nullable: Bool,
+        references: Opt(Str("column_ref")),
+        default: Opt(ValueWire),
+        merge_strategy: Opt(MergeStrategyWire),
     }
 }
 
-fn decode_row_descriptor(
-    data: &[u8],
-    offset: &mut usize,
-    schema_version: u8,
-) -> Result<RowDescriptor, CatalogueEncodingError> {
-    let count = read_count(data, offset, "row_descriptor_columns")?;
-    let mut columns = Vec::with_capacity(count);
-
-    for _ in 0..count {
-        columns.push(decode_column_descriptor(data, offset, schema_version)?);
-    }
-
-    ensure_unique_names(
-        columns.iter().map(|column| column.name.as_str()),
-        "row descriptor column",
-    )?;
-
-    Ok(RowDescriptor::new(columns))
-}
-
-fn encode_column_descriptor(buf: &mut Vec<u8>, col: &ColumnDescriptor) {
-    write_string(buf, col.name.as_str());
-    encode_column_type(buf, &col.column_type);
-    buf.push(if col.nullable { 1 } else { 0 });
-
-    // References (FK)
-    match &col.references {
-        Some(table) => {
-            buf.push(1);
-            write_string(buf, table.as_str());
-        }
-        None => {
-            buf.push(0);
-        }
-    }
-    match &col.default {
-        Some(default) => {
-            buf.push(1);
-            encode_value(buf, default);
-        }
-        None => buf.push(0),
-    }
-    match col.merge_strategy {
-        Some(ColumnMergeStrategy::Counter) => {
-            buf.push(1);
-            buf.push(1);
-        }
-        Some(ColumnMergeStrategy::GSet) => {
-            buf.push(1);
-            buf.push(2);
-        }
-        None => buf.push(0),
+wire_enum! {
+    MergeStrategyWire: ColumnMergeStrategy, "column_merge_strategy" {
+        1 => Counter,
+        2 => GSet,
+        3 => Text,
+        4 => Markdown,
+        5 => Html,
     }
 }
 
-fn decode_column_descriptor(
-    data: &[u8],
-    offset: &mut usize,
-    schema_version: u8,
-) -> Result<ColumnDescriptor, CatalogueEncodingError> {
-    let name = read_string(data, offset, "column_name")?;
-    let column_type = decode_column_type(data, offset, schema_version)?;
-    let nullable = read_u8(data, offset)? != 0;
-    let has_ref = read_u8(data, offset)? != 0;
-    let references = if has_ref {
-        Some(TableName::new(read_string(data, offset, "column_ref")?))
-    } else {
-        None
-    };
-    let has_default = read_u8(data, offset)? != 0;
-    let default = if has_default {
-        Some(decode_value(data, offset)?)
-    } else {
-        None
-    };
-    let has_merge_strategy = read_u8(data, offset)? != 0;
-    let merge_strategy = if has_merge_strategy {
-        match read_u8(data, offset)? {
-            1 => Some(ColumnMergeStrategy::Counter),
-            2 => Some(ColumnMergeStrategy::GSet),
-            tag => {
-                return Err(CatalogueEncodingError::InvalidTypeTag {
-                    tag,
-                    context: "column_merge_strategy",
-                });
-            }
-        }
-    } else {
-        None
-    };
-    Ok(ColumnDescriptor {
-        name: ColumnName::new(name),
-        column_type,
-        nullable,
-        references,
-        default,
-        merge_strategy,
-    })
-}
-
-/// Column type tags.
-const TYPE_INTEGER: u8 = 1;
-const TYPE_BIGINT: u8 = 2;
-const TYPE_BOOLEAN: u8 = 3;
-const TYPE_TEXT: u8 = 4;
-const TYPE_TIMESTAMP: u8 = 5;
-const TYPE_UUID: u8 = 6;
-const TYPE_ARRAY: u8 = 7;
-const TYPE_ROW: u8 = 8;
-const TYPE_ENUM: u8 = 9;
-const TYPE_DOUBLE: u8 = 10;
-const TYPE_BYTEA: u8 = 11;
-const TYPE_JSON: u8 = 12;
-const TYPE_TRANSACTION_ID: u8 = 13;
-const TYPE_ENUM_PAYLOAD: u8 = 14;
-const TYPE_SCALAR_ENUM: u8 = 15;
-const TYPE_CATALOGUE_ENUM_PAYLOAD: u8 = 16;
-
-fn encode_column_type(buf: &mut Vec<u8>, col_type: &ColumnType) {
-    match col_type {
-        ColumnType::Integer => buf.push(TYPE_INTEGER),
-        ColumnType::BigInt => buf.push(TYPE_BIGINT),
-        ColumnType::Double => buf.push(TYPE_DOUBLE),
-        ColumnType::Boolean => buf.push(TYPE_BOOLEAN),
-        ColumnType::Text => buf.push(TYPE_TEXT),
-        ColumnType::Timestamp => buf.push(TYPE_TIMESTAMP),
-        ColumnType::Uuid => buf.push(TYPE_UUID),
-        ColumnType::TransactionId => buf.push(TYPE_TRANSACTION_ID),
-        ColumnType::Bytea => buf.push(TYPE_BYTEA),
-        ColumnType::Json { schema } => {
-            buf.push(TYPE_JSON);
-            match schema {
-                Some(schema) => {
-                    buf.push(1);
-                    encode_canonical_json_value(buf, schema);
-                }
-                None => buf.push(0),
-            }
-        }
-        ColumnType::Enum { variants } => {
-            buf.push(TYPE_ENUM);
-            write_u32(buf, variants.len() as u32);
-            for variant in variants {
-                write_string(buf, variant);
-            }
-        }
-        ColumnType::ScalarEnum { name, variants } => {
-            buf.push(TYPE_SCALAR_ENUM);
-            write_string(buf, name);
-            write_u32(buf, variants.len() as u32);
-            for variant in variants {
-                write_string(buf, variant);
-            }
-        }
-        ColumnType::EnumPayload { cases } => {
-            buf.push(TYPE_ENUM_PAYLOAD);
-            write_u32(buf, cases.len() as u32);
-            for case in cases {
-                write_string(buf, &case.name);
-                encode_row_descriptor(buf, &RowDescriptor::new(case.fields.clone()));
-            }
-        }
-        ColumnType::CatalogueEnumPayload { name, cases } => {
-            buf.push(TYPE_CATALOGUE_ENUM_PAYLOAD);
-            write_string(buf, name);
-            write_u32(buf, cases.len() as u32);
-            for case in cases {
-                write_string(buf, &case.name);
-                encode_row_descriptor(buf, &RowDescriptor::new(case.fields.clone()));
-            }
-        }
-        ColumnType::Array { element: elem } => {
-            buf.push(TYPE_ARRAY);
-            encode_column_type(buf, elem);
-        }
-        ColumnType::Row { columns: desc } => {
-            buf.push(TYPE_ROW);
-            encode_row_descriptor(buf, desc);
-        }
-    }
-}
-
-fn decode_column_type(
-    data: &[u8],
-    offset: &mut usize,
-    schema_version: u8,
-) -> Result<ColumnType, CatalogueEncodingError> {
-    let tag = read_u8(data, offset)?;
-    match tag {
-        TYPE_INTEGER => Ok(ColumnType::Integer),
-        TYPE_BIGINT => Ok(ColumnType::BigInt),
-        TYPE_DOUBLE => Ok(ColumnType::Double),
-        TYPE_BOOLEAN => Ok(ColumnType::Boolean),
-        TYPE_TEXT => Ok(ColumnType::Text),
-        TYPE_TIMESTAMP => Ok(ColumnType::Timestamp),
-        TYPE_UUID => Ok(ColumnType::Uuid),
-        TYPE_TRANSACTION_ID => Ok(ColumnType::TransactionId),
-        TYPE_BYTEA => Ok(ColumnType::Bytea),
-        TYPE_JSON => {
-            let has_schema = read_flag(data, offset, "json_schema_presence")?;
-            if has_schema {
-                let schema = decode_canonical_json_value(data, offset)?;
-                Ok(ColumnType::Json {
-                    schema: Some(schema),
-                })
-            } else {
-                Ok(ColumnType::Json { schema: None })
-            }
-        }
-        TYPE_ENUM => {
-            let variant_count = read_count(data, offset, "enum_variants")?;
-            let mut variants = Vec::with_capacity(variant_count);
-            for _ in 0..variant_count {
-                variants.push(read_string(data, offset, "enum_variant")?);
-            }
-            ensure_unique_names(variants.iter().map(String::as_str), "enum variant")?;
-            Ok(ColumnType::Enum { variants })
-        }
-        TYPE_SCALAR_ENUM => {
-            let name = read_string(data, offset, "scalar_enum_name")?;
-            let variant_count = read_count(data, offset, "scalar_enum_variants")?;
-            let mut variants = Vec::with_capacity(variant_count);
-            for _ in 0..variant_count {
-                variants.push(read_string(data, offset, "scalar_enum_variant")?);
-            }
-            ensure_unique_names(variants.iter().map(String::as_str), "scalar enum variant")?;
-            Ok(ColumnType::ScalarEnum { name, variants })
-        }
-        TYPE_ENUM_PAYLOAD => {
-            let count = read_count(data, offset, "enum_payload_cases")?;
-            let mut cases = Vec::with_capacity(count);
-            for _ in 0..count {
-                let name = read_string(data, offset, "enum_case")?;
-                let fields = decode_row_descriptor(data, offset, schema_version)?.columns;
-                cases.push(EnumCaseDescriptor { name, fields });
-            }
-            ensure_unique_names(
-                cases.iter().map(|case| case.name.as_str()),
-                "enum payload case",
-            )?;
-            Ok(ColumnType::EnumPayload { cases })
-        }
-        TYPE_CATALOGUE_ENUM_PAYLOAD => {
-            let name = read_string(data, offset, "catalogue_enum_payload_name")?;
-            let count = read_count(data, offset, "catalogue_enum_payload_cases")?;
-            let mut cases = Vec::with_capacity(count);
-            for _ in 0..count {
-                let name = read_string(data, offset, "catalogue_enum_payload_case")?;
-                let fields = decode_row_descriptor(data, offset, schema_version)?.columns;
-                cases.push(EnumCaseDescriptor { name, fields });
-            }
-            ensure_unique_names(
-                cases.iter().map(|case| case.name.as_str()),
+wire_enum! {
+    ColumnTypeWire: ColumnType, "column_type" {
+        1 => Integer,
+        2 => BigInt,
+        3 => Boolean,
+        4 => Text,
+        5 => Timestamp,
+        6 => Uuid,
+        7 => Array { element: Boxed(ColumnTypeWire) },
+        8 => Row { columns: Boxed(RowWire) },
+        9 => Enum {
+            variants: Unique(Seq("enum_variants", Str("enum_variant")), "enum variant"),
+        },
+        10 => Double,
+        11 => Bytea,
+        12 => Json { schema: Flag("json_schema_presence", JsonWire) },
+        13 => TransactionId,
+        14 => EnumPayload {
+            cases: Unique(Seq("enum_payload_cases", CaseWire("enum_case")), "enum payload case"),
+        },
+        15 => ScalarEnum {
+            name: Str("scalar_enum_name"),
+            variants: Unique(
+                Seq("scalar_enum_variants", Str("scalar_enum_variant")),
+                "scalar enum variant",
+            ),
+        },
+        16 => CatalogueEnumPayload {
+            name: Str("catalogue_enum_payload_name"),
+            cases: Unique(
+                Seq("catalogue_enum_payload_cases", CaseWire("catalogue_enum_payload_case")),
                 "catalogue enum payload case",
-            )?;
-            Ok(ColumnType::CatalogueEnumPayload { name, cases })
-        }
-        TYPE_ARRAY => {
-            let elem = decode_column_type(data, offset, schema_version)?;
-            Ok(ColumnType::Array {
-                element: Box::new(elem),
-            })
-        }
-        TYPE_ROW => {
-            let desc = decode_row_descriptor(data, offset, schema_version)?;
-            Ok(ColumnType::Row {
-                columns: Box::new(desc),
-            })
-        }
-        _ => Err(CatalogueEncodingError::InvalidTypeTag {
-            tag,
-            context: "column_type",
-        }),
+            ),
+        },
+    }
+}
+
+/// One payload-enum case: its name (the string names it in decode errors),
+/// then its fields.
+struct CaseWire(&'static str);
+
+impl Wire<EnumCaseDescriptor> for CaseWire {
+    fn put(&self, buf: &mut Vec<u8>, case: &EnumCaseDescriptor) {
+        write_string(buf, &case.name);
+        COLUMNS.put(buf, &case.fields);
+    }
+
+    fn get(
+        &self,
+        data: &[u8],
+        offset: &mut usize,
+    ) -> Result<EnumCaseDescriptor, CatalogueEncodingError> {
+        Ok(EnumCaseDescriptor {
+            name: read_string(data, offset, self.0)?,
+            fields: COLUMNS.get(data, offset)?,
+        })
     }
 }
 
@@ -610,241 +483,55 @@ fn decode_column_type(
 /// [version: u8][op_count: u32][ops...][draft_count: u32][draft_indices...]
 /// ```
 pub fn encode_lens_transform(transform: &LensTransform) -> Vec<u8> {
-    let mut buf = Vec::new();
-    let version = if transform.ops.iter().any(|op| {
-        matches!(op,
-            LensOp::AddTable { schema, .. } | LensOp::RemoveTable { schema, .. }
-                if !schema.composite_indexes.is_empty()
-        )
-    }) {
-        LENS_COMPOSITE_VERSION
-    } else {
-        LENS_VERSION
-    };
-    buf.push(version);
-
-    // Ops
-    write_u32(&mut buf, transform.ops.len() as u32);
-    for op in &transform.ops {
-        encode_lens_op(&mut buf, op, version);
-    }
-
-    // Draft indices
-    write_u32(&mut buf, transform.draft_ops.len() as u32);
-    for &idx in &transform.draft_ops {
-        write_u32(&mut buf, idx as u32);
-    }
-
+    let mut buf = vec![LENS_VERSION];
+    LensWire.put(&mut buf, transform);
     buf
 }
 
 /// Decode a LensTransform from binary format.
 pub fn decode_lens_transform(data: &[u8]) -> Result<LensTransform, CatalogueEncodingError> {
-    if data.is_empty() {
-        return Err(CatalogueEncodingError::TruncatedData {
-            expected: 1,
-            actual: 0,
-        });
-    }
-
-    let version = data[0];
-    if version != LENS_VERSION && version != LENS_COMPOSITE_VERSION {
-        return Err(CatalogueEncodingError::UnsupportedVersion {
-            found: version,
-            expected: LENS_VERSION,
-        });
-    }
-
-    let transform = decode_current_lens_transform(data, version)?;
+    read_format_version(data, &[LENS_VERSION])?;
+    let mut offset = 1;
+    let transform = LensWire.get(data, &mut offset)?;
+    ensure_consumed(data, offset)?;
     ensure_canonical_payload(data, &encode_lens_transform(&transform), "lens")?;
     Ok(transform)
 }
 
-/// LensOp type tags.
-const OP_ADD_COLUMN: u8 = 1;
-const OP_REMOVE_COLUMN: u8 = 2;
-const OP_RENAME_COLUMN: u8 = 3;
-const OP_ADD_TABLE: u8 = 4;
-const OP_REMOVE_TABLE: u8 = 5;
-const OP_RENAME_TABLE: u8 = 6;
-
-fn encode_lens_op(buf: &mut Vec<u8>, op: &LensOp, version: u8) {
-    match op {
-        LensOp::RenameTable { old_name, new_name } => {
-            buf.push(OP_RENAME_TABLE);
-            write_string(buf, old_name);
-            write_string(buf, new_name);
-        }
-        LensOp::AddColumn {
-            table,
-            column,
-            column_type,
-            default,
-        } => {
-            buf.push(OP_ADD_COLUMN);
-            write_string(buf, table);
-            write_string(buf, column);
-            encode_column_type(buf, column_type);
-            encode_value(buf, default);
-        }
-        LensOp::RemoveColumn {
-            table,
-            column,
-            column_type,
-            default,
-        } => {
-            buf.push(OP_REMOVE_COLUMN);
-            write_string(buf, table);
-            write_string(buf, column);
-            encode_column_type(buf, column_type);
-            encode_value(buf, default);
-        }
-        LensOp::RenameColumn {
-            table,
-            old_name,
-            new_name,
-        } => {
-            buf.push(OP_RENAME_COLUMN);
-            write_string(buf, table);
-            write_string(buf, old_name);
-            write_string(buf, new_name);
-        }
-        LensOp::AddTable { table, schema } => {
-            buf.push(OP_ADD_TABLE);
-            write_string(buf, table);
-            encode_table_schema(buf, schema, version);
-        }
-        LensOp::RemoveTable { table, schema } => {
-            buf.push(OP_REMOVE_TABLE);
-            write_string(buf, table);
-            encode_table_schema(buf, schema, version);
-        }
+wire_struct! {
+    LensWire: LensTransform {
+        ops: Seq("lens_ops", LensOpWire),
+        draft_ops: Seq("lens_draft_ops", U32),
     }
 }
 
-fn decode_lens_op(
-    data: &[u8],
-    offset: &mut usize,
-    lens_version: u8,
-) -> Result<LensOp, CatalogueEncodingError> {
-    let schema_version = schema_version_for_lens_payload(lens_version);
-    let tag = read_u8(data, offset)?;
-    match tag {
-        OP_RENAME_TABLE => {
-            let old_name = read_string(data, offset, "old_name")?;
-            let new_name = read_string(data, offset, "new_name")?;
-            Ok(LensOp::RenameTable { old_name, new_name })
-        }
-        OP_ADD_COLUMN => {
-            let table = read_string(data, offset, "table")?;
-            let column = read_string(data, offset, "column")?;
-            let column_type = decode_column_type(data, offset, schema_version)?;
-            let default = decode_value(data, offset)?;
-            Ok(LensOp::AddColumn {
-                table,
-                column,
-                column_type,
-                default,
-            })
-        }
-        OP_REMOVE_COLUMN => {
-            let table = read_string(data, offset, "table")?;
-            let column = read_string(data, offset, "column")?;
-            let column_type = decode_column_type(data, offset, schema_version)?;
-            let default = decode_value(data, offset)?;
-            Ok(LensOp::RemoveColumn {
-                table,
-                column,
-                column_type,
-                default,
-            })
-        }
-        OP_RENAME_COLUMN => {
-            let table = read_string(data, offset, "table")?;
-            let old_name = read_string(data, offset, "old_name")?;
-            let new_name = read_string(data, offset, "new_name")?;
-            Ok(LensOp::RenameColumn {
-                table,
-                old_name,
-                new_name,
-            })
-        }
-        OP_ADD_TABLE => {
-            let table = read_string(data, offset, "table")?;
-            let schema = decode_table_schema(data, offset, lens_version)?;
-            Ok(LensOp::AddTable { table, schema })
-        }
-        OP_REMOVE_TABLE => {
-            let table = read_string(data, offset, "table")?;
-            let schema = decode_table_schema(data, offset, lens_version)?;
-            Ok(LensOp::RemoveTable { table, schema })
-        }
-        _ => Err(CatalogueEncodingError::InvalidTypeTag {
-            tag,
-            context: "lens_op",
-        }),
+wire_enum! {
+    LensOpWire: LensOp, "lens_op" {
+        1 => AddColumn {
+            table: Str("table"),
+            column: Str("column"),
+            column_type: ColumnTypeWire,
+            default: ValueWire,
+        },
+        2 => RemoveColumn {
+            table: Str("table"),
+            column: Str("column"),
+            column_type: ColumnTypeWire,
+            default: ValueWire,
+        },
+        3 => RenameColumn {
+            table: Str("table"),
+            old_name: Str("old_name"),
+            new_name: Str("new_name"),
+        },
+        4 => AddTable { table: Str("table"), schema: LENS_TABLE },
+        5 => RemoveTable { table: Str("table"), schema: LENS_TABLE },
+        6 => RenameTable { old_name: Str("old_name"), new_name: Str("new_name") },
     }
 }
 
-fn decode_current_lens_transform(
-    data: &[u8],
-    lens_version: u8,
-) -> Result<LensTransform, CatalogueEncodingError> {
-    let mut offset = 1;
-
-    let op_count = read_count(data, &mut offset, "lens_ops")?;
-    let mut ops = Vec::with_capacity(op_count);
-    for _ in 0..op_count {
-        ops.push(decode_lens_op(data, &mut offset, lens_version)?);
-    }
-
-    let draft_count = read_count(data, &mut offset, "lens_draft_ops")?;
-    let mut draft_ops = Vec::with_capacity(draft_count);
-    for _ in 0..draft_count {
-        draft_ops.push(read_u32(data, &mut offset)? as usize);
-    }
-
-    ensure_consumed(data, offset)?;
-    Ok(LensTransform { ops, draft_ops })
-}
-
-fn encode_table_schema(buf: &mut Vec<u8>, schema: &TableSchema, lens_version: u8) {
-    encode_row_descriptor(buf, &schema.columns);
-    encode_branch_bindings(buf, &schema.branch_by);
-    if lens_version >= LENS_COMPOSITE_VERSION {
-        encode_composite_indexes(buf, &schema.composite_indexes);
-    }
-}
-
-fn decode_table_schema(
-    data: &[u8],
-    offset: &mut usize,
-    lens_version: u8,
-) -> Result<TableSchema, CatalogueEncodingError> {
-    let schema_version = schema_version_for_lens_payload(lens_version);
-    let descriptor = decode_row_descriptor(data, offset, schema_version)?;
-    let branch_by = decode_branch_bindings(data, offset)?;
-    let composite_indexes = if lens_version >= LENS_COMPOSITE_VERSION {
-        decode_composite_indexes(data, offset, &descriptor)?
-    } else {
-        Vec::new()
-    };
-    Ok(TableSchema {
-        columns: descriptor,
-        indexed_columns: None,
-        composite_indexes,
-        policies: TablePolicies::default(),
-        branch_by,
-    })
-}
-
-fn schema_version_for_lens_payload(lens_version: u8) -> u8 {
-    if lens_version >= LENS_COMPOSITE_VERSION {
-        SCHEMA_COMPOSITE_VERSION
-    } else {
-        SCHEMA_VERSION
-    }
-}
+/// A lens op's table schema carries no indexed-column set.
+const LENS_TABLE: TableWire = TableWire { indexed: false };
 
 // ============================================================================
 // Canonical nested payload codec
@@ -864,9 +551,34 @@ const JSON_STRING: u8 = 5;
 const JSON_ARRAY: u8 = 6;
 const JSON_OBJECT: u8 = 7;
 
-fn encode_canonical_json_value(buf: &mut Vec<u8>, value: &serde_json::Value) {
-    buf.push(NESTED_CODEC_VERSION);
-    encode_canonical_json_value_body(buf, value);
+/// A JSON Schema declaration in the canonical nested grammar.
+struct JsonWire;
+
+impl Wire<serde_json::Value> for JsonWire {
+    fn put(&self, buf: &mut Vec<u8>, value: &serde_json::Value) {
+        buf.push(NESTED_CODEC_VERSION);
+        encode_canonical_json_value_body(buf, value);
+    }
+
+    fn get(
+        &self,
+        data: &[u8],
+        offset: &mut usize,
+    ) -> Result<serde_json::Value, CatalogueEncodingError> {
+        let start = *offset;
+        let version = read_u8(data, offset)?;
+        if version != NESTED_CODEC_VERSION {
+            return Err(CatalogueEncodingError::UnsupportedVersion {
+                found: version,
+                expected: NESTED_CODEC_VERSION,
+            });
+        }
+        let value = decode_canonical_json_value_body(data, offset)?;
+        let mut canonical = Vec::new();
+        self.put(&mut canonical, &value);
+        ensure_canonical_segment(data, start, *offset, &canonical, "json schema")?;
+        Ok(value)
+    }
 }
 
 fn encode_canonical_json_value_body(buf: &mut Vec<u8>, value: &serde_json::Value) {
@@ -886,41 +598,18 @@ fn encode_canonical_json_value_body(buf: &mut Vec<u8>, value: &serde_json::Value
         }
         serde_json::Value::Array(values) => {
             buf.push(JSON_ARRAY);
-            write_u32(buf, values.len() as u32);
-            for value in values {
-                encode_canonical_json_value_body(buf, value);
-            }
+            write_seq(buf, values, encode_canonical_json_value_body);
         }
         serde_json::Value::Object(values) => {
             buf.push(JSON_OBJECT);
-            write_u32(buf, values.len() as u32);
             let mut entries = values.iter().collect::<Vec<_>>();
             entries.sort_unstable_by(|(left, _), (right, _)| left.as_bytes().cmp(right.as_bytes()));
-            for (key, value) in entries {
+            write_seq(buf, &entries, |buf, (key, value)| {
                 write_string(buf, key);
                 encode_canonical_json_value_body(buf, value);
-            }
+            });
         }
     }
-}
-
-fn decode_canonical_json_value(
-    data: &[u8],
-    offset: &mut usize,
-) -> Result<serde_json::Value, CatalogueEncodingError> {
-    let start = *offset;
-    let version = read_u8(data, offset)?;
-    if version != NESTED_CODEC_VERSION {
-        return Err(CatalogueEncodingError::UnsupportedVersion {
-            found: version,
-            expected: NESTED_CODEC_VERSION,
-        });
-    }
-    let value = decode_canonical_json_value_body(data, offset)?;
-    let mut canonical = Vec::new();
-    encode_canonical_json_value(&mut canonical, &value);
-    ensure_canonical_segment(data, start, *offset, &canonical, "json schema")?;
-    Ok(value)
 }
 
 fn decode_canonical_json_value_body(
@@ -950,14 +639,12 @@ fn decode_canonical_json_value_body(
             offset,
             "json_string",
         )?)),
-        JSON_ARRAY => {
-            let count = read_count(data, offset, "json_array")?;
-            let mut values = Vec::with_capacity(count);
-            for _ in 0..count {
-                values.push(decode_canonical_json_value_body(data, offset)?);
-            }
-            Ok(serde_json::Value::Array(values))
-        }
+        JSON_ARRAY => Ok(serde_json::Value::Array(read_seq(
+            data,
+            offset,
+            "json_array",
+            decode_canonical_json_value_body,
+        )?)),
         JSON_OBJECT => {
             let count = read_count(data, offset, "json_object")?;
             let mut values = serde_json::Map::new();
@@ -985,7 +672,6 @@ fn decode_canonical_json_value_body(
     }
 }
 
-const REL_TABLE_SCAN: u8 = 1;
 const REL_FILTER: u8 = 2;
 const REL_UNION: u8 = 3;
 const REL_JOIN: u8 = 4;
@@ -997,46 +683,22 @@ const REL_GATHER: u8 = 6;
 const REL_UNION_LABELED: u8 = 7;
 const MAX_RELATION_UNION_ARM_LABEL_BYTES: usize = 4096;
 
-const REL_PREDICATE_CMP: u8 = 1;
-const REL_PREDICATE_IS_NULL: u8 = 2;
-const REL_PREDICATE_IS_NOT_NULL: u8 = 3;
-const REL_PREDICATE_IN: u8 = 4;
-const REL_PREDICATE_CONTAINS: u8 = 5;
 const REL_PREDICATE_ENUM_MATCH: u8 = 6;
 const REL_PREDICATE_AND: u8 = 7;
 const REL_PREDICATE_OR: u8 = 8;
 const REL_PREDICATE_NOT: u8 = 9;
-const REL_PREDICATE_TRUE: u8 = 10;
-const REL_PREDICATE_FALSE: u8 = 11;
-
-const REL_VALUE_LITERAL: u8 = 1;
-const REL_VALUE_SESSION_REF: u8 = 2;
-const REL_VALUE_OUTER_COLUMN: u8 = 3;
-const REL_VALUE_ROW_ID: u8 = 4;
-
-const REL_ROW_ID_CURRENT: u8 = 1;
-const REL_ROW_ID_OUTER: u8 = 2;
-const REL_ROW_ID_FRONTIER: u8 = 3;
-
-const REL_KEY_COLUMN: u8 = 1;
-const REL_KEY_ROW_ID: u8 = 2;
-const REL_PROJECT_COLUMN: u8 = 1;
-const REL_PROJECT_ROW_ID: u8 = 2;
-const REL_JOIN_INNER: u8 = 1;
-const REL_JOIN_LEFT: u8 = 2;
-const REL_BOUND_FIXPOINT: u8 = 1;
-const REL_BOUND_MAX_DEPTH: u8 = 2;
-
-fn encode_canonical_relation_expr(buf: &mut Vec<u8>, rel: &RelExpr) {
+fn encode_canonical_relation_expr(buf: &mut Vec<u8>, rel: &RelationExpr) {
     buf.push(NESTED_CODEC_VERSION);
     encode_relation_expr_body(buf, rel);
 }
 
-/// Validate every relation-IR arm before an infallible catalogue encoder is
-/// allowed to hash or persist it. Server callers can publish `TablePolicies`
+/// Validate every relation-IR arm and literal before an infallible catalogue
+/// encoder is allowed to hash or persist it. Policies use a subset of the query
+/// relation IR: no output steps, query parameters or frontier columns, and
+/// literals are typed public values. Server callers can publish `TablePolicies`
 /// directly, bypassing core-schema conversion, so this is the admission
 /// boundary for the durable grammar as well as a decoder defense.
-pub fn validate_permissions_relation_unions(
+pub fn validate_permissions_relations(
     permissions: &HashMap<TableName, TablePolicies>,
 ) -> Result<(), CatalogueEncodingError> {
     for policies in permissions.values() {
@@ -1051,21 +713,21 @@ pub fn validate_permissions_relation_unions(
         .into_iter()
         .flatten()
         {
-            validate_policy_relation_unions(policy)?;
+            validate_policy_relations(policy)?;
         }
     }
     Ok(())
 }
 
-fn validate_policy_relation_unions(policy: &PolicyExpr) -> Result<(), CatalogueEncodingError> {
+fn validate_policy_relations(policy: &PolicyExpr) -> Result<(), CatalogueEncodingError> {
     match policy {
-        PolicyExpr::ExistsRel { rel } => validate_relation_union_labels(rel),
+        PolicyExpr::ExistsRel { rel } => validate_relation_policy(rel),
         PolicyExpr::Exists { condition, .. } | PolicyExpr::Not(condition) => {
-            validate_policy_relation_unions(condition)
+            validate_policy_relations(condition)
         }
         PolicyExpr::And(expressions) | PolicyExpr::Or(expressions) => {
             for expression in expressions {
-                validate_policy_relation_unions(expression)?;
+                validate_policy_relations(expression)?;
             }
             Ok(())
         }
@@ -1073,13 +735,22 @@ fn validate_policy_relation_unions(policy: &PolicyExpr) -> Result<(), CatalogueE
     }
 }
 
-fn validate_relation_union_labels(rel: &RelExpr) -> Result<(), CatalogueEncodingError> {
+fn validate_relation_policy(rel: &RelationExpr) -> Result<(), CatalogueEncodingError> {
     match rel {
-        RelExpr::TableScan { .. } => Ok(()),
-        RelExpr::Filter { input, .. } | RelExpr::Project { input, .. } => {
-            validate_relation_union_labels(input)
+        RelationExpr::TableScan { .. } => Ok(()),
+        RelationExpr::Filter { input, predicate } => {
+            validate_relation_policy_predicate(predicate)?;
+            validate_relation_policy(input)
         }
-        RelExpr::Union { inputs } => {
+        RelationExpr::Project { input, .. } => validate_relation_policy(input),
+        RelationExpr::Distinct { .. }
+        | RelationExpr::OrderBy { .. }
+        | RelationExpr::Offset { .. }
+        | RelationExpr::Limit { .. } => Err(CatalogueEncodingError::DecodeError {
+            message: "relation policies do not support Distinct, OrderBy, Offset or Limit"
+                .to_owned(),
+        }),
+        RelationExpr::Union { inputs } => {
             let mut labels = BTreeSet::new();
             for arm in inputs {
                 if arm.label.is_empty()
@@ -1093,39 +764,82 @@ fn validate_relation_union_labels(rel: &RelExpr) -> Result<(), CatalogueEncoding
                                 .to_owned(),
                     });
                 }
-                validate_relation_union_labels(&arm.input)?;
+                validate_relation_policy(&arm.input)?;
             }
             Ok(())
         }
-        RelExpr::Join { left, right, .. } => {
-            validate_relation_union_labels(left)?;
-            validate_relation_union_labels(right)
+        RelationExpr::Join { left, right, .. } => {
+            validate_relation_policy(left)?;
+            validate_relation_policy(right)
         }
-        RelExpr::Gather { seed, step, .. } => {
-            validate_relation_union_labels(seed)?;
-            validate_relation_union_labels(step)
+        RelationExpr::Gather { seed, step, .. } => {
+            validate_relation_policy(seed)?;
+            validate_relation_policy(step)
         }
     }
 }
 
-fn encode_relation_expr_body(buf: &mut Vec<u8>, rel: &RelExpr) {
+fn validate_relation_policy_predicate(
+    predicate: &RelationPredicate,
+) -> Result<(), CatalogueEncodingError> {
+    match predicate {
+        RelationPredicate::Cmp { right, .. } | RelationPredicate::Contains { right, .. } => {
+            validate_relation_policy_value(right)
+        }
+        RelationPredicate::In { values, .. } => {
+            values.iter().try_for_each(validate_relation_policy_value)
+        }
+        RelationPredicate::EnumMatch { payload, .. } | RelationPredicate::Not(payload) => {
+            validate_relation_policy_predicate(payload)
+        }
+        RelationPredicate::And(predicates) | RelationPredicate::Or(predicates) => predicates
+            .iter()
+            .try_for_each(validate_relation_policy_predicate),
+        RelationPredicate::IsNull { .. }
+        | RelationPredicate::IsNotNull { .. }
+        | RelationPredicate::True
+        | RelationPredicate::False => Ok(()),
+    }
+}
+
+fn validate_relation_policy_value(value: &RelationValueRef) -> Result<(), CatalogueEncodingError> {
+    let message = match value {
+        RelationValueRef::Literal(literal) => match relation_policy_literal(literal) {
+            Ok(_) => return Ok(()),
+            Err(error) => format!("relation policy literals must be typed values: {error}"),
+        },
+        RelationValueRef::Param(_) => {
+            "relation policies do not support query parameters".to_owned()
+        }
+        RelationValueRef::FrontierColumn(_) => {
+            "relation policies do not support frontier column operands".to_owned()
+        }
+        RelationValueRef::SessionRef(_)
+        | RelationValueRef::OuterColumn(_)
+        | RelationValueRef::RowId(_) => return Ok(()),
+    };
+    Err(CatalogueEncodingError::DecodeError { message })
+}
+
+fn relation_policy_literal(literal: &serde_json::Value) -> Result<Value, serde_json::Error> {
+    serde_json::from_value(literal.clone())
+}
+
+fn encode_relation_expr_body(buf: &mut Vec<u8>, rel: &RelationExpr) {
     let mut tasks = vec![RelationEncodeTask::Expr(rel)];
     while let Some(task) = tasks.pop() {
         match task {
-            RelationEncodeTask::Expr(RelExpr::TableScan { table, alias }) => {
-                buf.push(REL_TABLE_SCAN);
-                write_string(buf, table.as_str());
-                encode_optional_string(buf, alias.as_deref());
+            RelationEncodeTask::Expr(leaf @ RelationExpr::TableScan { .. }) => {
+                RelationLeafWire.put_variant(buf, leaf)
             }
-            RelationEncodeTask::Expr(RelExpr::Filter { input, predicate }) => {
+            RelationEncodeTask::Expr(RelationExpr::Filter { input, predicate }) => {
                 buf.push(REL_FILTER);
                 tasks.push(RelationEncodeTask::Pred(predicate));
                 tasks.push(RelationEncodeTask::Expr(input));
             }
-            RelationEncodeTask::Expr(RelExpr::Union { inputs }) => {
+            RelationEncodeTask::Expr(RelationExpr::Union { inputs }) => {
                 buf.push(REL_UNION_LABELED);
-                write_u32(buf, inputs.len() as u32);
-                for arm in inputs {
+                write_seq(buf, inputs, |buf, arm| {
                     assert!(
                         !arm.label.is_empty()
                             && arm.label.len() <= MAX_RELATION_UNION_ARM_LABEL_BYTES
@@ -1133,12 +847,12 @@ fn encode_relation_expr_body(buf: &mut Vec<u8>, rel: &RelExpr) {
                         "relation union arm labels must be 1..=4096 bytes and NUL-free"
                     );
                     write_string(buf, &arm.label);
-                }
+                });
                 for arm in inputs.iter().rev() {
                     tasks.push(RelationEncodeTask::Expr(&arm.input));
                 }
             }
-            RelationEncodeTask::Expr(RelExpr::Join {
+            RelationEncodeTask::Expr(RelationExpr::Join {
                 left,
                 right,
                 on,
@@ -1149,12 +863,12 @@ fn encode_relation_expr_body(buf: &mut Vec<u8>, rel: &RelExpr) {
                 tasks.push(RelationEncodeTask::Expr(right));
                 tasks.push(RelationEncodeTask::Expr(left));
             }
-            RelationEncodeTask::Expr(RelExpr::Project { input, columns }) => {
+            RelationEncodeTask::Expr(RelationExpr::Project { input, columns }) => {
                 buf.push(REL_PROJECT);
                 tasks.push(RelationEncodeTask::ProjectTail(columns));
                 tasks.push(RelationEncodeTask::Expr(input));
             }
-            RelationEncodeTask::Expr(RelExpr::Gather {
+            RelationEncodeTask::Expr(RelationExpr::Gather {
                 seed,
                 step,
                 frontier_key,
@@ -1170,50 +884,44 @@ fn encode_relation_expr_body(buf: &mut Vec<u8>, rel: &RelExpr) {
                 tasks.push(RelationEncodeTask::Expr(step));
                 tasks.push(RelationEncodeTask::Expr(seed));
             }
+            RelationEncodeTask::Expr(
+                RelationExpr::Distinct { .. }
+                | RelationExpr::OrderBy { .. }
+                | RelationExpr::Offset { .. }
+                | RelationExpr::Limit { .. },
+            ) => unreachable!("validated relation policies have no output steps"),
             RelationEncodeTask::Pred(pred) => encode_relation_predicate_task(buf, pred, &mut tasks),
             RelationEncodeTask::JoinTail(on, kind) => {
-                write_u32(buf, on.len() as u32);
-                for c in on {
-                    encode_relation_column_ref(buf, &c.left);
-                    encode_relation_column_ref(buf, &c.right);
-                }
-                buf.push(match kind {
-                    RelJoinKind::Inner => REL_JOIN_INNER,
-                    RelJoinKind::Left => REL_JOIN_LEFT,
-                });
+                JOIN_CONDITIONS.put(buf, on);
+                JoinKindWire.put(buf, kind);
             }
-            RelationEncodeTask::ProjectTail(columns) => {
-                write_u32(buf, columns.len() as u32);
-                for c in columns {
-                    write_string(buf, &c.alias);
-                    encode_relation_project_expr(buf, &c.expr);
-                }
-            }
+            RelationEncodeTask::ProjectTail(columns) => PROJECT_COLUMNS.put(buf, columns),
             RelationEncodeTask::GatherTail(key, bound, keys) => {
-                encode_relation_key_ref(buf, key);
-                encode_relation_bound(buf, bound);
-                write_u32(buf, keys.len() as u32);
-                for key in keys {
-                    encode_relation_key_ref(buf, key);
-                }
+                KeyRefWire.put(buf, key);
+                BoundWire.put(buf, bound);
+                DEDUPE_KEYS.put(buf, keys);
             }
         }
     }
 }
 
 enum RelationEncodeTask<'a> {
-    Expr(&'a RelExpr),
-    Pred(&'a RelPredicateExpr),
-    JoinTail(&'a [RelJoinCondition], &'a RelJoinKind),
-    ProjectTail(&'a [RelProjectColumn]),
-    GatherTail(&'a RelKeyRef, &'a RelRecursionBound, &'a [RelKeyRef]),
+    Expr(&'a RelationExpr),
+    Pred(&'a RelationPredicate),
+    JoinTail(&'a Vec<RelationJoinCondition>, &'a RelationJoinKind),
+    ProjectTail(&'a Vec<RelationProjectColumn>),
+    GatherTail(
+        &'a RelationKeyRef,
+        &'a RecursionBound,
+        &'a Vec<RelationKeyRef>,
+    ),
 }
 
 fn decode_canonical_relation_expr(
     data: &[u8],
     offset: &mut usize,
-    budget: &mut PolicyExpressionDecodeBudget,
-) -> Result<RelExpr, CatalogueEncodingError> {
+    budget: &mut PolicyExpressionBudget,
+) -> Result<RelationExpr, CatalogueEncodingError> {
     let start = *offset;
     let version = read_u8(data, offset)?;
     if version != NESTED_CODEC_VERSION {
@@ -1229,42 +937,6 @@ fn decode_canonical_relation_expr(
     Ok(rel)
 }
 
-#[derive(Default)]
-struct PolicyExpressionDecodeBudget {
-    nodes: usize,
-}
-
-impl PolicyExpressionDecodeBudget {
-    fn enter(&mut self, depth: usize) -> Result<(), CatalogueEncodingError> {
-        if depth > MAX_POLICY_EXPRESSION_DEPTH {
-            return Err(policy_expression_limit(
-                "MAX_POLICY_EXPRESSION_DEPTH",
-                MAX_POLICY_EXPRESSION_DEPTH,
-                depth,
-            ));
-        }
-        if self.nodes >= MAX_POLICY_EXPRESSION_NODES {
-            return Err(policy_expression_limit(
-                "MAX_POLICY_EXPRESSION_NODES",
-                MAX_POLICY_EXPRESSION_NODES,
-                self.nodes + 1,
-            ));
-        }
-        self.nodes += 1;
-        Ok(())
-    }
-    fn reserve(&self, children: usize) -> Result<(), CatalogueEncodingError> {
-        if children > MAX_POLICY_EXPRESSION_NODES - self.nodes {
-            return Err(policy_expression_limit(
-                "MAX_POLICY_EXPRESSION_NODES",
-                MAX_POLICY_EXPRESSION_NODES,
-                self.nodes.saturating_add(children),
-            ));
-        }
-        Ok(())
-    }
-}
-
 enum RelationDecodeTask {
     Expr(usize),
     Pred(usize),
@@ -1276,35 +948,36 @@ enum RelationDecodeTask {
     ProjectDone,
     GatherTail,
     GatherDone,
-    EnumDone(RelColumnRef, String),
+    EnumDone(RelationColumnRef, String),
     AndDone(usize),
     OrDone(usize),
     NotDone,
 }
 enum RelationDecodeValue {
-    Expr(RelExpr),
-    Pred(RelPredicateExpr),
-    Join(Vec<RelJoinCondition>, RelJoinKind),
-    Project(Vec<RelProjectColumn>),
-    Gather(RelKeyRef, RelRecursionBound, Vec<RelKeyRef>),
+    Expr(RelationExpr),
+    Pred(RelationPredicate),
+    Join(Vec<RelationJoinCondition>, RelationJoinKind),
+    Project(Vec<RelationProjectColumn>),
+    Gather(RelationKeyRef, RecursionBound, Vec<RelationKeyRef>),
 }
 
 fn decode_relation_expr_body_iterative(
     data: &[u8],
     offset: &mut usize,
-    budget: &mut PolicyExpressionDecodeBudget,
-) -> Result<RelExpr, CatalogueEncodingError> {
+    budget: &mut PolicyExpressionBudget,
+) -> Result<RelationExpr, CatalogueEncodingError> {
     let mut tasks = vec![RelationDecodeTask::Expr(1)];
     let mut values = Vec::new();
     while let Some(task) = tasks.pop() {
         match task {
             RelationDecodeTask::Expr(depth) => {
                 budget.enter(depth)?;
-                match read_u8(data, offset)? {
-                    REL_TABLE_SCAN => values.push(RelationDecodeValue::Expr(RelExpr::TableScan {
-                        table: TableName::new(read_string(data, offset, "relation_table")?),
-                        alias: decode_optional_string(data, offset, "relation_alias")?,
-                    })),
+                let tag = read_u8(data, offset)?;
+                if let Some(leaf) = RelationLeafWire.get_variant(tag, data, offset)? {
+                    values.push(RelationDecodeValue::Expr(leaf));
+                    continue;
+                }
+                match tag {
                     REL_FILTER => {
                         budget.reserve(1)?;
                         tasks.push(RelationDecodeTask::FilterDone);
@@ -1378,7 +1051,7 @@ fn decode_relation_expr_body_iterative(
             RelationDecodeTask::FilterDone => {
                 let predicate = pop_pred(&mut values)?;
                 let input = pop_expr(&mut values)?;
-                values.push(RelationDecodeValue::Expr(RelExpr::Filter {
+                values.push(RelationDecodeValue::Expr(RelationExpr::Filter {
                     input: Box::new(input),
                     predicate,
                 }));
@@ -1386,23 +1059,23 @@ fn decode_relation_expr_body_iterative(
             RelationDecodeTask::UnionDone(labels) => {
                 let mut inputs = Vec::with_capacity(labels.len());
                 for label in labels.into_iter().rev() {
-                    inputs.push(RelUnionArm {
+                    inputs.push(RelationUnionArm {
                         label,
                         input: pop_expr(&mut values)?,
                     });
                 }
                 inputs.reverse();
-                values.push(RelationDecodeValue::Expr(RelExpr::Union { inputs }));
+                values.push(RelationDecodeValue::Expr(RelationExpr::Union { inputs }));
             }
-            RelationDecodeTask::JoinTail => {
-                let (on, join_kind) = read_join_tail(data, offset)?;
-                values.push(RelationDecodeValue::Join(on, join_kind))
-            }
+            RelationDecodeTask::JoinTail => values.push(RelationDecodeValue::Join(
+                JOIN_CONDITIONS.get(data, offset)?,
+                JoinKindWire.get(data, offset)?,
+            )),
             RelationDecodeTask::JoinDone => {
                 let (on, join_kind) = pop_join(&mut values)?;
                 let right = pop_expr(&mut values)?;
                 let left = pop_expr(&mut values)?;
-                values.push(RelationDecodeValue::Expr(RelExpr::Join {
+                values.push(RelationDecodeValue::Expr(RelationExpr::Join {
                     left: Box::new(left),
                     right: Box::new(right),
                     on,
@@ -1410,25 +1083,26 @@ fn decode_relation_expr_body_iterative(
                 }));
             }
             RelationDecodeTask::ProjectTail => values.push(RelationDecodeValue::Project(
-                read_project_tail(data, offset)?,
+                PROJECT_COLUMNS.get(data, offset)?,
             )),
             RelationDecodeTask::ProjectDone => {
                 let columns = pop_project(&mut values)?;
                 let input = pop_expr(&mut values)?;
-                values.push(RelationDecodeValue::Expr(RelExpr::Project {
+                values.push(RelationDecodeValue::Expr(RelationExpr::Project {
                     input: Box::new(input),
                     columns,
                 }));
             }
-            RelationDecodeTask::GatherTail => {
-                let (frontier_key, bound, dedupe_key) = read_gather_tail(data, offset)?;
-                values.push(RelationDecodeValue::Gather(frontier_key, bound, dedupe_key))
-            }
+            RelationDecodeTask::GatherTail => values.push(RelationDecodeValue::Gather(
+                KeyRefWire.get(data, offset)?,
+                BoundWire.get(data, offset)?,
+                DEDUPE_KEYS.get(data, offset)?,
+            )),
             RelationDecodeTask::GatherDone => {
                 let (frontier_key, bound, dedupe_key) = pop_gather(&mut values)?;
                 let step = pop_expr(&mut values)?;
                 let seed = pop_expr(&mut values)?;
-                values.push(RelationDecodeValue::Expr(RelExpr::Gather {
+                values.push(RelationDecodeValue::Expr(RelationExpr::Gather {
                     seed: Box::new(seed),
                     step: Box::new(step),
                     frontier_key,
@@ -1438,7 +1112,7 @@ fn decode_relation_expr_body_iterative(
             }
             RelationDecodeTask::EnumDone(column, case) => {
                 let payload = pop_pred(&mut values)?;
-                values.push(RelationDecodeValue::Pred(RelPredicateExpr::EnumMatch {
+                values.push(RelationDecodeValue::Pred(RelationPredicate::EnumMatch {
                     column,
                     case,
                     payload: Box::new(payload),
@@ -1450,7 +1124,7 @@ fn decode_relation_expr_body_iterative(
                     expressions.push(pop_pred(&mut values)?);
                 }
                 expressions.reverse();
-                values.push(RelationDecodeValue::Pred(RelPredicateExpr::And(
+                values.push(RelationDecodeValue::Pred(RelationPredicate::And(
                     expressions,
                 )));
             }
@@ -1460,11 +1134,13 @@ fn decode_relation_expr_body_iterative(
                     expressions.push(pop_pred(&mut values)?);
                 }
                 expressions.reverse();
-                values.push(RelationDecodeValue::Pred(RelPredicateExpr::Or(expressions)));
+                values.push(RelationDecodeValue::Pred(RelationPredicate::Or(
+                    expressions,
+                )));
             }
             RelationDecodeTask::NotDone => {
                 let input = pop_pred(&mut values)?;
-                values.push(RelationDecodeValue::Pred(RelPredicateExpr::Not(Box::new(
+                values.push(RelationDecodeValue::Pred(RelationPredicate::Not(Box::new(
                     input,
                 ))));
             }
@@ -1481,46 +1157,20 @@ fn decode_relation_expr_body_iterative(
 fn decode_relation_predicate_task_iterative(
     data: &[u8],
     offset: &mut usize,
-    budget: &mut PolicyExpressionDecodeBudget,
+    budget: &mut PolicyExpressionBudget,
     depth: usize,
     tasks: &mut Vec<RelationDecodeTask>,
     values: &mut Vec<RelationDecodeValue>,
 ) -> Result<(), CatalogueEncodingError> {
     budget.enter(depth)?;
-    match read_u8(data, offset)? {
-        REL_PREDICATE_CMP => values.push(RelationDecodeValue::Pred(RelPredicateExpr::Cmp {
-            left: decode_relation_column_ref(data, offset)?,
-            op: decode_relation_cmp_op(data, offset)?,
-            right: decode_relation_value_ref(data, offset)?,
-        })),
-        REL_PREDICATE_IS_NULL => values.push(RelationDecodeValue::Pred(RelPredicateExpr::IsNull {
-            column: decode_relation_column_ref(data, offset)?,
-        })),
-        REL_PREDICATE_IS_NOT_NULL => {
-            values.push(RelationDecodeValue::Pred(RelPredicateExpr::IsNotNull {
-                column: decode_relation_column_ref(data, offset)?,
-            }))
-        }
-        REL_PREDICATE_IN => {
-            let left = decode_relation_column_ref(data, offset)?;
-            let count = read_count(data, offset, "relation_predicate_in")?;
-            let mut items = Vec::with_capacity(count);
-            for _ in 0..count {
-                items.push(decode_relation_value_ref(data, offset)?);
-            }
-            values.push(RelationDecodeValue::Pred(RelPredicateExpr::In {
-                left,
-                values: items,
-            }));
-        }
-        REL_PREDICATE_CONTAINS => {
-            values.push(RelationDecodeValue::Pred(RelPredicateExpr::Contains {
-                left: decode_relation_column_ref(data, offset)?,
-                right: decode_relation_value_ref(data, offset)?,
-            }))
-        }
+    let tag = read_u8(data, offset)?;
+    if let Some(leaf) = PredicateLeafWire.get_variant(tag, data, offset)? {
+        values.push(RelationDecodeValue::Pred(leaf));
+        return Ok(());
+    }
+    match tag {
         REL_PREDICATE_ENUM_MATCH => {
-            let column = decode_relation_column_ref(data, offset)?;
+            let column = ColumnRefWire.get(data, offset)?;
             let case = read_string(data, offset, "relation_enum_case")?;
             budget.reserve(1)?;
             tasks.push(RelationDecodeTask::EnumDone(column, case));
@@ -1547,8 +1197,6 @@ fn decode_relation_predicate_task_iterative(
             tasks.push(RelationDecodeTask::NotDone);
             tasks.push(RelationDecodeTask::Pred(depth + 1));
         }
-        REL_PREDICATE_TRUE => values.push(RelationDecodeValue::Pred(RelPredicateExpr::True)),
-        REL_PREDICATE_FALSE => values.push(RelationDecodeValue::Pred(RelPredicateExpr::False)),
         tag => {
             return Err(CatalogueEncodingError::InvalidTypeTag {
                 tag,
@@ -1559,63 +1207,12 @@ fn decode_relation_predicate_task_iterative(
     Ok(())
 }
 
-fn read_join_tail(
-    data: &[u8],
-    offset: &mut usize,
-) -> Result<(Vec<RelJoinCondition>, RelJoinKind), CatalogueEncodingError> {
-    let count = read_count(data, offset, "relation_join_conditions")?;
-    let mut on = Vec::with_capacity(count);
-    for _ in 0..count {
-        on.push(RelJoinCondition {
-            left: decode_relation_column_ref(data, offset)?,
-            right: decode_relation_column_ref(data, offset)?,
-        });
-    }
-    let kind = match read_u8(data, offset)? {
-        REL_JOIN_INNER => RelJoinKind::Inner,
-        REL_JOIN_LEFT => RelJoinKind::Left,
-        tag => {
-            return Err(CatalogueEncodingError::InvalidTypeTag {
-                tag,
-                context: "relation_join_kind",
-            });
-        }
-    };
-    Ok((on, kind))
-}
-fn read_project_tail(
-    data: &[u8],
-    offset: &mut usize,
-) -> Result<Vec<RelProjectColumn>, CatalogueEncodingError> {
-    let count = read_count(data, offset, "relation_project_columns")?;
-    let mut columns = Vec::with_capacity(count);
-    for _ in 0..count {
-        columns.push(RelProjectColumn {
-            alias: read_string(data, offset, "relation_project_alias")?,
-            expr: decode_relation_project_expr(data, offset)?,
-        });
-    }
-    Ok(columns)
-}
-fn read_gather_tail(
-    data: &[u8],
-    offset: &mut usize,
-) -> Result<(RelKeyRef, RelRecursionBound, Vec<RelKeyRef>), CatalogueEncodingError> {
-    let key = decode_relation_key_ref(data, offset)?;
-    let bound = decode_relation_bound(data, offset)?;
-    let count = read_count(data, offset, "relation_dedupe_keys")?;
-    let mut keys = Vec::with_capacity(count);
-    for _ in 0..count {
-        keys.push(decode_relation_key_ref(data, offset)?);
-    }
-    Ok((key, bound, keys))
-}
 fn relation_frame_error() -> CatalogueEncodingError {
     CatalogueEncodingError::DecodeError {
         message: "invalid relation decoder frame order".to_owned(),
     }
 }
-fn pop_expr(values: &mut Vec<RelationDecodeValue>) -> Result<RelExpr, CatalogueEncodingError> {
+fn pop_expr(values: &mut Vec<RelationDecodeValue>) -> Result<RelationExpr, CatalogueEncodingError> {
     match values.pop() {
         Some(RelationDecodeValue::Expr(value)) => Ok(value),
         _ => Err(relation_frame_error()),
@@ -1623,7 +1220,7 @@ fn pop_expr(values: &mut Vec<RelationDecodeValue>) -> Result<RelExpr, CatalogueE
 }
 fn pop_pred(
     values: &mut Vec<RelationDecodeValue>,
-) -> Result<RelPredicateExpr, CatalogueEncodingError> {
+) -> Result<RelationPredicate, CatalogueEncodingError> {
     match values.pop() {
         Some(RelationDecodeValue::Pred(value)) => Ok(value),
         _ => Err(relation_frame_error()),
@@ -1631,7 +1228,7 @@ fn pop_pred(
 }
 fn pop_join(
     values: &mut Vec<RelationDecodeValue>,
-) -> Result<(Vec<RelJoinCondition>, RelJoinKind), CatalogueEncodingError> {
+) -> Result<(Vec<RelationJoinCondition>, RelationJoinKind), CatalogueEncodingError> {
     match values.pop() {
         Some(RelationDecodeValue::Join(on, kind)) => Ok((on, kind)),
         _ => Err(relation_frame_error()),
@@ -1639,7 +1236,7 @@ fn pop_join(
 }
 fn pop_project(
     values: &mut Vec<RelationDecodeValue>,
-) -> Result<Vec<RelProjectColumn>, CatalogueEncodingError> {
+) -> Result<Vec<RelationProjectColumn>, CatalogueEncodingError> {
     match values.pop() {
         Some(RelationDecodeValue::Project(value)) => Ok(value),
         _ => Err(relation_frame_error()),
@@ -1647,7 +1244,7 @@ fn pop_project(
 }
 fn pop_gather(
     values: &mut Vec<RelationDecodeValue>,
-) -> Result<(RelKeyRef, RelRecursionBound, Vec<RelKeyRef>), CatalogueEncodingError> {
+) -> Result<(RelationKeyRef, RecursionBound, Vec<RelationKeyRef>), CatalogueEncodingError> {
     match values.pop() {
         Some(RelationDecodeValue::Gather(key, bound, keys)) => Ok((key, bound, keys)),
         _ => Err(relation_frame_error()),
@@ -1656,399 +1253,280 @@ fn pop_gather(
 
 fn encode_relation_predicate_task<'a>(
     buf: &mut Vec<u8>,
-    predicate: &'a RelPredicateExpr,
+    predicate: &'a RelationPredicate,
     tasks: &mut Vec<RelationEncodeTask<'a>>,
 ) {
     match predicate {
-        RelPredicateExpr::Cmp { left, op, right } => {
-            buf.push(REL_PREDICATE_CMP);
-            encode_relation_column_ref(buf, left);
-            encode_relation_cmp_op(buf, *op);
-            encode_relation_value_ref(buf, right);
-        }
-        RelPredicateExpr::IsNull { column } => {
-            buf.push(REL_PREDICATE_IS_NULL);
-            encode_relation_column_ref(buf, column);
-        }
-        RelPredicateExpr::IsNotNull { column } => {
-            buf.push(REL_PREDICATE_IS_NOT_NULL);
-            encode_relation_column_ref(buf, column);
-        }
-        RelPredicateExpr::In { left, values } => {
-            buf.push(REL_PREDICATE_IN);
-            encode_relation_column_ref(buf, left);
-            write_u32(buf, values.len() as u32);
-            for value in values {
-                encode_relation_value_ref(buf, value);
-            }
-        }
-        RelPredicateExpr::Contains { left, right } => {
-            buf.push(REL_PREDICATE_CONTAINS);
-            encode_relation_column_ref(buf, left);
-            encode_relation_value_ref(buf, right);
-        }
-        RelPredicateExpr::EnumMatch {
+        RelationPredicate::EnumMatch {
             column,
             case,
             payload,
         } => {
             buf.push(REL_PREDICATE_ENUM_MATCH);
-            encode_relation_column_ref(buf, column);
+            ColumnRefWire.put(buf, column);
             write_string(buf, case);
             tasks.push(RelationEncodeTask::Pred(payload));
         }
-        RelPredicateExpr::And(expressions) => {
+        RelationPredicate::And(expressions) => {
             buf.push(REL_PREDICATE_AND);
             write_u32(buf, expressions.len() as u32);
             for expression in expressions.iter().rev() {
                 tasks.push(RelationEncodeTask::Pred(expression));
             }
         }
-        RelPredicateExpr::Or(expressions) => {
+        RelationPredicate::Or(expressions) => {
             buf.push(REL_PREDICATE_OR);
             write_u32(buf, expressions.len() as u32);
             for expression in expressions.iter().rev() {
                 tasks.push(RelationEncodeTask::Pred(expression));
             }
         }
-        RelPredicateExpr::Not(expression) => {
+        RelationPredicate::Not(expression) => {
             buf.push(REL_PREDICATE_NOT);
             tasks.push(RelationEncodeTask::Pred(expression));
         }
-        RelPredicateExpr::True => buf.push(REL_PREDICATE_TRUE),
-        RelPredicateExpr::False => buf.push(REL_PREDICATE_FALSE),
+        leaf @ (RelationPredicate::Cmp { .. }
+        | RelationPredicate::IsNull { .. }
+        | RelationPredicate::IsNotNull { .. }
+        | RelationPredicate::In { .. }
+        | RelationPredicate::Contains { .. }
+        | RelationPredicate::True
+        | RelationPredicate::False) => PredicateLeafWire.put_variant(buf, leaf),
     }
 }
 
-fn encode_relation_column_ref(buf: &mut Vec<u8>, column: &RelColumnRef) {
-    encode_optional_string(buf, column.scope.as_deref());
-    write_string(buf, &column.column);
-}
-
-fn decode_relation_column_ref(
-    data: &[u8],
-    offset: &mut usize,
-) -> Result<RelColumnRef, CatalogueEncodingError> {
-    Ok(RelColumnRef {
-        scope: decode_optional_string(data, offset, "relation_column_scope")?,
-        column: read_string(data, offset, "relation_column")?,
-    })
-}
-
-fn encode_relation_value_ref(buf: &mut Vec<u8>, value: &RelValueRef) {
-    match value {
-        RelValueRef::Literal(value) => {
-            buf.push(REL_VALUE_LITERAL);
-            encode_value(buf, value);
-        }
-        RelValueRef::SessionRef(path) => {
-            buf.push(REL_VALUE_SESSION_REF);
-            encode_string_list(buf, path);
-        }
-        RelValueRef::OuterColumn(column) => {
-            buf.push(REL_VALUE_OUTER_COLUMN);
-            encode_relation_column_ref(buf, column);
-        }
-        RelValueRef::RowId(row_id) => {
-            buf.push(REL_VALUE_ROW_ID);
-            encode_relation_row_id(buf, row_id);
-        }
+wire_enum! {
+    partial RelationLeafWire: RelationExpr {
+        1 => TableScan {
+            table: Str("relation_table"),
+            alias: Flag("relation_alias", Str("relation_alias")),
+        },
     }
 }
 
-fn decode_relation_value_ref(
-    data: &[u8],
-    offset: &mut usize,
-) -> Result<RelValueRef, CatalogueEncodingError> {
-    match read_u8(data, offset)? {
-        REL_VALUE_LITERAL => Ok(RelValueRef::Literal(decode_value(data, offset)?)),
-        REL_VALUE_SESSION_REF => Ok(RelValueRef::SessionRef(decode_string_list(
-            data,
-            offset,
-            "relation_session_path",
-        )?)),
-        REL_VALUE_OUTER_COLUMN => Ok(RelValueRef::OuterColumn(decode_relation_column_ref(
-            data, offset,
-        )?)),
-        REL_VALUE_ROW_ID => Ok(RelValueRef::RowId(decode_relation_row_id(data, offset)?)),
-        tag => Err(CatalogueEncodingError::InvalidTypeTag {
-            tag,
-            context: "relation_value_ref",
-        }),
+wire_enum! {
+    partial PredicateLeafWire: RelationPredicate {
+        1 => Cmp { left: ColumnRefWire, op: RelCmpOpWire, right: ValueRefWire },
+        2 => IsNull { column: ColumnRefWire },
+        3 => IsNotNull { column: ColumnRefWire },
+        4 => In { left: ColumnRefWire, values: Seq("relation_predicate_in", ValueRefWire) },
+        5 => Contains { left: ColumnRefWire, right: ValueRefWire },
+        10 => True,
+        11 => False,
     }
 }
 
-fn encode_relation_cmp_op(buf: &mut Vec<u8>, op: RelPredicateCmpOp) {
-    buf.push(match op {
-        RelPredicateCmpOp::Eq => 1,
-        RelPredicateCmpOp::Ne => 2,
-        RelPredicateCmpOp::Lt => 3,
-        RelPredicateCmpOp::Le => 4,
-        RelPredicateCmpOp::Gt => 5,
-        RelPredicateCmpOp::Ge => 6,
-    });
-}
-
-fn decode_relation_cmp_op(
-    data: &[u8],
-    offset: &mut usize,
-) -> Result<RelPredicateCmpOp, CatalogueEncodingError> {
-    match read_u8(data, offset)? {
-        1 => Ok(RelPredicateCmpOp::Eq),
-        2 => Ok(RelPredicateCmpOp::Ne),
-        3 => Ok(RelPredicateCmpOp::Lt),
-        4 => Ok(RelPredicateCmpOp::Le),
-        5 => Ok(RelPredicateCmpOp::Gt),
-        6 => Ok(RelPredicateCmpOp::Ge),
-        tag => Err(CatalogueEncodingError::InvalidTypeTag {
-            tag,
-            context: "relation_cmp_op",
-        }),
+wire_struct! {
+    ColumnRefWire: RelationColumnRef {
+        scope: Flag("relation_column_scope", Str("relation_column_scope")),
+        column: Str("relation_column"),
     }
 }
 
-fn encode_relation_row_id(buf: &mut Vec<u8>, row_id: &RowIdRef) {
-    buf.push(match row_id {
-        RowIdRef::Current => REL_ROW_ID_CURRENT,
-        RowIdRef::Outer => REL_ROW_ID_OUTER,
-        RowIdRef::Frontier => REL_ROW_ID_FRONTIER,
-    });
-}
-
-fn decode_relation_row_id(
-    data: &[u8],
-    offset: &mut usize,
-) -> Result<RowIdRef, CatalogueEncodingError> {
-    match read_u8(data, offset)? {
-        REL_ROW_ID_CURRENT => Ok(RowIdRef::Current),
-        REL_ROW_ID_OUTER => Ok(RowIdRef::Outer),
-        REL_ROW_ID_FRONTIER => Ok(RowIdRef::Frontier),
-        tag => Err(CatalogueEncodingError::InvalidTypeTag {
-            tag,
-            context: "relation_row_id",
-        }),
+wire_enum! {
+    partial ValueRefWire: RelationValueRef {
+        1 => Literal(value: PolicyLiteralWire),
+        2 => SessionRef(path: strings("relation_session_path")),
+        3 => OuterColumn(column: ColumnRefWire),
+        4 => RowId(row_id: RowIdWire),
     }
 }
 
-fn encode_relation_key_ref(buf: &mut Vec<u8>, key: &RelKeyRef) {
-    match key {
-        RelKeyRef::Column(column) => {
-            buf.push(REL_KEY_COLUMN);
-            encode_relation_column_ref(buf, column);
-        }
-        RelKeyRef::RowId(row_id) => {
-            buf.push(REL_KEY_ROW_ID);
-            encode_relation_row_id(buf, row_id);
+impl Wire<RelationValueRef> for ValueRefWire {
+    fn put(&self, buf: &mut Vec<u8>, value: &RelationValueRef) {
+        match value {
+            RelationValueRef::Param(_) | RelationValueRef::FrontierColumn(_) => {
+                unreachable!("validated relation policies have no parameters or frontier columns")
+            }
+            listed @ (RelationValueRef::Literal(_)
+            | RelationValueRef::SessionRef(_)
+            | RelationValueRef::OuterColumn(_)
+            | RelationValueRef::RowId(_)) => self.put_variant(buf, listed),
         }
     }
-}
 
-fn decode_relation_key_ref(
-    data: &[u8],
-    offset: &mut usize,
-) -> Result<RelKeyRef, CatalogueEncodingError> {
-    match read_u8(data, offset)? {
-        REL_KEY_COLUMN => Ok(RelKeyRef::Column(decode_relation_column_ref(data, offset)?)),
-        REL_KEY_ROW_ID => Ok(RelKeyRef::RowId(decode_relation_row_id(data, offset)?)),
-        tag => Err(CatalogueEncodingError::InvalidTypeTag {
-            tag,
-            context: "relation_key_ref",
-        }),
+    fn get(
+        &self,
+        data: &[u8],
+        offset: &mut usize,
+    ) -> Result<RelationValueRef, CatalogueEncodingError> {
+        let tag = read_u8(data, offset)?;
+        self.get_variant(tag, data, offset)?
+            .ok_or(CatalogueEncodingError::InvalidTypeTag {
+                tag,
+                context: "relation_value_ref",
+            })
     }
 }
 
-fn encode_relation_project_expr(buf: &mut Vec<u8>, expression: &RelProjectExpr) {
-    match expression {
-        RelProjectExpr::Column(column) => {
-            buf.push(REL_PROJECT_COLUMN);
-            encode_relation_column_ref(buf, column);
-        }
-        RelProjectExpr::RowId(row_id) => {
-            buf.push(REL_PROJECT_ROW_ID);
-            encode_relation_row_id(buf, row_id);
-        }
+/// A relation policy literal: a typed public value in its JSON envelope,
+/// stored as that value.
+struct PolicyLiteralWire;
+
+impl Wire<serde_json::Value> for PolicyLiteralWire {
+    fn put(&self, buf: &mut Vec<u8>, literal: &serde_json::Value) {
+        let value = relation_policy_literal(literal)
+            .expect("validated relation policy literals are typed values");
+        ValueWire.put(buf, &value);
+    }
+
+    fn get(
+        &self,
+        data: &[u8],
+        offset: &mut usize,
+    ) -> Result<serde_json::Value, CatalogueEncodingError> {
+        Ok(serde_json::to_value(ValueWire.get(data, offset)?)
+            .expect("public values serialize to JSON"))
     }
 }
 
-fn decode_relation_project_expr(
-    data: &[u8],
-    offset: &mut usize,
-) -> Result<RelProjectExpr, CatalogueEncodingError> {
-    match read_u8(data, offset)? {
-        REL_PROJECT_COLUMN => Ok(RelProjectExpr::Column(decode_relation_column_ref(
-            data, offset,
-        )?)),
-        REL_PROJECT_ROW_ID => Ok(RelProjectExpr::RowId(decode_relation_row_id(data, offset)?)),
-        tag => Err(CatalogueEncodingError::InvalidTypeTag {
-            tag,
-            context: "relation_project_expr",
-        }),
+wire_enum! {
+    RelCmpOpWire: RelationCmpOp, "relation_cmp_op" {
+        1 => Eq,
+        2 => Ne,
+        3 => Lt,
+        4 => Le,
+        5 => Gt,
+        6 => Ge,
     }
 }
 
-fn encode_relation_bound(buf: &mut Vec<u8>, bound: &RelRecursionBound) {
-    match bound {
-        RelRecursionBound::Fixpoint => buf.push(REL_BOUND_FIXPOINT),
-        RelRecursionBound::MaxDepth(depth) => {
-            buf.push(REL_BOUND_MAX_DEPTH);
-            write_u64(buf, *depth as u64);
-        }
+wire_enum! {
+    RowIdWire: RelationRowIdRef, "relation_row_id" {
+        1 => Current,
+        2 => Outer,
+        3 => Frontier,
     }
 }
 
-fn decode_relation_bound(
-    data: &[u8],
-    offset: &mut usize,
-) -> Result<RelRecursionBound, CatalogueEncodingError> {
-    match read_u8(data, offset)? {
-        REL_BOUND_FIXPOINT => Ok(RelRecursionBound::Fixpoint),
-        REL_BOUND_MAX_DEPTH => {
-            let depth = read_u64(data, offset)?;
-            let depth =
-                usize::try_from(depth).map_err(|_| CatalogueEncodingError::DecodeError {
-                    message: "relation recursion depth exceeds platform usize".to_owned(),
-                })?;
-            Ok(RelRecursionBound::MaxDepth(depth))
-        }
-        tag => Err(CatalogueEncodingError::InvalidTypeTag {
-            tag,
-            context: "relation_recursion_bound",
-        }),
+wire_enum! {
+    JoinKindWire: RelationJoinKind, "relation_join_kind" {
+        1 => Inner,
+        2 => Left,
     }
 }
 
-fn encode_optional_string(buf: &mut Vec<u8>, value: Option<&str>) {
-    match value {
-        Some(value) => {
-            buf.push(1);
-            write_string(buf, value);
-        }
-        None => buf.push(0),
+wire_enum! {
+    KeyRefWire: RelationKeyRef, "relation_key_ref" {
+        1 => Column(column: ColumnRefWire),
+        2 => RowId(row_id: RowIdWire),
     }
 }
 
-fn decode_optional_string(
-    data: &[u8],
-    offset: &mut usize,
-    context: &'static str,
-) -> Result<Option<String>, CatalogueEncodingError> {
-    if read_flag(data, offset, context)? {
-        Ok(Some(read_string(data, offset, context)?))
-    } else {
-        Ok(None)
+wire_enum! {
+    ProjectExprWire: RelationProjectExpr, "relation_project_expr" {
+        1 => Column(column: ColumnRefWire),
+        2 => RowId(row_id: RowIdWire),
     }
 }
 
-fn encode_string_list(buf: &mut Vec<u8>, values: &[String]) {
-    write_u32(buf, values.len() as u32);
-    for value in values {
-        write_string(buf, value);
+wire_enum! {
+    BoundWire: RecursionBound, "relation_recursion_bound" {
+        1 => Fixpoint,
+        2 => MaxDepth(depth: Depth),
     }
 }
 
-fn decode_string_list(
-    data: &[u8],
-    offset: &mut usize,
-    context: &'static str,
-) -> Result<Vec<String>, CatalogueEncodingError> {
-    let count = read_count(data, offset, context)?;
-    let mut values = Vec::with_capacity(count);
-    for _ in 0..count {
-        values.push(read_string(data, offset, context)?);
+/// A recursion depth, stored as a `u64`.
+struct Depth;
+
+impl Wire<usize> for Depth {
+    fn put(&self, buf: &mut Vec<u8>, value: &usize) {
+        write_u64(buf, *value as u64);
     }
-    Ok(values)
+
+    fn get(&self, data: &[u8], offset: &mut usize) -> Result<usize, CatalogueEncodingError> {
+        usize::try_from(read_u64(data, offset)?).map_err(|_| CatalogueEncodingError::DecodeError {
+            message: "relation recursion depth exceeds platform usize".to_owned(),
+        })
+    }
 }
+
+wire_struct! {
+    JoinConditionWire: RelationJoinCondition { left: ColumnRefWire, right: ColumnRefWire }
+}
+
+wire_struct! {
+    ProjectColumnWire: RelationProjectColumn {
+        alias: Str("relation_project_alias"),
+        expr: ProjectExprWire,
+    }
+}
+
+const JOIN_CONDITIONS: Seq<JoinConditionWire> = Seq("relation_join_conditions", JoinConditionWire);
+const PROJECT_COLUMNS: Seq<ProjectColumnWire> = Seq("relation_project_columns", ProjectColumnWire);
+const DEDUPE_KEYS: Seq<KeyRefWire> = Seq("relation_dedupe_keys", KeyRefWire);
 
 // ============================================================================
 // Policy Encoding
 // ============================================================================
 
-const POLICY_EXPR_CMP: u8 = 1;
-const POLICY_EXPR_IS_NULL: u8 = 2;
-const POLICY_EXPR_IS_NOT_NULL: u8 = 3;
-const POLICY_EXPR_IN: u8 = 4;
 const POLICY_EXPR_EXISTS: u8 = 5;
 const POLICY_EXPR_INHERITS: u8 = 6;
 const POLICY_EXPR_AND: u8 = 7;
 const POLICY_EXPR_OR: u8 = 8;
 const POLICY_EXPR_NOT: u8 = 9;
-const POLICY_EXPR_TRUE: u8 = 10;
-const POLICY_EXPR_FALSE: u8 = 11;
 const POLICY_EXPR_INHERITS_WITH_DEPTH: u8 = 12;
 const POLICY_EXPR_EXISTS_REL: u8 = 13;
-const POLICY_EXPR_INHERITS_REFERENCING: u8 = 14;
-const POLICY_EXPR_CONTAINS: u8 = 15;
-const POLICY_EXPR_IN_LIST: u8 = 16;
-const POLICY_EXPR_SESSION_CMP: u8 = 17;
-const POLICY_EXPR_SESSION_IS_NULL: u8 = 18;
-const POLICY_EXPR_SESSION_IS_NOT_NULL: u8 = 19;
-const POLICY_EXPR_SESSION_CONTAINS: u8 = 20;
-const POLICY_EXPR_SESSION_IN_LIST: u8 = 21;
-
-const POLICY_VALUE_LITERAL: u8 = 1;
-const POLICY_VALUE_SESSION_REF: u8 = 2;
 
 fn encode_table_policies(buf: &mut Vec<u8>, policies: &TablePolicies) {
-    encode_operation_policy(buf, &policies.select);
-    encode_operation_policy(buf, &policies.insert);
-    encode_operation_policy(buf, &policies.update);
-    encode_operation_policy(buf, &policies.delete);
+    for operation in [
+        &policies.select,
+        &policies.insert,
+        &policies.update,
+        &policies.delete,
+    ] {
+        write_opt(buf, operation.using.as_ref(), encode_policy_expr);
+        write_opt(buf, operation.with_check.as_ref(), encode_policy_expr);
+    }
 }
 
 fn decode_table_policies(
     data: &[u8],
     offset: &mut usize,
-    budget: &mut PolicyExpressionDecodeBudget,
+    budget: &mut PolicyExpressionBudget,
 ) -> Result<TablePolicies, CatalogueEncodingError> {
+    let mut expr = || {
+        read_opt(data, offset, |data, offset| {
+            decode_policy_expr(data, offset, budget)
+        })
+    };
+    let mut operation = || -> Result<OperationPolicy, CatalogueEncodingError> {
+        Ok(OperationPolicy {
+            using: expr()?,
+            with_check: expr()?,
+        })
+    };
     Ok(TablePolicies {
-        select: decode_operation_policy(data, offset, budget)?,
-        insert: decode_operation_policy(data, offset, budget)?,
-        update: decode_operation_policy(data, offset, budget)?,
-        delete: decode_operation_policy(data, offset, budget)?,
+        select: operation()?,
+        insert: operation()?,
+        update: operation()?,
+        delete: operation()?,
     })
 }
 
 pub fn encode_permissions(permissions: &HashMap<TableName, TablePolicies>) -> Vec<u8> {
-    let mut buf = Vec::new();
-    buf.push(PERMISSIONS_VERSION);
-
+    let mut buf = vec![PERMISSIONS_VERSION];
     let mut entries: Vec<_> = permissions.iter().collect();
     entries.sort_by_key(|(name, _)| name.as_str());
-    write_u32(&mut buf, entries.len() as u32);
-
-    for (table_name, policies) in entries {
-        write_string(&mut buf, table_name.as_str());
-        encode_table_policies(&mut buf, policies);
-    }
-
+    write_seq(&mut buf, &entries, |buf, (table_name, policies)| {
+        write_string(buf, table_name.as_str());
+        encode_table_policies(buf, policies);
+    });
     buf
 }
 
 pub fn decode_permissions(
     data: &[u8],
 ) -> Result<HashMap<TableName, TablePolicies>, CatalogueEncodingError> {
-    if data.is_empty() {
-        return Err(CatalogueEncodingError::TruncatedData {
-            expected: 1,
-            actual: 0,
-        });
-    }
-
-    let version = data[0];
-    if version != PERMISSIONS_VERSION {
-        return Err(CatalogueEncodingError::UnsupportedVersion {
-            found: version,
-            expected: PERMISSIONS_VERSION,
-        });
-    }
-
+    read_format_version(data, &[PERMISSIONS_VERSION])?;
     let mut offset = 1;
     let table_count = read_count(data, &mut offset, "permissions_tables")?;
     let mut permissions = HashMap::new();
-    let mut budget = PolicyExpressionDecodeBudget::default();
+    let mut budget = PolicyExpressionBudget::default();
 
     for _ in 0..table_count {
-        let table_name = TableName::new(read_string(data, &mut offset, "table_name")?);
+        let table_name = Str("table_name").get(data, &mut offset)?;
         let policies = decode_table_policies(data, &mut offset, &mut budget)?;
         permissions.insert(table_name, policies);
     }
@@ -2058,26 +1536,23 @@ pub fn decode_permissions(
     Ok(permissions)
 }
 
+/// The schema hash, version and parent bundle that open both a permissions
+/// bundle and a permissions head.
+const PERMISSIONS_HEADER: (HashWire, Le, Opt<Oid>) = (
+    HashWire,
+    Le,
+    Opt(Oid("parent permissions bundle object id")),
+);
+
 pub fn encode_permissions_bundle(
     schema_hash: SchemaHash,
     version: u64,
     parent_bundle_object_id: Option<ObjectId>,
     permissions: &HashMap<TableName, TablePolicies>,
 ) -> Vec<u8> {
-    let encoded_permissions = encode_permissions(permissions);
-    let mut buf = Vec::with_capacity(1 + 32 + 8 + 1 + 16 + 4 + encoded_permissions.len());
-    buf.push(PERMISSIONS_BUNDLE_VERSION);
-    buf.extend_from_slice(schema_hash.as_bytes());
-    write_u64(&mut buf, version);
-    match parent_bundle_object_id {
-        Some(parent_bundle_object_id) => {
-            buf.push(1);
-            buf.extend_from_slice(parent_bundle_object_id.uuid().as_bytes());
-        }
-        None => buf.push(0),
-    }
-    write_u32(&mut buf, encoded_permissions.len() as u32);
-    buf.extend_from_slice(&encoded_permissions);
+    let mut buf = vec![PERMISSIONS_BUNDLE_VERSION];
+    PERMISSIONS_HEADER.put(&mut buf, &(schema_hash, version, parent_bundle_object_id));
+    Raw.put(&mut buf, &encode_permissions(permissions));
     buf
 }
 
@@ -2091,58 +1566,26 @@ type DecodedPermissionsBundle = (
 pub fn decode_permissions_bundle(
     data: &[u8],
 ) -> Result<DecodedPermissionsBundle, CatalogueEncodingError> {
-    if data.is_empty() {
-        return Err(CatalogueEncodingError::TruncatedData {
-            expected: 1,
-            actual: 0,
-        });
-    }
-
-    let version = data[0];
-    if version != PERMISSIONS_BUNDLE_VERSION {
-        return Err(CatalogueEncodingError::UnsupportedVersion {
-            found: version,
-            expected: PERMISSIONS_BUNDLE_VERSION,
-        });
-    }
-
-    let decoded = decode_current_permissions_bundle(data)?;
+    read_format_version(data, &[PERMISSIONS_BUNDLE_VERSION])?;
+    let mut offset = 1;
+    let (schema_hash, version, parent) = PERMISSIONS_HEADER.get(data, &mut offset)?;
+    let payload: Vec<u8> = Raw.get(data, &mut offset)?;
+    let permissions = decode_permissions(&payload)?;
+    ensure_consumed(data, offset)?;
     ensure_canonical_payload(
         data,
-        &encode_permissions_bundle(decoded.0, decoded.1, decoded.2, &decoded.3),
+        &encode_permissions_bundle(schema_hash, version, parent, &permissions),
         "permissions bundle",
     )?;
-    Ok(decoded)
+    Ok((schema_hash, version, parent, permissions))
 }
 
-fn decode_current_permissions_bundle(
-    data: &[u8],
-) -> Result<DecodedPermissionsBundle, CatalogueEncodingError> {
-    let mut offset = 1;
-    let schema_hash = SchemaHash::from_bytes(
-        read_bytes(data, &mut offset, 32)?
-            .try_into()
-            .expect("schema hash length should be exact"),
-    );
-    let version = read_u64(data, &mut offset)?;
-    let has_parent = read_u8(data, &mut offset)? != 0;
-    let parent_bundle_object_id = if has_parent {
-        let parent_uuid =
-            uuid::Uuid::from_slice(read_bytes(data, &mut offset, 16)?).map_err(|err| {
-                CatalogueEncodingError::DecodeError {
-                    message: format!("invalid parent permissions bundle object id: {err}"),
-                }
-            })?;
-        Some(ObjectId::from_uuid(parent_uuid))
-    } else {
-        None
-    };
-    let payload_len = read_u32(data, &mut offset)? as usize;
-    let payload = read_bytes(data, &mut offset, payload_len)?;
-    let permissions = decode_permissions(payload)?;
-    ensure_consumed(data, offset)?;
-    Ok((schema_hash, version, parent_bundle_object_id, permissions))
-}
+const PERMISSIONS_HEAD: (HashWire, Le, Opt<Oid>, Oid) = (
+    HashWire,
+    Le,
+    Opt(Oid("parent permissions bundle object id")),
+    Oid("permissions bundle object id"),
+);
 
 pub fn encode_permissions_head(
     schema_hash: SchemaHash,
@@ -2150,18 +1593,14 @@ pub fn encode_permissions_head(
     parent_bundle_object_id: Option<ObjectId>,
     bundle_object_id: ObjectId,
 ) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(1 + 32 + 8 + 1 + 16 + 16);
-    buf.push(PERMISSIONS_HEAD_VERSION);
-    buf.extend_from_slice(schema_hash.as_bytes());
-    write_u64(&mut buf, version);
-    match parent_bundle_object_id {
-        Some(parent_bundle_object_id) => {
-            buf.push(1);
-            buf.extend_from_slice(parent_bundle_object_id.uuid().as_bytes());
-        }
-        None => buf.push(0),
-    }
-    buf.extend_from_slice(bundle_object_id.uuid().as_bytes());
+    let mut buf = vec![PERMISSIONS_HEAD_VERSION];
+    let head = (
+        schema_hash,
+        version,
+        parent_bundle_object_id,
+        bundle_object_id,
+    );
+    PERMISSIONS_HEAD.put(&mut buf, &head);
     buf
 }
 
@@ -2170,22 +1609,10 @@ type DecodedPermissionsHead = (SchemaHash, u64, Option<ObjectId>, ObjectId);
 pub fn decode_permissions_head(
     data: &[u8],
 ) -> Result<DecodedPermissionsHead, CatalogueEncodingError> {
-    if data.is_empty() {
-        return Err(CatalogueEncodingError::TruncatedData {
-            expected: 1,
-            actual: 0,
-        });
-    }
-
-    let version = data[0];
-    if version != PERMISSIONS_HEAD_VERSION {
-        return Err(CatalogueEncodingError::UnsupportedVersion {
-            found: version,
-            expected: PERMISSIONS_HEAD_VERSION,
-        });
-    }
-
-    let decoded = decode_active_schema_summary(data)?;
+    read_format_version(data, &[PERMISSIONS_HEAD_VERSION])?;
+    let mut offset = 1;
+    let decoded = PERMISSIONS_HEAD.get(data, &mut offset)?;
+    ensure_consumed(data, offset)?;
     ensure_canonical_payload(
         data,
         &encode_permissions_head(decoded.0, decoded.1, decoded.2, decoded.3),
@@ -2194,167 +1621,8 @@ pub fn decode_permissions_head(
     Ok(decoded)
 }
 
-fn decode_active_schema_summary(
-    data: &[u8],
-) -> Result<DecodedPermissionsHead, CatalogueEncodingError> {
-    let mut offset = 1;
-    let schema_hash = SchemaHash::from_bytes(
-        read_bytes(data, &mut offset, 32)?
-            .try_into()
-            .expect("schema hash length should be exact"),
-    );
-    let version = read_u64(data, &mut offset)?;
-    let has_parent = read_u8(data, &mut offset)? != 0;
-    let parent_bundle_object_id = if has_parent {
-        let parent_uuid =
-            uuid::Uuid::from_slice(read_bytes(data, &mut offset, 16)?).map_err(|err| {
-                CatalogueEncodingError::DecodeError {
-                    message: format!("invalid parent permissions bundle object id: {err}"),
-                }
-            })?;
-        Some(ObjectId::from_uuid(parent_uuid))
-    } else {
-        None
-    };
-    let bundle_uuid =
-        uuid::Uuid::from_slice(read_bytes(data, &mut offset, 16)?).map_err(|err| {
-            CatalogueEncodingError::DecodeError {
-                message: format!("invalid permissions bundle object id: {err}"),
-            }
-        })?;
-    ensure_consumed(data, offset)?;
-    Ok((
-        schema_hash,
-        version,
-        parent_bundle_object_id,
-        ObjectId::from_uuid(bundle_uuid),
-    ))
-}
-
-fn encode_operation_policy(
-    buf: &mut Vec<u8>,
-    policy: &jazz::tools::public_schema::OperationPolicy,
-) {
-    encode_optional_policy_expr(buf, policy.using.as_ref());
-    encode_optional_policy_expr(buf, policy.with_check.as_ref());
-}
-
-fn decode_operation_policy(
-    data: &[u8],
-    offset: &mut usize,
-    budget: &mut PolicyExpressionDecodeBudget,
-) -> Result<jazz::tools::public_schema::OperationPolicy, CatalogueEncodingError> {
-    Ok(jazz::tools::public_schema::OperationPolicy {
-        using: decode_optional_policy_expr(data, offset, budget)?,
-        with_check: decode_optional_policy_expr(data, offset, budget)?,
-    })
-}
-
-fn encode_optional_policy_expr(buf: &mut Vec<u8>, expr: Option<&PolicyExpr>) {
-    match expr {
-        Some(e) => {
-            buf.push(1);
-            encode_policy_expr(buf, e);
-        }
-        None => buf.push(0),
-    }
-}
-
-fn decode_optional_policy_expr(
-    data: &[u8],
-    offset: &mut usize,
-    budget: &mut PolicyExpressionDecodeBudget,
-) -> Result<Option<PolicyExpr>, CatalogueEncodingError> {
-    let has_expr = read_u8(data, offset)? != 0;
-    if has_expr {
-        Ok(Some(decode_policy_expr(data, offset, budget)?))
-    } else {
-        Ok(None)
-    }
-}
-
 fn encode_policy_expr(buf: &mut Vec<u8>, expr: &PolicyExpr) {
     match expr {
-        PolicyExpr::Cmp { column, op, value } => {
-            buf.push(POLICY_EXPR_CMP);
-            write_string(buf, column);
-            encode_cmp_op(buf, op);
-            encode_policy_value(buf, value);
-        }
-        PolicyExpr::SessionCmp { path, op, value } => {
-            buf.push(POLICY_EXPR_SESSION_CMP);
-            write_u32(buf, path.len() as u32);
-            for part in path {
-                write_string(buf, part);
-            }
-            encode_cmp_op(buf, op);
-            encode_value(buf, value);
-        }
-        PolicyExpr::IsNull { column } => {
-            buf.push(POLICY_EXPR_IS_NULL);
-            write_string(buf, column);
-        }
-        PolicyExpr::SessionIsNull { path } => {
-            buf.push(POLICY_EXPR_SESSION_IS_NULL);
-            write_u32(buf, path.len() as u32);
-            for part in path {
-                write_string(buf, part);
-            }
-        }
-        PolicyExpr::IsNotNull { column } => {
-            buf.push(POLICY_EXPR_IS_NOT_NULL);
-            write_string(buf, column);
-        }
-        PolicyExpr::SessionIsNotNull { path } => {
-            buf.push(POLICY_EXPR_SESSION_IS_NOT_NULL);
-            write_u32(buf, path.len() as u32);
-            for part in path {
-                write_string(buf, part);
-            }
-        }
-        PolicyExpr::Contains { column, value } => {
-            buf.push(POLICY_EXPR_CONTAINS);
-            write_string(buf, column);
-            encode_policy_value(buf, value);
-        }
-        PolicyExpr::SessionContains { path, value } => {
-            buf.push(POLICY_EXPR_SESSION_CONTAINS);
-            write_u32(buf, path.len() as u32);
-            for part in path {
-                write_string(buf, part);
-            }
-            encode_value(buf, value);
-        }
-        PolicyExpr::In {
-            column,
-            session_path,
-        } => {
-            buf.push(POLICY_EXPR_IN);
-            write_string(buf, column);
-            write_u32(buf, session_path.len() as u32);
-            for part in session_path {
-                write_string(buf, part);
-            }
-        }
-        PolicyExpr::InList { column, values } => {
-            buf.push(POLICY_EXPR_IN_LIST);
-            write_string(buf, column);
-            write_u32(buf, values.len() as u32);
-            for value in values {
-                encode_policy_value(buf, value);
-            }
-        }
-        PolicyExpr::SessionInList { path, values } => {
-            buf.push(POLICY_EXPR_SESSION_IN_LIST);
-            write_u32(buf, path.len() as u32);
-            for part in path {
-                write_string(buf, part);
-            }
-            write_u32(buf, values.len() as u32);
-            for value in values {
-                encode_value(buf, value);
-            }
-        }
         PolicyExpr::Exists { table, condition } => {
             buf.push(POLICY_EXPR_EXISTS);
             write_string(buf, table);
@@ -2364,6 +1632,7 @@ fn encode_policy_expr(buf: &mut Vec<u8>, expr: &PolicyExpr) {
             buf.push(POLICY_EXPR_EXISTS_REL);
             encode_canonical_relation_expr(buf, rel);
         }
+        // Two tags, chosen by whether a depth is present, so coded by hand.
         PolicyExpr::Inherits {
             operation,
             via_column,
@@ -2374,54 +1643,82 @@ fn encode_policy_expr(buf: &mut Vec<u8>, expr: &PolicyExpr) {
             } else {
                 POLICY_EXPR_INHERITS
             });
-            encode_policy_operation(buf, *operation);
+            OperationWire.put(buf, operation);
             write_string(buf, via_column);
             if let Some(depth) = max_depth {
-                write_u32(buf, *depth as u32);
-            }
-        }
-        PolicyExpr::InheritsReferencing {
-            operation,
-            source_table,
-            via_column,
-            max_depth,
-        } => {
-            buf.push(POLICY_EXPR_INHERITS_REFERENCING);
-            encode_policy_operation(buf, *operation);
-            write_string(buf, source_table);
-            write_string(buf, via_column);
-            buf.push(if max_depth.is_some() { 1 } else { 0 });
-            if let Some(depth) = max_depth {
-                write_u32(buf, *depth as u32);
+                U32.put(buf, depth);
             }
         }
         PolicyExpr::And(exprs) => {
             buf.push(POLICY_EXPR_AND);
-            write_u32(buf, exprs.len() as u32);
-            for expr in exprs {
-                encode_policy_expr(buf, expr);
-            }
+            write_seq(buf, exprs, encode_policy_expr);
         }
         PolicyExpr::Or(exprs) => {
             buf.push(POLICY_EXPR_OR);
-            write_u32(buf, exprs.len() as u32);
-            for expr in exprs {
-                encode_policy_expr(buf, expr);
-            }
+            write_seq(buf, exprs, encode_policy_expr);
         }
         PolicyExpr::Not(expr) => {
             buf.push(POLICY_EXPR_NOT);
             encode_policy_expr(buf, expr);
         }
-        PolicyExpr::True => buf.push(POLICY_EXPR_TRUE),
-        PolicyExpr::False => buf.push(POLICY_EXPR_FALSE),
+        leaf @ (PolicyExpr::Cmp { .. }
+        | PolicyExpr::IsNull { .. }
+        | PolicyExpr::IsNotNull { .. }
+        | PolicyExpr::In { .. }
+        | PolicyExpr::True
+        | PolicyExpr::False
+        | PolicyExpr::InheritsReferencing { .. }
+        | PolicyExpr::Contains { .. }
+        | PolicyExpr::InList { .. }
+        | PolicyExpr::SessionCmp { .. }
+        | PolicyExpr::SessionIsNull { .. }
+        | PolicyExpr::SessionIsNotNull { .. }
+        | PolicyExpr::SessionContains { .. }
+        | PolicyExpr::SessionInList { .. }) => PolicyLeafWire.put_variant(buf, leaf),
+    }
+}
+
+wire_enum! {
+    partial PolicyLeafWire: PolicyExpr {
+        1 => Cmp { column: Str("policy_cmp_column"), op: CmpOpWire, value: PolicyValueWire },
+        2 => IsNull { column: Str("policy_is_null_column") },
+        3 => IsNotNull { column: Str("policy_is_not_null_column") },
+        4 => In {
+            column: Str("policy_in_column"),
+            session_path: strings("policy_in_session_path"),
+        },
+        10 => True,
+        11 => False,
+        14 => InheritsReferencing {
+            operation: OperationWire,
+            source_table: Str("policy_inherits_referencing_source"),
+            via_column: Str("policy_inherits_referencing_via_column"),
+            max_depth: Opt(U32),
+        },
+        15 => Contains { column: Str("policy_contains_column"), value: PolicyValueWire },
+        16 => InList {
+            column: Str("policy_in_list_column"),
+            values: Seq("policy_in_list_values", PolicyValueWire),
+        },
+        17 => SessionCmp {
+            path: strings("policy_session_cmp_path"),
+            op: CmpOpWire,
+            value: ValueWire,
+        },
+        18 => SessionIsNull { path: strings("policy_session_is_null_path") },
+        19 => SessionIsNotNull { path: strings("policy_session_is_not_null_path") },
+        20 => SessionContains { path: strings("policy_session_contains_path"), value: ValueWire },
+        21 => SessionInList {
+            path: strings("policy_session_in_list_path"),
+            values: Seq("policy_session_in_list_values", ValueWire),
+        },
     }
 }
 
 fn decode_policy_expr(
     data: &[u8],
     offset: &mut usize,
-    budget: &mut PolicyExpressionDecodeBudget,
+    budget: &mut PolicyExpressionBudget,
 ) -> Result<PolicyExpr, CatalogueEncodingError> {
     let mut frames = Vec::new();
 
@@ -2509,103 +1806,14 @@ enum PolicyDecodeFrame {
 fn decode_policy_expr_node(
     data: &[u8],
     offset: &mut usize,
-    budget: &mut PolicyExpressionDecodeBudget,
+    budget: &mut PolicyExpressionBudget,
 ) -> Result<DecodedPolicyNode, CatalogueEncodingError> {
     let complete = |expression| Ok(DecodedPolicyNode::Complete(expression));
     let tag = read_u8(data, offset)?;
+    if let Some(leaf) = PolicyLeafWire.get_variant(tag, data, offset)? {
+        return complete(leaf);
+    }
     match tag {
-        POLICY_EXPR_CMP => {
-            let column = read_string(data, offset, "policy_cmp_column")?;
-            let op = decode_cmp_op(data, offset)?;
-            let value = decode_policy_value(data, offset)?;
-            complete(PolicyExpr::Cmp { column, op, value })
-        }
-        POLICY_EXPR_SESSION_CMP => {
-            let count = read_count(data, offset, "policy_session_cmp_path")?;
-            let mut path = Vec::with_capacity(count);
-            for _ in 0..count {
-                path.push(read_string(data, offset, "policy_session_cmp_path")?);
-            }
-            let op = decode_cmp_op(data, offset)?;
-            let value = decode_value(data, offset)?;
-            complete(PolicyExpr::SessionCmp { path, op, value })
-        }
-        POLICY_EXPR_IS_NULL => {
-            let column = read_string(data, offset, "policy_is_null_column")?;
-            complete(PolicyExpr::IsNull { column })
-        }
-        POLICY_EXPR_SESSION_IS_NULL => {
-            let count = read_count(data, offset, "policy_session_is_null_path")?;
-            let mut path = Vec::with_capacity(count);
-            for _ in 0..count {
-                path.push(read_string(data, offset, "policy_session_is_null_path")?);
-            }
-            complete(PolicyExpr::SessionIsNull { path })
-        }
-        POLICY_EXPR_IS_NOT_NULL => {
-            let column = read_string(data, offset, "policy_is_not_null_column")?;
-            complete(PolicyExpr::IsNotNull { column })
-        }
-        POLICY_EXPR_SESSION_IS_NOT_NULL => {
-            let count = read_count(data, offset, "policy_session_is_not_null_path")?;
-            let mut path = Vec::with_capacity(count);
-            for _ in 0..count {
-                path.push(read_string(
-                    data,
-                    offset,
-                    "policy_session_is_not_null_path",
-                )?);
-            }
-            complete(PolicyExpr::SessionIsNotNull { path })
-        }
-        POLICY_EXPR_CONTAINS => {
-            let column = read_string(data, offset, "policy_contains_column")?;
-            let value = decode_policy_value(data, offset)?;
-            complete(PolicyExpr::Contains { column, value })
-        }
-        POLICY_EXPR_SESSION_CONTAINS => {
-            let count = read_count(data, offset, "policy_session_contains_path")?;
-            let mut path = Vec::with_capacity(count);
-            for _ in 0..count {
-                path.push(read_string(data, offset, "policy_session_contains_path")?);
-            }
-            let value = decode_value(data, offset)?;
-            complete(PolicyExpr::SessionContains { path, value })
-        }
-        POLICY_EXPR_IN => {
-            let column = read_string(data, offset, "policy_in_column")?;
-            let count = read_count(data, offset, "policy_in_session_path")?;
-            let mut session_path = Vec::with_capacity(count);
-            for _ in 0..count {
-                session_path.push(read_string(data, offset, "policy_in_session_path")?);
-            }
-            complete(PolicyExpr::In {
-                column,
-                session_path,
-            })
-        }
-        POLICY_EXPR_IN_LIST => {
-            let column = read_string(data, offset, "policy_in_list_column")?;
-            let count = read_count(data, offset, "policy_in_list_values")?;
-            let mut values = Vec::with_capacity(count);
-            for _ in 0..count {
-                values.push(decode_policy_value(data, offset)?);
-            }
-            complete(PolicyExpr::InList { column, values })
-        }
-        POLICY_EXPR_SESSION_IN_LIST => {
-            let path_count = read_count(data, offset, "policy_session_in_list_path")?;
-            let mut path = Vec::with_capacity(path_count);
-            for _ in 0..path_count {
-                path.push(read_string(data, offset, "policy_session_in_list_path")?);
-            }
-            let value_count = read_count(data, offset, "policy_session_in_list_values")?;
-            let mut values = Vec::with_capacity(value_count);
-            for _ in 0..value_count {
-                values.push(decode_value(data, offset)?);
-            }
-            complete(PolicyExpr::SessionInList { path, values })
-        }
         POLICY_EXPR_EXISTS => {
             let table = read_string(data, offset, "policy_exists_table")?;
             Ok(DecodedPolicyNode::Children(PolicyDecodeFrame::Exists {
@@ -2616,38 +1824,16 @@ fn decode_policy_expr_node(
             let rel = decode_canonical_relation_expr(data, offset, budget)?;
             complete(PolicyExpr::ExistsRel { rel })
         }
-        POLICY_EXPR_INHERITS => {
-            let operation = decode_policy_operation(data, offset)?;
+        POLICY_EXPR_INHERITS | POLICY_EXPR_INHERITS_WITH_DEPTH => {
+            let operation = OperationWire.get(data, offset)?;
             let via_column = read_string(data, offset, "policy_inherits_via_column")?;
-            complete(PolicyExpr::Inherits {
-                operation,
-                via_column,
-                max_depth: None,
-            })
-        }
-        POLICY_EXPR_INHERITS_WITH_DEPTH => {
-            let operation = decode_policy_operation(data, offset)?;
-            let via_column = read_string(data, offset, "policy_inherits_via_column")?;
-            let max_depth = read_u32(data, offset)? as usize;
-            complete(PolicyExpr::Inherits {
-                operation,
-                via_column,
-                max_depth: Some(max_depth),
-            })
-        }
-        POLICY_EXPR_INHERITS_REFERENCING => {
-            let operation = decode_policy_operation(data, offset)?;
-            let source_table = read_string(data, offset, "policy_inherits_referencing_source")?;
-            let via_column = read_string(data, offset, "policy_inherits_referencing_via_column")?;
-            let has_max_depth = read_u8(data, offset)? != 0;
-            let max_depth = if has_max_depth {
-                Some(read_u32(data, offset)? as usize)
+            let max_depth = if tag == POLICY_EXPR_INHERITS_WITH_DEPTH {
+                Some(U32.get(data, offset)?)
             } else {
                 None
             };
-            complete(PolicyExpr::InheritsReferencing {
+            complete(PolicyExpr::Inherits {
                 operation,
-                source_table,
                 via_column,
                 max_depth,
             })
@@ -2675,8 +1861,6 @@ fn decode_policy_expr_node(
             }))
         }
         POLICY_EXPR_NOT => Ok(DecodedPolicyNode::Children(PolicyDecodeFrame::Not)),
-        POLICY_EXPR_TRUE => complete(PolicyExpr::True),
-        POLICY_EXPR_FALSE => complete(PolicyExpr::False),
         _ => Err(CatalogueEncodingError::InvalidTypeTag {
             tag,
             context: "policy_expr",
@@ -2684,104 +1868,30 @@ fn decode_policy_expr_node(
     }
 }
 
-fn policy_expression_limit(
-    limit: &'static str,
-    max: usize,
-    actual: usize,
-) -> CatalogueEncodingError {
-    CatalogueEncodingError::ProtocolLimit(PolicyExpressionLimitError { limit, max, actual })
-}
-
-fn encode_policy_value(buf: &mut Vec<u8>, value: &PolicyValue) {
-    match value {
-        PolicyValue::Literal(v) => {
-            buf.push(POLICY_VALUE_LITERAL);
-            encode_value(buf, v);
-        }
-        PolicyValue::SessionRef(path) => {
-            buf.push(POLICY_VALUE_SESSION_REF);
-            write_u32(buf, path.len() as u32);
-            for part in path {
-                write_string(buf, part);
-            }
-        }
+wire_enum! {
+    PolicyValueWire: PolicyValue, "policy_value" {
+        1 => Literal(value: ValueWire),
+        2 => SessionRef(path: strings("policy_session_ref_path")),
     }
 }
 
-fn decode_policy_value(
-    data: &[u8],
-    offset: &mut usize,
-) -> Result<PolicyValue, CatalogueEncodingError> {
-    let tag = read_u8(data, offset)?;
-    match tag {
-        POLICY_VALUE_LITERAL => Ok(PolicyValue::Literal(decode_value(data, offset)?)),
-        POLICY_VALUE_SESSION_REF => {
-            let count = read_count(data, offset, "policy_session_ref_path")?;
-            let mut path = Vec::with_capacity(count);
-            for _ in 0..count {
-                path.push(read_string(data, offset, "policy_session_ref_path")?);
-            }
-            Ok(PolicyValue::SessionRef(path))
-        }
-        _ => Err(CatalogueEncodingError::InvalidTypeTag {
-            tag,
-            context: "policy_value",
-        }),
+wire_enum! {
+    CmpOpWire: CmpOp, "policy_cmp_op" {
+        1 => Eq,
+        2 => Ne,
+        3 => Lt,
+        4 => Le,
+        5 => Gt,
+        6 => Ge,
     }
 }
 
-fn encode_cmp_op(buf: &mut Vec<u8>, op: &CmpOp) {
-    let tag = match op {
-        CmpOp::Eq => 1,
-        CmpOp::Ne => 2,
-        CmpOp::Lt => 3,
-        CmpOp::Le => 4,
-        CmpOp::Gt => 5,
-        CmpOp::Ge => 6,
-    };
-    buf.push(tag);
-}
-
-fn decode_cmp_op(data: &[u8], offset: &mut usize) -> Result<CmpOp, CatalogueEncodingError> {
-    let tag = read_u8(data, offset)?;
-    match tag {
-        1 => Ok(CmpOp::Eq),
-        2 => Ok(CmpOp::Ne),
-        3 => Ok(CmpOp::Lt),
-        4 => Ok(CmpOp::Le),
-        5 => Ok(CmpOp::Gt),
-        6 => Ok(CmpOp::Ge),
-        _ => Err(CatalogueEncodingError::InvalidTypeTag {
-            tag,
-            context: "policy_cmp_op",
-        }),
-    }
-}
-
-fn encode_policy_operation(buf: &mut Vec<u8>, operation: Operation) {
-    let tag = match operation {
-        Operation::Select => 1,
-        Operation::Insert => 2,
-        Operation::Update => 3,
-        Operation::Delete => 4,
-    };
-    buf.push(tag);
-}
-
-fn decode_policy_operation(
-    data: &[u8],
-    offset: &mut usize,
-) -> Result<Operation, CatalogueEncodingError> {
-    let tag = read_u8(data, offset)?;
-    match tag {
-        1 => Ok(Operation::Select),
-        2 => Ok(Operation::Insert),
-        3 => Ok(Operation::Update),
-        4 => Ok(Operation::Delete),
-        _ => Err(CatalogueEncodingError::InvalidTypeTag {
-            tag,
-            context: "policy_operation",
-        }),
+wire_enum! {
+    OperationWire: Operation, "policy_operation" {
+        1 => Select,
+        2 => Insert,
+        3 => Update,
+        4 => Delete,
     }
 }
 
@@ -2789,168 +1899,23 @@ fn decode_policy_operation(
 // Value Encoding
 // ============================================================================
 
-/// Value type tags.
-const VALUE_NULL: u8 = 0;
-const VALUE_INTEGER: u8 = 1;
-const VALUE_BIGINT: u8 = 2;
-const VALUE_BOOLEAN: u8 = 3;
-const VALUE_TEXT: u8 = 4;
-const VALUE_TIMESTAMP: u8 = 5;
-const VALUE_UUID: u8 = 6;
-const VALUE_ARRAY: u8 = 7;
-const VALUE_ROW: u8 = 8;
-// 9 intentionally skipped: TYPE_ENUM is 9, and Values have no Enum tag
+// 9 is intentionally skipped: TYPE_ENUM is 9, and Values have no Enum tag
 // (enum values are stored as Text). Keeping Double at 10 aligns with TYPE_DOUBLE.
-const VALUE_DOUBLE: u8 = 10;
-const VALUE_BYTEA: u8 = 11;
-const VALUE_BATCH_ID: u8 = 12;
-const VALUE_ENUM: u8 = 13;
-
-fn encode_value(buf: &mut Vec<u8>, value: &Value) {
-    match value {
-        Value::Null => buf.push(VALUE_NULL),
-        Value::Integer(n) => {
-            buf.push(VALUE_INTEGER);
-            buf.extend_from_slice(&n.to_le_bytes());
-        }
-        Value::BigInt(n) => {
-            buf.push(VALUE_BIGINT);
-            buf.extend_from_slice(&n.to_le_bytes());
-        }
-        Value::Double(f) => {
-            buf.push(VALUE_DOUBLE);
-            buf.extend_from_slice(&f.to_le_bytes());
-        }
-        Value::Boolean(b) => {
-            buf.push(VALUE_BOOLEAN);
-            buf.push(if *b { 1 } else { 0 });
-        }
-        Value::Text(s) => {
-            buf.push(VALUE_TEXT);
-            write_string(buf, s);
-        }
-        Value::Timestamp(t) => {
-            buf.push(VALUE_TIMESTAMP);
-            buf.extend_from_slice(&t.to_le_bytes());
-        }
-        Value::Uuid(id) => {
-            buf.push(VALUE_UUID);
-            buf.extend_from_slice(id.uuid().as_bytes());
-        }
-        Value::TransactionId(bytes) => {
-            buf.push(VALUE_BATCH_ID);
-            buf.extend_from_slice(bytes);
-        }
-        Value::Bytea(bytes) => {
-            buf.push(VALUE_BYTEA);
-            write_u32(buf, bytes.len() as u32);
-            buf.extend_from_slice(bytes);
-        }
-        Value::Array(elements) => {
-            buf.push(VALUE_ARRAY);
-            write_u32(buf, elements.len() as u32);
-            for elem in elements {
-                encode_value(buf, elem);
-            }
-        }
-        Value::Row { values, .. } => {
-            buf.push(VALUE_ROW);
-            write_u32(buf, values.len() as u32);
-            for v in values {
-                encode_value(buf, v);
-            }
-        }
-        Value::Enum { case, values } => {
-            buf.push(VALUE_ENUM);
-            write_string(buf, case);
-            write_u32(buf, values.len() as u32);
-            for value in values {
-                encode_value(buf, value);
-            }
-        }
-    }
-}
-
-fn decode_value(data: &[u8], offset: &mut usize) -> Result<Value, CatalogueEncodingError> {
-    let tag = read_u8(data, offset)?;
-    match tag {
-        VALUE_NULL => Ok(Value::Null),
-        VALUE_INTEGER => {
-            let bytes = read_bytes(data, offset, 4)?;
-            Ok(Value::Integer(i32::from_le_bytes(
-                bytes.try_into().unwrap(),
-            )))
-        }
-        VALUE_BIGINT => {
-            let bytes = read_bytes(data, offset, 8)?;
-            Ok(Value::BigInt(i64::from_le_bytes(bytes.try_into().unwrap())))
-        }
-        VALUE_DOUBLE => {
-            let bytes = read_bytes(data, offset, 8)?;
-            Ok(Value::Double(f64::from_le_bytes(bytes.try_into().unwrap())))
-        }
-        VALUE_BOOLEAN => {
-            let b = read_u8(data, offset)?;
-            Ok(Value::Boolean(b != 0))
-        }
-        VALUE_TEXT => {
-            let s = read_string(data, offset, "value_text")?;
-            Ok(Value::Text(s))
-        }
-        VALUE_TIMESTAMP => {
-            let bytes = read_bytes(data, offset, 8)?;
-            Ok(Value::Timestamp(u64::from_le_bytes(
-                bytes.try_into().unwrap(),
-            )))
-        }
-        VALUE_UUID => {
-            let bytes = read_bytes(data, offset, 16)?;
-            let uuid =
-                uuid::Uuid::from_slice(bytes).map_err(|e| CatalogueEncodingError::DecodeError {
-                    message: format!("invalid uuid: {e}"),
-                })?;
-            Ok(Value::Uuid(ObjectId::from_uuid(uuid)))
-        }
-        VALUE_BATCH_ID => {
-            let bytes = read_bytes(data, offset, 16)?;
-            Ok(Value::TransactionId(
-                bytes.try_into().expect("16-byte batch id"),
-            ))
-        }
-        VALUE_BYTEA => {
-            let len = read_u32(data, offset)? as usize;
-            let bytes = read_bytes(data, offset, len)?;
-            Ok(Value::Bytea(bytes.to_vec()))
-        }
-        VALUE_ARRAY => {
-            let count = read_count(data, offset, "value_array")?;
-            let mut elements = Vec::with_capacity(count);
-            for _ in 0..count {
-                elements.push(decode_value(data, offset)?);
-            }
-            Ok(Value::Array(elements))
-        }
-        VALUE_ROW => {
-            let count = read_count(data, offset, "value_row")?;
-            let mut values = Vec::with_capacity(count);
-            for _ in 0..count {
-                values.push(decode_value(data, offset)?);
-            }
-            Ok(Value::Row { id: None, values })
-        }
-        VALUE_ENUM => {
-            let case = read_string(data, offset, "enum_value_case")?;
-            let count = read_count(data, offset, "value_enum")?;
-            let mut values = Vec::with_capacity(count);
-            for _ in 0..count {
-                values.push(decode_value(data, offset)?);
-            }
-            Ok(Value::Enum { case, values })
-        }
-        _ => Err(CatalogueEncodingError::InvalidTypeTag {
-            tag,
-            context: "value",
-        }),
+wire_enum! {
+    ValueWire: Value, "value" {
+        0 => Null,
+        1 => Integer(n: Le),
+        2 => BigInt(n: Le),
+        3 => Boolean(b: Bool),
+        4 => Text(s: Str("value_text")),
+        5 => Timestamp(t: Le),
+        6 => Uuid(id: Oid("uuid")),
+        7 => Array(items: Seq("value_array", ValueWire)),
+        8 => Row { id: Skip, values: Seq("value_row", ValueWire) },
+        10 => Double(n: Le),
+        11 => Bytea(bytes: Raw),
+        12 => TransactionId(id: Raw),
+        13 => Enum { case: Str("enum_value_case"), values: Seq("value_enum", ValueWire) },
     }
 }
 
@@ -3093,6 +2058,58 @@ fn ensure_unique_names<'a>(
     Ok(())
 }
 
+/// Writes a `u32` item count followed by each item.
+fn write_seq<T>(buf: &mut Vec<u8>, items: &[T], mut write: impl FnMut(&mut Vec<u8>, &T)) {
+    write_u32(buf, items.len() as u32);
+    for item in items {
+        write(buf, item);
+    }
+}
+
+/// Reads a bounded item count (see [`read_count`]) followed by that many items.
+fn read_seq<T>(
+    data: &[u8],
+    offset: &mut usize,
+    context: &'static str,
+    mut read: impl FnMut(&[u8], &mut usize) -> Result<T, CatalogueEncodingError>,
+) -> Result<Vec<T>, CatalogueEncodingError> {
+    let count = read_count(data, offset, context)?;
+    let mut items = Vec::with_capacity(count);
+    for _ in 0..count {
+        items.push(read(data, offset)?);
+    }
+    Ok(items)
+}
+
+/// Writes a presence byte (`1` or `0`) followed by the value when present.
+fn write_opt<T: ?Sized>(
+    buf: &mut Vec<u8>,
+    value: Option<&T>,
+    write: impl FnOnce(&mut Vec<u8>, &T),
+) {
+    match value {
+        Some(value) => {
+            buf.push(1);
+            write(buf, value);
+        }
+        None => buf.push(0),
+    }
+}
+
+/// Reads a presence byte and, when it is non-zero, the value. Payload decoders
+/// re-encode and compare, so a non-canonical presence byte is still rejected.
+fn read_opt<T>(
+    data: &[u8],
+    offset: &mut usize,
+    read: impl FnOnce(&[u8], &mut usize) -> Result<T, CatalogueEncodingError>,
+) -> Result<Option<T>, CatalogueEncodingError> {
+    if read_u8(data, offset)? != 0 {
+        read(data, offset).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
 fn write_string(buf: &mut Vec<u8>, s: &str) {
     let bytes = s.as_bytes();
     write_u32(buf, bytes.len() as u32);
@@ -3109,14 +2126,309 @@ fn read_string(
     String::from_utf8(bytes.to_vec()).map_err(|_| CatalogueEncodingError::InvalidUtf8 { context })
 }
 
+// ============================================================================
+// Symmetric wire descriptions
+// ============================================================================
+
+/// One description of a wire shape, used for both directions so encode and
+/// decode cannot drift. Codecs are small values; a `&'static str` they hold
+/// names the context that decode errors report.
+trait Wire<T> {
+    fn put(&self, buf: &mut Vec<u8>, value: &T);
+    fn get(&self, data: &[u8], offset: &mut usize) -> Result<T, CatalogueEncodingError>;
+}
+
+/// Anything stored as a name: written as a string, and checked for
+/// duplicates by [`Unique`].
+trait Named {
+    fn name(&self) -> &str;
+}
+
+impl Named for String {
+    fn name(&self) -> &str {
+        self
+    }
+}
+
+impl Named for TableName {
+    fn name(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Named for ColumnName {
+    fn name(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Named for ColumnDescriptor {
+    fn name(&self) -> &str {
+        self.name.as_str()
+    }
+}
+
+impl Named for EnumCaseDescriptor {
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+/// A `u32`-length-prefixed UTF-8 string.
+struct Str(&'static str);
+
+impl<T: Named + From<String>> Wire<T> for Str {
+    fn put(&self, buf: &mut Vec<u8>, value: &T) {
+        write_string(buf, value.name());
+    }
+
+    fn get(&self, data: &[u8], offset: &mut usize) -> Result<T, CatalogueEncodingError> {
+        read_string(data, offset, self.0).map(T::from)
+    }
+}
+
+/// A fixed-width little-endian number.
+struct Le;
+
+macro_rules! le_wire {
+    ($($ty:ty),+) => {$(
+        impl Wire<$ty> for Le {
+            fn put(&self, buf: &mut Vec<u8>, value: &$ty) {
+                buf.extend_from_slice(&value.to_le_bytes());
+            }
+
+            fn get(&self, data: &[u8], offset: &mut usize) -> Result<$ty, CatalogueEncodingError> {
+                let bytes = read_bytes(data, offset, std::mem::size_of::<$ty>())?;
+                Ok(<$ty>::from_le_bytes(bytes.try_into().expect("exact width")))
+            }
+        }
+    )+};
+}
+
+le_wire!(i32, i64, u64, f64);
+
+/// A `usize` stored as a `u32`.
+struct U32;
+
+impl Wire<usize> for U32 {
+    fn put(&self, buf: &mut Vec<u8>, value: &usize) {
+        write_u32(buf, *value as u32);
+    }
+
+    fn get(&self, data: &[u8], offset: &mut usize) -> Result<usize, CatalogueEncodingError> {
+        Ok(read_u32(data, offset)? as usize)
+    }
+}
+
+/// A `1`/`0` byte. Any non-zero byte reads as `true`; payload decoders
+/// re-encode and compare, so a non-canonical byte is still rejected.
+struct Bool;
+
+impl Wire<bool> for Bool {
+    fn put(&self, buf: &mut Vec<u8>, value: &bool) {
+        buf.push(u8::from(*value));
+    }
+
+    fn get(&self, data: &[u8], offset: &mut usize) -> Result<bool, CatalogueEncodingError> {
+        Ok(read_u8(data, offset)? != 0)
+    }
+}
+
+/// Raw bytes: a fixed 16-byte id, or a `u32`-length-prefixed blob.
+struct Raw;
+
+impl Wire<[u8; 16]> for Raw {
+    fn put(&self, buf: &mut Vec<u8>, value: &[u8; 16]) {
+        buf.extend_from_slice(value);
+    }
+
+    fn get(&self, data: &[u8], offset: &mut usize) -> Result<[u8; 16], CatalogueEncodingError> {
+        Ok(read_bytes(data, offset, 16)?.try_into().expect("16 bytes"))
+    }
+}
+
+impl Wire<Vec<u8>> for Raw {
+    fn put(&self, buf: &mut Vec<u8>, value: &Vec<u8>) {
+        write_u32(buf, value.len() as u32);
+        buf.extend_from_slice(value);
+    }
+
+    fn get(&self, data: &[u8], offset: &mut usize) -> Result<Vec<u8>, CatalogueEncodingError> {
+        let len = read_u32(data, offset)? as usize;
+        Ok(read_bytes(data, offset, len)?.to_vec())
+    }
+}
+
+/// An object id as its 16 UUID bytes; the string names it in decode errors.
+struct Oid(&'static str);
+
+impl Wire<ObjectId> for Oid {
+    fn put(&self, buf: &mut Vec<u8>, value: &ObjectId) {
+        buf.extend_from_slice(value.uuid().as_bytes());
+    }
+
+    fn get(&self, data: &[u8], offset: &mut usize) -> Result<ObjectId, CatalogueEncodingError> {
+        let uuid = uuid::Uuid::from_slice(read_bytes(data, offset, 16)?).map_err(|err| {
+            CatalogueEncodingError::DecodeError {
+                message: format!("invalid {}: {err}", self.0),
+            }
+        })?;
+        Ok(ObjectId::from_uuid(uuid))
+    }
+}
+
+/// Nothing on the wire: a field the payload does not persist reads back as
+/// its default.
+struct Skip;
+
+impl<T: Default> Wire<T> for Skip {
+    fn put(&self, _: &mut Vec<u8>, _: &T) {}
+
+    fn get(&self, _: &[u8], _: &mut usize) -> Result<T, CatalogueEncodingError> {
+        Ok(T::default())
+    }
+}
+
+/// A bounded item count followed by the items (see [`write_seq`] and
+/// [`read_seq`]); the string names the count in decode errors.
+struct Seq<C>(&'static str, C);
+
+impl<T, C: Wire<T>> Wire<Vec<T>> for Seq<C> {
+    fn put(&self, buf: &mut Vec<u8>, value: &Vec<T>) {
+        write_seq(buf, value, |buf, item| self.1.put(buf, item));
+    }
+
+    fn get(&self, data: &[u8], offset: &mut usize) -> Result<Vec<T>, CatalogueEncodingError> {
+        read_seq(data, offset, self.0, |data, offset| {
+            self.1.get(data, offset)
+        })
+    }
+}
+
+/// A list of strings whose count and items share one error context.
+const fn strings(context: &'static str) -> Seq<Str> {
+    Seq(context, Str(context))
+}
+
+/// A sequence whose items' names must be distinct; the string names the
+/// items in the duplicate error.
+struct Unique<C>(C, &'static str);
+
+impl<T: Named, C: Wire<Vec<T>>> Wire<Vec<T>> for Unique<C> {
+    fn put(&self, buf: &mut Vec<u8>, value: &Vec<T>) {
+        self.0.put(buf, value);
+    }
+
+    fn get(&self, data: &[u8], offset: &mut usize) -> Result<Vec<T>, CatalogueEncodingError> {
+        let items = self.0.get(data, offset)?;
+        ensure_unique_names(items.iter().map(Named::name), self.1)?;
+        Ok(items)
+    }
+}
+
+/// A lenient presence byte followed by the value (see [`read_opt`]).
+struct Opt<C>(C);
+
+impl<T, C: Wire<T>> Wire<Option<T>> for Opt<C> {
+    fn put(&self, buf: &mut Vec<u8>, value: &Option<T>) {
+        write_opt(buf, value.as_ref(), |buf, value| self.0.put(buf, value));
+    }
+
+    fn get(&self, data: &[u8], offset: &mut usize) -> Result<Option<T>, CatalogueEncodingError> {
+        read_opt(data, offset, |data, offset| self.0.get(data, offset))
+    }
+}
+
+/// A strict `0`/`1` presence byte (see [`read_flag`]) followed by the value.
+struct Flag<C>(&'static str, C);
+
+impl<T, C: Wire<T>> Wire<Option<T>> for Flag<C> {
+    fn put(&self, buf: &mut Vec<u8>, value: &Option<T>) {
+        write_opt(buf, value.as_ref(), |buf, value| self.1.put(buf, value));
+    }
+
+    fn get(&self, data: &[u8], offset: &mut usize) -> Result<Option<T>, CatalogueEncodingError> {
+        if read_flag(data, offset, self.0)? {
+            self.1.get(data, offset).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+/// A boxed value, stored inline.
+struct Boxed<C>(C);
+
+impl<T, C: Wire<T>> Wire<Box<T>> for Boxed<C> {
+    fn put(&self, buf: &mut Vec<u8>, value: &Box<T>) {
+        self.0.put(buf, value);
+    }
+
+    fn get(&self, data: &[u8], offset: &mut usize) -> Result<Box<T>, CatalogueEncodingError> {
+        self.0.get(data, offset).map(Box::new)
+    }
+}
+
+/// A schema hash as its 32 raw bytes.
+struct HashWire;
+
+impl Wire<SchemaHash> for HashWire {
+    fn put(&self, buf: &mut Vec<u8>, value: &SchemaHash) {
+        buf.extend_from_slice(value.as_bytes());
+    }
+
+    fn get(&self, data: &[u8], offset: &mut usize) -> Result<SchemaHash, CatalogueEncodingError> {
+        let bytes = read_bytes(data, offset, 32)?;
+        Ok(SchemaHash::from_bytes(bytes.try_into().expect("32 bytes")))
+    }
+}
+
+/// A tuple of codecs describes a tuple of values written in order.
+macro_rules! tuple_wire {
+    ($(($($codec:ident $value:ident $index:tt),+)),+) => {$(
+        impl<$($value, $codec: Wire<$value>),+> Wire<($($value,)+)> for ($($codec,)+) {
+            fn put(&self, buf: &mut Vec<u8>, value: &($($value,)+)) {
+                $(self.$index.put(buf, &value.$index);)+
+            }
+
+            fn get(
+                &self,
+                data: &[u8],
+                offset: &mut usize,
+            ) -> Result<($($value,)+), CatalogueEncodingError> {
+                Ok(($(self.$index.get(data, offset)?,)+))
+            }
+        }
+    )+};
+}
+
+tuple_wire!((A TA 0, B TB 1, C TC 2), (A TA 0, B TB 1, C TC 2, D TD 3));
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jazz::protocol_limits::{MAX_POLICY_EXPRESSION_DEPTH, MAX_POLICY_EXPRESSION_NODES};
     use jazz::tools::public_schema::SchemaBuilder;
     use jazz::tools::public_schema::{
-        PolicyExpr, RelColumnRef, RelExpr, RelPredicateCmpOp, RelPredicateExpr, RelValueRef,
+        PolicyExpr, RelationCmpOp, RelationColumnRef, RelationExpr, RelationPredicate,
+        RelationValueRef,
     };
     use serde_json::json;
+
+    // Wire tags these tests spell out by hand.
+    const TYPE_ENUM: u8 = 9;
+    const VALUE_ARRAY: u8 = 7;
+    const POLICY_VALUE_SESSION_REF: u8 = 2;
+    const REL_TABLE_SCAN: u8 = 1;
+    const REL_PREDICATE_TRUE: u8 = 10;
+    const POLICY_EXPR_IN: u8 = 4;
+    const POLICY_EXPR_TRUE: u8 = 10;
+    const POLICY_EXPR_IN_LIST: u8 = 16;
+    const POLICY_EXPR_SESSION_CMP: u8 = 17;
+    const POLICY_EXPR_SESSION_IS_NULL: u8 = 18;
+    const POLICY_EXPR_SESSION_IS_NOT_NULL: u8 = 19;
+    const POLICY_EXPR_SESSION_CONTAINS: u8 = 20;
+    const POLICY_EXPR_SESSION_IN_LIST: u8 = 21;
 
     #[test]
     fn schema_roundtrip_simple() {
@@ -3262,7 +2574,7 @@ mod tests {
     // This stays internal because it verifies the exact restart-authoritative
     // byte contract below the public catalogue API.
     #[test]
-    fn nested_catalogue_payload_v1_goldens_are_exact() {
+    fn nested_catalogue_payload_goldens_are_exact() {
         let schema = SchemaBuilder::new()
             .table(TableSchema::builder("docs").column(
                 "payload",
@@ -3274,25 +2586,25 @@ mod tests {
         let schema_bytes = encode_schema(&schema);
         assert_eq!(
             hex(&schema_bytes),
-            "010100000004000000646f637301000000070000007061796c6f61640c010107020000000100000061060200000003040100000031010000007a0100000000ffffffff00000000"
+            "020100000004000000646f637301000000070000007061796c6f61640c010107020000000100000061060200000003040100000031010000007a0100000000ffffffff0000000000000000"
         );
         assert_eq!(decode_schema(&schema_bytes).unwrap(), schema);
 
         let lens = LensTransform::new();
-        assert_eq!(hex(&encode_lens_transform(&lens)), "010000000000000000");
+        assert_eq!(hex(&encode_lens_transform(&lens)), "020000000000000000");
         let decoded_lens = decode_lens_transform(&encode_lens_transform(&lens)).unwrap();
         assert!(decoded_lens.ops.is_empty());
         assert!(decoded_lens.draft_ops.is_empty());
 
-        let rel = RelExpr::Filter {
-            input: Box::new(RelExpr::TableScan {
-                table: TableName::new("members"),
+        let rel = RelationExpr::Filter {
+            input: Box::new(RelationExpr::TableScan {
+                table: String::from("members"),
                 alias: Some("m".to_owned()),
             }),
-            predicate: RelPredicateExpr::Cmp {
-                left: RelColumnRef::unscoped("owner_id"),
-                op: RelPredicateCmpOp::Eq,
-                right: RelValueRef::SessionRef(vec!["claims".to_owned(), "sub".to_owned()]),
+            predicate: RelationPredicate::Cmp {
+                left: RelationColumnRef::unscoped("owner_id"),
+                op: RelationCmpOp::Eq,
+                right: RelationValueRef::SessionRef(vec!["claims".to_owned(), "sub".to_owned()]),
             },
         };
         let permissions = HashMap::from([(
@@ -3332,10 +2644,10 @@ mod tests {
             b'a',
             JSON_NULL,
         ];
-        assert!(decode_canonical_json_value(&unordered_json, &mut offset).is_err());
+        assert!(JsonWire.get(&unordered_json, &mut offset).is_err());
 
-        let rel = RelExpr::TableScan {
-            table: TableName::new("docs"),
+        let rel = RelationExpr::TableScan {
+            table: String::from("docs"),
             alias: None,
         };
         let permissions = HashMap::from([(
@@ -3377,7 +2689,7 @@ mod tests {
             decode_policy_expr(
                 &with_huge(POLICY_EXPR_SESSION_CMP),
                 &mut offset,
-                &mut PolicyExpressionDecodeBudget::default(),
+                &mut PolicyExpressionBudget::default(),
             ),
             "policy_session_cmp_path",
         );
@@ -3396,7 +2708,7 @@ mod tests {
                 decode_policy_expr(
                     &with_huge(tag),
                     &mut offset,
-                    &mut PolicyExpressionDecodeBudget::default(),
+                    &mut PolicyExpressionBudget::default(),
                 ),
                 context,
             );
@@ -3412,7 +2724,7 @@ mod tests {
             decode_policy_expr(
                 &session_in_list_value_count,
                 &mut offset,
-                &mut PolicyExpressionDecodeBudget::default(),
+                &mut PolicyExpressionBudget::default(),
             ),
             "policy_session_in_list_values",
         );
@@ -3425,7 +2737,7 @@ mod tests {
                 decode_policy_expr(
                     &with_empty_name_and_huge(tag),
                     &mut offset,
-                    &mut PolicyExpressionDecodeBudget::default(),
+                    &mut PolicyExpressionBudget::default(),
                 ),
                 context,
             );
@@ -3446,17 +2758,17 @@ mod tests {
 
         let mut offset = 0;
         assert_count_bound(
-            decode_column_type(&with_huge(TYPE_ENUM), &mut offset, SCHEMA_VERSION),
+            ColumnTypeWire.get(&with_huge(TYPE_ENUM), &mut offset),
             "enum_variants",
         );
         let mut offset = 0;
         assert_count_bound(
-            decode_value(&with_huge(VALUE_ARRAY), &mut offset),
+            ValueWire.get(&with_huge(VALUE_ARRAY), &mut offset),
             "value_array",
         );
         let mut offset = 0;
         assert_count_bound(
-            decode_policy_value(&with_huge(POLICY_VALUE_SESSION_REF), &mut offset),
+            PolicyValueWire.get(&with_huge(POLICY_VALUE_SESSION_REF), &mut offset),
             "policy_session_ref_path",
         );
 
@@ -3465,7 +2777,7 @@ mod tests {
             decode_policy_expr(
                 &[POLICY_EXPR_SESSION_CMP],
                 &mut offset,
-                &mut PolicyExpressionDecodeBudget::default(),
+                &mut PolicyExpressionBudget::default(),
             ),
             Err(CatalogueEncodingError::TruncatedData { .. })
         ));
@@ -3525,7 +2837,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_roundtrip_preserves_composite_indexes_without_changing_v1_payloads() {
+    fn schema_roundtrip_preserves_composite_indexes() {
         let schema = SchemaBuilder::new()
             .table(
                 TableSchema::builder("documents")
@@ -3538,7 +2850,7 @@ mod tests {
             .build();
 
         let encoded = encode_schema(&schema);
-        assert_eq!(encoded[0], SCHEMA_COMPOSITE_VERSION);
+        assert_eq!(encoded[0], SCHEMA_VERSION);
         let decoded = decode_schema(&encoded).unwrap();
         assert_eq!(encode_schema(&decoded), encoded);
         assert_eq!(
@@ -3554,7 +2866,7 @@ mod tests {
         );
     }
 
-    // Internal for the same reason as the v1 goldens: this pins the exact
+    // Internal for the same reason as the nested-value goldens: this pins the exact
     // restart-authoritative v2 bytes below the public catalogue API.
     #[test]
     fn composite_catalogue_payload_v2_goldens_are_exact() {
@@ -3589,14 +2901,17 @@ mod tests {
             "composite indexes encode in canonical order"
         );
 
-        // Neither label is an alias for the other.
+        // Retired version 1 is rejected even when the table has no indexes.
         let mut as_v1 = schema_bytes.clone();
-        as_v1[0] = SCHEMA_VERSION;
+        as_v1[0] = 1;
         assert!(decode_schema(&as_v1).is_err());
-        let mut plain_as_v2 = encode_schema(&SchemaBuilder::new().table(table()).build());
-        assert_eq!(plain_as_v2[0], SCHEMA_VERSION);
-        plain_as_v2[0] = SCHEMA_COMPOSITE_VERSION;
-        assert!(decode_schema(&plain_as_v2).is_err());
+        let plain = SchemaBuilder::new().table(table()).build();
+        let plain_bytes = encode_schema(&plain);
+        assert_eq!(plain_bytes[0], SCHEMA_VERSION);
+        assert_eq!(decode_schema(&plain_bytes).unwrap(), plain);
+        let mut plain_as_v1 = plain_bytes;
+        plain_as_v1[0] = 1;
+        assert!(decode_schema(&plain_as_v1).is_err());
 
         let mut lens = LensTransform::new();
         lens.push(
@@ -3616,7 +2931,7 @@ mod tests {
             lens_bytes
         );
         let mut lens_as_v1 = lens_bytes.clone();
-        lens_as_v1[0] = LENS_VERSION;
+        lens_as_v1[0] = 1;
         assert!(decode_lens_transform(&lens_as_v1).is_err());
     }
 
@@ -3909,8 +3224,8 @@ mod tests {
     }
 
     fn permissions_with_raw_relation(relation: Vec<u8>) -> Vec<u8> {
-        let leaf = RelExpr::TableScan {
-            table: TableName::new("documents"),
+        let leaf = RelationExpr::TableScan {
+            table: String::from("documents"),
             alias: None,
         };
         let permissions = permissions_with_policy(PolicyExpr::ExistsRel { rel: leaf.clone() });
@@ -3932,7 +3247,7 @@ mod tests {
         relation.extend(std::iter::repeat_n(REL_FILTER, filters));
         relation.push(REL_TABLE_SCAN);
         write_string(&mut relation, "documents");
-        encode_optional_string(&mut relation, None);
+        relation.push(0); // no alias
         relation.extend(std::iter::repeat_n(REL_PREDICATE_TRUE, filters));
         relation
     }
@@ -3969,7 +3284,7 @@ mod tests {
 
         let mut wide_predicate = vec![NESTED_CODEC_VERSION, REL_FILTER, REL_TABLE_SCAN];
         write_string(&mut wide_predicate, "documents");
-        encode_optional_string(&mut wide_predicate, None);
+        wide_predicate.push(0); // no alias
         wide_predicate.push(REL_PREDICATE_AND);
         write_u32(&mut wide_predicate, MAX_POLICY_EXPRESSION_NODES as u32);
         wide_predicate.extend(std::iter::repeat_n(0, MAX_POLICY_EXPRESSION_NODES));
@@ -4016,64 +3331,64 @@ mod tests {
 
     #[test]
     fn relation_policy_variants_keep_exact_catalogue_roundtrip() {
-        let column = RelColumnRef::unscoped("owner");
-        let predicate = RelPredicateExpr::And(vec![
-            RelPredicateExpr::Cmp {
+        let column = RelationColumnRef::unscoped("owner");
+        let predicate = RelationPredicate::And(vec![
+            RelationPredicate::Cmp {
                 left: column.clone(),
-                op: RelPredicateCmpOp::Eq,
-                right: RelValueRef::SessionRef(vec!["user".to_owned()]),
+                op: RelationCmpOp::Eq,
+                right: RelationValueRef::SessionRef(vec!["user".to_owned()]),
             },
-            RelPredicateExpr::Or(vec![
-                RelPredicateExpr::Not(Box::new(RelPredicateExpr::IsNull {
+            RelationPredicate::Or(vec![
+                RelationPredicate::Not(Box::new(RelationPredicate::IsNull {
                     column: column.clone(),
                 })),
-                RelPredicateExpr::EnumMatch {
-                    column: RelColumnRef::unscoped("kind"),
+                RelationPredicate::EnumMatch {
+                    column: RelationColumnRef::unscoped("kind"),
                     case: "song".to_owned(),
-                    payload: Box::new(RelPredicateExpr::Contains {
-                        left: RelColumnRef::unscoped("title"),
-                        right: RelValueRef::Literal(Value::Text("jazz".to_owned())),
+                    payload: Box::new(RelationPredicate::Contains {
+                        left: RelationColumnRef::unscoped("title"),
+                        right: RelationValueRef::literal(Value::Text("jazz".to_owned())),
                     }),
                 },
             ]),
         ]);
-        let relation = RelExpr::Gather {
-            seed: Box::new(RelExpr::Project {
-                input: Box::new(RelExpr::Join {
-                    left: Box::new(RelExpr::Union {
-                        inputs: vec![RelUnionArm {
+        let relation = RelationExpr::Gather {
+            seed: Box::new(RelationExpr::Project {
+                input: Box::new(RelationExpr::Join {
+                    left: Box::new(RelationExpr::Union {
+                        inputs: vec![RelationUnionArm {
                             label: "documents".to_owned(),
-                            input: RelExpr::Filter {
-                                input: Box::new(RelExpr::TableScan {
-                                    table: TableName::new("documents"),
+                            input: RelationExpr::Filter {
+                                input: Box::new(RelationExpr::TableScan {
+                                    table: String::from("documents"),
                                     alias: Some("d".to_owned()),
                                 }),
                                 predicate,
                             },
                         }],
                     }),
-                    right: Box::new(RelExpr::TableScan {
-                        table: TableName::new("owners"),
+                    right: Box::new(RelationExpr::TableScan {
+                        table: String::from("owners"),
                         alias: Some("o".to_owned()),
                     }),
-                    on: vec![RelJoinCondition {
-                        left: RelColumnRef::unscoped("owner"),
-                        right: RelColumnRef::unscoped("id"),
+                    on: vec![RelationJoinCondition {
+                        left: RelationColumnRef::unscoped("owner"),
+                        right: RelationColumnRef::unscoped("id"),
                     }],
-                    join_kind: RelJoinKind::Left,
+                    join_kind: RelationJoinKind::Left,
                 }),
-                columns: vec![RelProjectColumn {
+                columns: vec![RelationProjectColumn {
                     alias: "owner".to_owned(),
-                    expr: RelProjectExpr::Column(RelColumnRef::unscoped("owner")),
+                    expr: RelationProjectExpr::Column(RelationColumnRef::unscoped("owner")),
                 }],
             }),
-            step: Box::new(RelExpr::TableScan {
-                table: TableName::new("documents"),
+            step: Box::new(RelationExpr::TableScan {
+                table: String::from("documents"),
                 alias: None,
             }),
-            frontier_key: RelKeyRef::RowId(RowIdRef::Current),
-            bound: RelRecursionBound::MaxDepth(3),
-            dedupe_key: vec![RelKeyRef::Column(RelColumnRef::unscoped("owner"))],
+            frontier_key: RelationKeyRef::RowId(RelationRowIdRef::Current),
+            bound: RecursionBound::MaxDepth(3),
+            dedupe_key: vec![RelationKeyRef::Column(RelationColumnRef::unscoped("owner"))],
         };
         let permissions = permissions_with_policy(PolicyExpr::ExistsRel { rel: relation });
         let encoded = encode_permissions(&permissions);
@@ -4089,19 +3404,19 @@ mod tests {
 
     #[test]
     fn labeled_relation_union_uses_explicit_canonical_wire_grammar() {
-        let relation = RelExpr::Union {
+        let relation = RelationExpr::Union {
             inputs: vec![
-                RelUnionArm {
+                RelationUnionArm {
                     label: "a".to_owned(),
-                    input: RelExpr::TableScan {
-                        table: TableName::new("a"),
+                    input: RelationExpr::TableScan {
+                        table: String::from("a"),
                         alias: None,
                     },
                 },
-                RelUnionArm {
+                RelationUnionArm {
                     label: "b".to_owned(),
-                    input: RelExpr::TableScan {
-                        table: TableName::new("b"),
+                    input: RelationExpr::TableScan {
+                        table: String::from("b"),
                         alias: None,
                     },
                 },
@@ -4118,7 +3433,7 @@ mod tests {
             decode_canonical_relation_expr(
                 &encoded,
                 &mut offset,
-                &mut PolicyExpressionDecodeBudget::default(),
+                &mut PolicyExpressionBudget::default(),
             )
             .expect("labeled union grammar decodes"),
             relation
@@ -4132,7 +3447,7 @@ mod tests {
             decode_canonical_relation_expr(
                 &legacy,
                 &mut offset,
-                &mut PolicyExpressionDecodeBudget::default(),
+                &mut PolicyExpressionBudget::default(),
             ),
             Err(CatalogueEncodingError::DecodeError { .. })
         ));
@@ -4140,19 +3455,19 @@ mod tests {
         let invalid = HashMap::from([(
             TableName::new("documents"),
             TablePolicies::new().with_select(PolicyExpr::ExistsRel {
-                rel: RelExpr::Union {
+                rel: RelationExpr::Union {
                     inputs: vec![
-                        RelUnionArm {
+                        RelationUnionArm {
                             label: "duplicate".to_owned(),
-                            input: RelExpr::TableScan {
-                                table: TableName::new("a"),
+                            input: RelationExpr::TableScan {
+                                table: String::from("a"),
                                 alias: None,
                             },
                         },
-                        RelUnionArm {
+                        RelationUnionArm {
                             label: "duplicate".to_owned(),
-                            input: RelExpr::TableScan {
-                                table: TableName::new("b"),
+                            input: RelationExpr::TableScan {
+                                table: String::from("b"),
                                 alias: None,
                             },
                         },
@@ -4160,7 +3475,7 @@ mod tests {
                 },
             }),
         )]);
-        assert!(validate_permissions_relation_unions(&invalid).is_err());
+        assert!(validate_permissions_relations(&invalid).is_err());
     }
 
     #[test]
@@ -4254,7 +3569,7 @@ mod tests {
         );
 
         let encoded = encode_lens_transform(&transform);
-        assert_eq!(encoded[0], LENS_COMPOSITE_VERSION);
+        assert_eq!(encoded[0], LENS_VERSION);
         let decoded = decode_lens_transform(&encoded).unwrap();
         assert_eq!(encode_lens_transform(&decoded), encoded);
         let LensOp::AddTable { schema, .. } = &decoded.ops[0] else {
@@ -4466,10 +3781,10 @@ mod tests {
 
         for original in values {
             let mut buf = Vec::new();
-            encode_value(&mut buf, &original);
+            ValueWire.put(&mut buf, &original);
 
             let mut offset = 0;
-            let decoded = decode_value(&buf, &mut offset).unwrap();
+            let decoded = ValueWire.get(&buf, &mut offset).unwrap();
 
             assert_eq!(decoded, original);
         }
@@ -4504,19 +3819,33 @@ mod tests {
     }
 
     #[test]
-    fn storage_epoch_one_catalogue_envelopes_reject_pre_freeze_outer_labels() {
+    fn catalogue_payloads_reject_unsupported_versions() {
+        assert_eq!(
+            decode_schema(&[1, 0, 0, 0, 0]),
+            Err(CatalogueEncodingError::UnsupportedVersion {
+                found: 1,
+                expected: 2
+            })
+        );
+        assert_eq!(
+            decode_lens_transform(&[1, 0, 0, 0, 0, 0, 0, 0, 0]),
+            Err(CatalogueEncodingError::UnsupportedVersion {
+                found: 1,
+                expected: 2
+            })
+        );
         assert!(matches!(
             decode_schema(&[12]),
             Err(CatalogueEncodingError::UnsupportedVersion {
                 found: 12,
-                expected: 1
+                expected: 2
             })
         ));
         assert!(matches!(
             decode_lens_transform(&[5]),
             Err(CatalogueEncodingError::UnsupportedVersion {
                 found: 5,
-                expected: 1
+                expected: 2
             })
         ));
 
@@ -4567,4 +3896,189 @@ mod tests {
             Ok(_) => panic!("huge untrusted count unexpectedly decoded for {context}"),
         }
     }
+
+    /// Every relation-IR node kind, including one literal of each value type.
+    /// Policy relations are durable (catalogue JSON and these canonical bytes),
+    /// so any change to the relation IR must keep both outputs identical.
+    fn golden_relation_policy() -> PolicyExpr {
+        use jazz::tools::public_schema::{
+            RecursionBound, RelationJoinCondition, RelationJoinKind, RelationKeyRef,
+            RelationProjectColumn, RelationProjectExpr, RelationRowIdRef, RelationUnionArm,
+        };
+        let col = |scope: Option<&str>, column: &str| RelationColumnRef {
+            scope: scope.map(str::to_owned),
+            column: column.to_owned(),
+        };
+        let uuid = ObjectId::from_uuid(uuid::Uuid::from_u128(0x0123_4567_89ab_cdef));
+        let literals = vec![
+            Value::Integer(-7),
+            Value::BigInt(9_007_199_254_740_993),
+            Value::Double(1.5),
+            Value::Boolean(true),
+            Value::Text("viewer".to_owned()),
+            Value::Timestamp(1_700_000_000_000),
+            Value::Uuid(uuid),
+            Value::TransactionId([7; 16]),
+            Value::Bytea(vec![0, 1, 255]),
+            Value::Array(vec![Value::Integer(1), Value::Integer(2)]),
+            // The catalogue codec does not carry nested-row ids.
+            Value::Row {
+                id: None,
+                values: vec![Value::Text("a".to_owned()), Value::Null],
+            },
+            Value::Enum {
+                case: "active".to_owned(),
+                values: vec![Value::Integer(3)],
+            },
+            Value::Null,
+        ];
+        let cmp = |column: &str, op, right| RelationPredicate::Cmp {
+            left: col(Some("t"), column),
+            op,
+            right,
+        };
+        let predicate = RelationPredicate::And(vec![
+            cmp(
+                "a",
+                RelationCmpOp::Eq,
+                RelationValueRef::SessionRef(vec!["claims".to_owned(), "sub".to_owned()]),
+            ),
+            cmp(
+                "b",
+                RelationCmpOp::Ne,
+                RelationValueRef::OuterColumn(col(None, "owner")),
+            ),
+            cmp(
+                "c",
+                RelationCmpOp::Lt,
+                RelationValueRef::RowId(RelationRowIdRef::Outer),
+            ),
+            cmp(
+                "d",
+                RelationCmpOp::Le,
+                RelationValueRef::RowId(RelationRowIdRef::Frontier),
+            ),
+            cmp(
+                "e",
+                RelationCmpOp::Gt,
+                RelationValueRef::RowId(RelationRowIdRef::Current),
+            ),
+            cmp(
+                "f",
+                RelationCmpOp::Ge,
+                RelationValueRef::literal(Value::Integer(4)),
+            ),
+            RelationPredicate::In {
+                left: col(Some("t"), "g"),
+                values: literals
+                    .into_iter()
+                    .map(RelationValueRef::literal)
+                    .collect(),
+            },
+            RelationPredicate::Or(vec![
+                RelationPredicate::IsNull {
+                    column: col(None, "h"),
+                },
+                RelationPredicate::Not(Box::new(RelationPredicate::IsNotNull {
+                    column: col(Some("t"), "i"),
+                })),
+            ]),
+            RelationPredicate::Contains {
+                left: col(Some("t"), "tags"),
+                right: RelationValueRef::literal(Value::Text("x".to_owned())),
+            },
+            RelationPredicate::EnumMatch {
+                column: col(Some("t"), "status"),
+                case: "active".to_owned(),
+                payload: Box::new(RelationPredicate::Cmp {
+                    left: col(None, "since"),
+                    op: RelationCmpOp::Gt,
+                    right: RelationValueRef::literal(Value::Timestamp(5)),
+                }),
+            },
+            RelationPredicate::True,
+            RelationPredicate::False,
+        ]);
+        let scan = |table: &str, alias: Option<&str>| RelationExpr::TableScan {
+            table: String::from(table),
+            alias: alias.map(str::to_owned),
+        };
+        let gather = RelationExpr::Gather {
+            seed: Box::new(RelationExpr::Filter {
+                input: Box::new(scan("teams", Some("t"))),
+                predicate,
+            }),
+            step: Box::new(RelationExpr::Project {
+                input: Box::new(scan("team_edges", None)),
+                columns: vec![
+                    RelationProjectColumn {
+                        alias: "id".to_owned(),
+                        expr: RelationProjectExpr::Column(col(Some("team_edges"), "parent")),
+                    },
+                    RelationProjectColumn {
+                        alias: "row".to_owned(),
+                        expr: RelationProjectExpr::RowId(RelationRowIdRef::Current),
+                    },
+                ],
+            }),
+            frontier_key: RelationKeyRef::RowId(RelationRowIdRef::Current),
+            bound: RecursionBound::MaxDepth(6),
+            dedupe_key: vec![
+                RelationKeyRef::RowId(RelationRowIdRef::Current),
+                RelationKeyRef::Column(col(Some("t"), "a")),
+            ],
+        };
+        let fixpoint = RelationExpr::Gather {
+            seed: Box::new(scan("teams", None)),
+            step: Box::new(scan("teams", None)),
+            frontier_key: RelationKeyRef::Column(col(None, "id")),
+            bound: RecursionBound::Fixpoint,
+            dedupe_key: Vec::new(),
+        };
+        PolicyExpr::ExistsRel {
+            rel: RelationExpr::Union {
+                inputs: vec![
+                    RelationUnionArm {
+                        label: "inner".to_owned(),
+                        input: RelationExpr::Join {
+                            left: Box::new(gather),
+                            right: Box::new(scan("access", Some("access"))),
+                            on: vec![RelationJoinCondition {
+                                left: col(None, "id"),
+                                right: col(Some("access"), "team"),
+                            }],
+                            join_kind: RelationJoinKind::Inner,
+                        },
+                    },
+                    RelationUnionArm {
+                        label: "left".to_owned(),
+                        input: RelationExpr::Join {
+                            left: Box::new(fixpoint),
+                            right: Box::new(scan("access", None)),
+                            on: Vec::new(),
+                            join_kind: RelationJoinKind::Left,
+                        },
+                    },
+                ],
+            },
+        }
+    }
+
+    #[test]
+    fn relation_policy_json_and_catalogue_bytes_are_frozen() {
+        let policy = golden_relation_policy();
+        let json = serde_json::to_string(&policy).unwrap();
+        let permissions = HashMap::from([(
+            TableName::new("docs"),
+            TablePolicies::new().with_select(policy.clone()),
+        )]);
+        let bytes = encode_permissions(&permissions);
+        assert_eq!(json, GOLDEN_RELATION_POLICY_JSON);
+        assert_eq!(hex(&bytes), GOLDEN_RELATION_POLICY_HEX);
+        assert_eq!(serde_json::from_str::<PolicyExpr>(&json).unwrap(), policy);
+        assert_eq!(decode_permissions(&bytes).unwrap(), permissions);
+    }
+
+    const GOLDEN_RELATION_POLICY_JSON: &str = r#"{"type":"ExistsRel","rel":{"Union":{"inputs":[{"label":"inner","input":{"Join":{"left":{"Gather":{"seed":{"Filter":{"input":{"TableScan":{"table":"teams","alias":"t"}},"predicate":{"And":[{"Cmp":{"left":{"scope":"t","column":"a"},"op":"Eq","right":{"SessionRef":["claims","sub"]}}},{"Cmp":{"left":{"scope":"t","column":"b"},"op":"Ne","right":{"OuterColumn":{"scope":null,"column":"owner"}}}},{"Cmp":{"left":{"scope":"t","column":"c"},"op":"Lt","right":{"RowId":"Outer"}}},{"Cmp":{"left":{"scope":"t","column":"d"},"op":"Le","right":{"RowId":"Frontier"}}},{"Cmp":{"left":{"scope":"t","column":"e"},"op":"Gt","right":{"RowId":"Current"}}},{"Cmp":{"left":{"scope":"t","column":"f"},"op":"Ge","right":{"Literal":{"type":"Integer","value":4}}}},{"In":{"left":{"scope":"t","column":"g"},"values":[{"Literal":{"type":"Integer","value":-7}},{"Literal":{"type":"BigInt","value":"9007199254740993"}},{"Literal":{"type":"Double","value":1.5}},{"Literal":{"type":"Boolean","value":true}},{"Literal":{"type":"Text","value":"viewer"}},{"Literal":{"type":"Timestamp","value":1700000000000}},{"Literal":{"type":"Uuid","value":"00000000-0000-0000-0123-456789abcdef"}},{"Literal":{"type":"TransactionId","value":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7]}},{"Literal":{"type":"Bytea","value":[0,1,255]}},{"Literal":{"type":"Array","value":[{"type":"Integer","value":1},{"type":"Integer","value":2}]}},{"Literal":{"type":"Row","value":{"values":[{"type":"Text","value":"a"},{"type":"Null"}]}}},{"Literal":{"type":"Enum","value":{"case":"active","values":[{"type":"Integer","value":3}]}}},{"Literal":{"type":"Null"}}]}},{"Or":[{"IsNull":{"column":{"scope":null,"column":"h"}}},{"Not":{"IsNotNull":{"column":{"scope":"t","column":"i"}}}}]},{"Contains":{"left":{"scope":"t","column":"tags"},"right":{"Literal":{"type":"Text","value":"x"}}}},{"EnumMatch":{"column":{"scope":"t","column":"status"},"case":"active","payload":{"Cmp":{"left":{"scope":null,"column":"since"},"op":"Gt","right":{"Literal":{"type":"Timestamp","value":5}}}}}},"True","False"]}}},"step":{"Project":{"input":{"TableScan":{"table":"team_edges"}},"columns":[{"alias":"id","expr":{"Column":{"scope":"team_edges","column":"parent"}}},{"alias":"row","expr":{"RowId":"Current"}}]}},"frontier_key":{"RowId":"Current"},"bound":{"MaxDepth":6},"dedupe_key":[{"RowId":"Current"},{"Column":{"scope":"t","column":"a"}}]}},"right":{"TableScan":{"table":"access","alias":"access"}},"on":[{"left":{"scope":null,"column":"id"},"right":{"scope":"access","column":"team"}}],"join_kind":"Inner"}}},{"label":"left","input":{"Join":{"left":{"Gather":{"seed":{"TableScan":{"table":"teams"}},"step":{"TableScan":{"table":"teams"}},"frontier_key":{"Column":{"scope":null,"column":"id"}},"bound":"Fixpoint","dedupe_key":[]}},"right":{"TableScan":{"table":"access"}},"on":[],"join_kind":"Left"}}}]}}}"#;
+    const GOLDEN_RELATION_POLICY_HEX: &str = "010100000004000000646f6373010d01070200000005000000696e6e6572040000006c65667404060201050000007465616d73010100000074070c00000001010100000074010000006101020200000006000000636c61696d7303000000737562010101000000740100000062020300050000006f776e6572010101000000740100000063030402010101000000740100000064040403010101000000740100000065050401010101000000740100000066060101040000000401010000007401000000670d0000000101f9ffffff01020100000000002000010a000000000000f83f01030101040600000076696577657201050068e5cf8b010000010600000000000000000123456789abcdef010c07070707070707070707070707070707010b030000000001ff0107020000000101000000010200000001080200000004010000006100010d060000006163746976650100000001030000000100080200000002000100000068090301010000007401000000690501010000007404000000746167730104010000007806010100000074060000007374617475730600000061637469766501000500000073696e636505010505000000000000000a0b05010a0000007465616d5f6564676573000200000002000000696401010a0000007465616d5f656467657306000000706172656e7403000000726f77020102010206000000000000000200000002010101010000007401000000610106000000616363657373010600000061636365737301000000000200000069640106000000616363657373040000007465616d01040601050000007465616d730001050000007465616d730001000200000069640100000000010600000061636365737300000000000200000000000000";
 }

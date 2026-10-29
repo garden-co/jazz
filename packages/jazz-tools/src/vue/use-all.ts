@@ -1,5 +1,5 @@
 import { ref, toValue, watchEffect, type MaybeRefOrGetter, type Ref } from "vue";
-import { applyDelta } from "../shared/index.js";
+import { applyDeltaToRows } from "../reconcile-array.js";
 import type {
   CacheEntryHandle,
   QueryBuilder,
@@ -9,6 +9,7 @@ import type {
 } from "../shared/index.js";
 import { getSubscriptionStore } from "../subscription-store-internal.js";
 import { useJazzClient } from "./provider.js";
+import { toError } from "../runtime/util.js";
 
 /**
  * Reactive result of {@link useAll}. `data` is the matching rows (or `undefined`
@@ -30,10 +31,6 @@ export interface UseAllResult<T extends { id: string }> {
 export interface UseAllSuspenseResult<T extends { id: string }> {
   data: Ref<T[] | undefined>;
   error: Ref<Error | null>;
-}
-
-function toError(value: unknown): Error {
-  return value instanceof Error ? value : new Error(String(value));
 }
 
 function applyEntryState<T extends { id: string }>(
@@ -72,14 +69,7 @@ function subscribeToEntry<T extends { id: string }>(
       isLoading.value = false;
     },
     onDelta: (delta: SubscriptionDelta<T>) => {
-      if (data.value) {
-        applyDelta(data.value, delta);
-      } else if (delta.reset) {
-        data.value = [...delta.all];
-      } else {
-        data.value = [];
-        applyDelta(data.value, delta);
-      }
+      data.value = applyDeltaToRows(data.value, delta);
       isLoading.value = false;
     },
     onError: (err) => {

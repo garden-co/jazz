@@ -1,180 +1,112 @@
 //! Wire-stable identifier newtypes for nodes, rows, schemas, branches, lenses,
 //! and compact storage aliases. This module owns identity vocabulary and UUID
-//! byte ordering only; allocation, alias persistence, and recovery live in
-//! `jazz::node::codec` and `jazz::node::recovery`. These ids are shared
-//! across every layer from `Db` facade calls through protocol messages to groove
-//! storage keys.
+//! byte ordering only; allocation and persistence live in `jazz-db`. These ids
+//! are shared across every layer from `Db` facade calls through protocol
+//! messages to storage keys.
 
-/// Globally stable node identity used on the wire.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
-pub struct NodeUuid(pub uuid::Uuid);
+use crate::identity::principal_is_nonempty;
 
-impl NodeUuid {
-    /// Construct from UUID bytes in wire order.
-    pub fn from_bytes(bytes: [u8; 16]) -> Self {
-        Self(uuid::Uuid::from_bytes(bytes))
-    }
-
-    /// Return the UUID bytes in wire order.
-    pub fn to_bytes(self) -> Vec<u8> {
-        self.0.as_bytes().to_vec()
-    }
-
-    /// Borrow the UUID bytes in wire order.
-    pub fn as_bytes(&self) -> &[u8; 16] {
-        self.0.as_bytes()
-    }
+/// Declares a `Copy` identifier newtype with the shared derive set. The derive
+/// list (including serde) is part of the wire and storage contract.
+macro_rules! id_newtype {
+    ($(#[$meta:meta])* $name:ident($inner:ty)) => {
+        $(#[$meta])*
+        #[derive(
+            Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+        )]
+        pub struct $name(pub $inner);
+    };
 }
 
-/// Node-local integer alias for compact storage.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
-pub struct NodeAlias(pub u64);
+/// Declares a UUID-backed identifier newtype with wire-order byte accessors.
+macro_rules! uuid_id {
+    ($(#[$meta:meta])* $name:ident) => {
+        id_newtype!($(#[$meta])* $name(uuid::Uuid));
 
-/// Content-addressed schema version identity.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
-pub struct SchemaVersionId(pub uuid::Uuid);
+        impl $name {
+            /// Construct from UUID bytes in wire order.
+            pub fn from_bytes(bytes: [u8; 16]) -> Self {
+                Self(uuid::Uuid::from_bytes(bytes))
+            }
 
-impl SchemaVersionId {
-    /// Construct from UUID bytes in wire order.
-    pub fn from_bytes(bytes: [u8; 16]) -> Self {
-        Self(uuid::Uuid::from_bytes(bytes))
-    }
+            /// Return the UUID bytes in wire order.
+            pub fn to_bytes(self) -> Vec<u8> {
+                self.0.as_bytes().to_vec()
+            }
 
-    /// Return the UUID bytes in wire order.
-    pub fn to_bytes(self) -> Vec<u8> {
-        self.0.as_bytes().to_vec()
-    }
-
-    /// Borrow the UUID bytes in wire order.
-    pub fn as_bytes(&self) -> &[u8; 16] {
-        self.0.as_bytes()
-    }
+            /// Borrow the UUID bytes in wire order.
+            pub fn as_bytes(&self) -> &[u8; 16] {
+                self.0.as_bytes()
+            }
+        }
+    };
 }
 
-/// Node-local integer alias for compact schema-version storage.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
-pub struct SchemaVersionAlias(pub u64);
-
-/// Node-local identity for one shared physical table lineage.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
-pub struct PhysicalTableId(pub u64);
-
-/// Node-local identity for one physical column epoch.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
-pub struct PhysicalColumnId(pub u64);
-
-/// Authority-allocated permanent identity for a physical table lineage.
-/// Unlike `PhysicalTableId`, this value crosses catalogue replicas and never
-/// serves as a compact local storage alias.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
-pub struct GlobalPhysicalTableId(pub uuid::Uuid);
-
-/// Authority-allocated permanent identity for one physical column epoch.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
-pub struct GlobalPhysicalColumnId(pub uuid::Uuid);
-
-/// Authority-allocated permanent identity for one enum variant occurrence.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
-pub struct GlobalPhysicalEnumVariantId(pub uuid::Uuid);
-
-/// Content-addressed migration-lens identity.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
-pub struct MigrationLensId(pub uuid::Uuid);
-
-impl MigrationLensId {
-    /// Construct from UUID bytes in wire order.
-    pub fn from_bytes(bytes: [u8; 16]) -> Self {
-        Self(uuid::Uuid::from_bytes(bytes))
-    }
-
-    /// Return the UUID bytes in wire order.
-    pub fn to_bytes(self) -> Vec<u8> {
-        self.0.as_bytes().to_vec()
-    }
-
-    /// Borrow the UUID bytes in wire order.
-    pub fn as_bytes(&self) -> &[u8; 16] {
-        self.0.as_bytes()
-    }
+uuid_id! {
+    /// Globally stable node identity used on the wire.
+    NodeUuid
 }
 
-/// Content-addressed atomic schema-lineage publication identity.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
-pub struct SchemaLineagePublicationId(pub uuid::Uuid);
-
-impl SchemaLineagePublicationId {
-    /// Borrow the UUID bytes in wire order.
-    pub fn as_bytes(&self) -> &[u8; 16] {
-        self.0.as_bytes()
-    }
+id_newtype! {
+    /// Node-local integer alias for compact storage.
+    NodeAlias(u64)
 }
 
-/// Stable identity for a schema family across catalogue projections.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
-pub struct SchemaFamilyId(pub uuid::Uuid);
-
-impl SchemaFamilyId {
-    /// Construct from UUID bytes in wire order.
-    pub fn from_bytes(bytes: [u8; 16]) -> Self {
-        Self(uuid::Uuid::from_bytes(bytes))
-    }
-
-    /// Return the UUID bytes in wire order.
-    pub fn to_bytes(self) -> Vec<u8> {
-        self.0.as_bytes().to_vec()
-    }
-
-    /// Borrow the UUID bytes in wire order.
-    pub fn as_bytes(&self) -> &[u8; 16] {
-        self.0.as_bytes()
-    }
+uuid_id! {
+    /// Content-addressed schema version identity.
+    SchemaVersionId
 }
 
-/// Stable row identity shared by every historical version of a row.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
-pub struct RowUuid(pub uuid::Uuid);
+id_newtype! {
+    /// Node-local integer alias for compact schema-version storage.
+    SchemaVersionAlias(u64)
+}
 
-impl RowUuid {
-    /// Construct from UUID bytes in wire order.
-    pub fn from_bytes(bytes: [u8; 16]) -> Self {
-        Self(uuid::Uuid::from_bytes(bytes))
-    }
+id_newtype! {
+    /// Node-local identity for one shared physical table lineage.
+    PhysicalTableId(u64)
+}
 
-    /// Return the UUID bytes in wire order.
-    pub fn to_bytes(self) -> Vec<u8> {
-        self.0.as_bytes().to_vec()
-    }
+id_newtype! {
+    /// Node-local identity for one physical column epoch.
+    PhysicalColumnId(u64)
+}
 
-    /// Borrow the UUID bytes in wire order.
-    pub fn as_bytes(&self) -> &[u8; 16] {
-        self.0.as_bytes()
-    }
+id_newtype! {
+    /// Authority-allocated permanent identity for a physical table lineage.
+    /// Unlike `PhysicalTableId`, this value crosses catalogue replicas and never
+    /// serves as a compact local storage alias.
+    GlobalPhysicalTableId(uuid::Uuid)
+}
+
+id_newtype! {
+    /// Authority-allocated permanent identity for one physical column epoch.
+    GlobalPhysicalColumnId(uuid::Uuid)
+}
+
+id_newtype! {
+    /// Authority-allocated permanent identity for one enum variant occurrence.
+    GlobalPhysicalEnumVariantId(uuid::Uuid)
+}
+
+uuid_id! {
+    /// Content-addressed migration-lens identity.
+    MigrationLensId
+}
+
+uuid_id! {
+    /// Content-addressed atomic schema-lineage publication identity.
+    SchemaLineagePublicationId
+}
+
+uuid_id! {
+    /// Stable identity for a schema family across catalogue projections.
+    SchemaFamilyId
+}
+
+uuid_id! {
+    /// Stable row identity shared by every historical version of a row.
+    RowUuid
 }
 
 /// Whole-structure interned author identity. The cached portable spelling is
@@ -184,8 +116,8 @@ pub struct InternedAuthor {
     issuer: String,
     subject: String,
     canonical: String,
-    row_record: std::sync::OnceLock<crate::groove::records::OwnedRecord>,
-    session_record: std::sync::OnceLock<crate::groove::records::OwnedRecord>,
+    row_record: std::sync::OnceLock<crate::records::OwnedRecord>,
+    session_record: std::sync::OnceLock<crate::records::OwnedRecord>,
 }
 
 // Derived caches must not change diagnostic identity as they initialize.
@@ -333,8 +265,10 @@ pub enum AuthorSubjectError {
     InvalidSystemOrigin,
 }
 
-fn author_identity_descriptor() -> crate::groove::records::RecordDescriptor {
-    use crate::groove::records::{RecordDescriptor, ValueType};
+/// The `(issuer, subject)` principal record shared by row authors and the
+/// account registry.
+pub(crate) fn author_identity_descriptor() -> crate::records::RecordDescriptor {
+    use crate::records::{RecordDescriptor, ValueType};
     static DESCRIPTOR: std::sync::OnceLock<RecordDescriptor> = std::sync::OnceLock::new();
     *DESCRIPTOR.get_or_init(|| {
         RecordDescriptor::new([
@@ -444,12 +378,12 @@ impl RowAuthor {
     }
 
     /// Native record type exposed for persisted row and transaction metadata.
-    pub fn value_type() -> crate::groove::records::ValueType {
-        crate::groove::records::ValueType::Record(Box::new(Self::record_descriptor()))
+    pub fn value_type() -> crate::records::ValueType {
+        crate::records::ValueType::Record(Box::new(Self::record_descriptor()))
     }
 
-    fn record_descriptor() -> crate::groove::records::RecordDescriptor {
-        use crate::groove::records::{RecordDescriptor, ValueType};
+    fn record_descriptor() -> crate::records::RecordDescriptor {
+        use crate::records::{RecordDescriptor, ValueType};
         static DESCRIPTOR: std::sync::OnceLock<RecordDescriptor> = std::sync::OnceLock::new();
         *DESCRIPTOR.get_or_init(|| {
             RecordDescriptor::new([
@@ -463,20 +397,20 @@ impl RowAuthor {
     }
 
     /// Structured durable attribution value.
-    pub fn to_value(self) -> crate::groove::records::Value {
-        crate::groove::records::Value::Record(self.encoded_record().clone())
+    pub fn to_value(self) -> crate::records::Value {
+        crate::records::Value::Record(self.encoded_record().clone())
     }
 
-    /// The cached groove record encoding of this row author.
-    pub fn encoded_record(self) -> &'static crate::groove::records::OwnedRecord {
+    /// The cached record encoding of this row author.
+    pub fn encoded_record(self) -> &'static crate::records::OwnedRecord {
         let author = match self.0 {
             RowAuthorKind::SystemAt(author) | RowAuthorKind::Account(author) => author.as_ref(),
         };
         author.row_record.get_or_init(|| self.build_record())
     }
 
-    fn build_record(self) -> crate::groove::records::OwnedRecord {
-        use crate::groove::records::{OwnedRecord, Value};
+    fn build_record(self) -> crate::records::OwnedRecord {
+        use crate::records::{OwnedRecord, Value};
         let (issuer, subject) = self.principal_parts();
         let identity = author_identity_descriptor();
         let raw = identity
@@ -491,8 +425,8 @@ impl RowAuthor {
     }
 
     /// Decode durable metadata without granting the system capability.
-    pub fn from_value(value: crate::groove::records::Value) -> Result<Self, AuthorSubjectError> {
-        use crate::groove::records::Value;
+    pub fn from_value(value: crate::records::Value) -> Result<Self, AuthorSubjectError> {
+        use crate::records::Value;
         let bad = || AuthorSubjectError::InvalidCanonical("invalid row author record".into());
         let Value::Record(record) = value else {
             return Err(bad());
@@ -500,9 +434,9 @@ impl RowAuthor {
         Self::from_record(record.borrowed())
     }
 
-    /// Decode an author subject from its groove record encoding.
+    /// Decode an author subject from its record encoding.
     pub fn from_record(
-        record: crate::groove::records::BorrowedRecord<'_>,
+        record: crate::records::BorrowedRecord<'_>,
     ) -> Result<Self, AuthorSubjectError> {
         let bad = || AuthorSubjectError::InvalidCanonical("invalid row author record".into());
         let expected = Self::record_descriptor();
@@ -529,17 +463,7 @@ impl RowAuthor {
             if account != crate::account_registry::SYSTEM_ACCOUNT_ID {
                 return Err(AuthorSubjectError::ReservedAccount);
             }
-            let node = uuid::Uuid::parse_str(subject)
-                .map(NodeUuid)
-                .map_err(|_| AuthorSubjectError::InvalidSystemOrigin)?;
-            if &*node
-                .0
-                .hyphenated()
-                .encode_lower(&mut uuid::Uuid::encode_buffer())
-                != subject
-            {
-                return Err(AuthorSubjectError::InvalidSystemOrigin);
-            }
+            parse_system_origin(subject)?;
             return Ok(Self(RowAuthorKind::SystemAt(intern_author(
                 Some(account),
                 issuer,
@@ -560,6 +484,44 @@ impl RowAuthor {
     pub fn canonical(&self) -> &str {
         match &self.0 {
             RowAuthorKind::SystemAt(author) | RowAuthorKind::Account(author) => &author.canonical,
+        }
+    }
+}
+
+/// A whole author or one of its public fields.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum AuthorField {
+    /// The complete author.
+    Whole,
+    /// Author account.
+    Account,
+    /// Provider identity.
+    Identity,
+    /// Identity issuer.
+    IdentityIssuer,
+    /// Identity subject.
+    IdentitySubject,
+}
+impl AuthorField {
+    /// Parse one supported nested author path.
+    pub fn parse_path(path: &str) -> Option<Self> {
+        match path {
+            "account" => Some(Self::Account),
+            "identity" => Some(Self::Identity),
+            "identity.issuer" => Some(Self::IdentityIssuer),
+            "identity.subject" => Some(Self::IdentitySubject),
+            _ => None,
+        }
+    }
+
+    /// Record members traversed to obtain this field.
+    pub fn path(self) -> &'static [&'static str] {
+        match self {
+            Self::Whole => &[],
+            Self::Account => &["account"],
+            Self::Identity => &["identity"],
+            Self::IdentityIssuer => &["identity", "issuer"],
+            Self::IdentitySubject => &["identity", "subject"],
         }
     }
 }
@@ -694,12 +656,12 @@ impl AuthorSubject {
     }
 
     /// Native record type exposed for structured author metadata.
-    pub fn value_type() -> crate::groove::records::ValueType {
-        crate::groove::records::ValueType::Record(Box::new(Self::record_descriptor()))
+    pub fn value_type() -> crate::records::ValueType {
+        crate::records::ValueType::Record(Box::new(Self::record_descriptor()))
     }
 
-    fn record_descriptor() -> crate::groove::records::RecordDescriptor {
-        use crate::groove::records::{RecordDescriptor, ValueType};
+    fn record_descriptor() -> crate::records::RecordDescriptor {
+        use crate::records::{RecordDescriptor, ValueType};
         static DESCRIPTOR: std::sync::OnceLock<RecordDescriptor> = std::sync::OnceLock::new();
         *DESCRIPTOR.get_or_init(|| {
             RecordDescriptor::new([
@@ -716,47 +678,58 @@ impl AuthorSubject {
     /// as provider claims or user-defined columns.
     pub fn metadata_path(column: &str) -> Option<(&str, &'static [&'static str])> {
         let (root, path) = column.split_once('.')?;
-        if !matches!(root, "$createdBy" | "$updatedBy") {
+        if !matches!(root, "$createdBy" | "$updatedBy" | "$deletedBy") {
             return None;
         }
-        let path: &'static [&'static str] = match path {
-            "account" => &["account"],
-            "identity" => &["identity"],
-            "identity.issuer" => &["identity", "issuer"],
-            "identity.subject" => &["identity", "subject"],
-            _ => return None,
-        };
+        let path = AuthorField::parse_path(path)?.path();
         Some((root, path))
     }
 
     /// Declared native type for an author root or an explicit nested field.
-    pub fn metadata_type(column: &str) -> Option<&'static crate::groove::records::ValueType> {
-        use crate::groove::records::ValueType;
+    pub fn metadata_type(column: &str) -> Option<&'static crate::records::ValueType> {
+        use crate::records::ValueType;
+        let (root, path) = if matches!(column, "$createdBy" | "$updatedBy" | "$deletedBy") {
+            (column, &[][..])
+        } else {
+            Self::metadata_path(column)?
+        };
         static AUTHOR: std::sync::OnceLock<ValueType> = std::sync::OnceLock::new();
         let mut ty = AUTHOR.get_or_init(RowAuthor::value_type);
-        if matches!(column, "$createdBy" | "$updatedBy") {
-            return Some(ty);
-        }
-        let (_, path) = Self::metadata_path(column)?;
         for name in path {
             let ValueType::Record(record) = ty else {
                 return None;
             };
             ty = &record.fields().get(record.field_index(name)?)?.value_type;
         }
-        Some(ty)
+        if root == "$deletedBy" {
+            // Deletion authors are nullable. This runs per published row, so
+            // build each path's nullable type once instead of interning it.
+            const PATHS: [AuthorField; 5] = [
+                AuthorField::Whole,
+                AuthorField::Account,
+                AuthorField::Identity,
+                AuthorField::IdentityIssuer,
+                AuthorField::IdentitySubject,
+            ];
+            static DELETED: [std::sync::OnceLock<ValueType>; PATHS.len()] =
+                [const { std::sync::OnceLock::new() }; PATHS.len()];
+            let slot = PATHS.iter().position(|field| field.path() == path)?;
+            Some(DELETED[slot].get_or_init(|| ValueType::Nullable(Box::new(ty.clone()))))
+        } else {
+            Some(ty)
+        }
     }
 
     /// Structured native author value; intern handles are never serialized.
-    pub fn to_value(self) -> crate::groove::records::Value {
-        crate::groove::records::Value::Record(self.encoded_record().clone())
+    pub fn to_value(self) -> crate::records::Value {
+        crate::records::Value::Record(self.encoded_record().clone())
     }
 
-    /// The cached groove record encoding of this author.
-    pub fn encoded_record(self) -> &'static crate::groove::records::OwnedRecord {
+    /// The cached record encoding of this author.
+    pub fn encoded_record(self) -> &'static crate::records::OwnedRecord {
         match self {
             Self::System => {
-                static RECORD: std::sync::OnceLock<crate::groove::records::OwnedRecord> =
+                static RECORD: std::sync::OnceLock<crate::records::OwnedRecord> =
                     std::sync::OnceLock::new();
                 RECORD.get_or_init(|| self.build_record())
             }
@@ -767,8 +740,8 @@ impl AuthorSubject {
         }
     }
 
-    fn build_record(self) -> crate::groove::records::OwnedRecord {
-        use crate::groove::records::{OwnedRecord, Value};
+    fn build_record(self) -> crate::records::OwnedRecord {
+        use crate::records::{OwnedRecord, Value};
         let (issuer, subject) = self.principal_parts();
         let identity = author_identity_descriptor();
         let raw = identity
@@ -787,8 +760,8 @@ impl AuthorSubject {
     }
 
     /// Decode structured provenance using its exact native descriptor.
-    pub fn from_value(value: crate::groove::records::Value) -> Result<Self, AuthorSubjectError> {
-        use crate::groove::records::Value;
+    pub fn from_value(value: crate::records::Value) -> Result<Self, AuthorSubjectError> {
+        use crate::records::Value;
         let bad = || AuthorSubjectError::InvalidCanonical("invalid author record".into());
         let Value::Record(record) = value else {
             return Err(bad());
@@ -827,17 +800,7 @@ impl AuthorSubject {
             if account != crate::account_registry::SYSTEM_ACCOUNT_ID.0 {
                 return Err(AuthorSubjectError::ReservedAccount);
             }
-            let node = uuid::Uuid::parse_str(subject)
-                .map(NodeUuid)
-                .map_err(|_| AuthorSubjectError::InvalidSystemOrigin)?;
-            if &*node
-                .0
-                .hyphenated()
-                .encode_lower(&mut uuid::Uuid::encode_buffer())
-                != subject
-            {
-                return Err(AuthorSubjectError::InvalidSystemOrigin);
-            }
+            parse_system_origin(subject)?;
             return Ok(Self::SystemAt(intern_author(
                 Some(crate::account_registry::AccountId(account)),
                 issuer,
@@ -873,25 +836,7 @@ impl AuthorSubject {
         if canonical == Self::SYSTEM_CANONICAL {
             return Ok(Self::SYSTEM);
         }
-        let parts: Vec<String> = serde_json::from_str(canonical)
-            .map_err(|error| AuthorSubjectError::InvalidCanonical(error.to_string()))?;
-        let (account, issuer, subject) = match parts.as_slice() {
-            [issuer, subject] => (None, issuer.clone(), subject.clone()),
-            [account, issuer, subject] => {
-                let uuid = uuid::Uuid::parse_str(account)
-                    .map_err(|error| AuthorSubjectError::InvalidCanonical(error.to_string()))?;
-                (
-                    Some(crate::account_registry::AccountId(uuid)),
-                    issuer.clone(),
-                    subject.clone(),
-                )
-            }
-            _ => {
-                return Err(AuthorSubjectError::InvalidCanonical(
-                    "expected principal or account author".into(),
-                ));
-            }
-        };
+        let (account, issuer, subject) = parse_canonical_parts(canonical)?;
         if issuer == Self::SYSTEM_ISSUER {
             let Some(account) = account else {
                 return Err(AuthorSubjectError::ReservedIssuer(issuer));
@@ -899,18 +844,7 @@ impl AuthorSubject {
             if account != crate::account_registry::SYSTEM_ACCOUNT_ID {
                 return Err(AuthorSubjectError::ReservedAccount);
             }
-            let node = uuid::Uuid::parse_str(&subject)
-                .map(NodeUuid)
-                .map_err(|_| AuthorSubjectError::InvalidSystemOrigin)?;
-            if &*node
-                .0
-                .hyphenated()
-                .encode_lower(&mut uuid::Uuid::encode_buffer())
-                != subject.as_str()
-            {
-                return Err(AuthorSubjectError::InvalidSystemOrigin);
-            }
-            let author = Self::system_at(node);
+            let author = Self::system_at(parse_system_origin(&subject)?);
             if author.canonical() != canonical {
                 return Err(AuthorSubjectError::NonCanonical);
             }
@@ -938,25 +872,7 @@ impl AuthorSubject {
     /// Jazz-reserved issuers are capabilities selected only by verified or
     /// in-process authority paths; serialized callers may never select them.
     pub fn from_untrusted_canonical(canonical: &str) -> Result<Self, AuthorSubjectError> {
-        let parts: Vec<String> = serde_json::from_str(canonical)
-            .map_err(|error| AuthorSubjectError::InvalidCanonical(error.to_string()))?;
-        let (account, issuer, subject) = match parts.as_slice() {
-            [issuer, subject] => (None, issuer.clone(), subject.clone()),
-            [account, issuer, subject] => {
-                let uuid = uuid::Uuid::parse_str(account)
-                    .map_err(|error| AuthorSubjectError::InvalidCanonical(error.to_string()))?;
-                (
-                    Some(crate::account_registry::AccountId(uuid)),
-                    issuer.clone(),
-                    subject.clone(),
-                )
-            }
-            _ => {
-                return Err(AuthorSubjectError::InvalidCanonical(
-                    "expected principal or account author".into(),
-                ));
-            }
-        };
+        let (account, issuer, subject) = parse_canonical_parts(canonical)?;
         let principal = Self::authenticated(&issuer, &subject)?;
         if account.is_some_and(|account| account.is_system()) {
             return Err(AuthorSubjectError::ReservedAccount);
@@ -995,11 +911,45 @@ impl AuthorSubject {
     }
 }
 
-fn principal_is_nonempty(value: &str) -> bool {
-    value
-        .as_bytes()
-        .iter()
-        .any(|byte| !matches!(byte, b'\t' | b'\n' | b'\x0b' | b'\x0c' | b'\r' | b' '))
+/// Parse a system author's subject as its originating node, accepting only the
+/// lowercase hyphenated UUID spelling.
+fn parse_system_origin(subject: &str) -> Result<NodeUuid, AuthorSubjectError> {
+    let node = uuid::Uuid::parse_str(subject)
+        .map(NodeUuid)
+        .map_err(|_| AuthorSubjectError::InvalidSystemOrigin)?;
+    if &*node
+        .0
+        .hyphenated()
+        .encode_lower(&mut uuid::Uuid::encode_buffer())
+        != subject
+    {
+        return Err(AuthorSubjectError::InvalidSystemOrigin);
+    }
+    Ok(node)
+}
+
+/// Split a portable canonical author into `(account, issuer, subject)` without
+/// validating the components.
+fn parse_canonical_parts(
+    canonical: &str,
+) -> Result<(Option<crate::account_registry::AccountId>, String, String), AuthorSubjectError> {
+    let parts: Vec<String> = serde_json::from_str(canonical)
+        .map_err(|error| AuthorSubjectError::InvalidCanonical(error.to_string()))?;
+    match parts.as_slice() {
+        [issuer, subject] => Ok((None, issuer.clone(), subject.clone())),
+        [account, issuer, subject] => {
+            let uuid = uuid::Uuid::parse_str(account)
+                .map_err(|error| AuthorSubjectError::InvalidCanonical(error.to_string()))?;
+            Ok((
+                Some(crate::account_registry::AccountId(uuid)),
+                issuer.clone(),
+                subject.clone(),
+            ))
+        }
+        _ => Err(AuthorSubjectError::InvalidCanonical(
+            "expected principal or account author".into(),
+        )),
+    }
 }
 
 impl PartialOrd for AuthorSubject {
@@ -1207,7 +1157,7 @@ mod tests {
 
     #[test]
     fn system_capability_decode_is_limited_to_the_nullable_permission_descriptor() {
-        use crate::groove::records::{OwnedRecord, Value, ValueType};
+        use crate::records::{OwnedRecord, Value, ValueType};
 
         assert_eq!(
             AuthorSubject::from_value(AuthorSubject::SYSTEM.to_value()).unwrap(),
@@ -1245,7 +1195,7 @@ mod tests {
 
     #[test]
     fn row_author_rejects_noncanonical_system_origin() {
-        use crate::groove::records::{OwnedRecord, Value, ValueType};
+        use crate::records::{OwnedRecord, Value, ValueType};
         let ValueType::Record(descriptor) = RowAuthor::value_type() else {
             unreachable!()
         };
@@ -1411,63 +1361,63 @@ mod tests {
 
 // Durable record-field encodings for these types. They live beside the types
 // so the impls stay coherent once this layer is its own crate.
-groove::impl_record_field_u64!(NodeAlias);
-groove::impl_record_field_u64!(SchemaVersionAlias);
-groove::impl_record_field_uuid!(NodeUuid);
-groove::impl_record_field_uuid!(SchemaFamilyId);
-groove::impl_record_field_uuid!(RowUuid);
-groove::impl_record_field_uuid!(SchemaVersionId);
+crate::impl_record_field_u64!(NodeAlias);
+crate::impl_record_field_u64!(SchemaVersionAlias);
+crate::impl_record_field_uuid!(NodeUuid);
+crate::impl_record_field_uuid!(SchemaFamilyId);
+crate::impl_record_field_uuid!(RowUuid);
+crate::impl_record_field_uuid!(SchemaVersionId);
 
-impl groove::records::RecordField for AuthorSubject {
+impl crate::records::RecordField for AuthorSubject {
     fn read_raw(
         bytes: &[u8],
-        value_type: &groove::records::ValueType,
-    ) -> Result<Self, groove::records::Error> {
+        value_type: &crate::records::ValueType,
+    ) -> Result<Self, crate::records::Error> {
         AuthorSubject::from_value(
-            <groove::records::Value as groove::records::RecordField>::read_raw(bytes, value_type)?,
+            <crate::records::Value as crate::records::RecordField>::read_raw(bytes, value_type)?,
         )
-        .map_err(|_| groove::records::Error::NonCanonicalRecord)
+        .map_err(|_| crate::records::Error::NonCanonicalRecord)
     }
     fn read(
-        record: &groove::records::BorrowedRecord<'_>,
+        record: &crate::records::BorrowedRecord<'_>,
         idx: usize,
-    ) -> Result<Self, groove::records::Error> {
+    ) -> Result<Self, crate::records::Error> {
         AuthorSubject::from_value(record.get_idx(idx)?)
-            .map_err(|_| groove::records::Error::NonCanonicalRecord)
+            .map_err(|_| crate::records::Error::NonCanonicalRecord)
     }
 
-    fn to_value(&self) -> groove::records::Value {
+    fn to_value(&self) -> crate::records::Value {
         (*self).to_value()
     }
 
-    const COLUMN_KIND: groove::records::FieldKind = groove::records::FieldKind::Record;
+    const COLUMN_KIND: crate::records::FieldKind = crate::records::FieldKind::Record;
 }
 
-impl groove::records::RecordField for RowAuthor {
+impl crate::records::RecordField for RowAuthor {
     fn read_raw(
         bytes: &[u8],
-        value_type: &groove::records::ValueType,
-    ) -> Result<Self, groove::records::Error> {
-        let groove::records::ValueType::Record(descriptor) = value_type else {
-            return Err(groove::records::Error::TypeMismatch {
+        value_type: &crate::records::ValueType,
+    ) -> Result<Self, crate::records::Error> {
+        let crate::records::ValueType::Record(descriptor) = value_type else {
+            return Err(crate::records::Error::TypeMismatch {
                 expected: value_type.clone(),
             });
         };
         RowAuthor::from_record(descriptor.bind(bytes))
-            .map_err(|_| groove::records::Error::NonCanonicalRecord)
+            .map_err(|_| crate::records::Error::NonCanonicalRecord)
     }
 
     fn read(
-        record: &groove::records::BorrowedRecord<'_>,
+        record: &crate::records::BorrowedRecord<'_>,
         idx: usize,
-    ) -> Result<Self, groove::records::Error> {
+    ) -> Result<Self, crate::records::Error> {
         RowAuthor::from_record(record.get_record(idx)?)
-            .map_err(|_| groove::records::Error::NonCanonicalRecord)
+            .map_err(|_| crate::records::Error::NonCanonicalRecord)
     }
 
-    fn to_value(&self) -> groove::records::Value {
+    fn to_value(&self) -> crate::records::Value {
         (*self).to_value()
     }
 
-    const COLUMN_KIND: groove::records::FieldKind = groove::records::FieldKind::Record;
+    const COLUMN_KIND: crate::records::FieldKind = crate::records::FieldKind::Record;
 }

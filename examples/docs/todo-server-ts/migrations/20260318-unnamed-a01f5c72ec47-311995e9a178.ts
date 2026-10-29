@@ -1,9 +1,9 @@
-import { schema as s } from "jazz-tools";
+import { schema as s, migration as m } from "jazz-tools";
 
-export default s.defineMigration({
+export default m.defineMigration({
   migrate: {
     todos: {
-      description: s.add.string({ default: null }),
+      description: m.add.string({ default: null }),
     },
   },
   fromHash: "a01f5c72ec47",

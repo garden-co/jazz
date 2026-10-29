@@ -20,7 +20,9 @@ test("catalogue documents every current wallclock case once", () => {
 });
 
 test("every current Divan function in the owned suites has a metadata entry", () => {
-  const paths = [...new Set(benchmarkMetadata.map((m) => m.source))];
+  const paths = [
+    ...new Set(benchmarkMetadata.filter((m) => m.harness !== "vitest").map((m) => m.source)),
+  ];
   for (const path of paths) {
     const source = readFileSync(new URL(path, root), "utf8");
     const functions = [...source.matchAll(/#\[divan::bench\(([\s\S]*?)\)\]\s*fn\s+(\w+)/g)];
@@ -56,11 +58,12 @@ test("every current Divan function in the owned suites has a metadata entry", ()
 test("denominators distinguish transaction count, batch rows, queries and load context", () => {
   assert.equal(getBenchmarkMetadata("stage_plan_add_task_1350")?.work.count, 1350);
   assert.equal(getBenchmarkMetadata("stage_plan_bulk_complete_1350")?.work.unit, "rows updated/s");
-  assert.equal(getBenchmarkMetadata("first_sync_27518_rocksdb")?.work.count, 27518);
   assert.equal(getBenchmarkMetadata("first_sync_local_relay_27518_rocksdb")?.work.count, 27518);
+  assert.equal(getBenchmarkMetadata("first_sync_direct_27518_file")?.work.count, 27518);
+  assert.equal(getBenchmarkMetadata("first_sync_local_relay_27518_file")?.work.count, 27518);
   assert.match(
-    getBenchmarkMetadata("first_sync_27518_rocksdb")!.description,
-    /Member, not anonymous/,
+    getBenchmarkMetadata("first_sync_local_relay_27518_rocksdb")!.description,
+    /Member identity \(not anonymous\)/,
   );
   assert.equal(getBenchmarkMetadata("stage_plan_open_task_detail")?.work.count, 1);
   assert.equal(getBenchmarkMetadata("band_chat_new_message_rooms_open[100]")?.work.count, 1);
@@ -104,8 +107,6 @@ test("former names moved to a nightly target are still measured there", async ()
   const nightly = [
     "examples/stage-plan/benchmarks/benches/nightly.rs",
     "examples/band-book/benchmarks/benches/nightly.rs",
-    "crates/groove/benches/pull_vs_snapshot.rs",
-    "crates/groove/benches/steady_state.rs",
   ].map((path) => readFileSync(new URL(path, root), "utf8"));
   for (const [former, fate] of formerBenchmarks) {
     if (fate.kind !== "nightly") continue;

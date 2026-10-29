@@ -175,7 +175,6 @@ async function createTestContext(
     backendSecret,
     jwtPublicKey: externalJwtPublicKey,
     env: "test",
-    tier: "local",
   });
 
   onTestFinished(async () => {
@@ -221,6 +220,73 @@ async function createConcurrentTestEnv() {
 // ---------------------------------------------------------------------------
 
 describe("forRequest auth and policy", () => {
+  it("uses request-visible transform dependencies and rejects uncertain upsert absence", async () => {
+    const appId = randomUUID();
+    const backendSecret = "dependent-transform-backend";
+    const adminSecret = "dependent-transform-admin";
+    const app = s.defineApp({
+      products: s.table(
+        {
+          owner_id: s.uuid(),
+          unit: s.string().default("cents"),
+          price: s.float().transform({
+            dependsOn: ["unit"],
+            from: (value, context: Readonly<{ unit: string }>) =>
+              context.unit === "cents" ? value / 100 : value,
+            to: (value: number, context: Readonly<{ unit: string }>) =>
+              context.unit === "cents" ? value * 100 : value,
+          }),
+        },
+        {},
+      ),
+    });
+    const permissions = s.definePermissions(app, ({ policy, session }) => {
+      policy.products.allowRead.where({ owner_id: session.user.account });
+      policy.products.allowInsert.where({});
+      policy.products.allowUpdate.where({});
+    });
+    const server = await startRequestTestServer({ appId, backendSecret, adminSecret });
+    onTestFinished(() => server.stop());
+    await deploy({ appId, serverUrl: server.url, adminSecret, schema: app, permissions });
+    const { createJazzContext } = await import("../backend/create-jazz-context.js");
+    const context = createJazzContext({
+      appId,
+      app,
+      permissions,
+      driver: { type: "memory" },
+      serverUrl: server.url,
+      backendSecret,
+      jwtPublicKey: externalJwtPublicKey,
+      env: "test",
+    });
+    onTestFinished(() => context.shutdown());
+    const alice = await createExternalIdentity("alice", server, appId);
+    const bob = await createExternalIdentity("bob", server, appId);
+    const backend = context.asBackend();
+    const hidden = await backend
+      .insert(app.products, { owner_id: bob.user, unit: "dollars", price: 1 })
+      .wait({ tier: "global" });
+    const visible = await backend
+      .insert(app.products, { owner_id: alice.user, unit: "dollars", price: 1 })
+      .wait({ tier: "global" });
+    const scoped = await context.forRequest({
+      headers: { authorization: `Bearer ${alice.token}` },
+    });
+    await expect(scoped.one(app.products.where({ id: hidden.id }))).resolves.toBeNull();
+    await expect(
+      scoped.upsert(app.products, hidden.id, { price: 2 }).wait({ tier: "local" }),
+    ).rejects.toThrow(/cannot establish|unavailable/);
+    await scoped.update(app.products, visible.id, { price: 2 }).wait({ tier: "global" });
+    await expect(backend.one(app.products.where({ id: hidden.id }))).resolves.toMatchObject({
+      price: 1,
+      unit: "dollars",
+    });
+    await expect(backend.one(app.products.where({ id: visible.id }))).resolves.toMatchObject({
+      price: 2,
+      unit: "dollars",
+    });
+  });
+
   /**
    * Alice inserts her own row; then tries to insert with a foreign owner_id.
    * Backend Db sees the row regardless of ownership.
@@ -266,7 +332,7 @@ describe("forRequest auth and policy", () => {
     await vi.waitFor(
       async () => {
         const rows = await aliceDb.all(todoApp.todos.where({ description: scopeTag }), {
-          tier: "global",
+          tier: "remote",
         });
         expect(rows).toEqual([
           expect.objectContaining({ id: row.id, title: "alice-todo", owner_id: alice.user }),
@@ -291,7 +357,7 @@ describe("forRequest auth and policy", () => {
     await vi.waitFor(
       async () => {
         const rows = await backendDb.all(todoApp.todos.where({ description: scopeTag }), {
-          tier: "global",
+          tier: "remote",
         });
         expect(rows).toContainEqual(expect.objectContaining({ id: row.id }));
       },
@@ -458,7 +524,7 @@ describe("forRequest auth and policy", () => {
     await vi.waitFor(
       async () => {
         const rows = await readerBackend.all(todoApp.todos.where({ description: scopeTag }), {
-          tier: "global",
+          tier: "remote",
         });
         expect(rows.map((r) => r.title).sort()).toEqual(["alice-item", "bob-item", "carol-item"]);
       },
@@ -469,9 +535,9 @@ describe("forRequest auth and policy", () => {
     await vi.waitFor(
       async () => {
         const [aliceSession, aliceRequest, bobSession] = await Promise.all([
-          aliceSessionDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "global" }),
-          aliceRequestDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "global" }),
-          bobSessionDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "global" }),
+          aliceSessionDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "remote" }),
+          aliceRequestDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "remote" }),
+          bobSessionDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "remote" }),
         ]);
         expect(aliceSession.map((r) => r.title)).toEqual(["alice-item"]);
         expect(aliceRequest.map((r) => r.title)).toEqual(["alice-item"]);
@@ -528,7 +594,7 @@ describe("forRequest concurrent session isolation", () => {
     await vi.waitFor(
       async () => {
         const rows = await aliceDb.all(todoApp.todos.where({ description: scopeTag }), {
-          tier: "global",
+          tier: "remote",
         });
         expect(rows.map((r) => r.title)).toEqual(["alice-todo"]);
       },
@@ -539,7 +605,7 @@ describe("forRequest concurrent session isolation", () => {
     await vi.waitFor(
       async () => {
         const rows = await bobDb.all(todoApp.todos.where({ description: scopeTag }), {
-          tier: "global",
+          tier: "remote",
         });
         expect(rows.map((r) => r.title)).toEqual(["bob-todo"]);
       },
@@ -576,7 +642,7 @@ describe("forRequest concurrent session isolation", () => {
     await vi.waitFor(
       async () => {
         const rows = await aliceAgain.all(todoApp.todos.where({ description: scopeTag }), {
-          tier: "global",
+          tier: "remote",
         });
         expect(rows.map((r) => r.title)).toEqual(["alice-todo"]);
       },
@@ -630,8 +696,8 @@ describe("forRequest concurrent session isolation", () => {
     await vi.waitFor(
       async () => {
         const [aliceRows, bobRows] = await Promise.all([
-          aliceDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "global" }),
-          bobDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "global" }),
+          aliceDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "remote" }),
+          bobDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "remote" }),
         ]);
         expect(aliceRows.map((r) => r.title)).toEqual(["alice-updated"]);
         expect(bobRows.map((r) => r.title)).toEqual(["bob-updated"]);
@@ -653,7 +719,7 @@ describe("forRequest concurrent session isolation", () => {
     await vi.waitFor(
       async () => {
         const rows = await aliceDb.all(todoApp.todos.where({ description: scopeTag }), {
-          tier: "global",
+          tier: "remote",
         });
         expect(rows.map((row) => row.title)).toEqual(["alice-upserted"]);
       },
@@ -691,7 +757,7 @@ describe("forRequest concurrent session isolation", () => {
     await vi.waitFor(
       async () => {
         const rows = await bobDb.all(todoApp.todos.where({ description: scopeTag }), {
-          tier: "global",
+          tier: "remote",
         });
         expect(rows.map((row) => row.title)).toEqual(["bob-still-writable"]);
       },
@@ -752,8 +818,8 @@ describe("forRequest concurrent session isolation", () => {
     await vi.waitFor(
       async () => {
         const [aliceRows, bobRows] = await Promise.all([
-          aliceDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "global" }),
-          bobDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "global" }),
+          aliceDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "remote" }),
+          bobDb.all(todoApp.todos.where({ description: scopeTag }), { tier: "remote" }),
         ]);
         expect(aliceRows).toEqual([]);
         expect(bobRows).toEqual([]);
@@ -802,8 +868,8 @@ describe("forRequest concurrent session isolation", () => {
     await vi.waitFor(
       async () => {
         const [rows1, rows2] = await Promise.all([
-          aliceDb1.all(todoApp.todos.where({ description: scopeTag }), { tier: "global" }),
-          aliceDb2.all(todoApp.todos.where({ description: scopeTag }), { tier: "global" }),
+          aliceDb1.all(todoApp.todos.where({ description: scopeTag }), { tier: "remote" }),
+          aliceDb2.all(todoApp.todos.where({ description: scopeTag }), { tier: "remote" }),
         ]);
         expect(rows1.map((r) => r.title)).toEqual(["alice-todo"]);
         expect(rows2.map((r) => r.title)).toEqual(["alice-todo"]);
@@ -824,7 +890,7 @@ describe("forRequest concurrent session isolation", () => {
     await vi.waitFor(
       async () => {
         const bobRows = await bobDb.all(todoApp.todos.where({ description: scopeTag }), {
-          tier: "global",
+          tier: "remote",
         });
         expect(bobRows).toHaveLength(1);
       },
@@ -832,8 +898,8 @@ describe("forRequest concurrent session isolation", () => {
     );
 
     const [rows1, rows2] = await Promise.all([
-      aliceDb1.all(todoApp.todos.where({ description: scopeTag }), { tier: "global" }),
-      aliceDb2.all(todoApp.todos.where({ description: scopeTag }), { tier: "global" }),
+      aliceDb1.all(todoApp.todos.where({ description: scopeTag }), { tier: "remote" }),
+      aliceDb2.all(todoApp.todos.where({ description: scopeTag }), { tier: "remote" }),
     ]);
     expect(rows1.map((r) => r.title)).toEqual(["alice-todo"]);
     expect(rows2.map((r) => r.title)).toEqual(["alice-todo"]);
@@ -867,7 +933,7 @@ describe("forRequest concurrent session isolation", () => {
     await vi.waitFor(
       async () => {
         const rows = await aliceDb.all(todoApp.todos.where({ description: scopeTag }), {
-          tier: "global",
+          tier: "remote",
         });
         expect(rows).toHaveLength(1);
       },
@@ -875,7 +941,7 @@ describe("forRequest concurrent session isolation", () => {
     );
 
     const carolRows = await carolDb.all(todoApp.todos.where({ description: scopeTag }), {
-      tier: "global",
+      tier: "remote",
     });
     expect(carolRows).toEqual([]);
   }, 30_000);
@@ -910,7 +976,6 @@ it.each(["table", "relation"] as const)(
       serverUrl: server.url,
       backendSecret,
       env: "test",
-      tier: "local",
       driver: { type: "memory" },
     });
     const reader = createJazzContext({
@@ -920,7 +985,6 @@ it.each(["table", "relation"] as const)(
       serverUrl: server.url,
       backendSecret,
       env: "test",
-      tier: "local",
       driver: { type: "memory" },
     });
     onTestFinished(async () => {
@@ -955,10 +1019,10 @@ it.each(["table", "relation"] as const)(
     const neither = reader.forSession({ ...base, claims: {} });
     for (let round = 0; round < 3; round++) {
       const [rowsA, rowsB, rowsNeither, rowsBackend] = await Promise.all([
-        a.all(query, { tier: "global" }),
-        b.all(query, { tier: "global" }),
-        neither.all(query, { tier: "global" }),
-        reader.asBackend().all(query, { tier: "global" }),
+        a.all(query, { tier: "remote" }),
+        b.all(query, { tier: "remote" }),
+        neither.all(query, { tier: "remote" }),
+        reader.asBackend().all(query, { tier: "remote" }),
       ]);
       expect(rowsA.map((row) => row.title)).toEqual(["room-a"]);
       expect(rowsB.map((row) => row.title)).toEqual(["room-b"]);
@@ -971,18 +1035,18 @@ it.each(["table", "relation"] as const)(
       seenBackend: string[][] = [];
     const stops = [
       a.subscribe(query, (rows) => seenA.push(rows.map((row) => row.title).sort()), {
-        tier: "global",
+        tier: "remote",
       }),
       b.subscribe(query, (rows) => seenB.push(rows.map((row) => row.title).sort()), {
-        tier: "global",
+        tier: "remote",
       }),
       neither.subscribe(query, (rows) => seenNeither.push(rows.map((row) => row.title).sort()), {
-        tier: "global",
+        tier: "remote",
       }),
       reader
         .asBackend()
         .subscribe(query, (rows) => seenBackend.push(rows.map((row) => row.title).sort()), {
-          tier: "global",
+          tier: "remote",
         }),
     ];
     try {
@@ -1032,19 +1096,19 @@ it.each(["table", "relation"] as const)(
           return row;
         });
       expect(
-        await writer.asBackend().all(app.rooms.where({ title: "local-a" }), { tier: "global" }),
+        await writer.asBackend().all(app.rooms.where({ title: "local-a" }), { tier: "remote" }),
       ).toEqual([]);
       const localA: string[][] = [],
         localB: string[][] = [];
       const stopLocalA = a.subscribe(
         query,
         (rows) => localA.push(rows.map((row) => row.title).sort()),
-        { tier: "local" },
+        { tier: "local-first" },
       );
       const stopLocalB = b.subscribe(
         query,
         (rows) => localB.push(rows.map((row) => row.title).sort()),
-        { tier: "local" },
+        { tier: "local-first" },
       );
       try {
         await vi.waitFor(() => {
@@ -1088,7 +1152,6 @@ it("shares explicit backend transport state across scoped Db wrappers", async ()
     serverUrl: server.url,
     backendSecret,
     env: "test",
-    tier: "local",
     driver: { type: "memory" },
   });
   const reader = createJazzContext({
@@ -1098,7 +1161,6 @@ it("shares explicit backend transport state across scoped Db wrappers", async ()
     serverUrl: server.url,
     backendSecret,
     env: "test",
-    tier: "local",
     driver: { type: "memory" },
   });
   onTestFinished(async () => {
@@ -1115,12 +1177,12 @@ it("shares explicit backend transport state across scoped Db wrappers", async ()
   // state; constructing it must not reconnect the shared client.
   const later = reader.asBackend();
   await later.insert(app.notes, { title: "offline-later" }).wait({ tier: "local" });
-  expect(await writer.asBackend().all(app.notes, { tier: "global" })).toEqual([]);
+  expect(await writer.asBackend().all(app.notes, { tier: "remote" })).toEqual([]);
 
   await sibling.reconnect();
   await vi.waitFor(async () => {
     expect(
-      (await writer.asBackend().all(app.notes, { tier: "global" }))
+      (await writer.asBackend().all(app.notes, { tier: "remote" }))
         .map((note) => note.title)
         .sort(),
     ).toEqual(["offline-later", "offline-sibling"]);
@@ -1146,7 +1208,6 @@ it("rejects a scoped remote wait when its context shuts down offline", async () 
     serverUrl: server.url,
     backendSecret,
     env: "test",
-    tier: "local",
     driver: { type: "memory" },
   });
   onTestFinished(() => context.shutdown());
@@ -1154,7 +1215,7 @@ it("rejects a scoped remote wait when its context shuts down offline", async () 
   const owner = context.asBackend();
   const sibling = context.asBackend();
   await owner.disconnect();
-  const pendingRemoteRead = sibling.all(app.notes, { tier: "global" });
+  const pendingRemoteRead = sibling.all(app.notes, { tier: "remote" });
   const rejectedRead = expect(pendingRemoteRead).rejects.toThrow("JazzContext is shutting down");
   const closing = context.shutdown();
   expect(() => sibling.insert(app.notes, { title: "during-close" })).toThrow(

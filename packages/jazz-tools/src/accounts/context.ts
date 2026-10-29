@@ -5,17 +5,28 @@ import {
   accountRegistry,
   accountToken,
   AccountAuthError,
+  isProvisionalAccount,
+  onAccountCredentialBound,
   onAccountInvalidated,
 } from "./enrollment.js";
 import { accountAppId } from "./local-first.js";
-import { createDbWithRuntimeSource, type Db, type DbConfig } from "../runtime/db.js";
+import {
+  createDbWithRuntimeSource,
+  holdCredentialRenewal,
+  releaseUnusedLease,
+  startBrowserWorkerLease,
+  type Db,
+  type DbConfig,
+} from "../runtime/db.js";
 import type { RuntimeSource } from "../runtime/runtime-source.js";
 import {
   internalSessionFromVerifiedReservedJwtPayload,
   parseJwtPayload,
+  retainedAccountSession,
 } from "../runtime/client-session.js";
 import { setTrustedReservedSession } from "../runtime/db-internal-session.js";
 import { AuthRenewalBackoff, authRetryDelay } from "../runtime/auth-renewal-backoff.js";
+import { isRenewableAuthFailure } from "../runtime/auth-state.js";
 
 /** Public clients always select an enrolled account, never an unverified principal. */
 export type AccountDbConfig = Omit<
@@ -66,6 +77,21 @@ function accountContextScope(config: AccountDbConfig): string {
 export async function resolveAccountRuntimeConfig(config: AccountDbConfig): Promise<DbConfig> {
   const registry = accountContextScope(config);
   const { account, ...runtimeConfig } = config;
+  if (isProvisionalAccount(account)) {
+    // Open the retained account's local data now. With no credential this
+    // context does not connect upstream, and its writes stay local until the
+    // first provider JWT replaces this session and starts its connection. In a
+    // shared browser worker another tab's credential for the same account may
+    // sync them sooner. Local policies see no provider claims until then.
+    const retained: DbConfig = {
+      ...runtimeConfig,
+      accountId: account.id,
+      accountRegistryAuthority: registry,
+    };
+    setTrustedReservedSession(retained, retainedAccountSession(account.identity));
+    admitAccountConfig(retained, account);
+    return retained;
+  }
   const jwtToken = await accountToken(account, registry);
   const resolved: DbConfig = {
     ...runtimeConfig,
@@ -103,10 +129,22 @@ export async function createAccountDbWithRuntimeSource(
         .catch((error) => console.error("Account context shutdown failed", error));
     }
   });
+  let stopBound: (() => void) | undefined;
+  let lease: ReturnType<typeof startBrowserWorkerLease>;
   try {
+    // The browser root is named by the account alone: boot its worker while
+    // the account's credential resolves.
+    const { account: _account, ...scope } = config;
+    lease = startBrowserWorkerLease(
+      { ...scope, accountId: account.id, accountRegistryAuthority: accountRegistry(account) },
+      runtimeSource,
+    );
     const resolved = await resolveAccountRuntimeConfig(config);
-    const jwtToken = resolved.jwtToken!;
-    db = await createDbWithRuntimeSource(resolved, runtimeSource);
+    const jwtToken = resolved.jwtToken;
+    // From here the runtime adopts the lease or returns it itself.
+    const opening = lease;
+    lease = undefined;
+    db = await createDbWithRuntimeSource(resolved, runtimeSource, opening);
     if (invalidated) {
       await db.shutdown();
       throw new AccountAuthError("account_logged_out");
@@ -127,20 +165,25 @@ export async function createAccountDbWithRuntimeSource(
     };
     const schedule = (token: string) => {
       const expires = parseJwtPayload(token)?.exp;
-      if (typeof expires !== "number" || !Number.isFinite(expires) || expires * 1000 <= Date.now())
+      if (typeof expires !== "number" || !Number.isFinite(expires)) return;
+      // Already expired, as when the app slept past its renewal timer (mobile
+      // platforms suspend timers in the background): renew now rather than
+      // leave nothing to renew it (#4248).
+      if (expires * 1000 <= Date.now()) {
+        renew();
         return;
+      }
       // A token that lives to its scheduled refresh ends any renewal streak.
       scheduleIn(Math.max(1000, Math.min(2_147_483_647, (expires * 1000 - Date.now()) * 0.8)), () =>
         renewals.reset(),
       );
     };
-    const renew = () => {
-      const delay = renewals.next();
-      if (delay === 0) void refresh();
-      else scheduleIn(delay);
-    };
+    // Always through the timer, never inline: `schedule()` runs inside a
+    // refresh, which an inline refresh would find still running and skip.
+    const renew = () => scheduleIn(renewals.next());
     const refresh = async () => {
-      if (refreshing || stopped) return;
+      // A retained account refreshes when revalidation binds its credential.
+      if (refreshing || stopped || isProvisionalAccount(account)) return;
       refreshing = true;
       try {
         const token = await opened.refreshAccountAuth(account);
@@ -156,18 +199,34 @@ export async function createAccountDbWithRuntimeSource(
         refreshing = false;
       }
     };
+    // The refresh cycle below renews every refusal a new token can fix.
+    const releaseRenewal = holdCredentialRenewal(opened);
     const stopAuth = opened.onAuthChanged((state) => {
-      if (state.error === "expired" || state.error === "missing") renew();
+      // A refused credential renews whatever the server called it: a
+      // rotated signing key reads as "invalid" until a new token is issued.
+      // A new token cannot fix an auth mode the app has turned off or a
+      // revoked account identity.
+      if (state.error && isRenewableAuthFailure(state.error)) renew();
+    });
+    stopBound = onAccountCredentialBound(account, () => {
+      renewals.reset();
+      failedRefreshes = 0;
+      void refresh();
     });
     opened.onShutdown(() => {
       stopped = true;
       if (timer) clearTimeout(timer);
       stopAuth();
+      releaseRenewal();
+      stopBound?.();
       unsubscribe();
     });
-    schedule(jwtToken);
+    if (jwtToken) schedule(jwtToken);
     return opened;
   } catch (error) {
+    stopBound?.();
+    // Return a lease the runtime never received before tearing it down.
+    await releaseUnusedLease(lease);
     unsubscribe();
     if (!db) await runtimeSource.shutdown();
     throw error;

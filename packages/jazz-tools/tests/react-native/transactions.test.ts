@@ -10,23 +10,30 @@ const app = schema.defineApp({
 // Browser donor: db.transaction-reads.test.ts, snapshot anchoring, staged
 // insert/update/delete isolation, rollback, and mergeable read-own-writes.
 describe("React Native transaction reads through the native C ABI", () => {
-  for (const kind of ["mergeable", "exclusive"] as const) {
+  for (const kind of ["mergeable", "serializable"] as const) {
     it(`${kind} isolates simultaneous staged writes and restores the base after rollback`, async () => {
       await withNativeRelayFixture(app, {}, async (fixture) => {
         const db = await fixture.createDb();
         const base = db.insert(app.todos, { title: "base", done: false }).value;
         await expect(db.all(app.todos)).resolves.toEqual([base]);
-        const first = kind === "exclusive" ? db.beginExclusiveTransaction() : db.beginTransaction();
+        const first =
+          kind === "serializable" ? db.beginSerializableTransaction() : db.beginTransaction();
         const second =
-          kind === "exclusive" ? db.beginExclusiveTransaction() : db.beginTransaction();
+          kind === "serializable" ? db.beginSerializableTransaction() : db.beginTransaction();
         first.update(app.todos, base.id, { title: "first draft" });
         second.update(app.todos, base.id, { title: "second draft" });
-        const draft = first.insert(app.todos, { title: "inserted draft", done: true });
+        const draft = first.insert(app.todos, {
+          title: "inserted draft",
+          done: true,
+        });
         expect(await first.all(app.todos.orderBy("title"))).toEqual([
           { ...base, title: "first draft" },
           draft,
         ]);
-        expect(await second.one(app.todos)).toEqual({ ...base, title: "second draft" });
+        expect(await second.one(app.todos)).toEqual({
+          ...base,
+          title: "second draft",
+        });
         expect(await db.one(app.todos)).toEqual(base);
         first.delete(app.todos, base.id);
         expect(await first.all(app.todos)).toEqual([draft]);
@@ -53,13 +60,19 @@ describe("React Native transaction reads through the native C ABI", () => {
     });
   });
 
-  it("anchors an exclusive snapshot at begin while ordinary reads advance", async () => {
+  // A replica pins a serializable snapshot at the transaction's first read
+  // (the authority's state then, or its own known cut offline).
+  it("keeps a serializable snapshot pinned while ordinary reads advance", async () => {
     await withNativeRelayFixture(app, {}, async (fixture) => {
       const db = await fixture.createDb();
-      const before = db.insert(app.todos, { title: "before", done: false }).value;
+      const before = db.insert(app.todos, {
+        title: "before",
+        done: false,
+      }).value;
       await db.all(app.todos);
-      const tx = db.beginExclusiveTransaction();
-      db.insert(app.todos, { title: "after", done: false });
+      const tx = db.beginSerializableTransaction();
+      expect(await tx.all(app.todos)).toEqual([before]);
+      await db.insert(app.todos, { title: "after", done: false }).wait({ tier: "local" });
       expect(await tx.all(app.todos)).toEqual([before]);
       expect(await db.all(app.todos)).toHaveLength(2);
       await tx.rollback();
@@ -82,7 +95,7 @@ describe("React Native transaction reads through the native C ABI", () => {
   });
 });
 
-it("waits for native upstream authority before accepting an exclusive commit", async () => {
+it("waits for native upstream authority before accepting a serializable commit", async () => {
   const { startLocalJazzServer, startTestJwtIssuer, deploy } =
     await import("../../src/testing/index.js");
   const issuer = await startTestJwtIssuer();
@@ -116,9 +129,9 @@ it("waits for native upstream authority before accepting an exclusive commit", a
           .wait({ tier: "global" });
         await db.all(app.todos, { tier: ReadTier.Remote });
         const applicationOpens = openForeground.mock.calls.length;
-        // The exclusive read hydrates its snapshot online; the commit is made
+        // The serializable read hydrates its snapshot online; the commit is made
         // offline. A read made offline could not vouch for the snapshot.
-        const tx = db.beginExclusiveTransaction();
+        const tx = db.beginSerializableTransaction();
         tx.update(app.todos, base.id, { title: "accepted" });
         expect(await tx.one(app.todos)).toEqual({ ...base, title: "accepted" });
         await db.disconnect();
@@ -149,11 +162,14 @@ it("waits for native upstream authority before accepting an exclusive commit", a
         appId: server.appId,
         session: {
           issuer: issuer.issuer,
-          user_id: "rn-exclusive-writer",
+          user_id: "rn-serializable-writer",
           claims: { role: "user" },
           authMode: "external",
         },
-        upstream: { serverUrl: server.url, jwt: issuer.jwtForUser("rn-exclusive-writer") },
+        upstream: {
+          serverUrl: server.url,
+          jwt: issuer.jwtForUser("rn-serializable-writer"),
+        },
       },
     );
   } finally {

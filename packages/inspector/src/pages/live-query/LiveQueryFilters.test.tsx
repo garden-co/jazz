@@ -22,9 +22,9 @@ describe("LiveQueryFilters", () => {
     expect(screen.getByRole("option", { name: "projects" })).not.toBeNull();
     expect(screen.getByRole("option", { name: "todos" })).not.toBeNull();
     expect(screen.getByRole("option", { name: "All tiers" })).not.toBeNull();
-    expect(screen.getByRole("option", { name: "local" })).not.toBeNull();
+    expect(screen.getByRole("option", { name: "local-first" })).not.toBeNull();
     expect(screen.queryByRole("option", { name: "edge" })).toBeNull();
-    expect(screen.getByRole("option", { name: "global" })).not.toBeNull();
+    expect(screen.getByRole("option", { name: "remote" })).not.toBeNull();
   });
 
   it("calls change handlers when filters change", () => {
@@ -45,10 +45,10 @@ describe("LiveQueryFilters", () => {
       target: { value: "todos" },
     });
     fireEvent.change(screen.getByLabelText("Filter by tier"), {
-      target: { value: "global" },
+      target: { value: "remote" },
     });
 
     expect(onTableChange).toHaveBeenCalledWith("todos");
-    expect(onTierChange).toHaveBeenCalledWith("global");
+    expect(onTierChange).toHaveBeenCalledWith("remote");
   });
 });

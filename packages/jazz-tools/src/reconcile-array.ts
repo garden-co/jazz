@@ -7,6 +7,25 @@ import {
 } from "./runtime/subscription-manager.js";
 
 /**
+ * Apply a subscription delta to an adapter's own copy of the rows: in place when
+ * it has one, otherwise into a fresh array (a copy of `all` on reset), which is
+ * returned. The fresh array never aliases the cache entry's shared rows.
+ */
+export function applyDeltaToRows<T extends { id: string }>(
+  rows: T[] | undefined,
+  delta: SubscriptionDelta<T>,
+): T[] {
+  if (rows) {
+    applyDelta(rows, delta);
+    return rows;
+  }
+  if (delta.reset) return [...delta.all];
+  const created: T[] = [];
+  applyDelta(created, delta);
+  return created;
+}
+
+/**
  * Apply a subscription delta to a reactive array, deep-merging only
  * the rows that actually changed.
  *

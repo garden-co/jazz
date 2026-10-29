@@ -42,23 +42,23 @@ describe("JSON parent includes through the native backend", () => {
         const child = await db
           .insert(app.children, { parentId: parent.id, name: "Note" })
           .wait({ tier: "global" });
-        expect(await db.all(app.parents, { tier: "global" })).toMatchObject([
+        expect(await db.all(app.parents, { tier: "remote" })).toMatchObject([
           { id: parent.id, metadata: {} },
         ]);
-        expect(await db.all(app.children, { tier: "global" })).toMatchObject([{ id: child.id }]);
+        expect(await db.all(app.children, { tier: "remote" })).toMatchObject([{ id: child.id }]);
         expect(
           await db.all(
             app.parents.select("id").include({ childrenViaParent: app.children.select("id") }),
-            { tier: "global" },
+            { tier: "remote" },
           ),
         ).toEqual([{ id: parent.id, childrenViaParent: [{ id: child.id }] }]);
         expect(
-          await db.all(app.parents.include({ childrenViaParent: true }), { tier: "global" }),
+          await db.all(app.parents.include({ childrenViaParent: true }), { tier: "remote" }),
         ).toMatchObject([{ id: parent.id, metadata: {}, childrenViaParent: [{ id: child.id }] }]);
         const metadata = { body: "x".repeat(100_000) };
         await db.update(app.parents, parent.id, { metadata }).wait({ tier: "global" });
         expect(
-          await db.all(app.parents.include({ childrenViaParent: true }), { tier: "global" }),
+          await db.all(app.parents.include({ childrenViaParent: true }), { tier: "remote" }),
         ).toMatchObject([{ id: parent.id, metadata, childrenViaParent: [{ id: child.id }] }]);
       } finally {
         await owner?.close();

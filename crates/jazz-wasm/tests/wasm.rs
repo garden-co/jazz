@@ -6,15 +6,16 @@
 
 use std::collections::BTreeMap;
 
-use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value};
+use jazz::binding_codec::{self, DecodedRowBatch};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::Query;
+use jazz::records::{RecordDescriptor, Value};
 use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchema};
 use jazz_wasm::{
     current_timestamp, derive_user_id, generate_id, mint_anonymous_token, mint_local_first_token,
     WasmDb,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::*;
@@ -70,24 +71,6 @@ fn test_identity_helpers_reject_invalid_seed() {
     assert!(message.contains("seed"));
 }
 
-#[derive(Deserialize)]
-struct DecodedRow {
-    raw: Vec<u8>,
-}
-
-#[derive(Deserialize)]
-struct DecodedRowBatch {
-    table: String,
-    descriptor: RecordDescriptor,
-    rows: Vec<DecodedRow>,
-}
-
-#[derive(Deserialize)]
-struct DecodedSubscriptionDelta {
-    added: Vec<DecodedRowBatch>,
-    updated: Vec<DecodedRowBatch>,
-}
-
 // This mirrors the private postcard input envelope exactly. It is intentionally
 // local to the binding receipt: making the config a Rust API would freeze an
 // implementation detail that JavaScript only ever sees as bytes.
@@ -110,8 +93,8 @@ fn fixture_db() -> WasmDb {
         .table(
             TableSchema::builder("values")
                 .column("text", ColumnType::Text)
-                .column("bytes", ColumnType::Bytea)
-                .column("json", ColumnType::Json { schema: None })
+                .nullable_column("bytes", ColumnType::Bytea)
+                .nullable_column("json", ColumnType::Json { schema: None })
                 .policies(
                     TablePolicies::new()
                         .with_select(PolicyExpr::True)
@@ -143,7 +126,7 @@ fn fixture_db() -> WasmDb {
 /// shared `WasmDb` receiver. `close` must therefore be callable through a
 /// shared reference and remain idempotent.
 #[wasm_bindgen_test]
-async fn close_is_idempotent_without_an_exclusive_wasm_receiver() {
+async fn close_is_idempotent_without_an_serializable_wasm_receiver() {
     let db = fixture_db();
 
     let closing = db.close();
@@ -240,7 +223,15 @@ async fn next_stream_chunk(reader: &JsValue) -> JsValue {
         .expect("call reader.read")
         .dyn_into::<js_sys::Promise>()
         .expect("reader.read returns promise");
-    await_promise(promise).await
+    let result = await_promise(promise).await;
+    assert_ne!(
+        js_sys::Reflect::get(&result, &JsValue::from_str("done"))
+            .expect("read result has done")
+            .as_bool(),
+        Some(true),
+        "the subscription stream ended early"
+    );
+    js_sys::Reflect::get(&result, &JsValue::from_str("value")).expect("read result has value")
 }
 
 fn stream_reader(stream: JsValue) -> JsValue {
@@ -251,7 +242,7 @@ fn stream_reader(stream: JsValue) -> JsValue {
     get_reader.call0(&stream).expect("obtain stream reader")
 }
 
-fn stream_delta(chunk: &JsValue) -> DecodedSubscriptionDelta {
+fn stream_delta(chunk: &JsValue) -> (Vec<DecodedRowBatch>, Vec<DecodedRowBatch>) {
     assert_eq!(
         js_sys::Reflect::get(chunk, &JsValue::from_str("type"))
             .expect("subscription chunk type")
@@ -265,23 +256,21 @@ fn stream_delta(chunk: &JsValue) -> DecodedSubscriptionDelta {
         .dyn_into::<js_sys::Uint8Array>()
         .expect("subscription delta is Uint8Array")
         .to_vec();
-    postcard::from_bytes(&bytes).expect("decode public subscription delta")
+    binding_codec::decode_subscription_delta_rows(&bytes).expect("decode public subscription delta")
 }
 
 fn values_from_batches(batches: &[DecodedRowBatch]) -> BTreeMap<String, Value> {
-    let batch = batches
+    batches
         .iter()
         .find(|batch| batch.table == "values" && !batch.rows.is_empty())
-        .expect("values output batch");
-    let values = BorrowedRecord::new(&batch.rows[0].raw, &batch.descriptor)
-        .to_values()
-        .expect("decode logical public row");
-    batch
-        .descriptor
-        .fields()
+        .expect("values output batch")
+        .rows[0]
+        .cells
         .iter()
-        .zip(values)
-        .filter_map(|(field, value)| field.name.as_ref().map(|name| (name.clone(), value)))
+        .map(|(name, value)| match value {
+            Value::Nullable(Some(value)) => (name.clone(), (**value).clone()),
+            value => (name.clone(), value.clone()),
+        })
         .collect()
 }
 
@@ -299,8 +288,8 @@ async fn public_wasm_large_values_hydrate_before_read_and_subscription_encoding(
 
     // The initial empty delta proves that the stream is live before the write.
     let initial = next_stream_chunk(&reader).await;
-    let initial_delta = stream_delta(&initial);
-    assert!(initial_delta.added.is_empty() && initial_delta.updated.is_empty());
+    let (added, updated) = stream_delta(&initial);
+    assert!(added.is_empty() && updated.is_empty());
 
     let row = RowUuid::from_bytes([0x71; 16]).0.as_bytes().to_vec();
     let text = format!("{}🙂", "text-".repeat(20_000));
@@ -366,12 +355,8 @@ async fn public_wasm_large_values_hydrate_before_read_and_subscription_encoding(
     // or let a later update overtake it.
     let mut subscription_values = None;
     for _ in 0..3 {
-        let delta = stream_delta(&next_stream_chunk(&reader).await);
-        let batches = if delta.added.is_empty() {
-            &delta.updated
-        } else {
-            &delta.added
-        };
+        let (added, updated) = stream_delta(&next_stream_chunk(&reader).await);
+        let batches = if added.is_empty() { &updated } else { &added };
         subscription_values = Some(values_from_batches(batches));
     }
     let subscription_values =
@@ -391,28 +376,29 @@ async fn public_wasm_large_values_hydrate_before_read_and_subscription_encoding(
 
     let sync_opts = serde_wasm_bindgen::to_value(&serde_json::json!({ "sync": true }))
         .expect("encode synchronous read options");
-    let synchronous_error = db
+    // SQLite holds large values in the row's database, so a synchronous
+    // read returns them directly.
+    let synchronous = db
         .all(query.clone(), sync_opts, None, None, JsValue::UNDEFINED)
-        .expect_err("synchronous public read must reject an indirect scalar");
-    assert!(
-        synchronous_error
-            .as_string()
-            .is_some_and(|message| message.contains("cannot materialize a large value")),
-        "the legacy synchronous path must fail helpfully instead of leaking tag 14 to the logical decoder"
+        .expect("synchronous public read")
+        .dyn_into::<js_sys::Uint8Array>()
+        .expect("synchronous read returns Uint8Array")
+        .to_vec();
+    let synchronous_values = values_from_batches(
+        &binding_codec::decode_rows(&synchronous).expect("decode synchronous read rows"),
     );
+    assert_eq!(synchronous_values, subscription_values);
 
+    // A read with everything it needs locally completes at once: `all`
+    // returns `Uint8Array | PendingNativeRead`.
     let read = db
         .all(query, JsValue::NULL, None, None, JsValue::UNDEFINED)
-        .expect("start public read")
-        .dyn_into::<js_sys::Promise>()
-        .expect("asynchronous all returns a promise");
-    let read = await_promise(read).await;
+        .expect("start public read");
     let read_bytes = read
         .dyn_into::<js_sys::Uint8Array>()
         .expect("read resolves Uint8Array")
         .to_vec();
-    let batches: Vec<DecodedRowBatch> =
-        postcard::from_bytes(&read_bytes).expect("decode public read rows");
+    let batches = binding_codec::decode_rows(&read_bytes).expect("decode public read rows");
     let read_values = values_from_batches(&batches);
     assert_eq!(read_values.get("text"), Some(&Value::String(text)));
     assert_eq!(read_values.get("bytes"), Some(&Value::Bytes(bytes)));

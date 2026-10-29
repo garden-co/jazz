@@ -230,6 +230,22 @@ const largeSchema = {
 };
 
 describe("typed app prototype", () => {
+  it("exposes history queries without reserving the table name history", () => {
+    const historyApp = s.defineApp({ history: s.table({ title: s.string() }, {}) });
+
+    expect(historyApp.history._table).toBe("history");
+    expect(historyApp.$history.history._table).toBe("history.history");
+    expect(historyApp.$history.history._schema).toBe(historyApp.wasmSchema);
+    expect(Object.keys(historyApp.wasmSchema)).toEqual(["history"]);
+    expect(Object.keys(historyApp.$history)).toEqual(["history"]);
+  });
+
+  it("reserves $history for the history namespace", () => {
+    expect(() => s.defineApp({ $history: s.table({ title: s.string() }, {}) })).toThrow(
+      'Schema name "$history" is reserved for Jazz schema controls.',
+    );
+  });
+
   it.each(["union", "wasmSchema", "schemaAst"])(
     "rejects a table named %s instead of masking an app control",
     (tableName) => {
@@ -451,12 +467,17 @@ describe("typed app prototype", () => {
                 },
               },
               {
-                label: "derived:107bcfc3905e1cbe15814d71882c4e518afdcf4d1137d36dd28e58ed8d8ac8d9",
+                label: "derived:542367f64bd5953a37a1d016b833a4a4539f4fe6937567e2aafb939f42bba6d8",
                 input: {
                   table: "teams",
                   conditions: [],
                   hops: [],
                   gather: {
+                    seed: {
+                      table: "teams",
+                      conditions: [{ column: "name", op: "eq", value: "admins" }],
+                      hops: [],
+                    },
                     max_depth: 2,
                     step_table: "team_edges",
                     step_current_column: "child_team",

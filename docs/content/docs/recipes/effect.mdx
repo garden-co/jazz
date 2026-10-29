@@ -87,7 +87,7 @@ const addGroceries = Effect.gen(function* () {
 });
 ```
 
-`jazz.exclusiveTransaction` also waits for the authority's verdict and fails with `JazzWriteRejected` on a
+`jazz.serializableTransaction` also waits for the authority's verdict and fails with `JazzWriteRejected` on a
 conflict, so it composes with `Effect.retry`.
 
 ## On the server

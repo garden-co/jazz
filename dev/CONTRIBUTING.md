@@ -4,7 +4,7 @@
 
 ### sccache (strongly recommended)
 
-[sccache](https://github.com/mozilla/sccache) caches compiler invocations across feature sets, profiles, and branches. Without it, crates with heavy C dependencies (rocksdb) recompile on every build.
+[sccache](https://github.com/mozilla/sccache) caches compiler invocations across feature sets, profiles, and branches. Without it, crates with C dependencies (the bundled SQLite) recompile on every build.
 
 ```sh
 cargo install sccache   # or: brew install sccache
@@ -16,22 +16,22 @@ Then add to your shell profile (`~/.zshrc`, `~/.bashrc`, etc.):
 export RUSTC_WRAPPER=sccache
 ```
 
-### RocksDB build requirements
+### Native build requirements
 
-RocksDB is compiled from source on the first build (cached by `sccache` afterwards).
-This requires a working C/C++ toolchain and `libclang` for `bindgen`:
+The bundled SQLite is compiled from source on the first build (cached by `sccache` afterwards).
+This requires a working C compiler:
 
 - macOS: `xcode-select --install` is enough.
-- Linux: install `libclang-dev` (Debian/Ubuntu) or `clang-devel` (Fedora).
+- Linux: install `build-essential` (Debian/Ubuntu) or `gcc` (Fedora).
 
 ## API documentation
 
 Keep API documentation attached to an authoritative, maintained source rather
 than committing a point-in-time export catalogue. The public application guide
 is in `docs/content/docs/`; its runnable examples are the adjacent
-`examples/docs/` projects. The new-core Rust contract is
-`crates/jazz/SPEC/13_db_api.md`, with the engine and incremental-maintenance
-contracts in `crates/jazz/SPEC/` and `crates/groove/SPEC/`.
+`examples/docs/` projects. The Rust contract is
+`crates/jazz/SPEC/13_db_api.md`, with the other engine contracts in
+`crates/jazz/SPEC/`.
 
 For a package's exact TypeScript surface, use its `package.json` export map and
 the emitted declaration files for the release being consumed. For Rust, use the
@@ -55,12 +55,27 @@ own explicit gates. Run `pnpm test:tooling:real` for the slower real-Cargo
 probe of that fallback. Direct invocations of
 `node dev/scripts/clippy-staged.mjs` remain available for local debugging.
 
+### CLI integration tests
+
+CLI integration scenarios are partitioned by behavior across focused test files;
+keep every scenario in exactly one suite. Shared helpers live in the private
+`tests/cli/fixtures.ts` factory, which creates isolated temporary roots per file
+and cleans up temporary files and stubbed globals after each test.
+
 ### Running tests
 
 ```sh
 pnpm test          # everything (via turbo)
 cargo test -p jazz --no-default-features --features testing,transport-compression-zstd   # rust core only
 ```
+
+### Better Auth adapter test fixtures
+
+Reuse the generated fixture schema and permissions when testing adapter
+behaviour. Each case still owns a fresh server, client context and rows, and
+publishes its catalogue through the real deployment interface. Keep filesystem
+schema-loading coverage in the CLI and loader suites rather than repeating it
+in adapter setup.
 
 ### Focus one Rust test safely
 
@@ -69,13 +84,9 @@ features it will run. A filter must resolve to exactly one inventory entry; the
 wrapper then invokes that canonical name with Cargo's `--exact`. It refuses an
 empty or ambiguous selection before a test runs, prints the selected binary,
 feature and cache context, and separately reports inventory/compile and test-run
-elapsed time. This is useful for files under the `jazz-node` crate's
-`src/node/tests/`: their test names are wrapped as `node::tests::harness::…`
-(rather than retaining their source file in the module path), but a distinctive
-test-name suffix is enough for `dev/t -p jazz-node` to discover and run the
-canonical name. A filter that already starts with `node::` or `peer::` selects
-`jazz-node` without `-p`, and one starting with `db::`, `binding_codec::`,
-`result_tree::` or `foreground_node_lease::` selects `jazz-db`.
+elapsed time. A distinctive test-name suffix is enough to discover and run the
+canonical name. A filter that starts with `db::` or `binding_codec::` selects
+`jazz-db` without `-p`.
 
 ```sh
 # Default: Jazz library tests, substring matching.
@@ -84,11 +95,11 @@ dev/t subscription::tests::reopens
 # Fully-qualified exact library test.
 dev/t --exact db::tests::round_trips
 
-# A node test: resolve its canonical harness path from the unique suffix.
-dev/t -p jazz-node query_rows_at_lowers_filters_against_historical_current_rows
+# A layer-crate test: resolve its canonical path from the unique suffix.
+dev/t -p jazz-types row_author_rejects_noncanonical_system_origin
 
 # An integration target is explicit, so Cargo cannot search an unintended bin.
-dev/t --test incremental_delivery_canary maintained_relation -- --nocapture
+dev/t --test integration include_live::renaming_a_sender -- --nocapture
 ```
 
 Run `pnpm test:focused-rust` to test the wrapper with a mocked Cargo inventory.

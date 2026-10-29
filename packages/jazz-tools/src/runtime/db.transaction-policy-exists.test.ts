@@ -39,7 +39,7 @@ async function withChief(
     });
     const account = await localAccountConfig(server.appId, server.url);
     db = await createDb(account);
-    await db.all(app.tasks, { tier: "global" });
+    await db.all(app.tasks, { tier: "remote" });
     await run(db, account.account.id);
   } finally {
     await db?.shutdown();
@@ -56,21 +56,21 @@ it("accepts a task inserted in the same transaction as the show it requires", as
     });
     const { show, task } = await result.wait({ tier: "global" });
 
-    expect(await db.all(app.tasks, { tier: "global" })).toEqual([
+    expect(await db.all(app.tasks, { tier: "remote" })).toEqual([
       { id: task.id, showId: show.id, title: "Load-in" },
     ]);
     expect(await db.all(app.tasks)).toEqual([{ id: task.id, showId: show.id, title: "Load-in" }]);
   });
 }, 60_000);
 
-it("accepts the same rows in one exclusive transaction", async () => {
+it("accepts the same rows in one serializable transaction", async () => {
   await withChief(async (db, me) => {
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     const show = tx.insert(app.shows, { chiefAccount: me });
     const task = tx.insert(app.tasks, { showId: show.id, title: "Load-in" });
     await tx.commit().wait();
 
-    expect(await db.all(app.tasks, { tier: "global" })).toEqual([
+    expect(await db.all(app.tasks, { tier: "remote" })).toEqual([
       { id: task.id, showId: show.id, title: "Load-in" },
     ]);
   });
@@ -90,7 +90,7 @@ it("rejects a task whose show the same transaction inserts and deletes, on clien
     );
     expect(rejection).toBeInstanceOf(PersistedWriteRejectedError);
     expect(rejection).toMatchObject({ code: "permission_denied" });
-    expect(await db.all(app.tasks, { tier: "global" })).toEqual([]);
+    expect(await db.all(app.tasks, { tier: "remote" })).toEqual([]);
     await expect.poll(() => db.all(app.tasks)).toEqual([]);
   });
 }, 60_000);
@@ -106,9 +106,9 @@ it("accepts a task whose committed show the same transaction deletes", async () 
     });
     const task = await result.wait({ tier: "global" });
 
-    expect(await db.all(app.tasks, { tier: "global" })).toEqual([
+    expect(await db.all(app.tasks, { tier: "remote" })).toEqual([
       { id: task.id, showId: show.id, title: "Strike" },
     ]);
-    expect(await db.all(app.shows, { tier: "global" })).toEqual([]);
+    expect(await db.all(app.shows, { tier: "remote" })).toEqual([]);
   });
 }, 60_000);

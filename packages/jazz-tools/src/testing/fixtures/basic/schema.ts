@@ -1,10 +1,10 @@
-import { col } from "../../../dsl.js";
+import { schema as s } from "../../../schema-namespace.js";
 import { defineApp, type Schema, type App } from "../../../typed-app.js";
 
 const schema = {
   todos: {
-    title: col.string(),
-    done: col.boolean(),
+    title: s.string(),
+    done: s.boolean(),
   },
 };
 

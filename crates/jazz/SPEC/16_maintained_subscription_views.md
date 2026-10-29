@@ -40,7 +40,7 @@ MUST lower to a groove graph whose terminal rows describe:
 The peer state machine consumes that terminal stream, updates its per-peer
 shipped/result indexes, and emits `ViewUpdate`s. It MAY deduplicate already
 shipped complete transaction payloads into
-`peer_payload_inventory.complete_tx_payloads`. View-complete exclusive payloads
+`peer_payload_inventory.complete_tx_payloads`. View-complete serializable payloads
 are coverage facts for the maintained subscription view only; they do not become
 complete transaction payload refs. The peer state machine MUST NOT answer a live
 subscription by running an independent semantic scan.
@@ -90,8 +90,9 @@ Subscription membership, source-closure generations, live settlement and
 body-dedup cursors are process-local. Reopen does not recover any authority
 scope or delta predecessor. Local-first evaluates eligible local data plus
 pending writes. Remote waits for a fresh complete v2 supporting snapshot;
-local-first-unless-empty is local-first and waits for that snapshot only to
-replace an empty opening while a remote can answer (ch. 13). Retaining native bytes does not prove remote membership.
+local-first with a server wait is local-first and waits for that snapshot,
+at most until its deadline, only to replace its opening while a remote can
+answer (ch. 13). Retaining native bytes does not prove remote membership.
 
 Local-current queries read retained Global-current and Ahead-current rows;
 they do not require a recovered node-wide read timestamp. Native transaction
@@ -99,22 +100,6 @@ recovery preserves sparse causal dots on partial replicas. Neither the maximum
 retained transaction time nor a discarded subscription cursor is promoted to
 a complete-history frontier. Only history-complete nodes have that guarantee;
 remote query settlement remains an exact live subscription claim.
-
-The reserved `jazz_known_state_facts` and `jazz_settled_program_facts` stores
-are opened solely to delete historical cache entries. Their JPFK/JSIR payloads,
-keys and cursors are not interpreted as authority evidence, including malformed
-retired payloads. No new scope writer, encoder or decoder exists. The closed
-storage profile retains `jazz.subscription-program-fact-key.v1` as a reserved
-legacy family ID so old roots open; this does not introduce a new encoding or
-reuse that ID for new values. Native storage encodings and manifests remain
-unchanged. Shared policy/availability metadata has independent consumers and
-is not discarded with the scope cache.
-
-`legacy_scope_caches_are_discarded_without_losing_native_or_pending_rows`
-pins both retired byte generations and native/pending retention;
-`retired_scope_payloads_never_restore_authority` covers malformed retired
-payloads. Cleanup must finish successfully before open returns; partial cleanup
-is safe to retry because no durable cursor or scope is ever recovered.
 
 Active subscriptions still maintain exact physical membership and predecessor
 revisions in memory. A retained process may use its own valid unevicted cursor
@@ -154,15 +139,47 @@ that role rather than being replaced by local numeric catalogue aliases.
 
 The concrete v1 byte contracts are:
 
-- Immutable-version row blob: ASCII `JVRR`, byte `1`, descriptor byte length as
-  little-endian `U32`, exactly that many Groove persisted-descriptor bytes, then
-  canonical row bytes consuming the remainder. The enclosing sync message owns
-  the blob length (canonical Postcard unsigned varint followed by exactly that
+- Immutable-version row blob: ASCII `JVRR`, byte `3` (alpha.60; version 2
+  repeated the descriptor in every row and version 1 carried `parents`; both
+  are rejected). One grammar covers every row, including a Core union image
+  and its union cells (`UnionExtraCells`, SPEC 10 §10.3):
+
+  ```text
+  blob  = "JVRR" 0x03  use(row)  [union]  row-bytes
+  use   = head  [descriptor-length:u32le  descriptor]
+  union = count  entry{count}
+  entry = schema-version:16  table-length:u32le  table:utf8
+          use(cells)  cell-bytes-length:u32le  cell-bytes
+  ```
+
+  `head` and `count` are canonical (shortest) unsigned LEB128. `head` is
+  `reference << 1 | union`, with `reference` no larger than 2^32. Reference
+  `0` defines the next entry of the enclosing sync message's descriptor
+  table inline: the descriptor byte length, then exactly that many Groove
+  persisted-descriptor bytes. Reference `k > 0` reuses entry `k - 1`, which
+  an earlier `use` of the same message defined. The `union` bit is set only
+  in the row's own `use` and only when union cells follow; then `count` is at
+  least 1, and the entries are in strictly ascending
+  `(schema version, table)` order, each a non-empty record of that schema's
+  nullable `_app_<column>` cells, in that schema's column order with each
+  column once (a receiver rejects any other order). An entry's own `use` has
+  the bit clear. Every other
+  row is `JVRR 0x03 use(row) row-bytes` with the bit clear, so it pays nothing
+  for the union grammar. The row's canonical bytes consume the remainder.
+  Each sync message starts with an empty table; the encoder defines a
+  descriptor at its first use in serialization order (the row's descriptor
+  before its entries') and references it afterwards, so a receiver rejects a
+  reference to an undefined entry and a second definition of the same
+  descriptor bytes. A blob encoded outside a sync message defines every
+  descriptor inline. Union cells are admitted only on Core images; a commit
+  unit carrying them is rejected. The enclosing sync message owns the blob
+  length (canonical Postcard unsigned varint followed by exactly that
   many raw bytes; identical for a byte blob and a sequence of `u8`) and retains,
   in its declared order, table, schema UUID, branch,
   this row blob, and authored-column set. The row blob is not a serde tuple of
   `RecordDescriptor` and bytes. Both unknown versions and the former incidental
   `OwnedRecord` representation are rejected.
+
 - Result descriptor blob: ASCII `JRPD`, byte `1`, role byte (`0` current,
   `1` aggregate), then one exact Groove persisted-descriptor tree. This is a
   runtime publication format, not a persisted-output family. Current descriptors start with
@@ -183,6 +200,26 @@ The concrete v1 byte contracts are:
   payload cells plus declared occurrence UUIDs and union labels; aggregate bytes
   contain only the declared groups and values.
   Member identity and query binding own omitted version/routing bookkeeping.
+- Aggregate replacement identity: zero outputs retain the scalar `String("empty")`
+  envelope; one output retains its exact canonical scalar descriptor/value
+  envelope and existing one-MiB identity limit. Two or more outputs use BLAKE3
+  over UTF-8 `jazz aggregate replacement v1`, the complete aggregate `JRPD`
+  descriptor length as little-endian `U64`, those descriptor bytes, canonical
+  row length as little-endian `U64`, then those row bytes. The 32 digest bytes
+  are wrapped in the existing runtime scalar `Bytes` descriptor/value envelope.
+  Hashing consumes the already materialised canonical publication, without an
+  allocated concatenated preimage or a second summary encoding. Producers and
+  validators use this same preimage; complete role/name/type and canonical row
+  validation MUST precede validation of the digest. Execution and nested runtime
+  bindings do not enter it, but logical names, recursive types and enum registry
+  identities do. A change to any output changes the replacement token (subject
+  to the BLAKE3 collision assumption); equal complete summaries still cancel
+  their before/after weights. The group-derived row identity and public
+  occurrence remain unchanged, including the fixed global group identity.
+  The scalar identity limit MUST NOT be applied to a complete multi-output
+  summary: previously admitted payloads above one MiB remain admitted, while
+  their replacement token has bounded size. This corrects an opaque, volatile
+  runtime discriminator; it changes no wire, durable, `JRPD` or binding format.
 - Root publication hash: BLAKE3 over ASCII `jazz terminal root publication v1`,
   the persisted role descriptor, root byte-layout position as little-endian
   `U64`, and carrier byte (`0` current-row, `1` logical). In descriptor order,
@@ -209,9 +246,9 @@ writer format explicitly. Hash-domain changes and descriptor-envelope versions
 are reviewed with the corresponding reader and rejection tests.
 
 The high-level `Db` facade follows the same boundary for every live
-subscription tier. Local subscriptions are desired and first-class: they are the
+subscription tier. Local-first subscriptions are desired and first-class: they are the
 application/UI-facing maintained view over the local read frontier, including the
-node's own pending committed writes. Global subscriptions are maintained
+node's own pending committed writes. Remote subscriptions are maintained
 views over their corresponding accepted-state frontiers, with additional
 settlement/completeness requirements. Tiers select the source/frontier
 expression and runtime consumption policy; they must not select a different
@@ -306,17 +343,20 @@ answer may be published; it does not select another evaluator:
 - `local-first` evaluates locally known current data plus pending local
   changes, online or offline. Installing a remote closure does not retire its
   cached inputs. This is determined by observation tier, not by whether the
-  local node is a trusted backend: a trusted backend may make the same Local
+  local node is a trusted backend: a trusted backend may make the same local-first
   read while merely propagating upstream. Remote scope withdrawal is not a
   stored client-side revocation;
 - `remote` waits for a fresh settled closure for its exact usage-site
   subscription and evaluates only that closure, without pending local changes.
   It waits while offline;
-- `local-first-unless-empty` evaluates exactly
-  like `local-first`; it differs only in publishing an empty first answer after
-  the usage's first settled authority closure while a remote can answer, and in
-  reading an `offset > 0` window as the strict remote view (ch. 13);
-- a core `Global` read with immediate local updates (no longer a product tier)
+- `local-first` with a server wait (`FirstLoad::WaitForRemote
+{ timeout_ms }`) evaluates exactly like `local-first`; it differs only in
+  withholding any unsettled first answer until the usage's first settled
+  authority closure, rejection, link loss, or the deadline, whichever comes
+  first, while a remote can answer, and in reading an `offset > 0` window as
+  the strict remote view (falling back to the local window at the deadline)
+  (ch. 13);
+- a local-first remote-answer execution, used by initial-wait pagination,
   evaluates the exact authority inputs with pending edits/deletes applied to
   those inputs, plus eligible pending new inserts. An edit alone does not
   admit an existing out-of-scope row. Relationships use only these inputs,
@@ -377,11 +417,11 @@ Worked examples:
   enters the same local graph and its collector removes every affected root or
   descendant occurrence in a remote-scoped result. The client does not
   re-evaluate the hidden policy, and the authority sends no presentation-level
-  remove. Local-first and local-first-unless-empty may still show the cached
-  row.
+  remove. Local-first (with or without a server wait) may still show the
+  cached row.
 - **Cached Local-first open.** A client can show retained same-scope A plus a
   pending insert B. A new authority closure containing only C does not evict A
-  from local-first knowledge. A `Global` read with immediate local updates
+  from local-first knowledge. A local-first remote-answer execution
   instead uses C plus B (if B matches using available query inputs); remote
   uses only C.
 - **Reconnect.** A fresh usage-site subscription cannot reuse its detached
@@ -601,9 +641,9 @@ Maintained-lowering gaps:
   edges, ordering/limit boundaries, and policy visibility must converge with the
   corresponding one-shot relation snapshot, and serving code must not compensate
   by recursively subscribing to coarse child shapes for sync coverage;
-- relation delivery is covered by the active
-  `groove/SPEC/INVARIANTS.md::INV-INC-1` mechanism canary in
-  `crates/jazz/tests/incremental_delivery_canary.rs`. The canary is at the
+- relation delivery is covered by the active `INV-PERF-9` canary
+  `include_live::renaming_a_sender_updates_exactly_their_messages`
+  (`crates/jazz/tests/include_live.rs`). The canary is at the
   `Db` facade level because the current `jazz-tools::JazzClient` subscription
   surface rejects relation/include queries as non-simple table queries;
 - application-column projection is a materialization concern layered over the
@@ -617,7 +657,7 @@ Window limitations:
 - root `limit`/`offset` windows without explicit `order_by` are supported by
   injecting the ch. 6 default ascending row-id order before lowering through
   `TopBy`; this applies to both prepared bindings and policy-routed maintained
-  views. Explicit order keys retain ascending row id as their stable tie-break.
+  views. Explicit order keys break ties by row id in the last key's direction (ch. 6).
 - The same rule applies to every non-recursive relation-local window, including
   an `array_subquery`: without child `order_by`, each parent/correlation group
   is ordered by ascending child row id before its child-local `offset` and
@@ -638,9 +678,9 @@ Window limitations:
 Maintained error debt after a supported maintained path fails:
 
 - some maintained-view delta cases still require conservative handling for
-  replacement witnesses and unsupported exclusive sibling cases. Exclusive
+  replacement witnesses and unsupported serializable sibling cases. Serializable
   transaction deltas are not a broad full-recompute class: maintained views may
-  ship view-scoped partial bundles when only some writes in an exclusive
+  ship view-scoped partial bundles when only some writes in a serializable
   transaction match the maintained view;
 - `current_rows_update` is not yet fully represented as the same maintained
   query-subscription abstraction for every role.
@@ -811,9 +851,10 @@ a fallback. A narrower remote query requires its own coverage receipt.
 A later Local query applies its complete order/offset/limit to local current
 inputs, even if its numeric window is contained in a previously received remote
 page. For example, with only positions 8–27 cached, Local offset 8/limit 2 yields
-16–17. Use `remote` for authority-relative pagination. `local-first-unless-empty`
-reads an `offset > 0` window as the strict remote view while a remote can
-answer, and otherwise paginates locally like `local-first` (ch. 13).
+16–17. Use `remote` for authority-relative pagination. `local-first` with a
+server wait reads an `offset > 0` window as the strict remote view while a
+remote can answer, only until its deadline, and otherwise paginates locally like
+`local-first` (ch. 13).
 Pending local rows participate in that local ordering normally; retained remote
 page coordinates must not silently change their rank.
 
@@ -952,7 +993,7 @@ result changes back to the correct parent output.
 
 ## Open Questions
 
-- 🔶 [#2501](https://github.com/garden-co/jazz/issues/2501) — Whether pending changes should expand the `Global` + immediate-local-updates inputs into existing out-of-scope rows or cached query dependencies; see §16.1.1 for the initial strict-input rule.
+- 🔶 [#2501](https://github.com/garden-co/jazz/issues/2501) — Whether pending changes should expand the local-first remote-answer inputs into existing out-of-scope rows or cached query dependencies; see §16.1.1 for the initial strict-input rule.
 - 🔶 [#1783](https://github.com/garden-co/jazz/issues/1783) — Subscription patch and first-result API.
 - 🔶 [#1765](https://github.com/garden-co/jazz/issues/1765) — Correlated subquery maintenance.
 - 🔶 [#1784](https://github.com/garden-co/jazz/issues/1784) — Partition-aware deletion witnesses.

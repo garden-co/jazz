@@ -12,17 +12,15 @@ use std::time::Instant;
 
 use jazz::account_registry::AccountId;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, InsertOptions, LocalUpdates, MergeableTxOps, PreparedQuery,
-    Propagation, ReadOpts, SubscriptionEvent, SubscriptionStream, WriteIdentity, block_on,
+    Db, DbConfig, DbIdentity, InsertOptions, PreparedQuery, ReadOpts, ReadTier, SubscriptionEvent,
+    SubscriptionStream, WriteIdentity, block_on,
 };
-use jazz::groove::records::Value;
-use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
+use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::policy_expr::{all_of, any_of, exists, session, table};
 use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
-use jazz::tx::DurabilityTier;
 
 pub const USERS: usize = 32;
 pub const CHATS: usize = 64;
@@ -123,6 +121,7 @@ fn schema() -> JazzSchema {
                     .column("text", ColumnType::Text)
                     .fk_column("senderId", "profiles")
                     .index_only(["chatId", "senderId"])
+                    .composite_index(["chatId", "$createdAt"])
                     .policies(
                         TablePolicies::new()
                             .with_select(any_of([
@@ -147,11 +146,8 @@ fn schema() -> JazzSchema {
 
 fn open_db() -> BenchDb {
     let schema = schema();
-    let families = schema.column_families();
-    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(DbConfig::new(
         schema,
-        MemoryStorage::new(&family_refs).expect("valid memory storage families"),
         DbIdentity {
             node: NodeUuid::from_bytes([0xc0; 16]),
             author: AuthorSubject::SYSTEM,
@@ -196,7 +192,7 @@ fn message_cells(chat: usize, sender: usize, index: usize) -> BTreeMap<String, V
 /// Seed profiles, chats (odd chats public), four members per chat and
 /// `messages` chat messages. Writes run as the database identity.
 fn seed(db: &BenchDb, messages: usize) {
-    let ((), tx_id) = block_on(db.transaction(async |tx| {
+    block_on(db.transaction(async |tx| {
         for user in 0..USERS {
             tx.insert(
                 "profiles",
@@ -236,12 +232,10 @@ fn seed(db: &BenchDb, messages: usize) {
         Ok(())
     }))
     .expect("seed Chat profiles, chats and memberships");
-    db.finalize_local_mergeable_commit_for_test(tx_id)
-        .expect("settle Chat profiles, chats and memberships");
 
     for start in (0..messages).step_by(SEED_BATCH) {
         let end = (start + SEED_BATCH).min(messages);
-        let ((), tx_id) = block_on(db.transaction(async |tx| {
+        block_on(db.transaction(async |tx| {
             for index in start..end {
                 let chat = message_chat(index);
                 tx.insert(
@@ -255,8 +249,6 @@ fn seed(db: &BenchDb, messages: usize) {
             Ok(())
         }))
         .unwrap_or_else(|error| panic!("seed Chat messages {start}..{end}: {error}"));
-        db.finalize_local_mergeable_commit_for_test(tx_id)
-            .expect("settle seeded messages");
     }
 }
 
@@ -290,10 +282,7 @@ fn open_chat_query(db: &BenchDb) -> PreparedQuery {
 
 fn subscription_opts() -> ReadOpts {
     ReadOpts {
-        tier: DurabilityTier::Local,
-        local_updates: LocalUpdates::Immediate,
-        propagation: Propagation::LocalOnly,
-        include_deleted: false,
+        tier: ReadTier::LocalOnly,
         ..ReadOpts::default()
     }
 }
@@ -380,7 +369,7 @@ impl SendFixture {
         for _ in 0..count {
             let index = self.next_message;
             self.next_message += 1;
-            let write = block_on(self.db.insert(
+            block_on(self.db.insert(
                 "messages",
                 message_cells(OPEN_CHAT, 0, index),
                 InsertOptions {
@@ -392,11 +381,6 @@ impl SendFixture {
                 },
             ))
             .expect("member sends a message");
-            // The in-process authority plays the server's part: it runs the
-            // membership and own-profile insert policy and accepts the message.
-            self.db
-                .finalize_local_mergeable_commit_for_test(write.mergeable_tx_id())
-                .expect("authority accepts the member's message");
             let mut added = 0;
             while added == 0 {
                 added = added_rows(&next_event(&self.db, &mut self.stream));
@@ -406,10 +390,11 @@ impl SendFixture {
         count
     }
 
-    /// Untimed oracle: a non-member cannot post into the private chat.
+    /// Untimed oracle: a non-member cannot post into the private chat. This
+    /// Db is the authority, so its insert policy rejects the write itself.
     pub fn non_member_send_is_denied(&self) -> bool {
         let outsider = outsider_index();
-        let write = block_on(self.db.insert(
+        block_on(self.db.insert(
             "messages",
             message_cells(OPEN_CHAT, outsider, usize::MAX),
             InsertOptions {
@@ -417,10 +402,6 @@ impl SendFixture {
                 ..Default::default()
             },
         ))
-        .expect("a denied write is still recorded locally");
-        self.db
-            .finalize_local_mergeable_commit_for_test(write.mergeable_tx_id())
-            .expect("authority decides the outsider's message");
-        block_on(write.wait(DurabilityTier::Global)).is_err()
+        .is_err()
     }
 }

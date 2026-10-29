@@ -1,15 +1,15 @@
-import { col } from "../../../dsl.js";
+import { schema as s } from "../../../schema-namespace.js";
 import { defineApp } from "../../../typed-app.js";
 
 export const app = defineApp({
   todos: {
-    title: col.string(),
-    done: col.boolean().default(false),
-    tags: col.array(col.string()).default(["work", "home"]),
-    metadata: col.json().default({ createdBy: "alice" }),
-    avatar: col.bytes().default(new Uint8Array([0, 1, 255])),
+    title: s.string(),
+    done: s.boolean().default(false),
+    tags: s.array(s.string()).default(["work", "home"]),
+    metadata: s.json().default({ createdBy: "alice" }),
+    avatar: s.bytes().default(new Uint8Array([0, 1, 255])),
   },
   counters: {
-    count: col.int().merge("counter") as ReturnType<typeof col.int>,
+    count: s.int().merge("counter") as ReturnType<typeof s.int>,
   },
 });

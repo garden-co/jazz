@@ -1,6 +1,4 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
 
 use super::*;
 
@@ -43,23 +41,7 @@ impl SchemaHash {
     }
 
     pub fn to_hex(&self) -> String {
-        static CACHE: OnceLock<Mutex<HashMap<SchemaHash, String>>> = OnceLock::new();
-        let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-        if let Some(cached) = cache
-            .lock()
-            .expect("schema hash hex cache poisoned")
-            .get(self)
-            .cloned()
-        {
-            return cached;
-        }
-
-        let encoded = hex::encode(&self.0);
-        cache
-            .lock()
-            .expect("schema hash hex cache poisoned")
-            .insert(*self, encoded.clone());
-        encoded
+        ::hex::encode(self.0)
     }
 
     /// Convert to an ObjectId for storage in the catalogue.
@@ -82,8 +64,7 @@ impl SchemaHash {
             let table_schema = &schema[table_name];
 
             // Hash table name
-            hasher.update(table_name.as_str().as_bytes());
-            hasher.update(&[0]); // delimiter
+            hash_cstr(&mut hasher, table_name.as_str());
 
             // Hash row descriptor in declared column order
             hash_row_descriptor(&mut hasher, &table_schema.columns);
@@ -95,8 +76,7 @@ impl SchemaHash {
                 let mut columns: Vec<_> = indexed_columns.iter().map(|c| c.as_str()).collect();
                 columns.sort_unstable();
                 for column in columns {
-                    hasher.update(column.as_bytes());
-                    hasher.update(&[0]);
+                    hash_cstr(&mut hasher, column);
                 }
             }
 
@@ -158,8 +138,7 @@ pub fn hash_row_descriptor(hasher: &mut blake3::Hasher, descriptor: &RowDescript
 /// Hash a single ColumnDescriptor.
 fn hash_column_descriptor(hasher: &mut blake3::Hasher, col: &ColumnDescriptor) {
     // Name
-    hasher.update(col.name.as_str().as_bytes());
-    hasher.update(&[0]);
+    hash_cstr(hasher, col.name.as_str());
 
     // Type
     hash_column_type(hasher, &col.column_type);
@@ -191,6 +170,15 @@ fn hash_column_descriptor(hasher: &mut blake3::Hasher, col: &ColumnDescriptor) {
             ColumnMergeStrategy::GSet => {
                 hasher.update(&[2]);
             }
+            ColumnMergeStrategy::Text => {
+                hasher.update(&[3]);
+            }
+            ColumnMergeStrategy::Markdown => {
+                hasher.update(&[4]);
+            }
+            ColumnMergeStrategy::Html => {
+                hasher.update(&[5]);
+            }
         }
     } else {
         hasher.update(&[0]);
@@ -218,8 +206,7 @@ fn hash_value(hasher: &mut blake3::Hasher, value: &Value) {
         }
         Value::Text(v) => {
             hasher.update(&[4]);
-            hasher.update(v.as_bytes());
-            hasher.update(&[0]);
+            hash_cstr(hasher, v);
         }
         Value::Timestamp(v) => {
             hasher.update(&[5]);
@@ -254,8 +241,7 @@ fn hash_value(hasher: &mut blake3::Hasher, value: &Value) {
         }
         Value::Enum { case, values } => {
             hasher.update(&[14]);
-            hasher.update(case.as_bytes());
-            hasher.update(&[0]);
+            hash_cstr(hasher, case);
             hasher.update(&(values.len() as u64).to_le_bytes());
             for inner in values {
                 hash_value(hasher, inner);
@@ -263,6 +249,25 @@ fn hash_value(hasher: &mut blake3::Hasher, value: &Value) {
         }
         Value::Null => {
             hasher.update(&[9]);
+        }
+    }
+}
+
+/// Hash a string followed by a NUL delimiter.
+fn hash_cstr(hasher: &mut blake3::Hasher, value: &str) {
+    hasher.update(value.as_bytes());
+    hasher.update(&[0]);
+}
+
+fn hash_enum_payload_cases(hasher: &mut blake3::Hasher, cases: &[EnumCaseDescriptor]) {
+    hasher.update(&(cases.len() as u64).to_le_bytes());
+    for case in cases {
+        hash_cstr(hasher, &case.name);
+        hasher.update(&(case.fields.len() as u64).to_le_bytes());
+        for field in &case.fields {
+            hash_cstr(hasher, field.name.as_str());
+            hash_column_type(hasher, &field.column_type);
+            hasher.update(&[u8::from(field.nullable)]);
         }
     }
 }
@@ -291,51 +296,25 @@ fn hash_column_type(hasher: &mut blake3::Hasher, col_type: &ColumnType) {
             // structural schema identity rather than presentation metadata.
             hasher.update(&(variants.len() as u64).to_le_bytes());
             for variant in variants {
-                hasher.update(variant.as_bytes());
-                hasher.update(&[0]);
+                hash_cstr(hasher, variant);
             }
         }
         ColumnType::ScalarEnum { name, variants } => {
             hasher.update(&[14]);
-            hasher.update(name.as_bytes());
-            hasher.update(&[0]);
+            hash_cstr(hasher, name);
             hasher.update(&(variants.len() as u64).to_le_bytes());
             for variant in variants {
-                hasher.update(variant.as_bytes());
-                hasher.update(&[0]);
+                hash_cstr(hasher, variant);
             }
         }
         ColumnType::CatalogueEnumPayload { name, cases } => {
             hasher.update(&[15]);
-            hasher.update(name.as_bytes());
-            hasher.update(&[0]);
-            hasher.update(&(cases.len() as u64).to_le_bytes());
-            for case in cases {
-                hasher.update(case.name.as_bytes());
-                hasher.update(&[0]);
-                hasher.update(&(case.fields.len() as u64).to_le_bytes());
-                for field in &case.fields {
-                    hasher.update(field.name.as_str().as_bytes());
-                    hasher.update(&[0]);
-                    hash_column_type(hasher, &field.column_type);
-                    hasher.update(&[u8::from(field.nullable)]);
-                }
-            }
+            hash_cstr(hasher, name);
+            hash_enum_payload_cases(hasher, cases);
         }
         ColumnType::EnumPayload { cases } => {
             hasher.update(&[13]);
-            hasher.update(&(cases.len() as u64).to_le_bytes());
-            for case in cases {
-                hasher.update(case.name.as_bytes());
-                hasher.update(&[0]);
-                hasher.update(&(case.fields.len() as u64).to_le_bytes());
-                for field in &case.fields {
-                    hasher.update(field.name.as_str().as_bytes());
-                    hasher.update(&[0]);
-                    hash_column_type(hasher, &field.column_type);
-                    hasher.update(&[u8::from(field.nullable)]);
-                }
-            }
+            hash_enum_payload_cases(hasher, cases);
         }
         ColumnType::Timestamp => {
             hasher.update(&[5]);

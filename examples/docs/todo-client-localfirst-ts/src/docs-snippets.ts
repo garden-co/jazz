@@ -241,9 +241,9 @@ export function buildTodoLineageQuery() {
 
 // #region reading-seeding-ts
 export async function seedDefaultProject(db: Db) {
-  // Wait for the global core before reading — prevents duplicate seeding
+  // Read from the server before seeding — prevents duplicate seeding
   // from concurrent fresh clients on first visit.
-  const existing = await db.all(app.projects, { tier: "global" });
+  const existing = await db.all(app.projects, { tier: "remote" });
 
   if (existing.length === 0) {
     db.insert(app.projects, { name: "Default" });
@@ -372,9 +372,9 @@ export async function groupTodoWrites(db: Db, existingTodoId: string) {
 }
 // #endregion writing-transaction-ts
 
-// #region writing-exclusive-transaction-ts
-export async function finishTodoExclusively(db: Db, todoId: string) {
-  const result = await db.exclusiveTransaction(async (tx) => {
+// #region writing-serializable-transaction-ts
+export async function finishTodoSerializably(db: Db, todoId: string) {
+  const result = await db.serializableTransaction(async (tx) => {
     const todo = await tx.one(app.todos.where({ id: todoId }));
     if (!todo) throw new Error("Todo not found");
 
@@ -384,7 +384,7 @@ export async function finishTodoExclusively(db: Db, todoId: string) {
 
   return result.wait();
 }
-// #endregion writing-exclusive-transaction-ts
+// #endregion writing-serializable-transaction-ts
 
 // #region writing-transaction-errors-ts
 export async function completeTodoInTransaction(db: Db, todoId: string) {

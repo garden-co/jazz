@@ -19,9 +19,6 @@
 //! path, so `jazz::schema::JazzSchema` and `crate::schema::JazzSchema` inside
 //! Jazz keep working.
 
-/// Re-export of the underlying groove crate.
-pub use groove;
-
 // The layer below, under the paths this crate's code already uses.
 use jazz_types::{account_registry, ids, object, postcard_exact, time};
 
@@ -39,3 +36,6 @@ pub mod tx;
 #[doc(hidden)]
 #[cfg(any(test, feature = "testing"))]
 pub mod test_public_schema;
+
+#[cfg(test)]
+mod gather_agreement_tests;

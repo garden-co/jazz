@@ -7,6 +7,7 @@ import {
   serializeBrowserRelayError,
   type BrowserRelayError,
 } from "./browser-worker-protocol.js";
+import { UnsupportedStorageCodecsError } from "../unsupported-storage-codecs-error.js";
 
 function codedError(message: string, code: string, cause?: unknown): Error {
   const error = new Error(message, cause === undefined ? undefined : { cause });
@@ -140,6 +141,79 @@ describe("BrowserRelayError protocol", () => {
       expect(deserializeBrowserRelayError(payload)).toMatchObject({
         name: "BrowserRelayErrorProtocolError",
         code: "browser_relay_error_protocol_violation",
+      });
+    }
+  });
+});
+
+describe("BrowserRelayError storage-format refusal", () => {
+  it("round-trips an UnsupportedStorageCodecsError with its codec lists and class", () => {
+    const refusal = new UnsupportedStorageCodecsError(
+      ["groove.durable-index.v2", "jazz.history-version-current.v4"],
+      ["jazz.future.v2"],
+      "Missing or invalid IndexedDB storage epoch manifest: unsupported storage format",
+    );
+
+    const serialized = serializeBrowserRelayError(refusal);
+    expect(serialized).toMatchObject({
+      name: "UnsupportedStorageCodecsError",
+      code: "unsupported_storage_codecs",
+      missing: ["groove.durable-index.v2", "jazz.history-version-current.v4"],
+      unknown: ["jazz.future.v2"],
+    });
+    // The envelope stays structured-clone safe.
+    const roundTripped = deserializeBrowserRelayError(structuredClone(serialized));
+
+    expect(roundTripped).toBeInstanceOf(UnsupportedStorageCodecsError);
+    expect(roundTripped).toMatchObject({
+      name: "UnsupportedStorageCodecsError",
+      code: "unsupported_storage_codecs",
+      message: refusal.message,
+      missing: ["groove.durable-index.v2", "jazz.history-version-current.v4"],
+      unknown: ["jazz.future.v2"],
+    });
+  });
+
+  it("rebuilds the class from a binding error that only carries the code and lists", () => {
+    const binding = codedError(
+      "UnsupportedStorageCodecs: unsupported",
+      "unsupported_storage_codecs",
+    );
+    Object.assign(binding, { missing: ["groove.durable-index.v2"], unknown: [] });
+
+    const roundTripped = deserializeBrowserRelayError(serializeBrowserRelayError(binding));
+
+    expect(roundTripped).toBeInstanceOf(UnsupportedStorageCodecsError);
+    expect(roundTripped).toMatchObject({ missing: ["groove.durable-index.v2"], unknown: [] });
+  });
+
+  it("keeps the code but no lists when the lists are malformed outbound", () => {
+    const binding = codedError("refused", "unsupported_storage_codecs");
+    Object.assign(binding, { missing: [42], unknown: [] });
+
+    const serialized = serializeBrowserRelayError(binding);
+    expect(serialized).not.toHaveProperty("missing");
+    expect(serialized).not.toHaveProperty("unknown");
+    const roundTripped = deserializeBrowserRelayError(serialized) as Error & { code?: string };
+    expect(roundTripped).not.toBeInstanceOf(UnsupportedStorageCodecsError);
+    expect(roundTripped.code).toBe("unsupported_storage_codecs");
+  });
+
+  it("fails closed for codec lists that are malformed or attached to another code", () => {
+    for (const payload of [
+      { name: "Error", message: "x", code: "unsupported_storage_codecs", missing: ["a"] },
+      {
+        name: "Error",
+        message: "x",
+        code: "unsupported_storage_codecs",
+        missing: [1],
+        unknown: [],
+      },
+      { name: "Error", message: "x", code: "storage", missing: [], unknown: [] },
+      { name: "Error", message: "x", missing: [], unknown: [] },
+    ] as BrowserRelayError[]) {
+      expect(deserializeBrowserRelayError(payload)).toMatchObject({
+        name: "BrowserRelayErrorProtocolError",
       });
     }
   });

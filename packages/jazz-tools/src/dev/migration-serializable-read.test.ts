@@ -1,0 +1,98 @@
+import { expect, it } from "vitest";
+import { schema as s } from "../schema-namespace.js";
+import { migration as m } from "../migration-namespace.js";
+import { definePermissions } from "../permissions/index.js";
+import { createDb } from "../runtime/default-create-db.js";
+import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
+import { deploy, startLocalJazzServer } from "../testing/index.js";
+
+it("accepts a serializable read of an unchanged table after migration", async () => {
+  const projects = s.table({ title: s.string() }, {});
+  const before = { projects, notes: s.table({ title: s.string() }, {}) };
+  const after = { projects, notes: s.table({ body: s.string() }, {}) };
+  const oldApp = s.defineApp(before);
+  const newApp = s.defineApp(after);
+  const migration = m.defineMigration({
+    from: before,
+    to: after,
+    migrate: { notes: { body: m.renameFrom("title") } },
+  });
+  const permissions = (app: typeof oldApp | typeof newApp) =>
+    definePermissions(app, ({ policy }) => {
+      policy.projects.allowRead.always();
+      policy.projects.allowInsert.always();
+      policy.notes.allowRead.always();
+    });
+  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let db: Awaited<ReturnType<typeof createDb>> | undefined;
+  try {
+    const target = { serverUrl: server.url, appId: server.appId, adminSecret: server.adminSecret };
+    await deploy({ ...target, schema: oldApp, permissions: permissions(oldApp) });
+    const account = await localAccountConfig(server.appId, server.url);
+    db = await createDb(account);
+    const project = await db.insert(oldApp.projects, { title: "Project" }).wait({ tier: "global" });
+    await db.shutdown();
+    db = undefined;
+    await deploy({ ...target, schema: newApp, permissions: permissions(newApp), migration });
+    db = await createDb(account);
+    const query = newApp.projects.where({ id: project.id });
+    expect(await db.one(query, { tier: "remote" })).toEqual(project);
+    const tx = db.beginSerializableTransaction();
+    expect(await tx.one(query, { tier: "local-first" })).toEqual(project);
+    await tx.commit().wait();
+  } finally {
+    await db?.shutdown();
+    await server.stop();
+  }
+}, 30_000);
+
+it("preserves serializable conflict detection after renaming the queried table", async () => {
+  const before = { projects: s.table({ title: s.string() }, {}) };
+  const after = { initiatives: s.table({ title: s.string() }, {}) };
+  const oldApp = s.defineApp(before);
+  const newApp = s.defineApp(after);
+  const migration = m.defineMigration({
+    from: before,
+    to: after,
+    renameTables: { initiatives: m.renameTableFrom("projects") },
+  });
+  const oldPermissions = definePermissions(oldApp, ({ policy }) => {
+    policy.projects.allowRead.always();
+    policy.projects.allowInsert.always();
+  });
+  const newPermissions = definePermissions(newApp, ({ policy }) => {
+    policy.initiatives.allowRead.always();
+    policy.initiatives.allowInsert.always();
+  });
+  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let db: Awaited<ReturnType<typeof createDb>> | undefined;
+  let writer: Awaited<ReturnType<typeof createDb>> | undefined;
+  try {
+    const target = { serverUrl: server.url, appId: server.appId, adminSecret: server.adminSecret };
+    await deploy({ ...target, schema: oldApp, permissions: oldPermissions });
+    const account = await localAccountConfig(server.appId, server.url);
+    db = await createDb(account);
+    const project = await db.insert(oldApp.projects, { title: "Project" }).wait({ tier: "global" });
+    await db.shutdown();
+    db = undefined;
+    await deploy({ ...target, schema: newApp, permissions: newPermissions, migration });
+    db = await createDb(account);
+    writer = await createDb(await localAccountConfig(server.appId, server.url));
+    expect(await db.all(newApp.initiatives, { tier: "remote" })).toEqual([project]);
+    const stable = db.beginSerializableTransaction();
+    expect(await stable.all(newApp.initiatives, { tier: "local-first" })).toEqual([project]);
+    await stable.commit().wait();
+    const changed = db.beginSerializableTransaction();
+    expect(await changed.all(newApp.initiatives, { tier: "local-first" })).toEqual([project]);
+    await writer
+      .insert(newApp.initiatives, { title: "Concurrent project" })
+      .wait({ tier: "global" });
+    await expect(changed.commit().wait()).rejects.toMatchObject({
+      code: "serialization_conflict",
+    });
+  } finally {
+    await writer?.shutdown();
+    await db?.shutdown();
+    await server.stop();
+  }
+}, 30_000);

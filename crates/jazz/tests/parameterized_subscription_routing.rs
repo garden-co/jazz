@@ -1,19 +1,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-mod common;
+use crate::common;
 
 use jazz::block_on;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, LocalUpdates, PreparedQuery, Propagation, ReadOpts,
-    SeededRowIdSource, SubscriptionEvent, SubscriptionStream,
+    Db, DbConfig, DbIdentity, PreparedQuery, ReadOpts, SeededRowIdSource, SubscriptionEvent,
+    SubscriptionStream,
 };
-use jazz::groove::records::Value;
-use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, all_of, claim, col, eq, param, provider_claim_key};
+use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
-use jazz::tx::DurabilityTier;
 
 use common::{allow_all_policies, compile_schema};
 
@@ -42,15 +40,9 @@ fn open_db() -> Db {
 
 fn open_db_as(author: AuthorSubject) -> Db {
     let schema = schema();
-    let column_families = schema.column_families();
-    let column_family_refs = column_families
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
     block_on(Db::open(
         DbConfig::new(
             schema,
-            TestStorage::new(&column_family_refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x71; 16]),
                 author,
@@ -85,10 +77,7 @@ fn insert_document(db: &Db, document: RowUuid, team: RowUuid, updated_at: u64) {
 
 fn local_read_opts() -> ReadOpts {
     ReadOpts {
-        tier: DurabilityTier::Local,
-        local_updates: LocalUpdates::Immediate,
-        propagation: Propagation::LocalOnly,
-        include_deleted: false,
+        tier: jazz::db::ReadTier::LocalOnly,
         ..ReadOpts::default()
     }
 }
@@ -551,8 +540,8 @@ fn local_bindings_of_one_shape_share_one_prepared_source() {
     assert_eq!(four.active_subscriptions, two.active_subscriptions + 2);
     assert_eq!(four.active_shape_params, two.active_shape_params + 2);
     assert_eq!(
-        four.arrangement_count, two.arrangement_count,
-        "later bindings of one Local-tier shape must reuse its prepared source"
+        four.active_prepared_shapes, two.active_prepared_shapes,
+        "later bindings of one Local-tier shape must reuse its prepared shape"
     );
     drop((first, second, rest));
     block_on(db.close()).expect("close sharing fixture");

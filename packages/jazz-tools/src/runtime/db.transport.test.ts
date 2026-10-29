@@ -20,7 +20,7 @@ class TestDb extends Db {
     return this.getClient(schema);
   }
   public exposeEnsureReady(): Promise<void> {
-    return this.ensureReady();
+    return this.ensureReady("server");
   }
 }
 
@@ -45,8 +45,6 @@ class TestRuntimeSource extends RuntimeSource<DbConfig> {
         jwtToken: config.jwtToken,
         cookieSession: config.cookieSession,
         adminSecret: config.adminSecret,
-        tier: "local",
-        defaultDurabilityTier: config.serverUrl ? "global" : undefined,
       },
       {
         onAuthFailure,

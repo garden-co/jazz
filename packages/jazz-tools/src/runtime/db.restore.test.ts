@@ -31,18 +31,18 @@ it.each(["standalone", "transaction"])(
       await db.delete(app.notes, note.id).wait({ tier: "global" });
       if (mode === "transaction") {
         const tx = db.beginTransaction();
-        await tx.all(app.notes.includeDeleted().where({ id: note.id }), { tier: "global" });
+        await tx.all(app.notes.includeDeleted().where({ id: note.id }), { tier: "remote" });
         tx.restore(app.notes, note.id, { title: "Restored" });
         await tx.commit().wait({ tier: "global" });
       } else {
         await db.restore(app.notes, note.id, { title: "Restored" }).wait({ tier: "global" });
       }
-      expect(await db.one(app.notes.where({ id: note.id }), { tier: "global" })).toEqual({
+      expect(await db.one(app.notes.where({ id: note.id }), { tier: "remote" })).toEqual({
         id: note.id,
         title: "Restored",
       });
       await db.delete(app.notes, note.id).wait({ tier: "global" });
-      expect(await db.one(app.notes.where({ id: note.id }), { tier: "global" })).toBeNull();
+      expect(await db.one(app.notes.where({ id: note.id }), { tier: "remote" })).toBeNull();
     } finally {
       await db?.shutdown();
       await server.stop();

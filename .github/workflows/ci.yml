@@ -3,10 +3,14 @@ name: CI
 on:
   workflow_dispatch:
   # Deliberately unfiltered so every layer of a stacked PR receives CI even
-  # when its base is another feature branch.
+  # when its base is another feature branch. ready_for_review starts the fast
+  # check when a draft is marked ready.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  # merge-group/** pushes are the Review Loop's batches; a ruleset limits who
+  # can push them, so they run trusted and write the shared compile cache.
   push:
-    branches: [main, release]
+    branches: [main, release, "merge-group/**"]
 
 concurrency:
   # For pushes, this lets concurrent runs happen, so each push gets a result.
@@ -23,6 +27,35 @@ concurrency:
 # cache access. GitHub's native repository/ref-scoped cache remains available
 # without any explicit cloud credential from this workflow.
 jobs:
+  # A main push whose tree a green merge group already tested skips the suite
+  # (dev/ci/main-push-coverage.sh). Any failure here runs the suite.
+  main-coverage:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      statuses: read
+    outputs:
+      covered: ${{ steps.coverage.outputs.covered }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+      - name: Look for a merge group that already tested this tree
+        id: coverage
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          if group="$(dev/ci/main-push-coverage.sh "${HEAD_SHA}")"; then
+            echo "::notice::Full suite already passed on this tree in ${group}; skipping it"
+            echo "covered=true" >> "${GITHUB_OUTPUT}"
+          fi
+
   untrusted:
     if: github.event_name != 'push' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association))
     permissions:
@@ -33,9 +66,15 @@ jobs:
     with:
       trusted-cache: false
       sccache-write: false
+      # Ready PRs get lint and typecheck only; the Review Loop proves them with
+      # the full suite on a merge-group/* push. Drafts run nothing.
+      scope: ${{ github.event_name != 'pull_request' && 'full' || github.base_ref == 'release' && 'full' || github.event.pull_request.draft && 'none' || 'fast' }}
 
   trusted:
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/release') || github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+    needs: [main-coverage]
+    if: >-
+      !cancelled() && needs.main-coverage.outputs.covered != 'true' &&
+      (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/release' || startsWith(github.ref, 'refs/heads/merge-group/')) || github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association))
     permissions:
       contents: read
       id-token: write
@@ -44,15 +83,18 @@ jobs:
     with:
       # Release branch OIDC trust has not been enabled in the external cache roles.
       # Keep ordinary GitHub caches without attempting credentialed cross-ref reads.
-      trusted-cache: ${{ github.event_name != 'push' || github.ref == 'refs/heads/main' }}
-      sccache-write: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      trusted-cache: ${{ github.event_name != 'push' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/merge-group/') }}
+      sccache-write: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/merge-group/')) }}
+      # Ready PRs get lint and typecheck only; the Review Loop proves them with
+      # the full suite on a merge-group/* push. Drafts run nothing.
+      scope: ${{ github.event_name != 'pull_request' && 'full' || github.base_ref == 'release' && 'full' || github.event.pull_request.draft && 'none' || 'fast' }}
     secrets: inherit
 
   # Preserve the branch-protection check name while the implementation jobs
   # live in the reusable suite. Exactly one invocation must have completed.
   test-rust:
     if: always()
-    needs: [untrusted, trusted]
+    needs: [main-coverage, untrusted, trusted]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 2
     permissions:
@@ -62,7 +104,14 @@ jobs:
         env:
           UNTRUSTED_RESULT: ${{ needs.untrusted.result }}
           TRUSTED_RESULT: ${{ needs.trusted.result }}
+          DRAFT: ${{ github.event.pull_request.draft == true }}
+          COVERED: ${{ needs.main-coverage.outputs.covered == 'true' }}
         run: |
+          # A draft's suite runs no jobs, so its invocation reports skipped. So
+          # does a main push whose tree a green merge group already tested.
+          if [ "${DRAFT}" = true ] || [ "${COVERED}" = true ]; then
+            test "${UNTRUSTED_RESULT}:${TRUSTED_RESULT}" = "skipped:skipped" && exit 0
+          fi
           test "${UNTRUSTED_RESULT}:${TRUSTED_RESULT}" = "success:skipped" || \
             test "${UNTRUSTED_RESULT}:${TRUSTED_RESULT}" = "skipped:success"
 
@@ -97,3 +146,56 @@ jobs:
             -f context=test-rust \
             -f description="Dispatched CI: ${RESULT}" \
             -f target_url="${TARGET_URL}"
+
+  # `test-rust` passes on ready PRs even though they only run the fast scope, so
+  # it cannot prove full-suite coverage (#4091). `full-suite` is a commit status
+  # posted only after the full suite passed: on the run's own head, and for a
+  # merge-group/* push also on every PR head the group cleanly merged along its
+  # first-parent chain (dev/ci/full-suite-coverage.sh). A PR head no green full
+  # run covered carries no `full-suite` status, so a ruleset requiring it blocks
+  # that merge. A new push to a covered PR moves its head off the covered SHA
+  # and so voids coverage.
+  report-full-suite:
+    if: >-
+      always() && needs.test-rust.result == 'success' && (
+        github.event_name == 'workflow_dispatch' ||
+        github.event_name == 'push' && needs.trusted.result == 'success' ||
+        github.event_name == 'pull_request' && needs.trusted.result == 'success' && github.base_ref == 'release'
+      )
+    needs: [trusted, test-rust]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      statuses: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          filter: blob:none
+      - name: Report full-suite on covered heads
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          IS_GROUP: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/merge-group/') }}
+          REF_NAME: ${{ github.ref_name }}
+          TARGET_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ "${IS_GROUP}" = true ]; then
+            description="Full suite passed in ${REF_NAME}"
+            covered="$(dev/ci/full-suite-coverage.sh origin/main "${HEAD_SHA}")"
+          else
+            description="Full suite passed on this commit"
+            covered="${HEAD_SHA}"
+          fi
+          for sha in ${covered}; do
+            echo "full-suite success on ${sha}"
+            gh api --method POST "repos/${REPO}/statuses/${sha}" \
+              -f state=success \
+              -f context=full-suite \
+              -f description="${description}" \
+              -f target_url="${TARGET_URL}" > /dev/null
+          done

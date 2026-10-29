@@ -15,6 +15,30 @@ export function appScopedUrl(serverUrl: string, appId: string, path: string): st
 }
 
 /**
+ * GET `url` with the admin secret and return its JSON body. A non-OK response
+ * throws `<label> fetch failed: <status> <statusText>[ - <body>]<guidance>`.
+ */
+export async function fetchAdminJson(
+  url: string,
+  adminSecret: string,
+  label: string,
+  guidance?: (status: number) => string,
+): Promise<unknown> {
+  const response = await fetch(url, {
+    method: "GET",
+    headers: { "X-Jazz-Admin-Secret": adminSecret },
+  });
+  if (!response.ok) {
+    const bodyText = await response.text().catch(() => "");
+    const detail = bodyText ? ` - ${bodyText}` : "";
+    throw new Error(
+      `${label} fetch failed: ${response.status} ${response.statusText}${detail}${guidance?.(response.status) ?? ""}`,
+    );
+  }
+  return response.json();
+}
+
+/**
  * Convert an HTTP(S) server URL to the WebSocket `/ws` endpoint URL.
  *
  * Mirrors the Rust `http_url_to_ws` helper in `crates/jazz-tools/src/client.rs`.

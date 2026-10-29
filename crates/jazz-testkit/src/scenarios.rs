@@ -60,7 +60,7 @@ pub use jazz_server::push_catalogue_in_memory;
 #[allow(unused_imports)]
 pub use crate::permissions::{
     PublishedPermissionsHead, allow_all_permissions, deny_all_select_permissions,
-    publish_allow_all_permissions, publish_permissions,
+    publish_allow_all_permissions, publish_permissions, schema_deployment,
 };
 
 #[cfg(test)]
@@ -318,17 +318,6 @@ impl<'a> TestingClient<'a> {
             TestingClientStorage::Memory => ClientStorage::Memory,
             TestingClientStorage::Persistent => ClientStorage::Persistent,
         };
-        if matches!(self.storage, TestingClientStorage::Persistent) {
-            #[cfg(feature = "rocksdb")]
-            {
-                context.storage_factory = Some(std::sync::Arc::new(
-                    jazz_storage_rocksdb::RocksDbStorageFactory,
-                ));
-            }
-            #[cfg(not(feature = "rocksdb"))]
-            panic!("persistent test clients require the rocksdb adapter feature");
-        }
-
         context
     }
 }

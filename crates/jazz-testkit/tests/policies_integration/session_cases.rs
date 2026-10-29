@@ -47,6 +47,37 @@ fn join_select_policy_schema() -> Schema {
         .build()
 }
 
+/// Organizations are public; teams and projects are each visible only to
+/// their owner. Joining an organization through both keeps two separately
+/// authorised inputs in one inner-join chain behind a public root.
+fn owned_children_policy_schema() -> Schema {
+    let owned = || {
+        super::explicit_allow_all_policies(permissions(|p| {
+            p.allow_read()
+                .where_(pe::eq("owner_id", pe::session(vec!["claims", "sub"])));
+        }))
+    };
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("orgs")
+                .column("name", ColumnType::Text)
+                .policies(super::explicit_allow_all_policies(permissions(|_| {}))),
+        )
+        .table(
+            TableSchema::builder("teams")
+                .column("owner_id", ColumnType::Text)
+                .fk_column("org_id", "orgs")
+                .policies(owned()),
+        )
+        .table(
+            TableSchema::builder("projects")
+                .column("owner_id", ColumnType::Text)
+                .fk_column("org_id", "orgs")
+                .policies(owned()),
+        )
+        .build()
+}
+
 /// Schema for documents owned by `owner_id` with INSERT/UPDATE/DELETE restricted
 /// to the row owner. SELECT is unrestricted (no policy) so observers can read.
 fn write_policy_schema() -> Schema {
@@ -221,6 +252,21 @@ async fn create_team_membership(
             jazz::row_input!("owner_id" => owner_id, "team_id" => Value::Uuid(team_id)),
         )
         .expect("create team membership")
+        .0
+}
+
+async fn create_owned_child(
+    client: &JazzClient,
+    table: &str,
+    owner_id: &str,
+    org_id: ObjectId,
+) -> ObjectId {
+    client
+        .insert(
+            table,
+            jazz::row_input!("owner_id" => owner_id, "org_id" => Value::Uuid(org_id)),
+        )
+        .expect("create owned child")
         .0
 }
 
@@ -2343,6 +2389,161 @@ async fn nested_join_subscription_tracks_membership_changes_inner() {
     })
     .await;
     assert_eq!(rows.len(), 2);
+    admin.shutdown().await.expect("shutdown admin");
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
+    server.shutdown().await;
+}
+
+/// Join results are keyed by occurrence; these match on the root organization.
+fn added_root(log: &[jazz::tools::OrderedRowDelta], root: ObjectId) -> bool {
+    log.iter().any(|delta| {
+        delta
+            .added
+            .iter()
+            .any(|change| change.id.as_occurrence().root_source() == root)
+    })
+}
+
+fn touches_root(log: &[jazz::tools::OrderedRowDelta], root: ObjectId) -> bool {
+    added_root(log, root)
+        || log.iter().any(|delta| {
+            delta
+                .removed
+                .iter()
+                .map(|change| &change.id)
+                .chain(delta.updated.iter().map(|change| &change.id))
+                .any(|id| id.as_occurrence().root_source() == root)
+        })
+}
+
+/// Users who subscribe to the same join query share one server graph. A public
+/// root joined through two separately authorised inputs must pair each user's
+/// team only with that same user's project: Alice's team and Bob's project in
+/// one organization authorise it for neither of them.
+#[tokio::test]
+async fn join_chain_subscription_pairs_inputs_of_one_user() {
+    tokio::task::LocalSet::new()
+        .run_until(join_chain_subscription_pairs_inputs_of_one_user_inner())
+        .await;
+}
+
+async fn join_chain_subscription_pairs_inputs_of_one_user_inner() {
+    let schema = owned_children_policy_schema();
+    let server = JazzServer::builder()
+        .with_schema(schema.clone())
+        .start()
+        .await
+        .expect("start test server");
+    let admin = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("admin")
+        .as_admin()
+        .ready_on("projects", READY_TIMEOUT)
+        .connect()
+        .await;
+    let alice = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id(super::ALICE_ID)
+        .as_user()
+        .ready_on("projects", READY_TIMEOUT)
+        .connect()
+        .await;
+    let bob = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema)
+        .with_user_id(super::BOB_ID)
+        .as_user()
+        .ready_on("projects", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    let query = Query::from("orgs")
+        .join_via("teams", "org_id", [])
+        .join_via("projects", "org_id", []);
+    let mut alice_stream = alice
+        .subscribe(query.clone())
+        .await
+        .expect("subscribe alice");
+    let mut bob_stream = bob.subscribe(query.clone()).await.expect("subscribe bob");
+    let mut alice_log = Vec::new();
+    let mut bob_log = Vec::new();
+
+    // Mixed: Alice's team, Bob's project. Neither user may see it.
+    let mixed_org = create_org(&admin, "Mixed Org").await;
+    create_owned_child(&admin, "teams", super::ALICE_ID, mixed_org).await;
+    create_owned_child(&admin, "projects", super::BOB_ID, mixed_org).await;
+    let alice_org = create_org(&admin, "Alice Org").await;
+    create_owned_child(&admin, "teams", super::ALICE_ID, alice_org).await;
+    create_owned_child(&admin, "projects", super::ALICE_ID, alice_org).await;
+    let bob_org = create_org(&admin, "Bob Org").await;
+    create_owned_child(&admin, "teams", super::BOB_ID, bob_org).await;
+    create_owned_child(&admin, "projects", super::BOB_ID, bob_org).await;
+
+    wait_for_subscription_update(
+        &mut alice_stream,
+        &mut alice_log,
+        QUERY_TIMEOUT,
+        "alice sees the organization she holds both inputs in",
+        |log| added_root(log, alice_org),
+    )
+    .await;
+    wait_for_subscription_update(
+        &mut bob_stream,
+        &mut bob_log,
+        QUERY_TIMEOUT,
+        "bob sees the organization he holds both inputs in",
+        |log| added_root(log, bob_org),
+    )
+    .await;
+    collect_stream_deltas(&mut alice_stream, &mut alice_log, NO_DELTA_WINDOW).await;
+    collect_stream_deltas(&mut bob_stream, &mut bob_log, NO_DELTA_WINDOW).await;
+    for (who, log, foreign) in [("alice", &alice_log, bob_org), ("bob", &bob_log, alice_org)] {
+        assert!(
+            !touches_root(log, mixed_org),
+            "{who} must not see an organization authorised by two different users"
+        );
+        assert!(
+            !touches_root(log, foreign),
+            "{who} must not see the other user's organization"
+        );
+    }
+    for (client, own) in [(&alice, alice_org), (&bob, bob_org)] {
+        let rows = wait_for_rows(client, query.clone(), "one-shot sees own org", |rows| {
+            rows.iter().any(|(id, _)| *id == own).then_some(rows)
+        })
+        .await;
+        assert_eq!(
+            rows.iter()
+                .map(|(id, _)| *id)
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from([own]),
+            "one-shot query returns only the organization one user holds both inputs in"
+        );
+    }
+
+    // Live: Bob gains a project in Alice's organization. He still holds no
+    // team there, so Alice's team must not complete the pair for him.
+    create_owned_child(&admin, "projects", super::BOB_ID, alice_org).await;
+    let marker_org = create_org(&admin, "Bob Marker Org").await;
+    create_owned_child(&admin, "teams", super::BOB_ID, marker_org).await;
+    create_owned_child(&admin, "projects", super::BOB_ID, marker_org).await;
+    wait_for_subscription_update(
+        &mut bob_stream,
+        &mut bob_log,
+        QUERY_TIMEOUT,
+        "bob sees his marker organization",
+        |log| added_root(log, marker_org),
+    )
+    .await;
+    assert!(
+        !touches_root(&bob_log, alice_org),
+        "bob's project alone must not admit alice's organization"
+    );
+    assert!(!touches_root(&bob_log, mixed_org));
+
     admin.shutdown().await.expect("shutdown admin");
     alice.shutdown().await.expect("shutdown alice");
     bob.shutdown().await.expect("shutdown bob");

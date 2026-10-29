@@ -14,7 +14,6 @@ use jazz::tools::{
     SchemaBuilder, TableSchema, Value,
 };
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 use tempfile::TempDir;
@@ -279,9 +278,6 @@ fn make_context(
         server_url,
         data_dir,
         storage: ClientStorage::Persistent,
-        storage_factory: Some(std::sync::Arc::new(
-            jazz_storage_rocksdb::RocksDbStorageFactory,
-        )),
         account_id: None,
         jwt_token: Some(jwt_token),
         backend_secret: None,
@@ -358,21 +354,6 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
     let app_id = AppId::from_string(APP_ID_STR).expect("parse app id");
 
     let server = ServerProcess::start(0, server_data.path(), &jwks_server.endpoint()).await;
-    let publish_schema_response = Client::new()
-        .post(format!(
-            "{}/apps/{}/admin/schemas",
-            server.base_url(),
-            APP_ID_STR
-        ))
-        .header("X-Jazz-Admin-Secret", ADMIN_SECRET)
-        .json(&json!({ "schema": test_schema(), "permissions": null }))
-        .send()
-        .await
-        .expect("publish schema");
-    assert_eq!(
-        publish_schema_response.status(),
-        reqwest::StatusCode::CREATED
-    );
     publish_allow_all_permissions(&server.base_url(), app_id, ADMIN_SECRET, &test_schema()).await;
 
     let client_dir = TempDir::new().expect("client dir");
@@ -488,7 +469,6 @@ async fn memory_storage_client_does_not_persist_local_state_to_disk_impl() {
         server_url: String::new(),
         data_dir: data_dir.path().to_path_buf(),
         storage: ClientStorage::Memory,
-        storage_factory: None,
         account_id: Some(AccountId(uuid::Uuid::from_bytes([0xa9; 16]))),
         jwt_token: Some(make_jwt("memory-writer")),
         backend_secret: None,
@@ -527,10 +507,6 @@ async fn memory_storage_client_does_not_persist_local_state_to_disk_impl() {
 
     client.shutdown().await.expect("shutdown memory client");
 
-    assert!(
-        !data_dir.path().join("jazz.rocksdb").exists(),
-        "memory storage should not create a RocksDB database on disk"
-    );
     assert!(
         !data_dir.path().join("jazz.sqlite").exists(),
         "memory storage should not create a SQLite database on disk"

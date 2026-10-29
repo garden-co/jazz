@@ -72,7 +72,7 @@ export function UploadDialog({
         checked: false,
         attachmentId: stored.value.id,
       });
-      block.wait({ tier: "edge" }).catch(() => db.delete(app.attachments, stored.value.id));
+      block.wait({ tier: "global" }).catch(() => db.delete(app.attachments, stored.value.id));
       onClose();
     } catch (cause) {
       setSent(null);

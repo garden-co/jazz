@@ -64,8 +64,9 @@ roadmap work.
 - **Authorization/session identity** — ch. 7 owns account/user/session/system
   terminology, admission hooks, claims, backend attribution, and fail-closed
   policy behavior.
-- **Storage portability** — groove ch. 2 owns the portable ordered-KV backend
-  contract; jazz ch. 14 owns which jazz data lowers to that substrate.
+- **Storage portability** — every host runs the same SQLite engine: native
+  files, the browser on an IndexedDB or OPFS VFS, and Cloudflare Durable
+  Object SQLite; ch. 14 owns how jazz data maps onto it.
 - **Subscription event bridge** — ch. 16 owns maintained subscription terminal
   deltas and the TypeScript event bridge; ch. 13 owns the ergonomic watch API.
 - **Lens/branch-view facades** — ch. 10 and ch. 11 own schema lenses and normalized
@@ -115,7 +116,7 @@ same conformance scenarios with topology-specific configuration only.**
   the protocol and transaction machinery stay shared.
 - **Conformance matrix.** Add black-box tests that run the same API scenarios
   against Rust-only, WASM, NAPI, browser-worker, local Core server, and local-relay
-  layouts. Cover mergeable/exclusive transactions, RLS,
+  layouts. Cover mergeable/serializable transactions, RLS,
   subscription deltas, branch views, and lenses.
 - **Operational surface.** Standardize config, logging, metrics, health checks,
   storage migration reporting, sync lag, full-recompute counters, and protocol
@@ -160,11 +161,9 @@ Milestone: **integrators can adopt jazz incrementally without bespoke glue.**
    load config, open storage, admit one authenticated session, serve a
    WebSocket/byte-transport listener, publish health/metrics, and drain
    connections on shutdown while all product behavior still flows through the
-   client API and shared sync protocol. The current `jazz-server` surface has
-   two canaries: `cargo run -p jazz-cli --bin jazz-server -- dry-run`, which validates the
-   default local shell plan without opening sockets; and
-   `jazz_server::loopback_websocket::LoopbackWebSocketServer`, which sends
-   postcard batches of raw ABI `WireFrame` bytes as binary WebSocket messages.
+   client API and shared sync protocol. The shell is `jazz-tools server`
+   (the `jazz-server` crate); its WebSocket route sends
+   postcard batches of sync frames as binary messages.
    HTTP schema routes are exercised through the production Axum router.
    The alpha TS/WASM gate now spawns the WebSocket listener as a Rust process
    and proves two-client todo convergence through that boundary.
@@ -181,9 +180,8 @@ Milestone: **integrators can adopt jazz incrementally without bespoke glue.**
 
 ### 17.6 Recorded packaging decision
 
-- ✅ **Conformance storage backends:** the alpha matrix covers in-memory,
-  IndexedDB, RocksDB, and SQLite through Groove's ordered-KV contract. Native mobile
-  hosts use SQLite through a process-local native relay (chapter 19); that is a
+- ✅ **Conformance storage backends:** the alpha matrix covers in-memory
+  SQLite, SQLite files, and SQLite on IndexedDB. Native mobile hosts use SQLite through a process-local native relay (chapter 19); that is a
   storage adapter and host boundary, not a new Jazz query or sync runtime.
 
 ## Open Questions

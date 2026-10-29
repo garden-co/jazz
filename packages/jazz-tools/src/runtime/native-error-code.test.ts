@@ -1,10 +1,25 @@
 import { NapiDb } from "jazz-napi";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { openConfig, queryFromTable } from "./native-runtime/native-codec.js";
-import { nativeCoreErrorCode, nativeErrorCode } from "./native-runtime/native-error-code.js";
+import {
+  NATIVE_CORE_ERROR_REASONS,
+  nativeCoreErrorCode,
+  nativeCoreErrorReason,
+  nativeErrorCode,
+} from "./native-runtime/native-error-code.js";
+import { NativeRuntimeAdapter } from "./native-runtime/native-runtime-adapter.js";
 import { encodeSchema } from "./native-runtime/schema-codec.js";
+import {
+  UnsupportedStorageCodecsError,
+  isUnsupportedStorageCodecsError,
+} from "./unsupported-storage-codecs-error.js";
 import { testAuthorBytes } from "./testing/account-fixtures.js";
+import { loadNapiModule } from "./testing/napi-runtime-test-utils.js";
 import { hasJazzWasmBuild, loadWasmModuleForTest } from "./testing/wasm-runtime-test-utils.js";
 
 // A core error crossing a native binding keeps its Rust display text as the
@@ -35,11 +50,32 @@ async function missingTableReadError(read: (query: Uint8Array) => unknown): Prom
   throw new Error("reading an undeclared table unexpectedly succeeded");
 }
 
+describe("native core error reasons", () => {
+  it("reads a core reason name and ignores anything else", () => {
+    const denied = Object.assign(new Error("WriteRejected: authorization_denied: x"), {
+      code: "write_rejected",
+      reason: "authorization_denied",
+    });
+    expect(nativeCoreErrorReason(denied)).toBe("authorization_denied");
+    expect(nativeCoreErrorReason(new Error("no reason"))).toBeUndefined();
+    expect(nativeCoreErrorReason({ reason: "a_reason_from_a_newer_engine" })).toBeUndefined();
+    expect(nativeCoreErrorReason("authorization_denied")).toBeUndefined();
+  });
+
+  it("knows exactly the reasons the engine has", async () => {
+    // A test-only export (`skip_typescript`), absent from the declarations.
+    const napi = (await loadNapiModule()) as unknown as {
+      __testCoreErrorReasonNames(): string[];
+    };
+    expect([...NATIVE_CORE_ERROR_REASONS].sort()).toEqual(napi.__testCoreErrorReasonNames().sort());
+  });
+});
+
 describe("native core error codes", () => {
   it("NAPI throws a core error as an Error with its message and stable code", async () => {
     const db = NapiDb.openMemoryAsBackend(encodeSchema(app.wasmSchema), config("napi-error-code"));
     try {
-      const error = await missingTableReadError((query) => db.all(query, { tier: "local" }));
+      const error = await missingTableReadError((query) => db.all(query, { tier: "local-first" }));
 
       expect(error).toBeInstanceOf(Error);
       expect((error as Error).message).toBe("Query: unknown table missing");
@@ -71,7 +107,7 @@ describe("native core error codes", () => {
       const db = wasm.WasmDb.openMemory(encodeSchema(app.wasmSchema), config("wasm-error-code"));
       try {
         const error = await missingTableReadError((query) =>
-          db.all(query, { tier: "local" }, undefined, undefined, undefined),
+          db.all(query, { tier: "local-first" }, undefined, undefined, undefined),
         );
 
         expect(error).toBeInstanceOf(Error);
@@ -83,4 +119,79 @@ describe("native core error codes", () => {
       }
     },
   );
+});
+
+// A store written before SQLite (the Groove engine's RocksDB directory) is
+// refused at open with the stable code `unsupported_storage_codecs`; the
+// SQLite engine has no codec lists, so they are empty.
+
+/** The published alpha.54 native client root, unpacked into a fresh directory. */
+function unpackPublishedAlpha54Root(): { dir: string; root: string } {
+  const base64 = readFileSync(
+    new URL(
+      "../../../../crates/jazz/fixtures/pre-sqlite/published-alpha54-native-rocksdb.tar.gz.base64",
+      import.meta.url,
+    ),
+    "utf8",
+  ).replace(/\s+/g, "");
+  const dir = mkdtempSync(join(tmpdir(), "jazz-old-store-"));
+  const archive = join(dir, "root.tar.gz");
+  writeFileSync(archive, Buffer.from(base64, "base64"));
+  execFileSync("tar", ["-xzf", archive, "-C", dir]);
+  return { dir, root: join(dir, "rocksdb-epoch-1") };
+}
+
+describe("storage-format refusal", () => {
+  it("NAPI throws a Groove store as an Error with the stable code", () => {
+    const { dir, root } = unpackPublishedAlpha54Root();
+    try {
+      let error: unknown;
+      try {
+        NapiDb.openPersistent(root, encodeSchema(app.wasmSchema), config("napi-old-store"));
+      } catch (thrown) {
+        error = thrown;
+      }
+
+      expect(error).toBeInstanceOf(Error);
+      expect(nativeCoreErrorCode(error)).toBe("unsupported_storage_codecs");
+      expect(isUnsupportedStorageCodecsError(error)).toBe(true);
+      expect((error as Error).message).toContain("Groove engine (RocksDB)");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("the native runtime rethrows the refusal as UnsupportedStorageCodecsError", () => {
+    const { dir, root } = unpackPublishedAlpha54Root();
+    try {
+      let error: unknown;
+      try {
+        new NativeRuntimeAdapter(
+          {
+            openMemory: (schema, configBytes) => NapiDb.openMemory(schema, configBytes) as never,
+            openPersistent: (path, schema, configBytes) =>
+              NapiDb.openPersistent(path, schema, configBytes) as never,
+          },
+          app.wasmSchema,
+          new Uint8Array(16).fill(32),
+          testAuthorBytes("runtime-old-store"),
+          1,
+          false,
+          { persistentPath: root },
+        );
+      } catch (thrown) {
+        error = thrown;
+      }
+
+      expect(error).toBeInstanceOf(UnsupportedStorageCodecsError);
+      expect(error).toMatchObject({
+        name: "UnsupportedStorageCodecsError",
+        code: "unsupported_storage_codecs",
+        missing: [],
+        unknown: [],
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

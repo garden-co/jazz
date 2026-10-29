@@ -16,15 +16,22 @@ export interface UploadOptions {
   ownerId: string;
   signal?: AbortSignal;
   onProgress?: (uploadedBytes: number) => void;
+  onSaving?: () => void;
 }
 
 /**
  * Stream a browser file into a new row without materializing it as one
  * application-owned Uint8Array. Aborting the signal fails the stream, and a
  * failed stream publishes no row.
+ *
+ * Resolves once the row is persisted in this browser's local storage, not
+ * merely published: `insertStreaming` returns before the write is durable,
+ * and a reload in between loses the file. After this, a reload keeps it and
+ * it syncs whenever the server is reachable. `onSaving` marks the end of the
+ * stream, while the bytes are written to storage.
  */
 export async function uploadFile(db: Db, file: File, options: UploadOptions) {
-  const { folderId, ownerId, signal, onProgress } = options;
+  const { folderId, ownerId, signal, onProgress, onSaving } = options;
   if (file.size > MAX_FILE_BYTES) throw new Error("Files larger than 2 GB are not supported yet");
   const write = await db.insertStreaming(app.files, {
     folder_id: folderId,
@@ -34,6 +41,8 @@ export async function uploadFile(db: Db, file: File, options: UploadOptions) {
     owner_id: ownerId,
     contents: trackedStream(file.stream(), signal, onProgress),
   });
+  onSaving?.();
+  await write.wait({ tier: "local" });
   return write.value;
 }
 

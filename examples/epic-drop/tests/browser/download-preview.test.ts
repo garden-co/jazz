@@ -108,7 +108,7 @@ describe("EpicDrop download and preview", () => {
     expect(parsed).toEqual(invite);
 
     // Before joining, Bob sees nothing.
-    await expect(bob.all(app.folders, { tier: "global" })).resolves.toEqual([]);
+    await expect(bob.all(app.folders, { tier: "remote" })).resolves.toEqual([]);
 
     // A forged code is rejected by the server.
     await expect(
@@ -116,17 +116,17 @@ describe("EpicDrop download and preview", () => {
     ).rejects.toThrow();
 
     await redeemInvite(bob, parsed!, bobId);
-    const folders = await bob.all(app.folders, { tier: "global" });
+    const folders = await bob.all(app.folders, { tier: "remote" });
     expect(folders.map((folder) => folder.name)).toEqual(["Demos"]);
 
     const [listed] = await bob.all(
       app.files.where({ folder_id: demos.value.id }).select("id", "name", "size_bytes"),
-      { tier: "global" },
+      { tier: "remote" },
     );
     expect(listed).toMatchObject({ name: "lyrics.txt", size_bytes: bytes.length });
     const [page] = await bob.all(
       app.files.where({ id: listed!.id }).select({ contents: { from: 4090, to: 4100 } }),
-      { tier: "global" },
+      { tier: "remote" },
     );
     expect(page!.contents).toEqual(bytes.subarray(4090, 4100));
 

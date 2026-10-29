@@ -14,6 +14,8 @@
  * proof that permits a successor to replace an epoch left by a crashed realm.
  */
 
+import { toError } from "./util.js";
+
 export class BrowserPhysicalDatabaseBusyError extends Error {
   constructor(readonly databaseName: string) {
     super(
@@ -123,7 +125,7 @@ export async function acquireBrowserPhysicalDatabaseEpoch(
       (error: unknown) => {
         releaseRequested = true;
         resolveLockReleased();
-        rejectEpoch(error instanceof Error ? error : new Error(String(error)));
+        rejectEpoch(toError(error));
       },
     );
   return await epoch;

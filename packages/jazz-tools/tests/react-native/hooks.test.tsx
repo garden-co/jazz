@@ -22,7 +22,7 @@ type Note = { id: string; title: string; done: boolean };
 
 function Probe({
   query,
-  options = { tier: "local" },
+  options = { tier: "local-first" },
   onDb,
 }: {
   query?: QueryBuilder<Note>;
@@ -61,7 +61,9 @@ function Probe({
 
 async function expectClosed(db: Db) {
   await waitFor(async () => {
-    await expect(db.all(app.notes, { tier: "local" })).rejects.toThrow("shutting down or closed");
+    await expect(db.all(app.notes, { tier: "local-first" })).rejects.toThrow(
+      "shutting down or closed",
+    );
   });
 }
 

@@ -1,53 +1,91 @@
 "use client";
 
 import { Suspense, useCallback, useEffect, useState } from "react";
-import { Button } from "@astryxdesign/core";
 import { BandBookApp } from "@/src/components/BandBookApp";
 import { StatusScreen } from "@/components/status-screen";
-import { useSession } from "jazz-tools/react";
-import { bootstrapWorkspace } from "@/src/lib/server-calls";
+import { useDb, useSession } from "jazz-tools/react";
+import {
+  confirmHomeWorkspace,
+  ensureHomeWorkspace,
+  rememberedHomeWorkspace,
+} from "@/src/lib/home-workspace";
 
 type Bootstrap =
-  | { state: "loading" }
+  | { state: "pending" }
   | { state: "ready"; workspaceId: string }
   | { state: "failed"; message: string };
 
 export default function WorkspacePage() {
   // The Jazz provider renders this page only once the account's client is ready.
-  const account = useSession()?.user.account;
-  const [bootstrap, setBootstrap] = useState<Bootstrap>({ state: "loading" });
+  const session = useSession();
+  const account = session?.user.account;
+  const principal = session?.user.identity.subject;
+  const db = useDb();
+  const [bootstrap, setBootstrap] = useState<Bootstrap>(() => {
+    const remembered = account ? rememberedHomeWorkspace(account) : null;
+    return remembered ? { state: "ready", workspaceId: remembered } : { state: "pending" };
+  });
 
-  const run = useCallback(async () => {
-    setBootstrap({ state: "loading" });
-    try {
-      const response = await bootstrapWorkspace();
-      if (!response.ok) throw new Error(`The server answered ${response.status}.`);
-      const { workspaceId } = (await response.json()) as { workspaceId: string };
-      setBootstrap({ state: "ready", workspaceId });
-    } catch (cause) {
-      setBootstrap({
-        state: "failed",
-        message: cause instanceof Error ? cause.message : String(cause),
-      });
-    }
-  }, []);
+  // The demo workspace is created by the server once per account. The app
+  // renders from local data meanwhile; this only picks the home workspace and
+  // reports a failure when there is nothing else to show.
+  const run = useCallback(
+    (account: string, principal: string) => {
+      let cancelled = false;
+      const fail = (cause: unknown) =>
+        !cancelled &&
+        setBootstrap({
+          state: "failed",
+          message: cause instanceof Error ? cause.message : String(cause),
+        });
+      const remembered = rememberedHomeWorkspace(account) !== null;
+      ensureHomeWorkspace(account, principal).then((workspaceId) => {
+        if (cancelled) return;
+        setBootstrap({ state: "ready", workspaceId });
+        if (!remembered) return;
+        // A remembered id renders at once; the server confirms it meanwhile.
+        // If the workspace is gone (data reset, deleted), set it up again. A
+        // failed check keeps the remembered id.
+        confirmHomeWorkspace(db, account, workspaceId).then(
+          (exists) => {
+            if (cancelled || exists) return;
+            setBootstrap({ state: "pending" });
+            ensureHomeWorkspace(account, principal).then(
+              (fresh) => !cancelled && setBootstrap({ state: "ready", workspaceId: fresh }),
+              fail,
+            );
+          },
+          (cause: unknown) => console.warn("Could not check the home workspace", cause),
+        );
+      }, fail);
+      return () => {
+        cancelled = true;
+      };
+    },
+    [db],
+  );
 
   useEffect(() => {
-    if (account) void run();
-  }, [account, run]);
+    if (account && principal) return run(account, principal);
+  }, [account, principal, run]);
 
-  if (bootstrap.state === "failed")
-    return (
-      <StatusScreen
-        label="Could not set up your band"
-        error={bootstrap.message}
-        action={<Button label="Try again" onClick={() => void run()} />}
-      />
-    );
-  if (bootstrap.state === "loading") return <StatusScreen label="Setting up your band" />;
   return (
     <Suspense fallback={<StatusScreen label="Opening BandBook" />}>
-      <BandBookApp homeWorkspaceId={bootstrap.workspaceId} />
+      <BandBookApp
+        homeWorkspaceId={bootstrap.state === "ready" ? bootstrap.workspaceId : null}
+        settingUp={bootstrap.state === "pending"}
+        setupError={
+          bootstrap.state === "failed" && account && principal
+            ? {
+                message: bootstrap.message,
+                retry: () => {
+                  setBootstrap({ state: "pending" });
+                  run(account, principal);
+                },
+              }
+            : null
+        }
+      />
     </Suspense>
   );
 }

@@ -124,15 +124,19 @@ visible state, but it is not a normal application-facing feature yet.
 ### Monotonic direct-write ordering
 
 Each runtime instance maintains a small monotonic clock for direct writes. New row versions created
-by that runtime get strictly increasing local timestamps, which makes deterministic last-writer-wins
-ordering straightforward within a single device or process.
+by that runtime get strictly increasing local timestamps, which identify its transactions and order
+them within a single device or process. Timestamps do not decide merges.
 
 ### Merge strategies
 
-By default, Jazz adopts a per-column last-writer-wins strategy to resolve concurrent edits. If two
-clients update the same column of the same row simultaneously, Jazz's deterministic
-[hybrid logical clock](/docs/concepts/how-sync-works#hybrid-logical-clock) ordering chooses the
-winner.
+By default, Jazz merges concurrent edits column by column against what each writer saw. Every
+write records the version of the row it was made over. When the server applies a write, each column
+the write changed takes the new value unless someone else changed that column since the version the
+writer saw. In that case the value already accepted stays, and the losing edit is kept in the row's
+history. Edits to different columns of the same row all survive. When two clients change the same
+column from the same starting point, the edit the server receives first wins, whatever the clients'
+clocks say. A long run of offline edits merges the same way: each edit is compared with what that
+device had seen, including its own earlier offline edits.
 
 This is a sensible default, but can cause some unexpected behaviour with certain types of data. For example,
 imagine a voting app. Alice and Bob both read the current `voteCount` value as 2. They each want to increment
@@ -169,6 +173,11 @@ Counter merges are useful for things like:
 - Any other counter where you care about preserving every increment rather than which device
   wrote last.
 
+A counter never wraps around. If applying an update would take the column past its type's range
+(for example two devices each subtract `1` from a counter at the type's minimum, or each add `1` at
+its maximum), the server applies the first and rejects the second with an explicit
+"out of range" rejection, and the counter keeps the value it had.
+
 <Callout type="warn">
   `merge("counter")` is only valid on **non-nullable integer or bigint columns**. Calling it on a
   string, a nullable integer (`s.int().optional()`), a nullable bigint (`s.bigint().optional()`), or
@@ -177,9 +186,10 @@ Counter merges are useful for things like:
 
 #### Grow-only sets
 
-Counters solve concurrent numbers; arrays have the same problem with concurrent membership. Under
-last-writer-wins, if Alice adds `"urgent"` to a `tags` array while Bob concurrently adds
-`"blocked"`, one write clobbers the whole array and a tag is silently lost.
+Counters solve concurrent numbers; arrays have the same problem with concurrent membership. Under the
+default merge, if Alice adds `"urgent"` to a `tags` array while Bob concurrently adds
+`"blocked"`, the array is one field: the edit the server receives second loses whole, and a tag is
+silently dropped.
 
 Use `.merge("g-set")` to make an array column a grow-only set instead — concurrent writes converge
 to the union of every replica's elements:
@@ -215,6 +225,16 @@ Grow-only sets are useful for things like:
   throws at schema construction time.
 </Callout>
 
+#### Text
+
+A string column has the same problem with prose: under the default merge, if Alice adds a sentence
+while Bob fixes a typo elsewhere in the same field, one of the two edits is lost. Use
+`.merge("text")`, `.merge("markdown")` or `.merge("html")` to merge the edits inside the string
+instead. Core merges them against the version each writer started from, so changes to different
+parts of the text all survive. See
+[mergeable text columns](/docs/schemas/column-types#mergeable-text-columns) and
+[how text merges work](/docs/concepts/how-sync-works#text-merges).
+
 ### Cold start
 
 On startup, Jazz loads indices first rather than eagerly decoding every row. Row content is then
@@ -231,8 +251,8 @@ In the browser, Jazz uses the direct Rust/WASM core for reads, writes, subscript
 server over the core WebSocket protocol.
 
 With `driver: { type: "persistent" }`, Jazz opens one directly durable SharedWorker runtime per
-database namespace. The worker owns the IndexedDB page store and the server connection; each tab
-communicates with that runtime through a message port. There is no tab-leader election, follower
+database namespace. The worker owns the SQLite database (stored in IndexedDB) and the server
+connection; each tab communicates with that runtime through a message port. There is no tab-leader election, follower
 handoff, or per-tab durable database. Jazz does use one origin-wide Web Lock per physical database
 namespace to prevent retry generations or separately loaded worker assets from concurrently opening
 the same IndexedDB root. If that lock is unavailable or already held by another worker realm, the
@@ -253,7 +273,8 @@ is neither the foreground replica/node ID nor a credential; those remain separat
 
 Calling `db.disconnect()` in one tab explicitly takes that **whole persistent namespace** offline:
 the worker has one upstream connection, so every attached tab stops waiting for the server on
-`"local-first-unless-empty"` reads and remote reads wait until any tab calls `db.reconnect()`.
+local-first reads with `firstLoadRemoteWaitMs`, and
+remote reads wait until any tab calls `db.reconnect()`.
 The worker also tells attached tabs when its live connection comes up, drops, or fails. This is
 intentional; disconnecting only one tab while continuing to sync its writes through the shared
 worker would give that tab an incoherent offline contract.
@@ -266,9 +287,8 @@ runtime syncs directly with the server.
 
 ### IndexedDB crash safety
 
-The IndexedDB page store commits a complete page generation and its metadata in one IndexedDB
-transaction. A failed or interrupted write therefore leaves the previous committed generation
-available on reopen.
+The worker's SQLite file is stored in IndexedDB, and each commit is persisted whole: a crash can
+lose the newest commits but never tears one.
 
 ### React Native
 
@@ -276,33 +296,14 @@ React Native uses its native adapter rather than browser workers or IndexedDB.
 
 ## Query engine
 
-### Execution pipeline
+### Execution
 
-Queries compile into a graph of processing nodes:
+Queries and their permission policies compile to SQL. A live subscription re-runs when a commit
+touches a table it depends on, and Jazz sends only the difference from the previous result, so
+subscribers receive row-level changes rather than whole results.
 
-```text
-IndexScan → [Union] → Materialize → [PolicyFilter]
-  → [ArraySubquery] → [Filter] → [Sort] → [LimitOffset]
-  → [Project] → Output
-```
-
-Nodes in brackets are only present when the query requires them. The graph processes deltas
-incrementally, which means that when data changes, only dirty nodes re-evaluate. That is what makes
-live subscriptions efficient: a single row change does not require re-running the whole query.
-
-### Materialization
-
-`Materialize` is where candidate row ids turn back into rows.
-
-It typically:
-
-1. looks up the visible entry for the relevant branch
-2. falls back to row history only when the query needs an older settled winner
-3. decodes or reprojects the flat row, dropping the reserved engine columns before returning app-facing values
-4. emits row-level deltas to the downstream graph
-
-This is why the visible region matters so much: most current reads never need to reconstruct a row
-from full history.
+Reads see each row's current version directly; only queries that ask for an older settled version
+read row history.
 
 ### One-shot queries
 

@@ -5,6 +5,7 @@
   import type { JazzClient } from './create-jazz-client.js';
   import JazzSessionClientProvider from './JazzSessionClientProvider.svelte';
   import { setJazzSession } from './session-state.js';
+  import { toError } from '../runtime/util.js';
 
   type Props = {
     children: Snippet;
@@ -34,7 +35,7 @@
       else owned = value;
     }).catch((cause) => {
       attempt = undefined;
-      if (!cancelled) publish({ status: 'error', error: cause instanceof Error ? cause : new Error(String(cause)) });
+      if (!cancelled) publish({ status: 'error', error: toError(cause) });
       throw cause;
     });
     return attempt;

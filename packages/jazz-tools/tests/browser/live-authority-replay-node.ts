@@ -15,8 +15,6 @@ export async function liveAuthorityBackendOpen(info: JazzServerInfo): Promise<Li
     app,
     permissions: liveAuthorityPermissions,
     driver: { type: "memory" },
-    tier: "global",
-    defaultDurabilityTier: "global",
   });
   sessions.set(info.appId, session);
   try {
@@ -61,7 +59,7 @@ export async function liveAuthorityBackendInsert(
       label_id: seed.labelId,
     })
     .wait({ tier: "global" });
-  const readable = await db.all(app.items.where({ id: row.id }), { tier: "global" });
+  const readable = await db.all(app.items.where({ id: row.id }), { tier: "remote" });
   if (readable.length !== 1) throw new Error("Globally settled backend insert is not readable");
   return row.id;
 }

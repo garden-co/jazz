@@ -106,7 +106,7 @@ parses that JSON with serde defaults, silently dropping `composite_indexes`.
 It is still rejected loudly, because composite indexes are part of the schema
 id (ch. 2, §2.4): the peer recomputes the id from the schema it parsed, gets
 the plain schema's id, and refuses the payload at catalogue admission as a
-content-id mismatch (the lineage-publication id, which hashes the CATS bytes,
+content-id mismatch (the lineage-publication id, which hashes the encoded catalogue schema,
 mismatches likewise). So once any schema that declares a composite index is
 published, a pre-composite peer rejects the catalogue rather than serving a
 schema without the index. The HTTP admin route is different: a
@@ -159,6 +159,26 @@ their bodies; unknown versions, unordered/duplicate names, malformed nested
 records, trailing bytes, or a content ID/canonical re-encoding mismatch reject
 reopen before resident state changes. The former naked serde JSON has no
 compatibility decoder in this experimental storage epoch.
+
+A schema publication contains a nonempty set of predecessors, each with its
+incoming lens and source-relative new/dropped table declarations. Sources must
+be distinct, already admitted before activation, and different from the target.
+All preserved target coordinates must agree on their permanent identities. A
+target may inherit a column from any predecessor; only identities preserved by
+an incoming lens may be reused from catalogue history. Activation and snapshots
+install the schema, every incoming lens, and its identity manifest together.
+
+The staged/pending envelopes retain their layout; their length-prefixed
+publication body always uses `v2:u8 | id:uuid[16] | schema_len:u32-le |
+schema | predecessor_count:u32-le | predecessors | physical_identity_manifest`.
+The predecessor count must be nonzero, including for a singleton. Each
+predecessor is `lens_len:u32-le | lens | new_table_count:u32-le |
+new_table_strings | dropped_table_count:u32-le | dropped_table_strings`,
+using length-prefixed UTF-8 strings and the existing lens encoding.
+Predecessors are sorted by source UUID bytes, declarations by name; duplicates
+are rejected. Content identity always uses the
+`jazz-schema-lineage-publication-v2` domain and the counted canonical list.
+`catalogue-predecessors.hex` pins singleton and multiple-predecessor bodies.
 
 The protocol `MigrationLens` is intentionally distinct from the server schema
 editor's `LensTransform`. A protocol lens describes a published source/target
@@ -568,6 +588,52 @@ authority snapshot, snapshot planning preserves its local aliases, verifies and
 installs the authority UUID manifest, and reconciles ancestors and descendants
 around the local anchor. Pending local rows therefore remain addressable while
 cross-node semantic identity converges.
+
+**Union row cases.** Besides one Groove case per schema version (tag = the
+schema's local alias), every physical history, global current, ahead current
+and ahead shadow table has a **union case** per schema version `G` whose
+lineage has columns `G` does not map: tag = `alias(G) | 1 << 31`, fields =
+`G`'s own case followed by those columns ("extras"), in physical column id
+order. The extras of `G` are the columns of the same physical table mapped by
+any schema version ranked no later than `G` in the catalogue: a lineage's
+target ranks at its catalogue position and the authority genesis before them
+all. Every node replicates that order from its Core, so every node that knows
+`G` derives the same extras, fixed once `G` is published; old union cases
+never change. Local aliases cannot order them: a client allocates its own
+schema's alias first and learns older schemas later. A schema version only
+the node knows (not yet published) has no union case. Rejected-version tables
+have no union case. A union row reads exactly like a `G` row to code that only
+knows `G`.
+
+Core stores each post-image in the union case of the schema version ranked
+last among those mapping the table (ch. 4 §4.6, "Across schema versions").
+That need not be the write's own schema, nor name the table as the write
+does, so a post-image replaces the write's pending record by its physical
+row (table, branch, row), not by its name or schema. An extra is
+**derived** when the lens path from `G` carries it on from one of `G`'s own
+columns (a rename chain or a bijective transform); it stays null, and readers
+derive it from `G`'s cell as for any `G` row. Every other extra is
+**stored**: a column `G` dropped, a sibling's column, and a copy
+(`CopyColumn`) target, which is a column of its own (ch. 4 §4.6) whose
+writes a lens from `G` would otherwise overwrite with the source's value.
+The lens path is taken through schema versions ranked no later than `G`
+only, so the stored set is fixed with `G`'s union case: a later schema with
+several predecessors cannot open a shorter route that turns a stored extra
+into a derived one (or the reverse) under existing union rows. Reading a
+union row as schema `R`, by any read path: a column of `R` that is a stored
+extra reads that field (null reads as absent); any other column takes the
+`G` → `R` projection.
+
+On the wire a Core image keeps `G`'s cells and descriptor; its stored extras
+travel as `UnionExtraCells`, one entry per schema version defining them, each
+a record of that schema's authored cells (`_app_<column>`, nullable). The
+entries travel inside the row's `JVRR` v3 blob, flagged by its descriptor
+head (ch. 16); a row without entries leaves the flag clear and carries
+nothing extra. A receiver validates each cell against its schema and
+stores the image unchanged, in `G`'s union case: its entries must be exactly
+`G`'s stored extras there, as the shared catalogue order guarantees. The image
+keeps its identity, so what the receiver serves or compares later is Core's
+record. Commit units carry no union cells.
 
 ### 10.4 Writes: authored schema variants
 

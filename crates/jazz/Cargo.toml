@@ -4,56 +4,29 @@ version = "0.1.0"
 edition = "2024"
 autobins = false
 autobenches = false
-# Integration tests are listed explicitly so the flat files build as one
-# binary; see tests/integration/main.rs.
 autotests = false
 
 [features]
 # Jazz is the common semantic library. Process and target shells select
-# storage, transport, compression, and runtime capabilities explicitly.
+# transport and compression capabilities explicitly.
 default = []
-runtime = [
-  "dep:jsonwebtoken",
-  "dep:tokio",
-  "jazz-model/runtime",
-  "jazz-node/runtime",
-  "jazz-db/runtime",
-]
-sync-autopsy = ["jazz-db/sync-autopsy"]
-# Disabled-by-default counters for the cold-settle attribution bench. They do
-# not alter protocol behavior or production measurement paths.
-cold-settle-attribution = [
-  "groove/cold-settle-attribution",
-  "jazz-node/cold-settle-attribution",
-  "jazz-db/cold-settle-attribution",
-]
-r3-open-attribution = ["testing"]
+runtime = ["dep:jsonwebtoken", "dep:tokio", "jazz-model/runtime"]
+# See jazz-db's `sql-trace`.
+sql-trace = ["jazz-db/sql-trace"]
+# See jazz-db's `durable-object-limits`.
+durable-object-limits = ["jazz-db/durable-object-limits"]
 testing = [
   "runtime",
   "jazz-types/testing",
   "jazz-model/testing",
   "jazz-protocol/testing",
-  "jazz-engine/testing",
-  "jazz-node/testing",
   "jazz-db/testing",
 ]
-transport-compression-lz4 = [
-  "jazz-compression/lz4",
-  "jazz-protocol/transport-compression-lz4",
-  "jazz-node/transport-compression-lz4",
-  "jazz-db/transport-compression-lz4",
-]
-transport-compression-zstd = [
-  "jazz-compression/zstd",
-  "jazz-protocol/transport-compression-zstd",
-  "jazz-node/transport-compression-zstd",
-  "jazz-db/transport-compression-zstd",
-]
+transport-compression-lz4 = ["jazz-compression/lz4", "jazz-protocol/transport-compression-lz4"]
+transport-compression-zstd = ["jazz-compression/zstd", "jazz-protocol/transport-compression-zstd"]
 transport-compression-ruzstd = [
   "jazz-compression/ruzstd",
   "jazz-protocol/transport-compression-ruzstd",
-  "jazz-node/transport-compression-ruzstd",
-  "jazz-db/transport-compression-ruzstd",
 ]
 
 [dependencies]
@@ -62,12 +35,9 @@ futures-channel = "0.3.31"
 futures = "0.3"
 futures-util = "0.3"
 blake3 = "1"
-groove = { workspace = true, default-features = false }
 jazz-types.workspace = true
 jazz-model.workspace = true
 jazz-protocol.workspace = true
-jazz-engine.workspace = true
-jazz-node.workspace = true
 jazz-db.workspace = true
 bytes = "1"
 jazz-compression.workspace = true
@@ -99,7 +69,6 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 # `testing` feature, so a featureless `cargo test -p jazz` enables it here.
 jazz = { path = ".", default-features = false, features = ["testing"] }
 divan.workspace = true
-groove = { workspace = true, default-features = false, features = ["test"] }
 jazz-benchmark-guard = { path = "../benchmark-guard" }
 hdrhistogram = "7.5.4"
 tempfile = "3.27.0"
@@ -107,16 +76,10 @@ tar = "0.4"
 libc = "0.2"
 criterion = "0.5"
 flate2 = "1"
-rusqlite = { version = "0.34", features = ["bundled"] }
-rocksdb = { package = "rust-rocksdb", version = "0.48.0", default-features = false, features = [
-  "lz4",
-  "zstd",
-] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 insta = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 jsonwebtoken = { version = "10.4", default-features = false, features = ["rust_crypto", "use_pem"] }
-jazz-storage-rocksdb.workspace = true
-jazz-storage-sqlite.workspace = true
 futures = "0.3"
 tokio = { version = "1", features = [
   "macros",
@@ -131,100 +94,21 @@ tower = { version = "0.5", features = ["util"] }
 rcgen = { version = "0.13", default-features = false, features = ["ring"] }
 
 [[bench]]
-name = "validation"
-harness = false
-required-features = ["testing"]
-
-[[bench]]
-name = "sync"
-harness = false
-required-features = ["testing"]
-
-[[bench]]
-name = "known_state_scaling"
-harness = false
-required-features = ["testing"]
-
-[[bench]]
-name = "maintained_rehydrate_scaling"
-harness = false
-required-features = ["testing"]
-
-[[bench]]
-name = "cold_subscription"
-harness = false
-required-features = ["testing"]
-
-[[bench]]
-name = "relation_include_delivery"
+name = "fanout"
 harness = false
 
 [[bench]]
-name = "selective_global_hydration"
+name = "fanout_wire"
 harness = false
-required-features = ["testing"]
-
-[[bench]]
-name = "exclusive_join_narrowing"
-harness = false
-required-features = ["testing"]
-
-[[bench]]
-name = "owner_filter_diagnostic"
-harness = false
-required-features = ["testing"]
-
-[[bench]]
-name = "observer_write_path"
-harness = false
-
-[[bench]]
-name = "db_benchmark"
-harness = false
-
-[[bench]]
-name = "authorization_scope_benchmark"
-harness = false
-
-[[bench]]
-name = "realistic_phase1"
-harness = false
-
-[[bench]]
-name = "insert_benchmark"
-harness = false
-
-[[bench]]
-name = "update_benchmark"
-harness = false
-
-[[bench]]
-name = "subscription_benchmark"
-harness = false
-
-[[bench]]
-name = "route_subscription_curve"
-harness = false
-required-features = ["testing"]
-
-[[bench]]
-name = "accepted_fate_replay"
-harness = false
-required-features = ["testing"]
-
-[[bench]]
-name = "local_blob_reads"
-harness = false
-required-features = ["testing"]
-
-[[test]]
-name = "legacy_benchmark_smoke"
-required-features = ["testing"]
 
 [[test]]
 name = "integration"
 path = "tests/integration/main.rs"
 
 [[test]]
-name = "incremental_delivery_canary"
-path = "tests/incremental_delivery_canary.rs"
+name = "durable_file"
+path = "tests/durable_file.rs"
+
+[[test]]
+name = "maintained_differential"
+path = "tests/maintained_differential.rs"

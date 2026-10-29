@@ -14,10 +14,10 @@ Invariant digest:
 
 - `INV-API-1`: Db MUST be the high-level runtime-typed client facade, exposing the application API and connection-driving surface without introducing different application or sync semantics; it MUST validate user Query values before executing reads or subscriptions.
 - `INV-API-2`: Db::open MUST construct a non-history-complete client. The history-complete opening path is reserved for core/Node use and MUST NOT make the ordinary application facade a fate authority.
-- `INV-API-3`: `Db::read` and `Db::one` MUST be synchronous local reads and MUST NOT wait for upstream sync; `Db::all` MUST use `ReadOpts` to choose the effective durability tier.
-- `INV-API-4`: When `ReadOpts.local_updates == LocalUpdates::Immediate`, the effective read tier MUST be at least `DurabilityTier::Local`; when it is `Deferred`, the effective read tier MUST be exactly `ReadOpts.tier`.
-- `INV-API-5`: `ReadOpts::default()` MUST be `{ tier: DurabilityTier::Local, local_updates: LocalUpdates::Immediate, propagation: Propagation::Full }`.
-- `INV-API-6`: `Db::subscribe` MUST support live subscriptions at the requested effective tier. Local subscriptions are first-class application-facing subscriptions that include the node's own pending committed writes and MUST publish their truthful node-local opening, including an empty opening, even when `Propagation::Full` concurrently requests upstream coverage; propagation does not raise the requested observation tier. Global subscriptions apply the same query semantics over the Core-confirmed frontier and MUST withhold an empty opening until it is authority-backed. The target implementation is maintained subscription views for every tier; until local maintained views are fully unified with the global path, local effective-tier subscriptions MAY serve alpha-style local live reads from an explicitly named local materialized-row bridge. No tier may introduce a second facade-side query engine as the target semantics.
+- `INV-API-3`: `Db::read` and `Db::one` MUST be synchronous local reads and MUST NOT wait for upstream sync; `Db::all` MUST use `ReadOpts` to choose the read semantics.
+- `INV-API-4`: `ReadOpts.tier` MUST be `ReadTier::LocalOnly`, `ReadTier::LocalFirst`, or `ReadTier::Remote`. Pending-write visibility follows this choice; execution coverage may be promoted to Global without changing LocalFirst semantics.
+- `INV-API-5`: `ReadOpts::default()` MUST use `ReadTier::LocalFirst`.
+- `INV-API-6`: `Db::subscribe` MUST support live subscriptions at the requested effective tier. Local subscriptions are first-class application-facing subscriptions that include the node's own pending committed writes and MUST publish their truthful node-local opening, including an empty opening, while `LocalFirst` concurrently requests upstream coverage; requesting upstream results does not delay local delivery. Global subscriptions apply the same query semantics over the Core-confirmed frontier and MUST withhold an empty opening until it is authority-backed. The target implementation is maintained subscription views for every tier; until local maintained views are fully unified with the global path, local effective-tier subscriptions MAY serve alpha-style local live reads from an explicitly named local materialized-row bridge. No tier may introduce a second facade-side query engine as the target semantics.
 - `INV-API-7`: Subscription streams MUST expose maintained-view opened/reset/delta
   events and MUST NOT queue facade-side full-result diffs as the normal live
   subscription mechanism.
@@ -33,7 +33,7 @@ Invariant digest:
 - `INV-API-17`: Db::connectupstream MUST make every already-registered facade subscription eligible for immediate upstream announcement without requiring re-registration.
 - `INV-API-18`: `Db::subscribe` MUST announce newly registered subscriptions to all existing upstream connections so query-driven sync can request remote completion on the next tick.
 - `INV-API-31`: `Db::disconnect` MUST mark the `Db` intentionally offline, disconnect every schema client from its server transport, and leave the local runtime and store alive; `Db::reconnect` MUST clear that marker and reconnect every schema client. A schema client created while intentionally offline MUST remain offline until `reconnect`.
-- `INV-API-32`: `ReadOpts.tier` selects the sufficient materialized knowledge and first-result gate; `Propagation` only controls whether evaluation or coverage may be forwarded upstream and MUST NOT change local-tier result semantics. Thus a `Local` read resolves from current local materialized state even with `Propagation::Full`: a locally committed pending write is returned, while a row written remotely but not yet delivered locally is absent. `LocalOnly` prevents upstream routing; it is not what makes a `Local` read local.
+- `INV-API-32`: `ReadOpts.tier` selects read behavior: `LocalOnly` evaluates local data and pending writes without requesting upstream results; `LocalFirst` also requests upstream results while delivering local data; `Remote` requires server-confirmed results: it waits while offline or without a server, through a relay too, since only the authority confirms a remote result. Offline `LocalFirst` reads return locally known data; rows not yet delivered remain absent until reconnect.
 - `INV-API-19`: Upstream announcement of a subscription MUST make its query definition available before the subscription that uses it, without re-announcing the same definition for that connection.
 - `INV-API-20`: An upstream connection MUST upload each locally-authored transaction at most once.
 - `INV-API-21`: A subscriber `PeerConnection::tick` MUST serve subscriptions under the `AuthorSubject` passed to `Node::accept_subscriber`, not under the serving node's own identity.
@@ -41,7 +41,7 @@ Invariant digest:
 - `INV-API-23`: A client binding tick driver MUST classify `Db::tick()` failures. A recoverable protocol condition MUST NOT terminate the driver; the driver MUST continue through its documented repair or reconnect path with bounded backoff. A fatal failure, or exhausted recovery, MUST stop the driver and be surfaced to the caller as an error rather than appearing as a stalled sync operation.
 - `INV-API-24`: The query builder exposed through Db::table MUST expose the schema-validated query construction capabilities defined in ch. 6.
 - `INV-API-26`: `Db::mergeable_tx()` MUST group multiple facade writes under one mergeable `TxId`, and the produced commit unit MUST set `Transaction.n_total_writes` to the number of grouped versions.
-- `INV-API-27`: `Db::exclusive_tx()` MUST expose serializable exclusive transactions on the facade, preserving snapshot reads and returning `WriteRejected` when authority validation detects a conflict.
+- `INV-API-27`: `Db::serializable_tx()` MUST expose serializable transactions on the facade, preserving snapshot reads and returning `WriteRejected` when authority validation detects a conflict.
 - `INV-API-28`: Permission advice is a three-valued, authority-scoped dry run: only the serving authority may issue definitive `Allowed`/`Denied`; client-local, offline, incomplete, not-ready, and timed-out requests yield `Unknown`. Advice is non-mutating and does not reserve a later mutation; its authenticated request/response exchange exposes no policy evidence and is correlation-, cancellation-, replay-, and dedup-safe.
 - `INV-API-33`: Ordinary `Db` reads and subscriptions MUST use client-local lowering: policy is enforced by the trusted upstream before emission and is never re-applied to received rows. Local/None reads scan locally available data; Global settled reads consume the identity-scoped settled view received upstream.
 - `INV-API-29`: A `Db` is a client: facade writes MUST keep `permission_subject == made_by`, and a `Db` MUST reject any attempt to attribute a write to another author. Cross-author attribution is a node-level concern on the ingest side (a trusted serving `Node`, `INV-RLS-18`, ch. 9), never a `Db` capability.
@@ -80,7 +80,7 @@ fabricate `Rejected`, roll back local data, invoke `onMutationError`, or
 replay that transient foreground error to a peer attached later.
 
 - `INV-API-35`: Once a local mutation is durably persisted or its ordered publication is owned by the node runtime, the mutation API MUST return its committed `WriteHandle`/`TxId`; a later resident-subscription refresh failure MUST be emitted through the subscription error channel and MUST NOT be returned as a generic mutation or peer-ingest failure.
-- `INV-API-36`: An explicit-id `insert` in an exclusive transaction MUST only create: it MUST reject with `ErrorCode::WriteRejected`, without staging content, when its `(table, row)` target is visible in the transaction's snapshot-plus-overlay view, deleted there, or staged earlier in the same transaction. A target hidden by read policy MUST be rejected with the same error as an `upsert` over it, never disclosed as existing. Overwriting requires `upsert` or `update`; concurrent creates of one absent id remain first-committer-wins.
+- `INV-API-36`: An explicit-id `insert` in a serializable transaction MUST only create: it MUST reject with `ErrorCode::WriteRejected`, without staging content, when its `(table, row)` target is visible in the transaction's snapshot-plus-overlay view, deleted there, or staged earlier in the same transaction. A target hidden by read policy MUST be rejected with the same error as an `upsert` over it, never disclosed as existing. Overwriting requires `upsert` or `update`; concurrent creates of one absent id remain first-committer-wins.
 - `INV-TX-26`: Client-side mergeable mutation staging MAY validate structure, schema, locally required preimages, and transaction consistency, but MUST NOT reject from a local read- or write-policy evaluation. The fate authority alone issues the definitive authorization verdict from complete admitted policy inputs.
 
 ## Details
@@ -97,9 +97,9 @@ read, and subscribe — is shown here using the `todos` example:
 
 ```rust
 use std::collections::BTreeMap;
-use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, RowCells, SeededRowIdSource};
-use jazz::groove::{records::Value, storage::MemoryStorage};
+use jazz::db::{Db, DbConfig, DbIdentity, FileOptions, ReadOpts, SeededRowIdSource};
 use jazz::ids::{AuthorSubject, NodeUuid};
+use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
@@ -112,45 +112,43 @@ let source = SchemaBuilder::new()
     )
     .build();
 let schema = JazzSchema::new(&source)?;
-let storage = MemoryStorage::new(
-    &schema.column_families().iter().map(String::as_str).collect::<Vec<_>>(),
-);
 
 // A `Db` is always a client. A local-first single-process app is just a client
 // with no upstream: its writes stay at the `Local` tier (durable on disk) and it
 // never needs `Global`. To sync later it connects an upstream and drives tick()
 // (§13.5); its backlog uploads and settles — no API change, no role.
-let db = jazz::block_on(Db::open(DbConfig {
-    schema, storage,
-    identity: DbIdentity {
+let config = DbConfig::new(
+    schema,
+    DbIdentity {
         node: NodeUuid::from_bytes([0x11; 16]),
         author: AuthorSubject::for_test_bytes([0xa1; 16]),
     },
-    id_source: Some(Box::new(SeededRowIdSource::new(0x1111))),
-}))?;
+)
+.with_id_source(SeededRowIdSource::new(0x1111));
+let db = jazz::block_on(Db::open_at(config, "todos.sqlite".as_ref(), FileOptions::default()))?;
 
-let cells: RowCells = BTreeMap::from([
-    ("title".into(), Value::String("buy milk".into())),
-    ("done".into(),  Value::Bool(false)),
+let cells = BTreeMap::from([
+    ("title".to_owned(), Value::String("buy milk".into())),
+    ("done".to_owned(), Value::Bool(false)),
 ]);
 
 // write — returns a handle; a client write settles at `Local` (an upstream would
 // later carry it to `Global`). With no upstream, wait(`Global`) never completes.
-let h = db.insert("todos", cells)?;
+let h = jazz::block_on(db.insert("todos", cells, Default::default()))?;
 let id = h.row_uuid();
 jazz::block_on(h.wait(DurabilityTier::Local))?;
 
 // read — query is immutable/chainable, validated against the schema (ch. 6)
-let q = db.table("todos").select(["title", "done"]);
-let rows = jazz::block_on(db.all(&q, ReadOpts::default()))?;   // Local tier by default
+let q = db.prepare_query(&db.table("todos").select(["title", "done"]))?;
+let rows = jazz::block_on(db.all(&q, ReadOpts::default()))?;   // LocalFirst by default
 
-// watch — conflated handle: current() + changed()
+// watch — a stream of the current result and its changes
 let watch = jazz::block_on(db.subscribe(&q, ReadOpts::default()))?;
 
 // update merges over current cells; omitted columns keep their value
-let patch: RowCells = BTreeMap::from([("done".into(), Value::Bool(true))]);
-jazz::block_on(db.update("todos", id, patch)?.wait(DurabilityTier::Local))?;
-jazz::block_on(db.delete("todos", id)?.wait(DurabilityTier::Local))?;
+let patch = BTreeMap::from([("done".to_owned(), Value::Bool(true))]);
+jazz::block_on(jazz::block_on(db.update("todos", id, patch, Default::default()))?.wait(DurabilityTier::Local))?;
+jazz::block_on(jazz::block_on(db.delete("todos", id, Default::default()))?.wait(DurabilityTier::Local))?;
 ```
 
 The application surface is exactly the set used above: `open`, the mutation
@@ -161,9 +159,11 @@ when an upstream is attached.
 
 ### 13.2 Opening a `Db`
 
-Opening a database binds a schema, storage backend, identity, and row-id source
-into one client facade. `Db::open(DbConfig<S>)` is async and takes a
-`JazzSchema`, storage, a `DbIdentity { node, author }`, and an optional
+Opening a database binds a schema, storage, identity, and row-id source into
+one client facade. `Db::open(DbConfig)` opens an in-memory database and
+`Db::open_at(DbConfig, path, FileOptions)` a SQLite file; both are async.
+`DbConfig::new(schema, identity)` takes a `JazzSchema` and a
+`DbIdentity { node, author }`, and `with_id_source` sets an optional
 `RowIdSource`. It opens an ordinary non-history-complete client node; the facade
 does not choose a topology role (`INV-API-2`, ch. 9). Row ids come either from
 `ProductionRowIdSource` (uuidv7) or from `SeededRowIdSource` (deterministic, for
@@ -207,11 +207,9 @@ unknown table.
 The facade offers both immediate local reads and durability-aware async reads.
 `Db::read` returns all matching rows and `Db::one` returns the first row, or
 none; both are **synchronous local reads** and never wait on upstream.
-`Db::all(query, ReadOpts)` is async and chooses the effective durability tier
-(`INV-API-3`). `ReadOpts` carries `tier`, `local_updates`, and `propagation`,
-defaulting to `{ Local, Immediate, Full }`. `Immediate` local updates raise the
-effective tier to at least `Local` (`INV-API-4`, `INV-API-5`), and `propagation`
-is an advanced knob that application code rarely changes from `Full`.
+`Db::all(query, ReadOpts)` is async and chooses read semantics
+(`INV-API-3`). `ReadOpts.tier` defaults to `LocalFirst` (`INV-API-4`, `INV-API-5`).
+`LocalOnly` never requests upstream results; `LocalFirst` and `Remote` do.
 
 Include payload breadth is not configurable: reads and subscriptions expose
 matched include paths only. Alpha-style `requireIncludes()` maps to required
@@ -219,18 +217,18 @@ include match semantics, not to broader traversed/failed-path payload material.
 
 Which `tier` to choose:
 
-| `ReadOpts.tier`   | use it for                      | sees                                                        |
-| ----------------- | ------------------------------- | ----------------------------------------------------------- |
-| `Local` (default) | optimistic UI, read-your-writes | local currency, including your own pending committed writes |
-| `Global`          | confirmed server-accepted state | only globally-accepted versions                             |
+| `ReadOpts.tier`        | use it for                      | sees                                                        |
+| ---------------------- | ------------------------------- | ----------------------------------------------------------- |
+| `LocalFirst` (default) | optimistic UI, read-your-writes | local currency, including your own pending committed writes |
+| `Remote`               | confirmed server-accepted state | only globally-accepted versions                             |
 
-A `Local` read includes the client's optimistic writes immediately.
-An asynchronous `Global` read waits for fresh Core confirmation through the
+A `LocalFirst` read includes the client's optimistic writes immediately.
+An asynchronous `Remote` read waits for fresh Core confirmation through the
 normal subscription path before returning. Cached data alone cannot satisfy
 that first-result gate. Synchronous local reads never perform a network wait.
 
 Repeated settled reads require a freshness proof, not merely a locally
-materialized result from an earlier request. Each newly initiated `Global` one-shot pins the shared live subscription and waits for a newer settled
+materialized result from an earlier request. Each newly initiated `Remote` one-shot pins the shared live subscription and waits for a newer settled
 authority receipt following its refresh request. If no live pin remains, it opens
 a fresh wire subscription. A late update for a
 detached predecessor cannot satisfy the new read, even when its shape, binding,
@@ -239,9 +237,9 @@ semantics, and still-live maintained subscriptions may continue sharing their
 coverage group (`INV-SYNC-30`, ch. 8 and ch. 16).
 
 `Db::subscribe(query, opts)` opens a live subscription at the requested effective
-tier. `Local` subscriptions are first-class application-facing subscriptions:
+tier. `LocalFirst` subscriptions are first-class application-facing subscriptions:
 they include the node's own pending committed writes and must be able to drive
-synchronous local UI state after a local write. `Global` subscriptions use the same query semantics, but their source/frontier and first
+synchronous local UI state after a local write. `Remote` subscriptions use the same query semantics, but their source/frontier and first
 settlement/completeness rules are constrained to Core-confirmed data.
 
 All live subscriptions use one maintained subscription mechanism, differing only
@@ -250,39 +248,50 @@ not grow a second query engine by rerunning `query_rows` and diffing full result
 as its normal live-subscription mechanism. Subscription delivery is a thin event
 bridge over the core subscription surface: it carries opened, reset, and delta
 events, rather than facade-side diffs of full result sets (`INV-API-7`, and
-`groove/SPEC/INVARIANTS.md::INV-INC-1` for the mechanism law it serves).
+`INV-PERF-9` for the cost law it serves).
 
 #### Binding read choices
 
 `DurabilityTier` remains the protocol/core lattice and the write-settlement API.
 Bindings expose the separate, read-only `ReadTier` vocabulary:
 
-| `ReadTier`              | binding behavior                                                                                                                     | own local writes | core lowering                            |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ---------------- | ---------------------------------------- |
-| `LocalFirst`            | evaluate cached local knowledge, online or offline                                                                                   | immediate        | local current state plus pending changes |
-| `Remote`                | wait for the current authority scope; wait while offline                                                                             | excluded         | remote accepted inputs only              |
-| `LocalFirstUnlessEmpty` | as `LocalFirst`, but an empty opening waits for the first remote view while a remote can serve; `offset > 0` reads the remote window | immediate        | as `LocalFirst`, plus the opening gate   |
+| `ReadTier`   | binding behavior                                                                                                                | own local writes | core lowering                            |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------- | ---------------- | ---------------------------------------- |
+| `LocalFirst` | evaluate cached local knowledge, online or offline; with a server wait, the opening waits up to the timeout for the remote view | immediate        | local current state plus pending changes |
+| `Remote`     | wait for the current authority scope; wait while offline                                                                        | excluded         | remote accepted inputs only              |
 
-`LocalFirstUnlessEmpty` keeps postcard index 2 in the Rust enum; the removed
-`RemoteIfPossible` name is rejected by every binding and by serde. The
-former bounded pending overlay over authority inputs remains a core
-`Global` + `LocalUpdates::Immediate` lowering, but no product tier selects it;
-broader expansion of that overlay is an open question in
+Product reads have two tiers, `LocalFirst` and `Remote`. `LocalFirst` takes an
+optional server-wait timeout (TypeScript `firstLoadRemoteWaitMs`;
+Rust `JazzClient::query_local_first` / `subscribe_local_first` with a
+`Duration`; host JSON read-option field `first_load_remote_wait_ms`). Zero means plain
+`LocalFirst`; `Remote` ignores the timeout. These are the only product read
+tiers: the product read options reject every other name, including the
+removed `local-first-unless-empty`, `remote-if-possible` and `edge` tiers and
+the former read aliases `local`, `global` and `core` (write waits keep the
+`DurabilityTier` names `local` and `global`).
+
+The Rust `ReadTier` enum has postcard indices 0 (`LocalFirst`), 1 (`Remote`),
+and 2 (`LocalOnly`). Removed tier names and unknown tags are rejected. This
+host read-option enum is not persisted or sent in peer query registrations;
+wire and storage versions remain unchanged. Earlier branch encodings are not
+compatible with the new host enum. The
+bounded pending overlay over authority inputs is used only by local-first
+execution that needs a remote answer, including an initial-wait offset window.
+A remote read never selects it. Broader expansion of that overlay is tracked in
 [#2501](https://github.com/garden-co/jazz/issues/2501).
 
 Remote scope withdrawal is not a deletion or a persistent client permission
-filter. LocalFirst and LocalFirstUnlessEmpty may still show downloaded rows. An actual authorized deletion version updates
+filter. LocalFirst (with or without a server wait) may still show downloaded rows. An actual authorized deletion version updates
 local knowledge and must suppress ordinary local reads too. Clients do not
 reevaluate read permissions. See ch. 16 §16.1.1 for source and deletion rules.
 
-Bindings MUST infer the own-local-write policy from `ReadTier`; they MUST NOT
-expose `LocalUpdates` as a product query option. The low-level core `ReadOpts`
-contract retains `LocalUpdates` for internal transaction and migration paths.
-Bindings also MUST NOT expose `Propagation` as a product query option. Product
-reads lower with `Propagation::Full`. The Inspector MAY use an internal
-`local-only` read tier that lowers to `DurabilityTier::Local`, immediate local
-updates, and `Propagation::LocalOnly`; that tier MUST NOT appear in the public
-binding `ReadTier` type.
+Bindings pass `ReadTier` directly to the core. There is no independent
+own-local-write option in TypeScript, host JSON, or Rust `ReadOpts`. Transaction
+reads use their transaction snapshot and staged writes.
+There is no separate propagation option. The TypeScript product API retains
+`LocalFirst` and `Remote`; its authenticated Inspector path passes the internal
+`local-only` tier directly to core `ReadTier::LocalOnly`. It is not a public
+TypeScript query capability.
 
 For an attached browser Inspector, both these reads and its edit batches execute
 inside the authenticated storage owner's runtime through a private MessagePort.
@@ -296,13 +305,21 @@ Only a worker-minted attachment for the exact account/storage scope admits these
 commands; callers cannot supply an alternate author, claims, or backend
 attribution. A write wait must name a transaction created by that attachment.
 
-`LocalFirstUnlessEmpty` is implemented once, in the core `Db`, so every host
-(Rust facade, WASM, NAPI, native relay) shares one definition. Bindings lower
-it to `ReadOpts { tier: Local, local_updates: Immediate, empty_opening:
-EmptyOpening::AwaitRemote }` and pass it through; they run no probe query and
-no catch-up timer. The gate applies only to product reads (client-local
-serving, `Propagation::Full`, effective tier `Local`); any other read ignores
-the flag.
+The server wait is implemented once, in the core `Db`, so every host (Rust
+facade, WASM, NAPI, native relay) shares one definition. Bindings lower a
+local-first read with a non-zero server wait to `ReadOpts { tier: LocalFirst,
+first_load: FirstLoad::WaitForRemote { timeout_ms }
+}`; they pass it through and run no probe query and no catch-up timer. Host
+bindings accept the timeout as the `first_load_remote_wait_ms` read-option
+field. The read uses an _opening gate_ that carries its deadline. The gate applies only
+to `LocalFirst` reads with client-local serving; any other read ignores the option. `FirstLoad` is never persisted. A
+non-durable foreground (below) sends its timeout to its relay with the read
+(the `wait` of `SyncMessage::Subscribe` and `Fetch`), because the relay holds
+the store it waits on: the relay waits that long for its upstream's answer,
+then serves its own store. No other peer sees it.
+
+The gate withholds _any_ unsettled opening, empty or not, and every wait
+ends at its deadline at the latest.
 
 _Can a remote answer?_ The gate consults the host link state, set with
 `Db::set_remote_link_hint` (`setRemoteLinkHint(state)` in WASM and NAPI):
@@ -313,9 +330,10 @@ _Can a remote answer?_ The gate consults the host link state, set with
   until `REMOTE_LINK_ATTEMPT_WINDOW` (5 s) after the _attempt_ started, not
   after the read started: a read issued 60 s into a stalled attempt does not
   wait at all;
-- `live` — admitted upstream: wait, with **no time bound**. A slow but live
-  server holds an empty opening until it answers, the link is lost, or the
-  host reports another state;
+- `live` — admitted upstream: wait, with no time bound other than the
+  read's deadline. A slow but live server holds a gated opening
+  until it answers, the link is lost, the deadline passes, or the host
+  reports another state;
 - `failed` — offline, failed, or backing off between retries: never wait.
 
 While no hint was ever set, the state is derived from the node's own
@@ -330,29 +348,33 @@ connected → `attempting`; explicit offline, terminal error, or no worker →
 `failed`); it has no host setter. The link state is host API only: it is not
 persisted and never crosses the wire.
 
-_Subscriptions._ The stream is evaluated exactly as `LocalFirst`. A non-empty
-opening is delivered immediately. An empty, unsettled opening is withheld
-while a remote can answer. Its upstream coverage is registered at `Global`,
-so the stream's own `settled` bit first flips with the authority receipt. The
-opening is released by the first settled delta, by the result becoming
-non-empty, by rejection or close, by the link leaving `live` or `attempting`,
-or by the attempt window expiring, whichever comes first. A release that
-follows withheld output publishes one `reset` delta built from the current
-state; later deltas are relative to it. With no server, a failed link, or an
-expired attempt, the opening is delivered immediately. After the opening the
-stream is exactly a `LocalFirst` stream.
+_Subscriptions._ The stream is evaluated exactly as `LocalFirst`. Its upstream
+coverage is registered at `Global`, so the stream's own `settled` bit first
+flips with the authority receipt. An unsettled opening (empty or not) is
+withheld while a remote can answer, until the stream settles, the
+subscription is rejected or closed, the link leaves `live` or `attempting`
+(or the attempt window expires), or the deadline passes, whichever comes
+first. A release that follows withheld output publishes one `reset` delta
+built from the current state; later deltas are relative to it. A rejection
+publishes the withheld local opening before the rejection, as for any
+local-first read. With no server, a failed link, or an expired attempt, the
+opening is delivered immediately. After the opening the stream is exactly a
+`LocalFirst` stream. Example: cached rows `[a]`,
+server rows `[a, b]`, 500 ms wait on a live link: an authority answer after
+100 ms yields a first delivery `[a, b]`; a server silent for 500 ms yields
+`[a]` at the deadline, and `b` arrives later as an ordinary delta.
 
-_One-shot reads._ The local result is read first and returned if non-empty.
-Otherwise, while a remote can answer, a strict remote read (`Global`,
-immediate local updates) is raced against link loss and attempt expiry. Its
-result is returned if it succeeds. On any failure or loss, the empty local
-result is returned and the pending remote read is dropped, so an outage does
-not accumulate pending remote queries.
+_One-shot reads._ The one-shot rule is `Db::read_local_first_within`:
+while a remote can answer, the local-first remote-answer execution (`Global` coverage,
+so own pending writes are included) is raced against link loss, attempt
+expiry, and the deadline. Its result is returned if it arrives in time;
+otherwise the pending remote read is dropped and the local-first result is
+returned. A zero timeout or an unreachable remote reads local-first at once.
 
 _Offset windows._ Local pagination is literal (ch. 16): on a partly synced
 client, `offset > 0` applies the offset to whatever subset is cached, which
-can produce an empty page or a wrong one. Under `LocalFirstUnlessEmpty`, a
-query with `offset > 0` therefore reads the strict remote view (`Global`,
+can produce an empty page or a wrong one. Under a server wait, a query with
+`offset > 0` therefore reads the strict remote view (`Global`,
 immediate local updates) for both one-shots and subscriptions, whenever a
 remote can answer when the read opens. A subscription's opening waits as
 above for its first authority page. If the link is lost or the attempt
@@ -362,7 +384,11 @@ when the authority answers. A one-shot then falls back to the local-first
 window. Otherwise, with no server or a failed link when the read opens, the
 query is an ordinary local-first read. Example: server rows a..j,
 query ordered by label with offset 4 and limit 2, on a fresh client: the
-subscription's first delivery and the one-shot both yield `[e, f]`.
+subscription's first delivery and the one-shot both yield `[e, f]`. Under
+`WaitForRemote`, reaching the deadline first releases the window like a link
+loss: the one-shot returns the cached local-first page, and an unopened
+subscription serves the local-first read of the same window, switching to
+the server's page with one `reset` when it arrives.
 
 _Non-durable foregrounds._ A foreground marked `set_non_durable_client` (a
 browser tab over a worker, or an RN foreground over the relay) registers
@@ -370,14 +396,14 @@ browser tab over a worker, or an RN foreground over the relay) registers
 local answer, so its `settled` bit cannot show that the authority answered.
 While its gate is armed, such a subscription therefore also holds a `Global`
 _authority witness_ coverage for the same read, which requires an authority
-receipt that the owner relays. The owner-local coverage still evaluates and
-delivers exactly as `LocalFirst`: a warm owner cache opens the stream at once.
-An empty opening is held until the witness has the authority's settled answer
-(then released, empty if the authority found nothing), rows arrive, or the
-link state releases it. The foreground host reports the _owner's_ server link
+receipt that the owner relays. The owner-local coverage still evaluates
+exactly as `LocalFirst`, but its opening, even from a warm owner cache, is
+held until the witness has the authority's settled answer (then released,
+empty if the authority found nothing), the deadline passes, or the link state
+releases it. The foreground host reports the _owner's_ server link
 (`attempting` / `live` / `failed`), so an owner that cannot reach the server
 releases the opening at once, an attempt is bounded by the window, and `live`
-has no time bound, as on a durable client. When the gate releases for any
+is bounded only by the deadline, as on a durable client. When the gate releases for any
 reason, the witness coverage is retired at the end of that owner turn. Only
 the owner-local coverage remains, so the stream is then exactly a `LocalFirst`
 stream. The witness is not kept, because a retained `Global` registration
@@ -385,11 +411,22 @@ would stop the owner's cache from reaching the stream while the owner cannot
 reach the server. One-shot reads need no witness, because their remote phase
 is already a `Global` read through the owner.
 
-Binding read-tier strings: `local-first-unless-empty` /
-`LocalFirstUnlessEmpty` select this gate. The removed `remote-if-possible` /
-`RemoteIfPossible` names are rejected with an error. `remote` / `Remote` are
-strict remote. Low-level `ReadOpts` and the legacy binding entrypoints still
-accept `DurabilityTier` unchanged during the migration.
+The core owns the product `ReadTier` (`LocalOnly` / `LocalFirst` / `Remote`), re-exported by
+Rust tools. `ReadOpts::for_read_tier` constructs the corresponding read options.
+Execution resolves semantics separately from its coverage durability tier:
+an initial-wait offset window promotes coverage to `Global` while retaining
+`LocalFirst` semantics. Pending overlays still require client-local execution
+and the caller's existing authorization restriction. `ReadOpts.tier` directly
+stores `ReadTier`; coverage durability is private
+execution state. Neither the read choice nor its initial-wait gate changes
+wire or storage encodings.
+
+Binding read-tier strings: `local-first` / `LocalFirst` with a non-zero server
+wait select the `WaitForRemote` gate; `remote` / `Remote` are strict remote.
+Unsupported names use the bindings' ordinary unknown-tier errors; migration
+guidance for removed names lives in the TypeScript public boundary. The host
+bindings' internal read entrypoints and Rust `ReadOpts` accept only
+`LocalFirst` and `Remote`; durability names are reserved for writes.
 
 Subscription finalization is also asynchronous ownership work. Dropping a
 stream MUST synchronously enqueue one idempotent finalization command without
@@ -416,7 +453,7 @@ close, concurrent drain, and shutdown overlap MUST remain deterministic and
 idempotent.
 
 Finalization commands identify the owned subscription state, not a snapshot of
-a Groove ID, so a catalogue/runtime refresh cannot replace a handle between
+an engine ID, so a catalogue/runtime refresh cannot replace a handle between
 enqueue and drain. Enqueue synchronously marks that state closed; refresh MUST
 NOT rehydrate it while retirement is waiting for the node mutex.
 
@@ -451,7 +488,7 @@ and `restore`. `insert` obtains its row id from the configured
 patch over the row's current local cells, so omitted fields keep their value
 (`INV-API-9`).
 
-In an exclusive transaction, `insert` with an explicit row id is
+In a serializable transaction, `insert` with an explicit row id is
 create-only (`INV-API-36`): overwriting an existing row requires `upsert`
 (`INV-API-10`) or `update`. The existence check is keyed by `(table, row)` and
 resolved against the transaction's snapshot-plus-overlay view before any
@@ -463,7 +500,7 @@ insert never implicitly restores the deletion register. Deciding existence is
 a user read (ch. 7), so a target hidden from the transaction's identity by read
 policy is rejected through exactly the path, code, and message an `upsert` over
 it produces, without naming the row as existing. A truly absent target stages
-normally, records its absence read, and remains subject to exclusive
+normally, records its absence read, and remains subject to serializable
 first-committer-wins validation, so of two concurrent creates of one absent id
 exactly one commits. Inserts that let `RowIdSource` choose the id skip the
 check. Standalone `Db::insert` and mergeable-transaction inserts are unchanged.
@@ -541,11 +578,11 @@ later publications or upstream upload work.
 Each single-call write creates **one mergeable transaction**. `mergeable_tx()`
 groups multiple facade writes under one `TxId`; the resulting commit unit carries
 `n_total_writes` equal to the number of grouped versions (`INV-API-26`).
-`exclusive_tx()` exposes the serializable transaction path from ch. 3/ch. 5 on
+`serializable_tx()` exposes the serializable transaction path from ch. 3/ch. 5 on
 the facade and reports validation conflicts as `WriteRejected` (`INV-API-27`).
 
 Owning Rust transaction handles use idempotent RAII abandonment. Dropping an
-uncommitted `MergeableTx` or `ExclusiveTx` synchronously records a deduplicated
+uncommitted `MergeableTx` or `SerializableTx` synchronously records a deduplicated
 tombstone outside the storage-owning node, then retires it immediately when the
 node is uncontended or schedules node maintenance. Every transaction open,
 read, stage, and commit operation MUST inspect and drain its id's tombstone
@@ -574,9 +611,7 @@ Local persistence is not permission to discard an upstream outbox entry.
 A pending upload remains until Core supplies terminal rejection or an Accepted
 receipt with both Global durability and its assigned `GlobalTime`. View
 hydration, locally replayed updates, and receipts from a detached or superseded
-connection do not release that obligation (`INV-API-34`). Legacy edge-only
-acceptance is treated as pending local work, subject to the identity checks
-above and chapter 9's migration rules.
+connection do not release that obligation (`INV-API-34`).
 
 Field-level semantics are the same regardless of the write method. An explicit
 null clears a nullable column. A JSON column accepts only syntactically valid
@@ -707,7 +742,7 @@ Facade errors carry an `ErrorCode` plus a message:
 | `Protocol`      | a local node / protocol operation failed                                                   |
 
 **Callable today:** `Db::open`; the mutation methods (§13.4), including
-`mergeable_tx`, `exclusive_tx`, attributed writes, and `can_*` dry-runs; `table` /
+`mergeable_tx`, `serializable_tx`, attributed writes, and `can_*` dry-runs; `table` /
 `read` / `one` / `all` / `subscribe` (§13.3); and the binding sync surface
 (§13.5). Read policies evaluate `claim("user")` plus admission/session-provided
 runtime claims (ch. 7); client query bindings never supply policy claims.
@@ -728,7 +763,7 @@ single-owner query rule.
 The binding surface is a thin host-language wrapper around Rust-owned `Db`,
 transaction, subscription, and selected serving `Node` objects. It is not a
 second semantic protocol. Sync semantics remain `SyncMessage` inside Rust
-transports, byte transport uses `WireFrame`/`WireEnvelope` (ch. 8), and
+transports, byte transport uses `WireFrame::Channel` (ch. 8), and
 TypeScript owns ergonomic objects, validation helpers, promise/stream adapters,
 and framework integrations.
 
@@ -742,16 +777,16 @@ High-level structs such as `JazzSchema`, `DbConfig`, `DbIdentity`, `ReadOpts`,
 host-native object mapping or postcard bytes. They are core types, not shadow
 ABI payloads. Row-shaped input and output is the stable hot path where custom
 encoding matters most. Reads, subscription streams, encoded-write variants, and
-transaction encoded-stage variants use the shared groove `Record` encoding
+transaction encoded-stage variants use the shared `jazz::records` `Record` encoding
 family at this boundary: postcard envelopes carry table/operation metadata, a
 `RecordDescriptor`, and raw encoded row/cell bytes.
 
-Read-side row arrays should use the shared groove `Record` encoding end-to-end
+Read-side row arrays should use the shared `jazz::records` `Record` encoding end-to-end
 across sync protocol records and binding returns: postcard envelopes carry a
 table name, a `RecordDescriptor`, and raw encoded row bytes. Bindings are
 expected to learn this row decoder once and may build descriptor/table-specialized
 accessors instead of receiving re-encoded maps for the hottest cross-boundary
-data path. This is the same lower-level groove descriptor/raw encoding family
+data path. This is the same lower-level descriptor/raw encoding family
 used by sync records, but read results are projected current-row records rather
 than sync `VersionRecord` payloads with parents/deletion/schema-version fields.
 
@@ -793,7 +828,7 @@ Binding payloads use core types directly:
 
 `WriteState` is not a parallel binding shape. Rejection detail is represented by
 the core `Fate::Rejected(RejectionReason)` variant, preserving
-`ExclusiveConflict`, `AuthorizationDenied`, `Cascade { root }`, clock-skew,
+`SerializationConflict`, `AuthorizationDenied`, `Cascade { root }`, clock-skew,
 causality, and malformed-commit detail without a second field that can drift
 from the transaction fate.
 
@@ -801,7 +836,7 @@ from the transaction fate.
 
 Bindings never decode `SyncMessage` as their primary sync API. The only portable
 byte transport payload is an encoded `WireFrame`; when the frame is
-`WireFrame::Message`, its `WireEnvelope.payload` contains the postcard-encoded
+`WireFrame::Channel`, its reassembled message contains the postcard-encoded
 `SyncMessage` owned by ch. 8. The binding is responsible for moving bytes between
 sockets, workers, or host channels and the Rust transport object exposed by the
 binding.
@@ -862,7 +897,7 @@ the client `Db` facade.
 | subscription streams             |         P |               Y |        Y |        Y |              Y |          Shell |
 | stream row changes/resets        |         P |               P |        P |        P |              P |          Shell |
 | mergeable writes                 |         Y |               Y |        Y |        Y |              Y |          Shell |
-| exclusive transactions           |         Y |               Y |        Y |        Y |              Y |          Shell |
+| serializable transactions        |         Y |               Y |        Y |        Y |              Y |          Shell |
 | write wait/state                 |         Y |               Y |        Y |        Y |              Y |          Shell |
 | dry-run permission probes        |         Y |               Y |        Y |        Y |              Y |          Shell |
 | byte wire transport              |         Y |               N |        Y |        Y |              Y |          Shell |
@@ -928,7 +963,7 @@ When a client API needs an alternate read view — read-your-writes inside an
 open transaction, a branch view, a historical snapshot — the API expresses that
 view to the core (`ReadOpts.read_view`, open-transaction overlays) and the
 normal lowered query executes there. The engine already evaluates queries
-inside open exclusive transactions (`tx_query` over
+inside open serializable transactions (`tx_query` over
 `OverlayRef::OpenTransaction`); binding layers plumb handles to it rather than
 overlaying pending writes above the engine.
 
@@ -955,31 +990,16 @@ marker and reconnects every schema client using the configured server URL and
 current auth configuration. A schema client created while the `Db` is
 intentionally offline remains offline until `reconnect` (`INV-API-31`).
 
-`ReadOpts.tier` selects the materialized knowledge sufficient for a result and
-therefore its first-result gate. `Propagation` is independent: it controls
-whether query evaluation or coverage may be forwarded upstream, and does not
-change what a `Local` result means. Consequently, while intentionally offline,
-a `Local` read with the default `Propagation::Full` still resolves from current
-local materialized state (`INV-API-32`):
+`LocalFirst` reads return local data and pending writes, and request upstream
+results when connected. While intentionally offline, a pending local write is
+returned immediately, but a row written remotely remains absent until reconnect
+delivery reaches the local store (`INV-API-32`).
 
-- a locally committed, pending write is returned immediately;
-- a row written remotely during the offline period is absent — an empty result
-  for a query matching only that row — until reconnect delivery reaches the
-  local store.
-
-`LocalOnly` prevents upstream routing, including from a memory-only browser
-foreground to its durable worker. Such a read sees only the foreground's own
-materialized/pending data; worker-only cache requires `Full` propagation.
-Local-only query attachments retain a unique usage identity but create no
-remote registration and are immediately covered. The wire compatibility field
-`RegisterShapeOptions.propagate_upstream` MUST be true: every receiving node
-rejects false as an unsupported capability, regardless of trust, topology,
-SYSTEM identity, delegated scope, or local-receiver role. No sender emits false.
-
-`LocalOnly` is **not** what chooses the local
-snapshot, nor is it a request to wait until that snapshot becomes complete
-relative to an unavailable upstream. Convergence is asserted separately, after
-`reconnect`.
+`LocalOnly` reads return local data and pending writes without requesting
+upstream results, including from a memory-only browser foreground to its durable
+worker. Worker-only cache requires `LocalFirst` or `Remote`. Local-only query
+attachments retain a unique usage identity but create no remote registration
+and are immediately covered. They do not wait for upstream completeness.
 
 ### Explicit TypeScript relationships
 

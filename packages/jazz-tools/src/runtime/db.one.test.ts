@@ -123,18 +123,16 @@ describe("Db.one", () => {
     const tx = db.beginTransaction();
 
     await tx.all(app.todos.where({ done: false }), {
-      tier: "local",
+      tier: "local-first",
       // JavaScript callers can supply these despite their absence from the
       // public type. They must not override transaction semantics.
       propagation: "local-only",
       localUpdates: "visible",
       openTransactionId: "forged-open-transaction",
-      runtimeSettledTier: "global",
     } as any);
 
     expect(query.mock.calls[0]?.[1]).toEqual({
-      tier: "local",
-      localUpdates: "deferred",
+      tier: "local-first",
       openTransactionId: "00000000000070008000000000000001",
     });
   });

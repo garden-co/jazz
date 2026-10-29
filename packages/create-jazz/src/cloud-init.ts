@@ -6,7 +6,7 @@ import {
   ProvisionParseError,
   provisionHostedApp,
 } from "./cloud-provision.js";
-import { replaceHostedEnv, writeHostedEnv } from "./cloud-env.js";
+import { envEntries, replaceHostedEnv, writeHostedEnv } from "./cloud-env.js";
 
 export interface RunHostedInitOptions {
   /** Absolute path to the directory containing .env (typically the starter root). */
@@ -39,16 +39,7 @@ export interface RunHostedInitOptions {
 
 function readEnvValues(envPath: string): Record<string, string> {
   if (!existsSync(envPath)) return {};
-  const content = readFileSync(envPath, "utf8");
-  const values: Record<string, string> = {};
-  for (let line of content.split("\n")) {
-    if (line.endsWith("\r")) line = line.slice(0, -1);
-    if (!line || line.startsWith("#")) continue;
-    const eq = line.indexOf("=");
-    if (eq === -1) continue;
-    values[line.slice(0, eq)] = line.slice(eq + 1);
-  }
-  return values;
+  return Object.fromEntries(envEntries(readFileSync(envPath, "utf8")));
 }
 
 /**

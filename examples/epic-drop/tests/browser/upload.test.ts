@@ -161,7 +161,7 @@ describe("EpicDrop streamed upload foundation", () => {
         .wait({ tier: "global" }),
     ).rejects.toThrow();
     await expect(
-      alice.all(fileTableQuery(aliceFolder.value.id)!, { tier: "global" }),
+      alice.all(fileTableQuery(aliceFolder.value.id)!, { tier: "remote" }),
     ).resolves.toMatchObject([
       {
         id: aliceFile.value.id,

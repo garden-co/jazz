@@ -10,6 +10,8 @@ import { jamazonBenchmarks } from "../../../examples/jamazon-warehouse/benchmark
 import { musicAgentBenchmarks } from "../../../examples/music-agent/benchmarks/metadata.ts";
 import { bigLabelBenchmarks } from "../../../examples/big-label/benchmarks/metadata.ts";
 import { permissionedBenchmarks } from "../../../examples/permissioned-resources/benchmarks/metadata.ts";
+import { textEditorBenchmarks } from "../../../examples/text-editor/benchmarks/metadata.ts";
+import { loadTimeBenchmarks } from "../example-load-times/metadata.ts";
 export { metadataRevision, throughput, type BenchmarkMetadata } from "./types.ts";
 export {
   formerBenchmarks,
@@ -19,8 +21,9 @@ export {
 } from "./former-names.ts";
 
 // Hero examples in the docs page's order, then the anonymized adopter
-// workload. Engine benchmarks (crates/groove) carry no per-case metadata.
+// workload, then the example apps' browser load times.
 export const benchmarkMetadata = [
+  ...textEditorBenchmarks,
   ...stagePlanBenchmarks,
   ...bandChatBenchmarks,
   ...bandBookBenchmarks,
@@ -33,6 +36,7 @@ export const benchmarkMetadata = [
   ...musicAgentBenchmarks,
   ...bigLabelBenchmarks,
   ...permissionedBenchmarks,
+  ...loadTimeBenchmarks,
 ];
 const byName = new Map(benchmarkMetadata.map((metadata) => [metadata.name, metadata]));
 if (byName.size !== benchmarkMetadata.length) throw new Error("Duplicate benchmark metadata name");

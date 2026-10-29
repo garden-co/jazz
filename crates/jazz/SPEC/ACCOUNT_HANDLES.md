@@ -316,7 +316,7 @@ this is neither row storage nor a server wire format. The key is
 Defaults are `dev` and `default`; the registry already includes the canonical
 application UUID, so app-name/UUID aliases share the same selection.
 
-Each read/transform/write runs synchronously under a native exclusive `flock`
+Each read/transform/write runs synchronously under a native serializable `flock`
 on `account-selection-v1.lock` in the platform-owned application storage root.
 JavaScript cannot supply this path. The lock spans separate runtimes/processes,
 rejects same-thread recursion, and releases on normal return, exception, or
@@ -334,7 +334,7 @@ ASCII `account-command:v1:` followed by the big-endian eight-byte revision,
 starting at zero without gaps. Recovery scans the entire `account-command:`
 prefix and rejects other versions, malformed keys, and invalid commands.
 
-The `jazz.account-journal.v1` profile versions the root-local journal
+The `jazz.account-storage.v1` profile versions the root-local journal
 key and closed descriptor contract, not a new value codec. It uses canonical Groove
 records exclusively. Its one field, `command`, is an Enum named
 `jazz.account-command.v1` with fixed registry identity 1 in this isolated root.

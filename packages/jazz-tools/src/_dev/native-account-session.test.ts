@@ -1,3 +1,4 @@
+import { NATIVE_RELAY_ABI_V1 } from "jazz-rn/native-relay-abi";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAccountManager } from "../react-native/create-account-manager.js";
 import { createNativeAccountTestSession } from "./native-account-session.js";
@@ -18,7 +19,7 @@ async function setup() {
   const pending = new Uint8Array(32).fill(4);
   const capability = new Uint8Array(32).fill(5);
   const native = {
-    abiVersion: 2,
+    abiVersion: NATIVE_RELAY_ABI_V1,
     accountSecret: vi.fn(() => new Uint8Array(32).fill(7)),
     mintLocalFirstToken: vi.fn(() => jwt),
     beginAccountSession: vi.fn((_request: string) => pending),

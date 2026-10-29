@@ -241,8 +241,26 @@ confirmation the caller waits for:
 <WriteTierDiagram />
 
 Offline, only `local` can resolve. A `global` wait stays pending until the device
-reconnects and Core accepts or rejects the queued write. Both choices apply the
-initial mutation locally and upload it when connected.
+reconnects and Core accepts or rejects the queued write, however long the outage
+lasts. Both choices apply the initial mutation locally and upload it when connected.
+
+A `global` wait fails early only when the client stops trying to reach Core: a
+protocol error, a closed client, or a credential the server refuses that nothing
+renews. Only an account context's refresh cycle and a local-first token the Db
+mints itself count as renewing a credential, so their waits outlast an expired
+token. With a static token or a backend secret, a refused credential ends the
+wait. To bound how long you wait, pass `timeoutMs`. The wait then rejects with
+a `WriteWaitTimeoutError` (`code: "timeout"`), but the write stays queued and may
+still be accepted, so do not retry it:
+
+```ts
+try {
+  await db.insert(app.todos, { title: "Buy milk" }).wait({ tier: "global", timeoutMs: 5_000 });
+} catch (error) {
+  if (error instanceof WriteWaitTimeoutError) showPendingBadge();
+  else throw error;
+}
+```
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
@@ -265,6 +283,63 @@ initial mutation locally and upload it when connected.
 See [Durability Tiers](/docs/reference/durability-tiers) for the full reference, including read durability, data flow between tiers, and consistency semantics.
 
 Need to clear local data during development? See [Auth Lifecycle](/docs/auth/lifecycle#storage-reset).
+
+## Showing sync status
+
+To show whether the user's changes have reached the server, read the Db's sync status. It combines
+the upstream connection with the number of transactions the server has not accepted or rejected yet:
+
+```ts
+const status = db.getSyncStatus();
+// {
+//   link: { state: "offline", reason: "network", retrying: true },
+//   pendingUploads: 3,
+//   synced: false,
+// }
+
+const unsubscribe = db.onSyncStatusChange((status) => renderBadge(status));
+```
+
+`link.state` is one of:
+
+| State        | Meaning                                                                                                                                                                                                                                                                          |
+| ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `local-only` | No server is configured, so nothing is uploaded                                                                                                                                                                                                                                  |
+| `connecting` | Connecting for the first time, or reconnecting after a short drop                                                                                                                                                                                                                |
+| `connected`  | Connected to the server                                                                                                                                                                                                                                                          |
+| `offline`    | Not connected. `reason` says why: `disconnected` after `db.disconnect()`, `network` when the server has been unreachable for a while (the client keeps retrying), `auth` when the server refused the credential, or `stopped` after a failure that only `db.reconnect()` retries |
+
+A brief drop shows as `connecting`, not `offline`, so a status badge doesn't flicker. `synced` is
+`true` when nothing waits for upload and the link is `connected` (or `local-only`).
+
+In Node and React Native, `pendingUploads` includes transactions recovered from local storage after a
+restart. In the browser, each tab counts only the transactions it committed itself. Transactions
+recovered after a reload, or written by another tab, are uploaded by the shared worker and are not
+counted, and `db.waitForSync()` does not wait for them.
+
+The framework bindings expose the same object: `useSyncStatus()` in React, React Native and Solid
+(an accessor), `useSyncStatus()` in Vue (a ref), and `syncStatus()` in Svelte (a store, read as
+`$status`). The Effect layer has a `syncStatus` stream.
+
+```tsx
+function SyncBadge() {
+  const { link, pendingUploads, synced } = useSyncStatus();
+  if (synced) return <span>Saved</span>;
+  if (link.state === "offline") return <span>Offline, {pendingUploads} changes waiting</span>;
+  return <span>Saving…</span>;
+}
+```
+
+To wait until everything written so far has reached the server, for example before letting the user
+sign out, use `db.waitForSync()`. Like a `global` write wait, it lasts through outages and
+reconnects, and fails only if the server rejects one of those writes or the client stops trying.
+Pass `timeoutMs` to bound it; it then rejects with a `WriteWaitTimeoutError` and the writes stay
+queued. In the browser it waits only for the current tab's own writes, as described above, so a
+write recovered after a reload or made in another tab may still be waiting when it resolves:
+
+```ts
+await db.waitForSync({ timeoutMs: 10_000 });
+```
 
 ## Handling mutation errors
 
@@ -322,7 +397,7 @@ garbage-collected.
 ## Transactions
 
 Use a transaction when several reads and writes must share one commit. Use a mergeable transaction
-for normal local-first work. Use an exclusive transaction only when the authority must check the
+for normal local-first work. Use a serializable transaction only when the authority must check the
 whole operation against one stable view of the data.
 
 See [Transactions](/docs/writing/transactions) for examples, error handling and the differences

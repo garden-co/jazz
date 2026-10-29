@@ -60,15 +60,15 @@ describe("vue/useAll", () => {
   it("forwards QueryOptions with tier to makeQueryKey", () => {
     const query = makeQuery();
     const scope = effectScope();
-    scope.run(() => useAll(query, { tier: "global" }));
-    expect(mocks.makeQueryKey).toHaveBeenCalledWith(query, { tier: "global" });
+    scope.run(() => useAll(query, { tier: "remote" }));
+    expect(mocks.makeQueryKey).toHaveBeenCalledWith(query, { tier: "remote" });
     scope.stop();
   });
 
   it("forwards full QueryOptions to makeQueryKey", () => {
     const query = makeQuery();
     const options = {
-      tier: "local" as const,
+      tier: "local-first" as const,
       branch: "draft",
     };
     const scope = effectScope();
@@ -79,7 +79,7 @@ describe("vue/useAll", () => {
 
   it("reactive options trigger re-subscription on change", async () => {
     const query = makeQuery();
-    const options = ref<any>({ tier: "local" });
+    const options = ref<any>({ tier: "local-first" });
 
     mocks.makeQueryKey.mockReturnValueOnce("key-worker").mockReturnValueOnce("key-global");
     mocks.getCacheEntry.mockReturnValue({
@@ -90,13 +90,13 @@ describe("vue/useAll", () => {
     const scope = effectScope();
     scope.run(() => useAll(query, options));
 
-    expect(mocks.makeQueryKey).toHaveBeenCalledWith(query, { tier: "local" });
+    expect(mocks.makeQueryKey).toHaveBeenCalledWith(query, { tier: "local-first" });
     expect(mocks.subscribe).toHaveBeenCalledTimes(1);
 
-    options.value = { tier: "global" };
+    options.value = { tier: "remote" };
     await nextTick();
 
-    expect(mocks.makeQueryKey).toHaveBeenCalledWith(query, { tier: "global" });
+    expect(mocks.makeQueryKey).toHaveBeenCalledWith(query, { tier: "remote" });
     expect(mocks.unsubscribe).toHaveBeenCalledTimes(1);
     expect(mocks.subscribe).toHaveBeenCalledTimes(2);
 

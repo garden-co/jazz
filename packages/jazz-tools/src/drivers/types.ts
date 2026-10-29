@@ -47,20 +47,6 @@ export type NativeTerminalEdit =
   | { Update: { key: NativeTerminalBytes; value: NativeTerminalBytes } }
   | { Remove: { key: NativeTerminalBytes } }
   | { Move: { key: NativeTerminalBytes; index: number } };
-/** Immutable producer-owned root descriptor contract retained for codec compatibility. */
-export interface NativeTerminalRootLayout {
-  id: string;
-  rootDescriptor: number[];
-  rootKeySlot: number;
-  rootKeyFieldName: string;
-  publicFields: Array<{
-    name: string;
-    descriptorFieldName: string;
-    slot: number;
-    carrier?: "CurrentRow" | "Logical";
-  }>;
-  carrier: "CurrentRow" | "Logical";
-}
 export interface NativeTerminalOperation {
   rootLayoutId?: string;
   rootDescriptor?: number[];
@@ -89,11 +75,21 @@ export interface RuntimeSubscriptionAddedRow {
   row: WasmRow;
 }
 
+/**
+ * One sequential edit of a large value: UTF-16 units and a string for TEXT,
+ * bytes for BYTEA. Each splice's offsets are in the value the earlier ones produced.
+ */
+export type RuntimeValueSplice =
+  | { at: number; delete: number; insert: string }
+  | { at: number; delete: number; insert: Uint8Array };
+
 export interface RuntimeSubscriptionUpdatedRow {
   sourceId: string;
   occurrenceKey: Uint8Array;
   index: number;
   row?: WasmRow;
+  /** Splices from the row's previous value, per column that opted in and could compute them. */
+  splices?: Record<string, RuntimeValueSplice[]>;
 }
 
 export interface RuntimeSubscriptionRemovedRow {
@@ -126,7 +122,7 @@ export type ColumnType =
   | { type: "Array"; element: ColumnType }
   | { type: "Row"; columns: ColumnDescriptor[] };
 
-export type ColumnMergeStrategy = "Counter" | "GSet";
+export type ColumnMergeStrategy = "Counter" | "GSet" | "Text" | "Markdown" | "Html";
 
 export interface ColumnDescriptor {
   name: string;
@@ -210,7 +206,7 @@ export type WasmSchema = Schema;
 /**
  * Interface for storage backend implementations.
  *
- * - `persistent`: local persistence enabled (IndexedDB in browser, Fjall in backend)
+ * - `persistent`: local persistence enabled (SQLite on IndexedDB in the browser, a SQLite file in the backend)
  * - `memory`: non-persistent in-memory runtime only
  */
 export type StorageDriver =

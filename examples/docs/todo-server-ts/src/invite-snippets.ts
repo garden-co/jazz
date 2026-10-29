@@ -89,7 +89,7 @@ export async function POST(req: Request): Promise<Response> {
 
   // Preserve the verified caller as author while using backend permissions.
   const backendDb = await client.withAttributionForRequest(req);
-  const result = await backendDb.exclusiveTransaction(async (tx) => {
+  const result = await backendDb.serializableTransaction(async (tx) => {
     // Checking membership first keeps re-opening a successfully redeemed link idempotent,
     // even after a single-use invite has been consumed.
     const existing = await tx.one(app.chatMembers.where({ chatId, user_id: user }));
@@ -103,7 +103,7 @@ export async function POST(req: Request): Promise<Response> {
     return "joined" as const;
   });
 
-  // Exclusive transactions settle at the authority, so wait() takes no tier.
+  // Serializable transactions settle at the authority, so wait() takes no tier.
   await result.wait();
   if (result.value === "invalid") return new Response("invalid invite", { status: 400 });
 

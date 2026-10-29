@@ -14,7 +14,7 @@ use std::time::Duration;
 use jazz::query::Query;
 use jazz::row_input;
 use jazz::tools::policy_expr::rel;
-use jazz::tools::public_schema::{RelPredicateCmpOp, RelValueRef, RowIdRef};
+use jazz::tools::public_schema::{RelationCmpOp, RelationRowIdRef, RelationValueRef};
 use jazz::tools::{
     ColumnType, JazzClient, Schema, SchemaBuilder, TableSchema, Value, permissions,
     policy_expr as pe,
@@ -73,8 +73,8 @@ fn membership_chain_schema() -> Schema {
         rel::eq_session("user_id", vec!["claims", "sub"]),
         rel::cmp(
             "folder_id",
-            RelPredicateCmpOp::Eq,
-            RelValueRef::RowId(RowIdRef::Outer),
+            RelationCmpOp::Eq,
+            RelationValueRef::RowId(RelationRowIdRef::Outer),
         ),
     ])));
 

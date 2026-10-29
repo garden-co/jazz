@@ -13,7 +13,10 @@ import {
   type RuntimeTelemetryContext,
   type RuntimeTokenOptions,
 } from "./runtime-source.js";
-import { NativeRuntimeAdapter } from "./native-runtime/native-runtime-adapter.js";
+import {
+  NativeRuntimeAdapter,
+  type SlowQueryLogOptions,
+} from "./native-runtime/native-runtime-adapter.js";
 import type { NativeSelfSignedClientProof } from "./native-runtime/native-codec.js";
 import {
   SharedBrowserForegroundNodeLease,
@@ -38,25 +41,12 @@ import {
   createBrowserWorkerFingerprint,
 } from "./browser-worker-config.js";
 import { getRuntimeSchemaCacheKey } from "../drivers/schema-wire.js";
+import { deterministicBytes } from "./deterministic-bytes.js";
 
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 
 function setGlobalWasmLogLevel(level?: DbConfig["logLevel"]): void {
   (globalThis as any).__JAZZ_WASM_LOG_LEVEL = level ?? DEFAULT_WASM_LOG_LEVEL;
-}
-
-function deterministicBytes(seed: string): Uint8Array {
-  let hash = 0x811c9dc5;
-  const bytes = new Uint8Array(16);
-  for (let round = 0; round < 4; round += 1) {
-    for (let i = 0; i < seed.length; i += 1) {
-      hash ^= seed.charCodeAt(i) + round;
-      hash = Math.imul(hash, 0x01000193);
-    }
-    const view = new DataView(bytes.buffer);
-    view.setUint32(round * 4, hash >>> 0, true);
-  }
-  return bytes;
 }
 
 function randomBytes(): Uint8Array {
@@ -219,6 +209,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       !browserMode,
       selfSignedClientProof,
       backendMode,
+      { appId: config.appId, thresholdMs: config.slowQueryThresholdMs },
     );
     if (foregroundNodeLease) {
       mainThreadPeerRuntime.seedForegroundTxTimeHighWater(foregroundNodeLease.confirmedTxTime);
@@ -240,7 +231,6 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       jwtToken: config.jwtToken,
       cookieSession: config.cookieSession,
       adminSecret: config.adminSecret,
-      tier: "local",
     };
     setTrustedReservedSession(context, getTrustedReservedSession(config));
     return JazzClient.connectWithRuntime(
@@ -341,6 +331,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         selfSignedClientProof,
         initialSyncFlushEvery: initialSyncFlushEvery(config),
         appId: config.appId,
+        slowQueryThresholdMs: config.slowQueryThresholdMs,
         storageOwner: createBrowserStorageOwner(config),
         authSessionKey: createBrowserAuthSessionKey(config),
         serverUrl: config.serverUrl ? httpUrlToWs(config.serverUrl, config.appId) : undefined,
@@ -402,6 +393,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     historyComplete: boolean,
     selfSignedClientProof?: NativeSelfSignedClientProof,
     backendMode = false,
+    slowQueryLog?: SlowQueryLogOptions,
   ): NativeRuntimeAdapter {
     if (!this.ownerRuntime || this.ownerRuntime.isClosed()) {
       this.ownerRuntime = new NativeRuntimeAdapter(
@@ -411,7 +403,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         author,
         1,
         historyComplete,
-        { initialSyncFlushEvery: flushEvery, selfSignedClientProof, backendMode },
+        { initialSyncFlushEvery: flushEvery, selfSignedClientProof, backendMode, slowQueryLog },
       );
       return this.ownerRuntime;
     }

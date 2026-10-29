@@ -1,14 +1,12 @@
 //! Pure Jazz query AST, validation, canonical form, bindings, and
 //! content-addressed shape ids for the `jazz/SPEC/6_queries.md` contract. This module
-//! owns syntax and schema-level validation only; execution, read-set recording,
-//! and groove plan preparation live in `jazz::node::query_eval`, with emitted
-//! view payloads assembled by `jazz::node::views`. It sits above groove query
-//! planning as Jazz's stable query vocabulary.
+//! owns syntax and schema-level validation only; `jazz-db` compiles queries to
+//! SQL and runs them (`compile.rs`).
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use groove::records::Value;
-use groove::schema::ColumnType;
+use jazz_types::column_schema::ColumnType;
+use jazz_types::records::Value;
 use thiserror::Error;
 
 use crate::ids::SchemaVersionId;
@@ -22,8 +20,9 @@ include!("query/ast.rs");
 include!("query/relation_codec.rs");
 
 // Relation-facade validation and name resolution into the stable query vocabulary.
-// Executable lowering and normalization remain in `node::query_eval`.
 include!("query/relation_resolution.rs");
+include!("query/relation_gather.rs");
+include!("query/relation_values.rs");
 
 // Fluent query builders.
 include!("query/builders.rs");

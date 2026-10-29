@@ -23,7 +23,8 @@ import type { Benchmark, Timeline } from "@/lib/perf-timeline/model";
 import {
   getBenchmarkMetadata,
   displayedTime,
-  estimatedSeconds,
+  benchmarkSeconds,
+  usesEstimatedTime,
   formatThroughput,
 } from "@/lib/perf-timeline/presentation";
 import {
@@ -32,10 +33,10 @@ import {
   moreBenchmarkSections,
   type HeroExample,
   type Lookup,
-  type Placed,
 } from "@/lib/showcase/catalogue";
 import { stitchFormerHistory, summarize, type MetricSummary } from "@/lib/showcase/summary";
 
+import { FieldMetrics } from "./field-metrics";
 import { basisText, Change, WithHistory } from "./metrics";
 
 const repo = "https://github.com/garden-co/jazz";
@@ -49,33 +50,30 @@ function useSummaries() {
   useEffect(() => {
     fetchTimeline().then(setData, (cause: Error) => setError(cause.message));
   }, []);
-  const { summaries, byId } = useMemo(() => {
+  const summaries = useMemo(() => {
     const byName: Summaries = new Map();
-    const byId: Summaries = new Map();
     // Declared-equivalent renames keep their former name's history.
     for (const bench of stitchFormerHistory(data?.benchmarks ?? [])) {
       const summary = summarize(bench);
       if (!summary) continue;
-      byId.set(bench.id, { bench, summary });
       // Names can repeat across retired IDs; keep the one with the newest data.
       const existing = byName.get(bench.name);
       if (!existing || existing.summary.headline.date < summary.headline.date)
         byName.set(bench.name, { bench, summary });
     }
-    return { summaries: byName, byId };
+    return byName;
   }, [data]);
-  return { data, error, summaries, byId };
+  return { data, error, summaries };
 }
 
 /**
  * Every current benchmark that is not a metric card, keyed by the hero example
- * or "More benchmarks" section that owns it. Engine rows are keyed by id, one
- * per scenario. Retired names are left out.
+ * or "More benchmarks" section that owns it. Retired names are left out.
  */
-function useGroups(summaries: Summaries, byId: Summaries) {
+function useGroups(summaries: Summaries) {
   return useMemo(
-    () => groupBenchmarks(summaries, byId, (name) => getBenchmarkMetadata(name)?.source),
-    [summaries, byId],
+    () => groupBenchmarks(summaries, (name) => getBenchmarkMetadata(name)?.source),
+    [summaries],
   );
 }
 
@@ -112,7 +110,7 @@ function MetricCard({
   const { summary, bench } = entry;
   const previous = summary.history.at(-2);
   const divisor = metric.per?.count ?? 1;
-  const time = displayedTime(summary.headline.median / divisor, true);
+  const time = displayedTime(summary.headline.median / divisor, usesEstimatedTime(bench.name));
   const headline = `${time}${metric.per ? ` per ${metric.per.unit}` : ""}`;
   return (
     <WithHistory
@@ -167,7 +165,9 @@ function MetricCard({
             )}
           </Text>
           <Text as="p" display="block">
-            {metric.interpret(estimatedSeconds(summary.headline.median), lookup)}
+            {metric.interpret(benchmarkSeconds(bench.name, summary.headline.median), lookup)}
+            {!usesEstimatedTime(bench.name) &&
+              " Measured browser wall time on the CodSpeed runner."}
           </Text>
         </VStack>
       </Card>
@@ -231,7 +231,7 @@ function Hero({
 }: {
   example: HeroExample;
   summaries: Summaries;
-  others: Placed<Entry>[];
+  others: Entry[];
   lookup: Lookup;
   loading: boolean;
 }) {
@@ -295,6 +295,7 @@ function Hero({
             <BenchmarkTable entries={others} />
           </VStack>
         )}
+        <FieldMetrics exampleId={example.id} />
         <Grid columns={{ minWidth: 280, max: 2 }} gap={3}>
           <Placeholder
             title="What it costs to run"
@@ -310,7 +311,7 @@ function Hero({
   );
 }
 
-function BenchmarkTable({ entries }: { entries: Placed<Entry>[] }) {
+function BenchmarkTable({ entries }: { entries: Entry[] }) {
   return (
     <Table density="compact" verticalAlign="top">
       <TableHeader>
@@ -320,19 +321,16 @@ function BenchmarkTable({ entries }: { entries: Placed<Entry>[] }) {
         </TableRow>
       </TableHeader>
       <TableBody>
-        {entries.map(({ bench, summary, scenario }) => {
+        {entries.map(({ bench, summary }) => {
           const metadata = getBenchmarkMetadata(bench.name);
-          const label = scenario ? `${bench.name} (${scenario})` : bench.name;
+          const label = bench.name;
           const previous = summary.history.at(-2);
-          const time = displayedTime(summary.headline.median, true);
+          const time = displayedTime(summary.headline.median, usesEstimatedTime(bench.name));
           return (
             <TableRow key={bench.id}>
               <TableCell>
                 <VStack gap={0.5}>
-                  <Text display="block">
-                    {metadata?.title ?? bench.name.replaceAll("_", " ")}
-                    {scenario && ` · ${scenario}`}
-                  </Text>
+                  <Text display="block">{metadata?.title ?? bench.name.replaceAll("_", " ")}</Text>
                   <Text type="code" color="secondary" display="block" className="break-all">
                     {bench.name}
                   </Text>
@@ -367,7 +365,7 @@ function BenchmarkTable({ entries }: { entries: Placed<Entry>[] }) {
                       </Text>
                       <Text type="supporting" display="block">
                         {metadata
-                          ? `${formatThroughput(summary.headline.median, metadata, true)} · `
+                          ? `${formatThroughput(summary.headline.median, metadata, usesEstimatedTime(bench.name))} · `
                           : ""}
                         {summary.basis === "release" ? summary.label : "main"}
                       </Text>
@@ -383,21 +381,14 @@ function BenchmarkTable({ entries }: { entries: Placed<Entry>[] }) {
   );
 }
 
-function MoreBenchmarks({
-  groups,
-  loading,
-}: {
-  groups: Map<string, Placed<Entry>[]>;
-  loading: boolean;
-}) {
+function MoreBenchmarks({ groups, loading }: { groups: Map<string, Entry[]>; loading: boolean }) {
   return (
     <VStack as="section" id="benchmarks" gap={6} className="scroll-mt-24">
       <VStack gap={2}>
         <Heading level={2}>More benchmarks</Heading>
         <Text as="p" color="secondary" display="block" className="max-w-3xl">
           Every example above owns the benchmarks of what it does best. These are the rest: an
-          anonymized adopter workload, and the engine work no product owns. Hover, focus or tap a
-          number for its history.
+          anonymized adopter workload. Hover, focus or tap a number for its history.
         </Text>
         {loading && (
           <Text type="supporting" display="block">
@@ -421,14 +412,14 @@ function MoreBenchmarks({
 }
 
 export function Showcase() {
-  const { data, error, summaries, byId } = useSummaries();
+  const { data, error, summaries } = useSummaries();
   const loading = !data && !error;
   const lookup: Lookup = (name) => {
     const seconds = summaries.get(name)?.summary.headline.median;
-    return seconds === undefined ? null : estimatedSeconds(seconds);
+    return seconds === undefined ? null : benchmarkSeconds(name, seconds);
   };
   const released = [...summaries.values()].some((entry) => entry.summary.basis === "release");
-  const groups = useGroups(summaries, byId);
+  const groups = useGroups(summaries);
 
   return (
     <div className="mx-auto w-full max-w-[1120px] px-4 pb-24 pt-10 sm:px-8">

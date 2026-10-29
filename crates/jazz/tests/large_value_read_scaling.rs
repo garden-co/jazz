@@ -9,7 +9,7 @@
 //! - a projected listing rebuilt the large columns it projected away.
 //!
 //! Elapsed time cannot establish scale independence robustly, so these tests
-//! observe Groove's test-only count of complete large-value rebuilds
+//! observe the test-only count of complete large-value rebuilds
 //! (`full_materializations_for_test`). That counter is the one internal hook
 //! here: the public API returns the same rows either way, and the defect is
 //! precisely the work those rows do not show. Every other assertion is on
@@ -17,18 +17,15 @@
 
 use std::collections::BTreeMap;
 
-mod common;
+use crate::common;
 
 use common::{allow_all_policies, compile_schema, read_and_allow_all_writes};
 use jazz::block_on;
-use jazz::db::{
-    Db, DbConfig, DbIdentity, ErrorCode, InsertOptions, LocalUpdates, Propagation, ReadOpts,
-};
-use jazz::groove::large_values::{LEAF_MAX_BYTES, full_materializations_for_test};
-use jazz::groove::records::Value;
-use jazz::groove::storage::TestStorage;
+use jazz::db::{Db, DbConfig, DbIdentity, ErrorCode, InsertOptions, ReadOpts};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
+use jazz::large_values::{LEAF_MAX_BYTES, full_materializations_for_test};
 use jazz::query::{OrderDirection, Query};
+use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{
     ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder, Value as PublicValue,
@@ -60,26 +57,14 @@ fn files_schema(policies: TablePolicies) -> JazzSchema {
 }
 
 fn open_db(schema: JazzSchema, seed: u8, author: AuthorSubject) -> Db {
-    let families = schema.column_families();
-    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(DbConfig::new(
         schema,
-        TestStorage::new(&refs),
         DbIdentity {
             node: NodeUuid::from_bytes([seed; 16]),
             author,
         },
     )))
     .expect("open db")
-}
-
-fn table(db_schema: &JazzSchema) -> jazz::schema::TableSchema {
-    db_schema
-        .tables()
-        .iter()
-        .find(|table| table.name == FILES)
-        .expect("files table")
-        .clone()
 }
 
 /// Deterministic bytes spanning several chunk leaves.
@@ -112,10 +97,7 @@ fn insert_file(db: &Db, id: RowUuid, name: &str, notes: &str, bytes: &[u8]) {
 
 fn opts() -> ReadOpts {
     ReadOpts {
-        tier: DurabilityTier::Local,
-        local_updates: LocalUpdates::Immediate,
-        propagation: Propagation::LocalOnly,
-        include_deleted: false,
+        tier: jazz::db::ReadTier::LocalOnly,
         ..ReadOpts::default()
     }
 }
@@ -160,12 +142,11 @@ fn range_reads_do_not_rebuild_the_whole_value_at_any_size() {
 ///
 /// alice ──insert 3 files with large notes and contents──► db
 /// alice ──read select(name)──────────────► 3 names, 0 full rebuilds
-/// alice ──read select(name, contents)────► 3 complete contents
+/// alice ──read select(name, contents)────► 3 complete contents, ≥1 full rebuild
 /// alice ──read *─────────────────────────► complete notes and contents
 #[test]
 fn projected_listing_leaves_excluded_large_columns_unread() {
     let schema = files_schema(allow_all_policies());
-    let table = table(&schema);
     let db = open_db(schema, 0x41, alice());
     let files = [
         (row(0x42), "a.bin", large_notes("a"), contents(0x42, 3)),
@@ -186,28 +167,26 @@ fn projected_listing_leaves_excluded_large_columns_unread() {
         "a listing must not rebuild the large columns it projects away"
     );
     for row in &rows {
-        assert_eq!(row.cell(&table, "contents"), None);
-        assert_eq!(row.cell(&table, "notes"), None);
+        assert_eq!(row.cell("contents"), None);
+        assert_eq!(row.cell("notes"), None);
     }
 
     let with_contents = db
         .prepare_query(&Query::from(FILES).select(["name", "contents"]))
         .expect("prepare contents listing");
-    let rows = db.read(&with_contents).expect("contents listing");
+    let (rows, rebuilds) = counting(|| db.read(&with_contents).expect("contents listing"));
+    assert!(
+        rebuilds >= 1,
+        "selecting the chunked contents rebuilds them on this thread"
+    );
     for (id, name, _, bytes) in &files {
         let row = rows
             .iter()
             .find(|row| row.row_uuid() == *id)
             .expect("listed");
-        assert_eq!(
-            row.cell(&table, "name"),
-            Some(Value::String((*name).to_owned()))
-        );
-        assert_eq!(
-            row.cell(&table, "contents"),
-            Some(Value::Bytes(bytes.clone()))
-        );
-        assert_eq!(row.cell(&table, "notes"), None);
+        assert_eq!(row.cell("name"), Some(Value::String((*name).to_owned())));
+        assert_eq!(row.cell("contents"), Some(Value::Bytes(bytes.clone())));
+        assert_eq!(row.cell("notes"), None);
     }
 
     let whole = db
@@ -219,14 +198,8 @@ fn projected_listing_leaves_excluded_large_columns_unread() {
             .iter()
             .find(|row| row.row_uuid() == *id)
             .expect("listed");
-        assert_eq!(
-            row.cell(&table, "notes"),
-            Some(Value::String(notes.clone()))
-        );
-        assert_eq!(
-            row.cell(&table, "contents"),
-            Some(Value::Bytes(bytes.clone()))
-        );
+        assert_eq!(row.cell("notes"), Some(Value::String(notes.clone())));
+        assert_eq!(row.cell("contents"), Some(Value::Bytes(bytes.clone())));
     }
 }
 
@@ -238,7 +211,6 @@ fn projected_listing_leaves_excluded_large_columns_unread() {
 #[test]
 fn projected_listing_orders_by_a_large_column() {
     let schema = files_schema(allow_all_policies());
-    let table = table(&schema);
     let db = open_db(schema, 0x51, alice());
     insert_file(
         &db,
@@ -270,19 +242,13 @@ fn projected_listing_orders_by_a_large_column() {
         )
         .expect("prepare ordered listing");
     let rows = db.read(&listing).expect("ordered listing");
-    let names = rows
-        .iter()
-        .map(|row| row.cell(&table, "name"))
-        .collect::<Vec<_>>();
+    let names = rows.iter().map(|row| row.cell("name")).collect::<Vec<_>>();
     assert_eq!(
         names,
         ["first", "second", "third"].map(|name| Some(Value::String(name.to_owned())))
     );
-    assert_eq!(
-        rows[0].cell(&table, "notes"),
-        Some(Value::String(large_notes("a")))
-    );
-    assert_eq!(rows[0].cell(&table, "contents"), None);
+    assert_eq!(rows[0].cell("notes"), Some(Value::String(large_notes("a"))));
+    assert_eq!(rows[0].cell("contents"), None);
 }
 
 /// A read policy whose predicate reads a large column still decides
@@ -301,7 +267,6 @@ fn large_column_read_policy_still_gates_range_and_projected_reads() {
         PublicValue::Text(allowed.clone()),
     ));
     let schema = files_schema(policy);
-    let table = table(&schema);
     let bob = AuthorSubject::for_test_bytes([0xb0; 16]);
     let db = open_db(schema, 0x61, bob);
     let visible = row(0x62);
@@ -328,7 +293,7 @@ fn large_column_read_policy_still_gates_range_and_projected_reads() {
         rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
         vec![visible]
     );
-    assert_eq!(rows[0].cell(&table, "notes"), None);
+    assert_eq!(rows[0].cell("notes"), None);
 
     let whole = db
         .prepare_query(&Query::from(FILES))
@@ -338,11 +303,8 @@ fn large_column_read_policy_still_gates_range_and_projected_reads() {
         rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
         vec![visible]
     );
-    assert_eq!(rows[0].cell(&table, "notes"), Some(Value::String(allowed)));
-    assert_eq!(
-        rows[0].cell(&table, "contents"),
-        Some(Value::Bytes(visible_bytes))
-    );
+    assert_eq!(rows[0].cell("notes"), Some(Value::String(allowed)));
+    assert_eq!(rows[0].cell("contents"), Some(Value::Bytes(visible_bytes)));
 }
 
 /// A selected column whose public name equals another column's storage name
@@ -362,7 +324,6 @@ fn projected_listing_does_not_confuse_public_and_storage_names() {
             )
             .build(),
     );
-    let table = table(&schema);
     let db = open_db(schema, 0x71, alice());
     let id = row(0x72);
     let write = block_on(db.insert(
@@ -388,8 +349,47 @@ fn projected_listing_does_not_confuse_public_and_storage_names() {
     let rows = db.read(&query).expect("listing");
     assert_eq!(rows.len(), 1);
     assert_eq!(
-        rows[0].cell(&table, "_app_notes"),
+        rows[0].cell("_app_notes"),
         Some(Value::String(large_notes("selected")))
     );
-    assert_eq!(rows[0].cell(&table, "notes"), None);
+    assert_eq!(rows[0].cell("notes"), None);
+}
+
+/// A local edit of a large cell is staged like any local write: the
+/// authority checks it on upload, so the store's author needs no local
+/// read grant on the row. A trusted session's edit is checked now.
+///
+/// bob ──append to a row bob cannot read (local staging)──► applied
+/// bob ──append as session bob──► NotObserved
+#[test]
+fn local_large_value_edits_are_staged_without_a_local_read_check() {
+    let policy = read_and_allow_all_writes(PolicyExpr::eq_literal(
+        "notes",
+        PublicValue::Text(large_notes("shared/")),
+    ));
+    let schema = files_schema(policy);
+    let bob = AuthorSubject::for_test_bytes([0xb0; 16]);
+    let db = open_db(schema, 0x81, bob);
+    let hidden = row(0x82);
+    let bytes = contents(0x82, 2);
+    insert_file(&db, hidden, "hidden", &large_notes("private/"), &bytes);
+
+    block_on(db.append_value(FILES, hidden, "contents", vec![1, 2, 3])).expect("local append");
+    let rows = block_on(db.all(&db.prepare_query(&Query::from(FILES)).unwrap(), opts())).unwrap();
+    let mut expected = bytes.clone();
+    expected.extend([1, 2, 3]);
+    assert_eq!(rows[0].cell("contents"), Some(Value::Bytes(expected)));
+
+    let denied = block_on(db.append_value_with(
+        FILES,
+        hidden,
+        "contents",
+        vec![4],
+        jazz::db::UpdateOptions {
+            identity: jazz::db::WriteIdentity::Session(bob),
+            ..Default::default()
+        },
+    ))
+    .expect_err("a session edit of a row it cannot read");
+    assert_eq!(denied.code, ErrorCode::NotObserved);
 }

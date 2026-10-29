@@ -19,7 +19,7 @@ export function TodoList() {
   // #endregion where-subscription-react
 
   // #region reading-tier-react
-  const todosAtGlobalDurability = useAll(app.todos, { tier: "global" });
+  const remoteTodos = useAll(app.todos, { tier: "remote" });
   // #endregion reading-tier-react
 
   // #region reading-loading-state-react

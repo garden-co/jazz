@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
 import { runInTransaction, Transaction } from "./db.js";
-import { ExclusiveWriteResult } from "./client.js";
+import { SerializableWriteResult } from "./client.js";
 import {
   JazzClient,
   type TxId,
@@ -127,15 +127,11 @@ function makeClient(runtimeOverrides: Partial<TransactionalRuntime> = {}) {
   };
 
   const JazzClientCtor = JazzClient as unknown as {
-    new (
-      runtime: Runtime,
-      context: AppContext,
-      defaultDurabilityTier: "local" | "global",
-    ): JazzClient;
+    new (runtime: Runtime, context: AppContext): JazzClient;
   };
 
   return {
-    client: new JazzClientCtor(runtime, context, "global"),
+    client: new JazzClientCtor(runtime, context),
     runtime,
     insertCalls,
     restoreCalls,
@@ -147,7 +143,7 @@ function makeClient(runtimeOverrides: Partial<TransactionalRuntime> = {}) {
 }
 
 describe("JazzClient write attribution", () => {
-  it.each(["mergeable", "exclusive"] as const)(
+  it.each(["mergeable", "serializable"] as const)(
     "preserves registered %s preparation failure without submitting the transaction",
     async (kind) => {
       const failure = new Error("Key lookup failed");
@@ -200,7 +196,7 @@ describe("JazzClient write attribution", () => {
     });
     let continued = false;
     const { client } = makeClient();
-    const tx = new Transaction("exclusive", () => client, null, client);
+    const tx = new Transaction("serializable", () => client, null, client);
     const id = tx.openTransactionId();
     client.prepareTransaction(id, async () => {
       started();
@@ -220,7 +216,7 @@ describe("JazzClient write attribution", () => {
     expect(() => client.prepareTransaction(id, async () => {})).toThrow("closed");
   });
 
-  it.each(["mergeable", "exclusive"] as const)(
+  it.each(["mergeable", "serializable"] as const)(
     "drains registered %s preparation before a dependent read and commit",
     async (kind) => {
       let release!: () => void;
@@ -272,7 +268,7 @@ describe("JazzClient write attribution", () => {
     },
   );
 
-  it.each(["mergeable", "exclusive"] as const)(
+  it.each(["mergeable", "serializable"] as const)(
     "preserves a %s read failure when rollback closes another in-flight read",
     async (kind) => {
       const failure = new Error("Read preparation failed");
@@ -303,12 +299,14 @@ describe("JazzClient write attribution", () => {
       });
       const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) });
       const tx = new Transaction(kind, () => client, null, client);
-      const first = tx.all(app.todos, { tier: "local" });
-      const second = tx.all(app.todos, { tier: "local" });
+      const first = tx.all(app.todos, { tier: "local-first" });
+      const second = tx.all(app.todos, { tier: "local-first" });
       try {
         const result = await runInTransaction(tx, () => "callback value", client);
         const waiting =
-          result instanceof ExclusiveWriteResult ? result.wait() : result.wait({ tier: "local" });
+          result instanceof SerializableWriteResult
+            ? result.wait()
+            : result.wait({ tier: "local" });
         failRead(failure);
         await expect(waiting).rejects.toBe(failure);
         await expect(first).rejects.toBe(failure);
@@ -322,7 +320,7 @@ describe("JazzClient write attribution", () => {
     },
   );
 
-  it.each(["mergeable", "exclusive"] as const)(
+  it.each(["mergeable", "serializable"] as const)(
     "rejects further %s operations while a no-read commit is deferred",
     async (kind) => {
       let complete!: (id: TxId) => void;
@@ -340,7 +338,7 @@ describe("JazzClient write attribution", () => {
           "after commit has been requested",
         );
         expect(() => tx.rollback()).toThrow("after commit has been requested");
-        await expect(tx.all(app.todos, { tier: "local" })).rejects.toThrow(
+        await expect(tx.all(app.todos, { tier: "local-first" })).rejects.toThrow(
           "after commit has been requested",
         );
       } finally {
@@ -350,7 +348,7 @@ describe("JazzClient write attribution", () => {
     },
   );
 
-  it.each(["mergeable", "exclusive"] as const)(
+  it.each(["mergeable", "serializable"] as const)(
     "closes a %s callback transaction after deferred commit fails",
     async (kind) => {
       const failure = new Error("Preparation failed before submission");
@@ -369,14 +367,14 @@ describe("JazzClient write attribution", () => {
       const tx = new Transaction(kind, () => client, null, client);
       const result = await runInTransaction(tx, () => "callback value", client);
       const waiting =
-        result instanceof ExclusiveWriteResult ? result.wait() : result.wait({ tier: "local" });
+        result instanceof SerializableWriteResult ? result.wait() : result.wait({ tier: "local" });
       await expect(waiting).rejects.toBe(failure);
       // The callback helper owns cleanup; no open transaction remains for its caller.
       await expect(tx.rollback()).resolves.toBe(false);
     },
   );
 
-  it.each(["mergeable", "exclusive"] as const)(
+  it.each(["mergeable", "serializable"] as const)(
     "retains a deferred %s failure for a later wait without an unhandled rejection",
     async (kind) => {
       const failure = new Error("Preparation failed");
@@ -394,7 +392,9 @@ describe("JazzClient write attribution", () => {
         // Applications can attach their wait after the asynchronous failure arrives.
         await new Promise((resolve) => setTimeout(resolve, 0));
         const waiting =
-          result instanceof ExclusiveWriteResult ? result.wait() : result.wait({ tier: "local" });
+          result instanceof SerializableWriteResult
+            ? result.wait()
+            : result.wait({ tier: "local" });
         await expect(waiting).rejects.toBe(failure);
         expect(unhandled).not.toHaveBeenCalled();
       } finally {
@@ -403,7 +403,7 @@ describe("JazzClient write attribution", () => {
     },
   );
 
-  it.each(["mergeable", "exclusive"] as const)(
+  it.each(["mergeable", "serializable"] as const)(
     "returns a %s callback result before deferred commit, but waits for persistence",
     async (kind) => {
       let prepare!: (id: TxId) => void;
@@ -434,7 +434,9 @@ describe("JazzClient write attribution", () => {
         expect(result.value).toBe("callback value");
         let completed = false;
         const waiting =
-          result instanceof ExclusiveWriteResult ? result.wait() : result.wait({ tier: "local" });
+          result instanceof SerializableWriteResult
+            ? result.wait()
+            : result.wait({ tier: "local" });
         waiting.then(() => {
           completed = true;
         });

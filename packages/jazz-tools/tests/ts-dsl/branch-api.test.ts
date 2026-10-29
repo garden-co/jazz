@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { schema as s } from "../../src/index.js";
 import { createDb } from "../../src/runtime/default-create-db.js";
 import type { Db } from "../../src/runtime/db.js";
+import { parseSnapshotRef, serializeSnapshotRef } from "../../src/runtime/snapshot-ref.js";
 
 const schema = {
   documents: s
@@ -112,6 +113,88 @@ describe("branch API", () => {
     expect(
       await db.one(app.documents.where({ id: document.id }), { branch: "published" }),
     ).toBeNull();
+  });
+
+  it("captures pending local writes, restores the reference, and freezes the base below a live draft", async () => {
+    db = await createDb({
+      ...(await localAccountConfig("branch-api-frozen-capture")),
+      driver: { type: "memory" },
+    });
+    const original = db.insert(
+      app.documents,
+      { branch: "main", title: "Original" },
+      { branch: "main" },
+    ).value;
+    const capture = db.captureSnapshot();
+    db.update(app.documents, original.id, { title: "Changed" }, { branch: "main" });
+    const snapshot = parseSnapshotRef(
+      JSON.parse(JSON.stringify(serializeSnapshotRef(await capture))),
+    );
+    const frozen = { branch: "draft", base: ["main", snapshot] } as const;
+    expect(await db.one(app.documents, frozen)).toMatchObject({
+      id: original.id,
+      branch: "draft",
+      title: "Original",
+    });
+    expect(await db.one(app.documents, { branch: "draft", base: "main" })).toMatchObject({
+      title: "Changed",
+    });
+    db.update(app.documents, original.id, { title: "Draft" }, frozen);
+    expect(await db.one(app.documents, frozen)).toMatchObject({ title: "Draft" });
+    expect(await db.one(app.documents, { branch: "main" })).toMatchObject({ title: "Changed" });
+  });
+
+  it("does not capture uncommitted transaction writes", async () => {
+    db = await createDb({
+      ...(await localAccountConfig("branch-api-capture-staged")),
+      driver: { type: "memory" },
+    });
+    const original = db.insert(
+      app.documents,
+      { branch: "main", title: "Original" },
+      { branch: "main" },
+    ).value;
+    const tx = db.beginTransaction();
+    tx.update(app.documents, original.id, { title: "Uncommitted" }, { branch: "main" });
+    const snapshot = await db.captureSnapshot();
+    tx.commit();
+    expect(
+      await db.one(app.documents, { branch: "draft", base: ["main", snapshot] }),
+    ).toMatchObject({ title: "Original" });
+    expect(await db.one(app.documents, { branch: "main" })).toMatchObject({ title: "Uncommitted" });
+  });
+
+  it("reports unavailable history when restoring onto an empty store", async () => {
+    db = await createDb({
+      ...(await localAccountConfig("branch-api-capture-origin")),
+      driver: { type: "memory" },
+    });
+    db.insert(app.documents, { branch: "main", title: "Original" }, { branch: "main" });
+    const restored = parseSnapshotRef(serializeSnapshotRef(await db.captureSnapshot()));
+    const empty = await createDb({
+      ...(await localAccountConfig("branch-api-capture-empty")),
+      driver: { type: "memory" },
+    });
+    try {
+      await expect(
+        empty.all(app.documents, { branch: "draft", base: ["main", restored] }),
+      ).rejects.toMatchObject({
+        code: "not_observed",
+        message: expect.stringContaining("Snapshot history is unavailable"),
+      });
+    } finally {
+      await empty.shutdown();
+    }
+  });
+
+  it("reports capture before schema attachment and after shutdown", async () => {
+    db = await createDb({
+      ...(await localAccountConfig("branch-api-capture-lifecycle")),
+      driver: { type: "memory" },
+    });
+    await expect(db.captureSnapshot()).rejects.toThrow("Run a query or mutation first");
+    await db.shutdown();
+    await expect(db.captureSnapshot()).rejects.toThrow();
   });
 
   it("uses referenced row IDs as scalar branch selectors", async () => {

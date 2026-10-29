@@ -1,9 +1,12 @@
 //! Native HTTP/WebSocket server adapter for Jazz's semantic runtime.
 
-pub mod loopback;
+mod kv;
 pub mod middleware;
 pub mod profiling;
+pub mod resources;
+pub mod runtime;
 pub mod server;
+pub mod storage_cache;
 mod tcp;
 
 pub use middleware::AuthConfig;
@@ -38,6 +41,7 @@ pub async fn run(
     bound_port_file: Option<String>,
     shutdown_timeout: Duration,
     diagnostics: DiagnosticsConfig,
+    limits: resources::ServerResourceLimits,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let app_id = AppId::from_string(app_id_str)?;
     diagnostics.validate()?;
@@ -49,9 +53,41 @@ pub async fn run(
     } else {
         info!("Data directory: {}", data_dir);
     }
+    match limits.memory_limit_bytes {
+        Some(limit) => info!("Memory limit: {} MiB", limit / (1024 * 1024)),
+        None => info!("Memory limit: none detected"),
+    }
+    info!(
+        "WebSocket connection cap: {}",
+        limits.max_websocket_connections
+    );
+    if !limits.stored_arrangements {
+        tracing::warn!("--no-stored-arrangements has no effect: SQLite reads stored tables by key");
+    }
+    let ceiling = limits.query_cache_ceiling_bytes();
+    storage_cache::set_budget(ceiling);
+    if let Some(ceiling) = ceiling {
+        info!(
+            "Storage cache budget: {} MiB{}",
+            ceiling / (1024 * 1024),
+            if limits.memory_limit_bytes.is_some() {
+                ", lowered under memory pressure"
+            } else {
+                ""
+            }
+        );
+    }
+    // Serves until this function returns, and leaves the process unbounded
+    // again for a server started after it.
+    let _cache_budget = CacheBudgetGuard(
+        limits
+            .cache_budget_governor()
+            .map(|governor| AbortOnDrop(tokio::spawn(govern_cache_budget(governor)))),
+    );
     let mut builder = ServerBuilder::new(app_id)
         .with_auth_config(auth_config)
-        .with_shutdown_timeout(shutdown_timeout);
+        .with_shutdown_timeout(shutdown_timeout)
+        .with_max_websocket_connections(limits.max_websocket_connections);
     if let Some(dump) = diagnostics.heap_profiler {
         builder = builder.with_heap_profiler(dump);
     }
@@ -59,9 +95,6 @@ pub async fn run(
         builder.with_storage(StorageBackend::InMemory).build().await
     } else {
         builder
-            .with_storage_factory(std::sync::Arc::new(
-                jazz_storage_rocksdb::RocksDbStorageFactory,
-            ))
             .with_storage(StorageBackend::Persistent {
                 path: data_dir.into(),
             })
@@ -122,18 +155,16 @@ pub async fn run(
             })
         });
     #[cfg(feature = "otel")]
-    let _rocksdb_memory_gauge = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+    let _query_cache_gauges = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
         .is_ok()
         .then(|| {
             let meter = opentelemetry::global::meter("jazz-server");
-            jazz_otel::register_rocksdb_memory_gauge(&meter, || {
-                let usage = jazz_storage_rocksdb::process_memory_usage()?;
-                Some(vec![
-                    ("block_cache", usage.block_cache_bytes),
-                    ("block_cache_pinned", usage.block_cache_pinned_bytes),
-                    ("memtables", usage.memtable_bytes),
-                    ("table_readers", usage.table_reader_bytes),
-                ])
+            jazz_otel::register_query_cache_metrics(&meter, || jazz_otel::QueryCacheUsage {
+                budget_bytes: storage_cache::budget().map(|bytes| bytes as u64),
+                resident_bytes: storage_cache::resident_bytes() as u64,
+                // SQLite recycles pages rather than evicting buckets.
+                evicted_buckets: 0,
+                process_rss_bytes: resources::process_rss_bytes(),
             })
         });
     let shutdown_budget = shutdown_timeout
@@ -242,6 +273,61 @@ impl Drop for AbortOnDrop {
     }
 }
 
+/// Resets the process-wide storage cache budget when its server stops.
+struct CacheBudgetGuard(#[allow(dead_code)] Option<AbortOnDrop>);
+
+impl Drop for CacheBudgetGuard {
+    fn drop(&mut self) {
+        storage_cache::set_budget(None);
+    }
+}
+
+/// How often the storage cache budget follows the resident set.
+const CACHE_BUDGET_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Keep the process-wide storage cache budget in step with memory pressure.
+async fn govern_cache_budget(mut governor: resources::CacheBudgetGovernor) {
+    let ceiling = governor.ceiling_bytes();
+    let floor = governor.floor_bytes();
+    let mib = |bytes: usize| bytes / (1024 * 1024);
+    let mut interval = tokio::time::interval(CACHE_BUDGET_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        interval.tick().await;
+        let Some(rss) = resources::process_rss_bytes() else {
+            return;
+        };
+        let current = governor.budget_bytes();
+        let next = governor.step(rss, storage_cache::resident_bytes());
+        if next == current {
+            continue;
+        }
+        storage_cache::set_budget(Some(next));
+        let rss_mib = rss / (1024 * 1024);
+        if current == ceiling {
+            tracing::info!(
+                rss_mib,
+                budget_mib = mib(next),
+                "memory pressure: storage cache budget lowered, queries read more from disk"
+            );
+        } else if next == floor {
+            tracing::warn!(
+                rss_mib,
+                budget_mib = mib(next),
+                "memory pressure: storage cache budget at its floor"
+            );
+        } else if next == ceiling {
+            tracing::info!(
+                rss_mib,
+                budget_mib = mib(next),
+                "storage cache budget back at its ceiling"
+            );
+        } else {
+            tracing::debug!(rss_mib, budget_mib = mib(next), "storage cache budget");
+        }
+    }
+}
+
 async fn abort_task<T>(task: &mut JoinHandle<T>) {
     task.abort();
     let _ = tokio::time::timeout(Duration::from_millis(50), task).await;
@@ -330,7 +416,7 @@ mod tests {
 
     #[test]
     fn semantic_runtime_facade_is_consumable_without_core_state_access() {
-        let _boundary = |runtime: &jazz::serving::ServerRuntimeHandle| {
+        let _boundary = |runtime: &crate::runtime::ServerRuntimeHandle| {
             let _activity = runtime.subscribe_activity();
             runtime.notify_activity();
         };

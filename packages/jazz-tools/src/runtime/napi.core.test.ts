@@ -27,6 +27,11 @@ import {
   createNapiRuntimeFixture,
 } from "./testing/napi-runtime-test-utils.js";
 import { testAccountId, testAuthorBytes } from "./testing/account-fixtures.js";
+import {
+  markTrustedReservedSession,
+  TRUSTED_RESERVED_SESSION_TOKEN_FIELD,
+  trustedReservedSessionToken,
+} from "./client-session.js";
 import { SubscriptionManager } from "./subscription-manager.js";
 import type { WasmRow } from "../drivers/types.js";
 import {
@@ -509,7 +514,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
           TEST_SCHEMA,
         ),
         null,
-        "local",
+        "local-first",
       ),
     ).resolves.toEqual([
       {
@@ -778,6 +783,53 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     await expect(runtime.query(JSON.stringify({ table: "todos" }))).resolves.toEqual([]);
   });
 
+  it("writes with a client's own local-first session as the runtime itself", async () => {
+    const napi = await loadNapiModule();
+    const appId = "00000000-0000-0000-0000-00000000d0f1";
+    const token = napi.mintLocalFirstToken(Buffer.alloc(32, 7).toString("base64url"), appId, 600);
+    const claims = JSON.parse(Buffer.from(token.split(".")[1]!, "base64url").toString()) as {
+      iss: string;
+      sub: string;
+    };
+    const session = markTrustedReservedSession({
+      issuer: claims.iss,
+      user_id: claims.sub,
+      authMode: "local-first" as const,
+      claims: {},
+    });
+    const claimedAuthor = JSON.stringify([session.issuer, session.user_id]);
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: (schema, config) => napi.NapiDb.openMemory(schema, config) as never,
+        openMemoryWithSelfSignedProof: (schema, config, token, appId, author) =>
+          napi.NapiDb.openMemoryWithSelfSignedProof(schema, config, token, appId, author) as never,
+      },
+      TEST_SCHEMA,
+      deterministicBytes("jazz-napi-native-runtime-own-session:node"),
+      new TextEncoder().encode(claimedAuthor),
+      1,
+      true,
+      { selfSignedClientProof: { token, appId, claimedAuthor } },
+    );
+    runtimes.push(runtime);
+
+    const inserted = runtime.insert(
+      "todos",
+      {
+        title: { type: "Text", value: "own session row" },
+        done: { type: "Boolean", value: false },
+      },
+      JSON.stringify({
+        ...session,
+        [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: trustedReservedSessionToken(session),
+      }),
+    );
+
+    await expect(runtime.query(JSON.stringify({ table: "todos" }))).resolves.toMatchObject([
+      { id: inserted.id },
+    ]);
+  });
+
   it("streams a typed text column through NAPI before publishing the row", async () => {
     const { NapiDb } = await loadNapiModule();
     const runtime = createNapiRuntimeFixture(
@@ -982,7 +1034,11 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
 
     const manager = new SubscriptionManager<WasmRow>();
     const updates: ReturnType<SubscriptionManager<WasmRow>["handleDelta"]>[] = [];
-    const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "local");
+    const handle = runtime.createSubscription(
+      JSON.stringify({ table: "todos" }),
+      null,
+      "local-first",
+    );
     runtime.executeSubscription(handle, (delta: unknown) => {
       if (delta instanceof Error) throw delta;
       updates.push(
@@ -1040,7 +1096,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     runtime.unsubscribe(handle);
   });
 
-  it("publishes an empty local snapshot after initial evaluation for both propagation modes", async () => {
+  it("publishes an empty local snapshot after initial evaluation for local-first and local-only tiers", async () => {
     const { NapiDb } = await loadNapiModule();
     const runtime = new NativeRuntimeAdapter(
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
@@ -1056,7 +1112,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const defaultFull = runtime.createSubscription(
       JSON.stringify({ table: "todos" }),
       null,
-      "local",
+      "local-first",
     );
     runtime.executeSubscription(defaultFull, (delta: unknown) => defaultFullUpdates.push(delta));
     await waitFor(async () => defaultFullUpdates.length > 0 || undefined, "initial full snapshot");
@@ -1066,8 +1122,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const localOnly = runtime.createSubscription(
       JSON.stringify({ table: "todos" }),
       null,
-      "local",
-      JSON.stringify({ propagation: "local-only" }),
+      "local-only",
     );
     runtime.executeSubscription(localOnly, (delta: unknown) => localOnlyUpdates.push(delta));
     await waitFor(
@@ -1156,7 +1211,11 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
 
     const manager = new SubscriptionManager<WasmRow>();
     const updates: ReturnType<SubscriptionManager<WasmRow>["handleDelta"]>[] = [];
-    const handle = runtime.createSubscription(JSON.stringify({ table: "blobs" }), null, "local");
+    const handle = runtime.createSubscription(
+      JSON.stringify({ table: "blobs" }),
+      null,
+      "local-first",
+    );
     runtime.executeSubscription(handle, (delta: unknown) => {
       if (delta instanceof Error) throw delta;
       updates.push(
@@ -1314,7 +1373,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         const handle = runtime.createSubscription(
           JSON.stringify({ table: "todos" }),
           null,
-          "local",
+          "local-first",
         );
         runtime.executeSubscription(handle, (...args: unknown[]) => notifications.push(args));
         expect(notifications).toHaveLength(1);
@@ -1387,7 +1446,11 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
 
     const manager = new SubscriptionManager<WasmRow>();
     const updates: ReturnType<SubscriptionManager<WasmRow>["handleDelta"]>[] = [];
-    const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "local");
+    const handle = runtime.createSubscription(
+      JSON.stringify({ table: "todos" }),
+      null,
+      "local-first",
+    );
     runtime.executeSubscription(handle, (delta: unknown) => {
       updates.push(
         manager.handleDelta(
@@ -1463,7 +1526,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const aliceRows = await runtime.query(
       JSON.stringify({ table: "todos" }),
       aliceSession,
-      "local",
+      "local-first",
     );
     expect(aliceRows).toHaveLength(1);
     expect(aliceRows).toEqual([
@@ -1492,7 +1555,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const aliceRowsAfterForeignOwnerInsert = await runtime.query(
       JSON.stringify({ table: "todos" }),
       aliceSession,
-      "local",
+      "local-first",
     );
     expect(aliceRowsAfterForeignOwnerInsert).toEqual(
       expect.arrayContaining([
@@ -1515,7 +1578,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const aliceRowsAfterBobInsert = await runtime.query(
       JSON.stringify({ table: "todos" }),
       aliceSession,
-      "local",
+      "local-first",
     );
     expect(aliceRowsAfterBobInsert).toEqual(
       expect.arrayContaining([
@@ -1554,7 +1617,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       );
     const aliceDecodedUpdates: ReturnType<SubscriptionManager<WasmRow>["handleDelta"]>[] = [];
 
-    const aliceHandle = runtime.createSubscription(query, aliceSession, "local");
+    const aliceHandle = runtime.createSubscription(query, aliceSession, "local-first");
     runtime.executeSubscription(aliceHandle, (delta: unknown) => {
       aliceUpdates.push(delta);
       aliceDecodedUpdates.push(decodeAliceDelta(delta));
@@ -1590,13 +1653,13 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       runtime.waitForTransaction(await committedTxId(bobTodo), "local"),
     ]);
 
-    await expect(runtime.query(query, aliceSession, "local")).resolves.toEqual(
+    await expect(runtime.query(query, aliceSession, "local-first")).resolves.toEqual(
       expect.arrayContaining([
         expect.objectContaining({ id: aliceTodo.id }),
         expect.objectContaining({ id: bobTodo.id }),
       ]),
     );
-    await expect(runtime.query(query, bobSession, "local")).resolves.toEqual(
+    await expect(runtime.query(query, bobSession, "local-first")).resolves.toEqual(
       expect.arrayContaining([
         expect.objectContaining({ id: aliceTodo.id }),
         expect.objectContaining({ id: bobTodo.id }),
@@ -1672,10 +1735,10 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     ]);
 
     await expect(
-      runtime.query(JSON.stringify({ table: "todos" }), aliceSession, "local"),
+      runtime.query(JSON.stringify({ table: "todos" }), aliceSession, "local-first"),
     ).resolves.toEqual([expect.objectContaining({ id: aliceTodo.id })]);
     await expect(
-      runtime.query(JSON.stringify({ table: "todos" }), bobSession, "local"),
+      runtime.query(JSON.stringify({ table: "todos" }), bobSession, "local-first"),
     ).resolves.toEqual([expect.objectContaining({ id: bobTodo.id })]);
 
     // This adapter's direct writes are advisory: capture both cross-identity
@@ -1688,10 +1751,10 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     ]);
 
     await expect(
-      runtime.query(JSON.stringify({ table: "todos" }), aliceSession, "local"),
+      runtime.query(JSON.stringify({ table: "todos" }), aliceSession, "local-first"),
     ).resolves.toEqual([]);
     await expect(
-      runtime.query(JSON.stringify({ table: "todos" }), bobSession, "local"),
+      runtime.query(JSON.stringify({ table: "todos" }), bobSession, "local-first"),
     ).resolves.toEqual([]);
   });
 
@@ -1747,7 +1810,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const rows = (await runtime.query(
       JSON.stringify({ table: "todos" }),
       bobSession,
-      "local",
+      "local-first",
       JSON.stringify({ transaction_id: transactionId }),
     )) as Array<{ id: string }>;
     expect(rows.map((row) => row.id).sort()).toEqual([aliceTodo.id, staged.id].sort());
@@ -1940,7 +2003,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       runtime.waitForTransaction(await committedTxId(bobTodo), "local"),
     ]);
     await expect(
-      runtime.query(JSON.stringify({ table: "todos" }), aliceSession, "local"),
+      runtime.query(JSON.stringify({ table: "todos" }), aliceSession, "local-first"),
     ).resolves.toHaveLength(2);
 
     const aliceDenied = runtime.waitForTransaction(await committedTxId(aliceTodo), "global");
@@ -1952,16 +2015,66 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const aliceRejection = await aliceDenied.catch((error) => error);
     expect(Object.getOwnPropertyDescriptor(aliceRejection, "message")).toMatchObject({
       enumerable: false,
-      value: expect.stringContaining("AuthorizationDenied"),
+      value: expect.stringContaining("authorization_denied"),
     });
-    await expect(aliceDenied).rejects.toThrow("AuthorizationDenied");
+    await expect(aliceDenied).rejects.toThrow("authorization_denied");
     const bobDenied = runtime.waitForTransaction(await committedTxId(bobTodo), "global");
     await expect(bobDenied).rejects.toMatchObject({
       kind: "rejected",
       code: "permission_denied",
       reason: "Write rejected by server authorization",
     });
-    await expect(bobDenied).rejects.toThrow("AuthorizationDenied");
+    await expect(bobDenied).rejects.toThrow("authorization_denied");
+  }, 15_000);
+
+  it("rejects a session write stamped too far ahead of the authority's clock with its own code", async () => {
+    globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
+
+    const { NapiDb } = await loadNapiModule();
+    const appId = "00000000-0000-0000-0000-00000000d00a";
+    server = await startLocalJazzServer({
+      appId,
+      inMemory: true,
+      backendSecret: "core-napi-clock-skew-backend",
+      adminSecret: "core-napi-clock-skew-admin",
+      schema: OWNED_TODOS_SCHEMA,
+      permissions: { todos: OWNED_TODOS_SCHEMA.todos.policies! },
+    });
+
+    const runtime = new NativeRuntimeAdapter(
+      { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
+      OWNED_TODOS_SCHEMA,
+      deterministicBytes("jazz-napi-native-runtime-clock-skew:node"),
+      testAuthorBytes("jazz-napi-native-runtime-clock-skew:author"),
+      13,
+      true,
+    );
+    runtimes.push(runtime);
+    runtime.connect(
+      webSocketUrl(server.url, appId),
+      JSON.stringify({ backend_secret: server.backendSecret }),
+    );
+
+    // An hour ahead: far beyond the authority's skew tolerance.
+    const future = runtime.insert(
+      "todos",
+      {
+        title: { type: "Text", value: "from the future" },
+        done: { type: "Boolean", value: false },
+        owner_id: { type: "Text", value: ALICE_ID },
+      },
+      JSON.stringify({
+        session: testExternalSession(ALICE_ID),
+        updated_at: Date.now() + 3_600_000,
+      }),
+    );
+    const refused = runtime.waitForTransaction(await committedTxId(future), "global");
+    await expect(refused).rejects.toMatchObject({
+      kind: "rejected",
+      code: "client_clock_too_far_ahead",
+      reason: "Client clock is too far ahead",
+    });
+    await expect(refused).rejects.toThrow("client_clock_too_far_ahead");
   }, 15_000);
 
   it("keeps persistent client-local session writes optimistic until the authority rejects them", async () => {
@@ -2026,15 +2139,15 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         runtime.waitForTransaction(await committedTxId(bobTodo), "local"),
       ]);
       await expect(
-        runtime.query(JSON.stringify({ table: "todos" }), aliceSession, "local"),
+        runtime.query(JSON.stringify({ table: "todos" }), aliceSession, "local-first"),
       ).resolves.toHaveLength(2);
 
       await expect(
         runtime.waitForTransaction(await committedTxId(aliceTodo), "global"),
-      ).rejects.toThrow("AuthorizationDenied");
+      ).rejects.toThrow("authorization_denied");
       await expect(
         runtime.waitForTransaction(await committedTxId(bobTodo), "global"),
-      ).rejects.toThrow("AuthorizationDenied");
+      ).rejects.toThrow("authorization_denied");
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
@@ -2166,7 +2279,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const reader = openRuntime("reader", 32);
     const queryJson = JSON.stringify({ table: "todos" });
 
-    expect(await reader.query(queryJson, null, "local")).toEqual([]);
+    expect(await reader.query(queryJson, null, "local-first")).toEqual([]);
 
     const inserted = writer.insert("todos", {
       title: { type: "Text", value: "direct napi propagated edge row" },
@@ -2178,7 +2291,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     );
 
     const propagatedRow = await waitFor(async () => {
-      const rows = (await reader.query(queryJson, null, "global")) as Array<{
+      const rows = (await reader.query(queryJson, null, "remote")) as Array<{
         id: string;
         table: string;
         values: unknown[];
@@ -2257,7 +2370,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       // not resolve with the reader's empty local state while the restarted
       // server is still delivering that receipt; callers should receive the
       // persisted row from this one read.
-      const rows = (await reader.query(queryJson, null, "global")) as Array<{
+      const rows = (await reader.query(queryJson, null, "remote")) as Array<{
         id: string;
         table: string;
         values: unknown[];
@@ -2331,7 +2444,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       const rows = (await reader.query(
         JSON.stringify({ table: "chats" }),
         bobSession,
-        "global",
+        "remote",
       )) as Array<{
         id: string;
         table: string;
@@ -2363,7 +2476,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       const rows = (await reader.query(
         JSON.stringify({ table: "messages" }),
         bobSession,
-        "global",
+        "remote",
       )) as Array<{
         id: string;
         table: string;

@@ -1,9 +1,9 @@
-//! Durable Groove encoding of policy claims in the policy-binding directory.
+//! Durable record encoding of policy claims in the policy-binding directory.
 //! Re-exported from `crate::protocol`.
 
 use std::collections::BTreeMap;
 
-use groove::records::{
+use jazz_types::records::{
     EnumCase, EnumSchema, EnumValue, OwnedRecord, RecordDescriptor, ScalarEnumSchema, Value,
     ValueType,
 };
@@ -11,7 +11,7 @@ use groove::records::{
 /// The durable, typed payload used by the policy-binding directory.
 ///
 /// This deliberately flattens a recursively shaped claims map into ordinary
-/// Groove records instead of inventing another opaque byte codec.  Each root
+/// records instead of inventing another opaque byte codec.  Each root
 /// node carries its claim name; containers name their children only by their
 /// position.  The representation supports the policy-claim value vocabulary
 /// admitted at public boundaries (scalars, nullable values, arrays, and
@@ -28,7 +28,7 @@ pub fn policy_binding_directory_claims_value(
     Ok(Value::Array(nodes))
 }
 
-/// Decode and validate the normal Groove representation of policy claims.
+/// Decode and validate the normal record representation of policy claims.
 pub fn policy_binding_directory_claims_from_value(
     value: Value,
 ) -> Result<BTreeMap<String, Value>, String> {
@@ -166,88 +166,30 @@ fn encode_policy_claim_node(
     if nodes.len() >= POLICY_CLAIM_DIRECTORY_MAX_NODES {
         return Err("policy binding directory claims exceed node limit".to_owned());
     }
-    let (kind, enum_value, children): (u8, EnumValue, Vec<&Value>) = match value {
-        Value::U8(value) => (
-            POLICY_CLAIM_U8 as u8,
-            policy_claim_scalar(POLICY_CLAIM_U8, Value::U8(*value))?,
-            vec![],
-        ),
-        Value::U16(value) => (
-            POLICY_CLAIM_U16 as u8,
-            policy_claim_scalar(POLICY_CLAIM_U16, Value::U16(*value))?,
-            vec![],
-        ),
-        Value::U32(value) => (
-            POLICY_CLAIM_U32 as u8,
-            policy_claim_scalar(POLICY_CLAIM_U32, Value::U32(*value))?,
-            vec![],
-        ),
-        Value::U64(value) => (
-            POLICY_CLAIM_U64 as u8,
-            policy_claim_scalar(POLICY_CLAIM_U64, Value::U64(*value))?,
-            vec![],
-        ),
-        Value::I32(value) => (
-            POLICY_CLAIM_I32 as u8,
-            policy_claim_scalar(POLICY_CLAIM_I32, Value::I32(*value))?,
-            vec![],
-        ),
-        Value::I64(value) => (
-            POLICY_CLAIM_I64 as u8,
-            policy_claim_scalar(POLICY_CLAIM_I64, Value::I64(*value))?,
-            vec![],
-        ),
-        Value::F64(value) => (
-            POLICY_CLAIM_F64 as u8,
-            policy_claim_scalar(POLICY_CLAIM_F64, Value::F64(*value))?,
-            vec![],
-        ),
-        Value::Bool(value) => (
-            POLICY_CLAIM_BOOL as u8,
-            policy_claim_scalar(POLICY_CLAIM_BOOL, Value::Bool(*value))?,
-            vec![],
-        ),
-        Value::String(value) => (
-            POLICY_CLAIM_STRING as u8,
-            policy_claim_scalar(POLICY_CLAIM_STRING, Value::String(value.clone()))?,
-            vec![],
-        ),
-        Value::Bytes(value) => (
-            POLICY_CLAIM_BYTES as u8,
-            policy_claim_scalar(POLICY_CLAIM_BYTES, Value::Bytes(value.clone()))?,
-            vec![],
-        ),
-        Value::Uuid(value) => (
-            POLICY_CLAIM_UUID as u8,
-            policy_claim_scalar(POLICY_CLAIM_UUID, Value::Uuid(*value))?,
-            vec![],
-        ),
-        Value::EnumTag(value) => (
-            POLICY_CLAIM_ENUM_TAG as u8,
-            policy_claim_scalar(POLICY_CLAIM_ENUM_TAG, Value::U8(*value))?,
-            vec![],
-        ),
-        Value::Nullable(None) => (
-            POLICY_CLAIM_NULL as u8,
-            policy_claim_container(POLICY_CLAIM_NULL)?,
-            vec![],
-        ),
-        Value::Nullable(Some(value)) => (
-            POLICY_CLAIM_NULLABLE as u8,
-            policy_claim_container(POLICY_CLAIM_NULLABLE)?,
-            vec![value],
-        ),
-        Value::Tuple(values) => (
-            POLICY_CLAIM_TUPLE as u8,
-            policy_claim_container(POLICY_CLAIM_TUPLE)?,
-            values.iter().collect(),
-        ),
-        Value::Array(values) => (
-            POLICY_CLAIM_ARRAY as u8,
-            policy_claim_container(POLICY_CLAIM_ARRAY)?,
-            values.iter().collect(),
-        ),
-        Value::Record(_) | Value::Enum(_) | Value::Large(_) => {
+    let scalar = |tag: u32, value: Value| -> Result<(u8, EnumValue, Vec<&Value>), String> {
+        Ok((tag as u8, policy_claim_scalar(tag, value)?, vec![]))
+    };
+    let container = |tag: u32, children| -> Result<(u8, EnumValue, Vec<&Value>), String> {
+        Ok((tag as u8, policy_claim_container(tag)?, children))
+    };
+    let (kind, enum_value, children) = match value {
+        Value::U8(_) => scalar(POLICY_CLAIM_U8, value.clone())?,
+        Value::U16(_) => scalar(POLICY_CLAIM_U16, value.clone())?,
+        Value::U32(_) => scalar(POLICY_CLAIM_U32, value.clone())?,
+        Value::U64(_) => scalar(POLICY_CLAIM_U64, value.clone())?,
+        Value::I32(_) => scalar(POLICY_CLAIM_I32, value.clone())?,
+        Value::I64(_) => scalar(POLICY_CLAIM_I64, value.clone())?,
+        Value::F64(_) => scalar(POLICY_CLAIM_F64, value.clone())?,
+        Value::Bool(_) => scalar(POLICY_CLAIM_BOOL, value.clone())?,
+        Value::String(_) => scalar(POLICY_CLAIM_STRING, value.clone())?,
+        Value::Bytes(_) => scalar(POLICY_CLAIM_BYTES, value.clone())?,
+        Value::Uuid(_) => scalar(POLICY_CLAIM_UUID, value.clone())?,
+        Value::EnumTag(value) => scalar(POLICY_CLAIM_ENUM_TAG, Value::U8(*value))?,
+        Value::Nullable(None) => container(POLICY_CLAIM_NULL, vec![])?,
+        Value::Nullable(Some(value)) => container(POLICY_CLAIM_NULLABLE, vec![value])?,
+        Value::Tuple(values) => container(POLICY_CLAIM_TUPLE, values.iter().collect())?,
+        Value::Array(values) => container(POLICY_CLAIM_ARRAY, values.iter().collect())?,
+        Value::Record(_) | Value::Enum(_) | Value::Large(_) | Value::U48(_) => {
             return Err(
                 "policy binding directory does not admit engine-owned claim values".to_owned(),
             );
@@ -343,8 +285,8 @@ fn decode_policy_claim_node(
         .map_err(|error| format!("policy binding directory value cannot decode: {error}"))?;
     let child_count = usize::try_from(*children)
         .map_err(|_| "policy binding directory child count overflows".to_owned())?;
-    let scalar = |expected: u32| -> Result<Value, String> {
-        if expected_tag != expected || child_count != 0 || payload.len() != 1 {
+    let scalar = || -> Result<Value, String> {
+        if child_count != 0 || payload.len() != 1 {
             return Err(
                 "policy binding directory scalar has invalid children or payload".to_owned(),
             );
@@ -352,18 +294,9 @@ fn decode_policy_claim_node(
         Ok(payload[0].clone())
     };
     let value = match expected_tag {
-        POLICY_CLAIM_U8 => scalar(POLICY_CLAIM_U8)?,
-        POLICY_CLAIM_U16 => scalar(POLICY_CLAIM_U16)?,
-        POLICY_CLAIM_U32 => scalar(POLICY_CLAIM_U32)?,
-        POLICY_CLAIM_U64 => scalar(POLICY_CLAIM_U64)?,
-        POLICY_CLAIM_I32 => scalar(POLICY_CLAIM_I32)?,
-        POLICY_CLAIM_I64 => scalar(POLICY_CLAIM_I64)?,
-        POLICY_CLAIM_F64 => scalar(POLICY_CLAIM_F64)?,
-        POLICY_CLAIM_BOOL => scalar(POLICY_CLAIM_BOOL)?,
-        POLICY_CLAIM_STRING => scalar(POLICY_CLAIM_STRING)?,
-        POLICY_CLAIM_BYTES => scalar(POLICY_CLAIM_BYTES)?,
-        POLICY_CLAIM_UUID => scalar(POLICY_CLAIM_UUID)?,
-        POLICY_CLAIM_ENUM_TAG => match scalar(POLICY_CLAIM_ENUM_TAG)? {
+        // Tags U8 through UUID are the plain scalar kinds.
+        POLICY_CLAIM_U8..=POLICY_CLAIM_UUID => scalar()?,
+        POLICY_CLAIM_ENUM_TAG => match scalar()? {
             Value::U8(value) => Value::EnumTag(value),
             _ => return Err("policy binding directory enum tag must be u8".to_owned()),
         },

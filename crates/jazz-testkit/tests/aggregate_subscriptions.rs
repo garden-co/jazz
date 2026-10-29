@@ -3,8 +3,8 @@ use jazz_testkit as support;
 
 use std::time::{Duration, Instant};
 
-use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value as GrooveValue, ValueType};
 use jazz::query::{Aggregate, AggregateFunction, OrderDirection};
+use jazz::records::{BorrowedRecord, RecordDescriptor, Value as RecordValue, ValueType};
 use jazz::row_input;
 use jazz::tools::{
     ColumnMergeStrategy, ColumnType, DurabilityTier, JazzClient, PolicyExpr, Row, RowDescriptor,
@@ -269,7 +269,7 @@ impl ObservedSubscription {
         // Keep the raw compiler-record fallback for non-testing consumers
         // that do not attach decoded public fields.
         let query_fields = self.descriptor.fields();
-        let output_wire_type = |field: &jazz::groove::records::DescriptorField,
+        let output_wire_type = |field: &jazz::records::DescriptorField,
                                 function: AggregateFunction| {
             if function == AggregateFunction::Count {
                 field.value_type.clone()
@@ -327,20 +327,20 @@ impl ObservedSubscription {
                     .skip(4)
                     .take(self.descriptor.fields().len())
                     .map(|value| match value {
-                        GrooveValue::Nullable(None) => Value::Null,
-                        GrooveValue::Nullable(Some(value)) => match *value {
-                            GrooveValue::String(value) => Value::Text(value),
-                            GrooveValue::I32(value) => Value::Integer(value),
-                            GrooveValue::I64(value) => Value::BigInt(value),
-                            GrooveValue::U64(value) => Value::Timestamp(value),
-                            GrooveValue::F64(value) => Value::Double(value),
+                        RecordValue::Nullable(None) => Value::Null,
+                        RecordValue::Nullable(Some(value)) => match *value {
+                            RecordValue::String(value) => Value::Text(value),
+                            RecordValue::I32(value) => Value::Integer(value),
+                            RecordValue::I64(value) => Value::BigInt(value),
+                            RecordValue::U64(value) => Value::Timestamp(value),
+                            RecordValue::F64(value) => Value::Double(value),
                             other => panic!("unsupported delivered aggregate value: {other:?}"),
                         },
-                        GrooveValue::String(value) => Value::Text(value),
-                        GrooveValue::I32(value) => Value::Integer(value),
-                        GrooveValue::I64(value) => Value::BigInt(value),
-                        GrooveValue::U64(value) => Value::Timestamp(value),
-                        GrooveValue::F64(value) => Value::Double(value),
+                        RecordValue::String(value) => Value::Text(value),
+                        RecordValue::I32(value) => Value::Integer(value),
+                        RecordValue::I64(value) => Value::BigInt(value),
+                        RecordValue::U64(value) => Value::Timestamp(value),
+                        RecordValue::F64(value) => Value::Double(value),
                         other => panic!("unsupported delivered aggregate value: {other:?}"),
                     })
                     .collect::<Vec<_>>()
@@ -2066,6 +2066,84 @@ async fn aggregate_subscription_spy_stays_at_policy_visible_truth() {
                 "one-shot spy count remains zero after invisible delete",
             )
             .await;
+        })
+        .await;
+}
+
+/// Like the spy test, but the owner also subscribes to the same count, so both
+/// bindings share one server program. The spy's count must stay 0 and its
+/// store must not receive the owner's rows.
+#[tokio::test]
+async fn shared_count_spy_with_concurrent_owner_subscription() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = policy_metrics_schema();
+            let server = JazzServer::start_with_schema(schema.clone())
+                .await
+                .expect("start test server");
+            let mut clients = Vec::new();
+            for name in ["review-owner", "review-spy"] {
+                let id = test_user_id(name);
+                let mut ctx = server.make_client_context_for_user(schema.clone(), id.clone());
+                ctx.backend_secret = None;
+                support::enroll_test_context(&mut ctx)
+                    .await
+                    .expect("enroll");
+                clients.push((id, jazz_testkit::connect(ctx).await.expect("connect")));
+            }
+            let (owner_id, owner) = &clients[0];
+            let (_spy_id, spy) = &clients[1];
+            let count_query = jazz::query::Query::from("metrics").count();
+            let mut owner_stream = ObservedSubscription::new(
+                owner
+                    .subscribe(count_query.clone())
+                    .await
+                    .expect("owner subscribe"),
+                &count_query,
+                aggregate_descriptor([("count", ValueType::U64)]),
+            );
+            let mut spy_stream = ObservedSubscription::new(
+                spy.subscribe(count_query.clone())
+                    .await
+                    .expect("spy subscribe"),
+                &count_query,
+                aggregate_descriptor([("count", ValueType::U64)]),
+            );
+            owner_stream
+                .wait_for_values(vec![vec![Value::Timestamp(0)]], "owner initial")
+                .await;
+            spy_stream
+                .wait_for_values(vec![vec![Value::Timestamp(0)]], "spy initial")
+                .await;
+            let (_row, _, tx) = owner
+                .insert(
+                    "metrics",
+                    row_input!("owner_id" => owner_id.clone(), "score" => 10),
+                )
+                .expect("insert owner row");
+            support::wait_for_global_txs(owner, &[tx.expect("commit")]).await;
+            owner_stream
+                .wait_for_values(vec![vec![Value::Timestamp(1)]], "owner sees own row")
+                .await;
+            spy_stream
+                .assert_values_remain(
+                    vec![vec![Value::Timestamp(0)]],
+                    Duration::from_millis(500),
+                    "spy count must ignore owner's row while owner shares the graph",
+                )
+                .await;
+            let held = spy
+                .query(
+                    jazz::query::Query::from("metrics"),
+                    jazz::tools::ReadTier::LocalOnly,
+                )
+                .await
+                .map(jazz::tools::test_support::ordinary_rows)
+                .expect("spy local read");
+            assert!(
+                held.is_empty(),
+                "spy store received the owner's rows: {held:?}"
+            );
         })
         .await;
 }

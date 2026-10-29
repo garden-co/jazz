@@ -7,7 +7,7 @@ import * as devServer from "./dev-server.js";
 import * as catalogueProject from "./catalogue-project.js";
 import * as schemaWatcher from "./schema-watcher.js";
 import { ensureEnvAppId, ManagedDevRuntime } from "./managed-runtime.js";
-import { fetchSchemaHashes, fetchStoredWasmSchema } from "../runtime/schema-fetch.js";
+import { fetchSchemaHashes, fetchStoredWasmSchema } from "./catalogue-api.js";
 import { schema as s } from "../index.js";
 import { chmod, lstat, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import { build } from "esbuild";
@@ -59,12 +59,8 @@ function setStdoutIsTTY(isTTY: boolean): void {
 function deployed(hash = "abc123def4567890") {
   return {
     schema: { hash, schemaFile: "schema.ts", status: "published" as const },
-    permissions: {
-      schemaHash: hash,
-      permissionsFile: "permissions.ts",
-      previousHead: null,
-      head: null,
-    },
+    changed: true,
+    published: { schemas: [hash], migrations: [] },
     warnings: [],
   };
 }

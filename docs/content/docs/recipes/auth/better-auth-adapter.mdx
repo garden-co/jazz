@@ -182,7 +182,7 @@ export async function messages(request: Request) {
   headers.set("Authorization", `Bearer ${token}`);
   const bearerRequest = new Request(request, { headers });
   const db = await client.forRequest(bearerRequest, { account: "login-or-register" });
-  return Response.json(await db.all(app.messages, { tier: "global" }));
+  return Response.json(await db.all(app.messages, { tier: "remote" }));
 }
 ```
 
@@ -200,7 +200,7 @@ import { app } from "./schema";
 
 export async function messages(request: Request) {
   const db = await client.forRequest(request);
-  return Response.json(await db.all(app.messages, { tier: "global" }));
+  return Response.json(await db.all(app.messages, { tier: "remote" }));
 }
 
 // A cookie-based route can ask Better Auth for the JWT server-side instead.

@@ -3,7 +3,7 @@ import type { Value } from "../drivers/types.js";
 import type { PublicSession, Session } from "./context.js";
 
 const canonicalAuthorDecoder = new Utf8Decoder({ fatal: true });
-const STORED_SCALAR_INLINE_TAG = 2;
+const STORED_SCALAR_INLINE_TAG = 0;
 const CANONICAL_AUTHOR_OPEN_BRACKET = 0x5b;
 const publicSessions = new WeakMap<Session, PublicSession>();
 // Verified-handler presentation metadata only. Internal sessions carry only

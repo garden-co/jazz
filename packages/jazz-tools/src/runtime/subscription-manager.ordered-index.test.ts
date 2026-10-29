@@ -15,7 +15,7 @@ const uuidBytes = (value: string) =>
       .map((h) => Number.parseInt(h, 16)),
   );
 const occurrenceKey = (value: string) =>
-  Uint8Array.from([1, ...uuidBytes(value), 0, 0, 0, 0, 0, 0, 0, 0]);
+  Uint8Array.from([2, ...uuidBytes(value), 0, 0, 0, 0, 0, 0, 0, 0, 0]);
 
 type Root = { id: string; title: string };
 function row(rowId: string, title: string): WasmRow {

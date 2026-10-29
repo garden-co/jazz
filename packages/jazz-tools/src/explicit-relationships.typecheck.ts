@@ -1,4 +1,4 @@
-import { schema as s } from "./index.js";
+import { schema as s, migration as m } from "./index.js";
 
 // @ts-expect-error Required explicit relationship map, even for empty tables.
 s.table({ name: s.string() });
@@ -10,12 +10,11 @@ s.table({ authorId: s.uuid() }, { author: s.rel("users", "missing") });
 s.table({ author: s.uuid() }, { author: s.rel("users", "author") });
 // @ts-expect-error Row ID is reserved.
 s.table({ authorId: s.uuid() }, { id: s.rel("users", "authorId") });
+// @ts-expect-error One reference column cannot target two tables.
 s.table(
   { authorId: s.uuid() },
   {
-    // @ts-expect-error One reference column cannot target two tables.
     author: s.rel("users", "authorId"),
-    // @ts-expect-error Conflicting target on the same column.
     writer: s.rel("writers", "authorId"),
   },
 );
@@ -75,8 +74,8 @@ const migrationTo = {
   posts: s.table({ owner: s.uuid() }, { author: s.rel("teams", "owner") }),
 };
 // @ts-expect-error Changing the effective stored reference target requires a supported migration, not an empty lens.
-s.defineMigration({ from: migrationFrom, to: migrationTo });
-s.defineMigration({
+m.defineMigration({ from: migrationFrom, to: migrationTo });
+m.defineMigration({
   from: migrationFrom,
   to: {
     ...migrationFrom,

@@ -3,7 +3,7 @@
 ## Overview
 
 Core is the only authority. It authorizes reads and writes, decides the final
-fate of both mergeable and exclusive transactions, and acknowledges global
+fate of both mergeable and serializable transactions, and acknowledges global
 durability. Clients retain authorized data and optimistic local edits. Local
 browser and native persistence relays remain non-authoritative parts of a
 client; there is no semantic server edge between a client and Core.
@@ -19,7 +19,7 @@ durability. Sharding and distributed query execution are outside this change.
 - A client-authored transaction starts pending. Persisting it locally raises its
   durability to Local without accepting it.
 - Core authenticates the session and evaluates current write policy before
-  accepting either transaction kind. Exclusive transactions additionally require
+  accepting either transaction kind. Serializable transactions additionally require
   their normal serialized conflict checks.
 - A successful Core acknowledgement establishes acceptance and Global
   durability. Rejection follows the existing rollback/dependency rules.
@@ -30,9 +30,10 @@ durability. Sharding and distributed query execution are outside this change.
   bytes is never authorization or permission to assign a fate (`INV-TX-23`).
 
 Local-first reads use retained data and local edits. Remote reads require a
-fresh Core-confirmed supporting set; local-first-unless-empty is local-first
-but may hold an empty opening for the first remote view while a remote can
-answer (ch. 13). No intermediate
+fresh Core-confirmed supporting set. A local-first read with a server wait
+(`FirstLoad::WaitForRemote`) is local-first but may hold its opening, for
+at most the timeout, for the first remote view while a remote can answer
+(ch. 13). No intermediate
 server can substitute a locally computed result for Core confirmation.
 
 Core supplies query supporting rows and handles extra-local-row reconciliation:
@@ -41,28 +42,32 @@ revealing hidden policy evidence. Clients still evaluate queries locally over
 these inputs. Reconnect, complete-set replacement, negative evidence and
 connection-scoped receipt rules from chapter 8 remain in force.
 
-### 9.2 Existing persisted durability
+### 9.2 Durability encoding v2 compatibility
 
-The record encoding keeps its established discriminants: None is 0, Local is 1,
-legacy Edge is 2, and Global is 3. New records never emit 2. Readers interpret
-legacy 2 as Local; Global must not be renumbered to 2.
+`jazz.transaction-durability.v2` encodes `None=0`, `Local=1`, `Global=2`.
+It is a required member of the persistent Jazz codec profile. Adapters reject
+roots without that exact profile before interpreting or rewriting records.
+There is no compatibility decoder or automatic migration for the preceding
+profile: its tag 2 had a different meaning, and its Global tag was 3.
+Historical physical fixtures remain immutable rejection receipts, including
+published alpha.54/alpha.56 and the pre-linear corpora; the current-producer
+corpus is regenerated in the current format (SPEC 2 §2.7.1).
 
-A legacy accepted transaction with durability 2 and no Core global position is
-pending under the new authority model. Preserve its authored commit unit,
-transaction ID, author and row versions. The normal locally-authored pending
-replay path resubmits it to Core, including after restart without an active
-query. Core may acknowledge an already-known identical unit, authorize and
-accept a new unit, or reject it through ordinary transaction reconciliation.
-The old edge acceptance is not evidence of present Core authorization
-(`INV-SYNC-47`).
-Retired edge-authority publications are rejected even on privileged links;
-authenticating the sender cannot reinstate the removed admission shortcut.
+Wire protocol v5 introduced the same compact core durability tags, and v6
+(linear row-state history, ch. 8) keeps them. Their handshake roles are
+`Client=0`, `Core=1`, `Relay=2`; a current peer admits only exact v6 peers.
+The Rust tools facade encodes `Local=0`, `GlobalServer=1`. These byte-level
+contracts are pinned independently; serializers' default ordering is not the
+compatibility contract. Read-view keys use `JRVK` version 2 because their tier
+byte changed with this release; include-deleted read views use version 3, which
+appends the include-deleted flag (SPEC 6 §6.5).
 
-Already globally confirmed transactions retain their fate and global position.
-Rejected transactions remain rejected. Reopening must not upload another
-account's cached history as the current account's authored edits. This migration
-cannot recover bytes absent from the local store; it does not invent credentials
-or convert cached remote transactions into local authorship.
+Upgrade clients, native bindings, and servers together. Earlier persistent
+roots cannot be opened by this release; retaining the files does not make them
+compatible. Use the matching older release to recover/export data before
+moving to a newly initialized root. New-format pending-write replay, write
+permissions, local relays, and globally confirmed durability retain their
+normal semantics.
 
 ### 9.3 Encoder and authorization trust
 
@@ -176,12 +181,15 @@ Local observations use the worker's retained authorized knowledge plus the
 foreground's optimistic local writes. An upstream addition makes newly
 delivered material part of that retained knowledge and MUST wake affected Local
 subscriptions. An upstream removal changes future authoritative Global
-membership, but does not retroactively redact material already delivered to the
-scope-isolated store; Local may continue to expose it (`INV-RLS-6`).
-`Propagation::LocalOnly` prevents asking upstream and does not change these
-Local semantics. `LocalFirstUnlessEmpty` is a Local read throughout; only an empty opening may wait
-for the first authority view, only while the link is live or within the
-attempt window, and an `offset > 0` window reads the strict remote view
+membership; an eviction (access loss) also drops the row from the
+scope-isolated store, so Local stops exposing it too (`INV-RLS-6`).
+`ReadTier::LocalOnly` reads local data and pending writes without asking
+upstream. `LocalFirst` also requests upstream results. A local-first read with a server wait
+(`FirstLoad::WaitForRemote { timeout_ms }`) is a Local read throughout;
+only its opening may wait for the first authority view, only while the link
+is live or within the attempt window, and never past its deadline. Under it,
+an `offset > 0` window reads the strict remote view, and a non-durable
+foreground holds an authority witness coverage while gated
 (ch. 13). The gate lives in the core `Db`; it never runs a second concurrent
 probe query.
 
@@ -192,10 +200,20 @@ trusted serving, manufacture authority, or change authorship.
 
 ### 9.5 Relays
 
+Jazz has exactly one relay tier. A client either talks to Core directly, or
+sits behind one durable, scope-isolated client relay (the browser shared
+worker, or a native relay, ch. 19) that talks to Core directly; the clients
+behind a relay are non-durable foreground sessions. Relays are not chained, a
+durable replica never attaches behind a relay, and no relay serves more than
+one auth scope. Requirements below are stated for this shape only; other
+shapes are not supported (`INV-SYNC-50`), and supporting one would need new
+design (for example versions named by origin rather than by local seq), not
+just new wiring.
+
 Relays provide unopinionated transport and caching. A relay link uses
 `PeerRole::Relay` with an explicit relay transport capability and no permission
 subject (`INV-EDGE-1`), and forwards
-both mergeable and exclusive commit units without deciding their outcome: stored
+both mergeable and serializable commit units without deciding their outcome: stored
 units remain `Fate::Pending` / `DurabilityTier::Local`, and the relay assigns no
 fate (`INV-EDGE-2`).
 
@@ -211,19 +229,14 @@ previously delivered authorized result/payload closure, or for a same-scope
 authored pending version. Mere physical co-location is insufficient: hidden
 policy evidence, catalogue internals, and unrelated cached rows are not thereby
 foreground-repairable. Revocation remains forward-looking for material already
-delivered (`INV-RLS-6`, `INV-EDGE-23`). A multiplexed relay is stricter. It may
-deduplicate immutable payload bytes, but before serving a principal it MUST
-prove the requested version belongs to that principal's exact authorized
-payload closure—not merely that the same row is currently a result member—or
-forward the repair upstream. Possession of cached bytes alone is not a
-cross-scope capability.
+delivered (`INV-RLS-6`, `INV-EDGE-23`). Possession of cached bytes alone is
+not a cross-scope capability.
 
-The default browser architecture is a shared-worker relay isolated to one auth
-scope, where one worker relays for all same-scope tabs. A server-deployed or
-otherwise multiplexed relay MUST preserve the policy-scoped result identities
-defined above rather than relying on physical-store isolation. Native/RN client
-relays have the same semantic boundary even when their storage-owner and
-lifecycle mechanism differs from the browser's IndexedDB marker.
+The browser architecture is a shared-worker relay isolated to one auth scope,
+where one worker relays for all same-scope tabs. Native/RN client relays have
+the same semantic boundary even when their storage-owner and lifecycle
+mechanism differs from the browser's IndexedDB marker. A relay shared across
+auth scopes (server-deployed or otherwise multiplexed) is not supported.
 
 ### 9.6 The Core/client boundary
 
@@ -250,9 +263,9 @@ may substitute for or widen the capability. Disconnect or transport replacement
 invalidates the proof and requires authorization under the freshly admitted
 epoch (`INV-EDGE-25`).
 
-This applies to both mergeable and exclusive transactions. Exclusive read-set
+This applies to both mergeable and serializable transactions. Serializable read-set
 validation is an additional core admission requirement, not an alternative to
-write authorization. For example, a foreground may submit an exclusive
+write authorization. For example, a foreground may submit a serializable
 todo/check/note insertion through its worker: all three write policies must
 pass under its admitted session before core validates and accepts the bundle.
 If the note is forbidden, none of the otherwise permitted siblings is admitted.

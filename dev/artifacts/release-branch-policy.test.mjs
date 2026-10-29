@@ -87,7 +87,7 @@ test("release triggers and cache trust retain development and release separation
   assert.match(dispatch, /gh workflow run preview-jazz-tools-alpha-release.yml/);
   assert.match(dispatch, /CURRENT_SHA.*!=.*RELEASE_SHA/);
   assert.match(dispatch, /PR_SHA.*!=.*RELEASE_SHA/);
-  assert.deepEqual(workflow("ci").on.push.branches, ["main", "release"]);
+  assert.deepEqual(workflow("ci").on.push.branches, ["main", "release", "merge-group/**"]);
   assert.match(JSON.stringify(workflow("ci")), /OWNER.*MEMBER.*COLLABORATOR/);
   assert.equal(JSON.parse(readFileSync(join(root, ".changeset/config.json"))).baseBranch, "main");
 });

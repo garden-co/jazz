@@ -19,6 +19,7 @@ use jazz::tools::{
 use jazz_server::JazzServer;
 use jazz_server::middleware::auth::TestClock;
 
+use jazz::tools::test_support::{disconnect_client, reconnect_client};
 use support::{has_row, wait_for_rows};
 
 const TOKEN_TTL_SECS: u64 = 3600;
@@ -76,11 +77,7 @@ fn local_first_context(
     ctx.backend_secret = None;
     ctx.admin_secret = None;
     ctx.storage = storage;
-    if storage == ClientStorage::Persistent {
-        ctx.storage_factory = Some(std::sync::Arc::new(
-            jazz_storage_rocksdb::RocksDbStorageFactory,
-        ));
-    }
+    if storage == ClientStorage::Persistent {}
     ctx
 }
 
@@ -626,5 +623,62 @@ async fn expired_token_reconnect_flushes_queued_writes_impl() {
     .await;
 
     reconnected.shutdown().await.expect("shutdown reconnected");
+    server.shutdown().await;
+}
+
+/// Alice's app refreshes her bearer token right after connecting, in the same
+/// turn, before the client's background link task has run. When her short
+/// token later expires and the link reconnects, the server must see the
+/// refreshed token, not the one she connected with.
+#[tokio::test]
+async fn token_refreshed_right_after_connect_is_used_on_reconnect() {
+    tokio::task::LocalSet::new()
+        .run_until(token_refreshed_right_after_connect_is_used_on_reconnect_impl())
+        .await
+}
+
+async fn token_refreshed_right_after_connect_is_used_on_reconnect_impl() {
+    let auth_clock = TestClock::new(1_700_000_000);
+    let server = JazzServer::builder()
+        .with_schema(test_schema())
+        .with_auth_clock(auth_clock.clone())
+        .start()
+        .await
+        .expect("start test server");
+    let audience = server.app_id().to_string();
+    let seed = alice_seed();
+    let mint = |ttl| {
+        identity::mint_jazz_self_signed_token_at(
+            &seed,
+            identity::LOCAL_FIRST_ISSUER,
+            &audience,
+            ttl,
+            auth_clock.now_seconds(),
+        )
+        .expect("mint token")
+    };
+
+    let mut ctx = local_first_context(&server, test_schema(), &seed, ClientStorage::Memory);
+    ctx.jwt_token = Some(mint(5));
+    let client = jazz_testkit::connect(ctx).await.expect("connect");
+    client
+        .update_auth_token(mint(TOKEN_TTL_SECS))
+        .expect("refresh token");
+
+    // The token Alice connected with has expired; only the refreshed one
+    // can be admitted.
+    auth_clock.advance(Duration::from_secs(6));
+    assert!(disconnect_client(&client), "detach the live transport");
+    let reconnected = tokio::time::timeout(Duration::from_secs(10), reconnect_client(&client))
+        .await
+        .expect("reconnect does not stall on a refused token")
+        .expect("reconnect with the refreshed token");
+    assert!(reconnected);
+    assert_eq!(
+        client.upstream_status().map(|status| status.phase),
+        Some(jazz::link::LinkPhase::Live)
+    );
+
+    client.shutdown().await.expect("shutdown");
     server.shutdown().await;
 }

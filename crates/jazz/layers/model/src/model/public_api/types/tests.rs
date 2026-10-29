@@ -1,23 +1,10 @@
 use super::*;
 use uuid::Uuid;
 
-#[test]
-fn column_type_fixed_sizes() {
-    assert_eq!(ColumnType::Integer.fixed_size(), Some(4));
-    assert_eq!(ColumnType::BigInt.fixed_size(), Some(8));
-    assert_eq!(ColumnType::Boolean.fixed_size(), Some(1));
-    assert_eq!(ColumnType::Timestamp.fixed_size(), Some(8));
-    assert_eq!(ColumnType::Uuid.fixed_size(), Some(16));
-    assert_eq!(ColumnType::TransactionId.fixed_size(), Some(16));
-    assert_eq!(ColumnType::Text.fixed_size(), None);
-    assert_eq!(ColumnType::Bytea.fixed_size(), None);
-    assert_eq!(
-        ColumnType::Enum {
-            variants: vec!["a".to_string()]
-        }
-        .fixed_size(),
-        Some(1)
-    );
+fn descriptor_hash(descriptor: &RowDescriptor) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hash_row_descriptor(&mut hasher, descriptor);
+    *hasher.finalize().as_bytes()
 }
 
 #[test]
@@ -113,9 +100,6 @@ fn row_descriptor_column_lookup() {
     assert_eq!(descriptor.column_index("name"), Some(1));
     assert_eq!(descriptor.column_index("age"), Some(2));
     assert_eq!(descriptor.column_index("unknown"), None);
-
-    assert_eq!(descriptor.fixed_column_count(), 2); // id (uuid) + age (integer)
-    assert_eq!(descriptor.variable_column_count(), 1); // name (text)
 }
 
 #[test]
@@ -210,10 +194,54 @@ fn row_descriptor_hash_changes_when_merge_strategy_changes() {
     ]);
 
     assert_ne!(
-        lww.content_hash(),
-        counter.content_hash(),
+        descriptor_hash(&lww),
+        descriptor_hash(&counter),
         "changing only the merge strategy should change the schema hash"
     );
+}
+
+#[test]
+fn merge_strategies_round_trip_and_unknown_ones_are_refused_by_name() {
+    for strategy in [
+        ColumnMergeStrategy::Counter,
+        ColumnMergeStrategy::GSet,
+        ColumnMergeStrategy::Text,
+        ColumnMergeStrategy::Markdown,
+        ColumnMergeStrategy::Html,
+    ] {
+        let json = serde_json::to_string(&strategy).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ColumnMergeStrategy>(&json).unwrap(),
+            strategy
+        );
+    }
+    let error = serde_json::from_str::<ColumnMergeStrategy>(r#""RichText""#)
+        .expect_err("a strategy this build does not know is refused");
+    assert!(
+        error
+            .to_string()
+            .contains("merge strategy `RichText` is not supported by this version of Jazz"),
+        "{error}"
+    );
+}
+
+#[test]
+fn text_merge_strategies_hash_apart() {
+    let hashes: Vec<[u8; 32]> = [
+        ColumnMergeStrategy::Text,
+        ColumnMergeStrategy::Markdown,
+        ColumnMergeStrategy::Html,
+    ]
+    .into_iter()
+    .map(|strategy| {
+        descriptor_hash(&RowDescriptor::new(vec![
+            ColumnDescriptor::new("body", ColumnType::Text).merge_strategy(strategy),
+        ]))
+    })
+    .collect();
+    assert_ne!(hashes[0], hashes[1]);
+    assert_ne!(hashes[1], hashes[2]);
+    assert_ne!(hashes[0], hashes[2]);
 }
 
 // ========================================================================
@@ -793,40 +821,20 @@ fn row_descriptor_content_hash() {
     ]);
 
     // Same columns, different order -> different hash because physical layout changes.
-    assert_ne!(desc1.content_hash(), desc2.content_hash());
+    assert_ne!(descriptor_hash(&desc1), descriptor_hash(&desc2));
 
     // Different columns -> different hash
     let desc3 = RowDescriptor::new(vec![ColumnDescriptor::new("id", ColumnType::Uuid)]);
-    assert_ne!(desc1.content_hash(), desc3.content_hash());
+    assert_ne!(descriptor_hash(&desc1), descriptor_hash(&desc3));
 
     let desc4 = RowDescriptor::new(vec![
         ColumnDescriptor::new("id", ColumnType::Uuid),
         ColumnDescriptor::new("name", ColumnType::Text).default(Value::Text("anonymous".into())),
     ]);
     assert_ne!(
-        desc1.content_hash(),
-        desc4.content_hash(),
+        descriptor_hash(&desc1),
+        descriptor_hash(&desc4),
         "Column defaults should affect row descriptor content hash"
-    );
-}
-
-#[test]
-fn cloned_row_descriptor_recomputes_content_hash_after_mutation() {
-    let desc = RowDescriptor::new(vec![
-        ColumnDescriptor::new("id", ColumnType::Uuid),
-        ColumnDescriptor::new("name", ColumnType::Text),
-    ]);
-    let original_hash = desc.content_hash();
-
-    let mut cloned = desc.clone();
-    cloned
-        .columns
-        .push(ColumnDescriptor::new("can_edit", ColumnType::Boolean));
-
-    assert_ne!(
-        original_hash,
-        cloned.content_hash(),
-        "A cloned descriptor must not reuse a stale cached hash after its columns change"
     );
 }
 
@@ -957,5 +965,107 @@ fn schema_hash_matches_composite_index_cross_runtime_fixture() {
     assert_eq!(
         hashes["composite-two-declared-sorted"], hashes["composite-two-declared-reversed"],
         "declaration order of distinct composite indexes is not identity"
+    );
+}
+
+#[test]
+fn value_json_shape_is_pinned() {
+    let id = crate::object::ObjectId::from_uuid(Uuid::from_bytes([7; 16]));
+    let value = Value::Array(vec![
+        Value::Integer(-1),
+        Value::BigInt(i64::MIN),
+        Value::Double(0.5),
+        Value::Boolean(false),
+        Value::Text("t".into()),
+        Value::Timestamp(9),
+        Value::Uuid(id),
+        Value::TransactionId([1; 16]),
+        Value::Bytea(vec![0, 255]),
+        Value::Row {
+            id: Some(id),
+            values: vec![Value::Null],
+        },
+        Value::Row {
+            id: None,
+            values: vec![],
+        },
+        Value::Enum {
+            case: "c".into(),
+            values: vec![Value::Array(vec![Value::Integer(2)])],
+        },
+        Value::Null,
+    ]);
+    let json = r#"{"type":"Array","value":[{"type":"Integer","value":-1},{"type":"BigInt","value":"-9223372036854775808"},{"type":"Double","value":0.5},{"type":"Boolean","value":false},{"type":"Text","value":"t"},{"type":"Timestamp","value":9},{"type":"Uuid","value":"07070707-0707-0707-0707-070707070707"},{"type":"TransactionId","value":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]},{"type":"Bytea","value":[0,255]},{"type":"Row","value":{"id":"07070707-0707-0707-0707-070707070707","values":[{"type":"Null"}]}},{"type":"Row","value":{"values":[]}},{"type":"Enum","value":{"case":"c","values":[{"type":"Array","value":[{"type":"Integer","value":2}]}]}},{"type":"Null"}]}"#;
+    assert_eq!(serde_json::to_string(&value).unwrap(), json);
+    assert_eq!(serde_json::from_str::<Value>(json).unwrap(), value);
+    let row = |values| Value::Row { id: None, values };
+    for (input, decoded) in [
+        (
+            r#"{"value":[{"value":{"values":[{"type":"Null"}]},"type":"Row"}],"type":"Array"}"#,
+            Value::Array(vec![row(vec![Value::Null])]),
+        ),
+        (
+            r#"{"value":[{"value":["c",[]],"type":"Enum"}],"type":"Array"}"#,
+            Value::Array(vec![Value::Enum {
+                case: "c".into(),
+                values: vec![],
+            }]),
+        ),
+        (
+            r#"{"type":"Row","value":{"values":[],"extra":1}}"#,
+            row(vec![]),
+        ),
+        (r#"{"type":"Null","value":null}"#, Value::Null),
+        (r#"["Integer",3]"#, Value::Integer(3)),
+    ] {
+        assert_eq!(
+            serde_json::from_str::<Value>(input).unwrap(),
+            decoded,
+            "{input}"
+        );
+    }
+    for (input, error) in [
+        (
+            r#"{"value":[{"value":{"values":[],"id":"x"},"type":"Row"}],"type":"Array"}"#,
+            "UUID parsing failed: invalid character: found `x` at 1 at line 1 column 72",
+        ),
+        (
+            r#"{"type":"Row","value":{"id":null}}"#,
+            "missing field `values` at line 1 column 33",
+        ),
+        (
+            r#"{"type":"Enum","value":{"values":[]}}"#,
+            "missing field `case` at line 1 column 36",
+        ),
+        (
+            r#"{"type":"Nope"}"#,
+            "unknown variant `Nope`, expected one of `Integer`, `BigInt`, `Double`, `Boolean`, \
+             `Text`, `Timestamp`, `Uuid`, `TransactionId`, `Bytea`, `Array`, `Row`, `Enum`, \
+             `Null` at line 1 column 14",
+        ),
+        (
+            r#"{"type":"Integer"}"#,
+            "missing field `value` at line 1 column 18",
+        ),
+        (
+            r#"{"type":"Array","value":[{"type":"BigInt","value":"x"}]}"#,
+            "bigint string must be a signed 64-bit integer at line 1 column 53",
+        ),
+    ] {
+        let actual = serde_json::from_str::<Value>(input)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(actual, error, "{input}");
+    }
+    for input in [r#"{"type":"Row","value":3}"#, r#""x""#] {
+        assert!(serde_json::from_str::<Value>(input).is_err(), "{input}");
+    }
+    assert_eq!(
+        postcard::to_allocvec(&value).unwrap_err(),
+        postcard::Error::SerdeSerCustom
+    );
+    assert_eq!(
+        postcard::from_bytes::<Value>(&[0, 1]).unwrap_err(),
+        postcard::Error::SerdeDeCustom
     );
 }

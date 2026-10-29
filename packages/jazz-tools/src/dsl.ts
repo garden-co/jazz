@@ -102,6 +102,9 @@ interface ColumnBuilder {
 type MergeStrategyColumnType = {
   counter: "INTEGER" | "BIGINT";
   "g-set": { kind: "ARRAY" };
+  text: "TEXT";
+  markdown: "TEXT";
+  html: "TEXT";
 };
 
 type AllowedColumnMergeStrategy<
@@ -154,10 +157,37 @@ export type TypedColumnBuilder<
    *
    * @experimental This API may change before the stable release.
    */
-  transform<TransformedValue>(transform: {
-    from(value: MaybeOptional<TSTypeFromSqlType<Sql>, Optional>): TransformedValue;
-    to(value: TransformedValue): MaybeOptional<TSTypeFromSqlType<Sql>, Optional>;
-  }): ColumnAlias<Sql, Optional, Ref, HasDefault, TransformedValue, TransformedValue>;
+  transform<
+    TransformedValue,
+    const Dependencies extends readonly string[] = readonly [],
+    StoredContext extends Record<Dependencies[number], unknown> = Record<
+      Dependencies[number],
+      unknown
+    >,
+    InputContext extends Record<Dependencies[number], unknown> = Record<
+      Dependencies[number],
+      unknown
+    >,
+  >(transform: {
+    dependsOn?: Dependencies;
+    from(
+      value: MaybeOptional<TSTypeFromSqlType<Sql>, Optional>,
+      dependencies: Readonly<StoredContext>,
+    ): TransformedValue;
+    to(
+      value: TransformedValue,
+      dependencies: Readonly<InputContext>,
+    ): MaybeOptional<TSTypeFromSqlType<Sql>, Optional>;
+  }): DependentColumn<
+    Sql,
+    Optional,
+    Ref,
+    HasDefault,
+    TransformedValue,
+    Dependencies,
+    StoredContext,
+    InputContext
+  >;
   /**
    * Make the column nullable
    */
@@ -194,24 +224,89 @@ export function hasExternalProvenanceNameAllowance(column: {
 }): boolean {
   return column._allowExternalProvenanceName === true;
 }
-export type ColumnBuilderSqlType<TBuilder extends AnyTypedColumnBuilder> =
-  TBuilder["__jazzSqlType"];
-export type ColumnBuilderOptional<TBuilder extends AnyTypedColumnBuilder> =
+/** A client-side, read-only field with no stored column. */
+export interface ComputedColumn<Value = unknown> {
+  readonly _computed: {
+    readonly rowColumns: readonly string[];
+    readonly compute: (row: Readonly<Record<string, unknown>>) => Value;
+  };
+  readonly _transform?: never;
+  readonly _allowExternalProvenanceName?: never;
+  readonly __jazzSqlType: never;
+  readonly __jazzOptional: false;
+  readonly __jazzReferences: undefined;
+  readonly __jazzHasDefault: false;
+  readonly __jazzValue: Readonly<Value>;
+  readonly __jazzInitValue: never;
+}
+
+export type AnyColumnDefinition = AnyTypedColumnBuilder | ComputedColumn;
+
+export function isComputedColumn(column: AnyColumnDefinition): column is ComputedColumn {
+  return "_computed" in column;
+}
+
+export type ColumnBuilderSqlType<TBuilder extends AnyColumnDefinition> = TBuilder["__jazzSqlType"];
+export type ColumnBuilderOptional<TBuilder extends AnyColumnDefinition> =
   TBuilder["__jazzOptional"];
-export type ColumnBuilderReferences<TBuilder extends AnyTypedColumnBuilder> =
+export type ColumnBuilderReferences<TBuilder extends AnyColumnDefinition> =
   TBuilder["__jazzReferences"];
-export type ColumnBuilderHasDefault<TBuilder extends AnyTypedColumnBuilder> =
+export type ColumnBuilderHasDefault<TBuilder extends AnyColumnDefinition> =
   TBuilder["__jazzHasDefault"];
-export type ColumnBuilderValue<TBuilder extends AnyTypedColumnBuilder> = TBuilder["__jazzValue"];
+export type ColumnBuilderValue<TBuilder extends AnyColumnDefinition> = TBuilder["__jazzValue"];
 
 /** Input values are explicit so even same-shape transforms retain their contract. */
-export type ColumnBuilderInitValue<TBuilder extends AnyTypedColumnBuilder> =
+export type ColumnBuilderInitValue<TBuilder extends AnyColumnDefinition> =
   TBuilder["__jazzInitValue"];
 
 export interface ColumnTransform<Stored = unknown, View = unknown> {
-  from(value: Stored): View;
-  to(value: View): Stored;
+  readonly dependsOn?: readonly string[];
+  from(value: Stored, dependencies: Readonly<Record<string, unknown>>): View;
+  to(value: View, dependencies: Readonly<Record<string, unknown>>): Stored;
 }
+
+type DependentColumn<
+  Sql extends SqlType,
+  Optional extends boolean,
+  Ref extends string | undefined,
+  HasDefault extends boolean,
+  Value,
+  Dependencies extends readonly string[],
+  StoredContext,
+  InputContext,
+> = Omit<
+  ColumnAlias<Sql, Optional, Ref, HasDefault, Value, Value>,
+  "default" | "optional" | "merge"
+> & {
+  readonly __jazzDependencies: Dependencies;
+  readonly __jazzStoredDependencies: StoredContext;
+  readonly __jazzInputDependencies: InputContext;
+  default(
+    value: MaybeOptional<ColumnDefaultValue<Sql>, Optional>,
+  ): DependentColumn<Sql, Optional, Ref, true, Value, Dependencies, StoredContext, InputContext>;
+  optional(): DependentColumn<
+    Sql,
+    true,
+    Ref,
+    HasDefault,
+    Value,
+    Dependencies,
+    StoredContext,
+    InputContext
+  >;
+  merge(
+    strategy: AllowedColumnMergeStrategy<Sql, Optional>,
+  ): DependentColumn<
+    Sql,
+    Optional,
+    Ref,
+    HasDefault,
+    Value,
+    Dependencies,
+    StoredContext,
+    InputContext
+  >;
+};
 
 export type StringColumn<
   Optional extends boolean = false,
@@ -375,6 +470,12 @@ function normalizeColumnMergeStrategy(
   if (strategy === "lww") {
     return undefined;
   }
+  if (strategy === "text" || strategy === "markdown" || strategy === "html") {
+    if (nullable || sqlType !== "TEXT") {
+      throw new Error(`${strategy} merge strategy is only supported on non-nullable TEXT columns.`);
+    }
+    return strategy;
+  }
   if (strategy === "g-set") {
     if (nullable || typeof sqlType !== "object" || sqlType.kind !== "ARRAY") {
       throw new Error("g-set merge strategy is only supported on non-nullable ARRAY columns.");
@@ -389,19 +490,18 @@ function normalizeColumnMergeStrategy(
   return "counter";
 }
 
-class ScalarBuilder implements ColumnBuilder {
+abstract class BaseColumnBuilder implements ColumnBuilder {
   private _nullable = false;
   private _default: unknown = undefined;
   private _mergeStrategy: ColumnMergeStrategy | undefined;
   _transform?: ColumnTransform<unknown, unknown>;
-
-  constructor(public _sqlType: ScalarSqlType) {}
+  abstract readonly _sqlType: SqlType;
 
   optional(): this {
-    if (this._mergeStrategy === "counter") {
-      throw new Error(
-        "Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns.",
-      );
+    if (this._mergeStrategy !== undefined) {
+      // Every merge strategy requires a non-nullable column; re-validate as
+      // nullable so the strategy's own error is thrown.
+      normalizeColumnMergeStrategy(this._mergeStrategy, this._sqlType, true);
     }
     this._nullable = true;
     return this;
@@ -437,14 +537,17 @@ class ScalarBuilder implements ColumnBuilder {
   }
 }
 
-class EnumBuilder implements ColumnBuilder {
-  private _nullable = false;
-  private _default: unknown = undefined;
-  private _mergeStrategy: ColumnMergeStrategy | undefined;
+class ScalarBuilder extends BaseColumnBuilder {
+  constructor(public _sqlType: ScalarSqlType) {
+    super();
+  }
+}
+
+class EnumBuilder extends BaseColumnBuilder {
   public _sqlType: EnumSqlType;
-  _transform?: ColumnTransform<unknown, unknown>;
 
   constructor(variantsOrCases: string[] | Record<string, ColumnBuilder>) {
+    super();
     if (Array.isArray(variantsOrCases)) {
       this._sqlType = { kind: "ENUM", variants: normalizeEnumVariants(variantsOrCases) };
       return;
@@ -484,45 +587,6 @@ class EnumBuilder implements ColumnBuilder {
     }
     this._sqlType = { kind: "ENUM", cases };
   }
-
-  optional(): this {
-    if (this._mergeStrategy === "counter") {
-      throw new Error(
-        "Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns.",
-      );
-    }
-    this._nullable = true;
-    return this;
-  }
-
-  default(value: unknown): this {
-    this._default = value;
-    return this;
-  }
-
-  merge(strategy: ColumnMergeStrategyName): this {
-    this._mergeStrategy = normalizeColumnMergeStrategy(strategy, this._sqlType, this._nullable);
-    return this;
-  }
-
-  transform(transform: ColumnTransform<unknown, unknown>): this {
-    this._transform = transform;
-    return this;
-  }
-
-  _build(name: string): Column {
-    return {
-      name,
-      sqlType: this._sqlType,
-      nullable: this._nullable,
-      ...(this._default === undefined ? {} : { default: this._default }),
-      ...(this._mergeStrategy === undefined ? {} : { mergeStrategy: this._mergeStrategy }),
-    };
-  }
-
-  get _references(): string | undefined {
-    return undefined;
-  }
 }
 
 function containsReference(sqlType: SqlType): boolean {
@@ -541,66 +605,20 @@ function isUuidArrayReference(builder: ColumnBuilder): boolean {
   );
 }
 
-class JsonBuilder<Output = JsonValue> implements ColumnBuilder {
-  private _nullable = false;
-  private _default: unknown = undefined;
-  private _mergeStrategy: ColumnMergeStrategy | undefined;
+class JsonBuilder<Output = JsonValue> extends BaseColumnBuilder {
   public _sqlType: JsonSqlType<Output>;
-  _transform?: ColumnTransform<unknown, unknown>;
 
   constructor(schema?: JsonSchemaSource<Output>) {
+    super();
     this._sqlType = schema
       ? { kind: "JSON", schema: normalizeJsonSchema(schema) }
       : { kind: "JSON" };
   }
-
-  optional(): this {
-    if (this._mergeStrategy === "counter") {
-      throw new Error(
-        "Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns.",
-      );
-    }
-    this._nullable = true;
-    return this;
-  }
-
-  default(value: unknown): this {
-    this._default = value;
-    return this;
-  }
-
-  merge(strategy: ColumnMergeStrategyName): this {
-    this._mergeStrategy = normalizeColumnMergeStrategy(strategy, this._sqlType, this._nullable);
-    return this;
-  }
-
-  transform(transform: ColumnTransform<unknown, unknown>): this {
-    this._transform = transform;
-    return this;
-  }
-
-  _build(name: string): Column {
-    return {
-      name,
-      sqlType: this._sqlType,
-      nullable: this._nullable,
-      ...(this._default === undefined ? {} : { default: this._default }),
-      ...(this._mergeStrategy === undefined ? {} : { mergeStrategy: this._mergeStrategy }),
-    };
-  }
-
-  get _references(): string | undefined {
-    return undefined;
-  }
 }
 
-class ArrayBuilder<T extends ColumnBuilder> implements ColumnBuilder {
-  private _nullable = false;
-  private _default: unknown = undefined;
-  private _mergeStrategy: ColumnMergeStrategy | undefined;
-  _transform?: ColumnTransform<unknown, unknown>;
-
+class ArrayBuilder<T extends ColumnBuilder> extends BaseColumnBuilder {
   constructor(public _element: T) {
+    super();
     if (isUuidArrayReference(_element)) {
       throw new Error(
         "Nested reference arrays are not supported; use a direct array(ref(...)) column.",
@@ -608,38 +626,8 @@ class ArrayBuilder<T extends ColumnBuilder> implements ColumnBuilder {
     }
   }
 
-  optional(): this {
-    if (this._mergeStrategy === "g-set") {
-      throw new Error("g-set merge strategy is only supported on non-nullable ARRAY columns.");
-    }
-    this._nullable = true;
-    return this;
-  }
-
-  default(value: unknown): this {
-    this._default = value;
-    return this;
-  }
-
-  merge(strategy: ColumnMergeStrategyName): this {
-    this._mergeStrategy = normalizeColumnMergeStrategy(strategy, this._sqlType, this._nullable);
-    return this;
-  }
-
-  transform(transform: ColumnTransform<unknown, unknown>): this {
-    this._transform = transform;
-    return this;
-  }
-
   _build(name: string): Column {
-    return {
-      name,
-      sqlType: this._sqlType,
-      nullable: this._nullable,
-      ...(this._default === undefined ? {} : { default: this._default }),
-      ...(this._mergeStrategy === undefined ? {} : { mergeStrategy: this._mergeStrategy }),
-      references: this._references,
-    };
+    return { ...super._build(name), references: this._references };
   }
 
   get _sqlType(): SqlType {
@@ -868,12 +856,10 @@ class DropBuilder {
 }
 
 // ============================================================================
-// col namespace
+// Schema column and migration operation builders
 // ============================================================================
 
-export const col = {
-  // Schema context
-
+export const schemaColumns = {
   string: () => new ScalarBuilder("TEXT") as unknown as StringColumn,
   uuid: () => new ScalarBuilder("UUID") as unknown as UuidColumn,
   boolean: () => new ScalarBuilder("BOOLEAN") as unknown as BooleanColumn,
@@ -924,9 +910,9 @@ export const col = {
       false,
       ColumnBuilderReferences<Builder>
     >,
+};
 
-  // Migration context
-
+export const migrationOperations = {
   /**
    * Add a new column to the table
    */

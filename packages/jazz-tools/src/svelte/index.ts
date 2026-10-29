@@ -17,34 +17,18 @@ export {
   createAccountManager,
   type AccountManagerConfig,
 } from "../accounts/create-account-manager.js";
-export type {
-  AccountHandle,
-  AccountIdentity,
-  AccountSnapshot,
-  AccountManager,
-} from "../accounts/state.js";
-export {
-  AccountAuthError,
-  exportLocalFirstSecret,
-  type BackendAuth,
-  type JWTAuth,
-} from "../accounts/enrollment.js";
-export type { AccountStore } from "../accounts/persistence.js";
+export * from "../accounts/exports.js";
 
 export { accountState } from "./account-state.js";
+export { syncStatus } from "./sync-status.js";
+export type { LinkStatus, SyncStatus } from "../runtime/sync-status.js";
 
 export { createJazzSession, type JazzSessionConfig } from "../session/create-jazz-session.js";
 export type { JazzSession, JazzSessionSnapshot } from "../session/state.js";
 export { default as JazzSessionProvider } from "./JazzSessionProvider.svelte";
 export { sessionState, getJazzSession, type JazzSessionState } from "./session-state.js";
 
-export {
-  connectAuthProvider,
-  type AuthProviderConnection,
-  type AuthProviderState,
-  type AuthProviderSnapshot,
-} from "../session/auth-provider.js";
-export { connectBetterAuth, type BetterAuthClient } from "../session/better-auth.js";
+export * from "../session/auth-provider-exports.js";
 
 export { default as JazzProvider } from "./JazzProvider.svelte";
 export { useJazzAuth, type JazzAuthState } from "./auth-state.js";

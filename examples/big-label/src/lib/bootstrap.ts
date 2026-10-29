@@ -3,7 +3,7 @@ import { app } from "../../schema";
 import { authJazzClient } from "./auth-jazz-client";
 import { planPersonalBootstrap } from "./bootstrap-state";
 import { normalizeEmail } from "./emails";
-import { isExclusiveConflict } from "./write-errors";
+import { isSerializationConflict } from "./write-errors";
 
 /**
  * Server-mediated first-tenant bootstrap. Ordinary clients never receive the
@@ -18,14 +18,14 @@ export async function ensurePersonalOrganization(
 ) {
   const db = (await authJazzClient()).db;
   const slug = `personal-${userId}`;
-  // Both the initial read and every retry happen inside the exclusive
+  // Both the initial read and every retry happen inside the serializable
   // transaction. A concurrent bootstrap can therefore only either commit the
   // complete triple or force this attempt to re-read the committed triple.
   // The retries are bounded: a cascade can come from a rejection that will
   // never clear, and this runs on a server route.
   for (let attempt = 1; ; attempt++) {
     try {
-      const write = await db.exclusiveTransaction(async (tx) => {
+      const write = await db.serializableTransaction(async (tx) => {
         const [people, organizations] = await Promise.all([
           tx.all(app.people.where({ userId })),
           tx.all(app.organizations.where({ slug })),
@@ -65,10 +65,10 @@ export async function ensurePersonalOrganization(
       if (!created) throw new Error("Bootstrap was acknowledged without its organization");
       return created;
     } catch (error) {
-      // The authority rejects a competing exclusive snapshot. Retry only once
+      // The authority rejects a competing serializable snapshot. Retry only once
       // it has become durable; all successful retry reads still pass the
       // duplicate/integrity checks above rather than selecting an arbitrary row.
-      if (!isExclusiveConflict(error) || attempt >= maxAttempts) throw error;
+      if (!isSerializationConflict(error) || attempt >= maxAttempts) throw error;
     }
   }
 }

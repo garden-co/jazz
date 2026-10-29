@@ -42,9 +42,6 @@ examples/wequencer/walkthrough/*.html
 # Runtime-owned process identity locks/receipts, not application source.
 **/.jazz/foreground-node-leases/
 data/
-!dev/benchmarks/storage/data/
-!dev/benchmarks/storage/data/*.kv
-!dev/benchmarks/storage/data/*.license
 
 # Sync server data
 data-multi/
@@ -66,7 +63,6 @@ data-multi/
 /crates/opfs-btree/wasm-bench/bench-data/
 /bench-out/
 /dev/benchmarks/profiles/
-/dev/benchmarks/realistic/site/history.json
 
 # Lane-local Android SDK, NDK, JDK and emulator cache.
 /.cache/android-device-acceptance/

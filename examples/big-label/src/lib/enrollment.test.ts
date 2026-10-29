@@ -36,12 +36,20 @@ function accounts(afterRegister: () => void = () => {}) {
       return selected;
     }),
   };
+  const events: string[] = [];
   const lifecycle = new JazzLifecycle(
     manager as never,
-    async () => ({ shutdown: async () => {} }) as never,
+    async (account) => {
+      events.push(`open:${account.id}`);
+      return {
+        shutdown: async () => {
+          events.push(`shutdown:${account.id}`);
+        },
+      } as never;
+    },
     () => {},
   );
-  return { manager, lifecycle };
+  return { manager, lifecycle, events };
 }
 
 function attempt(
@@ -80,7 +88,7 @@ describe("BigLabel enrollment", () => {
     await expect(second).resolves.toBe(true);
     expect(manager.registerJWT).toHaveBeenCalledTimes(1);
     expect(manager.loginJWT).not.toHaveBeenCalled();
-    expect(bootstrap).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(bootstrap).toHaveBeenCalledTimes(1));
     expect(claimsSignupIntent(storage, email, identityId)).toBe(false);
   });
 
@@ -94,8 +102,124 @@ describe("BigLabel enrollment", () => {
 
     await expect(attempt(lifecycle, storage, bootstrap, () => firstIsCurrent)).resolves.toBe(false);
     await expect(attempt(lifecycle, storage, bootstrap, () => true)).resolves.toBe(true);
+    await vi.waitFor(() => expect(bootstrap).toHaveBeenCalledTimes(1));
 
+    expect(manager.registerJWT).toHaveBeenCalledTimes(1);
     expect(manager.loginJWT).toHaveBeenCalledTimes(1);
-    expect(bootstrap).toHaveBeenCalledTimes(1);
+  });
+
+  it("logs in when the browser kept no account for this identity", async () => {
+    const { manager, lifecycle } = accounts();
+    // Registered on another device: this browser has no retained account.
+    await manager.registerJWT();
+    const retained = manager.getLoggedIn;
+    manager.getLoggedIn = vi.fn(() => undefined);
+    manager.loginJWT.mockImplementation(async () => {
+      manager.getLoggedIn = retained;
+      return retained()!;
+    });
+    const bootstrap = vi.fn(async () => {});
+
+    await expect(attempt(lifecycle, memoryStorage(), bootstrap, () => true)).resolves.toBe(true);
+    expect(manager.loginJWT).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(bootstrap).toHaveBeenCalledTimes(1));
+  });
+
+  it("opens a retained account before its login, then logs it in without reopening it", async () => {
+    const { manager, lifecycle, events } = accounts();
+    await manager.registerJWT();
+    manager.registerJWT.mockClear();
+    const bootstrap = vi.fn(async () => {});
+    // The provider answers only once the page shows the retained account.
+    let answer!: () => void;
+    const answered = new Promise<void>((resolve) => (answer = resolve));
+    const login = manager.loginJWT.getMockImplementation()!;
+    manager.loginJWT.mockImplementation(async () => {
+      await answered;
+      return login();
+    });
+    const loginError = vi.fn();
+
+    await expect(
+      enrollAndBootstrap({
+        lifecycle,
+        storage: memoryStorage(),
+        email,
+        identityId,
+        getToken: async () => "token",
+        needsBootstrap: () => false,
+        bootstrap,
+        onLoginError: loginError,
+        isCurrent: () => true,
+      }),
+    ).resolves.toBe(true);
+    expect(events).toEqual(["open:A"]);
+
+    // Only that login gives the retained account the credential it syncs
+    // with; logging in as the same identity keeps its open client.
+    answer();
+    await vi.waitFor(() => expect(manager.loginJWT).toHaveBeenCalledTimes(1));
+    await lifecycle.revalidate(() => {});
+    expect(events).toEqual(["open:A"]);
+    expect(loginError).not.toHaveBeenCalled();
+    expect(manager.registerJWT).not.toHaveBeenCalled();
+    expect(bootstrap).not.toHaveBeenCalled();
+  });
+
+  it("reports a retained account's failed background login", async () => {
+    const { manager, lifecycle, events } = accounts();
+    await manager.registerJWT();
+    manager.loginJWT.mockRejectedValueOnce(new Error("provider unavailable"));
+    const loginError = vi.fn();
+
+    await expect(
+      enrollAndBootstrap({
+        lifecycle,
+        storage: memoryStorage(),
+        email,
+        identityId,
+        getToken: async () => "token",
+        needsBootstrap: () => false,
+        bootstrap: async () => {},
+        onLoginError: loginError,
+        isCurrent: () => true,
+      }),
+    ).resolves.toBe(true);
+    await vi.waitFor(() =>
+      expect(loginError).toHaveBeenCalledWith(new Error("provider unavailable")),
+    );
+    expect(events).toEqual(["open:A"]);
+  });
+
+  it("names the account before fetching the token, so a failed token fetch can be retried", async () => {
+    const { manager, lifecycle } = accounts();
+    await manager.registerJWT();
+    const started = vi.fn();
+    const failed = vi.fn();
+    const bootstrap = vi.fn(async () => {});
+    let tokens = 0;
+
+    await expect(
+      enrollAndBootstrap({
+        lifecycle,
+        storage: memoryStorage(),
+        email,
+        identityId,
+        // This registry double asks no token to log in; only the bootstrap
+        // asks, and fails.
+        getToken: async () => {
+          tokens += 1;
+          throw new Error("token unavailable");
+        },
+        bootstrap,
+        onBootstrapStart: started,
+        onBootstrapError: failed,
+        isCurrent: () => true,
+      }),
+    ).resolves.toBe(true);
+    expect(started).toHaveBeenCalledWith("A");
+    await vi.waitFor(() => expect(failed).toHaveBeenCalledTimes(1));
+    expect(tokens).toBe(1);
+    expect(bootstrap).not.toHaveBeenCalled();
   });
 });

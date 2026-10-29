@@ -1,9 +1,11 @@
 import { useMemo, useState, type ChangeEvent, type FormEvent, type ReactNode } from "react";
 import { parseSignedBigInt64 } from "./parse-signed-bigint.js";
+import { parseBoolean } from "./row-mutation-form.js";
 import type { ColumnDescriptor, ColumnType } from "jazz-tools";
 import {
   getSupportedWhereOperatorsForColumn,
   type WhereOperator,
+  type WhereOperatorColumn,
 } from "../../utility/where-operators.js";
 import styles from "./TableFilterBuilder.module.css";
 
@@ -16,13 +18,7 @@ export interface TableFilterClause {
   value: unknown;
 }
 
-interface FilterableColumn {
-  name: string;
-  columnType: ColumnType;
-  nullable: boolean;
-  references?: string;
-  implicitId?: boolean;
-}
+type FilterableColumn = WhereOperatorColumn;
 
 interface TableFilterBuilderProps {
   schemaColumns: ColumnDescriptor[];
@@ -35,13 +31,6 @@ interface DraftState {
   column: string;
   operator: FilterOperator;
   valueText: string;
-}
-
-function parseBoolean(value: string): boolean | null {
-  const normalized = value.trim().toLowerCase();
-  if (normalized === "true" || normalized === "1") return true;
-  if (normalized === "false" || normalized === "0") return false;
-  return null;
 }
 
 function parseBytea(value: string): Uint8Array {

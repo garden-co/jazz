@@ -50,7 +50,7 @@ describe("TS Restore API", () => {
     });
 
     const queried = await db.one(app.projects.where({ id: { eq: project.id } }), {
-      tier: "local",
+      tier: "local-first",
     });
     expect(queried).toEqual(restored);
   });
@@ -97,7 +97,7 @@ describe("TS Restore API", () => {
 
     expect(restored).toEqual(inserted);
     await expect(
-      db.one(app.table_with_defaults.where({ id: { eq: inserted.id } }), { tier: "local" }),
+      db.one(app.table_with_defaults.where({ id: { eq: inserted.id } }), { tier: "local-first" }),
     ).resolves.toEqual(inserted);
   });
 

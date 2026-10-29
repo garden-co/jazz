@@ -40,6 +40,9 @@ import {
 } from "../runtime/native-runtime/native-runtime-adapter.js";
 import { encodeSchema } from "../runtime/native-runtime/schema-codec.js";
 import { deliverMutationErrorToAttachedPeers } from "./mutation-error-delivery.js";
+import { toError } from "../runtime/util.js";
+import type { RemoteLinkState } from "../runtime/remote-link-state.js";
+import { sameLinkStatus, type LinkStatus } from "../runtime/sync-status.js";
 
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 
@@ -518,6 +521,7 @@ function attachBootstrapPort(
         type: "foreground-node-lease-worker-alive",
         attemptId: message.attemptId,
       } satisfies BrowserForegroundNodeLeaseAcquireResponse);
+      if (message.wasmPrefetch) prefetchWorkerWasmModule(message.wasmPrefetch.runtimeSources);
       return;
     }
     if (message?.type === "cancel-foreground-node-lease") {
@@ -651,7 +655,7 @@ async function acquireForegroundNodeLease(
         type: "foreground-node-lease-cancelled",
         error: serializeBrowserRelayError(
           new Error("Shared browser foreground lease cancellation failed", {
-            cause: asError(error),
+            cause: toError(error),
           }),
         ),
       } satisfies BrowserForegroundNodeLeaseAcquireResponse);
@@ -811,6 +815,7 @@ async function acquireForegroundNodeLease(
     recordWorkerLifecycle("lease-admitted", request.dbName, null);
     post(port, {
       type: "foreground-node-lease-ready",
+      workerRealmId,
       leaseId: lease.leaseId,
       node: lease.node,
       confirmedTxTime: lease.confirmedTxTime.toString(),
@@ -1071,7 +1076,8 @@ async function initialize(context: RuntimeContext): Promise<void> {
   try {
     const { options } = context;
     // Opening the page store is also the durable ownership-admission gate for
-    // a derived physical browser root. Keep it before *any* WASM work: a
+    // a derived physical browser root. Keep it before any configuring WASM
+    // work (a lease probe may already have compiled this realm's own asset): a
     // rejected owner must not load or configure the process-wide WASM realm,
     // install telemetry, open a native database, or attach a follower.  In
     // particular, a low-level attempt to open another account's physical root
@@ -1106,14 +1112,9 @@ async function initialize(context: RuntimeContext): Promise<void> {
           proof.token,
           proof.appId,
           proof.claimedAuthor,
-          physicalOwner.storageOwner,
+          options.dbName,
         )
-      : await wasmModule.WasmDb.openBrowser(
-          context.pageStore,
-          schema,
-          config,
-          physicalOwner.storageOwner,
-        );
+      : await wasmModule.WasmDb.openBrowser(context.pageStore, schema, config, options.dbName);
     const runtime = NativeRuntimeAdapter.fromDb(
       unownedDb as never,
       options.schema,
@@ -1121,7 +1122,11 @@ async function initialize(context: RuntimeContext): Promise<void> {
       options.author,
       1,
       false,
-      { selfSignedClientProof: proof, scopeIsolatedRelay: true },
+      {
+        selfSignedClientProof: proof,
+        scopeIsolatedRelay: true,
+        slowQueryLog: { appId: options.appId, thresholdMs: options.slowQueryThresholdMs },
+      },
     );
     context.runtime = runtime;
     unownedDb = null;
@@ -1138,17 +1143,30 @@ async function initialize(context: RuntimeContext): Promise<void> {
         post(peer.port, { type: "mutation-error", event: received }),
       );
     });
-    runtime.onRemoteLinkStateChange((state) => {
+    let announced: { state: RemoteLinkState; link: LinkStatus } | null = null;
+    const announceLink = () => {
       // Only the current runtime speaks for this namespace's upstream.
-      if (context.runtime === runtime) broadcast(context, { type: "remote-link", state });
-    }, new AbortController().signal);
-    context.runtime.onServerTransportError((error) => {
+      if (context.runtime !== runtime) return;
+      const state = runtime.remoteLinkState();
+      const link = runtime.upstreamLinkStatus();
+      // Both sources can report one transition; attaching peers get their own copy.
+      if (announced?.state === state && sameLinkStatus(announced.link, link)) return;
+      announced = { state, link };
+      broadcast(context, { type: "remote-link", state, link });
+    };
+    runtime.onRemoteLinkStateChange(announceLink, new AbortController().signal);
+    runtime.onUpstreamLinkStatusChange(announceLink, new AbortController().signal);
+    context.runtime.onServerTransportError((error, { retrying }) => {
       // Transport failures are foreground events, not authority fates or
       // durable notifications. Only peers that have completed admission own a
       // tab runtime capable of rejecting an active remote wait.
       for (const peer of context.peers.values()) {
         if (!peer.subscriber || !peer.pump) continue;
-        post(peer.port, { type: "transport-error", error: serializeBrowserRelayError(error) });
+        post(peer.port, {
+          type: "transport-error",
+          error: serializeBrowserRelayError(error),
+          retrying,
+        });
       }
     });
     if (options.logLevel === "trace") {
@@ -1172,6 +1190,22 @@ async function initialize(context: RuntimeContext): Promise<void> {
     }
     throw error;
   }
+}
+
+/**
+ * Fetch, compile and instantiate this realm's WASM while lease admission,
+ * IndexedDB and the page's setup run. The realm name already fixes its asset
+ * source. Instantiation runs wasm-bindgen's start function, which only installs
+ * the panic hook: this neither opens a database nor configures tracing or
+ * telemetry, so owner admission still precedes every configuring WASM step in
+ * `initialize`.
+ */
+function prefetchWorkerWasmModule(
+  runtimeSources: BrowserWorkerInitOptions["runtimeSources"],
+): void {
+  if (wasmModulePromise || runtimeSources?.wasmModule || runtimeSources?.wasmSource) return;
+  // A failed prefetch clears itself; the runtime connect then loads again.
+  void loadWorkerWasmModule(runtimeSources).catch(() => undefined);
 }
 
 async function loadWorkerWasmModule(
@@ -1250,6 +1284,12 @@ async function configureServer(
 ): Promise<void> {
   const requestedUrl = options.serverUrl ?? null;
   if (context.serverUrl === requestedUrl) {
+    // A tab reopening a retained account has no credential yet. It must not
+    // replace a sibling tab's working credential: a worker context belongs to
+    // one storage owner (one account), so that credential authenticates the
+    // same account's upstream connection, which already carries this tab's
+    // local writes for that account.
+    if (!carriesCredential(options.authJson) && carriesCredential(context.serverAuthJson)) return;
     context.serverAuthJson = options.authJson;
     if (context.serverConnectionStarted) await requireRuntime(context).updateAuth(options.authJson);
     return;
@@ -1265,10 +1305,32 @@ async function configureServer(
   context.serverAuthJson = options.authJson;
 }
 
+/** Whether an upstream auth payload authenticates anything at all. */
+function carriesCredential(authJson: string): boolean {
+  try {
+    const auth = JSON.parse(authJson) as Record<string, unknown> | null;
+    return (
+      !!auth &&
+      (typeof auth.jwt_token === "string" ||
+        typeof auth.admin_secret === "string" ||
+        typeof auth.backend_secret === "string" ||
+        auth.backend_session != null)
+    );
+  } catch {
+    return false;
+  }
+}
+
 function ensureServerConnection(context: RuntimeContext): void {
   const requestedUrl = context.serverUrl;
+  // A worker with no server has the last word on its tabs' writes.
+  if (!requestedUrl) context.runtime?.setRemoteLinkHint("none");
   if (!requestedUrl || context.explicitlyDisconnected) return;
   if (context.serverConnectionStarted) return;
+  // A retained account's tabs open before the provider supplies a credential.
+  // The server rejects a credential-less connection as a terminal failure
+  // that ends every remote subscription, so the first credential dials.
+  if (!carriesCredential(context.serverAuthJson)) return;
   requireRuntime(context).connect(requestedUrl, context.serverAuthJson);
   context.serverConnectionStarted = true;
 }
@@ -1432,9 +1494,7 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
         post(peer.port, {
           type: "result",
           id: message.id,
-          error: serializeBrowserRelayError(
-            error instanceof Error ? error : new Error(String(error)),
-          ),
+          error: serializeBrowserRelayError(toError(error)),
         });
     }
     return;
@@ -1551,10 +1611,7 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
         if (handle !== undefined) activeRuntime.unsubscribe(handle);
         return;
       }
-      const options = JSON.stringify({
-        ...JSON.parse(message.options ?? "{}"),
-        propagation: "local-only",
-      });
+      const options = message.options;
       const current = () =>
         peer.context.peers.get(peer.tabId) === peer &&
         peer.context.runtime === activeRuntime &&
@@ -1562,12 +1619,17 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
         !peer.context.closing &&
         !!peer.subscriber;
       if (message.type === "inspect-query") {
-        const value = await activeRuntime.query(message.query, undefined, "local", options);
+        const value = await activeRuntime.query(message.query, undefined, "local-only", options);
         if (current()) post(peer.port, { type: "inspector-query-result", id: message.id, value });
       } else {
         if (peer.inspectorSubscriptions.has(message.id))
           throw new Error("Inspector subscription already exists");
-        const handle = activeRuntime.createSubscription(message.query, undefined, "local", options);
+        const handle = activeRuntime.createSubscription(
+          message.query,
+          undefined,
+          "local-only",
+          options,
+        );
         peer.inspectorSubscriptions.set(message.id, handle);
         activeRuntime.executeSubscription(handle, (value) => {
           if (!current() || peer.inspectorSubscriptions.get(message.id) !== handle) return;
@@ -1635,9 +1697,14 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
           } else {
             ensureServerConnection(peer.context);
           }
-          post(peer.port, { type: "remote-link", state: activeRuntime.remoteLinkState() });
+          post(peer.port, {
+            type: "remote-link",
+            state: activeRuntime.remoteLinkState(),
+            link: activeRuntime.upstreamLinkStatus(),
+          });
           result(peer, message.id, undefined, {
             peerAuthority,
+            workerRealmId,
             ...(peer.inspectorAttachment
               ? { inspectorAttachmentPhysicalDbName: peer.context.options.dbName }
               : {}),
@@ -1657,7 +1724,13 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
         const authFailureEpoch = peer.context.authFailureEpoch;
         try {
           if (!peer.context.explicitlyDisconnected) {
-            await activeRuntime.updateAuth(message.authJson);
+            if (peer.context.serverConnectionStarted) {
+              await activeRuntime.updateAuth(message.authJson);
+            } else {
+              // Nothing has dialled yet: the context opened without a credential.
+              peer.context.serverAuthJson = message.authJson;
+              ensureServerConnection(peer.context);
+            }
             await activeRuntime.waitForUpstreamServerConnection();
           }
         } catch (error) {
@@ -1703,8 +1776,7 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
       // Normal transport/tick messages must continue to settle these writes.
       void peer.context.runtime!.waitForPendingWrites("global").then(
         () => result(peer, message.id),
-        (error) =>
-          result(peer, message.id, error instanceof Error ? error : new Error(String(error))),
+        (error) => result(peer, message.id, toError(error)),
       );
       return;
     }
@@ -1729,12 +1801,21 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
       const serverUrl = peer.context.serverUrl;
       if (!serverUrl) throw new Error("Browser runtime reconnect requires a serverUrl");
       await enqueueTransportTransition(peer.context, async () => {
-        activeRuntime.connect(serverUrl, message.authJson);
-        await activeRuntime.waitForUpstreamServerConnection();
-        peer.context.serverAuthJson = message.authJson;
-        await publishWorkerSessionClaims(peer.context, message.sessionClaims);
+        // As in configureServer, a tab without a credential never replaces a
+        // sibling's; with none at all there is nothing to dial yet, and the
+        // first credential-bearing update connects (see ensureServerConnection).
+        const own =
+          carriesCredential(message.authJson) || !carriesCredential(peer.context.serverAuthJson);
+        const authJson = own ? message.authJson : peer.context.serverAuthJson;
+        const dial = carriesCredential(authJson);
+        if (dial) {
+          activeRuntime.connect(serverUrl, authJson);
+          await activeRuntime.waitForUpstreamServerConnection();
+        }
+        peer.context.serverAuthJson = authJson;
+        if (own) await publishWorkerSessionClaims(peer.context, message.sessionClaims);
         peer.context.explicitlyDisconnected = false;
-        peer.context.serverConnectionStarted = true;
+        peer.context.serverConnectionStarted = dial;
         publishExplicitOffline(peer.context);
       });
       result(peer, message.id);
@@ -1750,8 +1831,8 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
     ) {
       return;
     }
-    if ("id" in message) result(peer, message.id, asError(error));
-    else failPeer(peer, asError(error));
+    if ("id" in message) result(peer, message.id, toError(error));
+    else failPeer(peer, toError(error));
   }
 }
 
@@ -1888,6 +1969,7 @@ function result(
   receipt?: {
     inspectorAttachmentPhysicalDbName?: string;
     peerAuthority?: { node: Uint8Array; epoch: bigint; features: number };
+    workerRealmId?: string;
   },
 ): void {
   if (peer.context.peers.get(peer.tabId) !== peer) return;
@@ -1956,6 +2038,10 @@ async function finalizeContextStorageReset(context: RuntimeContext): Promise<voi
   context.disposePageStoreInvalidation?.();
   context.disposePageStoreInvalidation = null;
   context.pageStore = null;
+  // The SQLite file lives in its VFS's own IndexedDB store, outside the
+  // page store's root the tab just destroyed.
+  const wasmModule = await wasmModulePromise;
+  await wasmModule?.WasmDb.destroyBrowserStorage(undefined, context.options.dbName);
   context.disposeTelemetry?.();
   context.disposeTelemetry = null;
   context.disposeAuxiliaryTrace?.();
@@ -2163,7 +2249,7 @@ function attachPeerTransport(
         copies.map((frame) => frame.buffer),
       );
     },
-    (error) => failPeer(peer, asError(error)),
+    (error) => failPeer(peer, toError(error)),
     peer.context.options.logLevel === "trace"
       ? (entries) => {
           post(peer.port, {
@@ -2221,8 +2307,4 @@ function post(
     | BrowserForegroundNodeLeasePortEvent,
 ): void {
   port.postMessage(event);
-}
-
-function asError(error: unknown): Error {
-  return error instanceof Error ? error : new Error(String(error));
 }

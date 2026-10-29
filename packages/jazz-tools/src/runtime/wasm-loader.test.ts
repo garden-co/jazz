@@ -89,3 +89,56 @@ describe("browser WASM URL initialization", () => {
     expect(fetchWasm).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("browser WASM streaming compilation", () => {
+  afterEach(() => vi.restoreAllMocks());
+  const wasmResponse = (body: BodyInit, contentType: string) =>
+    new Response(body, { headers: { "content-type": contentType } });
+
+  it.each(["application/wasm"])(
+    "compiles a %s response while it downloads",
+    async (contentType) => {
+      const compileStreaming = vi.spyOn(WebAssembly, "compileStreaming");
+      fetchWasm.mockResolvedValueOnce(wasmResponse(wasmBinary, contentType));
+
+      await loadWasmModule(runtime);
+
+      expect(compileStreaming).toHaveBeenCalledTimes(1);
+      const [{ module_or_path }] = initialize.mock.calls[0]!;
+      expect(module_or_path).toBeInstanceOf(WebAssembly.Module);
+    },
+  );
+
+  it.each(["application/octet-stream", "application/wasm; charset=binary", "Application/WASM", ""])(
+    "buffers and validates a response served as %j",
+    async (contentType) => {
+      const compileStreaming = vi.spyOn(WebAssembly, "compileStreaming");
+      fetchWasm.mockResolvedValueOnce(wasmResponse(wasmBinary, contentType));
+
+      await loadWasmModule(runtime);
+
+      expect(compileStreaming).not.toHaveBeenCalled();
+      expect(initialize).toHaveBeenCalledWith({ module_or_path: wasmBinary });
+    },
+  );
+
+  it("buffers when the runtime has no compileStreaming", async () => {
+    vi.stubGlobal("WebAssembly", { ...WebAssembly, compileStreaming: undefined });
+    fetchWasm.mockResolvedValueOnce(wasmResponse(wasmBinary, "application/wasm"));
+
+    await loadWasmModule(runtime);
+
+    expect(initialize).toHaveBeenCalledWith({ module_or_path: wasmBinary });
+  });
+
+  it("reports a non-WASM body labelled application/wasm and retries", async () => {
+    fetchWasm.mockResolvedValueOnce(wasmResponse("<!doctype html>", "application/wasm"));
+
+    await expect(loadWasmModule(runtime)).rejects.toThrow(
+      /not a WebAssembly binary .*application\/wasm/,
+    );
+    expect(initialize).not.toHaveBeenCalled();
+    await expect(loadWasmModule(runtime)).resolves.toBeDefined();
+    expect(fetchWasm).toHaveBeenCalledTimes(2);
+  });
+});

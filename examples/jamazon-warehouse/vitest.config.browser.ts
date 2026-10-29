@@ -9,11 +9,9 @@ import type {
   JazzTopologyBrowserCommands,
 } from "../../packages/jazz-tools/tests/browser/browser-commands.js";
 import {
-  blockJazzServerNetwork,
   jazzServerInfo,
   jazzServerJwtForUser,
   stopJazzServerByUrl,
-  unblockJazzServerNetwork,
 } from "../../packages/jazz-tools/tests/browser/testing-server-node.js";
 
 async function jazzBrowserTopologyLog(
@@ -37,10 +35,6 @@ const jazzBrowserCommands = {
   jazzBrowserTopologyLog,
   jazzServerInfo: async (_context, appId) => jazzServerInfo(appId),
   jazzServerStop: async (_context, serverUrl) => stopJazzServerByUrl(serverUrl),
-  jazzServerBlockNetwork: async ({ context }, serverUrl) =>
-    blockJazzServerNetwork(context, serverUrl),
-  jazzServerUnblockNetwork: async ({ context }, serverUrl) =>
-    unblockJazzServerNetwork(context, serverUrl),
   jazzServerJwtForUser: async (_context, userId, claims, appId) =>
     jazzServerJwtForUser(userId, claims, appId),
 } satisfies JazzBrowserCommandHandlers;

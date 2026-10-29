@@ -1,10 +1,10 @@
 #[cfg(test)]
 mod tests {
     use super::*;
-    use groove::records::{
+    use jazz_types::records::{
         EnumCase, EnumSchema, EnumValue, OwnedRecord, RecordDescriptor, ValueType,
     };
-    use groove::schema::{ColumnSchema, ColumnType};
+    use jazz_types::column_schema::{ColumnSchema, ColumnType};
     use crate::model::public_schema::{
         ColumnDescriptor as PublicColumnDescriptor, ColumnType as PublicColumnType,
         EnumCaseDescriptor, SchemaBuilder as PublicSchemaBuilder,
@@ -331,7 +331,7 @@ mod tests {
 
     // This focused lowerer test is intentional: relation IR is the NAPI/WASM
     // boundary, while end-to-end matching and subscription deltas are covered
-    // at the Groove runtime boundary below it.
+    // at the database boundary below it.
     #[test]
     fn relation_payload_enum_match_lowers_and_validates_against_case_fields() {
         let event_payload = RecordDescriptor::new([("level", ValueType::I32)]);
@@ -447,6 +447,9 @@ mod tests {
         );
     }
 
+    /// Alice may use an array parameter as the `contains` haystack; model
+    /// validation infers its type from the compared UUID column. This
+    /// layer-level test isolates parameter inference before DB preparation.
     #[test]
     fn contains_param_array_against_column_infers_array_type() {
         let validated = Query::from("issues")
@@ -458,6 +461,117 @@ mod tests {
             validated.params()["teams"],
             ColumnType::Array(Box::new(ColumnType::Uuid))
         );
+    }
+    /// Alice may leave a `contains` needle untyped; validation infers its array
+    /// member or text type from the haystack. This layer-level test isolates
+    /// inference before database preparation.
+    #[test]
+    fn contains_unknown_needle_parameter_infers_array_member_and_text_types() {
+        let schema = RuntimeSchema::new([TableSchema::new(
+            "items",
+            [
+                ColumnSchema::new(
+                    "uuids",
+                    ColumnType::Array(Box::new(ColumnType::Uuid)),
+                ),
+                ColumnSchema::new("text", ColumnType::String),
+            ],
+        )]);
+
+        let uuid_query = Query::from("items")
+            .filter(contains(col("uuids"), param("uuid_needle")))
+            .validate_runtime(&schema)
+            .unwrap();
+        assert_eq!(uuid_query.params()["uuid_needle"], ColumnType::Uuid);
+
+        let text_query = Query::from("items")
+            .filter(contains(col("text"), param("text_needle")))
+            .validate_runtime(&schema)
+            .unwrap();
+        assert_eq!(text_query.params()["text_needle"], ColumnType::String);
+    }
+
+    /// Alice's provider claim can be the `contains` needle; validation leaves
+    /// its type dynamic and does not turn it into a query binding. This
+    /// model-level test pins the static/dynamic boundary before policy binding.
+    #[test]
+    fn contains_unknown_needle_claim_remains_dynamic() {
+        let query = Query::from("issues").filter(contains(col("title"), claim("unknown_needle")));
+        let validated = query.clone().validate_runtime(&schema()).unwrap();
+
+        assert_eq!(
+            validated.query(),
+            &query,
+            "the validated AST must retain the dynamic claim operand",
+        );
+        assert!(
+            validated.params().is_empty(),
+            "the claim must not become a user query binding"
+        );
+    }
+
+    /// Alice's provider claim can be the `contains` haystack; validation leaves
+    /// its type dynamic and does not turn it into a query binding. This
+    /// model-level test pins the static/dynamic boundary before policy binding.
+    #[test]
+    fn contains_unknown_haystack_claim_remains_dynamic() {
+        let query =
+            Query::from("issues").filter(contains(claim("unknown_haystack"), lit("needle")));
+        let validated = query.clone().validate_runtime(&schema()).unwrap();
+
+        assert_eq!(
+            validated.query(),
+            &query,
+            "the validated AST must retain the dynamic claim operand",
+        );
+        assert!(
+            validated.params().is_empty(),
+            "the claim must not become a user query binding"
+        );
+    }
+
+    /// Bob's mismatched needle receives expected and actual types with
+    /// nullability preserved. This model-level test checks typed error
+    /// construction; the DB test covers its public diagnostic.
+    #[test]
+    fn contains_mismatch_preserves_declared_member_and_actual_nullability() {
+        let nullable = |inner| ColumnType::Nullable(Box::new(inner));
+        let schema = RuntimeSchema::new([TableSchema::new(
+            "items",
+            [
+                ColumnSchema::new(
+                    "nullable_uuids",
+                    nullable(ColumnType::Array(Box::new(nullable(ColumnType::Uuid)))),
+                ),
+                ColumnSchema::new("nullable_text", nullable(ColumnType::String)),
+                ColumnSchema::new("nullable_uuid", nullable(ColumnType::Uuid)),
+            ],
+        )]);
+
+        for (predicate, expected, actual) in [
+            (
+                contains(col("nullable_uuids"), col("nullable_text")),
+                nullable(ColumnType::Uuid),
+                nullable(ColumnType::String),
+            ),
+            (
+                contains(col("nullable_text"), col("nullable_uuid")),
+                ColumnType::String,
+                nullable(ColumnType::Uuid),
+            ),
+        ] {
+            let error = Query::from("items")
+                .filter(predicate)
+                .validate_runtime(&schema)
+                .unwrap_err();
+            assert_eq!(
+                error,
+                QueryError::ContainsNeedleTypeMismatch {
+                    expected: Box::new(expected),
+                    actual: Box::new(actual),
+                }
+            );
+        }
     }
 
     #[test]
@@ -1114,6 +1228,515 @@ mod tests {
         assert_ne!(left.shape_id(), right.shape_id());
     }
 
+    /// Alice's UUID binding is required when any direct column comparison is
+    /// required, regardless of operand or occurrence order. This lower-level
+    /// public-builder test covers binding carriers and canonical revalidation,
+    /// which serving row reads cannot expose independently.
+    #[test]
+    fn mixed_nullability_uuid_parameter_binding_is_canonical_and_order_independent() {
+        let schema = JazzSchema::new(
+            &PublicSchemaBuilder::new()
+                .table(
+                    PublicTableSchemaBuilder::new("documents")
+                        .nullable_column("owner", PublicColumnType::Uuid)
+                        .column("account", PublicColumnType::Uuid)
+                        .column("title", PublicColumnType::Text),
+                )
+                .build(),
+        )
+        .unwrap();
+        let alice = uuid::Uuid::from_bytes([0xa1; 16]);
+        for param_first in [false, true] {
+            let comparison = |column| {
+                if param_first {
+                    eq(param("alice"), col(column))
+                } else {
+                    eq(col(column), param("alice"))
+                }
+            };
+            for columns in [["owner", "account"], ["account", "owner"]] {
+                let validated = Query::from("documents")
+                    .filter(comparison(columns[0]))
+                    .filter(comparison(columns[1]))
+                    .validate(&schema)
+                    .unwrap();
+                let canonical = validated.query().validate(&schema).unwrap();
+                assert_eq!(validated.shape_id(), canonical.shape_id());
+                for shape in [&validated, &canonical] {
+                    assert_eq!(shape.params()["alice"], ColumnType::Uuid);
+                    shape
+                        .bind(BTreeMap::from([("alice".to_owned(), Value::Uuid(alice))]))
+                        .expect("mixed comparisons accept a bare UUID");
+                    for value in [
+                        Value::Nullable(Some(Box::new(Value::Uuid(alice)))),
+                        Value::Nullable(None),
+                    ] {
+                        assert!(matches!(
+                            shape.bind(BTreeMap::from([("alice".to_owned(), value)])),
+                            Err(QueryError::ParamTypeMismatch { .. })
+                        ));
+                    }
+                }
+            }
+            let nullable = Query::from("documents")
+                .filter(comparison("owner"))
+                .validate(&schema)
+                .unwrap();
+            let canonical = nullable.query().validate(&schema).unwrap();
+            for shape in [&nullable, &canonical] {
+                assert_eq!(shape.params()["alice"], ColumnType::Uuid.nullable());
+                for value in [
+                    Value::Nullable(Some(Box::new(Value::Uuid(alice)))),
+                    Value::Nullable(None),
+                ] {
+                    shape
+                        .bind(BTreeMap::from([("alice".to_owned(), value)]))
+                        .expect("nullable-only comparisons accept nullable UUID carriers");
+                }
+            }
+            for columns in [["owner", "title"], ["title", "owner"]] {
+                assert!(matches!(
+                    Query::from("documents")
+                        .filter(comparison(columns[0]))
+                        .filter(comparison(columns[1]))
+                        .validate(&schema),
+                    Err(QueryError::OperandTypeMismatch)
+                ));
+            }
+        }
+    }
+
+    fn parameter_domain_schema() -> JazzSchema {
+        JazzSchema::new(
+            &PublicSchemaBuilder::new()
+                .table(
+                    PublicTableSchemaBuilder::new("documents")
+                        .nullable_column("a_optional", PublicColumnType::Uuid)
+                        .column("z_required", PublicColumnType::Uuid)
+                        .column("text", PublicColumnType::Text)
+                        .nullable_column("optional_text", PublicColumnType::Text)
+                        .column(
+                            "labels",
+                            PublicColumnType::Array {
+                                element: Box::new(PublicColumnType::Text),
+                            },
+                        )
+                        .column("wide", PublicColumnType::BigInt)
+                        .column(
+                            "uuids",
+                            PublicColumnType::Array {
+                                element: Box::new(PublicColumnType::Uuid),
+                            },
+                        ),
+                )
+                .build(),
+        )
+        .unwrap()
+    }
+
+    fn parameter_domain_permutations(predicates: &[Predicate]) -> Vec<Vec<Predicate>> {
+        if predicates.is_empty() {
+            return vec![Vec::new()];
+        }
+        let mut permutations = Vec::new();
+        for index in 0..predicates.len() {
+            let mut rest = predicates.to_vec();
+            let first = rest.remove(index);
+            for mut permutation in parameter_domain_permutations(&rest) {
+                permutation.insert(0, first.clone());
+                permutations.push(permutation);
+            }
+        }
+        permutations
+    }
+
+    /// Alice cannot validate a nullable obligation contradicted by a required
+    /// UUID occurrence. The public model seam exposes validity before serving;
+    /// every permutation and column-comparison orientation must reject.
+    #[test]
+    fn parameter_domain_is_null_contradiction_rejects_every_order() {
+        let schema = parameter_domain_schema();
+        for optional_first in [false, true] {
+            for required_first in [false, true] {
+                let comparison = |column, param_first| {
+                    if param_first {
+                        eq(param("p"), col(column))
+                    } else {
+                        eq(col(column), param("p"))
+                    }
+                };
+                let predicates = [
+                    comparison("a_optional", optional_first),
+                    Predicate::IsNull(param("p")),
+                    comparison("z_required", required_first),
+                ];
+                for permutation in parameter_domain_permutations(&predicates) {
+                    let query = permutation
+                        .into_iter()
+                        .fold(Query::from("documents"), |query, p| query.filter(p));
+                    assert!(
+                        matches!(
+                            query.validate(&schema),
+                            Err(QueryError::OperandTypeMismatch)
+                        ),
+                        "contradictory nullable obligation accepted: {query:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Alice's independently valued aliases share final UUID carrier metadata,
+    /// not values. Public validation/binding covers anchored chains, cycles and
+    /// self-relationships that serving rows cannot independently distinguish.
+    #[test]
+    fn parameter_domain_aliases_have_canonical_metadata_and_carriers() {
+        let schema = parameter_domain_schema();
+        for names in [
+            ["p", "q", "r"],
+            ["long_account_name", "other_long_name", "third_long_name"],
+        ] {
+            for reverse in [false, true] {
+                for required in [false, true] {
+                    for cycle in [false, true] {
+                        let comparison = |a, b| if reverse { eq(b, a) } else { eq(a, b) };
+                        let mut predicates = vec![
+                            comparison(col("a_optional"), param(names[0])),
+                            comparison(param(names[0]), param(names[1])),
+                            comparison(param(names[1]), param(names[2])),
+                            comparison(
+                                col(if required { "z_required" } else { "a_optional" }),
+                                param(names[0]),
+                            ),
+                        ];
+                        if cycle {
+                            predicates.push(comparison(param(names[2]), param(names[0])));
+                        } else {
+                            predicates.push(comparison(param(names[2]), param(names[2])));
+                        }
+                        let expected = names
+                            .into_iter()
+                            .map(|name| {
+                                (
+                                    name.to_owned(),
+                                    if required {
+                                        ColumnType::Uuid
+                                    } else {
+                                        ColumnType::Uuid.nullable()
+                                    },
+                                )
+                            })
+                            .collect::<BTreeMap<_, _>>();
+                        let mut identity = None;
+                        for permutation in parameter_domain_permutations(&predicates) {
+                            let query = permutation
+                                .into_iter()
+                                .fold(Query::from("documents"), |query, p| query.filter(p));
+                            let shape = query
+                                .validate(&schema)
+                                .expect("anchored aliases validate in every order");
+                            let canonical = shape
+                                .query()
+                                .validate(&schema)
+                                .expect("canonical aliases revalidate");
+                            for validated in [&shape, &canonical] {
+                                assert_eq!(validated.params(), &expected);
+                                let current =
+                                    (validated.shape_id(), validated.canonical_bytes().to_vec());
+                                if let Some(previous) = &identity {
+                                    assert_eq!(&current, previous);
+                                } else {
+                                    identity = Some(current);
+                                }
+                                let values = names
+                                    .into_iter()
+                                    .enumerate()
+                                    .map(|(index, name)| {
+                                        let value = Value::Uuid(uuid::Uuid::from_bytes(
+                                            [index as u8 + 1; 16],
+                                        ));
+                                        (
+                                            name.to_owned(),
+                                            if required {
+                                                value
+                                            } else {
+                                                Value::Nullable(Some(Box::new(value)))
+                                            },
+                                        )
+                                    })
+                                    .collect::<BTreeMap<_, _>>();
+                                validated
+                                    .bind(values.clone())
+                                    .expect("each alias has its own accepted value");
+                                for name in names {
+                                    let mut wrong = values.clone();
+                                    wrong.insert(
+                                        name.to_owned(),
+                                        if required {
+                                            Value::Nullable(None)
+                                        } else {
+                                            Value::Uuid(uuid::Uuid::nil())
+                                        },
+                                    );
+                                    assert!(matches!(
+                                        validated.bind(wrong),
+                                        Err(QueryError::ParamTypeMismatch { .. })
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            Query::from("documents")
+                .filter(eq(col("z_required"), param("anchored")))
+                .filter(eq(param("unanchored"), param("other")))
+                .validate(&schema)
+                .is_err(),
+            "disconnected aliases must not guess a type"
+        );
+    }
+
+    /// Alice's operator-derived holes settle before checking, without changing
+    /// substring, member or whole-value semantics. Public model validation and
+    /// binding expose constructor/literal inference independently of row reads.
+    #[test]
+    fn parameter_domain_operator_dependencies_preserve_existing_semantics() {
+        let schema = parameter_domain_schema();
+        for predicates in [
+            vec![
+                contains(param("haystack"), lit("needle")),
+                eq(col("text"), param("haystack")),
+            ],
+            vec![
+                contains(param("haystack"), param("needle")),
+                eq(col("a_optional"), param("needle")),
+                eq(col("z_required"), param("needle")),
+            ],
+            vec![
+                Predicate::In(param("left"), vec![param("right")]),
+                eq(col("z_required"), param("right")),
+            ],
+            vec![
+                eq(param("number"), lit(Value::I32(9))),
+                eq(col("wide"), param("number")),
+            ],
+            vec![
+                eq(col("optional_text"), param("n")),
+                contains(col("labels"), param("n")),
+            ],
+        ] {
+            for permutation in parameter_domain_permutations(&predicates) {
+                let shape = permutation
+                    .into_iter()
+                    .fold(Query::from("documents"), |query, p| query.filter(p))
+                    .validate(&schema)
+                    .unwrap();
+                let canonical = shape.query().validate(&schema).unwrap();
+                assert_eq!(shape.params(), canonical.params());
+                assert_eq!(shape.canonical_bytes(), canonical.canonical_bytes());
+                assert_eq!(shape.shape_id(), canonical.shape_id());
+                if shape.params().contains_key("n") {
+                    for validated in [&shape, &canonical] {
+                        assert_eq!(validated.params()["n"], ColumnType::String);
+                        validated
+                            .bind(BTreeMap::from([(
+                                "n".to_owned(),
+                                Value::String("alice".to_owned()),
+                            )]))
+                            .unwrap();
+                        for carrier in [
+                            Value::Nullable(Some(Box::new(Value::String("alice".to_owned())))),
+                            Value::Nullable(None),
+                        ] {
+                            assert!(matches!(
+                                validated.bind(BTreeMap::from([("n".to_owned(), carrier)])),
+                                Err(QueryError::ParamTypeMismatch { .. })
+                            ));
+                        }
+                    }
+                }
+                if let Some(haystack) = shape.params().get("haystack") {
+                    let expected = if shape.params().contains_key("needle") {
+                        ColumnType::Uuid.array_of()
+                    } else {
+                        ColumnType::String
+                    };
+                    assert_eq!(haystack, &expected);
+                }
+                if shape.params().contains_key("number") {
+                    assert_eq!(shape.params()["number"], ColumnType::I64);
+                }
+                if shape.params().contains_key("left") {
+                    assert_eq!(shape.params()["left"], ColumnType::Uuid);
+                    assert_eq!(shape.params()["right"], ColumnType::Uuid);
+                }
+            }
+        }
+        let empty = Query::from("documents")
+            .filter(Predicate::In(param("unused"), vec![]))
+            .validate(&schema)
+            .unwrap();
+        assert!(empty.params().is_empty());
+        empty.bind(BTreeMap::new()).unwrap();
+        assert!(
+            Query::from("documents")
+                .filter(contains(param("p"), param("q")))
+                .filter(contains(param("q"), param("p")))
+                .validate(&schema)
+                .is_err()
+        );
+    }
+
+    /// Alice's substring parameter obtains its String type through a separately
+    /// inferred array haystack. Public validation and binding must agree after
+    /// canonical sorting, rather than committing an earlier Array fallback.
+    #[test]
+    fn parameter_domain_contains_fallbacks_wait_for_forward_anchors() {
+        let schema = parameter_domain_schema();
+        for (middle, alias) in [(false, false), (true, false), (true, true)] {
+            let mut predicates = vec![
+                contains(param("long_array"), param("r")),
+                contains(param("p"), param("r")),
+                eq(col("text"), param("r")),
+            ];
+            let mut expected = BTreeMap::from([
+                ("long_array".to_owned(), ColumnType::String.array_of()),
+                ("p".to_owned(), ColumnType::String),
+                ("r".to_owned(), ColumnType::String),
+            ]);
+            let mut values = BTreeMap::from([
+                (
+                    "long_array".to_owned(),
+                    Value::Array(vec![Value::String("alice".to_owned())]),
+                ),
+                ("p".to_owned(), Value::String("bob".to_owned())),
+                ("r".to_owned(), Value::String("mallory".to_owned())),
+            ]);
+            if middle {
+                predicates.push(contains(param("long_array"), param("middle")));
+                predicates.push(contains(
+                    param(if alias { "alias_middle" } else { "middle" }),
+                    param("p"),
+                ));
+                expected.insert("middle".to_owned(), ColumnType::String);
+                values.insert("middle".to_owned(), Value::String("alice".to_owned()));
+                if alias {
+                    predicates.push(eq(param("middle"), param("alias_middle")));
+                    expected.insert("alias_middle".to_owned(), ColumnType::String);
+                    values.insert(
+                        "alias_middle".to_owned(),
+                        Value::String("mallory".to_owned()),
+                    );
+                }
+            } else {
+                predicates.push(contains(param("long_array"), param("p")));
+            }
+            let mut identity = None;
+            for permutation in parameter_domain_permutations(&predicates) {
+                let shape = permutation
+                    .into_iter()
+                    .fold(Query::from("documents"), |query, predicate| {
+                        query.filter(predicate)
+                    })
+                    .validate(&schema)
+                    .expect("transitive forward requirements precede backward fallback");
+                let canonical = shape
+                    .query()
+                    .validate(&schema)
+                    .expect("canonical domain remains valid");
+                for validated in [&shape, &canonical] {
+                    assert_eq!(validated.params(), &expected);
+                    let current = (validated.shape_id(), validated.canonical_bytes().to_vec());
+                    if let Some(previous) = &identity {
+                        assert_eq!(&current, previous);
+                    } else {
+                        identity = Some(current);
+                    }
+                    validated
+                        .bind(values.clone())
+                        .expect("independently valued carriers remain accepted");
+                    let mut nullable = values.clone();
+                    nullable.insert("p".to_owned(), Value::Nullable(None));
+                    assert!(matches!(
+                        validated.bind(nullable),
+                        Err(QueryError::ParamTypeMismatch { .. })
+                    ));
+                }
+            }
+        }
+        Query::from("documents")
+            .filter(contains(param("outer"), param("inner")))
+            .filter(contains(param("inner"), col("text")))
+            .validate(&schema)
+            .expect("an unavailable forward provider must not block a finite nested constructor");
+    }
+
+    /// Alice's inferred array member uses the strongest requiredness of its
+    /// parameter needles. Unlike an explicitly nullable schema member, this
+    /// constructor remains live until public binding metadata is final.
+    #[test]
+    fn parameter_domain_inferred_members_use_strongest_requiredness() {
+        let schema = parameter_domain_schema();
+        let predicates = [
+            contains(param("h"), param("p")),
+            contains(param("h"), param("q")),
+            eq(col("a_optional"), param("p")),
+            eq(col("z_required"), param("q")),
+        ];
+        let expected = BTreeMap::from([
+            ("h".to_owned(), ColumnType::Uuid.array_of()),
+            ("p".to_owned(), ColumnType::Uuid),
+            ("q".to_owned(), ColumnType::Uuid),
+        ]);
+        let mut identity = None;
+        for permutation in parameter_domain_permutations(&predicates) {
+            let shape = permutation
+                .into_iter()
+                .fold(Query::from("documents"), |query, predicate| {
+                    query.filter(predicate)
+                })
+                .validate(&schema)
+                .expect("inferred members settle their parameter needles");
+            let canonical = shape
+                .query()
+                .validate(&schema)
+                .expect("canonical members remain valid");
+            for validated in [&shape, &canonical] {
+                assert_eq!(validated.params(), &expected);
+                let current = (validated.shape_id(), validated.canonical_bytes().to_vec());
+                if let Some(previous) = &identity {
+                    assert_eq!(&current, previous);
+                } else {
+                    identity = Some(current);
+                }
+                validated
+                    .bind(BTreeMap::from([
+                        (
+                            "h".to_owned(),
+                            Value::Array(vec![Value::Uuid(uuid::Uuid::nil())]),
+                        ),
+                        ("p".to_owned(), Value::Uuid(uuid::Uuid::from_bytes([1; 16]))),
+                        ("q".to_owned(), Value::Uuid(uuid::Uuid::from_bytes([2; 16]))),
+                    ]))
+                    .unwrap();
+                assert!(matches!(
+                    validated.bind(BTreeMap::from([
+                        (
+                            "h".to_owned(),
+                            Value::Array(vec![Value::Uuid(uuid::Uuid::nil())])
+                        ),
+                        ("p".to_owned(), Value::Nullable(None)),
+                        ("q".to_owned(), Value::Uuid(uuid::Uuid::nil())),
+                    ])),
+                    Err(QueryError::ParamTypeMismatch { .. })
+                ));
+            }
+        }
+    }
+
     #[test]
     fn binding_type_mismatch_errors() {
         let validated = Query::from("issues")
@@ -1183,7 +1806,7 @@ mod tests {
         );
     }
 
-    /// Persisted exclusive predicate reads store canonical binding bytes and
+    /// Persisted serializable predicate reads store canonical binding bytes and
     /// decode them back (garden-co/jazz#3663). Every decodable tag must
     /// round-trip to the same bytes, and anything else is refused.
     #[test]
@@ -1365,5 +1988,179 @@ mod tests {
             .validate_runtime(&schema)
             .expect_err("text never correlates with a UUID");
         assert_eq!(error, QueryError::OperandTypeMismatch);
+    }
+
+    mod predicate_codec_pins {
+        use super::*;
+        use crate::query::policy_limits::{
+            MAX_POLICY_EXPRESSION_DEPTH, MAX_POLICY_EXPRESSION_NODES,
+        };
+
+        fn col(name: &str) -> Operand {
+            Operand::Column(name.to_owned())
+        }
+
+        fn every_variant() -> Predicate {
+            Predicate::All(vec![
+                Predicate::Any(vec![
+                    Predicate::Eq(col("a"), Operand::Param("p".to_owned())),
+                    Predicate::Ne(col("a"), Operand::Claim("c".to_owned())),
+                ]),
+                Predicate::Not(Box::new(Predicate::Gt(
+                    col("b"),
+                    Operand::Literal(Value::I64(-3)),
+                ))),
+                Predicate::Gte(col("b"), Operand::Literal(Value::String("s".to_owned()))),
+                Predicate::Lt(col("b"), Operand::Literal(Value::Bool(true))),
+                Predicate::Lte(col("b"), Operand::Literal(Value::U64(7))),
+                Predicate::In(
+                    col("c"),
+                    vec![
+                        Operand::Literal(Value::I32(1)),
+                        Operand::Param("q".to_owned()),
+                    ],
+                ),
+                Predicate::Contains(col("d"), Operand::Literal(Value::Bytes(vec![1, 2]))),
+                Predicate::EnumMatch {
+                    column: "e".to_owned(),
+                    case: "k".to_owned(),
+                    payload: Box::new(Predicate::Any(vec![Predicate::IsNull(col("f"))])),
+                },
+                Predicate::All(vec![]),
+            ])
+        }
+
+        fn nested(depth: usize) -> Predicate {
+            let mut predicate = Predicate::IsNull(col("x"));
+            for _ in 1..depth {
+                predicate = Predicate::Not(Box::new(predicate));
+            }
+            predicate
+        }
+
+        fn wide(nodes: usize) -> Predicate {
+            Predicate::All((1..nodes).map(|_| Predicate::IsNull(col("x"))).collect())
+        }
+
+        fn json_err(json: &str) -> String {
+            serde_json::from_str::<Predicate>(json)
+                .expect_err("must reject")
+                .to_string()
+        }
+
+        #[test]
+        fn predicate_json_and_postcard_encodings_are_pinned() {
+            let predicate = every_variant();
+            let json = r#"{"All":[{"Any":[{"Eq":[{"Column":"a"},{"Param":"p"}]},{"Ne":[{"Column":"a"},{"Claim":"c"}]}]},{"Not":{"Gt":[{"Column":"b"},{"Literal":{"I64":-3}}]}},{"Gte":[{"Column":"b"},{"Literal":{"String":"s"}}]},{"Lt":[{"Column":"b"},{"Literal":{"Bool":true}}]},{"Lte":[{"Column":"b"},{"Literal":{"U64":7}}]},{"In":[{"Column":"c"},[{"Literal":{"I32":1}},{"Param":"q"}]]},{"Contains":[{"Column":"d"},{"Literal":{"Bytes":[1,2]}}]},{"EnumMatch":{"column":"e","case":"k","payload":{"Any":[{"IsNull":{"Column":"f"}}]}}},{"All":[]}]}"#;
+            let bytes = "0009010203000161010170040001610201630206000162030e05070001620306017308000162030501090001620303070500016302030f020101710a00016403070201020b0165016b01010c0001660000";
+            assert_eq!(serde_json::to_string(&predicate).unwrap(), json);
+            assert_eq!(
+                hex::encode(postcard::to_allocvec(&predicate).unwrap()),
+                bytes
+            );
+            assert_eq!(serde_json::from_str::<Predicate>(json).unwrap(), predicate);
+            assert_eq!(
+                postcard::from_bytes::<Predicate>(&hex::decode(bytes).unwrap()).unwrap(),
+                predicate
+            );
+            assert_eq!(
+                serde_json::from_str::<Predicate>(
+                    r#"{"EnumMatch":["e","k",{"IsNull":{"Column":"f"}}]}"#
+                )
+                .unwrap(),
+                Predicate::EnumMatch {
+                    column: "e".to_owned(),
+                    case: "k".to_owned(),
+                    payload: Box::new(Predicate::IsNull(col("f"))),
+                }
+            );
+        }
+
+        #[test]
+        fn predicate_decode_errors_are_pinned() {
+            for (json, error) in [
+                (
+                    r#"{"EnumMatch":{"column":"e","case":"k","payload":{"IsNull":{"Column":"f"}},"extra":1}}"#,
+                    "unknown field `extra`, expected one of `column`, `case`, `payload` at line 1 column 81",
+                ),
+                (
+                    r#"{"EnumMatch":{"column":"e","column":"e","case":"k"}}"#,
+                    "duplicate field `column` at line 1 column 35",
+                ),
+                (
+                    r#"{"EnumMatch":{"case":"k","payload":{"IsNull":{"Column":"f"}}}}"#,
+                    "missing field `column` at line 1 column 61",
+                ),
+                (
+                    r#"{"Eq":[{"Column":"a"},{"Column":"b"},{"Column":"c"}]}"#,
+                    "trailing characters at line 1 column 38",
+                ),
+                (
+                    r#"{"All":{"IsNull":{"Column":"f"}}}"#,
+                    "invalid type: map, expected a bounded sequence of policy predicates at line 1 column 7",
+                ),
+            ] {
+                assert_eq!(json_err(json), error, "{json}");
+            }
+            for json in [
+                r#"{"EnumMatch":["e","k"]}"#,
+                r#"{"Eq":[{"Column":"a"}]}"#,
+                r#"{"In":[{"Column":"a"}]}"#,
+                r#"{"Nope":[]}"#,
+            ] {
+                assert!(serde_json::from_str::<Predicate>(json).is_err(), "{json}");
+            }
+        }
+
+        #[test]
+        fn predicate_decode_budget_is_pinned() {
+            let wide_json = serde_json::to_string(&wide(MAX_POLICY_EXPRESSION_NODES + 1)).unwrap();
+            assert_eq!(
+                json_err(&wide_json),
+                "MAX_POLICY_EXPRESSION_NODES exceeded: observed 16385, maximum 16384 at line 1 column 425966"
+            );
+            let nested_wide =
+                serde_json::to_string(&Predicate::Not(Box::new(wide(MAX_POLICY_EXPRESSION_NODES))))
+                    .unwrap();
+            assert_eq!(
+                json_err(&nested_wide),
+                "MAX_POLICY_EXPRESSION_NODES exceeded: observed 16385, maximum 16384 at line 1 column 425947"
+            );
+            let wide_ok = wide(MAX_POLICY_EXPRESSION_NODES);
+            assert_eq!(
+                serde_json::from_str::<Predicate>(&serde_json::to_string(&wide_ok).unwrap())
+                    .unwrap(),
+                wide_ok
+            );
+            for depth in [MAX_POLICY_EXPRESSION_DEPTH, MAX_POLICY_EXPRESSION_DEPTH + 1] {
+                let bytes = postcard::to_allocvec(&nested(depth)).unwrap();
+                let decoded = postcard::from_bytes::<Predicate>(&bytes);
+                if depth == MAX_POLICY_EXPRESSION_DEPTH {
+                    assert_eq!(decoded.unwrap(), nested(depth));
+                } else {
+                    assert_eq!(decoded.unwrap_err(), postcard::Error::SerdeDeCustom);
+                }
+            }
+            // A length header claiming more children than the remaining budget
+            // is refused before any child is read (the zero padding decodes as
+            // 8192 empty `All` children, then runs out).
+            for (header, error) in [
+                (
+                    vec![0x00u8, 0x80, 0x80, 0x01],
+                    postcard::Error::SerdeDeCustom,
+                ),
+                (
+                    vec![0x00, 0xff, 0x7f],
+                    postcard::Error::DeserializeUnexpectedEnd,
+                ),
+            ] {
+                let mut bytes = header;
+                bytes.resize(bytes.len() + MAX_POLICY_EXPRESSION_NODES, 0);
+                assert_eq!(
+                    postcard::from_bytes::<Predicate>(&bytes).unwrap_err(),
+                    error
+                );
+            }
+        }
     }
 }

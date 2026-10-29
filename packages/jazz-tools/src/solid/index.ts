@@ -24,19 +24,9 @@ export {
   createAccountManager,
   type AccountManagerConfig,
 } from "../accounts/create-account-manager.js";
-export type {
-  AccountHandle,
-  AccountIdentity,
-  AccountSnapshot,
-  AccountManager,
-} from "../accounts/state.js";
-export {
-  AccountAuthError,
-  exportLocalFirstSecret,
-  type BackendAuth,
-  type JWTAuth,
-} from "../accounts/enrollment.js";
-export type { AccountStore } from "../accounts/persistence.js";
+export { useSyncStatus } from "./use-sync-status.js";
+export type { LinkStatus, SyncStatus } from "../runtime/sync-status.js";
+export * from "../accounts/exports.js";
 
 export { createAccountState } from "./create-account-state.js";
 

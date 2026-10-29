@@ -1,6 +1,7 @@
 import { Cause, Context, Effect, Exit, Layer, Option, Queue, Stream } from "effect";
 import type { AccountDbConfig } from "../accounts/context.js";
 import type { AuthState } from "../runtime/auth-state.js";
+import type { SyncStatus } from "../runtime/sync-status.js";
 import type {
   DurabilityTier,
   MutationErrorEvent,
@@ -104,13 +105,13 @@ export interface JazzDb extends JazzReads {
   ): Effect.Effect<A, E | JazzError | JazzWriteRejected, R>;
 
   /**
-   * Run `body` in an exclusive transaction, validated serializably by the
+   * Run `body` in a serializable transaction, validated serializably by the
    * authority. Commits and rolls back like {@link transaction}, then waits for
    * the authority's verdict: a conflicting transaction fails with
    * {@link JazzWriteRejected}, which makes `Effect.retry` a natural fit.
    * Interrupting the verdict wait does not withdraw the committed transaction.
    */
-  exclusiveTransaction<A, E, R>(
+  serializableTransaction<A, E, R>(
     body: (tx: JazzTransaction) => Effect.Effect<A, E, R>,
   ): Effect.Effect<A, E | JazzError | JazzWriteRejected, R>;
 
@@ -139,6 +140,13 @@ export interface JazzDb extends JazzReads {
    * rejection as a {@link JazzWriteRejected} failure instead.
    */
   readonly mutationErrors: Stream.Stream<MutationErrorEvent>;
+  /** The current sync status, then every change to it. See {@link Db.getSyncStatus}. */
+  readonly syncStatus: Stream.Stream<SyncStatus>;
+  /**
+   * Succeed once every write committed before the call is accepted by the
+   * server. See {@link Db.waitForSync}.
+   */
+  waitForSync(options?: { timeoutMs?: number }): Effect.Effect<void, JazzError>;
 }
 
 /** Operations available inside {@link JazzDb.transaction}. */
@@ -276,11 +284,13 @@ function makeJazzDb(db: Db): JazzDb {
       Effect.gen(function* () {
         const transaction: Transaction = yield* Effect.try({
           try: () =>
-            kind === "exclusive" ? db.beginExclusiveTransaction() : db.beginTransaction(),
+            kind === "serializable" ? db.beginSerializableTransaction() : db.beginTransaction(),
           catch: toJazzError("transaction"),
         });
         const rollback = Effect.ignore(Effect.tryPromise(() => transaction.rollback()));
-        const exit = yield* Effect.exit(restore(body(makeJazzTransaction(transaction))));
+        const exit = yield* Effect.exit(
+          restore(Effect.suspend(() => body(makeJazzTransaction(transaction)))),
+        );
         if (Exit.isFailure(exit)) {
           yield* rollback;
           return yield* exit;
@@ -296,12 +306,12 @@ function makeJazzDb(db: Db): JazzDb {
           try: () => committed.txId,
           catch: toJazzError("commit"),
         }).pipe(Effect.tapError(() => rollback));
-        if (kind === "exclusive") {
+        if (kind === "serializable") {
           yield* restore(
             Effect.tryPromise({
               try: () =>
                 (committed as WriteHandle<unknown, unknown> & { wait(): Promise<unknown> }).wait(),
-              catch: toWriteError("exclusiveTransaction"),
+              catch: toWriteError("serializableTransaction"),
             }),
           );
         } else {
@@ -374,7 +384,7 @@ function makeJazzDb(db: Db): JazzDb {
     },
 
     transaction: (body, options) => runTransaction("mergeable", body, options?.wait),
-    exclusiveTransaction: (body) => runTransaction("exclusive", body, undefined),
+    serializableTransaction: (body) => runTransaction("serializable", body, undefined),
 
     canInsert: (table, data) =>
       Effect.tryPromise({ try: () => db.canInsert(table, data), catch: toJazzError("canInsert") }),
@@ -391,6 +401,15 @@ function makeJazzDb(db: Db): JazzDb {
     // `onAuthChanged` reports the current state as soon as it is attached.
     authState: callbackStream<AuthState>((emit) => db.onAuthChanged(emit)),
     mutationErrors: callbackStream<MutationErrorEvent>((emit) => db.onMutationError(emit)),
+    syncStatus: callbackStream<SyncStatus>((emit) => {
+      emit(db.getSyncStatus());
+      return db.onSyncStatusChange(emit);
+    }),
+    waitForSync: (options) =>
+      Effect.tryPromise({
+        try: (signal) => db.waitForSync({ ...options, signal }),
+        catch: toJazzError("waitForSync"),
+      }),
   };
 }
 

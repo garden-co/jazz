@@ -38,7 +38,7 @@ describe.each([
       await db.insert(app.notes, { title: "one", ownerId: account }).wait({ tier: "global" });
 
       const rows = await db.all(app.notes.select("title", "$createdAt", "$updatedAt"), {
-        tier: "global",
+        tier: "remote",
       });
 
       expect(rows).toHaveLength(1);

@@ -25,6 +25,8 @@ export function CodeWindow({ files }: { files: CodeFile[] }) {
         code={file.code}
         language={lang}
         tokenizer={customTokenizer(lang)}
+        // Keep syntax colors when Firefox mounts a code block after client navigation.
+        highlightMode="spans"
         hasLanguageLabel={false}
         width="100%"
         className="home-code"

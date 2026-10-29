@@ -1,4 +1,13 @@
 import { formatTime } from "../perf-timeline/model.ts";
+import bandBookWalkthrough from "../../scripts/example-videos/walkthroughs/band-book.storyboard.ts";
+import bandChatWalkthrough from "../../scripts/example-videos/walkthroughs/band-chat.storyboard.ts";
+import bigLabelWalkthrough from "../../scripts/example-videos/walkthroughs/big-label.storyboard.ts";
+import epicDropWalkthrough from "../../scripts/example-videos/walkthroughs/epic-drop.storyboard.ts";
+import jamazonWalkthrough from "../../scripts/example-videos/walkthroughs/jamazon.storyboard.ts";
+import posterShopWalkthrough from "../../scripts/example-videos/walkthroughs/poster-shop.storyboard.ts";
+import stagePlanWalkthrough from "../../scripts/example-videos/walkthroughs/stage-plan.storyboard.ts";
+import wequencerWalkthrough from "../../scripts/example-videos/walkthroughs/wequencer.storyboard.ts";
+import worldTourWalkthrough from "../../scripts/example-videos/walkthroughs/world-tour.storyboard.ts";
 
 /** Looks up another benchmark's headline seconds, for metrics that compare two cases. */
 export type Lookup = (benchmarkName: string) => number | null;
@@ -19,10 +28,11 @@ export type HeroMetric = {
 export type HeroVideo = {
   /**
    * An H.264 MP4 under docs/public, at most MAX_BYTES (scripts/example-videos/encode.mjs).
-   * Written by `node scripts/example-videos/<id>.mjs` (see walkthrough.mjs).
+   * Rendered by `pnpm render:walkthroughs <id>` from scripts/example-videos/walkthroughs/.
    */
   src: string;
   poster: string;
+  /** The storyboard's `summary`, so it always describes what the video shows. */
   caption: string;
 };
 
@@ -49,7 +59,7 @@ export type HeroExample = {
   plannedMetrics?: string;
 };
 
-// Interpretations are given the /5 estimate like every displayed time.
+// Interpretations receive native /5 estimates or measured browser wall time.
 // Ratios need none: the divisor cancels out.
 const t = (seconds: number) => formatTime(seconds);
 const rate = (count: number, seconds: number) =>
@@ -78,8 +88,7 @@ export const heroExamples: HeroExample[] = [
     video: {
       src: "/examples/videos/band-chat.mp4",
       poster: "/examples/videos/band-chat.jpg",
-      caption:
-        "A guest asks to join a room and the creator admits them; the room and its history appear in his list, replies arrive live, and a message he sends with the Wi-Fi off arrives once it's back.",
+      caption: bandChatWalkthrough.summary,
     },
     metrics: [
       {
@@ -132,8 +141,7 @@ export const heroExamples: HeroExample[] = [
     video: {
       src: "/examples/videos/stage-plan.mp4",
       poster: "/examples/videos/stage-plan.jpg",
-      caption:
-        "A crew chief and a crew member in two browsers: the invite link, card moves and task comments arriving live, edits made with the Wi-Fi off syncing once it's back, and a live checklist filter.",
+      caption: stagePlanWalkthrough.summary,
     },
     metrics: [
       {
@@ -181,8 +189,7 @@ export const heroExamples: HeroExample[] = [
     video: {
       src: "/examples/videos/band-book.mp4",
       poster: "/examples/videos/band-book.jpg",
-      caption:
-        'A bandmate shares one song with a "Can edit" link; the guest sees only that song and its subpage, typing shows up in both copies live, and edits made while his Wi-Fi is off merge once it’s back.',
+      caption: bandBookWalkthrough.summary,
     },
     metrics: [
       {
@@ -219,8 +226,7 @@ export const heroExamples: HeroExample[] = [
     video: {
       src: "/examples/videos/world-tour.mp4",
       poster: "/examples/videos/world-tour.jpg",
-      caption:
-        "The tour manager sees every stop while a fan with the public link sees only the confirmed ones; a stop the manager confirms appears on the fan's globe live, and one confirmed with the Wi-Fi off arrives once it's back.",
+      caption: worldTourWalkthrough.summary,
     },
     metrics: [
       {
@@ -250,8 +256,7 @@ export const heroExamples: HeroExample[] = [
     video: {
       src: "/examples/videos/wequencer.mp4",
       poster: "/examples/videos/wequencer.jpg",
-      caption:
-        "Two bandmates in one session: it appears in the second one's list live, then pattern edits, Play and tempo follow on both screens, and steps added while he's offline arrive when his Wi-Fi is back.",
+      caption: wequencerWalkthrough.summary,
     },
     metrics: [
       {
@@ -275,6 +280,45 @@ export const heroExamples: HeroExample[] = [
     ],
   },
   {
+    id: "text-editor",
+    title: "Collaborative text editor",
+    tagline: "Yjs text editing with incremental updates stored in Jazz.",
+    description:
+      "A minimal React and CodeMirror editor. Each editing session appends Yjs updates to its own binary log in Jazz, so separate offline sessions can merge their changes when they reconnect.",
+    highlights: [
+      "Edit the same document in multiple browsers",
+      "Keep editing offline and merge changes on reconnect",
+      "Restore text and CRDT state from incremental binary logs",
+    ],
+    sources: [
+      { label: "React app", path: "examples/text-editor" },
+      { label: "Browser benchmarks", path: "examples/text-editor/benchmarks" },
+    ],
+    benchmarks: "examples/text-editor/benchmarks",
+    video: null,
+    plannedVideo: "Two browsers edit a shared document, go offline, and merge their changes.",
+    metrics: [
+      {
+        benchmark: "text_editor_open_browser[100000]",
+        label: "Open 100,000 edits",
+        interpret: (s) =>
+          `A fresh browser context opens a document with 100,000 stored Yjs updates and reaches an editable CodeMirror view in ${t(s)}. Includes application startup, Jazz delivery and Yjs replay on a localhost server.`,
+      },
+      {
+        benchmark: "text_editor_reload_browser[100000]",
+        label: "Reload while offline",
+        interpret: (s) =>
+          `Reloading the same history from the browser's local database, with WebSockets blocked, takes ${t(s)}. The Yjs document is reconstructed on every reload.`,
+      },
+      {
+        benchmark: "text_editor_sync_edit_browser[100000]",
+        label: "Sync one new edit",
+        interpret: (s) =>
+          `Inserting one character in a loaded document until a second browser displays it takes ${t(s)}. Both browsers already hold the 100,000-edit history.`,
+      },
+    ],
+  },
+  {
     id: "poster-shop",
     title: "PosterShop",
     tagline: "A collaborative gig-poster canvas with layers, shapes and live cursors.",
@@ -293,8 +337,7 @@ export const heroExamples: HeroExample[] = [
     video: {
       src: "/examples/videos/poster-shop.mp4",
       poster: "/examples/videos/poster-shop.jpg",
-      caption:
-        "A second editor joins by invite link; her cursor and edits arrive live, edits she makes with the Wi-Fi off sync once it's back, then a named checkpoint.",
+      caption: posterShopWalkthrough.summary,
     },
     metrics: [
       {
@@ -371,8 +414,7 @@ export const heroExamples: HeroExample[] = [
     video: {
       src: "/examples/videos/epic-drop.mp4",
       poster: "/examples/videos/epic-drop.jpg",
-      caption:
-        'Uploads and previews in a shared folder; a second account joins by "Can edit" link, his upload appears in the open folder live, and a rename made while he’s offline reaches him once his Wi-Fi is back.',
+      caption: epicDropWalkthrough.summary,
     },
     metrics: [
       {
@@ -410,8 +452,7 @@ export const heroExamples: HeroExample[] = [
     video: {
       src: "/examples/videos/jamazon.mp4",
       poster: "/examples/videos/jamazon.jpg",
-      caption:
-        "A live catalogue search, an item added on the laptop appearing in the cart on her phone, an edit made on the phone with the Wi-Fi off, then checkout and the order's status updating live on both screens.",
+      caption: jamazonWalkthrough.summary,
     },
     metrics: [],
     plannedMetrics:
@@ -502,8 +543,7 @@ export const heroExamples: HeroExample[] = [
     video: {
       src: "/examples/videos/big-label.mp4",
       poster: "/examples/videos/big-label.jpg",
-      caption:
-        "An admin adds a viewer by email; the label appears in the viewer's menu live, read-only, a new artist shows up in the viewer's filtered search without a reload, and a rename reaches him once his Wi-Fi is back.",
+      caption: bigLabelWalkthrough.summary,
     },
     metrics: [
       {
@@ -535,106 +575,34 @@ export type BenchmarkSection = {
   description: string;
   /** Repository-relative directories whose metadata sources belong here. */
   sources: string[];
-  /**
-   * Benchmarks without metadata (the engine benches) listed here, by CodSpeed
-   * benchmark id: one bench name repeats once per scenario module, so a name
-   * alone does not identify a row.
-   */
-  benchmarks?: readonly EngineBenchmark[];
 };
-
-/** One engine row: a CodSpeed benchmark id and the scenario that tells it apart. */
-export type EngineBenchmark = {
-  /** CodSpeed's benchmark id, stable for the URI below. */
-  id: string;
-  /** CodSpeed name, shared by every scenario of the same bench. */
-  name: string;
-  scenario: string;
-  /** CodSpeed URI: `crates/groove/benches/<bench>.rs::<scenario module>::<name>`. */
-  uri: string;
-};
-
-const scenarioLabels: Record<string, string> = {
-  author_posts: "Author posts",
-  feed: "Feed",
-  feed_top20: "Top-20 feed",
-  tasks: "Tasks",
-};
-
-function engineBenchmark(id: string, bench: string, module: string, name: string): EngineBenchmark {
-  return {
-    id,
-    name,
-    scenario: scenarioLabels[module],
-    uri: `crates/groove/benches/${bench}.rs::${module}::${name}`,
-  };
-}
-
-/**
- * The Groove cases CodSpeed measures on every merge, and only those: the IVM
- * engines at the measured size. Smaller sizes and the reference engines run
- * in the nightly CodSpeed run (`GROOVE_BENCH_SWEEP=1`); they are not listed,
- * so a size that stops being measured is not shown with a frozen number.
- */
-export const engineBenchmarks: readonly EngineBenchmark[] = [
-  engineBenchmark(
-    "6ab494d0ad9a6239bfdd8982",
-    "pull_vs_snapshot",
-    "author_posts",
-    "prepared_warm[5000]",
-  ),
-  engineBenchmark("6ab494d0ad9a6239bfdd8992", "pull_vs_snapshot", "feed", "prepared_warm[5000]"),
-  engineBenchmark(
-    "6ab494d0ad9a6239bfdd898a",
-    "pull_vs_snapshot",
-    "feed_top20",
-    "prepared_warm[5000]",
-  ),
-  engineBenchmark(
-    "6ab494d0ad9a6239bfdd8980",
-    "pull_vs_snapshot",
-    "author_posts",
-    "prepared_cold[5000]",
-  ),
-  engineBenchmark("6ab494d0ad9a6239bfdd8990", "pull_vs_snapshot", "feed", "prepared_cold[5000]"),
-  engineBenchmark(
-    "6ab494d0ad9a6239bfdd8988",
-    "pull_vs_snapshot",
-    "feed_top20",
-    "prepared_cold[5000]",
-  ),
-  engineBenchmark("6ab4a076ad9a6239bfddd0c7", "steady_state", "feed", "ivm[100]"),
-  engineBenchmark("6ab4a076ad9a6239bfddd0bd", "steady_state", "feed_top20", "ivm[100]"),
-  engineBenchmark("6ab4a076ad9a6239bfddd0d1", "steady_state", "tasks", "ivm[100]"),
-];
 
 export const moreBenchmarkSections: BenchmarkSection[] = [
   {
     id: "adopter-workloads",
     title: "Anonymized adopter workloads",
     description:
-      "Synthetic fixtures shaped like real adopters' schemas and data, with invented names and values. Permissioned resources brings a brand-new device from empty to a fully settled, permission-filtered view of a deep-permission resource catalogue through a device-local persistence relay, with every row authorized by the server.",
+      "Synthetic fixtures shaped like real adopters' schemas and data, with invented names and values. Permissioned resources brings a brand-new device from empty to a fully settled, permission-filtered view of a deep-permission resource catalogue straight from Core, with every row authorized by the server.",
     sources: ["examples/permissioned-resources/"],
   },
-  {
-    id: "engine",
-    title: "Engine",
-    description:
-      "What no product owns: Groove's incremental view maintenance measured directly, for one-shot reads through prepared shapes (author posts, feed and top-20 feed) and for keeping 100 live subscriptions current as writes arrive (feed, top-20 feed and tasks). The reference engines they are compared against (SQLite re-query, hand-written pull plans, snapshot re-runs) and the smaller sizes run in the nightly CodSpeed run, not on every merge.",
-    sources: ["crates/"],
-    benchmarks: engineBenchmarks,
-  },
 ];
+
+const loadTimeScenarios = "dev/benchmarks/example-load-times/scenarios/";
 
 /**
  * Where the examples page lists a benchmark with metadata: the id of the hero
  * example whose suite holds its metadata source, the id of a "More benchmarks"
  * section, or null for a result no current suite produces (a retired name
- * still in the CodSpeed history). Engine rows have no metadata and are listed
- * by id instead (`BenchmarkSection.benchmarks`).
+ * still in the CodSpeed history).
  */
 export function placeBenchmark(source: string | undefined): string | null {
   if (!source) return null;
+  // Browser load times live in one suite with a scenario module per example,
+  // named by the example's id; each is listed with its example.
+  if (source.startsWith(loadTimeScenarios)) {
+    const id = source.slice(loadTimeScenarios.length).replace(/\.mjs$/, "");
+    return heroExamples.some((example) => example.id === id) ? id : null;
+  }
   const hero = heroExamples.find(
     (example) => example.benchmarks && source.startsWith(`${example.benchmarks}/`),
   );
@@ -645,41 +613,25 @@ export function placeBenchmark(source: string | undefined): string | null {
   return section?.id ?? null;
 }
 
-/** A row of a benchmark table: a benchmark and, for engine rows, its scenario. */
-export type Placed<E> = E & { scenario?: string };
-
 /**
  * Every current benchmark that is not a metric card, grouped by the hero
- * example or "More benchmarks" section that lists it, sorted by name (then
- * scenario). `byName` holds the newest result per name for benchmarks with
- * metadata; engine rows come from `byId`, one per catalogued id. Retired
- * names and unmeasured engine sizes are left out.
+ * example or "More benchmarks" section that lists it, sorted by name.
+ * `byName` holds the newest result per name. Retired names are left out.
  */
 export function groupBenchmarks<E extends { bench: { id: string; name: string } }>(
   byName: ReadonlyMap<string, E>,
-  byId: ReadonlyMap<string, E>,
   sourceOf: (name: string) => string | undefined,
-): Map<string, Placed<E>[]> {
-  const grouped = new Map<string, Placed<E>[]>();
-  const add = (place: string, entry: Placed<E>) =>
+): Map<string, E[]> {
+  const grouped = new Map<string, E[]>();
+  const add = (place: string, entry: E) =>
     grouped.set(place, [...(grouped.get(place) ?? []), entry]);
   for (const [name, entry] of byName) {
     if (heroBenchmarkNames.has(name)) continue;
     const place = placeBenchmark(sourceOf(name));
     if (place) add(place, entry);
   }
-  for (const section of moreBenchmarkSections) {
-    for (const row of section.benchmarks ?? []) {
-      const entry = byId.get(row.id);
-      if (entry) add(section.id, { ...entry, scenario: row.scenario });
-    }
-  }
   for (const entries of grouped.values())
-    entries.sort(
-      (a, b) =>
-        a.bench.name.localeCompare(b.bench.name) ||
-        (a.scenario ?? "").localeCompare(b.scenario ?? ""),
-    );
+    entries.sort((a, b) => a.bench.name.localeCompare(b.bench.name));
   return grouped;
 }
 

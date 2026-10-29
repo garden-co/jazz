@@ -12,6 +12,7 @@ import {
 import type { JazzSession, JazzSessionActions, JazzSessionSnapshot } from "../session/state.js";
 import { attachJazzSessionConsumer } from "../session/consumer.js";
 import { JazzClientProvider, type CoreJazzClient } from "./provider.js";
+import { toError } from "../runtime/util.js";
 
 export type UseJazzSessionResult<Client = CoreJazzClient> = JazzSessionSnapshot<Client> &
   JazzSessionActions;
@@ -127,6 +128,25 @@ export function ConfiguredJazzSessionProvider<Config, Client extends CoreJazzCli
   return <SessionContext.Provider value={startup}>{fallback}</SessionContext.Provider>;
 }
 
+/** A host adapter's session exports, with its client type and session factory filled in. */
+export function createJazzSessionBindings<Config, Client extends CoreJazzClient>(
+  createJazzSession: (config: Config) => Promise<JazzSession<Client>>,
+) {
+  return {
+    useJazzSession: (): UseJazzSessionResult<Client> => useJazzSession<Client>(),
+    JazzSessionProvider: (
+      props: JazzSessionProviderProps<Client> | ConfiguredJazzSessionProviderProps<Config>,
+    ) =>
+      "session" in props ? (
+        <JazzSessionProvider {...props} />
+      ) : (
+        <ConfiguredJazzSessionProvider {...props} createJazzSession={createJazzSession} />
+      ),
+    /** Capture configuration once and retain the owner across authentication UI transitions. */
+    useJazzSessionOwner: (config: Config) => useJazzSessionOwner(config, createJazzSession),
+  };
+}
+
 /** Own a session while keeping application authentication coordination mounted across transitions.
  * Configuration is captured at mount; use a React key to replace it.
  */
@@ -156,7 +176,7 @@ export function useJazzSessionOwner<Config, Client extends CoreJazzClient>(
             else await created.close();
           },
           (reason: unknown) => {
-            const failure = reason instanceof Error ? reason : new Error(String(reason));
+            const failure = toError(reason);
             owner.promise = undefined;
             if (owner.active) setError(failure);
             throw failure;

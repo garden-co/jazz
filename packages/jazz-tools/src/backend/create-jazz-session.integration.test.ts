@@ -229,7 +229,7 @@ describe("Node shared backend session", () => {
       expect(
         await owner
           .getSnapshot()
-          .client!.db.one(app.posts.where({ id: row.id }), { tier: "global" }),
+          .client!.db.one(app.posts.where({ id: row.id }), { tier: "remote" }),
       ).toMatchObject({ text: "pending scope" });
     } finally {
       await owner.close();
@@ -284,7 +284,7 @@ describe("Node shared backend session", () => {
       );
       await expect(user.client!.forRequest({ headers: {} })).rejects.toThrow("backend account");
       expect(
-        await user.client!.db.one(app.notes.where({ id: initial.id }), { tier: "global" }),
+        await user.client!.db.one(app.notes.where({ id: initial.id }), { tier: "remote" }),
       ).toMatchObject({ text: "service" });
       await user
         .client!.db.insert(app.posts, { text: "ordinary positive" })
@@ -374,12 +374,12 @@ describe("Node shared backend session", () => {
       const note = await backend.db.insert(app.notes, { text: "invite" }).wait({ tier: "global" });
       const attributed = await backend.withAttribution(account);
 
-      const exclusive = await attributed.exclusiveTransaction(async (tx) => {
+      const serializable = await attributed.serializableTransaction(async (tx) => {
         const read = await tx.one(app.notes.where({ id: note.id }));
-        return { read, id: tx.insert(app.posts, { text: "exclusive" }).id };
+        return { read, id: tx.insert(app.posts, { text: "serializable" }).id };
       });
-      await exclusive.wait();
-      expect(exclusive.value.read).toMatchObject({ text: "invite" });
+      await serializable.wait();
+      expect(serializable.value.read).toMatchObject({ text: "invite" });
 
       const mergeable = await attributed.transaction(async (tx) => {
         const read = await tx.one(app.notes.where({ id: note.id }));
@@ -390,7 +390,7 @@ describe("Node shared backend session", () => {
 
       // Users may not insert notes; the attributed transaction admits the
       // write as the backend while recording the user as its author.
-      const admitted = await attributed.exclusiveTransaction(async (tx) => {
+      const admitted = await attributed.serializableTransaction(async (tx) => {
         await tx.one(app.notes.where({ id: note.id }));
         return tx.insert(app.notes, { text: "backend admitted" }).id;
       });
@@ -400,7 +400,7 @@ describe("Node shared backend session", () => {
       ).toMatchObject({ $createdBy: { account: account.id, identity: account.identity } });
 
       await expect(
-        attributed.exclusiveTransaction(async (tx) => {
+        attributed.serializableTransaction(async (tx) => {
           await tx.one(app.notes.where({ id: note.id }));
           tx.insert(app.posts, { text: "rolled back" });
           throw new Error("abort redeem");
@@ -408,7 +408,7 @@ describe("Node shared backend session", () => {
       ).rejects.toThrow("abort redeem");
       expect(await backend.db.all(app.posts.where({ text: "rolled back" }))).toEqual([]);
 
-      for (const id of [exclusive.value.id, mergeable.value.id]) {
+      for (const id of [serializable.value.id, mergeable.value.id]) {
         expect(await backend.db.one(app.posts.select("$createdBy").where({ id }))).toMatchObject({
           $createdBy: { account: account.id, identity: account.identity },
         });
@@ -445,12 +445,24 @@ describe("Node shared backend session", () => {
       });
       const db = writer.getSnapshot().client!.db;
       await db.insert(app.posts, { text: "before outage" }).wait({ tier: "global" });
+      // A remote subscription opened before the outage keeps updating after it.
+      const deliveries: string[][] = [];
+      const subscriptionErrors: Error[] = [];
+      const unsubscribe = db.subscribe(
+        app.posts,
+        {
+          onUpdate: (rows) => deliveries.push(rows.map((row) => row.text).sort()),
+          onError: (error) => subscriptionErrors.push(error),
+        },
+        { tier: "remote" },
+      );
+      await vi.waitFor(() => expect(deliveries.at(-1)).toEqual(["before outage"]));
 
       const port = server.port;
       await server.stop();
       const during = db.insert(app.posts, { text: "during outage" });
       await during.wait({ tier: "local" });
-      const globalRead = db.all(app.posts, { tier: "global" }).then(
+      const globalRead = db.all(app.posts, { tier: "remote" }).then(
         () => "resolved",
         (error: unknown) => error,
       );
@@ -464,7 +476,7 @@ describe("Node shared backend session", () => {
       server = await startLocalJazzServer({ appId, port, backendSecret, dataDir });
       // The client reconnects by itself within one capped backoff interval;
       // until then Global reads keep reporting the outage.
-      await vi.waitFor(() => db.all(app.posts, { tier: "global" }), {
+      await vi.waitFor(() => db.all(app.posts, { tier: "remote" }), {
         timeout: 15_000,
         interval: 250,
       });
@@ -473,7 +485,7 @@ describe("Node shared backend session", () => {
       await vi.waitFor(
         async () => {
           const texts = (
-            await observer!.getSnapshot().client!.db.all(app.posts, { tier: "global" })
+            await observer!.getSnapshot().client!.db.all(app.posts, { tier: "remote" })
           )
             .map((row) => row.text)
             .sort();
@@ -486,6 +498,23 @@ describe("Node shared backend session", () => {
         },
         { timeout: 15_000, interval: 250 },
       );
+      await observer
+        .getSnapshot()
+        .client!.db.insert(app.posts, { text: "from observer" })
+        .wait({ tier: "global" });
+      await vi.waitFor(
+        () =>
+          expect(deliveries.at(-1)).toEqual([
+            "after outage",
+            "before outage",
+            "during outage",
+            "from observer",
+            "late in outage",
+          ]),
+        { timeout: 15_000, interval: 250 },
+      );
+      expect(subscriptionErrors).toEqual([]);
+      unsubscribe();
     } finally {
       await observer?.close();
       await writer.close();

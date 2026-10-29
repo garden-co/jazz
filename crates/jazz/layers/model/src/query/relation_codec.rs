@@ -5,6 +5,7 @@
 // typed recursive literal tree carried by the relation-query Postcard grammar.
 
 use serde::de::{self, DeserializeSeed, SeqAccess, Visitor};
+use std::marker::PhantomData;
 use serde::{Deserialize, Serialize};
 
 const MAX_RELATION_BYTES: usize = 1 << 20;
@@ -142,31 +143,6 @@ fn deserialize_bounded_string<'de, D: de::Deserializer<'de>>(
     deserializer.deserialize_string(BoundedString)
 }
 
-fn deserialize_bounded_vec<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
-where
-    D: de::Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    struct BoundedVec<T>(std::marker::PhantomData<T>);
-    impl<'de, T: Deserialize<'de>> Visitor<'de> for BoundedVec<T> {
-        type Value = Vec<T>;
-        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-            formatter.write_str("a bounded relation collection")
-        }
-        fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Vec<T>, A::Error> {
-            let mut values = Vec::new();
-            while let Some(value) = sequence.next_element()? {
-                if values.len() == MAX_RELATION_ITEMS {
-                    return Err(de::Error::custom("relation-query collection limit"));
-                }
-                values.push(value);
-            }
-            Ok(values)
-        }
-    }
-    deserializer.deserialize_seq(BoundedVec(std::marker::PhantomData))
-}
-
 fn deserialize_bounded_option_string<'de, D: de::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<String>, D::Error> {
@@ -186,36 +162,6 @@ fn deserialize_bounded_option_string<'de, D: de::Deserializer<'de>>(
     deserializer.deserialize_option(OptionString)
 }
 
-fn deserialize_bounded_string_vec<'de, D: de::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Vec<String>, D::Error> {
-    struct StringSeed;
-    impl<'de> DeserializeSeed<'de> for StringSeed {
-        type Value = String;
-        fn deserialize<D: de::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
-            deserialize_bounded_string(d)
-        }
-    }
-    struct Values;
-    impl<'de> Visitor<'de> for Values {
-        type Value = Vec<String>;
-        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            f.write_str("bounded relation strings")
-        }
-        fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Self::Value, A::Error> {
-            let mut values = Vec::new();
-            while let Some(value) = sequence.next_element_seed(StringSeed)? {
-                if values.len() == MAX_RELATION_ITEMS {
-                    return Err(de::Error::custom("relation-query collection limit"));
-                }
-                values.push(value);
-            }
-            Ok(values)
-        }
-    }
-    deserializer.deserialize_seq(Values)
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[doc(hidden)]
 pub struct WireRelationQuery {
@@ -226,27 +172,13 @@ impl<'de> Deserialize<'de> for WireRelationQuery {
     fn deserialize<D: de::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
         struct BorrowedWireRelationQuery {
-            #[serde(deserialize_with = "deserialize_expr")]
+            #[serde(deserialize_with = "deserialize_nested")]
             rel: WireRelationExpr,
         }
         let _scope = DeserializeBudgetScope::enter::<D::Error>()?;
         let value = BorrowedWireRelationQuery::deserialize(deserializer)?;
         Ok(Self { rel: value.rel })
     }
-}
-
-fn deserialize_expr<'de, D: de::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<WireRelationExpr, D::Error> {
-    budget_enter::<D::Error>()?;
-    let result = WireRelationExpr::deserialize(deserializer);
-    budget_leave();
-    result
-}
-fn deserialize_expr_box<'de, D: de::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Box<WireRelationExpr>, D::Error> {
-    deserialize_expr(deserializer).map(Box::new)
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -258,9 +190,9 @@ enum WireRelationExpr {
         alias: Option<String>,
     },
     Filter {
-        #[serde(deserialize_with = "deserialize_expr_box")]
+        #[serde(deserialize_with = "deserialize_nested_box")]
         input: Box<WireRelationExpr>,
-        #[serde(deserialize_with = "deserialize_predicate")]
+        #[serde(deserialize_with = "deserialize_nested")]
         predicate: WireRelationPredicate,
     },
     Union {
@@ -268,50 +200,50 @@ enum WireRelationExpr {
         inputs: Vec<WireRelationUnionArm>,
     },
     Join {
-        #[serde(deserialize_with = "deserialize_expr_box")]
+        #[serde(deserialize_with = "deserialize_nested_box")]
         left: Box<WireRelationExpr>,
-        #[serde(deserialize_with = "deserialize_expr_box")]
+        #[serde(deserialize_with = "deserialize_nested_box")]
         right: Box<WireRelationExpr>,
-        #[serde(deserialize_with = "deserialize_join_condition_vec")]
+        #[serde(deserialize_with = "deserialize_bounded_vec")]
         on: Vec<WireRelationJoinCondition>,
         join_kind: WireRelationJoinKind,
     },
     Project {
-        #[serde(deserialize_with = "deserialize_expr_box")]
+        #[serde(deserialize_with = "deserialize_nested_box")]
         input: Box<WireRelationExpr>,
-        #[serde(deserialize_with = "deserialize_project_column_vec")]
+        #[serde(deserialize_with = "deserialize_bounded_vec")]
         columns: Vec<WireRelationProjectColumn>,
     },
     Gather {
-        #[serde(deserialize_with = "deserialize_expr_box")]
+        #[serde(deserialize_with = "deserialize_nested_box")]
         seed: Box<WireRelationExpr>,
-        #[serde(deserialize_with = "deserialize_expr_box")]
+        #[serde(deserialize_with = "deserialize_nested_box")]
         step: Box<WireRelationExpr>,
-        #[serde(deserialize_with = "deserialize_key")]
+        #[serde(deserialize_with = "deserialize_node")]
         frontier_key: WireRelationKeyRef,
         bound: WireRecursionBound,
-        #[serde(deserialize_with = "deserialize_key_vec")]
+        #[serde(deserialize_with = "deserialize_bounded_vec")]
         dedupe_key: Vec<WireRelationKeyRef>,
     },
     Distinct {
-        #[serde(deserialize_with = "deserialize_expr_box")]
+        #[serde(deserialize_with = "deserialize_nested_box")]
         input: Box<WireRelationExpr>,
-        #[serde(deserialize_with = "deserialize_key_vec")]
+        #[serde(deserialize_with = "deserialize_bounded_vec")]
         key: Vec<WireRelationKeyRef>,
     },
     OrderBy {
-        #[serde(deserialize_with = "deserialize_expr_box")]
+        #[serde(deserialize_with = "deserialize_nested_box")]
         input: Box<WireRelationExpr>,
-        #[serde(deserialize_with = "deserialize_order_by_vec")]
+        #[serde(deserialize_with = "deserialize_bounded_vec")]
         terms: Vec<WireRelationOrderBy>,
     },
     Offset {
-        #[serde(deserialize_with = "deserialize_expr_box")]
+        #[serde(deserialize_with = "deserialize_nested_box")]
         input: Box<WireRelationExpr>,
         offset: u32,
     },
     Limit {
-        #[serde(deserialize_with = "deserialize_expr_box")]
+        #[serde(deserialize_with = "deserialize_nested_box")]
         input: Box<WireRelationExpr>,
         limit: u32,
     },
@@ -321,7 +253,7 @@ enum WireRelationExpr {
 struct WireRelationUnionArm {
     #[serde(deserialize_with = "deserialize_bounded_string")]
     label: String,
-    #[serde(deserialize_with = "deserialize_expr")]
+    #[serde(deserialize_with = "deserialize_nested")]
     input: WireRelationExpr,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -329,7 +261,7 @@ enum WireRelationPredicate {
     Cmp {
         left: WireRelationColumnRef,
         op: WireRelationCmpOp,
-        #[serde(deserialize_with = "deserialize_value")]
+        #[serde(deserialize_with = "deserialize_node")]
         right: WireRelationValueRef,
     },
     IsNull {
@@ -340,24 +272,24 @@ enum WireRelationPredicate {
     },
     In {
         left: WireRelationColumnRef,
-        #[serde(deserialize_with = "deserialize_value_vec")]
+        #[serde(deserialize_with = "deserialize_bounded_vec")]
         values: Vec<WireRelationValueRef>,
     },
     Contains {
         left: WireRelationColumnRef,
-        #[serde(deserialize_with = "deserialize_value")]
+        #[serde(deserialize_with = "deserialize_node")]
         right: WireRelationValueRef,
     },
     EnumMatch {
         column: WireRelationColumnRef,
         #[serde(deserialize_with = "deserialize_bounded_string")]
         case: String,
-        #[serde(deserialize_with = "deserialize_predicate_box")]
+        #[serde(deserialize_with = "deserialize_nested_box")]
         payload: Box<WireRelationPredicate>,
     },
-    And(#[serde(deserialize_with = "deserialize_predicate_vec")] Vec<WireRelationPredicate>),
-    Or(#[serde(deserialize_with = "deserialize_predicate_vec")] Vec<WireRelationPredicate>),
-    Not(#[serde(deserialize_with = "deserialize_predicate_box")] Box<WireRelationPredicate>),
+    And(#[serde(deserialize_with = "deserialize_bounded_vec")] Vec<WireRelationPredicate>),
+    Or(#[serde(deserialize_with = "deserialize_bounded_vec")] Vec<WireRelationPredicate>),
+    Not(#[serde(deserialize_with = "deserialize_nested_box")] Box<WireRelationPredicate>),
     True,
     False,
 }
@@ -379,9 +311,9 @@ struct WireRelationColumnRef {
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 enum WireRelationValueRef {
-    Literal(#[serde(deserialize_with = "deserialize_json")] WireJson),
+    Literal(#[serde(deserialize_with = "deserialize_nested")] WireJson),
     Param(#[serde(deserialize_with = "deserialize_bounded_string")] String),
-    SessionRef(#[serde(deserialize_with = "deserialize_bounded_string_vec")] Vec<String>),
+    SessionRef(#[serde(deserialize_with = "deserialize_bounded_vec")] Vec<String>),
     OuterColumn(WireRelationColumnRef),
     FrontierColumn(WireRelationColumnRef),
     RowId(WireRelationRowIdRef),
@@ -442,140 +374,67 @@ enum WireJson {
     U64(u64),
     F64(u64),
     String(#[serde(deserialize_with = "deserialize_bounded_string")] String),
-    Array(#[serde(deserialize_with = "deserialize_json_vec")] Vec<WireJson>),
-    Object(#[serde(deserialize_with = "deserialize_json_object")] Vec<(String, WireJson)>),
+    Array(#[serde(deserialize_with = "deserialize_bounded_vec")] Vec<WireJson>),
+    Object(#[serde(deserialize_with = "deserialize_bounded_vec")] Vec<(String, WireJson)>),
 }
 
-fn deserialize_predicate<'de, D: de::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<WireRelationPredicate, D::Error> {
+/// Decodes a node that can nest further nodes, charging depth and node budget.
+fn deserialize_nested<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: de::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
     budget_enter::<D::Error>()?;
-    let result = WireRelationPredicate::deserialize(deserializer);
+    let result = T::deserialize(deserializer);
     budget_leave();
     result
 }
-fn deserialize_predicate_box<'de, D: de::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Box<WireRelationPredicate>, D::Error> {
-    deserialize_predicate(deserializer).map(Box::new)
+fn deserialize_nested_box<'de, D, T>(deserializer: D) -> Result<Box<T>, D::Error>
+where
+    D: de::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    deserialize_nested(deserializer).map(Box::new)
 }
-fn deserialize_predicate_vec<'de, D: de::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Vec<WireRelationPredicate>, D::Error> {
-    struct Seed;
-    impl<'de> DeserializeSeed<'de> for Seed {
-        type Value = WireRelationPredicate;
-        fn deserialize<D: de::Deserializer<'de>>(
-            self,
-            deserializer: D,
-        ) -> Result<Self::Value, D::Error> {
-            deserialize_predicate(deserializer)
-        }
-    }
-    struct Values;
-    impl<'de> Visitor<'de> for Values {
-        type Value = Vec<WireRelationPredicate>;
-        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            f.write_str("bounded relation predicates")
-        }
-        fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Self::Value, A::Error> {
-            let mut values = Vec::new();
-            while let Some(value) = sequence.next_element_seed(Seed)? {
-                if values.len() == MAX_RELATION_ITEMS {
-                    return Err(de::Error::custom("relation-query collection limit"));
-                }
-                values.push(value);
-            }
-            Ok(values)
-        }
-    }
-    deserializer.deserialize_seq(Values)
-}
-fn deserialize_json<'de, D: de::Deserializer<'de>>(deserializer: D) -> Result<WireJson, D::Error> {
-    budget_enter::<D::Error>()?;
-    let result = WireJson::deserialize(deserializer);
-    budget_leave();
-    result
-}
-fn deserialize_json_vec<'de, D: de::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Vec<WireJson>, D::Error> {
-    struct Seed;
-    impl<'de> DeserializeSeed<'de> for Seed {
-        type Value = WireJson;
-        fn deserialize<D: de::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
-            deserialize_json(d)
-        }
-    }
-    struct Values;
-    impl<'de> Visitor<'de> for Values {
-        type Value = Vec<WireJson>;
-        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            f.write_str("bounded JSON values")
-        }
-        fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Self::Value, A::Error> {
-            let mut values = Vec::new();
-            while let Some(value) = sequence.next_element_seed(Seed)? {
-                if values.len() == MAX_RELATION_ITEMS {
-                    return Err(de::Error::custom("relation-query collection limit"));
-                }
-                values.push(value);
-            }
-            Ok(values)
-        }
-    }
-    deserializer.deserialize_seq(Values)
+/// Decodes a leaf node, charging node budget only.
+fn deserialize_node<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: de::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    budget_node::<D::Error>()?;
+    T::deserialize(deserializer)
 }
 
-fn deserialize_json_object<'de, D: de::Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Vec<(String, WireJson)>, D::Error> {
-    struct StringSeed;
-    impl<'de> DeserializeSeed<'de> for StringSeed {
-        type Value = String;
-        fn deserialize<D: de::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
-            deserialize_bounded_string(d)
-        }
+/// An element of a bounded relation collection, decoded through its
+/// budget-charging deserializer.
+trait BoundedElement<'de>: Sized {
+    const EXPECTING: &'static str;
+    fn deserialize_element<D: de::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error>;
+}
+struct ElementSeed<T>(PhantomData<T>);
+impl<'de, T: BoundedElement<'de>> DeserializeSeed<'de> for ElementSeed<T> {
+    type Value = T;
+    fn deserialize<D: de::Deserializer<'de>>(self, deserializer: D) -> Result<T, D::Error> {
+        T::deserialize_element(deserializer)
     }
-    struct JsonSeed;
-    impl<'de> DeserializeSeed<'de> for JsonSeed {
-        type Value = WireJson;
-        fn deserialize<D: de::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
-            deserialize_json(d)
+}
+
+/// Decodes a collection of at most `MAX_RELATION_ITEMS` bounded elements.
+fn deserialize_bounded_vec<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: de::Deserializer<'de>,
+    T: BoundedElement<'de>,
+{
+    struct BoundedVec<T>(PhantomData<T>);
+    impl<'de, T: BoundedElement<'de>> Visitor<'de> for BoundedVec<T> {
+        type Value = Vec<T>;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str(T::EXPECTING)
         }
-    }
-    struct Entry;
-    impl<'de> DeserializeSeed<'de> for Entry {
-        type Value = (String, WireJson);
-        fn deserialize<D: de::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
-            struct Tuple;
-            impl<'de> Visitor<'de> for Tuple {
-                type Value = (String, WireJson);
-                fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                    f.write_str("a JSON object entry")
-                }
-                fn visit_seq<A: SeqAccess<'de>>(self, mut s: A) -> Result<Self::Value, A::Error> {
-                    let key = s
-                        .next_element_seed(StringSeed)?
-                        .ok_or_else(|| de::Error::custom("object key"))?;
-                    let value = s
-                        .next_element_seed(JsonSeed)?
-                        .ok_or_else(|| de::Error::custom("object value"))?;
-                    Ok((key, value))
-                }
-            }
-            d.deserialize_tuple(2, Tuple)
-        }
-    }
-    struct Entries;
-    impl<'de> Visitor<'de> for Entries {
-        type Value = Vec<(String, WireJson)>;
-        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            f.write_str("bounded JSON object")
-        }
-        fn visit_seq<A: SeqAccess<'de>>(self, mut s: A) -> Result<Self::Value, A::Error> {
+        fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Vec<T>, A::Error> {
             let mut values = Vec::new();
-            while let Some(value) = s.next_element_seed(Entry)? {
+            while let Some(value) = sequence.next_element_seed(ElementSeed(PhantomData))? {
                 if values.len() == MAX_RELATION_ITEMS {
                     return Err(de::Error::custom("relation-query collection limit"));
                 }
@@ -584,100 +443,52 @@ fn deserialize_json_object<'de, D: de::Deserializer<'de>>(
             Ok(values)
         }
     }
-    deserializer.deserialize_seq(Entries)
+    deserializer.deserialize_seq(BoundedVec(PhantomData))
 }
 
-macro_rules! bounded_node_vec {
-    ($function:ident, $seed:ident, $type:ty, $single:ident) => {
-        fn $function<'de, D: de::Deserializer<'de>>(
-            deserializer: D,
-        ) -> Result<Vec<$type>, D::Error> {
-            struct $seed;
-            impl<'de> DeserializeSeed<'de> for $seed {
-                type Value = $type;
-                fn deserialize<D: de::Deserializer<'de>>(self, d: D) -> Result<$type, D::Error> {
-                    $single(d)
-                }
+macro_rules! bounded_elements {
+    ($($type:ty => $deserialize:path, $expecting:literal;)*) => {$(
+        impl<'de> BoundedElement<'de> for $type {
+            const EXPECTING: &'static str = $expecting;
+            fn deserialize_element<D: de::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                $deserialize(d)
             }
-            struct Values;
-            impl<'de> Visitor<'de> for Values {
-                type Value = Vec<$type>;
-                fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                    f.write_str("bounded relation nodes")
-                }
-                fn visit_seq<A: SeqAccess<'de>>(self, mut s: A) -> Result<Self::Value, A::Error> {
-                    let mut values = Vec::new();
-                    while let Some(value) = s.next_element_seed($seed)? {
-                        if values.len() == MAX_RELATION_ITEMS {
-                            return Err(de::Error::custom("relation-query collection limit"));
-                        }
-                        values.push(value);
-                    }
-                    Ok(values)
-                }
-            }
-            deserializer.deserialize_seq(Values)
         }
-    };
+    )*};
 }
-fn deserialize_value<'de, D: de::Deserializer<'de>>(
-    d: D,
-) -> Result<WireRelationValueRef, D::Error> {
-    budget_node::<D::Error>()?;
-    WireRelationValueRef::deserialize(d)
+bounded_elements! {
+    String => deserialize_bounded_string, "bounded relation strings";
+    WireRelationUnionArm => WireRelationUnionArm::deserialize, "a bounded relation collection";
+    WireRelationPredicate => deserialize_nested, "bounded relation predicates";
+    WireJson => deserialize_nested, "bounded JSON values";
+    WireRelationValueRef => deserialize_node, "bounded relation nodes";
+    WireRelationKeyRef => deserialize_node, "bounded relation nodes";
+    WireRelationJoinCondition => deserialize_node, "bounded relation nodes";
+    WireRelationProjectColumn => deserialize_node, "bounded relation nodes";
+    WireRelationOrderBy => deserialize_node, "bounded relation nodes";
 }
-fn deserialize_key<'de, D: de::Deserializer<'de>>(d: D) -> Result<WireRelationKeyRef, D::Error> {
-    budget_node::<D::Error>()?;
-    WireRelationKeyRef::deserialize(d)
+impl<'de> BoundedElement<'de> for (String, WireJson) {
+    const EXPECTING: &'static str = "bounded JSON object";
+    fn deserialize_element<D: de::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Entry;
+        impl<'de> Visitor<'de> for Entry {
+            type Value = (String, WireJson);
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a JSON object entry")
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut s: A) -> Result<Self::Value, A::Error> {
+                let key = s
+                    .next_element_seed(ElementSeed(PhantomData))?
+                    .ok_or_else(|| de::Error::custom("object key"))?;
+                let value = s
+                    .next_element_seed(ElementSeed(PhantomData))?
+                    .ok_or_else(|| de::Error::custom("object value"))?;
+                Ok((key, value))
+            }
+        }
+        d.deserialize_tuple(2, Entry)
+    }
 }
-fn deserialize_join_condition<'de, D: de::Deserializer<'de>>(
-    d: D,
-) -> Result<WireRelationJoinCondition, D::Error> {
-    budget_node::<D::Error>()?;
-    WireRelationJoinCondition::deserialize(d)
-}
-fn deserialize_project_column<'de, D: de::Deserializer<'de>>(
-    d: D,
-) -> Result<WireRelationProjectColumn, D::Error> {
-    budget_node::<D::Error>()?;
-    WireRelationProjectColumn::deserialize(d)
-}
-fn deserialize_order_by<'de, D: de::Deserializer<'de>>(
-    d: D,
-) -> Result<WireRelationOrderBy, D::Error> {
-    budget_node::<D::Error>()?;
-    WireRelationOrderBy::deserialize(d)
-}
-bounded_node_vec!(
-    deserialize_value_vec,
-    ValueSeed,
-    WireRelationValueRef,
-    deserialize_value
-);
-bounded_node_vec!(
-    deserialize_key_vec,
-    KeySeed,
-    WireRelationKeyRef,
-    deserialize_key
-);
-bounded_node_vec!(
-    deserialize_join_condition_vec,
-    JoinSeed,
-    WireRelationJoinCondition,
-    deserialize_join_condition
-);
-bounded_node_vec!(
-    deserialize_project_column_vec,
-    ProjectSeed,
-    WireRelationProjectColumn,
-    deserialize_project_column
-);
-bounded_node_vec!(
-    deserialize_order_by_vec,
-    OrderSeed,
-    WireRelationOrderBy,
-    deserialize_order_by
-);
 
 impl TryFrom<&RelationQuery> for WireRelationQuery {
     type Error = RelationWireError;
@@ -1546,10 +1357,13 @@ mod relation_postcard_tests {
                 alias: None,
             },
         });
+        // The relation is followed by the empty `partial` vec.
         let mut query_bytes = postcard::to_allocvec(&query).unwrap();
+        assert_eq!(query_bytes.pop(), Some(0));
         assert!(query_bytes.ends_with(&table_scan));
         query_bytes.truncate(query_bytes.len() - table_scan.len());
         query_bytes.extend(&relation);
+        query_bytes.push(0);
         assert!(std::panic::catch_unwind(|| postcard::from_bytes::<Query>(&query_bytes)).is_ok());
         assert!(postcard::from_bytes::<Query>(&query_bytes).is_err());
         let valid_query_bytes = postcard::to_allocvec(&query).unwrap();
@@ -1674,5 +1488,48 @@ mod relation_postcard_tests {
         query.relation = Some(relation.clone());
         let query_bytes = postcard::to_allocvec(&query).unwrap();
         assert_eq!(postcard::from_bytes::<Query>(&query_bytes).unwrap(), query);
+    }
+
+    /// The TypeScript native codec's pinned query bytes
+    /// (`crates/jazz/fixtures/native_query_codec.json`) decode as the Rust
+    /// `Query` and re-encode to the same bytes, so the two layouts agree.
+    #[test]
+    fn typescript_native_query_codec_bytes_decode_and_reencode_exactly() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/native_query_codec.json");
+        let fixture: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let cases = fixture["cases"].as_array().unwrap();
+        assert!(!cases.is_empty());
+        for case in cases {
+            let name = case["name"].as_str().unwrap();
+            let bytes = hex::decode(case["query_hex"].as_str().unwrap()).unwrap();
+            let query = postcard::from_bytes::<Query>(&bytes)
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(postcard::to_allocvec(&query).unwrap(), bytes, "{name}");
+            if name == "partial_selects_bytes_text_json" {
+                assert_eq!(
+                    query.partial,
+                    vec![
+                        PartialSelect {
+                            column: "payload".into(),
+                            part: Part::Bytes { from: 70_001, to: 70_005 },
+                        },
+                        PartialSelect {
+                            column: "body".into(),
+                            part: Part::TextUtf16 { from: 300, to: 302 },
+                        },
+                        PartialSelect {
+                            column: "title".into(),
+                            part: Part::TextUtf8 { from: 4, to: 9 },
+                        },
+                        PartialSelect {
+                            column: "metadata".into(),
+                            part: Part::JsonPointer("/nested/answer".into()),
+                        },
+                    ]
+                );
+            }
+        }
     }
 }

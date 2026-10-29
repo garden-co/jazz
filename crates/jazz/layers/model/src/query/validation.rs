@@ -211,9 +211,7 @@ pub fn binding_values_from_canonical_bytes(
 }
 
 #[doc(hidden)]
-pub fn binding_id_for_values(
-    values: &BTreeMap<String, Value>,
-) -> Result<BindingId, QueryError> {
+pub fn binding_id_for_values(values: &BTreeMap<String, Value>) -> Result<BindingId, QueryError> {
     Ok(BindingId(uuid::Uuid::new_v5(
         &QUERY_NAMESPACE,
         &canonical_binding_bytes(values)?,
@@ -249,6 +247,14 @@ pub enum QueryError {
     /// Operand types do not match.
     #[error("operand type mismatch")]
     OperandTypeMismatch,
+    /// A `contains` needle has a different type than its text/array haystack requires.
+    #[error("contains needle has type {actual:?}; expected {expected:?}")]
+    ContainsNeedleTypeMismatch {
+        /// Required needle type from the text or array haystack.
+        expected: Box<ColumnType>,
+        /// Inferred type of the supplied needle.
+        actual: Box<ColumnType>,
+    },
     /// An `in` candidate does not match its column's whole-value type.
     #[error(
         "in candidate for column {column} has type {candidate_type:?}, but the column has type {column_type:?}"
@@ -394,6 +400,124 @@ fn validate_query_with_schema_version_as(
 
 type ValidatedQueryCanonicalParts = (Query, BTreeMap<String, ColumnType>, Vec<u8>);
 
+impl Query {
+    /// Whether any flat-join source reads retained history.
+    #[doc(hidden)]
+    pub fn uses_history(&self) -> bool {
+        std::iter::once(&self.table)
+            .chain(
+                self.flat_join
+                    .iter()
+                    .flat_map(|join| join.sources.iter().map(|source| &source.table)),
+            )
+            .any(|table| crate::schema::history::is_history_table(&table))
+    }
+
+    /// A conjunctive finite row constraint bounds a primary-key source.
+    #[doc(hidden)]
+    pub fn primary_key_operands(&self) -> Option<Vec<&Operand>> {
+        fn bounded_id(predicate: &Predicate) -> Option<Vec<&Operand>> {
+            let supplied =
+                |value: &Operand| matches!(value, Operand::Literal(_) | Operand::Param(_));
+            match predicate {
+                Predicate::All(predicates) => predicates.iter().find_map(bounded_id),
+                // Validation canonicalizes an empty IN list to false.
+                Predicate::Any(predicates) if predicates.is_empty() => Some(Vec::new()),
+                Predicate::Eq(Operand::Column(column), value)
+                | Predicate::Eq(value, Operand::Column(column)) => {
+                    (column == "id" && supplied(value)).then(|| vec![value])
+                }
+                Predicate::In(Operand::Column(column), values) => {
+                    (column == "id" && values.iter().all(supplied)).then(|| values.iter().collect())
+                }
+                _ => None,
+            }
+        }
+        self.filters.iter().find_map(bounded_id)
+    }
+}
+
+fn supplied_transaction_id(predicate: &Predicate) -> bool {
+    match predicate {
+        Predicate::All(predicates) | Predicate::Any(predicates) => {
+            predicates.iter().any(supplied_transaction_id)
+        }
+        Predicate::Not(predicate)
+        | Predicate::EnumMatch {
+            payload: predicate, ..
+        } => supplied_transaction_id(predicate),
+        predicate => {
+            predicate.any_operand(&mut |operand| {
+                matches!(operand,
+                Operand::Column(column) if column.rsplit('.').next() == Some("$transactionId"))
+            }) && predicate.any_operand(&mut |operand| {
+                matches!(operand, Operand::Literal(_) | Operand::Param(_))
+            })
+        }
+    }
+}
+
+fn validate_history_query(
+    query: &Query,
+    schema: &RuntimeSchema,
+    role: RelationProjectionRole,
+) -> Result<ValidatedQueryCanonicalParts, QueryError> {
+    let source_name = crate::schema::history::history_source_table(&query.table)
+        .ok_or_else(|| QueryError::UnknownTable(query.table.clone()))?;
+    let source = schema_table(schema, source_name)
+        .map_err(|_| QueryError::UnknownTable(query.table.clone()))?;
+    let history = crate::schema::history::HistoryRelationSchema::new(source);
+    let unsupported = |pattern: &str| {
+        QueryError::UnsupportedRelationQuery(format!(
+            "Reading {pattern} is not supported in history queries yet"
+        ))
+    };
+    if !query.joins.is_empty()
+        || !query.includes.is_empty()
+        || !query.array_subqueries.is_empty()
+        || !query.reachable.is_empty()
+        || !query.inherits.is_empty()
+        || !query.policy_branches.is_empty()
+        || query.relation.is_some()
+    {
+        return Err(unsupported("joins or relationships"));
+    }
+    if let Some(aggregate) = &query.aggregate
+        && aggregate
+            .group_by
+            .iter()
+            .chain(
+                aggregate
+                    .aggregates
+                    .iter()
+                    .filter_map(|output| output.column.as_ref()),
+            )
+            .any(|column| column.starts_with('$'))
+    {
+        return Err(unsupported("aggregates over history metadata"));
+    }
+    if query.flat_join.is_none() && query.primary_key_operands().is_none() {
+        return Err(unsupported(
+            "history without an id equality or IN constraint",
+        ));
+    }
+    if query.filters.iter().any(supplied_transaction_id) {
+        return Err(unsupported("user-provided $transactionId predicates"));
+    }
+    if query
+        .order_by
+        .iter()
+        .any(|order| order.column == "$transactionId")
+    {
+        return Err(unsupported("ordering by $transactionId"));
+    }
+    // This is a query-local descriptor, never a writable catalogue table.
+    let table = history.table_schema();
+    let mut schema = schema.clone();
+    schema.tables.push(table);
+    validate_query_canonical_parts_as(query, &schema, role)
+}
+
 fn validate_query_canonical_parts(
     query: &Query,
     schema: &RuntimeSchema,
@@ -401,11 +525,646 @@ fn validate_query_canonical_parts(
     validate_query_canonical_parts_as(query, schema, RelationProjectionRole::Result)
 }
 
+// Preparation and checking share the schema-aware traversal. Only preparation
+// owns inference; nullable-sensitive checks see the final immutable domain.
+enum ParameterPhase<'a> {
+    Prepare(&'a mut ParameterDomain),
+    Check(&'a BTreeMap<String, ColumnType>),
+}
+
+#[derive(Clone, Copy)]
+struct ParameterFact {
+    descriptor: usize,
+    required: bool,
+}
+
+#[derive(Clone, Copy)]
+enum ParameterTerm {
+    Param(usize),
+    Known(ParameterFact),
+    Dynamic,
+}
+
+enum ParameterDescriptor {
+    Fixed(ColumnType),
+    // Keep the member live: copying a provisional nullable member would make
+    // aliases of this constructor stale when that member becomes required.
+    Array(ParameterTerm),
+}
+
+#[derive(Clone, Copy)]
+enum ParameterRelationship {
+    Compare,
+    In,
+    Contains,
+}
+
+struct ParameterRequirement {
+    fact: Option<ParameterFact>,
+    dependents: Vec<usize>,
+    constructed_dependents: Vec<usize>,
+    notified: usize,
+    needle_seen: usize,
+    haystack_seen: usize,
+    fallback_deferred: usize,
+}
+
+struct ParameterDependency {
+    relationship: ParameterRelationship,
+    left: ParameterTerm,
+    right: ParameterTerm,
+    literal: bool,
+    member: Option<ParameterTerm>,
+    constructor_queued: bool,
+}
+
+#[derive(Default)]
+struct ParameterDomain {
+    names: BTreeMap<String, usize>,
+    requirements: Vec<ParameterRequirement>,
+    descriptors: Vec<ParameterDescriptor>,
+    dependencies: Vec<ParameterDependency>,
+    pending: std::collections::VecDeque<usize>,
+    queued: Vec<bool>,
+    affected: Vec<usize>,
+    notification: usize,
+    literal_dependencies: Vec<usize>,
+    contains_dependencies: Vec<usize>,
+    constructors: std::collections::VecDeque<usize>,
+    needle_search: Vec<usize>,
+    haystack_search: Vec<usize>,
+    needle_generation: usize,
+    haystack_generation: usize,
+}
+
+impl ParameterDomain {
+    fn parameter(&mut self, name: &str) -> ParameterTerm {
+        if let Some(index) = self.names.get(name) {
+            return ParameterTerm::Param(*index);
+        }
+        let index = self.requirements.len();
+        self.names.insert(name.to_owned(), index);
+        self.requirements.push(ParameterRequirement {
+            fact: None,
+            dependents: Vec::new(),
+            constructed_dependents: Vec::new(),
+            notified: 0,
+            needle_seen: 0,
+            haystack_seen: 0,
+            fallback_deferred: 0,
+        });
+        ParameterTerm::Param(index)
+    }
+
+    fn known(&mut self, ty: ColumnType) -> ParameterTerm {
+        let (base, required) = match ty {
+            ColumnType::Nullable(inner) => (*inner, false),
+            other => (other, true),
+        };
+        let descriptor = self.descriptors.len();
+        self.descriptors.push(ParameterDescriptor::Fixed(base));
+        ParameterTerm::Known(ParameterFact {
+            descriptor,
+            required,
+        })
+    }
+
+    fn term(
+        &mut self,
+        table: &TableSchema,
+        operand: &Operand,
+    ) -> Result<ParameterTerm, QueryError> {
+        Ok(match operand {
+            Operand::Param(name) => self.parameter(name),
+            Operand::Column(column) => self.known(planner_column_type(table, column)?.clone()),
+            Operand::Literal(value) => self.known(value_type(value)?),
+            Operand::Claim(name) => match claim_type(name)? {
+                Some(ty) => self.known(ty),
+                None => ParameterTerm::Dynamic,
+            },
+        })
+    }
+
+    fn relationship(
+        &mut self,
+        table: &TableSchema,
+        left: &Operand,
+        right: &Operand,
+        relationship: ParameterRelationship,
+    ) -> Result<(), QueryError> {
+        // Empty vectors/maps allocate nothing on the ordinary no-param path.
+        if !matches!(left, Operand::Param(_)) && !matches!(right, Operand::Param(_)) {
+            return Ok(());
+        }
+        let left_term = self.term(table, left)?;
+        let right_term = self.term(table, right)?;
+        let index = self.dependencies.len();
+        for term in [left_term, right_term] {
+            if let ParameterTerm::Param(param) = term {
+                self.requirements[param].dependents.push(index);
+            }
+        }
+        let literal = matches!(left, Operand::Literal(_)) || matches!(right, Operand::Literal(_));
+        if literal {
+            self.literal_dependencies.push(index);
+        }
+        if matches!(relationship, ParameterRelationship::Contains) {
+            self.contains_dependencies.push(index);
+        }
+        self.dependencies.push(ParameterDependency {
+            relationship,
+            left: left_term,
+            right: right_term,
+            literal,
+            member: None,
+            constructor_queued: false,
+        });
+        self.queued.push(false);
+        Ok(())
+    }
+
+    fn fact(&self, term: ParameterTerm) -> Option<ParameterFact> {
+        match term {
+            ParameterTerm::Param(index) => self.requirements[index].fact,
+            ParameterTerm::Known(fact) => Some(fact),
+            ParameterTerm::Dynamic => None,
+        }
+    }
+
+    fn matches_type(&self, fact: ParameterFact, ty: &ColumnType) -> bool {
+        let (base, required) = match ty {
+            ColumnType::Nullable(inner) => (inner.as_ref(), false),
+            other => (other, true),
+        };
+        fact.required == required && self.descriptor_matches_type(fact.descriptor, base)
+    }
+
+    fn descriptor_matches_type(&self, descriptor: usize, ty: &ColumnType) -> bool {
+        match (&self.descriptors[descriptor], ty) {
+            (ParameterDescriptor::Fixed(actual), expected) => actual == expected,
+            (ParameterDescriptor::Array(member), ColumnType::Array(expected)) => self
+                .fact(*member)
+                .is_some_and(|fact| self.matches_type(fact, expected)),
+            _ => false,
+        }
+    }
+
+    fn same_descriptor(&self, left: usize, right: usize) -> bool {
+        if left == right {
+            return true;
+        }
+        match (&self.descriptors[left], &self.descriptors[right]) {
+            (ParameterDescriptor::Fixed(left), _) => self.descriptor_matches_type(right, left),
+            (_, ParameterDescriptor::Fixed(right)) => self.descriptor_matches_type(left, right),
+            (ParameterDescriptor::Array(left), ParameterDescriptor::Array(right)) => {
+                match (self.fact(*left), self.fact(*right)) {
+                    (Some(left), Some(right)) => {
+                        left.required == right.required
+                            && self.same_descriptor(left.descriptor, right.descriptor)
+                    }
+                    _ => false,
+                }
+            }
+        }
+    }
+
+    fn depends_on(&self, descriptor: usize, param: usize) -> bool {
+        match self.descriptors[descriptor] {
+            ParameterDescriptor::Fixed(_) => false,
+            ParameterDescriptor::Array(ParameterTerm::Param(member)) => {
+                member == param
+                    || self.requirements[member]
+                        .fact
+                        .is_some_and(|fact| self.depends_on(fact.descriptor, param))
+            }
+            ParameterDescriptor::Array(ParameterTerm::Known(fact)) => {
+                self.depends_on(fact.descriptor, param)
+            }
+            ParameterDescriptor::Array(ParameterTerm::Dynamic) => false,
+        }
+    }
+
+    fn enqueue(&mut self, dependency: usize) {
+        if !self.queued[dependency] {
+            self.queued[dependency] = true;
+            self.pending.push_back(dependency);
+        }
+    }
+
+    fn register_constructor_consumer(&mut self, descriptor: usize, consumer: usize) {
+        match self.descriptors[descriptor] {
+            ParameterDescriptor::Array(ParameterTerm::Param(member)) => {
+                self.requirements[member]
+                    .constructed_dependents
+                    .push(consumer);
+            }
+            ParameterDescriptor::Array(ParameterTerm::Known(fact)) => {
+                self.register_constructor_consumer(fact.descriptor, consumer);
+            }
+            _ => {}
+        }
+    }
+
+    fn require(&mut self, term: ParameterTerm, fact: ParameterFact) -> Result<(), QueryError> {
+        let ParameterTerm::Param(index) = term else {
+            return Ok(());
+        };
+        let changed = match self.requirements[index].fact {
+            None => {
+                if self.depends_on(fact.descriptor, index) {
+                    return Err(QueryError::OperandTypeMismatch);
+                }
+                self.requirements[index].fact = Some(fact);
+                self.register_constructor_consumer(fact.descriptor, index);
+                true
+            }
+            Some(existing)
+                if self.same_descriptor(existing.descriptor, fact.descriptor)
+                    && fact.required
+                    && !existing.required =>
+            {
+                self.requirements[index].fact = Some(ParameterFact {
+                    required: true,
+                    ..existing
+                });
+                true
+            }
+            // Heterogeneous comparability is not transitive. Keep independently
+            // anchored descriptors distinct; the immutable checker decides
+            // operator compatibility (including literal width normalisation).
+            Some(_) => false,
+        };
+        if changed {
+            // A constructor's member can change without its descriptor index
+            // changing. Notify all consumers of that descriptor, transitively.
+            self.notification += 1;
+            self.affected.push(index);
+            while let Some(param) = self.affected.pop() {
+                if self.requirements[param].notified == self.notification {
+                    continue;
+                }
+                self.requirements[param].notified = self.notification;
+                for offset in 0..self.requirements[param].dependents.len() {
+                    self.enqueue(self.requirements[param].dependents[offset]);
+                }
+                self.affected
+                    .extend_from_slice(&self.requirements[param].constructed_dependents);
+            }
+        }
+        Ok(())
+    }
+
+    fn unresolved_alias(&self, dependency: usize, param: usize) -> Option<usize> {
+        let dependency = &self.dependencies[dependency];
+        if dependency.literal || matches!(dependency.relationship, ParameterRelationship::Contains)
+        {
+            return None;
+        }
+        let (ParameterTerm::Param(left), ParameterTerm::Param(right)) =
+            (dependency.left, dependency.right)
+        else {
+            return None;
+        };
+        let other = if left == param { right } else { left };
+        self.requirements[other].fact.is_none().then_some(other)
+    }
+
+    fn ready_constructor(&self, dependency: usize) -> bool {
+        let dependency = &self.dependencies[dependency];
+        matches!(dependency.relationship, ParameterRelationship::Contains)
+            && matches!(dependency.left, ParameterTerm::Param(_))
+            && self.fact(dependency.left).is_none()
+            && self.fact(dependency.right).is_some()
+    }
+
+    fn ready_forward_provider(&mut self, needle: usize) -> Option<usize> {
+        // Mark this unknown alias component first: its own constructors cannot
+        // supply a forward expectation to themselves. This is dependency
+        // lookahead, not a union of broadly comparable descriptors.
+        self.needle_generation += 1;
+        self.haystack_generation += 1;
+        self.needle_search.clear();
+        self.haystack_search.clear();
+        self.needle_search.push(needle);
+        while let Some(param) = self.needle_search.pop() {
+            if self.requirements[param].needle_seen == self.needle_generation {
+                continue;
+            }
+            self.requirements[param].needle_seen = self.needle_generation;
+            for offset in 0..self.requirements[param].dependents.len() {
+                let index = self.requirements[param].dependents[offset];
+                if let Some(other) = self.unresolved_alias(index, param) {
+                    self.needle_search.push(other);
+                }
+                let dependency = &self.dependencies[index];
+                if matches!(dependency.relationship, ParameterRelationship::Contains)
+                    && matches!(dependency.right, ParameterTerm::Param(right) if right == param)
+                    && let ParameterTerm::Param(haystack) = dependency.left
+                    && self.requirements[haystack].fact.is_none()
+                {
+                    self.haystack_search.push(haystack);
+                }
+            }
+        }
+        // Follow forward providers transitively, including unknown aliases
+        // between them. A deeper provider may make this haystack a String,
+        // rather than the Array its own premature fallback would choose.
+        while let Some(param) = self.haystack_search.pop() {
+            if self.requirements[param].needle_seen == self.needle_generation
+                || self.requirements[param].haystack_seen == self.haystack_generation
+            {
+                continue;
+            }
+            self.requirements[param].haystack_seen = self.haystack_generation;
+            for offset in 0..self.requirements[param].dependents.len() {
+                let index = self.requirements[param].dependents[offset];
+                if let Some(other) = self.unresolved_alias(index, param) {
+                    self.haystack_search.push(other);
+                }
+                let dependency = &self.dependencies[index];
+                if matches!(dependency.left, ParameterTerm::Param(left) if left == param)
+                    && self.ready_constructor(index)
+                {
+                    return Some(index);
+                }
+                if matches!(dependency.relationship, ParameterRelationship::Contains)
+                    && matches!(dependency.right, ParameterTerm::Param(right) if right == param)
+                    && let ParameterTerm::Param(haystack) = dependency.left
+                    && self.requirements[haystack].fact.is_none()
+                {
+                    self.haystack_search.push(haystack);
+                }
+            }
+        }
+        None
+    }
+
+    fn enqueue_constructor(&mut self, index: usize) {
+        if self.ready_constructor(index) && !self.dependencies[index].constructor_queued {
+            self.dependencies[index].constructor_queued = true;
+            self.constructors.push_back(index);
+        }
+    }
+
+    fn drain_pending(&mut self, literals: bool, constructors: bool) -> Result<(), QueryError> {
+        while let Some(index) = self.pending.pop_front() {
+            self.queued[index] = false;
+            self.settle_dependency(index, u8::from(literals))?;
+            if constructors {
+                self.enqueue_constructor(index);
+            }
+        }
+        Ok(())
+    }
+
+    fn settle_dependency(&mut self, index: usize, fallbacks: u8) -> Result<(), QueryError> {
+        let dependency = &self.dependencies[index];
+        let (left, right, relationship, literal) = (
+            dependency.left,
+            dependency.right,
+            dependency.relationship,
+            dependency.literal,
+        );
+        if literal && fallbacks == 0 {
+            return Ok(());
+        }
+        match relationship {
+            ParameterRelationship::Compare | ParameterRelationship::In => {
+                match (self.fact(left), self.fact(right)) {
+                    (Some(fact), None) => self.require(right, fact)?,
+                    (None, Some(fact)) => self.require(left, fact)?,
+                    (Some(left_fact), Some(right_fact))
+                        if !literal
+                            && self
+                                .same_descriptor(left_fact.descriptor, right_fact.descriptor) =>
+                    {
+                        self.require(left, right_fact)?;
+                        self.require(right, left_fact)?;
+                    }
+                    _ => {}
+                }
+            }
+            ParameterRelationship::Contains => {
+                if let Some(haystack) = self.fact(left) {
+                    let member = if let Some(member) = self.dependencies[index].member {
+                        Some(member)
+                    } else {
+                        let member = match &self.descriptors[haystack.descriptor] {
+                            ParameterDescriptor::Fixed(ColumnType::String) => {
+                                Some(self.known(ColumnType::String))
+                            }
+                            ParameterDescriptor::Fixed(ColumnType::Array(member)) => {
+                                let ty = member.as_ref().clone();
+                                Some(self.known(ty))
+                            }
+                            ParameterDescriptor::Array(member) => Some(*member),
+                            _ => None,
+                        };
+                        self.dependencies[index].member = member;
+                        member
+                    };
+                    if let Some(member) = member {
+                        // Only inferred constructors reconcile their needles'
+                        // requiredness. A schema Array<Nullable<T>> is fixed and
+                        // must still reject a separately required needle.
+                        if matches!(
+                            self.descriptors[haystack.descriptor],
+                            ParameterDescriptor::Array(_)
+                        ) && let (Some(member_fact), Some(right_fact)) =
+                            (self.fact(member), self.fact(right))
+                            && self.same_descriptor(member_fact.descriptor, right_fact.descriptor)
+                        {
+                            self.require(member, right_fact)?;
+                        }
+                        if let Some(fact) = self.fact(member) {
+                            self.require(right, fact)?;
+                        }
+                    }
+                } else if fallbacks == 2
+                    && self.fact(right).is_some()
+                    && matches!(left, ParameterTerm::Param(_))
+                {
+                    let ParameterTerm::Param(param) = left else {
+                        unreachable!()
+                    };
+                    let epoch = self.notification + 1;
+                    if self.requirements[param].fallback_deferred == epoch {
+                        return Ok(());
+                    }
+                    if let Some(provider) = self.ready_forward_provider(param) {
+                        self.requirements[param].fallback_deferred = epoch;
+                        // Run the provider immediately instead of letting each
+                        // blocked consumer rescan its adjacency. Its stale
+                        // queued entry needs no linear removal and will be
+                        // skipped once its haystack is known. The epoch guard
+                        // lets other queued opportunities break provider cycles.
+                        self.dependencies[provider].constructor_queued = true;
+                        self.constructors.push_front(provider);
+                        return Ok(());
+                    }
+                    let descriptor = self.descriptors.len();
+                    self.descriptors.push(ParameterDescriptor::Array(right));
+                    self.require(
+                        left,
+                        ParameterFact {
+                            descriptor,
+                            required: true,
+                        },
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn materialize(&self, fact: ParameterFact) -> Result<ColumnType, QueryError> {
+        let base = match &self.descriptors[fact.descriptor] {
+            ParameterDescriptor::Fixed(ty) => ty.clone(),
+            ParameterDescriptor::Array(member) => ColumnType::Array(Box::new(
+                self.materialize(self.fact(*member).ok_or(QueryError::OperandTypeMismatch)?)?,
+            )),
+        };
+        Ok(if fact.required { base } else { base.nullable() })
+    }
+
+    fn finish(mut self) -> Result<BTreeMap<String, ColumnType>, QueryError> {
+        // Seed typed context once. Later phases awaken only deferred
+        // opportunities; notifications enqueue their affected relationships.
+        for index in 0..self.dependencies.len() {
+            self.enqueue(index);
+        }
+        self.drain_pending(false, false)?;
+        for offset in 0..self.literal_dependencies.len() {
+            self.enqueue(self.literal_dependencies[offset]);
+        }
+        self.drain_pending(true, false)?;
+        for offset in 0..self.contains_dependencies.len() {
+            self.enqueue_constructor(self.contains_dependencies[offset]);
+        }
+        while let Some(index) = self.constructors.pop_front() {
+            self.dependencies[index].constructor_queued = false;
+            if self.ready_constructor(index) {
+                self.settle_dependency(index, 2)?;
+                // Exhaust newly available forward context before the next
+                // backward choice, including aliases of constructed haystacks.
+                self.drain_pending(true, true)?;
+            }
+        }
+        let mut params = BTreeMap::new();
+        for (name, index) in std::mem::take(&mut self.names) {
+            let fact = self.requirements[index]
+                .fact
+                .ok_or(QueryError::OperandTypeMismatch)?;
+            params.insert(name, self.materialize(fact)?);
+        }
+        Ok(params)
+    }
+}
+
+fn validate_parameter_contexts(
+    query: &mut Query,
+    schema: &RuntimeSchema,
+    root: &TableSchema,
+    filter_schema: &TableSchema,
+    phase: &mut ParameterPhase<'_>,
+) -> Result<(), QueryError> {
+    for join in &mut query.joins {
+        validate_join(schema, root, &query.table, join, phase)?;
+    }
+    validate_predicates(filter_schema, &mut query.filters, phase)?;
+    for reachable in &mut query.reachable {
+        validate_reachable(schema, root, reachable, phase)?;
+    }
+    for branch in &mut query.policy_branches {
+        validate_predicates(root, &mut branch.filters, phase)?;
+        for join in &mut branch.joins {
+            validate_join(schema, root, &query.table, join, phase)?;
+        }
+        for reachable in &mut branch.reachable {
+            validate_reachable(schema, root, reachable, phase)?;
+        }
+    }
+    validate_array_subqueries(schema, root, &mut query.array_subqueries, phase)
+}
+
+fn prepare_parameter_domain(
+    query: &mut Query,
+    schema: &RuntimeSchema,
+    root: &TableSchema,
+    filter_schema: &TableSchema,
+    initial: BTreeMap<String, ColumnType>,
+) -> Result<BTreeMap<String, ColumnType>, QueryError> {
+    let mut domain = ParameterDomain::default();
+    for (name, ty) in &initial {
+        let parameter = domain.parameter(name);
+        let ParameterTerm::Known(fact) = domain.known(ty.clone()) else {
+            unreachable!()
+        };
+        domain.require(parameter, fact)?;
+    }
+    validate_parameter_contexts(
+        query,
+        schema,
+        root,
+        filter_schema,
+        &mut ParameterPhase::Prepare(&mut domain),
+    )?;
+    let params = domain.finish()?;
+    // UNION arms remain independent and their merged domain is exact. Outer
+    // presentation must not silently narrow an arm's published carrier.
+    for (name, ty) in initial {
+        if params.get(&name) != Some(&ty) {
+            return Err(QueryError::ParamTypeConflict { param: name });
+        }
+    }
+    validate_parameter_contexts(
+        query,
+        schema,
+        root,
+        filter_schema,
+        &mut ParameterPhase::Check(&params),
+    )?;
+    Ok(params)
+}
+
 fn validate_query_canonical_parts_as(
     query: &Query,
     schema: &RuntimeSchema,
     role: RelationProjectionRole,
 ) -> Result<ValidatedQueryCanonicalParts, QueryError> {
+    if query.uses_history() && query.filters.iter().any(supplied_transaction_id) {
+        return Err(QueryError::UnsupportedRelationQuery(
+            "Reading user-provided $transactionId predicates is not supported in history queries yet".into()));
+    }
+    let history_names = std::iter::once(&query.table)
+        .chain(
+            query
+                .flat_join
+                .iter()
+                .flat_map(|join| join.sources.iter().map(|source| &source.table)),
+        )
+        .filter(|name| {
+            crate::schema::history::is_history_table(&name)
+                && !schema.tables.iter().any(|table| &table.name == *name)
+        })
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if !history_names.is_empty() {
+        let mut virtual_schema = schema.clone();
+        for name in &history_names {
+            let base = crate::schema::history::history_source_table(&name).unwrap();
+            let source =
+                schema_table(schema, base).map_err(|_| QueryError::UnknownTable(name.clone()))?;
+            if name != &query.table {
+                let history = crate::schema::history::HistoryRelationSchema::new(source);
+                virtual_schema.tables.push(history.table_schema());
+            }
+        }
+        if history_names.contains(&query.table) {
+            return validate_history_query(query, &virtual_schema, role);
+        }
+        return validate_query_canonical_parts_as(query, &virtual_schema, role);
+    }
     let root = schema_table(schema, &query.table)?;
     let mut resolved_query = query.clone();
     let mut params = BTreeMap::new();
@@ -451,8 +1210,7 @@ fn validate_query_canonical_parts_as(
             resolved.array_subqueries = query.array_subqueries.clone();
             resolved.relation = None;
             resolved.select = query.select.clone();
-            let retain_relation =
-                retain_relation_output_projection(query, relation, &root, role)?;
+            let retain_relation = retain_relation_output_projection(query, relation, root, role)?;
             let (mut normalized, params, _) = validate_query_canonical_parts(&resolved, schema)?;
             if retain_relation {
                 normalized.relation = Some(relation.clone());
@@ -463,25 +1221,17 @@ fn validate_query_canonical_parts_as(
         validate_retained_relation_outer_query(query)?;
         reject_presentation_over_relation_projection(query)?;
         validate_retained_relation_union(relation, &query.table, schema, &mut params)?;
-        validate_array_subqueries(
-            schema,
-            &root,
-            &mut resolved_query.array_subqueries,
-            &mut params,
-        )?;
+        let params = prepare_parameter_domain(&mut resolved_query, schema, root, root, params)?;
         if let Some(select) = &query.select {
             for column in select {
-                validate_select_column(&root, column)?;
+                validate_select_column(root, column)?;
             }
         }
         let normalized = normalize_query(&resolved_query);
         let canonical = canonical_query_bytes_for_schema(&normalized, schema)?;
         return Ok((normalized, params, canonical));
     }
-    for join in &mut resolved_query.joins {
-        validate_join(schema, &root, &query.table, join, &mut params)?;
-    }
-    if let Some(flat_join) = &query.flat_join {
+    let flat_filter_schema = if let Some(flat_join) = &query.flat_join {
         let unsupported = [
             (flat_join.sources.is_empty(), "zero joined sources"),
             (!query.joins.is_empty(), "existential joins"),
@@ -509,56 +1259,40 @@ fn validate_query_canonical_parts_as(
             qualify_flat_join_predicate(predicate, &sources)?;
             validate_flat_join_filter_routing(predicate)?;
         }
-        let filter_schema = flat_join_filter_schema(&sources)?;
-        for predicate in &mut resolved_query.filters {
-            validate_predicate(&filter_schema, predicate, &mut params)?;
-        }
+        Some(flat_join_filter_schema(&sources)?)
     } else {
-        for predicate in &mut resolved_query.filters {
-            validate_predicate(&root, predicate, &mut params)?;
-        }
-    }
-    for reachable in &mut resolved_query.reachable {
-        validate_reachable(schema, &root, reachable, &mut params)?;
-    }
+        None
+    };
+    let params = prepare_parameter_domain(
+        &mut resolved_query,
+        schema,
+        root,
+        flat_filter_schema.as_ref().unwrap_or(root),
+        params,
+    )?;
     for inherits in &query.inherits {
-        validate_inherits(&root, inherits)?;
+        validate_inherits(root, inherits)?;
     }
     for branch in &mut resolved_query.policy_branches {
-        for predicate in &mut branch.filters {
-            validate_predicate(&root, predicate, &mut params)?;
-        }
-        for join in &mut branch.joins {
-            validate_join(schema, &root, &query.table, join, &mut params)?;
-        }
-        for reachable in &mut branch.reachable {
-            validate_reachable(schema, &root, reachable, &mut params)?;
-        }
         for inherits in &branch.inherits {
-            validate_inherits(&root, inherits)?;
+            validate_inherits(root, inherits)?;
         }
     }
     for include in &query.includes {
-        validate_include(schema, &root, &include.path)?;
+        validate_include(schema, root, &include.path)?;
     }
-    validate_array_subqueries(
-        schema,
-        &root,
-        &mut resolved_query.array_subqueries,
-        &mut params,
-    )?;
     if let Some(select) = &query.select {
         for column in select {
-            validate_select_column(&root, column)?;
+            validate_select_column(root, column)?;
         }
     }
     reject_author_ordering(&query.order_by)?;
     if let Some(aggregate) = &query.aggregate {
-        validate_aggregate(&root, aggregate)?;
+        validate_aggregate(root, aggregate)?;
         validate_aggregate_order_by(&query.table, aggregate, &query.order_by)?;
     } else {
         for order in &query.order_by {
-            planner_column_type(&root, &order.column)?;
+            planner_column_type(root, &order.column)?;
         }
     }
     let normalized = normalize_query(&resolved_query);
@@ -609,8 +1343,7 @@ fn is_full_identity_projection(
         let identity = match &column.expr {
             RelationProjectExpr::RowId(RelationRowIdRef::Current) => column.alias == "id",
             RelationProjectExpr::Column(reference) => {
-                reference.scope.as_deref() == Some(output_scope)
-                    && reference.column == column.alias
+                reference.scope.as_deref() == Some(output_scope) && reference.column == column.alias
             }
             RelationProjectExpr::RowId(_) => false,
         };
@@ -708,7 +1441,7 @@ fn validate_retained_relation_union(
                 column: term.column.column.clone(),
                 direction: term.direction,
             }])?;
-            planner_column_type(&output_table_schema, &term.column.column)?;
+            planner_column_type(output_table_schema, &term.column.column)?;
         }
     }
     let mut labels = BTreeSet::new();
@@ -727,7 +1460,7 @@ fn validate_retained_relation_union(
             rel: arm.input.clone(),
         };
         let (_, arm_columns) = relation_output_projection(&arm_relation)?;
-        let arm_contract = relation_projection_contract(&output_table_schema, &arm_columns)?;
+        let arm_contract = relation_projection_contract(output_table_schema, &arm_columns)?;
         if let Some(expected) = &output_projection {
             if expected != &arm_contract {
                 return Err(QueryError::UnsupportedRelationQuery(
@@ -745,8 +1478,11 @@ fn validate_retained_relation_union(
         }
         let mut arm_query = arm_query;
         arm_query.relation = Some(arm_relation);
-        let (_, arm_params, _) =
-            validate_query_canonical_parts_as(&arm_query, schema, RelationProjectionRole::UnionArm)?;
+        let (_, arm_params, _) = validate_query_canonical_parts_as(
+            &arm_query,
+            schema,
+            RelationProjectionRole::UnionArm,
+        )?;
         for (name, ty) in arm_params {
             match params.entry(name) {
                 std::collections::btree_map::Entry::Vacant(entry) => {
@@ -787,7 +1523,6 @@ fn relation_projection_contract(
         .collect()
 }
 
-
 fn reject_author_ordering(order_by: &[OrderBy]) -> Result<(), QueryError> {
     if let Some(order) = order_by
         .iter()
@@ -800,11 +1535,11 @@ fn reject_author_ordering(order_by: &[OrderBy]) -> Result<(), QueryError> {
     Ok(())
 }
 
-fn flat_join_source_tables(
-    schema: &RuntimeSchema,
+fn flat_join_source_tables<'a>(
+    schema: &'a RuntimeSchema,
     root_table: &str,
     flat_join: &FlatJoin,
-) -> Result<BTreeMap<String, TableSchema>, QueryError> {
+) -> Result<BTreeMap<String, &'a TableSchema>, QueryError> {
     let root_name = flat_join_source_name(root_table, &flat_join.root_alias);
     let mut sources = BTreeMap::from([(root_name, schema_table(schema, root_table)?)]);
     for source in &flat_join.sources {
@@ -813,17 +1548,14 @@ fn flat_join_source_tables(
             .insert(name.clone(), schema_table(schema, &source.table)?)
             .is_some()
         {
-            return Err(QueryError::UnknownColumn {
-                table: "flat join duplicate source".to_owned(),
-                column: name,
-            });
+            return Err(unknown_column("flat join duplicate source", &name));
         }
     }
     Ok(sources)
 }
 
 fn flat_join_filter_schema(
-    sources: &BTreeMap<String, TableSchema>,
+    sources: &BTreeMap<String, &TableSchema>,
 ) -> Result<TableSchema, QueryError> {
     let mut columns = Vec::new();
     for (scope, table) in sources {
@@ -856,7 +1588,7 @@ fn flat_join_filter_schema(
 
 fn qualify_flat_join_predicate(
     predicate: &mut Predicate,
-    sources: &BTreeMap<String, TableSchema>,
+    sources: &BTreeMap<String, &TableSchema>,
 ) -> Result<(), QueryError> {
     rewrite_flat_join_predicate_columns(predicate, &mut |column| {
         qualify_flat_join_column(column, sources)
@@ -902,9 +1634,7 @@ fn rewrite_flat_join_predicate_columns(
 }
 
 #[doc(hidden)]
-pub fn flat_join_predicate_sources(
-    predicate: &Predicate,
-) -> Result<BTreeSet<String>, QueryError> {
+pub fn flat_join_predicate_sources(predicate: &Predicate) -> Result<BTreeSet<String>, QueryError> {
     let mut predicate = predicate.clone();
     let mut sources = BTreeSet::new();
     rewrite_flat_join_predicate_columns(&mut predicate, &mut |column| {
@@ -960,15 +1690,20 @@ fn validate_flat_join_filter_routing(predicate: &Predicate) -> Result<(), QueryE
 
 fn qualify_flat_join_column(
     column: &str,
-    sources: &BTreeMap<String, TableSchema>,
+    sources: &BTreeMap<String, &TableSchema>,
 ) -> Result<String, QueryError> {
+    let field = flat_join_qualified_field(column).map_or(column, |(_, field)| field);
+    if crate::schema::magic::MagicColumn::parse(field).is_some_and(|magic| magic.is_deletion()) {
+        // includeDeleted() widens only a plain root query. Flat-join sources
+        // read live rows, so they have no deletion metadata to filter on.
+        return Err(QueryError::UnsupportedRelationQuery(format!(
+            "Reading {field} is not supported in flat joins yet"
+        )));
+    }
     if let Ok((scope, field)) = flat_join_qualified_field(column) {
         let table = sources
             .get(scope)
-            .ok_or_else(|| QueryError::UnknownColumn {
-                table: "flat join source".to_owned(),
-                column: scope.to_owned(),
-            })?;
+            .ok_or_else(|| unknown_column("flat join source", &scope))?;
         flat_join_column_type(table, field)?;
         return Ok(column.to_owned());
     }
@@ -978,16 +1713,13 @@ fn qualify_flat_join_column(
         .filter(|(_, table)| flat_join_column_type(table, column).is_ok())
         .map(|(scope, _)| scope.clone());
     let Some(scope) = matches.next() else {
-        return Err(QueryError::UnknownColumn {
-            table: "flat join".to_owned(),
-            column: column.to_owned(),
-        });
+        return Err(unknown_column("flat join", &column));
     };
     if matches.next().is_some() {
-        return Err(QueryError::UnknownColumn {
-            table: "ambiguous flat join column; qualify its source".to_owned(),
-            column: column.to_owned(),
-        });
+        return Err(unknown_column(
+            "ambiguous flat join column; qualify its source",
+            &column,
+        ));
     }
     Ok(format!("{scope}.{column}"))
 }
@@ -1002,10 +1734,7 @@ fn flat_join_qualified_field(field: &str) -> Result<(&str, &str), QueryError> {
     }
     field
         .rsplit_once('.')
-        .ok_or_else(|| QueryError::UnknownColumn {
-            table: "flat join qualified source".to_owned(),
-            column: field.to_owned(),
-        })
+        .ok_or_else(|| unknown_column("flat join qualified source", &field))
 }
 
 fn flat_join_column_type<'a>(
@@ -1031,31 +1760,22 @@ fn validate_flat_join(
     for source in &flat_join.sources {
         let name = flat_join_source_name(&source.table, &source.alias);
         if sources.contains_key(&name) {
-            return Err(QueryError::UnknownColumn {
-                table: "flat join duplicate source".to_owned(),
-                column: name,
-            });
+            return Err(unknown_column("flat join duplicate source", &name));
         }
         schema_table(schema, &source.table)?;
         let (left_source, left_column) = flat_join_qualified_field(&source.on.left)?;
         let (right_source, right_column) = flat_join_qualified_field(&source.on.right)?;
         let left_table = sources
             .get(left_source)
-            .ok_or_else(|| QueryError::UnknownColumn {
-                table: "flat join accumulated source".to_owned(),
-                column: left_source.to_owned(),
-            })?;
+            .ok_or_else(|| unknown_column("flat join accumulated source", &left_source))?;
         if right_source != name {
-            return Err(QueryError::UnknownColumn {
-                table: "flat join source".to_owned(),
-                column: right_source.to_owned(),
-            });
+            return Err(unknown_column("flat join source", &right_source));
         }
         let left_schema = schema_table(schema, left_table)?;
         let right_schema = schema_table(schema, &source.table)?;
         if !flat_join_key_types_compatible(
-            flat_join_column_type(&left_schema, left_column)?,
-            flat_join_column_type(&right_schema, right_column)?,
+            flat_join_column_type(left_schema, left_column)?,
+            flat_join_column_type(right_schema, right_column)?,
         ) {
             return Err(QueryError::OperandTypeMismatch);
         }
@@ -1069,7 +1789,7 @@ fn validate_join(
     root: &TableSchema,
     root_table: &str,
     join: &mut JoinVia,
-    params: &mut BTreeMap<String, ColumnType>,
+    params: &mut ParameterPhase<'_>,
 ) -> Result<(), QueryError> {
     let join_table = schema_table(schema, &join.table)?;
     if join.target == JoinTarget::Uncorrelated {
@@ -1078,31 +1798,22 @@ fn validate_join(
             || join.source_lookup.is_some()
             || !join.correlated_filters.is_empty()
         {
-            return Err(QueryError::JoinNotRefCompatible {
-                join_table: join.table.clone(),
-                column: join.on_column.clone(),
-                target_table: "uncorrelated existence (no join keys)".to_owned(),
-            });
+            return Err(not_ref_compatible(
+                &join.table,
+                &join.on_column,
+                "uncorrelated existence (no join keys)",
+            ));
         }
-        for predicate in &mut join.filters {
-            validate_predicate(&join_table, predicate, params)?;
-        }
-        for nested in &mut join.nested_joins {
-            validate_join(schema, &join_table, &join.table, nested, params)?;
-        }
-        return Ok(());
+        return validate_join_conditions(schema, join_table, join, params);
     }
     match join.target {
         JoinTarget::Uncorrelated => unreachable!("validated above"),
         JoinTarget::Column => {
-            planner_column_type(&join_table, &join.on_column)?;
+            planner_column_type(join_table, &join.on_column)?;
         }
         JoinTarget::RowId => {
             if join.on_column != "id" {
-                return Err(QueryError::UnknownColumn {
-                    table: join.table.clone(),
-                    column: join.on_column.clone(),
-                });
+                return Err(unknown_column(&join.table, &join.on_column));
             }
         }
     }
@@ -1115,7 +1826,7 @@ fn validate_join(
         && !join_table.references.contains_key(&join.on_column)
     {
         let source_type = planner_column_type(root, source_column)?;
-        let target_type = planner_column_type(&join_table, &join.on_column)?;
+        let target_type = planner_column_type(join_table, &join.on_column)?;
         if !matches!(
             non_null_column_type(source_type),
             ColumnType::Uuid | ColumnType::Array(_)
@@ -1129,18 +1840,12 @@ fn validate_join(
             for correlation in &join.correlated_filters {
                 if !column_types_comparable(
                     planner_column_type(root, &correlation.source_column)?,
-                    planner_column_type(&join_table, &correlation.join_column)?,
+                    planner_column_type(join_table, &correlation.join_column)?,
                 ) {
                     return Err(QueryError::OperandTypeMismatch);
                 }
             }
-            for predicate in &mut join.filters {
-                validate_predicate(&join_table, predicate, params)?;
-            }
-            for nested in &mut join.nested_joins {
-                validate_join(schema, &join_table, &join.table, nested, params)?;
-            }
-            return Ok(());
+            return validate_join_conditions(schema, join_table, join, params);
         }
     }
     let target_table = if let Some(lookup) = &join.source_lookup {
@@ -1149,20 +1854,20 @@ fn validate_join(
         match root.references.get(&lookup.row_id_source_column) {
             Some(target) if target == &lookup.table => {}
             _ => {
-                return Err(QueryError::JoinNotRefCompatible {
-                    join_table: root_table.to_owned(),
-                    column: lookup.row_id_source_column.clone(),
-                    target_table: lookup.table.clone(),
-                });
+                return Err(not_ref_compatible(
+                    &root_table,
+                    &lookup.row_id_source_column,
+                    &lookup.table,
+                ));
             }
         }
-        planner_column_type(&lookup_table, &lookup.value_column)?;
+        planner_column_type(lookup_table, &lookup.value_column)?;
         if join.source_column.as_deref() != Some(lookup.value_column.as_str()) {
-            return Err(QueryError::JoinNotRefCompatible {
-                join_table: lookup.table.clone(),
-                column: lookup.value_column.clone(),
-                target_table: "join source column".to_owned(),
-            });
+            return Err(not_ref_compatible(
+                &lookup.table,
+                &lookup.value_column,
+                "join source column",
+            ));
         }
         if lookup.value_column == "id" {
             lookup.table.clone()
@@ -1171,10 +1876,8 @@ fn validate_join(
                 .references
                 .get(&lookup.value_column)
                 .cloned()
-                .ok_or_else(|| QueryError::JoinNotRefCompatible {
-                    join_table: lookup.table.clone(),
-                    column: lookup.value_column.clone(),
-                    target_table: "referenced table".to_owned(),
+                .ok_or_else(|| {
+                    not_ref_compatible(&lookup.table, &lookup.value_column, "referenced table")
                 })?
         }
     } else if let Some(source_column) = &join.source_column {
@@ -1183,11 +1886,7 @@ fn validate_join(
         } else {
             planner_column_type(root, source_column)?;
             root.references.get(source_column).cloned().ok_or_else(|| {
-                QueryError::JoinNotRefCompatible {
-                    join_table: root_table.to_owned(),
-                    column: source_column.clone(),
-                    target_table: "referenced table".to_owned(),
-                }
+                not_ref_compatible(&root_table, &source_column, "referenced table")
             })?
         }
     } else {
@@ -1197,7 +1896,7 @@ fn validate_join(
     // two sides can be compared: a NULL side simply never matches.
     for correlation in &join.correlated_filters {
         let source_type = planner_column_type(root, &correlation.source_column)?;
-        let join_type = planner_column_type(&join_table, &correlation.join_column)?;
+        let join_type = planner_column_type(join_table, &correlation.join_column)?;
         if !column_types_comparable(source_type, join_type) {
             return Err(QueryError::OperandTypeMismatch);
         }
@@ -1208,30 +1907,24 @@ fn validate_join(
             Some(target) if target == &target_table => {}
             None if join.on_column == "id" && join.table == target_table => {}
             _ => {
-                return Err(QueryError::JoinNotRefCompatible {
-                    join_table: join.table.clone(),
-                    column: join.on_column.clone(),
-                    target_table: target_table.to_owned(),
-                });
+                return Err(not_ref_compatible(
+                    &join.table,
+                    &join.on_column,
+                    &target_table,
+                ));
             }
         },
         JoinTarget::RowId => {
             if join.table != target_table {
-                return Err(QueryError::JoinNotRefCompatible {
-                    join_table: join.table.clone(),
-                    column: join.on_column.clone(),
-                    target_table: target_table.to_owned(),
-                });
+                return Err(not_ref_compatible(
+                    &join.table,
+                    &join.on_column,
+                    &target_table,
+                ));
             }
         }
     }
-    for predicate in &mut join.filters {
-        validate_predicate(&join_table, predicate, params)?;
-    }
-    for nested in &mut join.nested_joins {
-        validate_join(schema, &join_table, &join.table, nested, params)?;
-    }
-    Ok(())
+    validate_join_conditions(schema, join_table, join, params)
 }
 
 fn validate_aggregate(table: &TableSchema, aggregate: &AggregateQuery) -> Result<(), QueryError> {
@@ -1293,10 +1986,7 @@ fn validate_aggregate_order_by(
             .iter()
             .any(|aggregate| aggregate.alias == order.column);
         if !is_group_by && !is_aggregate {
-            return Err(QueryError::UnknownColumn {
-                table: format!("{table}_aggregate"),
-                column: order.column.clone(),
-            });
+            return Err(unknown_column(&format!("{table}_aggregate"), &order.column));
         }
     }
     Ok(())
@@ -1305,21 +1995,24 @@ fn validate_aggregate_order_by(
 fn validate_select_column(table: &TableSchema, column: &str) -> Result<(), QueryError> {
     match column {
         "id" => Ok(()),
+        name if crate::schema::history::is_history_table(&table.name)
+            && crate::schema::history::HistoryMetadataColumn::contains(name) =>
+        {
+            column_type(table, column).map(|_| ())
+        }
         name if executable_magic_column_type(name)?.is_some() => Ok(()),
-        name if name.starts_with('$') => Err(QueryError::UnknownColumn {
-            table: table.name.clone(),
-            column: name.to_owned(),
-        }),
+        name if name.starts_with('$') => Err(unknown_column(&table.name, &name)),
         name => column_type(table, name).map(|_| ()),
     }
 }
 
-fn schema_table(schema: &RuntimeSchema, name: &str) -> Result<TableSchema, QueryError> {
+/// Borrows the table: validation runs for every policy and subscription, and
+/// copying a table schema per lookup dominated its cost.
+fn schema_table<'a>(schema: &'a RuntimeSchema, name: &str) -> Result<&'a TableSchema, QueryError> {
     schema
         .tables
         .iter()
         .find(|table| table.name == name)
-        .cloned()
         .ok_or_else(|| QueryError::UnknownTable(name.to_owned()))
 }
 
@@ -1335,10 +2028,7 @@ fn column_schema<'a>(
         .columns
         .iter()
         .find(|candidate| candidate.name == column)
-        .ok_or_else(|| QueryError::UnknownColumn {
-            table: table.name.clone(),
-            column: column.to_owned(),
-        })
+        .ok_or_else(|| unknown_column(&table.name, &column))
 }
 
 fn planner_column_type<'a>(
@@ -1355,18 +2045,14 @@ fn planner_column_type<'a>(
 }
 
 fn executable_magic_column_type(column: &str) -> Result<Option<&'static ColumnType>, QueryError> {
-    if let Some(ty) = crate::ids::AuthorSubject::metadata_type(column) {
-        return Ok(Some(ty));
-    }
     if is_permission_introspection_magic_column(column) {
         return Err(QueryError::UnsupportedMagicColumn {
             column: column.to_owned(),
         });
     }
-    match column {
-        "$createdAt" | "$updatedAt" => Ok(Some(&ColumnType::U64)),
-        _ => Ok(None),
-    }
+    Ok(crate::schema::magic::MagicColumn::parse(column)
+        .filter(|column| column.is_provenance())
+        .map(|column| column.value_type()))
 }
 
 fn is_permission_introspection_magic_column(column: &str) -> bool {
@@ -1378,9 +2064,9 @@ fn validate_include(
     root: &TableSchema,
     path: &str,
 ) -> Result<(), QueryError> {
-    let mut current = root.clone();
+    let mut current = root;
     for segment in path.split('.') {
-        column_type(&current, segment)?;
+        column_type(current, segment)?;
         let Some(target) = current.references.get(segment) else {
             return Err(QueryError::BadIncludePath {
                 path: path.to_owned(),
@@ -1395,7 +2081,7 @@ fn validate_array_subqueries(
     schema: &RuntimeSchema,
     parent: &TableSchema,
     subqueries: &mut [ArraySubquery],
-    params: &mut BTreeMap<String, ColumnType>,
+    params: &mut ParameterPhase<'_>,
 ) -> Result<(), QueryError> {
     let mut names = std::collections::BTreeSet::new();
     for subquery in subqueries.iter() {
@@ -1416,26 +2102,24 @@ fn validate_array_subquery(
     schema: &RuntimeSchema,
     parent: &TableSchema,
     subquery: &mut ArraySubquery,
-    params: &mut BTreeMap<String, ColumnType>,
+    params: &mut ParameterPhase<'_>,
     relation_path: &str,
 ) -> Result<(), QueryError> {
     let child = schema_table(schema, &subquery.table)?;
     let parent_type = planner_column_type(parent, &subquery.outer_column)?;
-    let child_type = planner_column_type(&child, &subquery.inner_column)?;
+    let child_type = planner_column_type(child, &subquery.inner_column)?;
     if !array_correlation_types_compatible(parent_type, child_type) {
         return Err(QueryError::OperandTypeMismatch);
     }
-    for predicate in &mut subquery.filters {
-        validate_predicate(&child, predicate, params)?;
-    }
+    validate_predicates(child, &mut subquery.filters, params)?;
     if let Some(select) = &subquery.select {
         for column in select {
-            validate_select_column(&child, column)?;
+            validate_select_column(child, column)?;
         }
     }
     reject_author_ordering(&subquery.order_by)?;
     for order in &subquery.order_by {
-        planner_column_type(&child, &order.column)?;
+        planner_column_type(child, &order.column)?;
     }
     let mut names = std::collections::BTreeSet::new();
     for nested in &mut subquery.nested_arrays {
@@ -1445,7 +2129,7 @@ fn validate_array_subquery(
             });
         }
         let nested_path = format!("{relation_path}.{}", nested.column_name);
-        validate_array_subquery(schema, &child, nested, params, &nested_path)?;
+        validate_array_subquery(schema, child, nested, params, &nested_path)?;
     }
     Ok(())
 }
@@ -1454,42 +2138,42 @@ fn validate_reachable(
     schema: &RuntimeSchema,
     root: &TableSchema,
     reachable: &mut ReachableVia,
-    params: &mut BTreeMap<String, ColumnType>,
+    params: &mut ParameterPhase<'_>,
 ) -> Result<(), QueryError> {
     let access = schema_table(schema, &reachable.access_table)?;
-    planner_column_type(&access, &reachable.access_row_column)?;
-    planner_column_type(&access, &reachable.access_team_column)?;
+    planner_column_type(access, &reachable.access_row_column)?;
+    planner_column_type(access, &reachable.access_team_column)?;
     let root_key_type = &ColumnType::Uuid;
     if reachable.access_row_column == "id" {
         if access.name != root.name {
-            return Err(QueryError::JoinNotRefCompatible {
-                join_table: reachable.access_table.clone(),
-                column: reachable.access_row_column.clone(),
-                target_table: root.name.clone(),
-            });
+            return Err(not_ref_compatible(
+                &reachable.access_table,
+                &reachable.access_row_column,
+                &root.name,
+            ));
         }
     } else if access.name == root.name {
-        let access_column_type = planner_column_type(&access, &reachable.access_row_column)?;
+        let access_column_type = planner_column_type(access, &reachable.access_row_column)?;
         if !column_types_comparable(access_column_type, root_key_type) {
-            return Err(QueryError::JoinNotRefCompatible {
-                join_table: reachable.access_table.clone(),
-                column: reachable.access_row_column.clone(),
-                target_table: root.name.clone(),
-            });
+            return Err(not_ref_compatible(
+                &reachable.access_table,
+                &reachable.access_row_column,
+                &root.name,
+            ));
         }
     } else {
         match access.references.get(&reachable.access_row_column) {
             Some(target) if target == &root.name => {}
             _ => {
-                return Err(QueryError::JoinNotRefCompatible {
-                    join_table: reachable.access_table.clone(),
-                    column: reachable.access_row_column.clone(),
-                    target_table: root.name.clone(),
-                });
+                return Err(not_ref_compatible(
+                    &reachable.access_table,
+                    &reachable.access_row_column,
+                    &root.name,
+                ));
             }
         }
         if !column_types_comparable(
-            planner_column_type(&access, &reachable.access_row_column)?,
+            planner_column_type(access, &reachable.access_row_column)?,
             root_key_type,
         ) {
             return Err(QueryError::OperandTypeMismatch);
@@ -1497,55 +2181,57 @@ fn validate_reachable(
     }
     let team_table = match reachable.access_team_target {
         JoinTarget::Uncorrelated => {
-            return Err(QueryError::JoinNotRefCompatible {
-                join_table: reachable.access_table.clone(),
-                column: reachable.access_team_column.clone(),
-                target_table: "reachability requires a team reference".to_owned(),
-            });
+            return Err(not_ref_compatible(
+                &reachable.access_table,
+                &reachable.access_team_column,
+                "reachability requires a team reference",
+            ));
         }
         JoinTarget::Column => access
             .references
             .get(&reachable.access_team_column)
-            .ok_or_else(|| QueryError::JoinNotRefCompatible {
-                join_table: reachable.access_table.clone(),
-                column: reachable.access_team_column.clone(),
-                target_table: "referenced table".to_owned(),
+            .ok_or_else(|| {
+                not_ref_compatible(
+                    &reachable.access_table,
+                    &reachable.access_team_column,
+                    "referenced table",
+                )
             })?,
         JoinTarget::RowId => {
             if reachable.access_team_column != "id" {
-                return Err(QueryError::JoinNotRefCompatible {
-                    join_table: reachable.access_table.clone(),
-                    column: reachable.access_team_column.clone(),
-                    target_table: reachable.access_table.clone(),
-                });
+                return Err(not_ref_compatible(
+                    &reachable.access_table,
+                    &reachable.access_team_column,
+                    &reachable.access_table,
+                ));
             }
             &access.name
         }
     };
     let edge = schema_table(schema, &reachable.edge_table)?;
     for column in [&reachable.edge_member_column, &reachable.edge_parent_column] {
-        planner_column_type(&edge, column)?;
+        planner_column_type(edge, column)?;
         if *column == "id" && edge.name == *team_table {
             continue;
         }
         match edge.references.get(column) {
             Some(target) if target == team_table => {}
             _ => {
-                return Err(QueryError::JoinNotRefCompatible {
-                    join_table: reachable.edge_table.clone(),
-                    column: column.clone(),
-                    target_table: team_table.clone(),
-                });
+                return Err(not_ref_compatible(
+                    &reachable.edge_table,
+                    &column,
+                    &team_table,
+                ));
             }
         }
     }
     if let Some(seed) = &mut reachable.seed {
         let seed_table = schema_table(schema, &seed.table)?;
-        if planner_column_type(&seed_table, &seed.team_column)? != &ColumnType::Uuid {
+        if planner_column_type(seed_table, &seed.team_column)? != &ColumnType::Uuid {
             return Err(QueryError::OperandTypeMismatch);
         }
         if let Some(user_column) = &seed.user_column {
-            planner_column_type(&seed_table, user_column)?;
+            planner_column_type(seed_table, user_column)?;
         }
         let seed_projects_team = if seed.team_column == "id" {
             seed_table.name == *team_table
@@ -1556,28 +2242,33 @@ fn validate_reachable(
             )
         };
         if !seed_projects_team {
-            return Err(QueryError::JoinNotRefCompatible {
-                join_table: seed.table.clone(),
-                column: seed.team_column.clone(),
-                target_table: team_table.clone(),
-            });
+            return Err(not_ref_compatible(
+                &seed.table,
+                &seed.team_column,
+                &team_table,
+            ));
         }
-        for predicate in &mut seed.filters {
-            validate_predicate(&seed_table, predicate, params)?;
-        }
+        validate_predicates(seed_table, &mut seed.filters, params)?;
     } else {
-        match operand_type(root, &reachable.from, params)? {
-            Some(ColumnType::Uuid) => {}
-            None => infer_param(&reachable.from, ColumnType::Uuid, params)?,
-            Some(_) => return Err(QueryError::OperandTypeMismatch),
+        match params {
+            ParameterPhase::Prepare(domain) => {
+                if let Operand::Param(name) = &reachable.from {
+                    let parameter = domain.parameter(name);
+                    let ParameterTerm::Known(fact) = domain.known(ColumnType::Uuid) else {
+                        unreachable!()
+                    };
+                    domain.require(parameter, fact)?;
+                }
+            }
+            ParameterPhase::Check(params) => match operand_type(root, &reachable.from, params)? {
+                Some(ColumnType::Uuid) => {}
+                None => check_inferred_param(&reachable.from, ColumnType::Uuid, params)?,
+                Some(_) => return Err(QueryError::OperandTypeMismatch),
+            },
         }
     }
-    for predicate in &mut reachable.access_filters {
-        validate_predicate(&access, predicate, params)?;
-    }
-    for predicate in &mut reachable.edge_filters {
-        validate_predicate(&edge, predicate, params)?;
-    }
+    validate_predicates(access, &mut reachable.access_filters, params)?;
+    validate_predicates(edge, &mut reachable.edge_filters, params)?;
     Ok(())
 }
 
@@ -1585,24 +2276,128 @@ fn validate_inherits(root: &TableSchema, inherits: &InheritsVia) -> Result<(), Q
     planner_column_type(root, &inherits.parent_column)?;
     root.references
         .get(&inherits.parent_column)
-        .ok_or_else(|| QueryError::JoinNotRefCompatible {
-            join_table: root.name.clone(),
-            column: inherits.parent_column.clone(),
-            target_table: "referenced table".to_owned(),
+        .ok_or_else(|| {
+            not_ref_compatible(&root.name, &inherits.parent_column, "referenced table")
         })?;
+    Ok(())
+}
+
+fn not_ref_compatible(join_table: &str, column: &str, target_table: &str) -> QueryError {
+    QueryError::JoinNotRefCompatible {
+        join_table: join_table.to_owned(),
+        column: column.to_owned(),
+        target_table: target_table.to_owned(),
+    }
+}
+
+fn unknown_column(table: &str, column: &str) -> QueryError {
+    QueryError::UnknownColumn {
+        table: table.to_owned(),
+        column: column.to_owned(),
+    }
+}
+
+fn validate_predicates(
+    table: &TableSchema,
+    predicates: &mut [Predicate],
+    params: &mut ParameterPhase<'_>,
+) -> Result<(), QueryError> {
+    predicates
+        .iter_mut()
+        .try_for_each(|predicate| validate_predicate(table, predicate, params))
+}
+
+/// Validates a join's own filters, then its nested joins.
+fn validate_join_conditions(
+    schema: &RuntimeSchema,
+    join_table: &TableSchema,
+    join: &mut JoinVia,
+    params: &mut ParameterPhase<'_>,
+) -> Result<(), QueryError> {
+    validate_predicates(join_table, &mut join.filters, params)?;
+    for nested in &mut join.nested_joins {
+        validate_join(schema, join_table, &join.table, nested, params)?;
+    }
     Ok(())
 }
 
 fn validate_predicate(
     table: &TableSchema,
     predicate: &mut Predicate,
-    params: &mut BTreeMap<String, ColumnType>,
+    params: &mut ParameterPhase<'_>,
 ) -> Result<(), QueryError> {
     match predicate {
-        Predicate::All(predicates) | Predicate::Any(predicates) => predicates
-            .iter_mut()
-            .try_for_each(|predicate| validate_predicate(table, predicate, params)),
-        Predicate::Not(predicate) => validate_predicate(table, predicate, params),
+        Predicate::All(predicates) | Predicate::Any(predicates) => {
+            return predicates
+                .iter_mut()
+                .try_for_each(|predicate| validate_predicate(table, predicate, params));
+        }
+        Predicate::Not(predicate) => return validate_predicate(table, predicate, params),
+        Predicate::EnumMatch {
+            column,
+            case,
+            payload,
+        } => {
+            let column_type = planner_column_type(table, column)?;
+            let ColumnType::Enum(schema) = non_null_column_type(column_type) else {
+                return Err(QueryError::OperandTypeMismatch);
+            };
+            let enum_case = schema
+                .case(
+                    schema
+                        .tag(case)
+                        .map_err(|_| QueryError::OperandTypeMismatch)?,
+                )
+                .map_err(|_| QueryError::OperandTypeMismatch)?;
+            let payload_table = TableSchema::new(
+                "__enum_payload",
+                enum_case.payload.fields().iter().map(|field| {
+                    crate::schema::ColumnSchema::new(
+                        field.name.clone().unwrap_or_default(),
+                        field.value_type.clone(),
+                    )
+                }),
+            );
+            return validate_predicate(&payload_table, payload, params);
+        }
+        _ => {}
+    }
+    if let ParameterPhase::Prepare(domain) = params {
+        return match predicate {
+            Predicate::Eq(left, right)
+            | Predicate::Ne(left, right)
+            | Predicate::Gt(left, right)
+            | Predicate::Gte(left, right)
+            | Predicate::Lt(left, right)
+            | Predicate::Lte(left, right) => {
+                domain.relationship(table, left, right, ParameterRelationship::Compare)
+            }
+            Predicate::In(left, values) if values.is_empty() => {
+                operand_type(table, left, &BTreeMap::new())?;
+                *predicate = Predicate::Any(Vec::new());
+                Ok(())
+            }
+            Predicate::In(left, values) => values.iter().try_for_each(|right| {
+                domain.relationship(table, left, right, ParameterRelationship::In)
+            }),
+            Predicate::Contains(left, right) => {
+                domain.relationship(table, left, right, ParameterRelationship::Contains)
+            }
+            Predicate::IsNull(Operand::Param(name)) => {
+                domain.parameter(name);
+                Ok(())
+            }
+            Predicate::IsNull(_) => Ok(()),
+            _ => unreachable!("recursive predicates handled by the shared traversal"),
+        };
+    }
+    let ParameterPhase::Check(params) = params else {
+        unreachable!()
+    };
+    match predicate {
+        Predicate::All(_) | Predicate::Any(_) | Predicate::Not(_) | Predicate::EnumMatch { .. } => {
+            unreachable!("recursive predicates handled by the shared traversal")
+        }
         Predicate::Eq(left, right) | Predicate::Ne(left, right) => {
             validate_comparable_operands(table, left, right, params).map(|_| ())
         }
@@ -1631,9 +2426,9 @@ fn validate_predicate(
                         ));
                     }
                     (Some(left_type), None) => {
-                        infer_param(value, left_type, params)?;
+                        check_inferred_param(value, left_type, params)?;
                     }
-                    (None, Some(value_type)) => infer_param(left, value_type, params)?,
+                    (None, Some(value_type)) => check_inferred_param(left, value_type, params)?,
                     (Some(_), Some(_)) => {}
                     (None, None) => return Err(QueryError::OperandTypeMismatch),
                 }
@@ -1654,49 +2449,32 @@ fn validate_predicate(
         Predicate::Contains(left, right) => {
             let left_type = operand_type(table, left, params)?;
             let right_type = operand_type(table, right, params)?;
-            match (
-                left_type.map(|column_type| non_null_column_type(&column_type)),
-                right_type,
-            ) {
-                (Some(ColumnType::String), _) => {
-                    validate_operand_against_type(table, right, ColumnType::String, params)
+            let expected = match left_type {
+                Some(column_type) => match non_null_column_type(&column_type) {
+                    ColumnType::String => ColumnType::String,
+                    ColumnType::Array(member) => *member,
+                    _ => return Err(QueryError::OperandTypeMismatch),
+                },
+                None => {
+                    return match right_type {
+                        Some(right_type) => check_inferred_param(
+                            left,
+                            ColumnType::Array(Box::new(right_type)),
+                            params,
+                        ),
+                        None => Err(QueryError::OperandTypeMismatch),
+                    };
                 }
-                (Some(ColumnType::Array(member)), _) => {
-                    validate_operand_against_type(table, right, *member, params)
-                }
-                (Some(_), _) => Err(QueryError::OperandTypeMismatch),
-                (None, Some(right_type)) => {
-                    infer_param(left, ColumnType::Array(Box::new(right_type)), params)
-                }
-                (None, None) => Err(QueryError::OperandTypeMismatch),
-            }
-        }
-        Predicate::EnumMatch {
-            column,
-            case,
-            payload,
-        } => {
-            let column_type = planner_column_type(table, column)?;
-            let ColumnType::Enum(schema) = non_null_column_type(column_type) else {
-                return Err(QueryError::OperandTypeMismatch);
             };
-            let enum_case = schema
-                .case(
-                    schema
-                        .tag(case)
-                        .map_err(|_| QueryError::OperandTypeMismatch)?,
-                )
-                .map_err(|_| QueryError::OperandTypeMismatch)?;
-            let payload_table = TableSchema::new(
-                "__enum_payload",
-                enum_case.payload.fields().iter().map(|field| {
-                    crate::schema::ColumnSchema::new(
-                        field.name.clone().unwrap_or_default(),
-                        field.value_type.clone(),
-                    )
+
+            match right_type {
+                Some(actual) if actual != expected => Err(QueryError::ContainsNeedleTypeMismatch {
+                    expected: Box::new(expected),
+                    actual: Box::new(actual),
                 }),
-            );
-            validate_predicate(&payload_table, payload, params)
+                Some(_) => Ok(()),
+                None => check_inferred_param(right, expected, params),
+            }
         }
         // Claims are dynamically typed and become literals when binding the session.
         // Either can be checked for nullness without a statically nullable column.
@@ -1713,7 +2491,7 @@ fn validate_comparable_operands(
     table: &TableSchema,
     left: &mut Operand,
     right: &mut Operand,
-    params: &mut BTreeMap<String, ColumnType>,
+    params: &BTreeMap<String, ColumnType>,
 ) -> Result<ColumnType, QueryError> {
     // An empty array literal has no element type of its own. Permit it only
     // when directly paired with a schema-resolved array column; unwrap outer
@@ -1772,28 +2550,15 @@ fn validate_comparable_operands(
             Err(QueryError::OperandTypeMismatch)
         }
         (Some(left_type), None) => {
-            infer_param(right, left_type.clone(), params)?;
+            check_inferred_param(right, left_type.clone(), params)?;
             Ok(left_type)
         }
         (None, Some(right_type)) => {
-            infer_param(left, right_type.clone(), params)?;
+            check_inferred_param(left, right_type.clone(), params)?;
             Ok(right_type)
         }
         (Some(left_type), Some(_)) => Ok(left_type),
         (None, None) => Err(QueryError::OperandTypeMismatch),
-    }
-}
-
-fn validate_operand_against_type(
-    table: &TableSchema,
-    operand: &Operand,
-    expected: ColumnType,
-    params: &mut BTreeMap<String, ColumnType>,
-) -> Result<(), QueryError> {
-    match operand_type(table, operand, params)? {
-        Some(actual) if actual == expected => Ok(()),
-        Some(_) => Err(QueryError::OperandTypeMismatch),
-        None => infer_param(operand, expected, params),
     }
 }
 
@@ -1990,10 +2755,10 @@ fn column_type_name(column_type: &ColumnType) -> String {
     format!("{column_type:?}")
 }
 
-fn infer_param(
+fn check_inferred_param(
     operand: &Operand,
     expected: ColumnType,
-    params: &mut BTreeMap<String, ColumnType>,
+    params: &BTreeMap<String, ColumnType>,
 ) -> Result<(), QueryError> {
     let Operand::Param(name) = operand else {
         return Ok(());
@@ -2003,9 +2768,6 @@ fn infer_param(
             param: name.clone(),
         }),
         Some(_) => Ok(()),
-        None => {
-            params.insert(name.clone(), expected);
-            Ok(())
-        }
+        None => Err(QueryError::OperandTypeMismatch),
     }
 }

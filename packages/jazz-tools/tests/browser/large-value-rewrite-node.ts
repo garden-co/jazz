@@ -24,8 +24,6 @@ export async function largeValueRewriteBackendOpen(info: JazzServerInfo): Promis
     app,
     permissions: largeValueRewritePermissions,
     driver: { type: "memory" },
-    tier: "global",
-    defaultDurabilityTier: "global",
   });
   sessions.set(info.appId, session);
 }
@@ -53,7 +51,7 @@ export async function largeValueRewriteBackendSeed(
 }
 
 /**
- * Append each word to the reply in its own exclusive read-modify-write
+ * Append each word to the reply in its own serializable read-modify-write
  * transaction, as MusicAgent's runner streams a model reply.
  */
 export async function largeValueRewriteBackendAppend(
@@ -64,7 +62,7 @@ export async function largeValueRewriteBackendAppend(
 ): Promise<string> {
   const db = backendDb(appId);
   for (const word of words) {
-    const write = await db.exclusiveTransaction(async (tx) => {
+    const write = await db.serializableTransaction(async (tx) => {
       const turn = await tx.one(app.turns.where({ id: turnId }));
       tx.update(app.turns, turnId, { body: (turn?.body ?? "") + word });
     });
@@ -72,7 +70,7 @@ export async function largeValueRewriteBackendAppend(
     await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
   const turn = await db.one(app.turns.where({ id: turnId }), {
-    tier: "global",
+    tier: "remote",
   });
   return turn?.body ?? "";
 }

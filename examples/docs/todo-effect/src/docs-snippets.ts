@@ -238,9 +238,9 @@ export const readOrdersWithRequiredCustomer = Effect.gen(function* () {
 // #region reading-seeding-effect
 export const seedDefaultProject = Effect.gen(function* () {
   const jazz = yield* Jazz;
-  // Wait for the global core before reading — prevents duplicate seeding
+  // Read from the server before seeding — prevents duplicate seeding
   // from concurrent fresh clients on first visit.
-  const existing = yield* jazz.all(app.projects, { tier: "global" });
+  const existing = yield* jazz.all(app.projects, { tier: "remote" });
 
   if (existing.length === 0) {
     yield* jazz.insert(app.projects, { name: "Default" });
@@ -378,13 +378,15 @@ export const groupTodoWrites = Effect.fn("groupTodoWrites")(function* (existingT
 });
 // #endregion writing-transaction-effect
 
-// #region writing-exclusive-transaction-effect
-export const finishTodoExclusively = Effect.fn("finishTodoExclusively")(function* (todoId: string) {
+// #region writing-serializable-transaction-effect
+export const finishTodoSerializably = Effect.fn("finishTodoSerializably")(function* (
+  todoId: string,
+) {
   const jazz = yield* Jazz;
   // Waits for the authority's verdict. A conflict fails with JazzWriteRejected,
   // so the whole transaction can simply be retried.
   return yield* jazz
-    .exclusiveTransaction((tx) =>
+    .serializableTransaction((tx) =>
       Effect.gen(function* () {
         const todo = yield* tx.one(app.todos.where({ id: todoId }));
         if (Option.isNone(todo)) return yield* new TodoNotFound({ id: todoId });
@@ -400,7 +402,7 @@ export const finishTodoExclusively = Effect.fn("finishTodoExclusively")(function
       }),
     );
 });
-// #endregion writing-exclusive-transaction-effect
+// #endregion writing-serializable-transaction-effect
 
 // #region writing-transaction-errors-effect
 export const completeTodoInTransaction = Effect.fn("completeTodoInTransaction")(function* (

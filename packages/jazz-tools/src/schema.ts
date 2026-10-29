@@ -42,28 +42,13 @@ export interface JsonSqlType<Output = JsonValue> {
   __output?: Output;
 }
 export type SqlType = ScalarSqlType | ArraySqlType | EnumSqlType | JsonSqlType<unknown>;
-export type ColumnMergeStrategy = "counter" | "g-set";
+/**
+ * How concurrent writes to a column combine. `counter` sums integer changes,
+ * `g-set` unions arrays, and `text`, `markdown` and `html` merge concurrent
+ * edits to a string three-way (markdown and HTML syntax is never split).
+ */
+export type ColumnMergeStrategy = "counter" | "g-set" | "text" | "markdown" | "html";
 export type ColumnMergeStrategyName = ColumnMergeStrategy | "lww";
-
-export function sqlTypeToString(sqlType: SqlType): string {
-  if (typeof sqlType === "string") {
-    return sqlType;
-  }
-  if (sqlType.kind === "ENUM") {
-    if (sqlType.variants) {
-      const variants = sqlType.variants.map((variant) => `'${variant.replace(/'/g, "''")}'`);
-      return `ENUM(${variants.join(",")})`;
-    }
-    return `ENUM(${(sqlType.cases ?? []).map((entry) => entry.name).join(",")})`;
-  }
-  if (sqlType.kind === "JSON") {
-    if (!sqlType.schema) {
-      return "JSON";
-    }
-    return `JSON('${JSON.stringify(sqlType.schema).replace(/'/g, "''")}')`;
-  }
-  return `${sqlTypeToString(sqlType.element)}[]`;
-}
 
 type TSTypeFromScalarSqlType<T extends ScalarSqlType> = T extends "TEXT"
   ? string
@@ -306,27 +291,9 @@ export interface RenameTableFromOp<TOldName extends string = string> {
 }
 
 // Lens format for SQL generation
-export interface IntroduceLensOp {
-  type: "introduce";
-  column: string;
-  sqlType: SqlType;
-  value: unknown;
-}
-
-export interface DropLensOp {
-  type: "drop";
-  column: string;
-  sqlType: SqlType;
-  value: unknown;
-}
-
-export interface RenameLensOp {
-  type: "rename";
-  column: string;
-  value: string;
-}
-
-export type LensOp = IntroduceLensOp | DropLensOp | RenameLensOp;
+export type LensOp =
+  | { type: "introduce" | "drop"; column: string; sqlType: SqlType; value: unknown }
+  | { type: "rename"; column: string; value: string };
 
 export type LensOpType = LensOp["type"];
 

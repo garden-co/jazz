@@ -77,23 +77,11 @@ fn normalize_array_subquery(subquery: &mut ArraySubquery) {
 
 fn canonical_flat_join_key(flat_join: &FlatJoin) -> Vec<u8> {
     let mut bytes = Vec::new();
-    match flat_join.root_alias.as_deref() {
-        Some(alias) => {
-            bytes.push(1);
-            put_str(&mut bytes, alias);
-        }
-        None => bytes.push(0),
-    }
+    put_opt_str(&mut bytes, flat_join.root_alias.as_deref());
     put_len(&mut bytes, flat_join.sources.len());
     for source in &flat_join.sources {
         put_str(&mut bytes, &source.table);
-        match source.alias.as_deref() {
-            Some(alias) => {
-                bytes.push(1);
-                put_str(&mut bytes, alias);
-            }
-            None => bytes.push(0),
-        }
+        put_opt_str(&mut bytes, source.alias.as_deref());
         put_str(&mut bytes, &source.on.left);
         put_str(&mut bytes, &source.on.right);
     }
@@ -112,22 +100,10 @@ fn normalize_join(join: &mut JoinVia) {
 
 fn canonical_policy_branch_key(branch: &PolicyBranch) -> Vec<u8> {
     let mut bytes = Vec::new();
-    put_len(&mut bytes, branch.filters.len());
-    for filter in &branch.filters {
-        put_bytes(&mut bytes, &canonical_predicate_key(filter));
-    }
-    put_len(&mut bytes, branch.joins.len());
-    for join in &branch.joins {
-        put_bytes(&mut bytes, &canonical_join_key(join));
-    }
-    put_len(&mut bytes, branch.reachable.len());
-    for reachable in &branch.reachable {
-        put_bytes(&mut bytes, &canonical_reachable_key(reachable));
-    }
-    put_len(&mut bytes, branch.inherits.len());
-    for inherits in &branch.inherits {
-        put_bytes(&mut bytes, &canonical_inherits_key(inherits));
-    }
+    put_keys(&mut bytes, &branch.filters, canonical_predicate_key);
+    put_keys(&mut bytes, &branch.joins, canonical_join_key);
+    put_keys(&mut bytes, &branch.reachable, canonical_reachable_key);
+    put_keys(&mut bytes, &branch.inherits, canonical_inherits_key);
     bytes
 }
 
@@ -136,25 +112,12 @@ fn canonical_policy_branch_key_for_schema(
     schema: &RuntimeSchema,
 ) -> Result<Vec<u8>, QueryError> {
     let mut bytes = Vec::new();
-    put_len(&mut bytes, branch.filters.len());
-    for filter in &branch.filters {
-        put_bytes(&mut bytes, &canonical_predicate_key(filter));
-    }
-    put_len(&mut bytes, branch.joins.len());
-    for join in &branch.joins {
-        put_bytes(&mut bytes, &canonical_join_key(join));
-    }
-    put_len(&mut bytes, branch.reachable.len());
-    for reachable in &branch.reachable {
-        put_bytes(
-            &mut bytes,
-            &canonical_reachable_key_for_schema(reachable, schema)?,
-        );
-    }
-    put_len(&mut bytes, branch.inherits.len());
-    for inherits in &branch.inherits {
-        put_bytes(&mut bytes, &canonical_inherits_key(inherits));
-    }
+    put_keys(&mut bytes, &branch.filters, canonical_predicate_key);
+    put_keys(&mut bytes, &branch.joins, canonical_join_key);
+    try_put_keys(&mut bytes, &branch.reachable, |item| {
+        canonical_reachable_key_for_schema(item, schema)
+    })?;
+    put_keys(&mut bytes, &branch.inherits, canonical_inherits_key);
     Ok(bytes)
 }
 
@@ -181,10 +144,7 @@ fn canonical_array_subquery_key(subquery: &ArraySubquery) -> Vec<u8> {
     put_str(&mut bytes, &subquery.table);
     put_str(&mut bytes, &subquery.inner_column);
     put_str(&mut bytes, &subquery.outer_column);
-    put_len(&mut bytes, subquery.filters.len());
-    for filter in &subquery.filters {
-        put_bytes(&mut bytes, &canonical_predicate_key(filter));
-    }
+    put_keys(&mut bytes, &subquery.filters, canonical_predicate_key);
     if let Some(select) = &subquery.select {
         bytes.push(b's');
         put_len(&mut bytes, select.len());
@@ -218,10 +178,11 @@ fn canonical_array_subquery_key(subquery: &ArraySubquery) -> Vec<u8> {
     });
     if !subquery.nested_arrays.is_empty() {
         bytes.push(b'n');
-        put_len(&mut bytes, subquery.nested_arrays.len());
-        for nested in &subquery.nested_arrays {
-            put_bytes(&mut bytes, &canonical_array_subquery_key(nested));
-        }
+        put_keys(
+            &mut bytes,
+            &subquery.nested_arrays,
+            canonical_array_subquery_key,
+        );
     }
     bytes
 }
@@ -263,10 +224,11 @@ fn canonical_reachable_key_with_seed_type(
         JoinTarget::Uncorrelated => bytes.push(b'e'),
     }
     put_bytes(&mut bytes, &canonical_operand_key(&reachable.from));
-    put_len(&mut bytes, reachable.access_filters.len());
-    for filter in &reachable.access_filters {
-        put_bytes(&mut bytes, &canonical_predicate_key(filter));
-    }
+    put_keys(
+        &mut bytes,
+        &reachable.access_filters,
+        canonical_predicate_key,
+    );
     put_str(&mut bytes, &reachable.edge_table);
     put_str(&mut bytes, &reachable.edge_member_column);
     put_str(&mut bytes, &reachable.edge_parent_column);
@@ -293,10 +255,7 @@ fn canonical_reachable_key_with_seed_type(
             }
         }
         put_str(&mut bytes, &seed.team_column);
-        put_len(&mut bytes, seed.filters.len());
-        for filter in &seed.filters {
-            put_bytes(&mut bytes, &canonical_predicate_key(filter));
-        }
+        put_keys(&mut bytes, &seed.filters, canonical_predicate_key);
     }
     bytes
 }
@@ -341,17 +300,15 @@ fn canonical_join_key(join: &JoinVia) -> Vec<u8> {
     }
     if !join.correlated_filters.is_empty() {
         bytes.push(b'c');
-        put_len(&mut bytes, join.correlated_filters.len());
-        for correlation in &join.correlated_filters {
-            put_bytes(&mut bytes, &canonical_join_correlation_key(correlation));
-        }
+        put_keys(
+            &mut bytes,
+            &join.correlated_filters,
+            canonical_join_correlation_key,
+        );
     }
     if !join.nested_joins.is_empty() {
         bytes.push(b'j');
-        put_len(&mut bytes, join.nested_joins.len());
-        for nested in &join.nested_joins {
-            put_bytes(&mut bytes, &canonical_join_key(nested));
-        }
+        put_keys(&mut bytes, &join.nested_joins, canonical_join_key);
     }
     for filter in &join.filters {
         put_bytes(&mut bytes, &canonical_predicate_key(filter));
@@ -371,81 +328,28 @@ fn canonical_predicate_key(predicate: &Predicate) -> Vec<u8> {
     match predicate {
         Predicate::All(predicates) => {
             bytes.push(b'A');
-            let mut predicates = predicates
-                .iter()
-                .map(canonical_predicate_key)
-                .collect::<Vec<_>>();
-            predicates.sort();
-            put_len(&mut bytes, predicates.len());
-            for predicate in predicates {
-                put_bytes(&mut bytes, &predicate);
-            }
+            put_sorted_keys(&mut bytes, predicates.iter().map(canonical_predicate_key));
         }
         Predicate::Any(predicates) => {
             bytes.push(b'O');
-            let mut predicates = predicates
-                .iter()
-                .map(canonical_predicate_key)
-                .collect::<Vec<_>>();
-            predicates.sort();
-            put_len(&mut bytes, predicates.len());
-            for predicate in predicates {
-                put_bytes(&mut bytes, &predicate);
-            }
+            put_sorted_keys(&mut bytes, predicates.iter().map(canonical_predicate_key));
         }
         Predicate::Not(predicate) => {
             bytes.push(b'!');
             put_bytes(&mut bytes, &canonical_predicate_key(predicate));
         }
-        Predicate::Eq(left, right) => {
-            bytes.push(b'e');
-            let mut operands = [canonical_operand_key(left), canonical_operand_key(right)];
-            operands.sort();
-            put_bytes(&mut bytes, &operands[0]);
-            put_bytes(&mut bytes, &operands[1]);
-        }
-        Predicate::Ne(left, right) => {
-            bytes.push(b'n');
-            let mut operands = [canonical_operand_key(left), canonical_operand_key(right)];
-            operands.sort();
-            put_bytes(&mut bytes, &operands[0]);
-            put_bytes(&mut bytes, &operands[1]);
-        }
+        Predicate::Eq(left, right) => put_unordered_operands(&mut bytes, b'e', left, right),
+        Predicate::Ne(left, right) => put_unordered_operands(&mut bytes, b'n', left, right),
         Predicate::In(left, values) => {
             bytes.push(b'i');
             put_bytes(&mut bytes, &canonical_operand_key(left));
-            let mut values = values.iter().map(canonical_operand_key).collect::<Vec<_>>();
-            values.sort();
-            put_len(&mut bytes, values.len());
-            for value in values {
-                put_bytes(&mut bytes, &value);
-            }
+            put_sorted_keys(&mut bytes, values.iter().map(canonical_operand_key));
         }
-        Predicate::Gt(left, right) => {
-            bytes.push(b'g');
-            put_bytes(&mut bytes, &canonical_operand_key(left));
-            put_bytes(&mut bytes, &canonical_operand_key(right));
-        }
-        Predicate::Gte(left, right) => {
-            bytes.push(b'G');
-            put_bytes(&mut bytes, &canonical_operand_key(left));
-            put_bytes(&mut bytes, &canonical_operand_key(right));
-        }
-        Predicate::Lt(left, right) => {
-            bytes.push(b't');
-            put_bytes(&mut bytes, &canonical_operand_key(left));
-            put_bytes(&mut bytes, &canonical_operand_key(right));
-        }
-        Predicate::Lte(left, right) => {
-            bytes.push(b'T');
-            put_bytes(&mut bytes, &canonical_operand_key(left));
-            put_bytes(&mut bytes, &canonical_operand_key(right));
-        }
-        Predicate::Contains(left, right) => {
-            bytes.push(b'c');
-            put_bytes(&mut bytes, &canonical_operand_key(left));
-            put_bytes(&mut bytes, &canonical_operand_key(right));
-        }
+        Predicate::Gt(left, right) => put_operands(&mut bytes, b'g', left, right),
+        Predicate::Gte(left, right) => put_operands(&mut bytes, b'G', left, right),
+        Predicate::Lt(left, right) => put_operands(&mut bytes, b't', left, right),
+        Predicate::Lte(left, right) => put_operands(&mut bytes, b'T', left, right),
+        Predicate::Contains(left, right) => put_operands(&mut bytes, b'c', left, right),
         Predicate::IsNull(operand) => {
             bytes.push(b'0');
             put_bytes(&mut bytes, &canonical_operand_key(operand));
@@ -494,44 +398,27 @@ fn canonical_query_bytes_for_schema(
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"jazz-query-v0");
     put_str(&mut bytes, &query.table);
-    put_len(&mut bytes, query.filters.len());
-    for filter in &query.filters {
-        put_bytes(&mut bytes, &canonical_predicate_key(filter));
-    }
-    put_len(&mut bytes, query.joins.len());
-    for join in &query.joins {
-        put_bytes(&mut bytes, &canonical_join_key(join));
-    }
+    put_keys(&mut bytes, &query.filters, canonical_predicate_key);
+    put_keys(&mut bytes, &query.joins, canonical_join_key);
     if let Some(flat_join) = &query.flat_join {
         bytes.push(b'j');
         put_bytes(&mut bytes, &canonical_flat_join_key(flat_join));
     }
     if !query.policy_branches.is_empty() {
         bytes.push(b'b');
-        put_len(&mut bytes, query.policy_branches.len());
-        for branch in &query.policy_branches {
-            put_bytes(
-                &mut bytes,
-                &canonical_policy_branch_key_for_schema(branch, schema)?,
-            );
-        }
+        try_put_keys(&mut bytes, &query.policy_branches, |item| {
+            canonical_policy_branch_key_for_schema(item, schema)
+        })?;
     }
     if !query.reachable.is_empty() {
         bytes.push(b'r');
-        put_len(&mut bytes, query.reachable.len());
-        for reachable in &query.reachable {
-            put_bytes(
-                &mut bytes,
-                &canonical_reachable_key_for_schema(reachable, schema)?,
-            );
-        }
+        try_put_keys(&mut bytes, &query.reachable, |item| {
+            canonical_reachable_key_for_schema(item, schema)
+        })?;
     }
     if !query.inherits.is_empty() {
         bytes.push(b'i');
-        put_len(&mut bytes, query.inherits.len());
-        for inherits in &query.inherits {
-            put_bytes(&mut bytes, &canonical_inherits_key(inherits));
-        }
+        put_keys(&mut bytes, &query.inherits, canonical_inherits_key);
     }
     put_len(&mut bytes, query.includes.len());
     for include in &query.includes {
@@ -544,11 +431,14 @@ fn canonical_query_bytes_for_schema(
     }
     if !query.array_subqueries.is_empty() {
         bytes.push(b'y');
-        put_len(&mut bytes, query.array_subqueries.len());
-        for subquery in &query.array_subqueries {
-            put_bytes(&mut bytes, &canonical_array_subquery_key(subquery));
-        }
+        put_keys(
+            &mut bytes,
+            &query.array_subqueries,
+            canonical_array_subquery_key,
+        );
     }
+    // `partial` is not part of the identity: a partial selection syncs the
+    // same rows and only reads less of their values (SPEC 19.12).
     if let Some(select) = &query.select {
         bytes.push(b's');
         put_len(&mut bytes, select.len());
@@ -569,16 +459,8 @@ fn canonical_query_bytes_for_schema(
     }
     if let Some(aggregate) = &query.aggregate {
         bytes.push(b'a');
-        put_len(&mut bytes, aggregate.aggregates.len());
-        for aggregate in &aggregate.aggregates {
-            put_bytes(&mut bytes, &canonical_aggregate_key(aggregate));
-        }
-        if let Some(group_by) = &aggregate.group_by {
-            bytes.push(1);
-            put_str(&mut bytes, group_by);
-        } else {
-            bytes.push(0);
-        }
+        put_keys(&mut bytes, &aggregate.aggregates, canonical_aggregate_key);
+        put_opt_str(&mut bytes, aggregate.group_by.as_deref());
     }
     if query.limit.is_some() || query.offset != 0 {
         bytes.push(b'p');
@@ -653,180 +535,30 @@ fn canonical_binding_bytes(
     put_len(&mut bytes, values.len());
     for (name, value) in values {
         put_str(&mut bytes, name);
-        put_binding_value(&mut bytes, value)?;
+        validate_binding_value(value)?;
+        put_value(&mut bytes, value);
     }
     Ok(bytes)
 }
 
-fn put_binding_value(bytes: &mut Vec<u8>, value: &Value) -> Result<(), QueryError> {
+/// Binding identities encode with the same tags as query literals, but only
+/// accept values a public caller can supply.
+fn validate_binding_value(value: &Value) -> Result<(), QueryError> {
     match value {
-        Value::U8(value) => {
-            bytes.push(1);
-            bytes.push(*value);
-        }
-        Value::U16(value) => {
-            bytes.push(2);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        Value::U32(value) => {
-            bytes.push(3);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        Value::U64(value) => {
-            bytes.push(4);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        Value::I32(value) => {
-            bytes.push(15);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        Value::I64(value) => {
-            bytes.push(14);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        Value::F64(value) => {
-            bytes.push(5);
-            bytes.extend_from_slice(&value.to_bits().to_be_bytes());
-        }
-        Value::Bool(value) => {
-            bytes.push(6);
-            bytes.push(u8::from(*value));
-        }
-        Value::String(value) => {
-            bytes.push(7);
-            put_str(bytes, value);
-        }
-        Value::Bytes(value) => {
-            bytes.push(8);
-            put_bytes(bytes, value);
-        }
-        Value::Uuid(value) => {
-            bytes.push(9);
-            bytes.extend_from_slice(value.as_bytes());
-        }
-        Value::EnumTag(value) => {
-            bytes.push(10);
-            bytes.push(*value);
-        }
-        Value::Tuple(values) => {
-            bytes.push(11);
-            put_len(bytes, values.len());
+        Value::Tuple(values) | Value::Array(values) => {
             for value in values {
-                put_binding_value(bytes, value)?;
+                validate_binding_value(value)?;
             }
         }
-        Value::Array(values) => {
-            bytes.push(12);
-            put_len(bytes, values.len());
-            for value in values {
-                put_binding_value(bytes, value)?;
-            }
+        Value::Nullable(Some(value)) => validate_binding_value(value)?,
+        Value::Record(record) => validate_public_column_type(&ColumnType::Record(Box::new(
+            record.descriptor().clone(),
+        )))?,
+        // U48 is an engine-owned stamp width, never a public query binding.
+        Value::Enum(_) | Value::Large(_) | Value::U48(_) => {
+            return Err(QueryError::OperandTypeMismatch);
         }
-        Value::Nullable(None) => {
-            bytes.push(13);
-            bytes.push(0);
-        }
-        Value::Nullable(Some(value)) => {
-            bytes.push(13);
-            bytes.push(1);
-            put_binding_value(bytes, value)?;
-        }
-        Value::Record(record) => {
-            bytes.push(16);
-            put_binding_column_type(
-                bytes,
-                &ColumnType::Record(Box::new(record.descriptor().clone())),
-            )?;
-            put_bytes(bytes, record.raw());
-        }
-        Value::Enum(_) | Value::Large(_) => return Err(QueryError::OperandTypeMismatch),
-    }
-    Ok(())
-}
-
-fn put_binding_column_type(
-    bytes: &mut Vec<u8>,
-    ty: &ColumnType,
-) -> Result<(), QueryError> {
-    match ty {
-        ColumnType::U8 => bytes.push(0),
-        ColumnType::U16 => bytes.push(1),
-        ColumnType::U32 => bytes.push(2),
-        ColumnType::U64 => bytes.push(3),
-        ColumnType::I32 => bytes.push(4),
-        ColumnType::I64 => bytes.push(5),
-        ColumnType::F64 => bytes.push(6),
-        ColumnType::Bool => bytes.push(7),
-        ColumnType::String => bytes.push(8),
-        ColumnType::Bytes => bytes.push(9),
-        ColumnType::Uuid => bytes.push(10),
-        ColumnType::EnumTag(schema) => {
-            bytes.push(11);
-            put_str(bytes, &schema.name);
-            put_len(bytes, schema.variants.len());
-            for variant in &schema.variants {
-                put_str(bytes, variant);
-            }
-        }
-        ColumnType::Tuple(types) => {
-            bytes.push(12);
-            put_len(bytes, types.len());
-            for ty in types {
-                put_binding_column_type(bytes, ty)?;
-            }
-        }
-        ColumnType::Array(member) => {
-            bytes.push(13);
-            put_binding_column_type(bytes, member)?;
-        }
-        ColumnType::Nullable(inner) => {
-            bytes.push(14);
-            put_binding_column_type(bytes, inner)?;
-        }
-        ColumnType::Record(descriptor) => {
-            bytes.push(15);
-            put_len(bytes, descriptor.fields().len());
-            for field in descriptor.fields() {
-                match &field.name {
-                    Some(name) => {
-                        bytes.push(1);
-                        put_str(bytes, name);
-                    }
-                    None => bytes.push(0),
-                }
-                match &field.identity {
-                    None => bytes.push(0),
-                    Some(groove::records::FieldIdentity::Name(name)) => {
-                        bytes.push(1);
-                        put_str(bytes, name);
-                    }
-                    Some(groove::records::FieldIdentity::Slot(slot)) => {
-                        bytes.push(2);
-                        bytes.extend_from_slice(&slot.to_be_bytes());
-                    }
-                    Some(groove::records::FieldIdentity::NamedSlot { name, slot }) => {
-                        bytes.push(3);
-                        put_str(bytes, name);
-                        bytes.extend_from_slice(&slot.to_be_bytes());
-                    }
-                }
-                put_binding_column_type(bytes, &field.value_type)?;
-            }
-        }
-        ColumnType::Enum(schema) => {
-            bytes.push(16);
-            bytes.extend_from_slice(&schema.registry_id.to_be_bytes());
-            put_str(bytes, &schema.name);
-            put_len(bytes, schema.cases.len());
-            for case in &schema.cases {
-                put_str(bytes, &case.name);
-                put_binding_column_type(
-                    bytes,
-                    &ColumnType::Record(Box::new(case.payload.clone())),
-                )?;
-            }
-        }
-        ColumnType::Internal(_) => return Err(QueryError::OperandTypeMismatch),
+        _ => {}
     }
     Ok(())
 }
@@ -853,7 +585,7 @@ fn validate_public_column_type(column_type: &ColumnType) -> Result<(), QueryErro
                 }
             }
         }
-        ColumnType::Internal(_) => return Err(QueryError::OperandTypeMismatch),
+        ColumnType::Internal(_) | ColumnType::U48 => return Err(QueryError::OperandTypeMismatch),
         ColumnType::U8
         | ColumnType::U16
         | ColumnType::U32
@@ -909,7 +641,7 @@ fn value_type(value: &Value) -> Result<ColumnType, QueryError> {
             validate_public_column_type(&column_type)?;
             Ok(column_type)
         }
-        Value::Enum(_) | Value::Large(_) => Err(QueryError::OperandTypeMismatch),
+        Value::Enum(_) | Value::Large(_) | Value::U48(_) => Err(QueryError::OperandTypeMismatch),
     }
 }
 
@@ -947,45 +679,26 @@ fn value_matches_type(value: &Value, column_type: &ColumnType) -> bool {
         (Value::Enum(_), _) => false,
         // Indirect descriptors are engine-owned and cannot be supplied as a
         // public query binding; callers bind the ordinary logical primitive.
-        (Value::Large(_), _) => false,
         _ => false,
     }
 }
 
+/// Writes a one-byte tag followed by `payload`.
+fn put_tagged(bytes: &mut Vec<u8>, tag: u8, payload: &[u8]) {
+    bytes.push(tag);
+    bytes.extend_from_slice(payload);
+}
+
 fn put_value(bytes: &mut Vec<u8>, value: &Value) {
     match value {
-        Value::U8(value) => {
-            bytes.push(1);
-            bytes.push(*value);
-        }
-        Value::U16(value) => {
-            bytes.push(2);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        Value::U32(value) => {
-            bytes.push(3);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        Value::U64(value) => {
-            bytes.push(4);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        Value::I32(value) => {
-            bytes.push(15);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        Value::I64(value) => {
-            bytes.push(14);
-            bytes.extend_from_slice(&value.to_be_bytes());
-        }
-        Value::F64(value) => {
-            bytes.push(5);
-            bytes.extend_from_slice(&value.to_bits().to_be_bytes());
-        }
-        Value::Bool(value) => {
-            bytes.push(6);
-            bytes.push(u8::from(*value));
-        }
+        Value::U8(value) => put_tagged(bytes, 1, &[*value]),
+        Value::U16(value) => put_tagged(bytes, 2, &value.to_be_bytes()),
+        Value::U32(value) => put_tagged(bytes, 3, &value.to_be_bytes()),
+        Value::U64(value) => put_tagged(bytes, 4, &value.to_be_bytes()),
+        Value::I32(value) => put_tagged(bytes, 15, &value.to_be_bytes()),
+        Value::I64(value) => put_tagged(bytes, 14, &value.to_be_bytes()),
+        Value::F64(value) => put_tagged(bytes, 5, &value.to_bits().to_be_bytes()),
+        Value::Bool(value) => put_tagged(bytes, 6, &[u8::from(*value)]),
         Value::String(value) => {
             bytes.push(7);
             put_str(bytes, value);
@@ -994,14 +707,8 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
             bytes.push(8);
             put_bytes(bytes, value);
         }
-        Value::Uuid(value) => {
-            bytes.push(9);
-            bytes.extend_from_slice(value.as_bytes());
-        }
-        Value::EnumTag(value) => {
-            bytes.push(10);
-            bytes.push(*value);
-        }
+        Value::Uuid(value) => put_tagged(bytes, 9, value.as_bytes()),
+        Value::EnumTag(value) => put_tagged(bytes, 10, &[*value]),
         Value::Tuple(values) => {
             bytes.push(11);
             put_len(bytes, values.len());
@@ -1016,10 +723,7 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
                 put_value(bytes, value);
             }
         }
-        Value::Nullable(None) => {
-            bytes.push(13);
-            bytes.push(0);
-        }
+        Value::Nullable(None) => put_tagged(bytes, 13, &[0]),
         Value::Nullable(Some(value)) => {
             bytes.push(13);
             bytes.push(1);
@@ -1033,7 +737,7 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
             );
             put_bytes(bytes, record.raw());
         }
-        // These Groove-native arms are rejected by value_type before a
+        // These internal arms are rejected by value_type before a
         // validated query reaches canonicalization. Keep their fallback
         // encodings total for defensive callers such as binding identities.
         Value::Enum(value) => {
@@ -1045,12 +749,13 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
             );
             put_bytes(bytes, value.record().raw());
         }
+        Value::U48(value) => put_tagged(bytes, 19, &value.to_be_bytes()),
         Value::Large(value) => {
             bytes.push(18);
             bytes.push(match value.kind {
-                groove::large_values::LargeValueKind::Bytes => 0,
-                groove::large_values::LargeValueKind::String => 1,
-                groove::large_values::LargeValueKind::Json => 2,
+                jazz_types::large_values::LargeValueKind::Bytes => 0,
+                jazz_types::large_values::LargeValueKind::String => 1,
+                jazz_types::large_values::LargeValueKind::Json => 2,
             });
             bytes.push(value.format_version);
             bytes.extend_from_slice(&value.logical_hash.0);
@@ -1109,15 +814,15 @@ fn put_column_type(bytes: &mut Vec<u8>, ty: &ColumnType) {
                 // Equal display names must not alias distinct typed columns.
                 match &field.identity {
                     None => bytes.push(0),
-                    Some(groove::records::FieldIdentity::Name(name)) => {
+                    Some(jazz_types::records::FieldIdentity::Name(name)) => {
                         bytes.push(1);
                         put_str(bytes, name);
                     }
-                    Some(groove::records::FieldIdentity::Slot(slot)) => {
+                    Some(jazz_types::records::FieldIdentity::Slot(slot)) => {
                         bytes.push(2);
                         bytes.extend_from_slice(&slot.to_be_bytes());
                     }
-                    Some(groove::records::FieldIdentity::NamedSlot { name, slot }) => {
+                    Some(jazz_types::records::FieldIdentity::NamedSlot { name, slot }) => {
                         bytes.push(3);
                         put_str(bytes, name);
                         bytes.extend_from_slice(&slot.to_be_bytes());
@@ -1143,6 +848,7 @@ fn put_column_type(bytes: &mut Vec<u8>, ty: &ColumnType) {
         // interface. Still keep this defensive encoder total if an internal
         // descriptor is carried by an otherwise supported record literal.
         ColumnType::Internal(_) => bytes.push(17),
+        ColumnType::U48 => bytes.push(18),
     }
 }
 
@@ -1153,6 +859,63 @@ fn put_str(bytes: &mut Vec<u8>, value: &str) {
 fn put_bytes(bytes: &mut Vec<u8>, value: &[u8]) {
     put_len(bytes, value.len());
     bytes.extend_from_slice(value);
+}
+
+/// A length-prefixed list of each item's canonical key.
+fn put_keys<T>(bytes: &mut Vec<u8>, items: &[T], key: impl Fn(&T) -> Vec<u8>) {
+    put_len(bytes, items.len());
+    for item in items {
+        put_bytes(bytes, &key(item));
+    }
+}
+
+fn try_put_keys<T>(
+    bytes: &mut Vec<u8>,
+    items: &[T],
+    key: impl Fn(&T) -> Result<Vec<u8>, QueryError>,
+) -> Result<(), QueryError> {
+    put_len(bytes, items.len());
+    for item in items {
+        put_bytes(bytes, &key(item)?);
+    }
+    Ok(())
+}
+
+/// A length-prefixed list of keys in sorted order, for operand lists whose
+/// order does not change meaning.
+fn put_sorted_keys(bytes: &mut Vec<u8>, keys: impl IntoIterator<Item = Vec<u8>>) {
+    let mut keys = keys.into_iter().collect::<Vec<_>>();
+    keys.sort();
+    put_len(bytes, keys.len());
+    for key in keys {
+        put_bytes(bytes, &key);
+    }
+}
+
+fn put_operands(bytes: &mut Vec<u8>, tag: u8, left: &Operand, right: &Operand) {
+    bytes.push(tag);
+    put_bytes(bytes, &canonical_operand_key(left));
+    put_bytes(bytes, &canonical_operand_key(right));
+}
+
+/// Like [`put_operands`], but for symmetric comparisons whose operand order
+/// does not change meaning.
+fn put_unordered_operands(bytes: &mut Vec<u8>, tag: u8, left: &Operand, right: &Operand) {
+    bytes.push(tag);
+    let mut operands = [canonical_operand_key(left), canonical_operand_key(right)];
+    operands.sort();
+    put_bytes(bytes, &operands[0]);
+    put_bytes(bytes, &operands[1]);
+}
+
+fn put_opt_str(bytes: &mut Vec<u8>, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            bytes.push(1);
+            put_str(bytes, value);
+        }
+        None => bytes.push(0),
+    }
 }
 
 fn put_len(bytes: &mut Vec<u8>, len: usize) {

@@ -15,18 +15,16 @@ use std::time::Instant;
 
 use jazz::account_registry::AccountId;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, InsertOptions, LocalUpdates, MergeableTxOps, PreparedQuery,
-    Propagation, ReadOpts, SubscriptionEvent, SubscriptionStream, WriteIdentity, block_on,
+    Db, DbConfig, DbIdentity, InsertOptions, PreparedQuery, ReadOpts, ReadTier, SubscriptionEvent,
+    SubscriptionStream, WriteIdentity, block_on,
 };
-use jazz::groove::records::Value;
-use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
+use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::policy_claims::canonical_policy_binding_claims;
 use jazz::tools::policy_expr::{SessionWhere, always, session_where};
 use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
-use jazz::tx::DurabilityTier;
 
 pub const GENERAL_ROOM: &str = "general";
 pub const ANNOUNCEMENTS_ROOM: &str = "announcements";
@@ -92,6 +90,7 @@ fn schema() -> JazzSchema {
                 .column("text", ColumnType::Text)
                 .column("sent_at", ColumnType::Timestamp)
                 .index_only(["chat_id", "sent_at"])
+                .composite_index(["chat_id", "sent_at"])
                 .policies(policies),
         )
         .build();
@@ -100,11 +99,8 @@ fn schema() -> JazzSchema {
 
 fn open_db() -> Db {
     let schema = schema();
-    let families = schema.column_families();
-    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let db = block_on(Db::open(DbConfig::new(
         schema,
-        MemoryStorage::new(&family_refs).expect("valid memory storage families"),
         DbIdentity {
             node: NodeUuid::from_bytes([0xa9; 16]),
             author: AuthorSubject::SYSTEM,
@@ -144,7 +140,7 @@ fn seed(db: &Db, room_messages: usize) {
     for (room_index, room) in [ANNOUNCEMENTS_ROOM, GENERAL_ROOM].into_iter().enumerate() {
         for start in (0..room_messages).step_by(SEED_BATCH) {
             let end = (start + SEED_BATCH).min(room_messages);
-            let ((), tx_id) = block_on(db.transaction(async |tx| {
+            block_on(db.transaction(async |tx| {
                 for message in start..end {
                     tx.insert(
                         "messages",
@@ -159,8 +155,6 @@ fn seed(db: &Db, room_messages: usize) {
                 Ok(())
             }))
             .unwrap_or_else(|error| panic!("seed {room} messages {start}..{end}: {error}"));
-            db.finalize_local_mergeable_commit_for_test(tx_id)
-                .expect("settle seeded messages");
         }
     }
 }
@@ -177,10 +171,7 @@ fn room_query(db: &Db, room: &str) -> PreparedQuery {
 
 fn subscription_opts() -> ReadOpts {
     ReadOpts {
-        tier: DurabilityTier::Local,
-        local_updates: LocalUpdates::Immediate,
-        propagation: Propagation::LocalOnly,
-        include_deleted: false,
+        tier: ReadTier::LocalOnly,
         ..ReadOpts::default()
     }
 }
@@ -240,7 +231,7 @@ impl AnnouncementsFixture {
         for _ in 0..count {
             let index = self.next_message;
             self.next_message += 1;
-            let write = block_on(self.db.insert(
+            block_on(self.db.insert(
                 "messages",
                 message_cells(ANNOUNCEMENTS_ROOM, index, index as u64),
                 InsertOptions {
@@ -250,11 +241,6 @@ impl AnnouncementsFixture {
                 },
             ))
             .expect("admin posts an announcement");
-            // The in-process authority plays the server's part: it runs the
-            // claim-gated insert policy and accepts the post.
-            self.db
-                .finalize_local_mergeable_commit_for_test(write.mergeable_tx_id())
-                .expect("authority accepts the admin's announcement");
             let mut shown = 0;
             while shown == 0 {
                 shown = added_rows(&next_event(&self.db, &mut self.stream));
@@ -269,10 +255,10 @@ impl AnnouncementsFixture {
         open_room_as(&self.db, &self.query, author).1
     }
 
-    /// Untimed oracle: a member's announcement is recorded locally but the
-    /// authority's insert policy rejects it.
+    /// Untimed oracle: this Db is the authority, so its insert policy
+    /// rejects a member's announcement at the write.
     pub fn member_announcement_is_denied(&self) -> bool {
-        let write = block_on(self.db.insert(
+        block_on(self.db.insert(
             "messages",
             message_cells(ANNOUNCEMENTS_ROOM, usize::MAX, 0),
             InsertOptions {
@@ -280,11 +266,7 @@ impl AnnouncementsFixture {
                 ..Default::default()
             },
         ))
-        .expect("a denied write is still recorded locally");
-        self.db
-            .finalize_local_mergeable_commit_for_test(write.mergeable_tx_id())
-            .expect("authority decides the announcement");
-        block_on(write.wait(DurabilityTier::Global)).is_err()
+        .is_err()
     }
 }
 

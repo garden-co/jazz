@@ -1,10 +1,10 @@
-import { schema as s } from "jazz-tools";
+import { schema as s, migration as m } from "jazz-tools";
 
 // Example of editing a generated migration stub.
-export default s.defineMigration({
+export default m.defineMigration({
   migrate: {
     todos: {
-      description: s.add.string({ default: "No description" }),
+      description: m.add.string({ default: "No description" }),
     },
   },
   fromHash: "a01f5c72ec47",

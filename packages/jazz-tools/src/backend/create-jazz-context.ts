@@ -30,6 +30,8 @@ import {
   verifiedLocalFirstRequestProof,
   type BackendRequestOptions,
 } from "./request-auth.js";
+import { deterministicBytes } from "../runtime/deterministic-bytes.js";
+import { resolveAllowLocalFirstAuth } from "./local-first-auth.js";
 
 export type BackendSchemaSource = WasmSchemaSource;
 export type BackendQuerySchemaSource = QuerySchemaSource;
@@ -39,7 +41,7 @@ export type BackendJwtPublicKey = JWK | string;
 export type BackendDriver =
   | {
       type: "persistent";
-      /** Path to the Fjall file used by the server runtime. */
+      /** Directory of the server runtime's SQLite store. */
       dataPath: string;
     }
   | {
@@ -58,11 +60,9 @@ type BackendContextSchemaConfig =
       permissions?: undefined;
     };
 
-export type BackendContextConfig = Omit<AppContext, "schema" | "driver" | "clientId" | "tier"> & {
+export type BackendContextConfig = Omit<AppContext, "schema" | "driver"> & {
   /** Server runtime driver mode and storage location. */
   driver: BackendDriver;
-  /** Optional node durability tier identity. */
-  tier?: "local" | "global";
   /**
    * Direct JWKS endpoint used to verify external bearer JWTs in `forRequest()`.
    * Requires HTTPS, except development HTTP whose WHATWG-canonical hostname is
@@ -78,7 +78,14 @@ export type BackendContextConfig = Omit<AppContext, "schema" | "driver" | "clien
   jwtIssuer?: string;
   /** Required audience, or audiences, for external bearer JWTs accepted by `forRequest()`. */
   jwtAudience?: string | readonly string[];
-  /** Whether local-first bearer JWTs are accepted in `forRequest()`. Defaults to `true`. */
+  /**
+   * Whether request verification accepts local-first bearer JWTs, including in
+   * `forRequest()` and `withAttributionForRequest()`. Defaults to `false` when
+   * `NODE_ENV` is `production` (case-insensitive), and `true` otherwise.
+   * Explicit `true` or `false` overrides the default. The sync server must also
+   * accept the token and verify its account. This does not control whether the
+   * backend can create local-first accounts.
+   */
   allowLocalFirstAuth?: boolean;
 } & BackendContextSchemaConfig;
 
@@ -192,7 +199,6 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
     }
 
     this.initializedSchemaJson = schemaJson;
-    const nodeTier = this.config.tier ?? "global";
     const env = this.config.env ?? "dev";
     this.runtime = new NativeRuntimeAdapter(
       NapiDb,
@@ -202,16 +208,17 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
       authorBytesForSession({ issuer: "https://jazz.invalid", user_id: "backend-open" }),
       1,
       true,
-      this.config.driver.type === "persistent"
-        ? {
-            persistentPath: this.config.driver.dataPath,
-            readAuthorizationHost: "trusted-serving",
-            backendMode: true,
-          }
-        : {
-            readAuthorizationHost: "trusted-serving",
-            backendMode: true,
-          },
+      {
+        ...(this.config.driver.type === "persistent"
+          ? { persistentPath: this.config.driver.dataPath }
+          : {}),
+        readAuthorizationHost: "trusted-serving",
+        backendMode: true,
+        slowQueryLog: {
+          appId: this.config.appId,
+          thresholdMs: this.config.slowQueryThresholdMs,
+        },
+      },
     );
 
     if (this.nodeClock?.initialHighWater !== undefined) {
@@ -230,9 +237,6 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
         backendSecret: this.config.backendSecret,
         adminSecret: config.adminSecret,
         cookieSession: config.cookieSession,
-        tier: nodeTier,
-        defaultDurabilityTier:
-          this.config.defaultDurabilityTier ?? (config.serverUrl ? nodeTier : undefined),
       },
       { onAuthFailure },
     );
@@ -547,20 +551,6 @@ class BackendDb extends Db implements BackendMutationErrorSink {
   }
 }
 
-export function deterministicBytes(seed: string): Uint8Array {
-  let hash = 0x811c9dc5;
-  const bytes = new Uint8Array(16);
-  const view = new DataView(bytes.buffer);
-  for (let round = 0; round < 4; round += 1) {
-    for (let i = 0; i < seed.length; i += 1) {
-      hash ^= seed.charCodeAt(i) + round;
-      hash = Math.imul(hash, 0x01000193);
-    }
-    view.setUint32(round * 4, hash >>> 0, true);
-  }
-  return bytes;
-}
-
 function assertValidBackendConfig(config: BackendContextConfig): void {
   if (config.driver.type === "memory" && !config.serverUrl) {
     throw new Error("driver.type='memory' requires serverUrl.");
@@ -595,7 +585,7 @@ export class JazzContext {
     assertValidBackendConfig(config);
     this.config = {
       ...config,
-      allowLocalFirstAuth: config.allowLocalFirstAuth ?? true,
+      allowLocalFirstAuth: resolveAllowLocalFirstAuth(config.allowLocalFirstAuth),
     };
     this.defaultSchemaInput = config.app;
     this.nodeIdentityScope =

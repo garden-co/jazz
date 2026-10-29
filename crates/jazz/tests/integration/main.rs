@@ -1,106 +1,171 @@
-// One integration-test binary for Jazz's flat test files.
-//
-// Every flat file used to be its own test executable, each compiling and
-// linking the full Jazz dependency graph. Here they build as modules of one
-// binary; Nextest still runs each test in its own process. A module whose file
-// used to need `required-features` is gated by the same feature with `cfg`, so
-// a build without that feature skips it exactly as Cargo skipped the binary.
-// account_author (runtime) and the four files calling `*_for_test` helpers
-// (testing) are gated too: they never compiled without those features, and
-// ungated they would break the whole binary for a plain `cargo test -p jazz`.
-//
-// Two files stay separate binaries (see Cargo.toml): incremental_delivery_canary
-// installs a #[global_allocator], and legacy_benchmark_smoke is selected by
-// name in the CI and benchmark gates.
+//! Jazz's integration tests, built as one binary: each flat `tests/*.rs`
+//! file is a module here (see dev/gates/test/rust-test-targets.test.mjs).
+//! Tests that need a process of their own (durable_file re-executes and
+//! measures its binary) stay separate targets.
 
-#[cfg(feature = "runtime")]
-#[path = "../account_author.rs"]
-mod account_author;
-#[cfg(feature = "testing")]
-#[path = "../async_open.rs"]
-mod async_open;
-#[cfg(feature = "runtime")]
-#[path = "../auth_admission.rs"]
-mod auth_admission;
-#[cfg(feature = "testing")]
+#[allow(dead_code)]
+#[path = "../common/mod.rs"]
+mod common;
+
+#[path = "../aggregate_nullable_keys.rs"]
+mod aggregate_nullable_keys;
+#[path = "../aggregate_ordering.rs"]
+mod aggregate_ordering;
+#[path = "../array_columns.rs"]
+mod array_columns;
 #[path = "../authorization_scope_reentry.rs"]
 mod authorization_scope_reentry;
+#[path = "../binding_host.rs"]
+mod binding_host;
+#[path = "../branch_column_evolution.rs"]
+mod branch_column_evolution;
 #[path = "../branch_views.rs"]
 mod branch_views;
-#[cfg(feature = "testing")]
-#[path = "../browser_relay_durability.rs"]
-mod browser_relay_durability;
+#[path = "../claims_change.rs"]
+mod claims_change;
 #[path = "../column_defaults.rs"]
 mod column_defaults;
-#[cfg(feature = "testing")]
+#[path = "../commit_atomicity_frames.rs"]
+mod commit_atomicity_frames;
 #[path = "../composite_indexes.rs"]
 mod composite_indexes;
-#[cfg(feature = "testing")]
-#[path = "../core_client_topology.rs"]
-mod core_client_topology;
-#[cfg(feature = "runtime")]
-#[path = "../core_fate_authority.rs"]
-mod core_fate_authority;
-#[path = "../coverage_group_flush_once.rs"]
-mod coverage_group_flush_once;
-#[path = "../deferred_local_persistence.rs"]
-mod deferred_local_persistence;
+#[path = "../deleted_rows.rs"]
+mod deleted_rows;
+#[path = "../deployment_preparation.rs"]
+mod deployment_preparation;
 #[path = "../dynamic_schema_views.rs"]
 mod dynamic_schema_views;
 #[path = "../error_code_strings.rs"]
 mod error_code_strings;
-#[cfg(feature = "runtime")]
-#[path = "../exclusive_snapshot_coverage.rs"]
-mod exclusive_snapshot_coverage;
-#[path = "../fate_regressions.rs"]
-mod fate_regressions;
-#[cfg(feature = "testing")]
-#[path = "../fate_replay.rs"]
-mod fate_replay;
-#[path = "../large_json_wire.rs"]
-mod large_json_wire;
+#[path = "../existential_joins.rs"]
+mod existential_joins;
+#[path = "../fanout_differential.rs"]
+mod fanout_differential;
+#[path = "../flat_joins.rs"]
+mod flat_joins;
+#[path = "../gather_policy_double_ref.rs"]
+mod gather_policy_double_ref;
+#[path = "../history_reads.rs"]
+mod history_reads;
+#[path = "../host_tables.rs"]
+mod host_tables;
+#[path = "../include_live.rs"]
+mod include_live;
 #[path = "../large_value_append.rs"]
 mod large_value_append;
+#[path = "../large_value_chunk_store.rs"]
+mod large_value_chunk_store;
 #[path = "../large_value_read_scaling.rs"]
 mod large_value_read_scaling;
 #[path = "../large_value_streaming_create.rs"]
 mod large_value_streaming_create;
 #[path = "../large_value_subscription_scaling.rs"]
 mod large_value_subscription_scaling;
+#[path = "../large_value_sync.rs"]
+mod large_value_sync;
 #[path = "../large_value_tx_update.rs"]
 mod large_value_tx_update;
-#[cfg(feature = "testing")]
-#[path = "../local_first_unless_empty.rs"]
-mod local_first_unless_empty;
+#[path = "../large_values.rs"]
+mod large_values;
+#[path = "../local_first_first_load_gate.rs"]
+mod local_first_first_load_gate;
+#[path = "../local_first_server_wait.rs"]
+mod local_first_server_wait;
+#[path = "../maybe_conflicting.rs"]
+mod maybe_conflicting;
 #[path = "../order_by_unselected_column.rs"]
 mod order_by_unselected_column;
-#[cfg(feature = "testing")]
 #[path = "../parameterized_subscription_routing.rs"]
 mod parameterized_subscription_routing;
-#[path = "../persistent_codec_family_registry.rs"]
-mod persistent_codec_family_registry;
-#[cfg(feature = "testing")]
+#[path = "../permission_advice.rs"]
+mod permission_advice;
+#[path = "../policy_activation.rs"]
+mod policy_activation;
 #[path = "../prepared_claim_routing.rs"]
 mod prepared_claim_routing;
-#[path = "../public_transaction_id_api.rs"]
-mod public_transaction_id_api;
-#[path = "../route_subscription_benchmark_contract.rs"]
-mod route_subscription_benchmark_contract;
-#[path = "../row_provenance.rs"]
-mod row_provenance;
-#[path = "../shared_coverage_differential.rs"]
-mod shared_coverage_differential;
-#[cfg(feature = "testing")]
-#[path = "../shared_query_hydration.rs"]
-mod shared_query_hydration;
+#[path = "../provenance.rs"]
+mod provenance;
+#[path = "../recheck_policies.rs"]
+mod recheck_policies;
+#[path = "../recheck_queries.rs"]
+mod recheck_queries;
+#[path = "../recheck_sync.rs"]
+mod recheck_sync;
+#[path = "../rejected_retry_store.rs"]
+mod rejected_retry_store;
+#[path = "../relation_policies.rs"]
+mod relation_policies;
+#[path = "../relation_queries.rs"]
+mod relation_queries;
+#[path = "../relation_results.rs"]
+mod relation_results;
+#[path = "../relational_delete_retraction.rs"]
+mod relational_delete_retraction;
+#[path = "../relay_local_seqs.rs"]
+mod relay_local_seqs;
+#[path = "../relay_policy_subscriptions.rs"]
+mod relay_policy_subscriptions;
+#[path = "../relay_serves_on_arrival.rs"]
+mod relay_serves_on_arrival;
+#[path = "../schema_activation.rs"]
+mod schema_activation;
+#[path = "../schema_renames.rs"]
+mod schema_renames;
+#[path = "../serializable_relay.rs"]
+mod serializable_relay;
+#[path = "../serializable_sqlite.rs"]
+mod serializable_sqlite;
+#[path = "../serializable_sync.rs"]
+mod serializable_sync;
+#[path = "../session_policy_values.rs"]
+mod session_policy_values;
+#[path = "../session_write_checks.rs"]
+mod session_write_checks;
+#[path = "../slow_queries.rs"]
+mod slow_queries;
+#[path = "../snapshots.rs"]
+mod snapshots;
+#[path = "../storage_corpus.rs"]
+mod storage_corpus;
+#[path = "../storage_errors.rs"]
+mod storage_errors;
 #[path = "../structured_result_tree.rs"]
 mod structured_result_tree;
-#[cfg(feature = "testing")]
-#[path = "../threaded_client_relay.rs"]
-mod threaded_client_relay;
+#[path = "../sync_access_loss.rs"]
+mod sync_access_loss;
+#[path = "../sync_aggregates.rs"]
+mod sync_aggregates;
+#[path = "../sync_differential.rs"]
+mod sync_differential;
+#[path = "../sync_echo.rs"]
+mod sync_echo;
+#[path = "../sync_frame_bounds.rs"]
+mod sync_frame_bounds;
+#[path = "../sync_gather.rs"]
+mod sync_gather;
+#[path = "../sync_resume.rs"]
+mod sync_resume;
+#[path = "../sync_sessions.rs"]
+mod sync_sessions;
+#[path = "../sync_support.rs"]
+mod sync_support;
+#[path = "../sync_support_access.rs"]
+mod sync_support_access;
+#[path = "../sync_untrusted_clients.rs"]
+mod sync_untrusted_clients;
+#[path = "../sync_wire_corpus.rs"]
+mod sync_wire_corpus;
+#[path = "../text_merge.rs"]
+mod text_merge;
+#[path = "../transaction_commit_kind.rs"]
+mod transaction_commit_kind;
+#[path = "../transaction_handles.rs"]
+mod transaction_handles;
+#[path = "../union_queries.rs"]
+mod union_queries;
 #[path = "../uuid_page_probe.rs"]
 mod uuid_page_probe;
-#[path = "../warm_reopen_differential.rs"]
-mod warm_reopen_differential;
-#[path = "../wire_fixtures.rs"]
-mod wire_fixtures;
+#[path = "../write_check_evidence.rs"]
+mod write_check_evidence;
+#[path = "../write_receipt_owner.rs"]
+mod write_receipt_owner;

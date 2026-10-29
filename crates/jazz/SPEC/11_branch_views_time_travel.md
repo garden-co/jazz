@@ -305,6 +305,12 @@ proportional to history depth within those selected branches. A future
 snapshot-current materialization or checkpoint index could make this bounded
 by current rows, but that optimization is not part of the initial contract.
 
+Branch layers and refs compose by one rule (SPEC 4 §4.7). Each branch layer
+is itself the `[local, origin]` stack of its key, so a live view reads
+`[head@local, head@origin, base@local, base@origin]`. Under an index path,
+the base is masked by the head's presence rather than by the head's index
+matches (`INV-REF-3`).
+
 Layer fallback is intentionally independent. Head content does not restore an
 inherited deletion; a head `Restored` winner may reveal inherited content; a
 head deletion hides either head or inherited content (`INV-BVIEW-9`,
@@ -381,7 +387,7 @@ This descriptor is neither a version parent nor a transaction read set, CAS
 condition, history edge, or contribution-merge dependency. It therefore does
 not park on source history, create cross-branch causality, or make the source
 currentness a serializability condition beyond the authority's one-time
-admission check. Root/head-local mutations and exclusive transactions continue
+admission check. Root/head-local mutations and serializable transactions continue
 to use their ordinary existing validation paths.
 
 For example, when `R` is inherited from `Main` and an update is requested in
@@ -498,7 +504,9 @@ duplicates; Jazz provides no global merge cursor or exactly-once import claim
 Branch-key evolution is monotone. A schema may add an ordinary column to
 `branchBy` only when that column has an immutable, typed, deterministic default.
 Old history and selectors authored under an older schema normalize the missing
-column to that default (`INV-BVIEW-19`).
+column to that default (`INV-BVIEW-19`). The SQLite store leaves a branch
+column at its default out of the stored branch key, so rows written before the
+column existed keep their key, and a node on either version keys them alike.
 
 For example:
 

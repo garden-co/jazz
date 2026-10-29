@@ -89,49 +89,49 @@ describe("MusicAgent workspace access", () => {
     expect(firstReply).toBeDefined();
 
     await expect
-      .poll(async () => (await user.all(app.artists, { tier: "global" })).length, {
+      .poll(async () => (await user.all(app.artists, { tier: "remote" })).length, {
         timeout: 30_000,
       })
       .toBe(1);
-    const conversations = await user.all(app.conversations, { tier: "global" });
+    const conversations = await user.all(app.conversations, { tier: "remote" });
     expect(conversations.map((c) => c.title)).toEqual(["Single release show"]);
     const turns = await user.all(app.turns.where({ conversationId: conversations[0]!.id }), {
-      tier: "global",
+      tier: "remote",
     });
     expect(turns.map((t) => t.role).sort()).toEqual(["assistant", "user"]);
     const files = await user.all(
       app.attachments.where({ conversationId: conversations[0]!.id }).select("filename"),
-      { tier: "global" },
+      { tier: "remote" },
     );
     expect(files.map((f) => f.filename)).toEqual(["night-shift-single-rough-mix.wav"]);
-    expect(await user.all(app.venues, { tier: "global" })).toHaveLength(8);
+    expect(await user.all(app.venues, { tier: "remote" })).toHaveLength(8);
   });
 
   test("a second user sees none of it and cannot build on it", async () => {
     const { bootstrapWorkspace } = await import("../src/server/bootstrap");
     await bootstrapWorkspace(otherAccountId, "auth-user-2", "Alex");
     await expect
-      .poll(async () => (await other.all(app.artists, { tier: "global" })).length, {
+      .poll(async () => (await other.all(app.artists, { tier: "remote" })).length, {
         timeout: 30_000,
       })
       .toBe(1);
 
-    const [ownArtist] = await other.all(app.artists, { tier: "global" });
-    const [ownConversation] = await other.all(app.conversations, { tier: "global" });
+    const [ownArtist] = await other.all(app.artists, { tier: "remote" });
+    const [ownConversation] = await other.all(app.conversations, { tier: "remote" });
     expect(ownArtist!.ownerAccount).toBe(otherAccountId);
     expect(ownConversation!.ownerAccount).toBe(otherAccountId);
 
     // The first user's rows stay invisible to the second.
-    const [samArtist] = await user.all(app.artists, { tier: "global" });
-    const [samConversation] = await user.all(app.conversations, { tier: "global" });
+    const [samArtist] = await user.all(app.artists, { tier: "remote" });
+    const [samConversation] = await user.all(app.conversations, { tier: "remote" });
     const [samTurn] = await user.all(app.turns.where({ conversationId: samConversation!.id }), {
-      tier: "global",
+      tier: "remote",
     });
     expect(
-      await other.one(app.artists.where({ id: samArtist!.id }), { tier: "global" }),
+      await other.one(app.artists.where({ id: samArtist!.id }), { tier: "remote" }),
     ).toBeNull();
     expect(
-      await other.all(app.turns.where({ conversationId: samConversation!.id }), { tier: "global" }),
+      await other.all(app.turns.where({ conversationId: samConversation!.id }), { tier: "remote" }),
     ).toEqual([]);
 
     // A conversation of their own that names the first user's artist is refused.
@@ -148,7 +148,7 @@ describe("MusicAgent workspace access", () => {
     // A turn continuing their own conversation is fine; one that continues the
     // first user's is refused.
     const [ownTurn] = await other.all(app.turns.where({ conversationId: ownConversation!.id }), {
-      tier: "global",
+      tier: "remote",
     });
     await other
       .insert(app.turns, {

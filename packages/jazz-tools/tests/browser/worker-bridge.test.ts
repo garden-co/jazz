@@ -65,7 +65,6 @@ import {
   LIVENESS_TEST_SIGNAL_MS,
   app,
   todos,
-  Todo,
   allTodos,
   catalogueTodos,
   startRawForegroundLease,
@@ -191,7 +190,7 @@ describe("foreground lease terminal policy with real IndexedDB and WASM", () => 
     });
     let write: Promise<unknown> | undefined;
     try {
-      const initialHighWater = runtime.foregroundTxTimeHighWater();
+      const initialHighWater = await runtime.foregroundTxTimeHighWater();
       const oldBatch = createOpenTransactionId();
       runtime.beginTransaction("mergeable", oldBatch);
       write = runtime.streamingMutation(
@@ -254,7 +253,7 @@ describe("foreground lease terminal policy with real IndexedDB and WASM", () => 
         await vi.waitFor(() => expect(fixture.close).toHaveBeenCalledOnce());
         await expect(lease.returnWithHighWater(highWater + 1n)).rejects.toBe(failure);
         await expect(lease.retire()).rejects.toBe(failure);
-        expect(runtime.foregroundTxTimeHighWater()).toBe(highWater);
+        expect(await runtime.foregroundTxTimeHighWater()).toBe(highWater);
         await reopened.returnForegroundNodeLease(successor.leaseId, highWater);
       } finally {
         reopened.close();
@@ -305,14 +304,7 @@ describe("foreground lease terminal policy with real IndexedDB and WASM", () => 
 });
 
 describe("SharedWorker bridge with IndexedDB", () => {
-  const {
-    errorListeners,
-    trackRemoteBrowserDb,
-    track,
-    trackSubscription,
-    untrack,
-    shutdownDbAndWorker,
-  } = useSharedWorkerBridgeHarness();
+  const { errorListeners, trackRemoteBrowserDb, track, untrack } = useSharedWorkerBridgeHarness();
 
   it("retains a queued first-owner allocation after the preceding lease returns", async () => {
     const dbName = uniqueDbName("queued-first-owner");
@@ -676,7 +668,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       const physicalDbName = resolveDefaultPersistentDbName(first.config);
       // Materialize both the foreground lease and worker runtime before
       // deliberately advancing the page-side generation key.
-      await first.all(allTodos, { tier: "local" });
+      await first.all(allTodos, { tier: "local-first" });
       const workerName = createBrowserSharedWorkerBaseName(undefined, physicalDbName);
       localStorage.setItem(`jazz:shared-worker-generation:${workerName}`, "1");
 
@@ -691,7 +683,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
       const successor = track(await createDb(config));
       try {
-        await expect(successor.all(allTodos, { tier: "local" })).resolves.toEqual([]);
+        await expect(successor.all(allTodos, { tier: "local-first" })).resolves.toEqual([]);
       } finally {
         await successor.shutdown();
         untrack(successor);
@@ -787,7 +779,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
           },
         }),
       );
-      await db.all(allTodos, { tier: "local" });
+      await db.all(allTodos, { tier: "local-first" });
       const armed = receive("holding-close");
       control.postMessage({ type: "hold-close" });
       await withTimeout(armed, 5_000, "test worker did not arm the pending control hold");
@@ -866,7 +858,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
           },
         }),
       );
-      await db.all(allTodos, { tier: "local" });
+      await db.all(allTodos, { tier: "local-first" });
       const armed = receive("holding-pending-writes");
       control.postMessage({ type: "hold-pending-writes" });
       await withTimeout(armed, 5_000, "test worker did not arm the pending control hold");
@@ -924,7 +916,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     );
     // `createDb` resolves after the foreground runtime is available; the
     // worker follower is installed on the first public read.
-    await db.all(allTodos, { tier: "local" });
+    await db.all(allTodos, { tier: "local-first" });
     const inspector = await db.openInspectorControlPort();
     inspector.start();
     try {
@@ -970,10 +962,10 @@ describe("SharedWorker bridge with IndexedDB", () => {
     const firstDeltas: unknown[] = [];
     const secondDeltas: unknown[] = [];
     const first = source.subscribeDelta(todos, (delta) => firstDeltas.push(delta), {
-      tier: "local",
+      tier: "local-first",
     });
     const second = source.subscribeDelta(todos, (delta) => secondDeltas.push(delta), {
-      tier: "local",
+      tier: "local-first",
     });
     try {
       expect(first.ready).toBeDefined();
@@ -1124,7 +1116,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     await waitForCondition(
       async () => {
-        const row = await db1.one(allTodos, { tier: "local" });
+        const row = await db1.one(allTodos, { tier: "local-first" });
         return row?.id === id;
       },
       8_000,
@@ -1141,7 +1133,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       }),
     );
 
-    const persistedRow = await db2.one(allTodos, { tier: "local" });
+    const persistedRow = await db2.one(allTodos, { tier: "local-first" });
     expect(persistedRow?.id).toBe(id);
   });
 
@@ -1188,7 +1180,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     const updateHandle = db.update(todos, id, { done: true });
     await updateHandle.wait({ tier: "local" });
 
-    const results = await db.all(allTodos, { tier: "local" });
+    const results = await db.all(allTodos, { tier: "local-first" });
     expect(results.length).toBe(1);
     expect(results[0].done).toBe(true);
   });
@@ -1227,91 +1219,14 @@ describe("SharedWorker bridge with IndexedDB", () => {
     const { id } = await db
       .insert(todos, { title: "Ephemeral", done: false })
       .wait({ tier: "local" });
-    expect((await db.all(allTodos, { tier: "local" })).length).toBe(1);
+    expect((await db.all(allTodos, { tier: "local-first" })).length).toBe(1);
 
     const deleteHandle = db.delete(todos, id);
     await deleteHandle.wait({ tier: "local" });
 
-    const results = await db.all(allTodos, { tier: "local" });
+    const results = await db.all(allTodos, { tier: "local-first" });
     expect(results.length).toBe(0);
   });
-
-  // -------------------------------------------------------------------------
-  // 4. IndexedDB persistence across shutdown + re-open
-  // -------------------------------------------------------------------------
-
-  it("persists data across shutdown and re-create", async () => {
-    const dbName = uniqueDbName("persistence");
-
-    const db1 = await createDb({
-      appId: "test-app",
-      driver: { type: "persistent", dbName },
-    });
-    db1.insert(todos, { title: "Survive reload", done: true });
-    const before = await db1.all(allTodos);
-    expect(before.length).toBe(1);
-    await db1.shutdown();
-
-    // A new Db with the same namespace reopens the IndexedDB tree.
-    const db2 = track(
-      await createDb({
-        appId: "test-app",
-        driver: { type: "persistent", dbName },
-      }),
-    );
-    const after = await db2.all(allTodos, { tier: "local" });
-    expect(after.length).toBe(1);
-    expect(after[0].title).toBe("Survive reload");
-    expect(after[0].done).toBe(true);
-  });
-
-  it("first local subscription snapshot returns no rows for an empty store", async () => {
-    const db = track(
-      await createDb({
-        appId: "test-app",
-        driver: { type: "persistent", dbName: uniqueDbName("empty-snapshot") },
-      }),
-    );
-    const firstSnapshot = new Promise<Todo[]>((resolve) => {
-      trackSubscription(db.subscribe(allTodos, resolve, { tier: "local" }));
-    });
-    await expect(firstSnapshot).resolves.toEqual([]);
-  });
-
-  it("first local subscription snapshot contains persisted data", async () => {
-    const config = {
-      appId: "test-app",
-      secret: generateAuthSecret(),
-      driver: { type: "persistent" as const, dbName: uniqueDbName("first-snapshot-reopen") },
-    };
-    const seeded = track(await createDb(config));
-    const expected: { id: string; title: string; done: boolean }[] = [];
-    for (let index = 0; index < 3; index++) {
-      const inserted = seeded.insert(todos, { title: `Persisted ${index}`, done: false });
-      const row = await inserted.wait({ tier: "local" });
-      expected.push({ id: row.id, title: row.title, done: row.done });
-    }
-    await seeded.all(allTodos, { tier: "local" });
-    await shutdownDbAndWorker(seeded);
-
-    const reopened = track(await createDb(config));
-    const snapshots: (typeof expected)[] = [];
-    // Subscribe before any read or readiness wait can warm the reopened
-    // runtime. An empty callback followed by the stored rows must fail.
-    trackSubscription(
-      reopened.subscribe(
-        todos.orderBy("title"),
-        (rows) => snapshots.push(rows.map(({ id, title, done }) => ({ id, title, done }))),
-        { tier: "local" },
-      ),
-    );
-    await waitForCondition(
-      async () => snapshots.length > 0,
-      5000,
-      "The initial local snapshot should contain the persisted rows",
-    );
-    expect(snapshots[0]).toEqual(expected);
-  }, 15_000);
 
   it("deletes IndexedDB storage for the current namespace and keeps the same Db usable", async () => {
     const db = track(
@@ -1322,19 +1237,19 @@ describe("SharedWorker bridge with IndexedDB", () => {
     );
 
     await db.insert(todos, { title: "Should be deleted", done: false }).wait({ tier: "local" });
-    const before = await db.all(allTodos, { tier: "local" });
+    const before = await db.all(allTodos, { tier: "local-first" });
     expect(before.length).toBe(1);
     expect(before[0].title).toBe("Should be deleted");
 
     await db.deleteClientStorage();
 
-    const afterDelete = await db.all(allTodos, { tier: "local" });
+    const afterDelete = await db.all(allTodos, { tier: "local-first" });
     expect(afterDelete).toEqual([]);
 
     const {
       value: { id },
     } = db.insert(todos, { title: "Fresh after delete", done: true });
-    const afterReinsert = await db.all(allTodos, { tier: "local" });
+    const afterReinsert = await db.all(allTodos, { tier: "local-first" });
     expect(afterReinsert).toHaveLength(1);
     expect(afterReinsert[0].id).toBe(id);
     expect(afterReinsert[0].title).toBe("Fresh after delete");
@@ -1366,12 +1281,12 @@ describe("SharedWorker bridge with IndexedDB", () => {
         driver: { type: "persistent", dbName },
       }),
     );
-    expect(await reopened.all(allTodos, { tier: "local" })).toEqual([]);
+    expect(await reopened.all(allTodos, { tier: "local-first" })).toEqual([]);
 
     await reopened
       .insert(todos, { title: "Fresh after reset and reopen", done: true })
       .wait({ tier: "local" });
-    expect(await reopened.all(allTodos, { tier: "local" })).toMatchObject([
+    expect(await reopened.all(allTodos, { tier: "local-first" })).toMatchObject([
       { title: "Fresh after reset and reopen", done: true },
     ]);
 
@@ -1398,7 +1313,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     await db
       .insert(todos, { title: "first row after fresh wipe", done: false })
       .wait({ tier: "local" });
-    expect(await db.all(allTodos, { tier: "local" })).toHaveLength(1);
+    expect(await db.all(allTodos, { tier: "local-first" })).toHaveLength(1);
   });
 
   it("resolves a fresh-namespace storage reset while a second fresh tab is open", async () => {
@@ -1419,7 +1334,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       .insert(todos, { title: "row after two-tab fresh wipe", done: false })
       .wait({ tier: "local" });
     await waitForCondition(
-      async () => (await dbB.all(allTodos, { tier: "local" })).length === 1,
+      async () => (await dbB.all(allTodos, { tier: "local-first" })).length === 1,
       8000,
       "Second fresh tab should observe the row written after the wipe",
     );
@@ -1451,8 +1366,8 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     await waitForCondition(
       async () => {
-        const firstRows = await dbA.all(allTodos, { tier: "local" });
-        const secondRows = await dbB.all(allTodos, { tier: "local" });
+        const firstRows = await dbA.all(allTodos, { tier: "local-first" });
+        const secondRows = await dbB.all(allTodos, { tier: "local-first" });
         return firstRows.length === 2 && secondRows.length === 2;
       },
       8000,
@@ -1463,8 +1378,8 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     await waitForCondition(
       async () => {
-        const firstRows = await dbA.all(allTodos, { tier: "local" });
-        const secondRows = await dbB.all(allTodos, { tier: "local" });
+        const firstRows = await dbA.all(allTodos, { tier: "local-first" });
+        const secondRows = await dbB.all(allTodos, { tier: "local-first" });
         return firstRows.length === 0 && secondRows.length === 0;
       },
       12000,
@@ -1476,8 +1391,8 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     await waitForCondition(
       async () => {
-        const firstRows = await dbA.all(allTodos, { tier: "local" });
-        const secondRows = await dbB.all(allTodos, { tier: "local" });
+        const firstRows = await dbA.all(allTodos, { tier: "local-first" });
+        const secondRows = await dbB.all(allTodos, { tier: "local-first" });
         const firstHas = firstRows.some((row) => row.title === marker);
         const secondHas = secondRows.some((row) => row.title === marker);
         return firstHas && secondHas;
@@ -1522,7 +1437,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     await db
       .insert(todos, { title: "Should be wiped on logout", done: false })
       .wait({ tier: "local" });
-    expect((await db.all(allTodos, { tier: "local" })).length).toBe(1);
+    expect((await db.all(allTodos, { tier: "local-first" })).length).toBe(1);
 
     await db.logout({ wipeData: true });
     untrack(db);
@@ -1533,7 +1448,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
         driver: { type: "persistent", dbName },
       }),
     );
-    const rows = await reopened.all(allTodos, { tier: "local" });
+    const rows = await reopened.all(allTodos, { tier: "local-first" });
     expect(rows).toEqual([]);
   });
 
@@ -1580,7 +1495,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       (rows) => rows.some((row) => row.title === marker && row.description?.includes("current")),
       "initial current-schema query should read the persisted row",
       15_000,
-      "local",
+      "local-first",
     );
 
     await seeded.shutdown();
@@ -1601,7 +1516,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       (rows) => rows.some((row) => row.title === marker && row.description?.includes("current")),
       "reopened persistent worker should rehydrate current schema and lenses before querying",
       15_000,
-      "local",
+      "local-first",
     );
     expect(rowsAfterReopen.find((row) => row.title === marker)?.completed).toBe(false);
 
@@ -1628,7 +1543,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       (rows) => rows.some((row) => row.title === remoteMarker && row.completed),
       "reopened worker should receive authoritative current-schema rows from the server",
       15_000,
-      "global",
+      "remote",
     );
     expect(authoritativeRows.find((row) => row.title === remoteMarker)?.description).toContain(
       "independent",
@@ -1657,7 +1572,9 @@ describe("SharedWorker bridge with IndexedDB", () => {
           .insert(todos, { title: `durable-${round}`, done: false })
           .wait({ tier: "local" });
         await db.update(todos, inserted.id, { done: true }).wait({ tier: "local" });
-        expect(await db.all(allTodos, { tier: "local" })).toEqual([{ ...inserted, done: true }]);
+        expect(await db.all(allTodos, { tier: "local-first" })).toEqual([
+          { ...inserted, done: true },
+        ]);
         await db.shutdown();
         untrack(db);
       }

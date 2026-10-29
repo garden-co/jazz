@@ -27,7 +27,7 @@ In dependency order: **S0** micro primitives (HLC, domination, deletion
 resolution, ingest/commit-unit/read-set costs) · **S1** relevance-scaled
 query-driven partial sync · **S2** realtime canvas (mergeable, tier `none`) ·
 **S3** recursive permission-filtered sync · **S4** serializable order processing
-(exclusive, TPC-C-derived) · **S5** durable streams · **S7** migration lenses ·
+(serializable, TPC-C-derived) · **S5** durable streams · **S7** migration lenses ·
 **S8** branch views · **S9** durable execution. Every implemented harness runs
 against the current feature set.
 
@@ -110,11 +110,28 @@ the per-milestone benchmarks that gate individual features.
 | 1   | SaaS app           | query-driven partial sync scales with _relevance_, not data | cold-load bytes vs. naive baseline; core cost vs. subscriber count                                                                        |
 | 2   | Canvas             | realtime mergeable collaboration converges fast and cheap   | cross-participant p95 at tier `none` vs. link-latency floor; history bytes vs. zstd-JSON event log _paired with_ time-travel read latency |
 | 3   | Permissions        | recursive RLS over partial replicas is correct and fast     | revocation-to-disappearance p95 at scale                                                                                                  |
-| 4   | Order processing   | jazz is competitive as a classical serializable database    | max sustained scale factor; exclusive-counters vs. mergeable-counters variant                                                             |
+| 4   | Order processing   | jazz is competitive as a classical serializable database    | max sustained scale factor; serializable-counters vs. mergeable-counters variant                                                          |
 | 5   | Durable stream     | append-heavy streams with tail/resume are trivial on jazz   | history+metadata bytes per appended token vs. log-file floor; append→tail p99                                                             |
 | 6   | Collaborative text | jazz competes with CRDT libraries on real editing traces    | storage ratio vs. durable CRDTs _paired with_ cold-load and time-travel latency                                                           |
 
 A micro tier (scenario 0) covers the primitive costs underneath all of them.
+
+### Harness
+
+Every scenario (`micro`, S1–S5, S7–S9) runs on one deterministic simulator
+(`jazz_sim::Sim`):
+full `Db` clients and relays linked to an authority over a seeded virtual
+network, carrying native messages or encoded wire frames. Its smoke tests are
+`jazz-sim/tests/scenario_smoke.rs`. The focused `jazz` bench contracts
+(cold subscription over deep history, four-tier sync, serializable
+validation against a model, relation include delivery, same-shape route
+subscriptions) are `jazz-sim/tests/core_benchmark_smoke.rs`. `Db` is
+single-threaded, so timing runs use the simulator at bench scale, with latency
+in virtual milliseconds and wall-clock microseconds for local work; sizes are
+wire bytes from the simulator's link stats.
+
+The audit table below predates this harness; rows that name `jazz/benches` or
+`groove/benches` receipts are pending a refresh.
 
 ### Overview: phase-level coverage audit
 
@@ -213,8 +230,8 @@ wired.
 | S0 micro             | deletion-register resolution                             | Yes                      | `jazz-sim/benches/micro.rs` has a deletion-resolution primitive over mixed events.                                                                                                                                                                                                                                                                                            |
 | S0 micro             | version ingest rate                                      | Yes                      | `jazz-sim/benches/micro.rs` emits version-ingest rate and bytes; `jazz/benches/sync.rs` is broader sync-path evidence.                                                                                                                                                                                                                                                        |
 | S0 micro             | commit-unit encode/decode, 1/10/100 rows                 | Yes                      | `jazz-sim/benches/micro.rs` has commit-unit size rows-per-unit cases and `commit_unit_bytes`.                                                                                                                                                                                                                                                                                 |
-| S0 micro             | read-set capture overhead                                | Yes                      | `jazz-sim/benches/micro.rs` emits read-set capture samples; `jazz/benches/validation.rs` exercises the exclusive validation path.                                                                                                                                                                                                                                             |
-| S0 micro             | validation by row vs predicate read-set entry            | Yes                      | `jazz-sim/benches/micro.rs` splits row and predicate validation; `jazz/benches/validation.rs` has broader exclusive validation histograms and a hand-rolled `BaselineModel`.                                                                                                                                                                                                  |
+| S0 micro             | read-set capture overhead                                | Yes                      | `jazz-sim/benches/micro.rs` emits read-set capture samples; `jazz/benches/validation.rs` exercises the serializable validation path.                                                                                                                                                                                                                                          |
+| S0 micro             | validation by row vs predicate read-set entry            | Yes                      | `jazz-sim/benches/micro.rs` splits row and predicate validation; `jazz/benches/validation.rs` has broader serializable validation histograms and a hand-rolled `BaselineModel`.                                                                                                                                                                                               |
 | S1 SaaS              | cold load                                                | Yes                      | `jazz-sim/benches/s1_saas.rs` emits cold/warm summary with `cold_bytes`, `cold_bytes_floor`, `naive_refetch_ceiling_bytes`, result rows, closure rows, and oracle equality checks.                                                                                                                                                                                            |
 | S1 SaaS              | warm local read                                          | Yes                      | `jazz-sim/benches/s1_saas.rs` emits `warm_local_*` and `warm_settled_*`; current query paths are validated against the S1 oracle.                                                                                                                                                                                                                                             |
 | S1 SaaS              | reconnect                                                | Partial                  | FEATURE: `jazz-sim/benches/s1_saas.rs` emits `phase: reconnect` and bytes/floor, but the spec's delta-resubscribe variant remains `[needs: payload-inventory]`; the current path is full rehydrate.                                                                                                                                                                           |
@@ -300,7 +317,7 @@ Landed capabilities were retired from the gate list; git history is the record.
   `s9_durable_execution.rs`; `groove/benches/scenario.rs` also has SQLite modes
   for predecessor social-feed/ACL/oneshot workloads. `jazz/benches/validation.rs`
   is not a SQLite reference: its `BaselineModel` is a hand-rolled in-memory
-  decision model for exclusive validation.
+  decision model for serializable validation.
 - **External anchors.** S5 has an fsync-disciplined log floor and SQLite WAL
   baseline; S2 lacks the required zstd JSON event-log storage anchor.
 - **Missing cross-cutting enablers.** Peak-RSS utility; a shared real SQLite
@@ -421,7 +438,7 @@ bytes:
 - deletion-register resolution with mixed delete/restore events
 - version ingest rate (versions/sec into history tables, single node)
 - commit-unit encode/decode (1 row, 10 rows, 100 rows)
-- read-set capture overhead per statement inside an open exclusive tx
+- read-set capture overhead per statement inside an open serializable tx
 - validation cost per read-set entry (row entries; predicate entries via
   prepared shapes)
 
@@ -714,7 +731,7 @@ Core's behalf.
 ### 4. Globally consistent order processing (TPC-C derived)
 
 _Motivation: jazz used deliberately against its grain — no partial
-replication, no offline, all writes `exclusive`, clients wait for `global`
+replication, no offline, all writes `serializable`, clients wait for `global`
 settlement. Tests whether commit-time validation (two-point predicate
 evaluation over prepared shapes) makes jazz competitive as a classical
 serializable database — and surfaces the OCC hot-row problem on purpose, so
@@ -762,7 +779,7 @@ except terminology: "local store size", not "SQLite size".
    pressure; report abort/retry curves at low/medium/high contention.
 3. **Counter-strategy variant**: identical mix, but
    `yearToDate*`/`paymentCount` counters modeled as **mergeable counter
-   columns** instead of exclusive writes. The all-exclusive variant
+   columns** instead of serializable writes. The all-serializable variant
    serializes every payment in a warehouse through the warehouse row
    (first-committer-wins on a hot row — the classic OCC wall, present by
    design); this variant is jazz's intended answer. The side-by-side is the
@@ -770,7 +787,7 @@ except terminology: "local store size", not "SQLite size".
 
 #### Metrics
 
-committed exclusive tx/sec · max sustained scale factor within SLO ·
+committed serializable tx/sec · max sustained scale factor within SLO ·
 per-warehouse throughput · p50/p95/p99 submission→global settlement ·
 abort/retry rate by contention level · read-set capture and validation time
 (row vs. predicate entries split) · row deltas per committed tx · core CPU in
@@ -946,7 +963,7 @@ concurrent-instance counts with natural partitioning. The incumbent
 architecture is a hand-tuned partitioned KV store: fast and scalable,
 but the application code carries the consistency burden. The claim
 under test: jazz matches the scalability while the application writes
-ordinary rows and transactions. Mostly reuses S4 (exclusive validation,
+ordinary rows and transactions. Mostly reuses S4 (serializable validation,
 scale-out ladder) and S5 (append streams, tailers) machinery under a
 workflow-shaped fixture._
 
@@ -968,7 +985,7 @@ events:     { instance: ref(instances), seq: int, payload: bytes }
 - N concurrent workflow instances (ladder: 100 / 1k / 10k), each
   advancing through K steps; step execution simulated, persistence
   real;
-- state transitions (`instances.state`, `currentStep`) are **exclusive
+- state transitions (`instances.state`, `currentStep`) are **serializable
   transactions** (an instance must never double-advance — two workers
   racing the same instance is the core correctness hazard, validated by
   read-set conflict);
@@ -1026,14 +1043,14 @@ tier under `benchmarks/systems/` with deliberately different rules:
 
 Scenario mapping (the claim each cell tests):
 
-| cell                 | systems                                                                                              | shared claim / expected differentiator                                                                                                                                                                                                                                                                 |
-| -------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| S1 partial sync      | **Zero** (closest cousin: query-driven sync + IVM), InstantDB, Electric shapes, Convex subscriptions | cold-load bytes/time, subscriber + distinct-shape sweeps, query churn                                                                                                                                                                                                                                  |
-| S2 realtime          | all four                                                                                             | input-to-receipt latency; their convergence is server-ordered LWW without history — envelope label carries the asymmetry                                                                                                                                                                               |
-| S3 permissions       | InstantDB perms, Electric shape where-clauses, Zero query auth                                       | **revocation-to-disappearance vs their resubscribe/invalidation storm** — likely the suite's most differentiating chart                                                                                                                                                                                |
-| S4 serializable      | **Convex only** (the others do not claim serializable transactions)                                  | OCC vs OCC at the same guarantee — a fairer "same product" reference than local SQLite                                                                                                                                                                                                                 |
-| S5                   | none                                                                                                 | not their product; log and SQLite baselines remain the useful adversaries                                                                                                                                                                                                                              |
-| S9 durable execution | stateful-compute platforms (actor/durable-object model)                                              | ephemeral compute attaching to shared state: cold-attach latency, cross-instance coordination via exclusive txs vs single-threaded state islands, fan-out without pre-chunking the app. v1 is jazz-side metrics + architecture contrast (the incumbent platforms need their own cloud to run honestly) |
+| cell                 | systems                                                                                              | shared claim / expected differentiator                                                                                                                                                                                                                                                                    |
+| -------------------- | ---------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| S1 partial sync      | **Zero** (closest cousin: query-driven sync + IVM), InstantDB, Electric shapes, Convex subscriptions | cold-load bytes/time, subscriber + distinct-shape sweeps, query churn                                                                                                                                                                                                                                     |
+| S2 realtime          | all four                                                                                             | input-to-receipt latency; their convergence is server-ordered LWW without history — envelope label carries the asymmetry                                                                                                                                                                                  |
+| S3 permissions       | InstantDB perms, Electric shape where-clauses, Zero query auth                                       | **revocation-to-disappearance vs their resubscribe/invalidation storm** — likely the suite's most differentiating chart                                                                                                                                                                                   |
+| S4 serializable      | **Convex only** (the others do not claim serializable transactions)                                  | OCC vs OCC at the same guarantee — a fairer "same product" reference than local SQLite                                                                                                                                                                                                                    |
+| S5                   | none                                                                                                 | not their product; log and SQLite baselines remain the useful adversaries                                                                                                                                                                                                                                 |
+| S9 durable execution | stateful-compute platforms (actor/durable-object model)                                              | ephemeral compute attaching to shared state: cold-attach latency, cross-instance coordination via serializable txs vs single-threaded state islands, fan-out without pre-chunking the app. v1 is jazz-side metrics + architecture contrast (the incumbent platforms need their own cloud to run honestly) |
 
 Additional workload this tier motivates (also useful standalone):
 **optimistic-write depth on reconnect** — N offline local writes against

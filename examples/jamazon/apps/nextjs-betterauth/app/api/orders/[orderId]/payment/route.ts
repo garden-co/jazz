@@ -23,7 +23,7 @@ export async function POST(request: Request, context: { params: Promise<{ orderI
         : undefined;
     await ensureStore();
     const { db } = await backend();
-    const order = await db.one(app.orders.where({ id: orderId }), { tier: "global" });
+    const order = await db.one(app.orders.where({ id: orderId }), { tier: "remote" });
     // Someone else's order is indistinguishable from a missing one.
     if (!order || order.shopper !== account) throw new CheckoutError("Order not found", 404);
     const provider = configuredPaymentProvider();

@@ -239,7 +239,7 @@ export function reservationOf(order: {
 }
 
 /**
- * TPC-C "new order", in two exclusive phases.
+ * TPC-C "new order", in two serializable phases.
  *
  * 1. {@link reserveOrder}: stock for every line, the district's order counter,
  *    the customer's balance and a `draft` order carrying its reservation
@@ -262,10 +262,10 @@ export function reservationOf(order: {
  * visible in order status, where an operator can place or release it.
  */
 export async function purchase(db: Db, request: PurchaseRequest): Promise<PurchaseReceipt> {
-  // Create the client before beginning an exclusive transaction. This is also
-  // the app's minimal connected preflight; an exclusive checkout is not an
+  // Create the client before beginning a serializable transaction. This is also
+  // the app's minimal connected preflight; a serializable checkout is not an
   // offline cart operation.
-  await db.all(app.warehouses.where({ id: request.warehouseId }).limit(1), { tier: "global" });
+  await db.all(app.warehouses.where({ id: request.warehouseId }).limit(1), { tier: "remote" });
 
   const reserved = await reserveOrder(db, request);
   if ("receipt" in reserved) return reserved.receipt;
@@ -290,10 +290,10 @@ export async function reserveOrder(
   request: PurchaseRequest,
 ): Promise<{ receipt: PurchaseReceipt } | { draft: DraftOrder }> {
   const lines = normalizeLines(request.lines);
-  return await retryExclusive(
+  return await retrySerializable(
     db,
     async () => {
-      const write = await db.exclusiveTransaction(
+      const write = await db.serializableTransaction(
         async (tx): Promise<{ receipt: PurchaseReceipt } | { draft: DraftOrder }> => {
           const existing = await tx.one(
             app.orders
@@ -393,7 +393,7 @@ export async function reserveOrder(
     // the next attempt sees the competing order's decrement.
     () =>
       db.all(app.stock.where({ warehouse_id: request.warehouseId }).limit(100), {
-        tier: "global",
+        tier: "remote",
       }),
   );
 }
@@ -404,8 +404,8 @@ export async function reserveOrder(
  * returns its receipt, so it is safe to repeat.
  */
 export async function placeReservation(db: Db, orderId: string): Promise<PurchaseReceipt> {
-  return await retryExclusive(db, async () => {
-    const write = await db.exclusiveTransaction(async (tx): Promise<PurchaseReceipt> => {
+  return await retrySerializable(db, async () => {
+    const write = await db.serializableTransaction(async (tx): Promise<PurchaseReceipt> => {
       const order = await tx.one(app.orders.where({ id: orderId }).limit(1));
       if (!order) throw new Error("the reserved order is missing");
       if (order.status === ORDER_STATUS.cancelled) {
@@ -463,8 +463,8 @@ export async function placeReservation(db: Db, orderId: string): Promise<Purchas
  * cancel it. Releasing an order that is no longer a draft does nothing.
  */
 export async function releaseReservation(db: Db, orderId: string): Promise<void> {
-  await retryExclusive(db, async () => {
-    const write = await db.exclusiveTransaction(async (tx) => {
+  await retrySerializable(db, async () => {
+    const write = await db.serializableTransaction(async (tx) => {
       const order = await tx.one(app.orders.where({ id: orderId }).limit(1));
       if (!order || order.status !== ORDER_STATUS.draft) return;
       const reservation = reservationOf(order);
@@ -539,13 +539,13 @@ export interface DeliveredOrder {
 
 /**
  * TPC-C "delivery": deliver the oldest pending order of every district in one
- * exclusive batch. Two operators pressing the button at once never deliver
+ * serializable batch. Two operators pressing the button at once never deliver
  * the same order twice; the loser retries against the new queue heads.
  */
 export async function deliverBatch(db: Db, warehouseId: string): Promise<DeliveredOrder[]> {
-  await db.all(app.warehouses.where({ id: warehouseId }).limit(1), { tier: "global" });
-  return await retryExclusive(db, async () => {
-    const write = await db.exclusiveTransaction(async (tx) => {
+  await db.all(app.warehouses.where({ id: warehouseId }).limit(1), { tier: "remote" });
+  return await retrySerializable(db, async () => {
+    const write = await db.serializableTransaction(async (tx) => {
       const districts = await tx.all(consoleQueries.districtsOf(warehouseId));
       const heads = await Promise.all(
         districts.map((district) =>
@@ -588,9 +588,9 @@ export async function recordPayment(
   if (!Number.isSafeInteger(request.amountCents) || request.amountCents <= 0) {
     throw new Error("payment must be a positive amount");
   }
-  await db.all(app.warehouses.where({ id: request.warehouseId }).limit(1), { tier: "global" });
-  return await retryExclusive(db, async () => {
-    const write = await db.exclusiveTransaction(async (tx) => {
+  await db.all(app.warehouses.where({ id: request.warehouseId }).limit(1), { tier: "remote" });
+  return await retrySerializable(db, async () => {
+    const write = await db.serializableTransaction(async (tx) => {
       const [existing, customer] = await Promise.all([
         tx.one(
           app.payments
@@ -622,13 +622,13 @@ export async function recordPayment(
   });
 }
 
-/** Receive units into one stock row. Exclusive, so concurrent receipts add up. */
+/** Receive units into one stock row. Serializable, so concurrent receipts add up. */
 export async function restock(db: Db, stockId: string, quantity: number): Promise<number> {
   if (!Number.isSafeInteger(quantity) || quantity <= 0) {
     throw new Error("quantity must be a positive integer");
   }
-  return await retryExclusive(db, async () => {
-    const write = await db.exclusiveTransaction(async (tx) => {
+  return await retrySerializable(db, async () => {
+    const write = await db.serializableTransaction(async (tx) => {
       const stock = await tx.one(app.stock.where({ id: stockId }).limit(1));
       if (!stock) throw new Error("stock row is missing");
       const onHand = stock.on_hand + quantity;
@@ -659,13 +659,13 @@ function normalizeLines(lines: readonly PurchaseLine[]): PurchaseLine[] {
 }
 
 /**
- * Re-run an exclusive transaction the authority rejected because a
+ * Re-run a serializable transaction the authority rejected because a
  * concurrent write changed what it read. Every other error is final.
  */
-async function retryExclusive<T>(
+async function retrySerializable<T>(
   db: Db,
   attempt: () => Promise<T>,
-  beforeRetry: () => Promise<unknown> = () => db.all(app.warehouses.limit(1), { tier: "global" }),
+  beforeRetry: () => Promise<unknown> = () => db.all(app.warehouses.limit(1), { tier: "remote" }),
 ): Promise<T> {
   return await retryOnConflict(attempt, beforeRetry);
 }

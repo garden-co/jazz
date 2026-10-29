@@ -14,6 +14,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdir, open, readFile, readdir, rename, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { ForegroundNodeLease } from "../runtime-source.js";
+import { toError } from "../util.js";
 
 const FORMAT = "jazz-node-foreground-node-leases-v1";
 const ACTIVE_DIRECTORY = "active";
@@ -114,7 +115,7 @@ class NodeForegroundNodeLease implements ForegroundNodeLease {
       await removeOwnedActiveClaim(this.directory, this.claim);
       this.finished = true;
     } catch (error) {
-      throw new Error(`Node foreground lease handoff failed: ${asError(error).message}`);
+      throw new Error(`Node foreground lease handoff failed: ${toError(error).message}`);
     }
   }
 
@@ -125,7 +126,7 @@ class NodeForegroundNodeLease implements ForegroundNodeLease {
       await removeOwnedActiveClaim(this.directory, this.claim);
       this.finished = true;
     } catch (error) {
-      throw new Error(`Node foreground lease retirement failed: ${asError(error).message}`);
+      throw new Error(`Node foreground lease retirement failed: ${toError(error).message}`);
     }
   }
 }
@@ -204,7 +205,7 @@ async function readReusableReceipt(
     return parseReusableReceipt(await readFile(reusablePath(directory, node), "utf8"), node);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw new Error(`Invalid Node foreground lease receipt: ${asError(error).message}`);
+    throw new Error(`Invalid Node foreground lease receipt: ${toError(error).message}`);
   }
 }
 
@@ -333,7 +334,4 @@ function maxBigInt(...values: bigint[]): bigint {
 }
 function isTxTime(value: bigint): boolean {
   return value >= 0n && value <= MAX_TX_TIME;
-}
-function asError(error: unknown): Error {
-  return error instanceof Error ? error : new Error(String(error));
 }

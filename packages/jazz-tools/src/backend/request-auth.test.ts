@@ -2,7 +2,7 @@ import { createHmac, randomUUID } from "node:crypto";
 import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
 import { createServer as createNetServer } from "node:net";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { resolveRequestSession } from "./request-auth.js";
+import { RequestAuthenticationError, resolveRequestSession } from "./request-auth.js";
 
 const JWT_KID = "backend-request-test-kid";
 const JWT_SECRET = "backend-request-test-secret";
@@ -139,6 +139,7 @@ describe("backend request auth", () => {
   });
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     vi.restoreAllMocks();
     await Promise.all(
       Array.from(servers, async (server) => {
@@ -488,6 +489,93 @@ describe("backend request auth", () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { nodeEnv: undefined, allowLocalFirstAuth: undefined, accepted: true },
+    { nodeEnv: "development", allowLocalFirstAuth: undefined, accepted: true },
+    { nodeEnv: "test", allowLocalFirstAuth: undefined, accepted: true },
+    { nodeEnv: "production", allowLocalFirstAuth: undefined, accepted: false },
+    { nodeEnv: "PrOdUcTiOn", allowLocalFirstAuth: undefined, accepted: false },
+    { nodeEnv: "development", allowLocalFirstAuth: true, accepted: true },
+    { nodeEnv: "development", allowLocalFirstAuth: false, accepted: false },
+    { nodeEnv: "production", allowLocalFirstAuth: true, accepted: true },
+    { nodeEnv: "production", allowLocalFirstAuth: false, accepted: false },
+  ])(
+    "local-first JWT accepted=$accepted when NODE_ENV=$nodeEnv and override=$allowLocalFirstAuth",
+    async ({ nodeEnv, allowLocalFirstAuth, accepted }) => {
+      vi.stubEnv("NODE_ENV", nodeEnv);
+      const identity = {
+        issuer: "urn:jazz:local-first",
+        subject: "11111111-1111-1111-1111-111111111111",
+      };
+      const token = makeUnsignedJwt({ iss: identity.issuer, sub: identity.subject });
+      const account = "00000000-0000-4000-8000-000000000012";
+      mocks.verifyLocalFirstIdentityProof.mockReturnValue({ ok: true, id: identity.subject });
+      const fetcher = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValue(new Response(JSON.stringify({ account, identity })));
+
+      const result = resolveRequestSession(
+        { headers: { authorization: `Bearer ${token}` } },
+        {
+          appId: "app",
+          accountRegistry: "https://core.example/apps/app/accounts",
+          allowLocalFirstAuth,
+        },
+      );
+
+      if (accepted) {
+        await expect(result).resolves.toMatchObject({
+          issuer: identity.issuer,
+          user_id: identity.subject,
+          account_id: account,
+          authMode: "local-first",
+        });
+        expect(mocks.verifyLocalFirstIdentityProof).toHaveBeenCalledWith(token, "app");
+        expect(fetcher).toHaveBeenCalledTimes(1);
+        expect(fetcher).toHaveBeenCalledWith(
+          "https://core.example/apps/app/accounts/found-local-first",
+          expect.objectContaining({
+            method: "POST",
+            headers: expect.objectContaining({ Authorization: `Bearer ${token}` }),
+          }),
+        );
+      } else {
+        await expect(result).rejects.toThrow(/allowLocalFirstAuth disabled/);
+        expect(mocks.verifyLocalFirstIdentityProof).not.toHaveBeenCalled();
+        expect(fetcher).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it("honours sync-server rejection when local-first auth is explicitly enabled in production", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    const userId = "11111111-1111-1111-1111-111111111111";
+    const token = makeUnsignedJwt({ iss: "urn:jazz:local-first", sub: userId });
+    mocks.verifyLocalFirstIdentityProof.mockReturnValue({ ok: true, id: userId });
+    const fetcher = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("invalid account credential", { status: 401 }));
+
+    await expect(
+      resolveRequestSession(
+        { headers: { authorization: `Bearer ${token}` } },
+        {
+          appId: "app",
+          accountRegistry: "https://core.example/apps/app/accounts",
+          allowLocalFirstAuth: true,
+        },
+      ),
+    ).rejects.toBeInstanceOf(RequestAuthenticationError);
+    expect(mocks.verifyLocalFirstIdentityProof).toHaveBeenCalledWith(token, "app");
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher).toHaveBeenCalledWith(
+      "https://core.example/apps/app/accounts/found-local-first",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: `Bearer ${token}` }),
+      }),
+    );
+  });
+
   it("rejects local-first JWTs when allowLocalFirstAuth is disabled", async () => {
     const appId = "local-first-disabled-app";
     const token = makeUnsignedJwt({
@@ -696,6 +784,8 @@ describe("backend request auth", () => {
   ])("verifies signing keys over HTTP at canonical loopback %s", async (hostname, listenHost) => {
     const secret = randomUUID();
     const path = `/jwks/${randomUUID()}`;
+    const remapLoopback = process.platform === "darwin" && listenHost === "127.255.255.254";
+    let restoreFetch = () => {};
     let requests = 0;
     const server = createHttpServer((request, response) => {
       if (request.url !== path) {
@@ -713,11 +803,23 @@ describe("backend request auth", () => {
     try {
       await new Promise<void>((resolve, reject) => {
         server.once("error", reject);
-        server.listen(0, listenHost, () => resolve());
+        server.listen(0, remapLoopback ? "127.0.0.1" : listenHost, () => resolve());
       });
       const address = server.address();
       if (!address || typeof address === "string") {
         throw new Error("failed to allocate loopback test port");
+      }
+      const jwksUrl = `http://${hostname}:${address.port}${path}`;
+      if (remapLoopback) {
+        // macOS lacks this 127/8 socket route; keep URL policy and real HTTP verification.
+        const fetch = globalThis.fetch;
+        const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation((input, options) => {
+          const url = new URL(input instanceof Request ? input.url : input.toString());
+          expect(url.href).toBe(jwksUrl);
+          url.hostname = "127.0.0.1";
+          return fetch(url, options);
+        });
+        restoreFetch = () => fetcher.mockRestore();
       }
       const token = signHs256Jwt({ iss: "https://issuer.example", sub: "loopback-user" }, secret);
 
@@ -726,7 +828,7 @@ describe("backend request auth", () => {
           { headers: { authorization: `Bearer ${token}` } },
           {
             appId: "app-with-loopback-jwks",
-            jwksUrl: `http://${hostname}:${address.port}${path}`,
+            jwksUrl,
           },
         ),
       ).resolves.toMatchObject({
@@ -736,6 +838,7 @@ describe("backend request auth", () => {
       });
       expect(requests).toBe(1);
     } finally {
+      restoreFetch();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });

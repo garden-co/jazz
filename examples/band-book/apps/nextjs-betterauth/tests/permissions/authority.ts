@@ -12,7 +12,7 @@ import permissions from "../../permissions.js";
 export async function startAuthority() {
   const testApp = await createPolicyTestApp(app, permissions, expect);
   // `seed` hands its callback the backend Db. Keep it for the server-side
-  // helpers under test, which run their own exclusive transactions.
+  // helpers under test, which run their own serializable transactions.
   let backend: Db | undefined;
   await testApp.seed((db) => {
     backend = db;

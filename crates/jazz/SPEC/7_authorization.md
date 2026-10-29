@@ -19,7 +19,7 @@ Invariant digest:
 - `INV-RLS-3`: Policy::owneronly(table, column) MUST compare the named column to claim("user"), where claim("user") is bound from the authenticated AuthorSubject, not from caller-provided q...
 - `INV-RLS-4`: A table policy MUST validate as a query shape rooted at the table that carries the policy.
 - `INV-RLS-5`: Downstream view emission for a non-system peer MUST only add result members, program facts, and version bundles whose relevant content/deletion versions pass that peer...
-- `INV-RLS-6`: Read-policy revocation MUST remove rows from future settled subscription result sets and MUST NOT redact previously delivered local copies from the receiving node.
+- `INV-RLS-6`: Read-policy revocation MUST remove rows from future settled subscription result sets, and the server MUST evict them so the receiving node drops its local copies (`INV-SYNC-14`). Eviction is coherence, not redaction: it makes no confidentiality promise about data a node already received.
 - `INV-RLS-7`: A deletion-register version by a non-system author MUST satisfy the table write policy against the current global content version for that row; if there is no current...
 - `INV-RLS-8`: A deletion-register version MUST be readable to a non-system identity only when the row has a global content winner and that content winner satisfies the table read po...
 - `INV-RLS-9`: Join-based policies MUST require at least one matching joined
@@ -39,10 +39,12 @@ Invariant digest:
   on every decision path. A unit is accepted only if every WITH CHECK
   clause also passes against the unit's full post-state; a write whose policy
   is monotone in the rows present is re-checked there only when a table it
-  reads holds a unit update that was not yet grounded when it passed.
+  reads holds a unit write that replaced a row's earlier content (an update,
+  or an insert or restore of a row live before the unit) and was not yet
+  grounded when it passed.
 - `INV-RLS-10`: Query-driven sync MUST compose the root table read policy into the subscribed query and bind policy claims from server-authenticated identity so a client cannot widen...
 - `INV-RLS-11`: Relay peer links MUST have an explicit relay transport capability and no permission subject; client-to-Core peer links MUST use the admitted client AuthorSubject for policy-composed reads.
-- `INV-RLS-12`: Exclusive transaction view shipping MUST be policy-atomic per recipient and maintained subscription view: a non-system recipient MUST NOT receive a result member or pr...
+- `INV-RLS-12`: Serializable transaction view shipping MUST be policy-atomic per recipient and maintained subscription view: a non-system recipient MUST NOT receive a result member or pr...
 - `INV-RLS-13`: Historical/as-of reads served for a link MUST evaluate read policy at the requested historical cut.
 - `INV-RLS-14`: Policy evaluation MUST deny when it cannot determine that a policy predicate is satisfied.
 - `INV-RLS-15`: Every omitted operation is denied at the serving authority, including when the table has no policy clauses; anonymous permission subjects remain structurally read-only.
@@ -251,7 +253,7 @@ policy.
 
 A transaction reads its own writes and nothing else that is uncommitted, and
 its policy checks follow the same rule (`INV-RLS-9`). This holds for mergeable
-and exclusive commit units alike, and wherever a unit's write policies are
+and serializable commit units alike, and wherever a unit's write policies are
 decided: at the fate authority, when a node self-finalizes its own commit, and
 in terminal relay admission. Without it, a client that applies a transaction
 optimistically through its read-your-writes view would have the authority
@@ -262,7 +264,7 @@ its insert policy requires.
 write-policy decision (WITH CHECK, USING and read-for-write alike) reads the
 Global tier, the current rows whose transactions the authority has accepted,
 never the Local read-your-writes view. This holds on every path that decides a
-unit: foreign ingest, a node finalizing its own mergeable or exclusive commit
+unit: foreign ingest, a node finalizing its own mergeable or serializable commit
 (where the unit is already stored Pending and Local, `INV-TX-2`) and relay
 admission. So the candidate never justifies itself through its own pending
 rows, a committed row the unit deletes is not hidden by that pending deletion,
@@ -309,9 +311,11 @@ client made them, so the checks run in two stages:
    policy:
    - A **monotone** policy (see below) can only grant more as rows are added,
      so grounding an insert or a restore cannot turn its pass into a failure;
-     only an update can, by replacing committed content. Such a write is
-     re-checked only when a table its policy reads holds a unit update that
-     was not grounded when the write passed.
+     only a write that replaces committed content can: an update, or an
+     insert or restore of a row that was live before the unit (the unit
+     deleted it first). Such a write is re-checked only when a table its
+     policy reads holds a replacing write that was not grounded when the
+     write passed.
    - Any other policy is re-checked when a table it reads holds any unit row
      that was not grounded when the write passed.
 
@@ -338,11 +342,15 @@ depend on the order in which the client made its writes.
 The first round reads no overlaid rows. Later rounds build one overlay per
 table and share it among their checks; a check overlays only the tables its
 policy reads, and still reads every unit row in those tables. A unit whose
-writes depend on each other's rows (a self-dependent chain) or whose
-post-state pass re-checks many writes therefore costs time quadratic in its
-size. The overlaid rows the unit's checks read are summed over every check
-after the first round, and a unit whose checks would read more than 262,144 of
-its own rows is rejected instead of being evaluated at unbounded cost. The
+writes depend on each other's rows (a self-dependent chain) therefore costs
+time quadratic in its size. The post-state pass does not: its overlay is every
+row the unit leaves live but the one under check, so a re-check reaches the
+unit's rows through the policy's keys, as it does committed rows, and a write
+is re-checked only when a table its policy reads holds a later write that could
+take its pass away. The overlaid rows the grounding rounds' checks read are
+summed over every check after the first round, and a unit whose checks would
+read more than 262,144 of its own rows is rejected instead of being evaluated
+at unbounded cost. The
 rejection is `MalformedCommit` carrying "Reading more than 262144 rows of a
 transaction's own writes in its write-policy checks is not supported yet";
 applications receive it as a `write_rejected` rejection with that sentence as
@@ -384,7 +392,7 @@ ordinary insert. Its v1 branch-view copy descriptor is the only additional proof
 may satisfy this rule: the authority re-resolves its exact live or frozen source
 and evaluates that source's ordinary read policy. The client does not evaluate
 or receive policy support, and the descriptor is not a causal dependency,
-exclusive read set, or CAS precondition.
+serializable read set, or CAS precondition.
 
 An upsert asks whether its target row exists. If there is a current target row,
 that is a read and an upsert MUST be rejected unless the writer may read it. If
@@ -460,21 +468,21 @@ unreadable target instead (`INV-RLS-5`), and `AuthorSubject::SYSTEM` bypasses th
 half and resolves on existence alone (`INV-RLS-2`, `INV-RLS-19`).
 
 The security boundary is _upstream emission_, not local storage. Read-policy
-revocation removes rows from **future** settled result sets but does **not**
-redact a copy already delivered to a receiving node (`INV-RLS-6`). A receiving
-node does not re-filter its own local reads or subscriptions by policy. The spec
-therefore makes no post-delivery confidentiality promise against a node that
-already received data: revocation is forward-looking sync narrowing.
+revocation removes rows from **future** settled result sets, and the server
+evicts them: an honest receiving node drops its copy (`INV-RLS-6`,
+`INV-SYNC-14`). A receiving node does not re-filter its own local reads or
+subscriptions by policy. Eviction keeps honest replicas coherent with what they
+may read; it is not redaction, and the spec makes no post-delivery
+confidentiality promise against a node that already received data.
 
 A client relay does not become an authority by retaining an authority-selected
 result. A scope-isolated relay may publish retained rows and repair payloads to
 an exactly same-scope foreground without re-running policy. For Global
 results it must use the exact policy-scoped membership emitted by the authority;
 for Local results it uses retained knowledge, including previously delivered
-rows that a later authority result removes. A multiplexed relay must keep each
-policy binding's authoritative membership separate and may not treat possession
-of a cached row as permission to reveal it to another scope (ch. 9,
-`INV-EDGE-21..24`).
+rows that a later authority result removes. A relay serves one auth scope
+only, and possession of a cached row is never permission to reveal it to
+another scope (ch. 9, `INV-EDGE-21..24`).
 
 effective branch-view reads evaluate ordinary table policy over the effective branch-view
 view. Partition columns are normal policy-visible values, including references
@@ -606,15 +614,15 @@ non-system identity only when the row has a global content winner that satisfies
 the read policy for that identity.
 that identity's read policy (ch. 12).
 
-### 7.5 Exclusive atomicity and historical reads
+### 7.5 Serializable atomicity and historical reads
 
-Exclusive transaction view shipping protects recipients from seeing an incomplete
+Serializable transaction view shipping protects recipients from seeing an incomplete
 policy-visible fragment for the maintained subscription view. It is
 **policy-atomic per recipient and per view**: a non-system recipient receives a
-result member or program fact from an exclusive transaction only when every
+result member or program fact from a serializable transaction only when every
 version required for that view is readable to it (`INV-RLS-12`). Versions
 outside that view need not be shipped or readable for the view to advance. This
-is distinct from exclusive serializability (ch. 3) and from write authorization:
+is distinct from serializability (ch. 3) and from write authorization:
 it governs only read/view shipping.
 
 Historical/as-of reads served for a link evaluate read policy **at the requested
@@ -654,8 +662,7 @@ not wait for the draft or start edit-specific retries. The durable denial stays
 in place, so rejecting or removing the draft cannot resurrect the settled row.
 Settled-only reads still exclude the row. Ahead storage can also contain confirmed versions awaiting cleanup; those
 settled versions are excluded by exact version identity while distinct pending
-versions continue to participate. Legacy edge receipts without Core acceptance
-are reopened as pending local writes, not as confirmed versions.
+versions continue to participate.
 SYSTEM, trusted serving sources, authorization proof evaluation, historical
 snapshots, and non-default branch views do not consume the marker. Stored row
 content remains intact. A fresh verified `Readable` evaluation readmits the row;

@@ -580,18 +580,16 @@ struct PermissionsHeadHttpResponse {
 }
 
 async fn seed_schema_catalogue(server: &JazzServer, schema: &jazz::tools::Schema) {
-    let response = reqwest::Client::new()
-        .post(format!(
-            "{}/apps/{}/admin/schemas",
-            server.base_url(),
-            server.app_id()
-        ))
-        .header("X-Jazz-Admin-Secret", server.admin_secret())
-        .json(&json!({ "schema": schema }))
-        .send()
-        .await
-        .expect("publish schema catalogue");
-    assert_eq!(response.status(), StatusCode::CREATED);
+    // Internal fixtures exercise queries against incomplete legacy catalogues.
+    push_catalogue_in_memory(
+        server.server_state(),
+        server.app_id(),
+        "dev",
+        std::slice::from_ref(schema),
+        &[],
+    )
+    .await
+    .expect("seed internal catalogue fixture");
 }
 
 /// Publish the explicit v1 -> v2 lineage required before the v2 schema can
@@ -601,13 +599,16 @@ async fn seed_schema_catalogue(server: &JazzServer, schema: &jazz::tools::Schema
 async fn publish_v1_to_v2_catalogue_migration(server: &JazzServer) {
     let response = reqwest::Client::new()
         .post(format!(
-            "{}/apps/{}/admin/migrations",
+            "{}/apps/{}/admin/deploy",
             server.base_url(),
             server.app_id()
         ))
         .header("X-Jazz-Admin-Secret", server.admin_secret())
         .json(&json!({
-            "fromHash": SchemaHash::compute(&schema_v1()).to_string(),
+            "targetSchemaHash": SchemaHash::compute(&schema_v2()).to_string(),
+            "schemas": [],
+            "permissions": support::allow_all_permissions(&schema_v2()).into_iter().collect::<std::collections::HashMap<_, _>>(),
+            "migrations": [{ "fromHash": SchemaHash::compute(&schema_v1()).to_string(),
             "toHash": SchemaHash::compute(&schema_v2()).to_string(),
             "forward": [{
                 "table": "users",
@@ -617,7 +618,7 @@ async fn publish_v1_to_v2_catalogue_migration(server: &JazzServer) {
                     "column_type": { "type": "Text" },
                     "value": { "type": "Null" }
                 }]
-            }]
+            }]}]
         }))
         .send()
         .await
@@ -625,7 +626,7 @@ async fn publish_v1_to_v2_catalogue_migration(server: &JazzServer) {
     let status = response.status();
     assert_eq!(
         status,
-        StatusCode::CREATED,
+        StatusCode::OK,
         "v2 must be admitted through its explicit v1-to-v2 lineage"
     );
 }
@@ -718,7 +719,6 @@ async fn core_permission_retightening_reaches_all_subscribed_clients_impl() {
         core.admin_secret(),
         &schema,
         deny_all_select_permissions(&schema),
-        Some(allow_head.bundle_object_id),
     )
     .await;
     wait_for_subscription_update(
@@ -1126,7 +1126,7 @@ async fn dynamic_server_live_subscription_replays_on_first_permissions_head_and_
     // matching authority-side write settle.
     let mut log = Vec::new();
 
-    let allow_head = publish_allow_all_permissions(
+    let _allow_head = publish_allow_all_permissions(
         &server.base_url(),
         server.app_id(),
         server.admin_secret(),
@@ -1165,7 +1165,6 @@ async fn dynamic_server_live_subscription_replays_on_first_permissions_head_and_
         server.admin_secret(),
         &schema,
         deny_all_select_permissions(&schema),
-        Some(allow_head.bundle_object_id),
     )
     .await;
     wait_for_subscription_update(
@@ -1751,6 +1750,14 @@ async fn table_rename_new_client_can_read_old_rows_impl() {
     let v1_schema = table_rename_schema_v1();
     let v2_schema = table_rename_schema_v2();
 
+    publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &v1_schema,
+    )
+    .await;
+
     push_catalogue_in_memory(
         server.server_state(),
         server.app_id(),
@@ -1760,13 +1767,6 @@ async fn table_rename_new_client_can_read_old_rows_impl() {
     )
     .await
     .expect("push table-rename catalogue");
-    publish_allow_all_permissions(
-        &server.base_url(),
-        server.app_id(),
-        server.admin_secret(),
-        &v1_schema,
-    )
-    .await;
 
     let alice = jazz_testkit::connect(
         server.make_client_context_for_user(v1_schema, test_user_id("alice-table-rename")),
@@ -1826,6 +1826,14 @@ async fn table_rename_subscription_reacts_to_old_branch_updates_impl() {
     let v1_schema = table_rename_schema_v1();
     let v2_schema = table_rename_schema_v2();
 
+    publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &v1_schema,
+    )
+    .await;
+
     push_catalogue_in_memory(
         server.server_state(),
         server.app_id(),
@@ -1835,13 +1843,6 @@ async fn table_rename_subscription_reacts_to_old_branch_updates_impl() {
     )
     .await
     .expect("push table-rename catalogue");
-    publish_allow_all_permissions(
-        &server.base_url(),
-        server.app_id(),
-        server.admin_secret(),
-        &v1_schema,
-    )
-    .await;
 
     let bob = jazz_testkit::connect(
         server.make_client_context_for_user(v2_schema, test_user_id("bob-table-rename-sub")),
@@ -2054,6 +2055,14 @@ async fn table_rename_update_and_delete_copy_on_write_impl() {
     let v1_schema = table_rename_schema_v1();
     let v2_schema = table_rename_copy_on_write_schema_v2();
 
+    publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &v1_schema,
+    )
+    .await;
+
     push_catalogue_in_memory(
         server.server_state(),
         server.app_id(),
@@ -2063,13 +2072,6 @@ async fn table_rename_update_and_delete_copy_on_write_impl() {
     )
     .await
     .expect("push table-rename catalogue");
-    publish_allow_all_permissions(
-        &server.base_url(),
-        server.app_id(),
-        server.admin_secret(),
-        &v1_schema,
-    )
-    .await;
 
     let alice = jazz_testkit::connect(server.make_client_context_for_user(
         v1_schema.clone(),
@@ -2187,6 +2189,14 @@ async fn table_rename_join_query_translates_join_target_on_old_branch_impl() {
     let v1_schema = table_rename_join_schema_v1();
     let v2_schema = table_rename_join_schema_v2();
 
+    publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &v1_schema,
+    )
+    .await;
+
     push_catalogue_in_memory(
         server.server_state(),
         server.app_id(),
@@ -2196,13 +2206,6 @@ async fn table_rename_join_query_translates_join_target_on_old_branch_impl() {
     )
     .await
     .expect("push join table-rename catalogue");
-    publish_allow_all_permissions(
-        &server.base_url(),
-        server.app_id(),
-        server.admin_secret(),
-        &v1_schema,
-    )
-    .await;
 
     let alice = jazz_testkit::connect(
         server.make_client_context_for_user(v1_schema, test_user_id("alice-join-rename")),
@@ -2297,6 +2300,14 @@ async fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch_impl() {
     let v1_schema = table_rename_join_schema_v1();
     let v2_schema = table_rename_join_schema_v2();
 
+    publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &v1_schema,
+    )
+    .await;
+
     push_catalogue_in_memory(
         server.server_state(),
         server.app_id(),
@@ -2306,13 +2317,6 @@ async fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch_impl() {
     )
     .await
     .expect("push array table-rename catalogue");
-    publish_allow_all_permissions(
-        &server.base_url(),
-        server.app_id(),
-        server.admin_secret(),
-        &v1_schema,
-    )
-    .await;
 
     let alice = jazz_testkit::connect(
         server.make_client_context_for_user(v1_schema, test_user_id("alice-array-rename")),
@@ -2419,7 +2423,6 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
         server.admin_secret(),
         &current_schema,
         current_permissions,
-        None,
     )
     .await;
 
@@ -2593,19 +2596,6 @@ async fn multi_hop_table_renames_and_column_rename_impl() {
     let v2_schema = multi_hop_table_rename_schema_v2();
     let v3_schema = multi_hop_table_rename_schema_v3();
 
-    push_catalogue_in_memory(
-        server.server_state(),
-        server.app_id(),
-        "dev",
-        &[v1_schema.clone(), v2_schema.clone(), v3_schema.clone()],
-        &[
-            multi_hop_table_rename_v1_to_v2_lens(),
-            multi_hop_table_rename_v2_to_v3_lens(),
-        ],
-    )
-    .await
-    .expect("push multi-hop table-rename catalogue");
-
     publish_allow_all_permissions(
         &server.base_url(),
         server.app_id(),
@@ -2632,6 +2622,15 @@ async fn multi_hop_table_renames_and_column_rename_impl() {
     )
     .await;
 
+    push_catalogue_in_memory(
+        server.server_state(),
+        server.app_id(),
+        "dev",
+        &[multi_hop_table_rename_schema_v1(), v2_schema.clone()],
+        &[multi_hop_table_rename_v1_to_v2_lens()],
+    )
+    .await
+    .expect("admit next migration");
     publish_allow_all_permissions(
         &server.base_url(),
         server.app_id(),
@@ -2658,6 +2657,15 @@ async fn multi_hop_table_renames_and_column_rename_impl() {
     )
     .await;
 
+    push_catalogue_in_memory(
+        server.server_state(),
+        server.app_id(),
+        "dev",
+        &[multi_hop_table_rename_schema_v2(), v3_schema.clone()],
+        &[multi_hop_table_rename_v2_to_v3_lens()],
+    )
+    .await
+    .expect("admit next migration");
     publish_allow_all_permissions(
         &server.base_url(),
         server.app_id(),
@@ -2734,11 +2742,19 @@ async fn removed_table_then_readded_does_not_resurface_old_rows_impl() {
     let v2_schema = removed_readded_schema_v2();
     let v3_schema = removed_readded_schema_v3();
 
+    publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &v1_schema,
+    )
+    .await;
+
     push_catalogue_in_memory(
         server.server_state(),
         server.app_id(),
         "dev",
-        &[v1_schema.clone(), v2_schema, v3_schema.clone()],
+        &[v1_schema.clone(), v2_schema.clone(), v3_schema.clone()],
         &[
             removed_readded_v1_to_v2_lens(),
             removed_readded_v2_to_v3_lens(),
@@ -2747,13 +2763,8 @@ async fn removed_table_then_readded_does_not_resurface_old_rows_impl() {
     .await
     .expect("push removed/re-added table catalogue");
 
-    publish_allow_all_permissions(
-        &server.base_url(),
-        server.app_id(),
-        server.admin_secret(),
-        &v1_schema,
-    )
-    .await;
+    // The empty historical version is meaningful once its lenses are admitted.
+    seed_schema_catalogue(&server, &v2_schema).await;
 
     let alice = jazz_testkit::connect(
         server.make_client_context_for_user(v1_schema, test_user_id("alice-removed-readded-v1")),

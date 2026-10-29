@@ -45,3 +45,14 @@ export function formatUuidAt(bytes: ArrayLike<number>, offset: number): string {
     BYTE_HEX[bytes[offset + 15]! & 0xff]!
   );
 }
+
+/** The 16 bytes of UUID text (dashes ignored), or undefined unless it is 32 hex digits. */
+export function parseUuidBytes(text: string): Uint8Array | undefined {
+  const hex = text.replaceAll("-", "");
+  if (!/^[0-9a-fA-F]{32}$/.test(hex)) return undefined;
+  const bytes = new Uint8Array(16);
+  for (let i = 0; i < 16; i += 1) {
+    bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  }
+  return bytes;
+}

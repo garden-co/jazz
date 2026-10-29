@@ -52,7 +52,6 @@ describe("transaction-committed rows in a hierarchical table", () => {
               adminSecret: server.adminSecret,
               backendSecret: server.backendSecret,
               driver: { type: "memory" },
-              tier: "local",
               env: "test",
             });
             db = context.asBackend();
@@ -76,10 +75,10 @@ describe("transaction-committed rows in a hierarchical table", () => {
 
           for (const row of rows) {
             expect(
-              await db.one(app.categories.where({ id: row.id }), { tier: "global" }),
+              await db.one(app.categories.where({ id: row.id }), { tier: "remote" }),
             ).toMatchObject(row);
           }
-          expect(await db.all(app.categories, { tier: "global" })).toHaveLength(3);
+          expect(await db.all(app.categories, { tier: "remote" })).toHaveLength(3);
         } finally {
           await client?.shutdown();
           await context?.shutdown();

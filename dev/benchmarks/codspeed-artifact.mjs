@@ -42,13 +42,13 @@ export function currentSuite(env = process.env) {
 }
 
 // Hero examples in the docs page's order, then the anonymized adopter
-// workload and the engine suite. Each hero example owns the areas it measures;
+// workload. Each hero example owns the areas it measures;
 // see dev/EXAMPLES_AND_BENCHMARKS_PROGRAM.md.
 const workloadSpecs = {
   "stage-plan": {
     ...nativeExample("stage-plan"),
     timeout: 40,
-    // Former W1 diagnostics: scaling points and memory twins.
+    // The W1 diagnostics (scaling points and memory twins).
     nightly: { benches: ["nightly"], env: {}, timeout: 40 },
   },
   "band-chat": {
@@ -76,21 +76,6 @@ const workloadSpecs = {
     timeout: 25,
   },
   "permissioned-resources": nativeExample("permissioned-resources"),
-  "groove-ivm": {
-    package: "groove",
-    benches: ["pull_vs_snapshot", "steady_state"],
-    features: null,
-    minStack: null,
-    timeout: 40,
-    // The reference engines (SQLite, pull plans, snapshot re-runs) and the
-    // smaller IVM sizes, from the same executables. GROOVE_BENCH_SWEEP=1
-    // also skips the IVM cases at the largest size, which merges measure.
-    nightly: {
-      benches: ["pull_vs_snapshot", "steady_state"],
-      env: { GROOVE_BENCH_SWEEP: "1" },
-      timeout: 40,
-    },
-  },
 };
 export const workloads = Object.keys(workloadSpecs);
 
@@ -110,7 +95,6 @@ const workloadGroups = {
   "live-apps": ["band-chat", "wequencer", "record-player"],
   "files-and-ops": ["epic-drop", "music-agent", "big-label"],
   "public-apps": ["world-tour", "poster-shop", "jamazon-warehouse"],
-  engine: ["groove-ivm"],
 };
 {
   const grouped = Object.values(workloadGroups).flat();

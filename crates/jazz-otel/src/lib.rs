@@ -5,7 +5,7 @@
 //! in NAPI. Standard OTel env vars (`OTEL_SERVICE_NAME`, `OTEL_TRACES_SAMPLER`,
 //! etc.) are respected automatically by the SDK.
 
-use opentelemetry::metrics::{Meter, ObservableGauge};
+use opentelemetry::metrics::{Meter, ObservableCounter, ObservableGauge};
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::{Protocol, WithExportConfig};
 use opentelemetry_sdk::logs::SdkLoggerProvider;
@@ -262,31 +262,70 @@ where
         .build()
 }
 
-/// Metric name for the memory RocksDB holds outside Rust's allocator.
-const ROCKSDB_MEMORY_METRIC: &str = "jazz.server.rocksdb.memory";
+/// Metric names for the server's query cache.
+const QUERY_CACHE_MEMORY_METRIC: &str = "jazz.server.query_cache.memory";
+const QUERY_CACHE_EVICTIONS_METRIC: &str = "jazz.server.query_cache.evicted_buckets";
 
-/// Register an observable gauge that samples `usage` on each metric
-/// collection and reports each `(component, bytes)` pair as
-/// `jazz.server.rocksdb.memory{component=...}`. The heap profile only covers
-/// Rust allocations, so this is where RocksDB's block cache, memtables and
-/// table readers show up. Nothing is reported when `usage` returns `None`.
-pub fn register_rocksdb_memory_gauge<F>(meter: &Meter, usage: F) -> ObservableGauge<u64>
+/// A sample of the query cache and the memory it is steered by.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct QueryCacheUsage {
+    /// The current budget, or `None` when unbounded.
+    pub budget_bytes: Option<u64>,
+    pub resident_bytes: u64,
+    /// Buckets evicted since the process started.
+    pub evicted_buckets: u64,
+    pub process_rss_bytes: Option<u64>,
+}
+
+/// The query cache instruments; keep it alive for as long as they report.
+pub struct QueryCacheMetrics {
+    _memory: ObservableGauge<u64>,
+    _evictions: ObservableCounter<u64>,
+}
+
+/// Register `jazz.server.query_cache.memory{component=budget|resident|process_rss}`
+/// and the `jazz.server.query_cache.evicted_buckets` counter, sampled from
+/// `usage` on each collection. A lowered budget with a growing eviction
+/// count is a server trading query latency for memory.
+pub fn register_query_cache_metrics<F>(meter: &Meter, usage: F) -> QueryCacheMetrics
 where
-    F: Fn() -> Option<Vec<(&'static str, u64)>> + Send + Sync + 'static,
+    F: Fn() -> QueryCacheUsage + Send + Sync + 'static,
 {
-    meter
-        .u64_observable_gauge(ROCKSDB_MEMORY_METRIC)
-        .with_description("Memory RocksDB holds outside Rust's allocator, by component")
+    let usage = std::sync::Arc::new(usage);
+    let sample = usage.clone();
+    let memory = meter
+        .u64_observable_gauge(QUERY_CACHE_MEMORY_METRIC)
+        .with_description("Query cache budget and resident bytes, and the process resident set")
         .with_unit("By")
         .with_callback(move |observer| {
-            for (component, bytes) in usage().into_iter().flatten() {
-                observer.observe(
-                    bytes,
-                    &[opentelemetry::KeyValue::new("component", component)],
-                );
+            let usage = sample();
+            let components = [
+                ("budget", usage.budget_bytes),
+                ("resident", Some(usage.resident_bytes)),
+                ("process_rss", usage.process_rss_bytes),
+            ];
+            for (component, bytes) in components {
+                if let Some(bytes) = bytes {
+                    observer.observe(
+                        bytes,
+                        &[opentelemetry::KeyValue::new("component", component)],
+                    );
+                }
             }
         })
-        .build()
+        .build();
+    let evictions = meter
+        .u64_observable_counter(QUERY_CACHE_EVICTIONS_METRIC)
+        .with_description(
+            "Query cache buckets evicted, each read from storage again on its next read",
+        )
+        .with_unit("{bucket}")
+        .with_callback(move |observer| observer.observe(usage().evicted_buckets, &[]))
+        .build();
+    QueryCacheMetrics {
+        _memory: memory,
+        _evictions: evictions,
+    }
 }
 
 #[cfg(test)]
@@ -329,7 +368,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rocksdb_memory_gauge_reports_each_component() {
+    async fn query_cache_metrics_report_budget_resident_and_evictions() {
         use opentelemetry::metrics::MeterProvider as _;
         use opentelemetry_sdk::metrics::InMemoryMetricExporter;
         use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
@@ -339,42 +378,50 @@ mod tests {
             .with_periodic_exporter(exporter.clone())
             .build();
         let meter = provider.meter("test");
-
-        let _gauge = register_rocksdb_memory_gauge(&meter, || {
-            Some(vec![("block_cache", 4096), ("memtables", 1024)])
+        let _metrics = register_query_cache_metrics(&meter, || QueryCacheUsage {
+            budget_bytes: Some(100),
+            resident_bytes: 60,
+            evicted_buckets: 7,
+            process_rss_bytes: None,
         });
-        provider.force_flush().expect("flush collects the gauge");
+        provider.force_flush().expect("flush collects the metrics");
 
-        let mut observed = exporter
-            .get_finished_metrics()
-            .expect("metrics collected")
+        let metrics = exporter.get_finished_metrics().expect("metrics collected");
+        let metrics = metrics
             .iter()
             .flat_map(|rm| rm.scope_metrics())
             .flat_map(|sm| sm.metrics())
-            .filter(|m| m.name() == "jazz.server.rocksdb.memory")
-            .flat_map(|m| match m.data() {
-                AggregatedMetrics::U64(MetricData::Gauge(g)) => g
-                    .data_points()
-                    .map(|dp| {
-                        let component = dp
-                            .attributes()
-                            .find(|kv| kv.key.as_str() == "component")
-                            .map(|kv| kv.value.to_string())
-                            .unwrap_or_default();
-                        (component, dp.value())
-                    })
-                    .collect::<Vec<_>>(),
-                _ => Vec::new(),
+            .collect::<Vec<_>>();
+        let memory = metrics
+            .iter()
+            .find(|m| m.name() == "jazz.server.query_cache.memory")
+            .expect("memory gauge present");
+        let AggregatedMetrics::U64(MetricData::Gauge(gauge)) = memory.data() else {
+            panic!("memory is a u64 gauge");
+        };
+        let mut points = gauge
+            .data_points()
+            .map(|dp| {
+                let component = dp
+                    .attributes()
+                    .find(|kv| kv.key.as_str() == "component")
+                    .map(|kv| kv.value.to_string())
+                    .unwrap();
+                (component, dp.value())
             })
             .collect::<Vec<_>>();
-        observed.sort();
-        observed.dedup();
+        points.sort();
         assert_eq!(
-            observed,
-            [
-                ("block_cache".to_owned(), 4096),
-                ("memtables".to_owned(), 1024)
-            ]
+            points,
+            vec![("budget".to_owned(), 100), ("resident".to_owned(), 60)]
         );
+        let evictions = metrics
+            .iter()
+            .find(|m| m.name() == "jazz.server.query_cache.evicted_buckets")
+            .expect("eviction counter present");
+        let AggregatedMetrics::U64(MetricData::Sum(sum)) = evictions.data() else {
+            panic!("evictions is a u64 sum");
+        };
+        assert_eq!(sum.data_points().next().map(|dp| dp.value()), Some(7));
     }
 }

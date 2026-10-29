@@ -1,5 +1,4 @@
 import { bytesToHex, formatUuidAt } from "./hex.js";
-import { Utf8Decoder } from "./utf8.js";
 /**
  * Manage subscription state and compute deltas.
  *
@@ -10,11 +9,11 @@ import { Utf8Decoder } from "./utf8.js";
 import type {
   RuntimeSubscriptionDelta,
   RuntimeTerminalOperation,
+  RuntimeValueSplice,
   Value,
   WasmRow,
 } from "../drivers/types.js";
-
-const fatalUtf8Decoder = new Utf8Decoder({ fatal: true });
+import { isValidUtf8 } from "./util.js";
 
 export const RowChangeKind = {
   Added: 0 as const,
@@ -24,15 +23,34 @@ export const RowChangeKind = {
 export type RowChangeKind = typeof RowChangeKind;
 export type RowChangeKindValue = (typeof RowChangeKind)[keyof typeof RowChangeKind];
 
+/**
+ * Per column, the sequential splices that turn a row's previous value into its
+ * new one: UTF-16 units and a string for TEXT, bytes for BYTEA.
+ */
+export type ValueSplices = Readonly<Record<string, readonly RuntimeValueSplice[]>>;
+
 export type RowDelta<T> =
   | { kind: RowChangeKind["Added"]; id: string; index: number; item: T }
   | { kind: RowChangeKind["Removed"]; id: string; index: number }
-  | { kind: RowChangeKind["Updated"]; id: string; index: number; item?: T };
+  | {
+      kind: RowChangeKind["Updated"];
+      id: string;
+      index: number;
+      item?: T;
+      /** Opted-in columns' splices, when they could be computed. */
+      splices?: ValueSplices;
+    };
 
 type DecodedRowDelta =
   | { kind: RowChangeKind["Added"]; id: string; index: number; row: WasmRow }
   | { kind: RowChangeKind["Removed"]; id: string; index: number }
-  | { kind: RowChangeKind["Updated"]; id: string; index: number; row?: WasmRow | null };
+  | {
+      kind: RowChangeKind["Updated"];
+      id: string;
+      index: number;
+      row?: WasmRow | null;
+      splices?: ValueSplices;
+    };
 
 export type SubscriptionDelta<T> =
   | {
@@ -340,7 +358,7 @@ export function resultIdentity(item: { id: string }): string {
 export class SubscriptionManager<T extends { id: string }> {
   private currentResults = new JournaledMap<string, T>();
   private terminalRows = new JournaledMap<string, WasmRow>();
-  /** Exact ordered Groove root key -> opaque ResultKey V1 sidecar address. */
+  /** Exact ordered root key -> opaque ResultKey sidecar address. */
   private terminalOccurrenceAddresses = new JournaledMap<string, string>();
   private orderedIds: string[] = [];
   private orderedIdIndex = new JournaledMap<string, number>();
@@ -484,7 +502,7 @@ export class SubscriptionManager<T extends { id: string }> {
       const registerOccurrence = (sidecar: Uint8Array) => {
         const orderedKey = orderedTerminalKeyForTypedOccurrence(sidecar);
         if (!orderedKey) {
-          throw new Error("malformed or noncanonical ResultKey V1 terminal occurrence key");
+          throw new Error("malformed or noncanonical ResultKey terminal occurrence key");
         }
         const id = publicResultKey(sidecar);
         return { id, address: this.registerTerminalOccurrenceAddress(orderedKey, id) };
@@ -498,6 +516,7 @@ export class SubscriptionManager<T extends { id: string }> {
           id: updatedKeys[index]!.id,
           index: change.index,
           row: change.row,
+          ...(change.splices ? { splices: change.splices } : {}),
         })),
         ...delta.added.map((change, index) => ({
           kind: RowChangeKind.Added,
@@ -788,6 +807,7 @@ export class SubscriptionManager<T extends { id: string }> {
               id: change.id,
               index: change.index,
               item: updatedItem ? withResultIdentity(updatedItem, change.id) : undefined,
+              ...(change.splices ? { splices: change.splices } : {}),
             };
           }
         }
@@ -948,14 +968,14 @@ export class SubscriptionManager<T extends { id: string }> {
 }
 
 /**
- * Reconstruct the exact Groove ordered root key from a complete ResultKey V1.
+ * Reconstruct the exact ordered root key from a complete ResultKey.
  * This is metadata-driven: a terminal key is accepted as typed only when it
  * byte-for-byte matches the sidecar's root, joined UUIDs, and union-arm
  * discriminators. It intentionally does not infer meaning from a string in an
  * arbitrary ordered key.
  */
 function orderedTerminalKeyForTypedOccurrence(sidecar: Uint8Array): Uint8Array | undefined {
-  if (sidecar[0] !== 1 || sidecar.byteLength < 25) return undefined;
+  if (sidecar[0] !== 2 || sidecar.byteLength < 26) return undefined;
   let cursor = 1;
   const root = sidecar.subarray(cursor, (cursor += 16));
   const joinedCount = readU32Be(sidecar, cursor);
@@ -989,18 +1009,36 @@ function orderedTerminalKeyForTypedOccurrence(sidecar: Uint8Array): Uint8Array |
     previousPosition = position;
     arms.set(position, sidecar.subarray(cursor, (cursor += length)));
   }
+  const transactions: (Uint8Array | undefined)[] = [];
+  for (let index = 0; index <= joinedCount; index++) {
+    const hasTransaction = sidecar[cursor++];
+    if (hasTransaction === 1) {
+      transactions.push(sidecar.subarray(cursor, cursor + 24));
+      cursor += 24;
+    } else if (hasTransaction === 0) {
+      transactions.push(undefined);
+    } else {
+      return undefined;
+    }
+  }
   if (cursor !== sidecar.byteLength) return undefined;
 
   const ordered: number[] = [];
   const rootArm = arms.get(0);
   if (rootArm) ordered.push(6, ...orderedBytes(rootArm));
   ordered.push(10, ...root);
+  const transaction = transactions[0];
+  if (transaction) {
+    ordered.push(3, ...transaction.subarray(0, 8), 10, ...transaction.subarray(8));
+  }
   for (const [index, uuid] of joined.entries()) {
     const arm = arms.get(index + 1);
     if (arm) {
       ordered.push(6, ...orderedBytes(arm));
     }
     ordered.push(10, ...uuid);
+    const transaction = transactions[index + 1];
+    if (transaction) ordered.push(3, ...transaction.subarray(0, 8), 10, ...transaction.subarray(8));
   }
   return Uint8Array.from(ordered);
 }
@@ -1025,24 +1063,15 @@ function orderedBytes(value: Uint8Array): number[] {
   return encoded;
 }
 
-function isValidUtf8(bytes: Uint8Array): boolean {
-  try {
-    fatalUtf8Decoder.decode(bytes);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function terminalKeyId(encoded: readonly number[]): string {
   const bytes = Uint8Array.from(encoded);
   if (bytes.length === 17 && bytes[0] === 10) {
     return readUuid(bytes, 1);
   }
-  // Groove terminal operations address roots by an ordered Record key. A
+  // Terminal operations address roots by an ordered Record key. A
   // multi-source row is therefore `Uuid, Uuid, …`, while the packed stream's
-  // occurrence sidecar uses the equivalent V1 ResultKey (`1, root UUID,
-  // joined count, joined UUIDs, label count`). Normalize only this exact
+  // occurrence sidecar uses the equivalent ResultKey (`2, root UUID,
+  // joined count, joined UUIDs, label count, per-source transaction flags`). Normalize only this exact
   // physical form so terminal patches meet the same full occurrence identity
   // that seeded the subscription state.
   if (bytes.length > 17 && isUuidOnlyTerminalKey(bytes)) {
@@ -1053,8 +1082,8 @@ function terminalKeyId(encoded: readonly number[]): string {
       }
       uuids.push(Array.from(bytes.subarray(offset + 1, offset + 17)));
     }
-    const occurrence = new Uint8Array(25 + (uuids.length - 1) * 16);
-    occurrence[0] = 1;
+    const occurrence = new Uint8Array(25 + (uuids.length - 1) * 16 + uuids.length);
+    occurrence[0] = 2;
     occurrence.set(uuids[0]!, 1);
     new DataView(occurrence.buffer).setUint32(17, uuids.length - 1);
     let cursor = 21;
@@ -1076,7 +1105,7 @@ function isUuidOnlyTerminalKey(encoded: ArrayLike<number>): boolean {
   );
 }
 
-/** Decode the leading UUID key field from Groove's ordered record-key carrier. */
+/** Decode the leading UUID key field from the ordered record-key carrier. */
 function terminalPayloadRowId(encoded: readonly number[]): string {
   const bytes = Uint8Array.from(encoded);
   if (bytes.length < 17 || bytes[0] !== 10) {
@@ -1223,7 +1252,7 @@ function readUuid(bytes: Uint8Array, offset: number): string {
 }
 
 function publicResultKey(bytes: Uint8Array): string {
-  if (bytes.length === 25 && bytes[0] === 1 && isZeroFrom(bytes, 17)) return readUuid(bytes, 1);
+  if (bytes.length === 26 && bytes[0] === 2 && isZeroFrom(bytes, 17)) return readUuid(bytes, 1);
   return `result:${bytesToHex(bytes)}`;
 }
 

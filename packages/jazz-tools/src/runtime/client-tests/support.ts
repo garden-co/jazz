@@ -55,7 +55,7 @@ export function mockMutation(txId = "00000000000070008000000000000001"): Mutatio
 }
 
 export const runtimeTransactionRecordStubs = {
-  beginTransaction: (_kind: "mergeable" | "exclusive", id: OpenTransactionId) => id,
+  beginTransaction: (_kind: "mergeable" | "serializable", id: OpenTransactionId) => id,
   upsert: () => mockMutation("upsert-transaction-id"),
   commitTransaction: () => testTxId("committed-batch"),
   waitForTransaction: async () => {},
@@ -135,14 +135,10 @@ export function makeClient() {
   };
 
   const JazzClientCtor = JazzClient as unknown as {
-    new (
-      runtime: Runtime,
-      context: AppContext,
-      defaultDurabilityTier: "local" | "global",
-    ): JazzClient;
+    new (runtime: Runtime, context: AppContext): JazzClient;
   };
   return {
-    client: new JazzClientCtor(runtime, context, "global"),
+    client: new JazzClientCtor(runtime, context),
     queryCalls,
     createSubscriptionCalls,
     executeSubscriptionCalls,
@@ -173,11 +169,7 @@ export function makeClientWithContext(context: AppContext): JazzClient {
   };
 
   const JazzClientCtor = JazzClient as unknown as {
-    new (
-      runtime: Runtime,
-      context: AppContext,
-      defaultDurabilityTier: "local" | "global",
-    ): JazzClient;
+    new (runtime: Runtime, context: AppContext): JazzClient;
   };
-  return new JazzClientCtor(runtime, context, "global");
+  return new JazzClientCtor(runtime, context);
 }

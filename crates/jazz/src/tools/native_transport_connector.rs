@@ -12,7 +12,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::app_id::AppId;
-use crate::db::ConnectionSessionContext;
 use crate::ids::AuthorSubject;
 use crate::tools::websocket_prelude_auth::AuthConfig;
 use crate::wire::WireTransport;
@@ -59,19 +58,13 @@ impl std::fmt::Debug for NativeTransportRequest {
 
 /// A negotiated byte transport returned by a target-specific connector.
 ///
-/// `session_context` is authenticated during the adapter handshake. Keeping it
-/// with the transport prevents an adapter from asserting identity in semantic
-/// messages or requiring server-private admission APIs. `terminal` observes
-/// the adapter's actual socket pump rather than semantic queue activity.
+/// The server authenticates the link during the adapter handshake, so no
+/// identity travels in semantic messages. `terminal` observes the adapter's
+/// actual socket pump rather than semantic queue activity.
 pub struct ConnectedNativeTransport {
     pub transport: Box<dyn WireTransport + Send>,
     pub protocol_version: u16,
     pub features: u64,
-    pub session_context: Option<ConnectionSessionContext>,
-    /// Set only by an adapter that opened an authenticated SYSTEM backend
-    /// link. It permits forwarding downstream policy bindings to the remote
-    /// authority; ordinary session links must leave it false.
-    pub permits_delegated_sessions: bool,
     /// Resolves exactly once when the established adapter pump stops.
     pub terminal: NativeTransportTerminalFuture,
 }
@@ -101,12 +94,19 @@ pub enum NativeTransportTerminal {
 }
 
 /// Error at the target/socket boundary, before a core peer has been attached.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum NativeTransportError {
     /// The peer is unavailable; local work may continue while connection retries.
+    #[error("{0}")]
     Retryable(String),
     /// Admission, protocol, or an unclassified adapter failure must fail closed.
+    #[error("{0}")]
     Terminal(String),
+    /// The upstream refused the request's credential. Retrying with the same
+    /// credential cannot succeed; a refreshed one can. Fails closed like
+    /// [`Self::Terminal`] until the caller supplies a new credential.
+    #[error("{0}")]
+    AuthRejected(String),
 }
 
 impl NativeTransportError {
@@ -114,16 +114,6 @@ impl NativeTransportError {
         matches!(self, Self::Retryable(_))
     }
 }
-
-impl std::fmt::Display for NativeTransportError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Retryable(message) | Self::Terminal(message) => f.write_str(message),
-        }
-    }
-}
-
-impl std::error::Error for NativeTransportError {}
 
 /// Factory implemented by `jazz-native-transport` (or another native shell).
 ///
@@ -161,8 +151,6 @@ mod tests {
                     transport: Box::new(NoopTransport),
                     protocol_version: 1,
                     features: 0,
-                    session_context: None,
-                    permits_delegated_sessions: false,
                     terminal: Box::pin(std::future::pending()),
                 })
             })

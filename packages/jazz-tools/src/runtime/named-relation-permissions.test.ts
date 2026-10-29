@@ -80,7 +80,6 @@ it.each(["forward", "reverse"])(
         serverUrl: server.url,
         backendSecret,
         env: "test",
-        tier: "global",
       });
       const backend = context.asBackend(app);
       const owner = (name: string) => localFirstAccountId(name, "named-relations-tests");

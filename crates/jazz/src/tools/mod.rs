@@ -6,10 +6,13 @@ pub use crate::model::admin_catalogue_row_format;
 pub(crate) use crate::model::public_api;
 #[doc(hidden)]
 pub use crate::model::public_schema_convert;
-pub use crate::model::{metadata, policy_claims, public_schema, schema_lens, transaction};
+pub use crate::model::{metadata, policy_claims, public_schema, transaction};
 pub use crate::{app_id, identity};
+#[doc(hidden)]
+pub mod deployment;
 /// Target-shell factory boundary for native peer transports.
 pub mod native_transport_connector;
+pub mod schema_lens;
 pub mod sync;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_support;
@@ -23,8 +26,6 @@ mod client;
 
 #[cfg(feature = "runtime")]
 use std::path::PathBuf;
-#[cfg(feature = "runtime")]
-use std::sync::Arc;
 
 #[cfg(feature = "runtime")]
 use thiserror::Error;
@@ -65,8 +66,6 @@ pub struct AppContext {
     pub data_dir: PathBuf,
     /// Local storage backend.
     pub storage: ClientStorage,
-    /// Target-shell factory for persistent local storage.
-    pub storage_factory: Option<Arc<dyn crate::groove::storage::StorageFactory>>,
 
     // Authentication fields
     /// Registry-resolved account metadata for this low-level native client.
@@ -94,7 +93,6 @@ impl AppContext {
             server_url: String::new(),
             data_dir: std::env::temp_dir(),
             storage: crate::tools::ClientStorage::Memory,
-            storage_factory: None,
             account_id: None,
             jwt_token: None,
             backend_secret: None,
@@ -107,7 +105,7 @@ impl AppContext {
 #[cfg(feature = "runtime")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ClientStorage {
-    /// Persist client state to disk under `AppContext::data_dir`.
+    /// Persist client state to `jazz.sqlite` under `AppContext::data_dir`.
     #[default]
     Persistent,
     /// Keep all client state in memory for the lifetime of the process only.
@@ -135,6 +133,12 @@ pub enum JazzError {
 
     #[error("Storage error: {0}")]
     Storage(String),
+
+    /// The data directory holds a store from before the SQLite engine.
+    /// It is left untouched; delete it and resync from Core. Writes in it
+    /// that never reached Core are lost.
+    #[error("Unsupported storage format: {0}")]
+    UnsupportedStorage(String),
 
     #[error("Schema error: {0}")]
     Schema(String),

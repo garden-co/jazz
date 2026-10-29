@@ -30,7 +30,7 @@ const schema = {
   // (app/api/join) that checks the token with backend authority and adds a
   // membership; clients never write their own membership row. The token only
   // ever travels in a URL fragment, and a single-use invite is deleted in the
-  // same exclusive transaction that admits its first redeemer.
+  // same serializable transaction that admits its first redeemer.
   canvasInvites: s
     .table(
       {

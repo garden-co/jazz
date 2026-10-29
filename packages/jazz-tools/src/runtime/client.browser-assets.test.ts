@@ -108,7 +108,11 @@ describe("loadWasmModule runtimeSources bootstrap", () => {
     expect(globalThis.fetch).toHaveBeenCalledWith(
       "http://localhost:3000/custom/jazz/jazz_wasm_bg.wasm?jazz-runtime-version=deploy-42",
     );
-    expect(wasmDefaultInit).toHaveBeenCalledWith({ module_or_path: expect.any(Uint8Array) });
+    // An application/wasm response is compiled while streaming; wasm-bindgen
+    // then instantiates the compiled module.
+    expect(wasmDefaultInit).toHaveBeenCalledWith({
+      module_or_path: expect.any(WebAssembly.Module),
+    });
   });
 
   it("derives the wasm URL from runtimeSources.baseUrl when wasmUrl is omitted", async () => {
@@ -127,7 +131,11 @@ describe("loadWasmModule runtimeSources bootstrap", () => {
     expect(globalThis.fetch).toHaveBeenCalledWith(
       "http://localhost:3000/assets/jazz/jazz_wasm_bg.wasm?jazz-runtime-version=deploy-42",
     );
-    expect(wasmDefaultInit).toHaveBeenCalledWith({ module_or_path: expect.any(Uint8Array) });
+    // An application/wasm response is compiled while streaming; wasm-bindgen
+    // then instantiates the compiled module.
+    expect(wasmDefaultInit).toHaveBeenCalledWith({
+      module_or_path: expect.any(WebAssembly.Module),
+    });
   });
 
   it("rejects an HTML fallback before wasm-bindgen attempts instantiation", async () => {

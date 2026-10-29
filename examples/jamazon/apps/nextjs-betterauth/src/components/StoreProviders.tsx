@@ -91,8 +91,8 @@ export function useShopper(): Shopper {
 function ShopperProvider({ children }: { children: ReactNode }) {
   const db = useDb();
   const session = useSession();
-  const { sessionActions: actions, account: handle } = useJazzAuth();
-  const { data: auth, isPending } = authClient.useSession();
+  const { sessionActions: actions, account: handle, needsLogin } = useJazzAuth();
+  const { data: auth, isPending, error: authError } = authClient.useSession();
   const account = session?.user.account ?? handle?.id ?? "";
   const isSignedIn = handle?.identity.issuer === origin;
 
@@ -102,13 +102,42 @@ function ShopperProvider({ children }: { children: ReactNode }) {
   // Deliberately keyed on the auth state only: `db`, `account` and `actions`
   // change identity as a consequence of the switch this effect starts, and
   // re-running on them would start a second switch.
+  //
+  // A signed-in account reopened after a reload has no credential yet: Jazz
+  // reports `needsLogin` until it logs in again, and only then syncs.
+  //
+  // Failures are not rethrown: Jazz reports them in its lifecycle state, which
+  // shows the error fallback with a retry. The `restoring` guard also keeps
+  // StrictMode's second effect run from starting a second, "already pending"
+  // operation.
   useEffect(() => {
-    if (isPending || !auth?.user || isSignedIn || restoring.current || changingAccount) return;
-    restoring.current = true;
-    void switchToAccount(db, account, () => actions.loginOrRegisterJWT({ getToken })).finally(
-      () => (restoring.current = false),
-    );
-  }, [isPending, auth?.user?.id, isSignedIn]);
+    if (isPending || restoring.current || changingAccount) return;
+    const run = (operation: () => Promise<void>) => {
+      restoring.current = true;
+      void operation()
+        .catch(() => {})
+        .finally(() => (restoring.current = false));
+    };
+    if (!auth?.user) {
+      // Signed out of Better Auth (say, in another tab) while this browser
+      // reopened the shopper's account: start a fresh guest instead of
+      // writing to an account that cannot sync. Skip it when the session
+      // could not be read at all (offline), so the shopper keeps their cart.
+      if (needsLogin && !authError)
+        run(() =>
+          changeAccount(async () => {
+            await actions.logout();
+            await actions.createLocalFirst();
+          }),
+        );
+      return;
+    }
+    if (isSignedIn) {
+      if (needsLogin) run(() => actions.loginOrRegisterJWT({ getToken }));
+      return;
+    }
+    run(() => switchToAccount(db, account, () => actions.loginOrRegisterJWT({ getToken })));
+  }, [isPending, auth?.user?.id, !!authError, isSignedIn, needsLogin]);
 
   // After switching accounts, claim the lines the guest had in their cart.
   // `db` is left out of the deps: it changes with the account, which is.
