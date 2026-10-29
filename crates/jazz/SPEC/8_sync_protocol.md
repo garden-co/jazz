@@ -290,6 +290,16 @@ for one query's result:
   themselves; a non-durable replica refuses a windowed subscription over a
   frozen base ("not supported yet"), as a window over every branch's rows
   would cut the view's own.
+- A replica with a live read of a branch view over a base also reads the
+  view's whole head branch, deleted rows included and unfiltered, for every
+  branched table the read's query or policies read (one refcounted live read
+  per table and head). A base row can reach the replica through any other
+  read, and a head image the view's query would not match (a tombstone, a
+  version outside its filter) still masks it, so the replica must hold every
+  head image to answer the view locally. A head branch is a draft's own
+  writes, so this is usually small; a long-lived head makes it grow with the
+  head's history. A non-durable replica over a frozen base skips it, its
+  relay holding every current row.
 - A listing judges only the rows the view holds. A cached row it leaves out
   that the head supplies is evicted; one the live base supplies may be
   another read's, so the replica asks for the head's and the base's row

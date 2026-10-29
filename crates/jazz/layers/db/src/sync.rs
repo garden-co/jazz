@@ -1426,8 +1426,9 @@ fn remote_key(
 /// `query` in `source`: the query, its deletion flag and its view. A
 /// branch view's head and live base are maintained upstream as they are.
 /// A frozen base is this replica's own capture, so a durable replica asks
-/// for the head alone, deleted rows included and without a window: a head
-/// tombstone or version masks a base row however the query ranks it. A
+/// for the head alone, deleted rows included and without a window, so the
+/// head rows the query matches arrive whatever the window (the head's other
+/// rows arrive through `head_branch_reads`). A
 /// non-durable replica (a tab, whose memory store its worker fills) and a
 /// snapshot read take the current rows and apply the cut themselves.
 pub(crate) fn upstream_read<'q>(
@@ -5393,57 +5394,26 @@ impl Db {
         Rc<StdCell<bool>>,
     )> {
         let mut inner = self.inner.borrow_mut();
+        inner.client.as_ref()?;
+        // A branch view's result is read here over every base row this
+        // replica holds, whichever read brought it: each needs the head's
+        // own row of it, a tombstone or a version the query leaves out, to
+        // be masked. So the replica also holds its head branch's rows of
+        // every branched table the read reads, deleted ones included.
+        let companions = inner.head_branch_reads(&prepared.query, view);
         let (query, include_deleted, view) =
             upstream_read(&prepared.query, include_deleted, view, inner.non_durable);
-        let client = inner.client.as_mut()?;
-        let key = remote_key(&query, &prepared.binding, include_deleted, &view, reach);
-        if let Some(remote) = client.remote.get_mut(&key) {
-            remote.refs += 1;
-            return Some((
-                remote.answered.clone(),
-                remote.refused.clone(),
-                remote.global.clone(),
-            ));
+        for (query, view) in companions {
+            inner.attach_upstream_read(query, &BTreeMap::new(), true, view, reach);
         }
-        let id = client.next_id;
-        client.next_id += 1;
-        let answered = Rc::new(StdCell::new(false));
-        let refused = Rc::new(RefCell::new(None));
-        let global = Rc::new(StdCell::new(false));
-        let author = inner.identity.author;
-        let watermark = watermark_key(&query, &prepared.binding, include_deleted, &view, author);
-        // A replica that cannot read its watermark opens the query fresh.
-        let through = inner.watermark(&watermark).ok().flatten();
-        let client = inner.client.as_mut()?;
-        client.outbox.push(SyncMessage::Read {
-            id,
-            query: Box::new(query.clone().into_owned()),
-            binding: prepared.binding.clone(),
+        let (_, flags) = inner.attach_upstream_read(
+            query.into_owned(),
+            &prepared.binding,
             include_deleted,
-            tier: reach.tier,
-            wait: reach.wait,
-            view: Box::new(view.clone()),
-            span: ReadSpan::Live { since: through },
-        });
-        client.remote.insert(
-            key.clone(),
-            Remote {
-                id,
-                refs: 1,
-                query: query.into_owned(),
-                binding: prepared.binding.clone(),
-                include_deleted,
-                view,
-                reach,
-                answered: answered.clone(),
-                refused: refused.clone(),
-                global: global.clone(),
-                through,
-                watermark,
-            },
+            view,
+            reach,
         );
-        client.remote_ids.insert(id, key);
-        Some((answered, refused, global))
+        Some(flags)
     }
 
     pub(crate) fn detach_remote(
@@ -5465,6 +5435,142 @@ impl Db {
 }
 
 impl Inner {
+    /// The head-branch reads a branch view over a base needs beside it
+    /// (see `Db::attach_remote`): every row on the head's branch key of
+    /// each branched table the read reads.
+    fn head_branch_reads(
+        &self,
+        query: &Query,
+        view: &ReadViewSourceSpec,
+    ) -> Vec<(Query, ReadViewSourceSpec)> {
+        let ReadViewSourceSpec::BranchView {
+            head,
+            base: Some(_),
+        } = view
+        else {
+            return Vec::new();
+        };
+        // A non-durable replica over a frozen base takes every current row.
+        if self.non_durable && frozen_at(view).is_some() {
+            return Vec::new();
+        }
+        // Named as this store's schema names them, as release finds them.
+        let prepared = PreparedQuery {
+            query: query.clone(),
+            binding: BTreeMap::new(),
+            shape: Shape([0; 16]),
+            binding_id: Binding([0; 16]),
+            request_claims: None,
+            schema: None,
+        };
+        let Ok(tables) = self.read_dependencies(&prepared, None) else {
+            return Vec::new();
+        };
+        let schema = &self.owner;
+        tables
+            .iter()
+            .filter_map(|stored| schema.by_stored(stored))
+            .filter(|table| !table.branch_by.is_empty())
+            .map(|table| {
+                (
+                    Query::from(table.name.as_str()),
+                    ReadViewSourceSpec::BranchView {
+                        head: head.clone(),
+                        base: None,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Attach one upstream live read (refcounted by its key): its key, and
+    /// whether the server answered it, why it refused it, and whether the
+    /// answer was the global authority's.
+    fn attach_upstream_read(
+        &mut self,
+        query: Query,
+        binding: &BTreeMap<String, Value>,
+        include_deleted: bool,
+        view: ReadViewSourceSpec,
+        reach: RemoteReach,
+    ) -> (
+        String,
+        (
+            Rc<StdCell<bool>>,
+            Rc<RefCell<Option<Error>>>,
+            Rc<StdCell<bool>>,
+        ),
+    ) {
+        let key = remote_key(&query, binding, include_deleted, &view, reach);
+        let client = self.client.as_mut().expect("client");
+        if let Some(remote) = client.remote.get_mut(&key) {
+            remote.refs += 1;
+            let flags = (
+                remote.answered.clone(),
+                remote.refused.clone(),
+                remote.global.clone(),
+            );
+            return (key, flags);
+        }
+        let id = client.next_id;
+        client.next_id += 1;
+        let answered = Rc::new(StdCell::new(false));
+        let refused = Rc::new(RefCell::new(None));
+        let global = Rc::new(StdCell::new(false));
+        let author = self.identity.author;
+        let watermark = watermark_key(&query, binding, include_deleted, &view, author);
+        // A replica that cannot read its watermark opens the query fresh.
+        let through = self.watermark(&watermark).ok().flatten();
+        let client = self.client.as_mut().expect("client");
+        client.outbox.push(SyncMessage::Read {
+            id,
+            query: Box::new(query.clone()),
+            binding: binding.clone(),
+            include_deleted,
+            tier: reach.tier,
+            wait: reach.wait,
+            view: Box::new(view.clone()),
+            span: ReadSpan::Live { since: through },
+        });
+        client.remote.insert(
+            key.clone(),
+            Remote {
+                id,
+                refs: 1,
+                query,
+                binding: binding.clone(),
+                include_deleted,
+                view,
+                reach,
+                answered: answered.clone(),
+                refused: refused.clone(),
+                global: global.clone(),
+                through,
+                watermark,
+            },
+        );
+        client.remote_ids.insert(id, key.clone());
+        (key, (answered, refused, global))
+    }
+
+    /// Drop one reference to an upstream read by its key; the last one
+    /// unsubscribes.
+    fn release_upstream_read(&mut self, key: &str) {
+        let Some(client) = self.client.as_mut() else {
+            return;
+        };
+        let Some(remote) = client.remote.get_mut(key) else {
+            return;
+        };
+        remote.refs -= 1;
+        if remote.refs == 0 {
+            let id = remote.id;
+            client.remote.remove(key);
+            client.remote_ids.remove(&id);
+            client.outbox.push(SyncMessage::Unsubscribe { id });
+        }
+    }
+
     /// Drop one reference to an upstream subscription; the last one
     /// unsubscribes.
     pub(crate) fn release_remote(
@@ -5475,22 +5581,14 @@ impl Inner {
         view: &ReadViewSourceSpec,
         reach: RemoteReach,
     ) {
+        for (query, view) in self.head_branch_reads(query, view) {
+            let key = remote_key(&query, &BTreeMap::new(), true, &view, reach);
+            self.release_upstream_read(&key);
+        }
         let (query, include_deleted, view) =
             upstream_read(query, include_deleted, view, self.non_durable);
-        let Some(client) = self.client.as_mut() else {
-            return;
-        };
         let key = remote_key(&query, binding, include_deleted, &view, reach);
-        let Some(remote) = client.remote.get_mut(&key) else {
-            return;
-        };
-        remote.refs -= 1;
-        if remote.refs == 0 {
-            let id = remote.id;
-            client.remote.remove(&key);
-            client.remote_ids.remove(&id);
-            client.outbox.push(SyncMessage::Unsubscribe { id });
-        }
+        self.release_upstream_read(&key);
     }
 }
 

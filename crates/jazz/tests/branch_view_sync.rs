@@ -469,3 +469,169 @@ fn a_tab_refuses_a_windowed_view_over_a_frozen_base() {
         error.message
     );
 }
+
+fn set_rank(db: &Db, row: u8, head: &BranchSelector, base: &BranchSelector, rank: i32) {
+    block_on(db.update(
+        "todos",
+        RowUuid::from_bytes([row; 16]),
+        BTreeMap::from([("rank".to_owned(), Value::I32(rank))]),
+        jazz::db::UpdateOptions {
+            target: jazz::db::WriteTarget::BranchView {
+                head: head.clone(),
+                base: Some(BranchViewBase::Current(base.clone())),
+            },
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+}
+
+fn rank_one() -> Query {
+    Query::from("todos")
+        .filter(jazz::query::eq(
+            jazz::query::col("rank"),
+            jazz::query::lit(Value::I32(1)),
+        ))
+        .order_by("title", OrderDirection::Asc)
+}
+
+/// A replica that synced main's x and y (both rank 1, written elsewhere)
+/// through a read it has since closed, and a view of `draft` over main
+/// frozen at that point.
+fn frozen_base(main: u8, draft: u8) -> (Db, Db, BranchSelector, BranchSelector, ReadOpts) {
+    let (server, client, _) = connected();
+    let (main, draft) = (branch(main), branch(draft));
+    put(&server, &main, 0x45, "x", 1);
+    put(&server, &main, 0x46, "y", 1);
+    let all = client.prepare_query(&Query::from("todos")).unwrap();
+    let main_all =
+        block_on(client.subscribe(&all, ReadOpts::default().branch_view(main.clone(), None)))
+            .unwrap();
+    pump(&server, &client);
+    drop(main_all);
+    pump(&server, &client);
+    let frozen = block_on(client.capture_snapshot()).unwrap();
+    let view = ReadOpts::default().branch_view(
+        draft.clone(),
+        Some(BranchViewBase::Snapshot {
+            branch: main.clone(),
+            snapshot: frozen,
+        }),
+    );
+    (server, client, main, draft, view)
+}
+
+#[test]
+fn a_frozen_base_view_drops_a_row_another_writer_moves_out_of_its_filter() {
+    let (server, client, main, draft, view) = frozen_base(0xc1, 0xc2);
+    let prepared = client.prepare_query(&rank_one()).unwrap();
+    let _s = block_on(client.subscribe(&prepared, view.clone())).unwrap();
+    pump(&server, &client);
+    assert_eq!(titles(&client, &rank_one(), view.clone()), ["x", "y"]);
+
+    // The head's x no longer matches, but it still masks the frozen x.
+    set_rank(&server, 0x45, &draft, &main, 9);
+    pump(&server, &client);
+    assert_eq!(titles(&client, &rank_one(), view), ["y"]);
+}
+
+#[test]
+fn a_frozen_base_view_opens_without_a_row_its_head_moved_out_of_the_filter() {
+    let (server, client, main, draft, view) = frozen_base(0xc5, 0xc6);
+    set_rank(&server, 0x45, &draft, &main, 9);
+    pump(&server, &client);
+    let prepared = client.prepare_query(&rank_one()).unwrap();
+    let _s = block_on(client.subscribe(&prepared, view.clone())).unwrap();
+    pump(&server, &client);
+    assert_eq!(titles(&client, &rank_one(), view), ["y"]);
+}
+
+#[test]
+fn a_filtered_frozen_base_view_follows_a_head_tombstone() {
+    let (server, client, main, draft, view) = frozen_base(0xc3, 0xc4);
+    let prepared = client.prepare_query(&rank_one()).unwrap();
+    let _s = block_on(client.subscribe(&prepared, view.clone())).unwrap();
+    pump(&server, &client);
+    del(&server, 0x45, &draft, Some(&main));
+    pump(&server, &client);
+    assert_eq!(titles(&client, &rank_one(), view), ["y"]);
+}
+
+#[test]
+fn a_live_base_view_masks_a_held_base_row_with_a_head_version_outside_its_filter() {
+    let (server, client, _) = connected();
+    let (main, draft) = (branch(0xc7), branch(0xc8));
+    put(&server, &main, 0x45, "x", 1);
+    put(&server, &main, 0x46, "y", 1);
+    set_rank(&server, 0x45, &draft, &main, 9);
+    // Another read brings main's x (rank 1) to the replica.
+    let all = Query::from("todos").order_by("title", OrderDirection::Asc);
+    let main_all = client.prepare_query(&all).unwrap();
+    let _m = block_on(client.subscribe(
+        &main_all,
+        ReadOpts::default().branch_view(main.clone(), None),
+    ))
+    .unwrap();
+    pump(&server, &client);
+
+    let view = ReadOpts::default().branch_view(draft, Some(BranchViewBase::Current(main)));
+    let prepared = client.prepare_query(&rank_one()).unwrap();
+    let _s = block_on(client.subscribe(&prepared, view.clone())).unwrap();
+    pump(&server, &client);
+    assert_eq!(titles(&client, &rank_one(), view), ["y"]);
+}
+
+#[test]
+fn a_head_tombstone_masks_a_base_row_that_arrives_after_the_view_opened() {
+    let (server, client, _) = connected();
+    let (main, draft) = (branch(0xf9), branch(0xfa));
+    put(&server, &main, 0x70, "x", 1);
+    put(&server, &main, 0x71, "y", 2);
+    put(&server, &main, 0x72, "z", 3);
+    del(&server, 0x70, &draft, Some(&main));
+    let query = Query::from("todos").order_by("rank", OrderDirection::Asc);
+    let draft_view =
+        ReadOpts::default().branch_view(draft, Some(BranchViewBase::Current(main.clone())));
+    let prepared = client.prepare_query(&query).unwrap();
+    let windowed = client.prepare_query(&query.clone().limit(2)).unwrap();
+    let _d = block_on(client.subscribe(&prepared, draft_view.clone())).unwrap();
+    let _w = block_on(client.subscribe(&windowed, draft_view.clone())).unwrap();
+    pump(&server, &client);
+
+    // A main subscription opened later brings main's x.
+    let _m = block_on(client.subscribe(
+        &prepared,
+        ReadOpts::default().branch_view(main.clone(), None),
+    ))
+    .unwrap();
+    pump(&server, &client);
+    assert_eq!(titles(&client, &query, draft_view.clone()), ["y", "z"]);
+    assert_eq!(titles(&client, &query.limit(2), draft_view), ["y", "z"]);
+
+    // So does a one-shot remote read of main.
+    let (server, client, _) = connected();
+    let (main, draft) = (branch(0xfb), branch(0xfc));
+    put(&server, &main, 0x70, "x", 1);
+    put(&server, &main, 0x71, "y", 2);
+    del(&server, 0x70, &draft, Some(&main));
+    let query = Query::from("todos").order_by("rank", OrderDirection::Asc);
+    let draft_view =
+        ReadOpts::default().branch_view(draft, Some(BranchViewBase::Current(main.clone())));
+    let prepared = client.prepare_query(&query).unwrap();
+    let _d = block_on(client.subscribe(&prepared, draft_view.clone())).unwrap();
+    pump(&server, &client);
+    let mut opts = ReadOpts::default().branch_view(main, None);
+    opts.tier = ReadTier::Remote;
+    let mut read = pin!(client.all(&prepared, opts));
+    let mut cx = Context::from_waker(Waker::noop());
+    loop {
+        if let Poll::Ready(result) = read.as_mut().poll(&mut cx) {
+            result.unwrap();
+            break;
+        }
+        block_on(client.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+    }
+    pump(&server, &client);
+    assert_eq!(titles(&client, &query, draft_view), ["y"]);
+}

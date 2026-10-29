@@ -459,7 +459,10 @@ receives the view's own window rather than every branch key's matching rows.
 Other branch keys' rows can still arrive: a supporting row is followed by id
 under any branch key, a row leaving the result ships with all its branch
 keys' images, and so can a resumed read's prior diff. A resumed read diffs
-its view as of `since` (§8.11), the frozen base keeping its own cut.
+its view as of `since` (§8.11), the frozen base keeping its own cut. The
+replica also holds the view's whole head branch of every branched table it
+reads (ch. 8 §8.4), so a base row arriving through another read is masked
+by the head image the view's query would not ship.
 
 ### 11.6 Cross-branch-key merge helper
 
