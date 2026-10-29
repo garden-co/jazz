@@ -50,12 +50,39 @@ function escapeBlockMarkers(text: string): string {
 }
 
 /**
+ * Drop the Markdown this schema has no node for, which would otherwise take
+ * its text with it: indentation that opens a code block (4+ spaces or a tab
+ * at the start of a paragraph) and hard-break markers (two trailing spaces or
+ * a backslash before a line end). The text and the line break both stay.
+ */
+function dropUnsupportedMarkup(text: string): string {
+  const lines = text.split("\n");
+  return lines
+    .map((line, i) => {
+      if (i < lines.length - 1) {
+        // An odd run of backslashes ends in a hard break; an even one is escaped text.
+        line = line.replace(/ {2,}$/, "").replace(/\\+$/, (run) => run.slice(run.length % 2));
+      }
+      if (i === 0 || lines[i - 1]!.trim() === "") line = line.replace(/^(?: {4,}| *\t)[ \t]*/, "");
+      return line;
+    })
+    .join("\n");
+}
+
+/**
  * A block's stored Markdown as an editor document. Text written before blocks
  * had formatting is plain text, so a line such as `1. Intro` stays text
  * rather than becoming a list the editor cannot show.
  */
 export function markdownToDoc(text: string): JSONContent {
-  return markdown.parse(escapeBlockMarkers(text));
+  return markdown.parse(escapeBlockMarkers(dropUnsupportedMarkup(text)));
+}
+
+/** A block's text without its formatting, for labels and search. */
+export function markdownToPlainText(text: string): string {
+  const collect = (node: JSONContent): string =>
+    node.text ?? (node.content ?? []).map(collect).join(node.type === "doc" ? "\n\n" : "");
+  return collect(markdownToDoc(text));
 }
 
 /** The editor document as the Markdown stored in `blocks.text`. */

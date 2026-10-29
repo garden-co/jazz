@@ -51,6 +51,15 @@ async function shoot(page, name) {
 
 const sidebarItem = (page, name) => page.getByRole("button", { name, exact: true }).first();
 
+// The title box stays mounted when the page changes and takes the new title a
+// moment later, so wait for the value instead of reading it once.
+const waitForTitle = (page, title) =>
+  page.waitForFunction(
+    (title) => document.querySelector('textarea[aria-label="Page title"]')?.value === title,
+    title,
+    { timeout },
+  );
+
 try {
   const ownerContext = await browser.newContext({ viewport: { width: 1280, height: 800 } });
   const owner = await signUp(ownerContext, "Ada");
@@ -63,10 +72,7 @@ try {
   // Blocks are editable in place and new ones append at the end.
   await sidebarItem(owner, "Songs").click();
   await sidebarItem(owner, "Harbour lights").click();
-  // The title box stays mounted across pages, so wait for its value.
-  await owner.waitForFunction(
-    () => document.querySelector('textarea[aria-label="Page title"]')?.value === "Harbour lights",
-  );
+  await waitForTitle(owner, "Harbour lights");
   await owner.getByRole("button", { name: "Add block" }).click();
   await owner.getByRole("menuitem", { name: "Text" }).click();
   await owner.keyboard.type("Bridge: stay on the IV chord");
@@ -77,7 +83,11 @@ try {
   await owner.getByRole("table").waitFor();
   assert.ok(await owner.getByText("Confirm backline with Porto venue").isVisible());
   await shoot(owner, "issues-table");
-  await owner.getByText("Board", { exact: true }).first().click();
+  // Issue views use the TabList navigation pattern: buttons, not tabs.
+  await owner
+    .getByRole("toolbar", { name: "Issue views" })
+    .getByRole("button", { name: "Board", exact: true })
+    .click();
   await owner.getByRole("region", { name: "In progress" }).waitFor();
   await shoot(owner, "issues-board");
 
@@ -97,19 +107,16 @@ try {
   const guest = await signUp(guestContext, "Bo");
   await guest.goto(inviteUrl);
   await guest.waitForURL(/p=/);
-  await guest.getByRole("textbox", { name: "Page title" }).waitFor();
-  assert.equal(
-    await guest.getByRole("textbox", { name: "Page title" }).inputValue(),
-    "Harbour lights",
-  );
+  await waitForTitle(guest, "Harbour lights");
   await guest.getByText("Bridge: stay on the IV chord").first().waitFor();
-  await sidebarItem(guest, "Harbour lights").waitFor();
-  await guest.getByText("Shared with you").waitFor();
-  assert.equal(
-    await sidebarItem(guest, "Tour notes").count(),
-    0,
-    "guest does not see the rest of the band",
-  );
+  // The side nav's landmark keeps the design system's default name; a guest's
+  // page list is its "Shared with you" section.
+  const guestNav = await guest
+    .getByRole("navigation")
+    .filter({ hasText: "Shared with you" })
+    .innerText();
+  assert.ok(guestNav.includes("Harbour lights"), "guest sees the shared song");
+  assert.ok(!guestNav.includes("Tour notes"), "guest does not see the rest of the band");
   await shoot(guest, "guest");
 
   // Live collaboration: the owner's edit reaches the guest without a reload.

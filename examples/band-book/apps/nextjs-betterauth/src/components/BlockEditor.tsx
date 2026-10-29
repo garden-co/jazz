@@ -19,6 +19,7 @@ import {
 import { app, type Block, type BlockKind } from "@/schema";
 import { comparePositioned, positionBetween } from "@/src/lib/positions";
 import { AttachmentBlock } from "./AttachmentBlock";
+import { markdownToPlainText } from "@/src/lib/rich-text";
 import { RichText, type RichTextHandle, type RichTextKeyInfo } from "./RichText";
 import { UploadDialog } from "./UploadDialog";
 import { useWorkspace } from "./workspace-context";
@@ -63,7 +64,9 @@ export function BlockEditor({ pageId, editable }: { pageId: string; editable: bo
   const { workspace } = useWorkspace();
   const { data: blocks } = useAll(app.blocks.where({ pageId }).select("*", "$createdAt"));
   const [uploading, setUploading] = useState(false);
-  const [writeError, setWriteError] = useState<string | null>(null);
+  const [writeError, setWriteError] = useState<{ title: string; message: string } | null>(null);
+  const failed = (title: string) => (cause: unknown) =>
+    setWriteError({ title, message: cause instanceof Error ? cause.message : String(cause) });
   const inputs = useRef(new Map<string, RichTextHandle>());
   const [focusRequest, setFocusRequest] = useState<{ id: string; at: "start" | "end" } | null>(
     null,
@@ -149,9 +152,7 @@ export function BlockEditor({ pageId, editable }: { pageId: string; editable: bo
     db.transaction((tx) => {
       for (const row of doomed) tx.delete(app.blocks, row.id);
       if (block.attachmentId) tx.delete(app.attachments, block.attachmentId);
-    }).catch((cause: unknown) =>
-      setWriteError(cause instanceof Error ? cause.message : String(cause)),
-    );
+    }).catch(failed("Could not delete the block"));
   };
 
   const indent = (block: Row) => {
@@ -184,7 +185,7 @@ export function BlockEditor({ pageId, editable }: { pageId: string; editable: bo
       db.update(app.blocks, block.id, { text });
     } catch (cause) {
       // The block was deleted (here or by someone else) before the write.
-      setWriteError(cause instanceof Error ? cause.message : String(cause));
+      failed("Could not save the text")(cause);
     }
   };
 
@@ -336,8 +337,8 @@ export function BlockEditor({ pageId, editable }: { pageId: string; editable: bo
       {writeError && (
         <Banner
           status="error"
-          title="Could not delete the block"
-          description={writeError}
+          title={writeError.title}
+          description={writeError.message}
           collapsible={false}
         />
       )}
@@ -411,7 +412,7 @@ function BlockContent({
       return (
         <HStack gap={2} align="start">
           <CheckboxInput
-            label={block.text || "To-do"}
+            label={markdownToPlainText(block.text) || "To-do"}
             isLabelHidden
             value={block.checked}
             isReadOnly={!editable}

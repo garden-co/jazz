@@ -1,6 +1,7 @@
 ---
 title: "Rich text with a text merge column"
 description: Store rich text as Markdown in a text merge column and connect it to a TipTap editor, so concurrent and offline edits merge.
+reviewedAt: "e944f728c1"
 ---
 
 A rich text editor and a [text merge column](/docs/schemas/column-types#mergeable-text-columns) fit
@@ -60,7 +61,11 @@ and writes whatever is left when the editor loses focus or unmounts. Each write 
 on its own; fewer writes just mean less work and less history:
 
 ```tsx title="src/components/BlockEditor.tsx"
-<RichText value={block.text} onWrite={(text) => db.update(app.blocks, block.id, { text })} />
+<RichText
+  label="Block text"
+  value={block.text}
+  onWrite={(text) => db.update(app.blocks, block.id, { text })}
+/>
 ```
 
 ## Apply incoming values as a change

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { docToMarkdown, markdownToDoc, rebaseText } from "../../src/lib/rich-text";
+import {
+  docToMarkdown,
+  markdownToDoc,
+  markdownToPlainText,
+  rebaseText,
+} from "../../src/lib/rich-text";
 import { DEMO_PAGES, type SeedBlock, type SeedPage } from "../../src/lib/seed";
 
 const roundTrip = (text: string) => docToMarkdown(markdownToDoc(text));
@@ -58,6 +63,42 @@ describe("block Markdown", () => {
     expect(markdownToDoc(plain).content?.[0]?.content?.[0]?.text).toBe(plain);
     expect(roundTrip(plain)).toBe(saved);
     expect(roundTrip(saved)).toBe(saved);
+  });
+
+  // Markdown this schema has no node for (indented code, hard breaks) would
+  // otherwise vanish with its text; loading keeps the text and the line break.
+  it.each([
+    ["    indented", "indented"],
+    ["\ttabbed", "tabbed"],
+    ["first\n\n    after a blank line", "first\n\nafter a blank line"],
+    ["a line\n    continued", "a line\n    continued"],
+    ["hard  \nbreak", "hard\nbreak"],
+    ["hard\\\nbreak", "hard\nbreak"],
+    ["an escaped backslash\\\\\nstays", "an escaped backslash\\\\\nstays"],
+  ])("keeps the text of %j, saved as %j", (stored, saved) => {
+    expect(roundTrip(stored)).toBe(saved);
+    expect(roundTrip(saved)).toBe(saved);
+  });
+
+  // Some Markdown has more than one spelling. Loading keeps the text and the
+  // formatting, and the first save picks one spelling, stable from then on.
+  it.each([
+    ["_x_", "*x*"],
+    ["__x__", "**x**"],
+    ["see https://example.com now", "see [https://example.com](https://example.com) now"],
+    ["x &copy; y", "x &amp;copy; y"],
+    ["a\n\n\nb", "a\n\nb"],
+    ["\nleading and trailing line breaks\n", "leading and trailing line breaks"],
+  ])("settles %j as %j", (stored, saved) => {
+    expect(roundTrip(stored)).toBe(saved);
+    expect(roundTrip(saved)).toBe(saved);
+  });
+
+  it("gives the text without its formatting for labels", () => {
+    expect(markdownToPlainText("Bring **snare** and [kick](https://example.com)")).toBe(
+      "Bring snare and kick",
+    );
+    expect(markdownToPlainText("")).toBe("");
   });
 });
 
