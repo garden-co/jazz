@@ -128,7 +128,7 @@ fn fates(down: &Q) -> Vec<(u64, bool)> {
     down.borrow()
         .iter()
         .filter_map(|m| match m {
-            SyncMessage::Fate { tx, result, .. } => Some((*tx, result.is_ok())),
+            SyncMessage::Fate { tx, outcome, .. } => Some((*tx, outcome.result().is_ok())),
             _ => None,
         })
         .collect()
@@ -267,7 +267,6 @@ fn a_commit_as_another_identitys_node_is_refused_and_claims_nothing() {
         kind,
         ops: Vec::new(),
         acting: Acting::Own,
-        expect: Vec::new(),
         origin: None,
     });
     block_on(server.tick()).unwrap();
@@ -343,7 +342,6 @@ fn an_upsert_over_a_row_deleted_in_the_same_commit_is_checked_as_an_insert() {
             .into(),
         ],
         acting: Acting::Own,
-        expect: Vec::new(),
         origin: None,
     });
     block_on(server.tick()).unwrap();
@@ -375,7 +373,6 @@ fn the_authority_refuses_cells_that_are_not_of_their_columns_type() {
                 .into(),
             ],
             acting: Acting::Own,
-            expect: Vec::new(),
             origin: None,
         });
     }
@@ -415,7 +412,6 @@ fn a_reopened_authority_continues_after_the_seq_of_a_rowless_commit() {
         kind: WireKind::Mergeable,
         ops: Vec::new(),
         acting: Acting::Own,
-        expect: Vec::new(),
         origin: None,
     });
     block_on(server.tick()).unwrap();
@@ -512,7 +508,6 @@ fn the_authority_refuses_misplaced_bases() {
         kind: WireKind::Mergeable,
         ops,
         acting: Acting::Own,
-        expect: Vec::new(),
         origin: None,
     };
     // On the row's second op; twice on its first; then as SPEC 8.2 says.
@@ -531,8 +526,8 @@ fn the_authority_refuses_misplaced_bases() {
         .borrow()
         .iter()
         .filter_map(|m| match m {
-            SyncMessage::Fate { result, .. } => {
-                Some(result.as_ref().err().map(|e| format!("{e:?}")))
+            SyncMessage::Fate { outcome, .. } => {
+                Some(outcome.result().err().map(|e| format!("{e:?}")))
             }
             _ => None,
         })
@@ -602,7 +597,6 @@ fn a_session_link_may_not_attribute_and_its_session_writes_are_its_own() {
             .into(),
         ],
         acting,
-        expect: Vec::new(),
         origin: None,
     };
     let other = user(3).canonical().to_owned();
