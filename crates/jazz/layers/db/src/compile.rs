@@ -275,6 +275,12 @@ pub struct Ctx<'a> {
     pub overlaid_rows: usize,
     /// The stored tables a write check reads through its cut's overlay.
     pub overlay_tables: BTreeSet<String>,
+    /// A relation policy keyed only by the row id runs once for the whole
+    /// statement, as an `IN` list (`exists_rel`): set for reads not
+    /// narrowed to listed rows. A per-row `EXISTS` costs every row its own
+    /// subquery but seeks by the key, so a write check or a recheck of a few
+    /// rows keeps it rather than listing every row the policy grants.
+    lift_row_keys: bool,
     next_alias: usize,
 }
 
@@ -382,6 +388,7 @@ impl<'a> Ctx<'a> {
             history_origin: None,
             overlaid_rows: 0,
             overlay_tables: BTreeSet::new(),
+            lift_row_keys: false,
             next_alias: 0,
         }
     }
@@ -758,7 +765,12 @@ impl<'a> Ctx<'a> {
         })
     }
 
-    pub fn compile_query(self, query: &Query, include_deleted: bool) -> Result<Compiled, Error> {
+    pub fn compile_query(
+        mut self,
+        query: &Query,
+        include_deleted: bool,
+    ) -> Result<Compiled, Error> {
+        self.lift_row_keys = !narrowed_to_ids(query);
         let schema = self.schema;
         let mut compiled = self.compile_shape(query, include_deleted)?;
         if !query.partial.is_empty() {
@@ -2177,7 +2189,7 @@ impl<'a> Ctx<'a> {
         // uncorrelated IN list, where an EXISTS re-runs its body (a
         // recursive closure included) for every outer row.
         let key = std::cell::RefCell::new(None);
-        let keyed = outer_key_only(rel);
+        let keyed = self.lift_row_keys && outer_key_only(rel);
         let scope = RelScope {
             outer: Some((outer, outer_alias)),
             frontier: None,
@@ -2191,7 +2203,9 @@ impl<'a> Ctx<'a> {
             format!("WITH RECURSIVE {} ", rel.ctes.join(", "))
         };
         if let Some(key) = key.into_inner() {
-            // A NULL key matches no row id, and keeps `IN` two-valued.
+            // A NULL key matches no row id, and keeps `IN` two-valued. `IN`
+            // compares with the left side's collation, as `=` on the key
+            // did: row ids are blobs, which have none.
             rel.wheres.push(format!("{key} IS NOT NULL"));
             return Ok(format!(
                 "{outer_alias}.id IN ({with}SELECT {key} FROM {} WHERE {})",
@@ -2527,6 +2541,17 @@ impl Clone for RelScope<'_> {
             key: self.key,
         }
     }
+}
+
+/// Whether `query`'s root rows are picked by id (`id = x`, `id IN (..)`), as
+/// a recheck of changed rows picks them.
+fn narrowed_to_ids(query: &Query) -> bool {
+    let is_id = |operand: &Operand| matches!(operand, Operand::Column(column) if column == "id");
+    query.filters.iter().any(|filter| match filter {
+        Predicate::Eq(left, right) => is_id(left) || is_id(right),
+        Predicate::In(left, _) => is_id(left),
+        _ => false,
+    })
 }
 
 /// A value naming the outer row's id, which is never NULL.
@@ -3678,7 +3703,134 @@ fn json_value(json: &serde_json::Value) -> Result<Value, Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{plain_exists, semi_join};
+    use super::{outer_key_only, plain_exists, semi_join};
+    use crate::query::{
+        RecursionBound, RelationCmpOp, RelationColumnRef, RelationExpr, RelationJoinCondition,
+        RelationJoinKind, RelationKeyRef, RelationPredicate, RelationRowIdRef, RelationValueRef,
+    };
+
+    fn scan(table: &str) -> RelationExpr {
+        RelationExpr::TableScan {
+            table: table.to_owned(),
+            alias: None,
+        }
+    }
+
+    fn filter(input: RelationExpr, predicate: RelationPredicate) -> RelationExpr {
+        RelationExpr::Filter {
+            input: Box::new(input),
+            predicate,
+        }
+    }
+
+    fn eq(column: &str, right: RelationValueRef) -> RelationPredicate {
+        RelationPredicate::Cmp {
+            left: RelationColumnRef::unscoped(column),
+            op: RelationCmpOp::Eq,
+            right,
+        }
+    }
+
+    fn outer_id() -> RelationValueRef {
+        RelationValueRef::RowId(RelationRowIdRef::Outer)
+    }
+
+    fn literal() -> RelationValueRef {
+        RelationValueRef::Literal(serde_json::json!("viewer"))
+    }
+
+    fn gather(seed: RelationExpr) -> RelationExpr {
+        RelationExpr::Gather {
+            seed: Box::new(seed),
+            step: Box::new(filter(
+                scan("edges"),
+                eq("child", RelationValueRef::RowId(RelationRowIdRef::Frontier)),
+            )),
+            frontier_key: RelationKeyRef::RowId(RelationRowIdRef::Current),
+            bound: RecursionBound::MaxDepth(8),
+            dedupe_key: vec![RelationKeyRef::RowId(RelationRowIdRef::Current)],
+        }
+    }
+
+    fn joined(left: RelationExpr, right: RelationExpr) -> RelationExpr {
+        RelationExpr::Join {
+            left: Box::new(left),
+            right: Box::new(right),
+            on: vec![RelationJoinCondition {
+                left: RelationColumnRef::unscoped("id"),
+                right: RelationColumnRef::unscoped("team"),
+            }],
+            join_kind: RelationJoinKind::Inner,
+        }
+    }
+
+    /// White-box: the schema refuses most correlations the lift must not
+    /// take (under OR, in a gather seed), so only the precondition itself
+    /// shows that the compiler would keep them per-row EXISTS too.
+    #[test]
+    fn only_a_lone_conjoined_row_id_key_is_lifted() {
+        let keyed = filter(
+            scan("grants"),
+            RelationPredicate::And(vec![eq("resource", outer_id()), eq("role", literal())]),
+        );
+        assert!(outer_key_only(&keyed));
+        // Below a join with a gather of the session's teams.
+        assert!(outer_key_only(&filter(
+            joined(
+                gather(filter(scan("teams"), eq("member", literal()))),
+                scan("grants")
+            ),
+            eq("resource", outer_id()),
+        )));
+
+        let under_or = filter(
+            scan("grants"),
+            RelationPredicate::Or(vec![eq("resource", outer_id()), eq("role", literal())]),
+        );
+        let under_not = filter(
+            scan("grants"),
+            RelationPredicate::Not(Box::new(eq("resource", outer_id()))),
+        );
+        let second_outer_column = filter(
+            scan("grants"),
+            RelationPredicate::And(vec![
+                eq("resource", outer_id()),
+                eq(
+                    "role",
+                    RelationValueRef::OuterColumn(RelationColumnRef::unscoped("label")),
+                ),
+            ]),
+        );
+        let in_gather_seed = joined(
+            gather(filter(scan("teams"), eq("id", outer_id()))),
+            scan("grants"),
+        );
+        let not_equal = filter(
+            scan("grants"),
+            RelationPredicate::Cmp {
+                left: RelationColumnRef::unscoped("resource"),
+                op: RelationCmpOp::Ne,
+                right: outer_id(),
+            },
+        );
+        let other_outer_column = filter(
+            scan("grants"),
+            eq(
+                "resource",
+                RelationValueRef::OuterColumn(RelationColumnRef::unscoped("parent")),
+            ),
+        );
+        for (name, rel) in [
+            ("under OR", under_or),
+            ("under NOT", under_not),
+            ("with a second outer column", second_outer_column),
+            ("in a gather seed", in_gather_seed),
+            ("not equal", not_equal),
+            ("on another outer column", other_outer_column),
+        ] {
+            assert!(!outer_key_only(&rel), "{name}");
+        }
+    }
 
     #[test]
     fn nested_exists_conditions_join_into_one_level() {
