@@ -59,8 +59,8 @@ const CLIENT_FILE: &str = "sqlite-storage-v1/client.sqlite.gz.base64";
 /// change re-runs the producer and re-pins these; after that the corpus is
 /// immutable and a new storage format gets a new corpus beside it (see
 /// `fixtures/sqlite-storage-v1/README.md`).
-const SERVER_SHA256: &str = "1c8043a5539e33bf83bfc55471828b05c08c3faa0e8f26e337bf8855f60a6783";
-const CLIENT_SHA256: &str = "f8e09e8044c2f4b41ac1743611e96f4ba149bb3a27929d97440b9c4b5ebf34a7";
+const SERVER_SHA256: &str = "0bd49cd130a2a205eadac2356299665f49eb6569cd2caee8bfbe360b31dc69f3";
+const CLIENT_SHA256: &str = "fcbd981b7c8e257e0c383fbeb37542c49cb720b9fcde1dda326479ab25c13034";
 
 const SERVER_NODE: [u8; 16] = [0xa0; 16];
 const CLIENT_NODE: [u8; 16] = [0xc0; 16];
@@ -133,7 +133,7 @@ fn blob(n: u8) -> Vec<u8> {
 }
 
 /// `projects(name)`, `documents(project -> projects, title, body, blob,
-/// rank)` with an index on `title` and a text-merging `body`, and
+/// rank, status: enum)` with an index on `title` and a text-merging `body`, and
 /// `drafts(branch_id, title, owner)` branched by `branch_id`, readable when
 /// it has no owner or the reader owns it. `title_column` names
 /// `documents.title`.
@@ -166,6 +166,13 @@ fn schema(title_column: &str) -> JazzSchema {
                 .column("body", ColumnType::Text)
                 .column("blob", ColumnType::Bytea)
                 .column_with_default("rank", ColumnType::BigInt, jazz::tools::Value::BigInt(0))
+                .column_with_default(
+                    "status",
+                    ColumnType::Enum {
+                        variants: ["draft", "review", "published"].map(str::to_owned).to_vec(),
+                    },
+                    jazz::tools::Value::Text("draft".to_owned()),
+                )
                 .index_only([title_column])
                 .policies(allow_all_policies()),
         )
@@ -444,6 +451,7 @@ fn produce_sqlite_storage_corpus_v1() {
                 ("body", string("short")),
                 ("blob", Value::Bytes(blob(2))),
                 ("rank", Value::I64(5)),
+                ("status", string("published")),
             ],
         );
         update_as(
@@ -736,6 +744,7 @@ fn expected_documents(title: &str, offline_edit: bool) -> Rows {
                 ("body", string(&text(1, LARGE))),
                 ("blob", Value::Bytes(blob(1))),
                 ("rank", Value::I64(0)),
+                ("status", string("draft")),
             ],
         ),
         expect(
@@ -746,6 +755,7 @@ fn expected_documents(title: &str, offline_edit: bool) -> Rows {
                 ("body", string("Short, edited!")),
                 ("blob", Value::Bytes(blob(2))),
                 ("rank", Value::I64(5)),
+                ("status", string("published")),
             ],
         ),
         expect(
@@ -756,6 +766,7 @@ fn expected_documents(title: &str, offline_edit: bool) -> Rows {
                 ("body", string("v2")),
                 ("blob", Value::Bytes(blob(4))),
                 ("rank", Value::I64(0)),
+                ("status", string("draft")),
             ],
         ),
     ]
@@ -775,6 +786,30 @@ fn assert_server_corpus(server: &Db, with_client_writes: bool) {
     assert_eq!(
         rows(&old, Query::from("documents"), ReadOpts::default()).unwrap(),
         expected_documents("title", with_client_writes)
+    );
+    // The enum sorts in the order its variants were added and filters by
+    // name.
+    let by_status = rows(
+        server,
+        Query::from("documents")
+            .order_by("status", OrderDirection::Desc)
+            .select(["status"]),
+        ReadOpts::default(),
+    )
+    .unwrap();
+    let ids: Vec<RowUuid> = by_status.iter().map(|(id, _)| *id).collect();
+    assert_eq!(ids, [document(2), document(1), document(4)]);
+    let published = rows(
+        server,
+        Query::from("documents")
+            .filter(eq(col("status"), lit(string("published"))))
+            .select(["status"]),
+        ReadOpts::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        published,
+        vec![expect(document(2), &[("status", string("published"))])]
     );
     // History: both versions of project 1, oldest first.
     let history = rows(
@@ -945,6 +980,48 @@ fn pinned_sqlite_corpus_reopens_and_accepts_current_writes() {
         ]
         .map(string)
     );
+}
+
+/// The server stores `documents.status` as tags in the order the variants
+/// were declared, and the client mirrored the same tags.
+#[test]
+fn pinned_corpus_stores_enum_tags() {
+    let dir = scratch("enum-tags");
+    for (file, sha256) in [(SERVER_FILE, SERVER_SHA256), (CLIENT_FILE, CLIENT_SHA256)] {
+        let path = install(file, sha256, &dir);
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let tags: Vec<(i64, String)> = conn
+            .prepare("SELECT tag, name FROM _jazz_enum_tags ORDER BY tag")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            tags,
+            [
+                (0, "draft".into()),
+                (1, "review".into()),
+                (2, "published".into())
+            ],
+            "{file}"
+        );
+        let (table, column): (String, String) = conn
+            .query_row("SELECT tbl, col FROM _jazz_enum_tags LIMIT 1", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        let cells: Vec<String> = conn
+            .prepare(&format!(
+                "SELECT DISTINCT typeof(\"{column}\") FROM \"{table}\""
+            ))
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(cells, ["integer"], "{file}");
+    }
 }
 
 /// The server's recorded fates are format 1 too: the rejected commit's fate
