@@ -87,11 +87,23 @@ pub(super) struct Group {
     awaiting: bool,
     /// Whether the opening was published.
     opened: bool,
+    /// Under a branch view, per branched stored table, the branch keys it
+    /// reads (its head, and its live base): a change on any other key of
+    /// that table cannot move the result.
+    branches: HashMap<String, Vec<Vec<u8>>>,
+    /// Under a branch view over a base (live or frozen), what the head
+    /// rows of each branched table it reads mask (see [`ViewMask`]).
+    masks: Vec<ViewMask>,
 }
 
 type SortKey = Vec<(Sql, bool)>;
 
 impl Group {
+    /// Under a branch view over a base: what its head rows mask.
+    pub(super) fn masks(&self) -> &[ViewMask] {
+        &self.masks
+    }
+
     /// Whether the last run waits on large-value chunks still to arrive.
     pub(super) fn awaiting(&self) -> bool {
         self.awaiting
@@ -343,6 +355,19 @@ impl Inner {
             )?
             .to_owned();
         let recheck = recheckable(&prepared.query, &root, &read, &compiled);
+        let branches = view_branches(
+            prepared.schema.as_ref().unwrap_or(&self.owner),
+            &read,
+            &watches,
+        );
+        let masks = view_masks(
+            prepared.schema.as_ref().unwrap_or(&self.owner),
+            prepared,
+            &read,
+            watches
+                .iter()
+                .map(|(Watch::Table(table) | Watch::Key(table, ..))| table),
+        );
         let projected = order_projected(&prepared.query, &compiled);
         let includes = self.output_only_includes(prepared, identity, &read, &compiled)?;
         let queue: Queue = Rc::new(RefCell::new(if awaiting {
@@ -369,6 +394,8 @@ impl Inner {
             includes,
             awaiting,
             opened: !awaiting,
+            branches,
+            masks,
         }));
         self.read_keys(&mut handle.borrow_mut());
         let weak = Rc::downgrade(&handle);
@@ -421,10 +448,19 @@ impl Inner {
         prepared: &PreparedQuery,
         identity: Option<AuthorSubject>,
     ) -> Result<BTreeSet<String>, Error> {
-        let read = ReadSpec::default();
-        let (compiled, _) = self.compile_tracked(prepared, identity, &read)?;
+        self.read_dependencies_in(prepared, identity, &ReadSpec::default())
+    }
+
+    /// [`Self::read_dependencies`] of a read in `read`'s view.
+    pub(super) fn read_dependencies_in(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &ReadSpec,
+    ) -> Result<BTreeSet<String>, Error> {
+        let (compiled, _) = self.compile_tracked(prepared, identity, read)?;
         let mut tables = compiled.tables.clone();
-        for watch in self.watches(prepared, identity, &read, &compiled)? {
+        for watch in self.watches(prepared, identity, read, &compiled)? {
             match watch {
                 Watch::Table(table) | Watch::Key(table, ..) => {
                     tables.insert(table);
@@ -606,12 +642,19 @@ impl Inner {
         // Per woken group: include targets that changed, as (root column, id).
         let mut targets: BTreeMap<u64, BTreeSet<(String, RowUuid)>> = BTreeMap::new();
         let groups = &self.fan.groups;
-        let mut wake = |gids: &BTreeSet<u64>, table: &str, row: RowUuid| {
+        let mut wake = |gids: &BTreeSet<u64>, table: &str, row: RowUuid, key: &[u8]| {
             for gid in gids {
                 let Some(group) = groups.get(gid) else {
                     continue;
                 };
                 let group = group.borrow();
+                if group
+                    .branches
+                    .get(table)
+                    .is_some_and(|keys| !keys.iter().any(|k| k == key))
+                {
+                    continue;
+                }
                 let root = group.root == table;
                 let entry = woken.entry(*gid).or_insert_with(|| Some(BTreeSet::new()));
                 let columns: Vec<&String> = group
@@ -635,7 +678,7 @@ impl Inner {
         };
         for (table, row, key) in &changes {
             if let Some(groups) = self.fan.tables.get(table) {
-                wake(groups, table, *row);
+                wake(groups, table, *row, key);
             }
             let Some(columns) = self.fan.key_columns.get(table) else {
                 continue;
@@ -643,7 +686,7 @@ impl Inner {
             for image in self.images(table, *row, key, columns) {
                 for (column, value) in image {
                     if let Some(groups) = self.fan.keys.get(&(table.clone(), column, value)) {
-                        wake(groups, table, *row);
+                        wake(groups, table, *row, key);
                     }
                 }
             }
@@ -651,7 +694,7 @@ impl Inner {
         for image in std::mem::take(&mut *self.gone.borrow_mut()) {
             let row = RowUuid::from_bytes(image.id);
             if let Some(groups) = self.fan.tables.get(&image.table) {
-                wake(groups, &image.table, row);
+                wake(groups, &image.table, row, &image.key);
             }
             let Some(columns) = self.fan.key_columns.get(&image.table) else {
                 continue;
@@ -664,7 +707,7 @@ impl Inner {
                         canon(&Sql::from(cell)),
                     ))
                 {
-                    wake(groups, &image.table, row);
+                    wake(groups, &image.table, row, &image.key);
                 }
             }
         }
@@ -1390,6 +1433,119 @@ fn recheckable(query: &Query, root: &str, read: &ReadSpec, compiled: &Compiled) 
         && !read.settled_only
         && !compiled.aggregate
         && compiled.sql.matches(&quote(root)).count() == 1
+}
+
+/// The branch keys a branch-view group reads, per branched table it
+/// watches: its head's, and its base's unless the base is frozen (a cut
+/// state no later change reaches). Tables a selector cannot key are left
+/// out, so every change to them wakes the group.
+fn view_branches(
+    schema: &Schema,
+    read: &ReadSpec,
+    watches: &[Watch],
+) -> HashMap<String, Vec<Vec<u8>>> {
+    let mut out = HashMap::new();
+    let Some(view) = &read.view else {
+        return out;
+    };
+    for watch in watches {
+        let (Watch::Table(table) | Watch::Key(table, ..)) = watch;
+        let Some(t) = schema.by_stored(table).filter(|t| !t.branch_by.is_empty()) else {
+            continue;
+        };
+        let mut keys = vec![];
+        let live_base = view.base.as_ref().filter(|_| view.base_cut.is_none());
+        for selector in std::iter::once(&view.head).chain(live_base) {
+            match t.selector_key(selector) {
+                Ok(key) => keys.push(key),
+                Err(_) => {
+                    keys.clear();
+                    break;
+                }
+            }
+        }
+        if !keys.is_empty() {
+            out.insert(table.clone(), keys);
+        }
+    }
+    out
+}
+
+/// What a branch view over a base masks on a replica that reads it over
+/// the base rows it holds: a base row of a branched table it reads shows
+/// there unless the replica holds the head's row of it too (a tombstone, or
+/// a version the query leaves out), which the view's own result need not
+/// ship (ch. 8 §8.4). Only base rows the reader may see through the view
+/// need one: of the root table, those the query matches; of a table it
+/// reads besides (relations, joins, policies), those the reader may read.
+#[derive(Clone)]
+pub(crate) struct ViewMask {
+    pub table: String,
+    pub head: Vec<u8>,
+    pub base: Vec<u8>,
+    /// The root table's: the query without its window, read on the base
+    /// alone (as of a frozen base's cut).
+    pub base_query: Option<PreparedQuery>,
+    pub base_read: ReadSpec,
+}
+
+/// The [`ViewMask`]s of a read of `prepared` in `read` over the stored
+/// `tables` it reads, if it is a branch view over a base.
+pub(crate) fn view_masks<'t>(
+    schema: &Schema,
+    prepared: &PreparedQuery,
+    read: &ReadSpec,
+    tables: impl IntoIterator<Item = &'t String>,
+) -> Vec<ViewMask> {
+    let Some(view) = read.view.as_ref() else {
+        return Vec::new();
+    };
+    let Some(base) = view.base.as_ref() else {
+        return Vec::new();
+    };
+    let query = &prepared.query;
+    let root: Option<String> = history_source_table(&query.table)
+        .is_none()
+        .then(|| schema.stored_table(&query.table).ok().map(str::to_owned))
+        .flatten();
+    let base_read = ReadSpec {
+        include_deleted: read.include_deleted,
+        settled_only: read.settled_only,
+        view: Some(View {
+            head: base.clone(),
+            base: None,
+            base_cut: None,
+        }),
+        cut: view.base_cut.clone(),
+        splices: Vec::new(),
+    };
+    let mut out: Vec<ViewMask> = Vec::new();
+    let tables: Vec<String> = tables.into_iter().cloned().chain(root.clone()).collect();
+    for table in tables.iter().map(String::as_str) {
+        if out.iter().any(|mask| mask.table == table) {
+            continue;
+        }
+        let Some(branched) = schema.by_stored(table).filter(|t| !t.branch_by.is_empty()) else {
+            continue;
+        };
+        let (Ok(head), Ok(base)) = (
+            branched.selector_key(&view.head),
+            branched.selector_key(base),
+        ) else {
+            continue;
+        };
+        if head == base {
+            continue;
+        }
+        out.push(ViewMask {
+            table: table.to_owned(),
+            head,
+            base,
+            base_query: (root.as_deref() == Some(table)).then(|| prepared.unwindowed()),
+            base_read: base_read.clone(),
+        });
+    }
+    out
 }
 
 /// Whether every order column of a query is among its shown columns.

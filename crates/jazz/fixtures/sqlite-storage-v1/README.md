@@ -11,9 +11,9 @@ are stored, a rejection's reason name changed how fates are recorded, and
 pending uploads moved from one encoded message to a row per op).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `94e06f90678579806523f100a690f81359aa8f18cd3d72c858951d91f335b86f`.
+  the SQLite file `1c8043a5539e33bf83bfc55471828b05c08c3faa0e8f26e337bf8855f60a6783`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `a96432b9fbdb9caa268110cedab776b396804c28cba8ca1154bdc5d179eaef2e`.
+  `f8e09e8044c2f4b41ac1743611e96f4ba149bb3a27929d97440b9c4b5ebf34a7`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
@@ -33,6 +33,9 @@ nodes and write times:
   that read one project and inserted two, none of which reached the
   server: its pending uploads, the last one stored as two op rows and a
   read row;
+- a row of `drafts` on a base branch that the draft branch overrides with a
+  version the client may not read: the client's view of the draft over that
+  base hides the row, so the client keeps a marker of it in `_jazz_withheld`;
 - then the server activated a second schema version that renames
   `documents.title` to `heading` (a stored-names lens) and wrote under it.
 
@@ -77,3 +80,12 @@ Deleting a settled commit's pending rows in one statement (the
 `_jazz_pending_versions` now created on open) regenerated it the same way,
 adding the serializable pending commit above so the per-op layout is
 pinned with more than one op and a read.
+
+Hiding branch-view rows whose head version the reader may not read added the
+client's `_jazz_withheld` table (created on the first hidden eviction) and
+gave `drafts` an `owner` column and a read policy, which regenerated it the
+same way, and re-pinned the browser corpus (whose producer hides a note the
+same way). A storage change re-pins this corpus and the browser corpus;
+`server-data-dir-v1` is re-pinned only when an authority's bytes change (an
+authority never writes `_jazz_withheld`, and that producer is not
+byte-deterministic).
