@@ -1243,7 +1243,7 @@ fn behind_two_relays_a_write_over_the_upper_relays_version_is_kept_conservativel
 
 #[test]
 fn an_app_column_cannot_take_a_stored_row_columns_name() {
-    for column in ["_base", "_cols", "_del", "_b"] {
+    for column in ["_base", "_cols", "_st", "_b"] {
         let source = SchemaBuilder::new()
             .table(TableSchemaBuilder::new("todos").column(column, ColumnType::Text))
             .build();

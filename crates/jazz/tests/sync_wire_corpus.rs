@@ -26,8 +26,8 @@ use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
 use jazz::db::{
-    CorpusReader, Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadTier, Reason, SyncMessage,
-    Transport, UpdateOptions, WireError as SyncWireError, block_on, encode_frames,
+    CorpusReader, Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadSpan, ReadTier, Reason,
+    SyncMessage, Transport, UpdateOptions, WireError as SyncWireError, block_on, encode_frames,
     validate_frame_batch_for_corpus,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
@@ -48,28 +48,25 @@ use common::{compile_schema, read_and_allow_all_writes, session_eq};
 const CORPUS: &str = "sqlite_sync_wire_v1.json";
 const FORMAT: &str = "jazz-sqlite-sync-wire-corpus-v1";
 
-/// Every `SyncMessage` variant, in declaration order, but `RowsPart`: a
-/// framing of a `Rows` too large for one frame, whose real frames are
-/// megabytes (binding_host's frame-split test covers it).
-const VARIANTS: [&str; 22] = [
-    "Subscribe",
+/// Every `SyncMessage` variant, in declaration order. A message too
+/// large for one frame travels in parts below the message layer
+/// (binding_host's frame-split test covers it).
+const VARIANTS: [&str; 19] = [
+    "Read",
     "Unsubscribe",
     "Hold",
-    "Fetch",
+    "Settled",
     "Commit",
     "ChunkRequests",
     "PushChunks",
     "Chunks",
     "Rows",
     "Evict",
-    "Settled",
-    "Answer",
     "Refused",
     "Fate",
     "Advise",
     "Advice",
     "Schema",
-    "Origins",
     "SchemaAdmission",
     "Stored",
     "Holds",
@@ -209,6 +206,33 @@ fn every_pinned_rejected_fate_decodes_with_its_reason_and_reencodes_exactly() {
     }
 }
 
+/// The shapes one frame per variant misses are pinned too: each still
+/// decodes to its shape and re-encodes to the same bytes.
+#[test]
+fn every_pinned_message_shape_decodes_and_reencodes_exactly() {
+    let corpus = corpus();
+    for name in SHAPES {
+        let entry = corpus
+            .frames
+            .iter()
+            .find(|frame| frame.name == name)
+            .unwrap_or_else(|| panic!("{name} is not pinned"));
+        let frames = jazz::wire::decode_websocket_frame_batch(&unhex(&entry.batch_hex)).unwrap();
+        let [bytes] = frames.as_slice() else {
+            panic!("{name}: one frame");
+        };
+        let decoded: SyncMessage = postcard::from_bytes(bytes).unwrap_or_else(|error| {
+            panic!("{name}: the pinned frame no longer decodes ({error}); the layout changed")
+        });
+        assert_eq!(shape(&decoded), Some(name));
+        assert_eq!(
+            &postcard::to_allocvec(&decoded).unwrap(),
+            bytes,
+            "{name}: re-encoding changed the bytes; the layout changed"
+        );
+    }
+}
+
 #[test]
 fn the_corpus_validator_accepts_every_frame_and_rejects_every_rejection() {
     let corpus = corpus();
@@ -277,6 +301,11 @@ impl Transport for Recording {
                     .entry(rejected_fate_key(reason.as_deref()))
                     .or_insert_with(|| (self.peer.to_owned(), frame.clone()));
             }
+            if let Some(shape) = shape(&decoded) {
+                recorded
+                    .entry(shape.to_owned())
+                    .or_insert_with(|| (self.peer.to_owned(), frame.clone()));
+            }
             let pinned = recorded
                 .entry(variant(&decoded))
                 .or_insert_with(|| (self.peer.to_owned(), frame.clone()));
@@ -297,6 +326,30 @@ impl Transport for Recording {
     fn try_recv(&mut self) -> Option<SyncMessage> {
         self.inbound.borrow_mut().pop_front()
     }
+}
+
+/// Message shapes the one frame per variant leaves unpinned: a one-shot
+/// `Read` (its span carries a snapshot and a view) and `Rows` carrying the
+/// commits behind history versions.
+const SHAPES: [&str; 2] = ["Read/once", "Rows/origins"];
+
+fn shape(message: &SyncMessage) -> Option<&'static str> {
+    match message {
+        SyncMessage::Read {
+            span: ReadSpan::Once { .. },
+            ..
+        } => Some(SHAPES[0]),
+        SyncMessage::Rows { origins, .. } if !origins.is_empty() => Some(SHAPES[1]),
+        _ => None,
+    }
+}
+
+/// The two-frame split of `frame` a reader joins: the transport's part
+/// markers (0xFF a leading part, 0xFE the last) ahead of each half. A real
+/// split happens past 2 MiB; the joiner reads a small one the same way.
+fn split(frame: &[u8]) -> [Vec<u8>; 2] {
+    let (head, tail) = frame.split_at(frame.len() / 2);
+    [[&[0xFF], head].concat(), [&[0xFE], tail].concat()]
 }
 
 /// The recording key of the first rejected fate with `reason`.
@@ -419,7 +472,7 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     .unwrap();
     block_on(server.update("notes", shared, note(1, large(2)), UpdateOptions::default())).unwrap();
 
-    // Schema, SchemaAdmission, Subscribe, Rows, Settled, ChunkRequests,
+    // Schema, SchemaAdmission, Read (live), Rows, Settled, ChunkRequests,
     // Chunks: a client subscribes and pulls the large value it reads.
     let alice = open(0x51, user(1), false);
     connect(&alice, &server, user(1), &recorded);
@@ -442,9 +495,9 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     .unwrap();
     pump(&[&alice, &server, &alice]);
 
-    // Fetch, Answer, Origins: a serializable transaction's second read is
-    // pinned to its snapshot, so after a newer write it answers from
-    // history.
+    // Read (once), Settled with a listing: a serializable
+    // transaction's second read is pinned to its snapshot, so after a
+    // newer write it answers from history.
     let open_tx = OpenTransactionId::new();
     block_on(alice.begin_serializable(open_tx)).unwrap();
     let _ = drive(
@@ -459,8 +512,8 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     );
     alice.abandon_transaction_handle(open_tx).unwrap();
 
-    // Origins: a history subscription ships superseded versions, and the
-    // commits behind them first.
+    // A history subscription ships superseded versions, with the commits
+    // behind them.
     let history = alice
         .prepare_query(
             &Query::from("history.notes").filter(eq(col("id"), lit(Value::Uuid(shared.0)))),
@@ -551,14 +604,14 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     let schema = postcard::from_bytes::<SyncMessage>(&recorded.borrow()["Schema"].1).unwrap();
     let inbound = Rc::new(RefCell::new(VecDeque::from([
         schema,
-        SyncMessage::Subscribe {
+        SyncMessage::Read {
             id: 1,
-            query: Query::from("missing"),
+            query: Box::new(Query::from("missing")),
             binding: BTreeMap::new(),
-            since: None,
             include_deleted: false,
             tier: ReadTier::LocalFirst,
             wait: None,
+            span: ReadSpan::Live { since: None },
         },
     ])));
     server.accept_subscriber(
@@ -645,6 +698,16 @@ fn produce_sqlite_sync_wire_corpus_v1() {
         "malformed frame",
     )))
     .unwrap();
+    let shapes: Vec<(&str, String, Vec<u8>)> = SHAPES
+        .iter()
+        .map(|name| {
+            let (reader, frame) = recorded
+                .remove(*name)
+                .unwrap_or_else(|| panic!("the scenario never sent a {name}"));
+            (*name, reader, frame)
+        })
+        .collect();
+    let rows = shapes[1].2.clone();
     let mut commit = unhex(&messages[4].frame_hex);
     commit.truncate(commit.len() / 2);
     let subscribe = unhex(&messages[0].frame_hex);
@@ -694,7 +757,19 @@ fn produce_sqlite_sync_wire_corpus_v1() {
                 batch(&[subscribe.clone(), unsubscribe]),
             ),
             entry("structured error", "client", batch(&[error])),
-        ],
+            entry(
+                "a split message in one batch",
+                "client",
+                batch(&split(&rows)),
+            ),
+        ]
+        .into_iter()
+        .chain(
+            shapes
+                .iter()
+                .map(|(name, reader, frame)| entry(name, reader, batch(&[frame.clone()]))),
+        )
+        .collect(),
         rejections: vec![
             entry(
                 "unknown sync message discriminant",
@@ -738,6 +813,19 @@ fn produce_sqlite_sync_wire_corpus_v1() {
                 batch(&[vec![1, 0xff]]),
             ),
             entry("not a websocket frame batch", "server", hex(&[0xff, 0xff])),
+            entry(
+                "a split message's last part with no part before it",
+                "client",
+                batch(&[split(&rows)[1].clone()]),
+            ),
+            entry(
+                "a whole message between a split message's parts",
+                "client",
+                batch(&{
+                    let [head, tail] = split(&rows);
+                    [head, rows.clone(), tail]
+                }),
+            ),
         ],
     };
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -758,6 +846,6 @@ fn served_refusal_has_a_typed_wire_category() {
     };
     assert_eq!(
         postcard::to_allocvec(&message).unwrap(),
-        [12, 1, 5, 0, 1, 4]
+        [10, 1, 5, 0, 1, 4]
     );
 }

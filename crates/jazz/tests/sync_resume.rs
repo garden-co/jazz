@@ -83,7 +83,7 @@ struct Pipe {
 
 impl Transport for Pipe {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
-        if let (Some(count), SyncMessage::Rows { images }) = (&self.shipped, &message) {
+        if let (Some(count), SyncMessage::Rows { images, .. }) = (&self.shipped, &message) {
             *count.borrow_mut() += images.len();
         }
         self.out.borrow_mut().push_back(message);
@@ -620,4 +620,68 @@ fn a_row_a_listing_dropped_returns_when_an_older_subscription_resumes() {
         "server: m0 readable"
     );
     assert_eq!(ids(&client, None), [id(3, 0)], "client converges on m0");
+}
+
+/// A resumed subscription takes the fast path (nothing it depends on was
+/// written since), then, in the same server tick, another client's
+/// offline commit makes an older, unchanged row readable. That row joins
+/// the result after the resume point was judged, so it ships: the client
+/// never held it.
+#[test]
+fn a_row_readable_through_a_commit_in_the_resumes_tick_ships() {
+    let server = seeded(1);
+    let bob = AuthorSubject::for_test_bytes([0x66; 16]);
+    let alice_db = open(1, alice());
+    let bob_db = open(2, bob);
+    let connect = |db: &Db, who: AuthorSubject| {
+        let (client_side, server_side, _) = pipe();
+        let upstream = block_on(db.connect_upstream(client_side));
+        server.accept_subscriber(server_side, who);
+        upstream
+    };
+    let tick_all = || {
+        for _ in 0..5 {
+            block_on(alice_db.tick()).unwrap();
+            block_on(bob_db.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+        }
+        block_on(alice_db.tick()).unwrap();
+        block_on(bob_db.tick()).unwrap();
+    };
+    let alice_up = connect(&alice_db, alice());
+    let bob_up = connect(&bob_db, bob);
+    let prepared = alice_db.prepare_query(&Query::from("messages")).unwrap();
+    let _stream = block_on(alice_db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    tick_all();
+    assert_eq!(ids(&alice_db, None), [id(3, 0)], "alice reads room 0 only");
+
+    // Both away; bob adds alice to room 1 offline. Nothing reaches the
+    // server, so alice's subscription is caught up when it resumes.
+    assert!(alice_db.detach_connection(&alice_up));
+    assert!(bob_db.detach_connection(&bob_up));
+    block_on(bob_db.insert(
+        "memberships",
+        cells(&[
+            ("room", Value::Uuid(id(1, 1).0)),
+            ("member", Value::String(subject())),
+        ]),
+        Default::default(),
+    ))
+    .unwrap();
+
+    // Alice's resume and bob's upload reach the server in one tick, the
+    // resume first.
+    let _alice_up = connect(&alice_db, alice());
+    let _bob_up = connect(&bob_db, bob);
+    tick_all();
+    assert_eq!(
+        ids(&server, Some(alice())),
+        [id(3, 0), id(3, 1)],
+        "server: m1 readable"
+    );
+    assert_eq!(
+        ids(&alice_db, None),
+        [id(3, 0), id(3, 1)],
+        "alice receives m1, unchanged since her resume point"
+    );
 }

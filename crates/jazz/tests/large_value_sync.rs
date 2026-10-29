@@ -10,15 +10,18 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 
 use jazz::db::{
-    CellDelta, Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadTier, RemoteLinkHint,
-    SubscriptionStream, SyncCell, SyncMessage, Transport, TransportError, WireDelta, WireError,
-    WireKind, WireOp, WirePull, WireTarget, block_on, encode_frames,
+    BuiltOn, CellDelta, Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadSpan, ReadTier,
+    RemoteLinkHint, SubscriptionStream, SyncCell, SyncMessage, Transport, TransportError, WireBase,
+    WireDelta, WireError, WireKind, WireOp, WirePull, WireTarget, block_on, encode_frames,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::ReadViewSourceSpec;
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::records::Value;
-use jazz::tools::{ColumnType, Operation, PolicyExpr, SchemaBuilder, TableSchemaBuilder};
+use jazz::tools::{
+    ColumnMergeStrategy, ColumnType, Operation, PolicyExpr, SchemaBuilder, TableName,
+    TableSchemaBuilder,
+};
 
 use common::{allow_all_policies, compile_schema};
 
@@ -57,17 +60,29 @@ fn open(node: u8, author: AuthorSubject) -> Db {
     let drafts = TableSchemaBuilder::new("drafts")
         .column("body", ColumnType::Text)
         .policies(allow_all_policies().with_select(PolicyExpr::False));
+    // Its `body` merges concurrent text edits (SPEC 4 §4.3).
+    let merged = TableSchemaBuilder::new("merged")
+        .column("body", ColumnType::Text)
+        .policies(allow_all_policies());
+    let mut schema = SchemaBuilder::new()
+        .table(docs)
+        .table(titled)
+        .table(notes)
+        .table(comments)
+        .table(links)
+        .table(drafts)
+        .table(merged)
+        .build();
+    for column in &mut schema
+        .get_mut(&TableName::new("merged"))
+        .unwrap()
+        .columns
+        .columns
+    {
+        *column = column.clone().merge_strategy(ColumnMergeStrategy::Text);
+    }
     let config = DbConfig::new(
-        compile_schema(
-            &SchemaBuilder::new()
-                .table(docs)
-                .table(titled)
-                .table(notes)
-                .table(comments)
-                .table(links)
-                .table(drafts)
-                .build(),
-        ),
+        compile_schema(&schema),
         DbIdentity {
             node: NodeUuid::from_bytes([node; 16]),
             author,
@@ -430,7 +445,7 @@ fn pulls_answer_only_for_versions_the_reader_may_read() {
         .borrow()
         .iter()
         .find_map(|message| match message {
-            SyncMessage::Rows { images } => images.iter().find_map(|image| {
+            SyncMessage::Rows { images, .. } => images.iter().find_map(|image| {
                 let cell = image.cells.iter().find_map(|(name, cell)| match cell {
                     SyncCell::Large(descriptor) if name.ends_with("body") => Some(descriptor),
                     _ => None,
@@ -482,13 +497,15 @@ fn pulls_answer_only_for_versions_the_reader_may_read() {
     assert!(missing.contains(&draft));
 }
 
+/// A replica orders synced chunked values as the authority does: by cell,
+/// before every inline value (SPEC 19.5), with no chunk read.
 #[test]
-fn indexed_large_values_are_prefetched_before_the_row_is_installed() {
+fn synced_chunked_values_sort_before_inline_ones() {
     let server = open(0, AuthorSubject::SYSTEM);
     let alice = open(1, user(1));
     let _log = connect(&server, &alice, user(1));
     let base = text(2, LARGE);
-    let titles = [format!("{base}b"), format!("{base}a"), "short".to_owned()];
+    let titles = ["short".to_owned(), format!("{base}b"), format!("{base}a")];
     for (n, title) in titles.iter().enumerate() {
         insert(
             &server,
@@ -499,20 +516,22 @@ fn indexed_large_values_are_prefetched_before_the_row_is_installed() {
     }
     let _stream = subscribe(&alice, Query::from("titled"));
     pump(&server, &[&alice]);
-    // Every chunk is local, so ordering through the index never waits.
-    let (nodes, _) = alice.large_value_nodes_for_test().unwrap();
-    assert_eq!(nodes, server.large_value_nodes_for_test().unwrap().0);
-    let query = Query::from("titled").order_by("title", OrderDirection::Asc);
-    let rows = block_on(alice.all(
-        &alice.prepare_query(&query).unwrap(),
-        ReadOpts {
-            tier: ReadTier::LocalOnly,
-            ..ReadOpts::default()
-        },
-    ))
-    .unwrap();
-    let ids: Vec<RowUuid> = rows.iter().map(|r| r.row_uuid()).collect();
-    assert_eq!(ids, vec![row(2), row(1), row(3)]);
+    let query = Query::from("titled")
+        .select(["id"])
+        .order_by("title", OrderDirection::Asc);
+    for db in [&server, &alice] {
+        let rows = block_on(db.all(
+            &db.prepare_query(&query).unwrap(),
+            ReadOpts {
+                tier: ReadTier::LocalOnly,
+                ..ReadOpts::default()
+            },
+        ))
+        .unwrap();
+        let ids: Vec<RowUuid> = rows.iter().map(|r| r.row_uuid()).collect();
+        assert_eq!(ids.len(), 3);
+        assert_eq!(ids[2], row(1), "the inline title sorts last");
+    }
 }
 
 #[test]
@@ -574,7 +593,7 @@ impl Transport for Spy {
         let entry = match &message {
             SyncMessage::Commit { deltas, .. } => Some(("commit", !deltas.is_empty())),
             SyncMessage::PushChunks { .. } => Some(("push", false)),
-            SyncMessage::Rows { images } => {
+            SyncMessage::Rows { images, .. } => {
                 let mut cells = images.iter().flat_map(|image| image.cells.iter());
                 let large = cells
                     .clone()
@@ -733,7 +752,7 @@ struct Spoil {
 
 impl Transport for Spoil {
     fn send(&mut self, mut message: SyncMessage) -> Result<(), TransportError> {
-        if let SyncMessage::Rows { images } = &mut message
+        if let SyncMessage::Rows { images, .. } = &mut message
             && !*self.spoiled.borrow()
         {
             for (_, cell) in images.iter_mut().flat_map(|image| image.cells.iter_mut()) {
@@ -978,7 +997,7 @@ fn pulls_after_read_access_is_lost_are_answered_with_nothing() {
         .borrow()
         .iter()
         .find_map(|message| match message {
-            SyncMessage::Rows { images } => images.iter().find_map(|image| {
+            SyncMessage::Rows { images, .. } => images.iter().find_map(|image| {
                 let cell = image.cells.iter().find_map(|(name, cell)| match cell {
                     SyncCell::Large(descriptor) if name.ends_with("text") => Some(descriptor),
                     _ => None,
@@ -1053,7 +1072,7 @@ fn an_answer_to_many_pulls_is_bounded_and_the_rest_follows() {
         .borrow()
         .iter()
         .find_map(|message| match message {
-            SyncMessage::Rows { images } => images.iter().find_map(|image| {
+            SyncMessage::Rows { images, .. } => images.iter().find_map(|image| {
                 let cell = image.cells.iter().find_map(|(name, cell)| match cell {
                     SyncCell::Large(descriptor) if name.ends_with("blob") => Some(descriptor),
                     _ => None,
@@ -1190,6 +1209,90 @@ fn naming_a_hidden_trees_hash_reads_nothing() {
     assert_eq!(fates[0].1, fates[1].1, "{fates:?}");
     assert!(fates[0].1.contains("does not hold"), "{fates:?}");
     assert_eq!(local_cell(&server, "docs", 1, "body").unwrap(), None);
+}
+
+/// A text write the authority merges is checked like any other: its
+/// descriptor naming a hidden tree is refused before the merge reads it,
+/// so neither the merged value nor the write as sent takes in its text.
+#[test]
+fn a_merged_text_write_naming_a_hidden_tree_is_refused() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let mallory = open(9, user(9));
+    let (_, up, down) = connect_wires(&server, &mallory, user(9));
+    insert(
+        &server,
+        "drafts",
+        1,
+        vec![("body", Value::String(text(8, LARGE)))],
+    );
+    let hidden = jazz::large_values::prepare(
+        jazz::large_values::LargeValueKind::String,
+        text(8, LARGE).as_bytes(),
+    )
+    .unwrap()
+    .value_ref;
+    insert(
+        &server,
+        "merged",
+        2,
+        vec![("body", Value::String("hello".into()))],
+    );
+    let seed = server.write_conflicts("merged", row(2), None).unwrap()[0].seq;
+    block_on(server.update(
+        "merged",
+        row(2),
+        [("body".to_owned(), Value::String("hello there".into()))].into(),
+        Default::default(),
+    ))
+    .unwrap();
+    pump(&server, &[&mallory]);
+    // Mallory edits the doc over its first version, which the authority
+    // has to merge, naming the draft's tree as her value.
+    up.borrow_mut().push_back(SyncMessage::Commit {
+        node: [9; 16],
+        tx: 1,
+        kind: WireKind::Mergeable,
+        ops: vec![WireOp::Update {
+            table: "merged".to_owned(),
+            row: *row(2).0.as_bytes(),
+            cells: [("body".to_owned(), Value::Large(Box::new(hidden)))].into(),
+            target: WireTarget::Root,
+            at: None,
+        }],
+        author: None,
+        session: None,
+        expect: Vec::new(),
+        deltas: Vec::new(),
+        sources: Vec::new(),
+        bases: vec![WireBase {
+            op: 0,
+            key: Vec::new(),
+            on: BuiltOn::Seq(seed),
+        }],
+        origin: None,
+    });
+    for _ in 0..4 {
+        block_on(server.tick()).unwrap();
+    }
+    let fates: Vec<String> = down
+        .borrow()
+        .iter()
+        .filter_map(|message| match message {
+            SyncMessage::Fate {
+                result: Err(WireError::Rejected { message, .. }),
+                ..
+            } => Some(message.clone()),
+            SyncMessage::Fate { .. } => Some("accepted".to_owned()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(fates.len(), 1, "{fates:?}");
+    assert!(fates[0].contains("does not hold"), "{fates:?}");
+    assert_eq!(
+        local_cell(&server, "merged", 2, "body").unwrap(),
+        Some(Value::String("hello there".into()))
+    );
+    assert_eq!(server.as_sent_versions_for_test().unwrap(), 0);
 }
 
 #[test]
@@ -1552,19 +1655,21 @@ fn a_snapshot_read_naming_a_held_commit_waits_for_it() {
     // Alice's own store answers that read itself, so the read goes up as a
     // relay would send it: on the wire, behind the held commit.
     const READ: u64 = 9_999;
-    up.borrow_mut().push_back(SyncMessage::Fetch {
+    up.borrow_mut().push_back(SyncMessage::Read {
         id: READ,
-        query: Query::from("titled"),
+        query: Box::new(Query::from("titled")),
         binding: BTreeMap::new(),
-        at: None,
         include_deleted: false,
         tier: ReadTier::Remote,
         wait: None,
-        view: ReadViewSourceSpec::Snapshot { snapshot },
+        span: ReadSpan::Once {
+            at: None,
+            view: Box::new(ReadViewSourceSpec::Snapshot { snapshot }),
+        },
     });
     let reply = || {
         down.borrow().iter().find_map(|message| match message {
-            SyncMessage::Answer { id: READ, .. } => Some(Ok(())),
+            SyncMessage::Settled { id: READ, .. } => Some(Ok(())),
             SyncMessage::Refused {
                 id: READ, message, ..
             } => Some(Err(message.clone())),
@@ -1745,7 +1850,7 @@ fn a_relay_forwards_no_pull_its_tab_may_not_make() {
         .borrow()
         .iter()
         .find_map(|message| match message {
-            SyncMessage::Rows { images } => images
+            SyncMessage::Rows { images, .. } => images
                 .iter()
                 .find(|image| image.id == *row(1).0.as_bytes())
                 .map(|image| (image.seq, image.key.clone())),

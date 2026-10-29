@@ -9,7 +9,7 @@
 //!
 //! One app's state is one SQLite file: the owner thread is also the only
 //! connection to it. It starts before the runtime does (an [`AppStore`]),
-//! serving the server's host tables (catalogue, account journal), and the
+//! serving the server's host tables (catalogue, account registry), and the
 //! runtime's [`Db`] opens on the same connection once a schema is known.
 
 pub mod auth_admission;
@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex, Weak, mpsc as std_mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::kv::HostKv;
+use crate::kv::{HostKv, HostSql};
 use jazz::db::{
     Db, DbConfig, DbIdentity, FileOptions, LensEffects, Reason, SubscriberId, SyncMessage,
     Transport, TransportError, WireError, block_on,
@@ -251,7 +251,7 @@ impl Source {
                     std::fs::create_dir_all(parent)
                         .map_err(|error| format!("create {}: {error}", parent.display()))?;
                 }
-                // Every commit (rows, catalogue, account journal) is durable
+                // Every commit (rows, catalogue, account registry) is durable
                 // when it returns.
                 StoreFile::open(
                     path,
@@ -369,6 +369,17 @@ impl AppStore {
     pub(crate) fn kv(&self, table: HostTable) -> Result<HostKv, String> {
         Ok(HostKv::new(
             table,
+            Arc::clone(&self.inner.reader),
+            HostSender {
+                host: self.inner.host.clone(),
+                wake: self.sender()?,
+            },
+        ))
+    }
+
+    /// SQL access to the host tables a server shapes itself.
+    pub(crate) fn sql(&self) -> Result<HostSql, String> {
+        Ok(HostSql::new(
             Arc::clone(&self.inner.reader),
             HostSender {
                 host: self.inner.host.clone(),
@@ -540,6 +551,12 @@ impl HostTables for Unavailable {
         Err(self.error())
     }
     fn host_delete(&self, _: HostTable, _: &[u8]) -> Result<(), jazz::db::Error> {
+        Err(self.error())
+    }
+    fn host_sql(
+        &self,
+        _: &mut dyn FnMut(&rusqlite::Connection) -> Result<(), jazz::db::Error>,
+    ) -> Result<(), jazz::db::Error> {
         Err(self.error())
     }
 }
@@ -1328,6 +1345,8 @@ struct OwnerSession {
     untrusted: bool,
     /// Reads held until the permissions head is published, in order.
     held: VecDeque<SyncMessage>,
+    /// The parts of a message split across frames, until its last part.
+    joiner: jazz::db::FrameJoiner,
     queues: Rc<SessionQueues>,
     output: tokio_mpsc::UnboundedSender<Outbound>,
     egress: Arc<AtomicUsize>,
@@ -1731,6 +1750,15 @@ impl Owner {
                 subscriber,
                 untrusted: identity != AuthorSubject::SYSTEM,
                 held: VecDeque::new(),
+                // An untrusted peer's split message must fit the budget
+                // its frames are admitted against (SPEC 8.1).
+                joiner: if identity != AuthorSubject::SYSTEM {
+                    jazz::db::FrameJoiner::with_ceiling(
+                        jazz::protocol_limits::MAX_UNTRUSTED_MESSAGE_BYTES,
+                    )
+                } else {
+                    jazz::db::FrameJoiner::default()
+                },
                 queues,
                 output,
                 egress,
@@ -1748,8 +1776,9 @@ impl Owner {
         };
         let mut inbound = owner_session.queues.inbound.borrow_mut();
         for frame in frames {
-            match jazz::db::decode_message(&frame) {
-                Ok(SyncMessage::Commit { tx, .. }) if gated => {
+            match owner_session.joiner.push(&frame) {
+                Ok(None) => {}
+                Ok(Some(SyncMessage::Commit { tx, .. })) if gated => {
                     owner_session
                         .queues
                         .outbound
@@ -1766,20 +1795,19 @@ impl Owner {
                             global: true,
                         });
                 }
-                Ok(
-                    message @ (SyncMessage::Subscribe { .. }
+                Ok(Some(
+                    message @ (SyncMessage::Read { .. }
                     | SyncMessage::Unsubscribe { .. }
-                    | SyncMessage::Fetch { .. }
                     | SyncMessage::Hold { .. }),
-                ) if gated => owner_session.held.push_back(message),
-                Ok(message) => inbound.push_back(message),
+                )) if gated => owner_session.held.push_back(message),
+                Ok(Some(message)) => inbound.push_back(message),
                 Err(error) => {
                     drop(inbound);
                     let _ = owner_session.output.send((
                         Err(jazz::wire::WireError::new(
                             WireErrorCode::MalformedFrame,
                             WireRetry::Never,
-                            format!("malformed sync frame: {error}"),
+                            error.to_string(),
                         )),
                         0,
                     ));
@@ -1846,6 +1874,7 @@ impl Owner {
             let mut outbound = session.queues.outbound.borrow_mut();
             let mut frames = Vec::new();
             let mut bytes = 0;
+            let mut failed = None;
             while session.egress.load(Ordering::Acquire) + bytes < SESSION_QUEUE_BUDGET
                 && let Some(message) = outbound.pop_front()
             {
@@ -1854,10 +1883,27 @@ impl Owner {
                         bytes += encoded.iter().map(Vec::len).sum::<usize>();
                         frames.extend(encoded);
                     }
+                    // Dropped, the message would leave the client waiting
+                    // on it: the session ends with why instead.
                     Err(error) => {
                         tracing::error!(%error, "encode outbound sync message");
+                        failed = Some(error.to_string());
+                        break;
                     }
                 }
+            }
+            if let Some(error) = failed {
+                drop(outbound);
+                let _ = session.output.send((
+                    Err(jazz::wire::WireError::new(
+                        WireErrorCode::Internal,
+                        WireRetry::Never,
+                        format!("sync session closed: {error}"),
+                    )),
+                    0,
+                ));
+                gone.push(*id);
+                continue;
             }
             if frames.is_empty() {
                 continue;

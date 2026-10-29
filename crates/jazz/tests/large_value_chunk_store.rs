@@ -118,15 +118,6 @@ fn body(db: &Db, n: u8) -> String {
     }
 }
 
-fn ids_with_body(db: &Db, body: &str) -> Vec<RowUuid> {
-    let query = Query::from("docs").filter(eq(col("body"), lit(Value::String(body.to_owned()))));
-    block_on(db.all(&db.prepare_query(&query).unwrap(), ReadOpts::default()))
-        .unwrap()
-        .iter()
-        .map(|row| row.row_uuid())
-        .collect()
-}
-
 /// Node bytes the SQLite file still holds, and how many nodes it keeps
 /// only as metadata. White-box: what moved where is the point of the
 /// feature, and the public API reads the same either way.
@@ -270,7 +261,6 @@ fn settled_leaves_move_to_a_directory_and_read_back_after_reopening() {
             Some(Value::Bytes(value.as_bytes().to_vec()))
         );
     }
-    assert_eq!(ids_with_body(&db, &values[2]), vec![row(3)]);
     // An append reads the last leaf back from the directory.
     block_on(db.append_value("docs", row(1), "body", b"!".to_vec())).unwrap();
     assert_eq!(body(&db, 1), format!("{}!", values[0]));

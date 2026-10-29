@@ -41,6 +41,7 @@
 use crate::schema::history::{history_source_table, is_history_table};
 use crate::values::CachedRow;
 use crate::values::query_error;
+use crate::values::{STATE_AS_SENT, STATE_DELETED, STATE_NO_CONTENT};
 use rusqlite::OptionalExtension;
 use std::cell::Cell as StdCell;
 use std::cell::RefCell;
@@ -114,6 +115,14 @@ pub trait Transport {
     fn take_failure(&mut self) -> Option<TransportError> {
         None
     }
+    /// Send what an earlier `send` accepted but could not yet hand on
+    /// whole (the rest of a split message). `Backpressure` means some is
+    /// still waiting for the queue to drain. A transport whose `send`
+    /// hands on every message whole needs nothing here; one wrapping
+    /// another must forward it, or the inner one's parts stay unsent.
+    fn flush(&mut self) -> Result<(), TransportError> {
+        Ok(())
+    }
 }
 
 /// An in-process link (a worker and its tab, or tests): each side's sends
@@ -160,79 +169,61 @@ pub struct WireTransportAdapter<W> {
     /// A frame failed to decode: nothing more is read, and
     /// [`Transport::take_failure`] reports it once.
     failed: Option<Option<TransportError>>,
+    /// The parts of a split message a full queue held back after its
+    /// first went out. They go ahead of anything sent later: a reader
+    /// joins parts in order, so the message is never sent again from its
+    /// start.
+    unsent: VecDeque<Vec<u8>>,
 }
 
 /// The largest encoded message one wire frame carries, leaving room for
 /// the carrier's count and length prefixes.
 const MAX_MESSAGE_FRAME_BYTES: usize = jazz_protocol::protocol_limits::MAX_WIRE_FRAME_BYTES - 64;
 
-// Keep the existing semantic bytes; this extraction only admits bounded
-// publications at the wire-frame encoder and joiner.
-fn encode_bounded_message(message: &SyncMessage) -> Result<Vec<u8>, postcard::Error> {
-    let bytes = postcard::to_allocvec(message)?;
+/// The first byte of a frame carrying a leading part of a message too
+/// large for one frame: more parts follow. Postcard writes a
+/// [`SyncMessage`]'s variant tag as one byte below 0x80, so neither part
+/// marker begins a whole message, a `Hello` or a `WireFrame`.
+const PART: u8 = 0xFF;
+/// The first byte of the frame carrying a split message's last part.
+const LAST_PART: u8 = 0xFE;
+
+/// `message` as wire frames: one frame, unless it outgrows one (a first
+/// result, one commit's fan-out, a large commit). Then its encoding
+/// travels in as many parts as it takes, each behind a part marker, and
+/// [`FrameJoiner`] makes them one message again. Splitting is a transport
+/// matter: any message may be split, and no message knows it was. A
+/// message beyond the logical message ceiling no reader joins is refused
+/// here, not sent.
+pub fn encode_frames(message: SyncMessage) -> Result<Vec<Vec<u8>>, TransportError> {
+    let bytes =
+        postcard::to_allocvec(&message).map_err(|e| TransportError::Failed(e.to_string()))?;
     if bytes.len() > jazz_protocol::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES {
-        return Err(postcard::Error::SerializeBufferFull);
+        return Err(TransportError::Failed(format!(
+            "a {} message of {} bytes is over the {}-byte message ceiling: not supported yet",
+            message.kind(),
+            bytes.len(),
+            jazz_protocol::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES,
+        )));
     }
-    Ok(bytes)
-}
-
-/// `message` as wire frames. A `Rows` message can outgrow one frame (a
-/// first result, or one commit's fan-out): its images travel in as many
-/// frames as it takes (a row fits one, as a large value travels as
-/// chunks), each but the last a `RowsPart`, and [`FrameJoiner`] makes
-/// them one message again.
-pub fn encode_frames(message: SyncMessage) -> Result<Vec<Vec<u8>>, postcard::Error> {
-    let SyncMessage::Rows { images } = message else {
-        let frame = encode_bounded_message(&message)?;
-        if frame.len() > MAX_MESSAGE_FRAME_BYTES {
-            return Err(postcard::Error::SerializeBufferFull);
-        }
-        return Ok(vec![frame]);
-    };
-    let mut parts = Vec::new();
-    split_rows(images, &mut parts)?;
+    if bytes.len() <= MAX_MESSAGE_FRAME_BYTES {
+        return Ok(vec![bytes]);
+    }
+    let parts = bytes.chunks(MAX_MESSAGE_FRAME_BYTES - 1);
     let last = parts.len() - 1;
-    for (i, (images, frame)) in parts.iter_mut().enumerate() {
-        if i < last {
-            *frame = encode_bounded_message(&SyncMessage::RowsPart {
-                images: std::mem::take(images),
-            })?;
-        }
-    }
-    if parts.len() > jazz_protocol::protocol_limits::MAX_WIRE_BATCH_FRAMES
-        || parts.iter().map(|(_, frame)| frame.len()).sum::<usize>()
-            > jazz_protocol::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES
-    {
-        return Err(postcard::Error::SerializeBufferFull);
-    }
-    Ok(parts.into_iter().map(|(_, frame)| frame).collect())
+    Ok(parts
+        .enumerate()
+        .map(|(i, part)| {
+            let mut frame = Vec::with_capacity(part.len() + 1);
+            frame.push(if i == last { LAST_PART } else { PART });
+            frame.extend_from_slice(part);
+            frame
+        })
+        .collect())
 }
 
-/// `images` halved until each half encodes as a `Rows` within one frame,
-/// in order, each with that encoding.
-fn split_rows(
-    images: Vec<Image>,
-    parts: &mut Vec<(Vec<Image>, Vec<u8>)>,
-) -> Result<(), postcard::Error> {
-    let message = SyncMessage::Rows { images };
-    let frame = encode_bounded_message(&message)?;
-    let SyncMessage::Rows { mut images } = message else {
-        unreachable!()
-    };
-    if frame.len() <= MAX_MESSAGE_FRAME_BYTES {
-        parts.push((images, frame));
-        return Ok(());
-    }
-    if images.len() <= 1 {
-        return Err(postcard::Error::SerializeBufferFull);
-    }
-    let rest = images.split_off(images.len() / 2);
-    split_rows(images, parts)?;
-    split_rows(rest, parts)
-}
-
-/// One frame's [`SyncMessage`]: exactly one postcard value, so a frame
-/// with bytes after its message is malformed rather than truncated.
+/// One whole message's bytes as a [`SyncMessage`]: exactly one postcard
+/// value, so bytes after the message are malformed rather than truncated.
 pub fn decode_message(frame: &[u8]) -> Result<SyncMessage, postcard::Error> {
     match postcard::take_from_bytes(frame)? {
         (message, []) => Ok(message),
@@ -240,69 +231,91 @@ pub fn decode_message(frame: &[u8]) -> Result<SyncMessage, postcard::Error> {
     }
 }
 
-/// Joins a `Rows` message's frames (see [`encode_frames`]) back into the
+/// Joins a split message's frames (see [`encode_frames`]) back into the
 /// one message they encode.
-#[derive(Default)]
 pub struct FrameJoiner {
-    /// The images of the parts received since the last whole message.
-    parts: Option<Vec<Image>>,
-    bytes: usize,
+    /// The bytes of the parts received since the last whole message.
+    parts: Option<Vec<u8>>,
+    /// How many parts those are.
     frames: usize,
+    /// The most bytes a joined message may have.
+    ceiling: usize,
+}
+
+impl Default for FrameJoiner {
+    fn default() -> Self {
+        Self::with_ceiling(jazz_protocol::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES)
+    }
 }
 
 impl FrameJoiner {
-    /// The message `frame` completes, if any. A frame that does not decode,
-    /// or a message other than `Rows` after a `RowsPart`, is the peer's
-    /// error.
+    /// A joiner refusing split messages over `ceiling` bytes: a server
+    /// bounds what an untrusted peer makes it buffer by the connection's
+    /// budget.
+    pub fn with_ceiling(ceiling: usize) -> Self {
+        Self {
+            parts: None,
+            frames: 0,
+            ceiling,
+        }
+    }
+
+    /// The message `frame` completes, if any. A frame over the frame
+    /// limit or that does not decode, a whole message between a split
+    /// message's parts, a last part with no leading ones, and parts beyond
+    /// the joined-message ceiling or the batch frame count are the peer's
+    /// error. A refused message's parts are dropped at once: the link
+    /// closes, and none of it reaches the database.
     pub fn push(&mut self, frame: &[u8]) -> Result<Option<SyncMessage>, TransportError> {
         let result = self.push_checked(frame);
         if result.is_err() {
-            // Drop a failed message's partial buffers immediately. The carrier
-            // closes the link; no prefix of that message reaches the database.
-            *self = Self::default();
+            *self = Self::with_ceiling(self.ceiling);
         }
         result
     }
 
     fn push_checked(&mut self, frame: &[u8]) -> Result<Option<SyncMessage>, TransportError> {
+        let failed = |why: String| TransportError::Failed(format!("malformed sync frame: {why}"));
         if frame.len() > MAX_MESSAGE_FRAME_BYTES {
-            return Err(TransportError::Failed(
-                "sync frame size limit exceeded".into(),
-            ));
+            return Err(failed("a frame over the frame limit".to_owned()));
         }
-        let bytes = self
-            .bytes
-            .checked_add(frame.len())
-            .ok_or_else(|| TransportError::Failed("sync message size overflow".into()))?;
-        if bytes > jazz_protocol::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES
-            || self.frames >= jazz_protocol::protocol_limits::MAX_WIRE_BATCH_FRAMES
-        {
-            return Err(TransportError::Failed(
-                "sync message reassembly limit exceeded".into(),
-            ));
-        }
-        let message = decode_message(frame)
-            .map_err(|error| TransportError::Failed(format!("malformed sync frame: {error}")))?;
-        match (self.parts.take(), message) {
-            (parts, SyncMessage::RowsPart { images }) => {
-                self.bytes = bytes;
-                self.frames += 1;
-                self.parts = Some(parts.unwrap_or_default());
-                self.parts.as_mut().expect("parts").extend(images);
-                Ok(None)
-            }
-            (Some(mut joined), SyncMessage::Rows { images }) => {
-                self.bytes = 0;
+        let joined;
+        let bytes = match (frame.split_first(), self.parts.take()) {
+            (Some((&marker @ (PART | LAST_PART), part)), parts) => {
+                let mut parts = match (marker, parts) {
+                    (LAST_PART, None) => {
+                        return Err(failed("a last part with no parts before it".to_owned()));
+                    }
+                    (_, parts) => parts.unwrap_or_default(),
+                };
+                if parts.len() + part.len() > self.ceiling
+                    || self.frames >= jazz_protocol::protocol_limits::MAX_WIRE_BATCH_FRAMES
+                {
+                    return Err(failed(
+                        "a split message beyond the message ceiling".to_owned(),
+                    ));
+                }
+                parts.extend_from_slice(part);
+                if marker == PART {
+                    self.parts = Some(parts);
+                    self.frames += 1;
+                    return Ok(None);
+                }
                 self.frames = 0;
-                joined.extend(images);
-                Ok(Some(SyncMessage::Rows { images: joined }))
+                joined = parts;
+                joined.as_slice()
             }
-            (Some(_), message) => Err(TransportError::Failed(format!(
-                "a Rows message's parts end with its Rows frame, not {}",
-                message.kind()
-            ))),
-            (None, message) => Ok(Some(message)),
-        }
+            (_, Some(_)) => {
+                return Err(failed(
+                    "a split message's parts end with its last part, not a whole message"
+                        .to_owned(),
+                ));
+            }
+            (_, None) => frame,
+        };
+        decode_message(bytes)
+            .map(Some)
+            .map_err(|error| failed(error.to_string()))
     }
 }
 
@@ -312,20 +325,37 @@ impl<W> WireTransportAdapter<W> {
             wire,
             joiner: FrameJoiner::default(),
             failed: None,
+            unsent: VecDeque::new(),
         }
     }
 }
 
 impl<W: WireTransport> Transport for WireTransportAdapter<W> {
+    /// Accepts `message` once its first frame is queued: `Backpressure`
+    /// means none of it was, so the caller keeps it. Parts a full queue
+    /// refuses after that wait in `unsent` for [`Transport::flush`].
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
-        for frame in encode_frames(message).map_err(|e| TransportError::Failed(e.to_string()))? {
-            self.wire.send_frame(frame)?;
+        self.flush()?;
+        let mut frames = encode_frames(message)?.into_iter();
+        let first = frames.next().expect("a message encodes to a frame");
+        self.wire.send_frame(first)?;
+        self.unsent.extend(frames);
+        match self.flush() {
+            Err(TransportError::Backpressure) => Ok(()),
+            result => result,
+        }
+    }
+
+    fn flush(&mut self) -> Result<(), TransportError> {
+        while let Some(frame) = self.unsent.front() {
+            self.wire.send_frame(frame.clone())?;
+            self.unsent.pop_front();
         }
         Ok(())
     }
 
-    /// The next whole message: a `Rows` whose frames have not all arrived
-    /// waits for the rest.
+    /// The next whole message: a split message whose frames have not all
+    /// arrived waits for the rest.
     fn try_recv(&mut self) -> Option<SyncMessage> {
         if self.failed.is_some() {
             return None;
@@ -382,11 +412,9 @@ pub fn validate_frame_batch_for_corpus(
             .map(drop)
             .map_err(|error| format!("hello rejected: {}", error.message))
     };
-    let message = |frame: &[u8]| {
-        decode_message(frame)
-            .map(drop)
-            .map_err(|error| format!("malformed sync message: {error}"))
-    };
+    // Frames of a split message join across the batch, as a reader's do.
+    let mut joiner = FrameJoiner::default();
+    let mut message = |frame: &[u8]| joiner.push(frame).map(drop).map_err(|e| e.to_string());
     let frames = decode_websocket_frame_batch(batch)
         .map_err(|error| format!("malformed websocket frame batch: {error}"))?;
     match reader {
@@ -470,10 +498,61 @@ pub struct Image {
     pub key: Vec<u8>,
     pub seq: u64,
     pub deleted: bool,
-    /// Whether the version's commit wrote content (see `_c`): history
+    /// Whether the version's commit wrote content (stored in `_st`): history
     /// reads list only content versions.
     pub content: bool,
     pub cells: Vec<(String, Cell)>,
+}
+
+/// The most image bytes one `Rows` carries: a first result of any size
+/// travels as several, each well under the logical message ceiling a
+/// reader joins split frames up to.
+const ROWS_MESSAGE_BYTES: usize = jazz_protocol::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES / 4;
+
+/// `images` (and the `origins` they come with) as `Rows` messages of at
+/// most `limit` ([`ROWS_MESSAGE_BYTES`]) of images each. A reader installs each
+/// message whole, so a commit's versions (one seq) never straddle two: a
+/// result that needs more than one goes in seq order, and a single
+/// commit larger than the bound still travels as one.
+fn rows_messages(
+    mut images: Vec<Image>,
+    origins: Vec<(u64, [u8; 16], u64)>,
+    limit: usize,
+) -> Vec<SyncMessage> {
+    let size = |image: &Image| {
+        postcard::serialize_with_flavor(image, postcard::ser_flavors::Size::default())
+            .unwrap_or(usize::MAX)
+    };
+    let sizes: Vec<usize> = images.iter().map(size).collect();
+    if sizes.iter().fold(0usize, |sum, n| sum.saturating_add(*n)) <= limit {
+        if images.is_empty() && origins.is_empty() {
+            return Vec::new();
+        }
+        return vec![SyncMessage::Rows { images, origins }];
+    }
+    let mut sized: Vec<(usize, Image)> = sizes.into_iter().zip(images.drain(..)).collect();
+    sized.sort_by_key(|(_, image)| image.seq);
+    let mut out = Vec::new();
+    let mut origins = Some(origins);
+    let mut batch: Vec<Image> = Vec::new();
+    let mut bytes = 0usize;
+    for (n, image) in sized {
+        let same_commit = batch.last().is_some_and(|last| last.seq == image.seq);
+        if !batch.is_empty() && !same_commit && bytes.saturating_add(n) > limit {
+            out.push(SyncMessage::Rows {
+                images: std::mem::take(&mut batch),
+                origins: origins.take().unwrap_or_default(),
+            });
+            bytes = 0;
+        }
+        bytes = bytes.saturating_add(n);
+        batch.push(image);
+    }
+    out.push(SyncMessage::Rows {
+        images: batch,
+        origins: origins.take().unwrap_or_default(),
+    });
+    out
 }
 
 /// A row a commit writes, as the writer's replica holds it afterwards:
@@ -767,27 +846,34 @@ const _: () = assert!(
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SyncMessage {
     // client → server
-    /// `since`: a resumed subscription the client held settled through
-    /// that seq; its opening ships only rows changed after it.
+    // Variants before `Commit` keep their wire tags: a replica stores its
+    // pending uploads as `Commit` frames.
+    /// A read of `query`, kept current until `Unsubscribe` or answered
+    /// once (see [`ReadSpan`]). Either way the server ships the result's
+    /// rows and supporting rows, then `Settled` (or `Refused`).
     /// `include_deleted`: the result also lists deleted rows (the root's),
     /// which ship as their deleted current versions.
-    /// `tier`: how far the subscription reaches, as for `Fetch`: a relay
-    /// serves a LocalOnly one from its store alone, without its upstream
-    /// (a non-durable foreground's LocalOnly read). An authority's store
-    /// is the answer either way.
-    /// `wait`: how long (ms) a relay waits for its upstream's answer
-    /// before it serves its own store: a LocalFirst one's first load (the
-    /// reader's `firstLoadRemoteWaitMs`). `None`: a LocalFirst one waits
-    /// while the upstream may answer, a Remote one however long it takes
-    /// (only the authority confirms a remote result).
-    Subscribe {
+    /// `tier`: how far the read reaches past a relay: `LocalOnly` is served
+    /// from the relay's store alone (a non-durable foreground's LocalOnly
+    /// read), `LocalFirst` from it too while the relay asks its upstream,
+    /// `Remote` once its upstream answered. An authority's store is the
+    /// answer either way.
+    /// `wait`: how long (ms) a relay waits for its upstream's answer while
+    /// it may give one, then serves its store: a LocalFirst read's first
+    /// load (the reader's `firstLoadRemoteWaitMs`), or a one-shot Remote
+    /// read that takes the relay's view when the authority cannot answer (a
+    /// serializable transaction's snapshot). `None`: a live LocalFirst read
+    /// waits while the upstream may answer, a one-shot one is served now;
+    /// a Remote one waits however long it takes (only the authority
+    /// confirms a remote result).
+    Read {
         id: u64,
-        query: Query,
+        query: Box<Query>,
         binding: BTreeMap<String, Value>,
-        since: Option<u64>,
         include_deleted: bool,
         tier: ReadTier,
         wait: Option<u64>,
+        span: ReadSpan,
     },
     Unsubscribe {
         id: u64,
@@ -800,29 +886,18 @@ pub enum SyncMessage {
     Hold {
         rows: Vec<(String, [u8; 16], Vec<u8>, u64)>,
     },
-    /// A one-shot read, at the current state or as of a server seq.
-    /// `tier` is how far it reaches past a relay: `LocalOnly` is served
-    /// from the relay's store, `LocalFirst` too while the relay asks its
-    /// upstream to refresh it, `Remote` once its upstream answered. An
-    /// authority's store answers any tier. `wait`: how long (ms) a relay
-    /// waits for its upstream's answer while it may give one, then serves
-    /// its store: a LocalFirst read's first load, or a Remote read that
-    /// takes the relay's view when the authority cannot answer (a
-    /// serializable transaction's snapshot). `None`: a LocalFirst read is
-    /// served now, a Remote one once the upstream answered. `view`: the
-    /// branch view the read observes, so its window and versions are the
-    /// view's. A view frozen at a snapshot reference is resolved by the
-    /// receiver (a reopened tab's capture, which its worker settled), which
-    /// also sends the [`SyncMessage::Origins`] of the commits it names.
-    Fetch {
+    /// A read's result is complete through server seq `through`.
+    /// `listing`: the result's rows, in order: always for a one-shot
+    /// read, and for a live one's opening and window changes when it is
+    /// limited or its opening could not tell what left it; the replica
+    /// drops cached rows a listing leaves out. `global`: the result is the
+    /// global authority's (directly, or through relays that settle by
+    /// their upstream), not a relay's own store.
+    Settled {
         id: u64,
-        query: Query,
-        binding: BTreeMap<String, Value>,
-        at: Option<u64>,
-        include_deleted: bool,
-        tier: ReadTier,
-        wait: Option<u64>,
-        view: ReadViewSourceSpec,
+        through: u64,
+        listing: Option<Vec<[u8; 16]>>,
+        global: bool,
     },
     /// `author`: the provenance the writes carry when it is not the
     /// sender's own (a trusted session or an attribution), as a canonical
@@ -875,8 +950,14 @@ pub enum SyncMessage {
         nodes: Vec<WireChunk>,
         missing: Vec<WireChunkRef>,
     },
+    /// Row images. `origins` names the transactions behind the history
+    /// versions among them, as (seq, writer node, writer tx): a replica
+    /// lists a history version only once it knows its `$transactionId`,
+    /// and a one-shot read frozen at a snapshot names the commits that
+    /// snapshot holds. Empty for current rows.
     Rows {
         images: Vec<Image>,
+        origins: Vec<(u64, [u8; 16], u64)>,
     },
     /// The row is unavailable to this reader (a write or a policy change
     /// took its read access): the replica drops its copy (INV-SYNC-14).
@@ -885,23 +966,8 @@ pub enum SyncMessage {
         id: [u8; 16],
         key: Vec<u8>,
     },
-    /// A subscription's result is complete through server seq `through`;
-    /// `window` lists its rows when it is limited. `global`: the result is
-    /// the global authority's (directly, or through relays that settle by
-    /// their upstream), not a relay's own store.
-    Settled {
-        id: u64,
-        through: u64,
-        window: Option<Vec<[u8; 16]>>,
-        global: bool,
-    },
-    Answer {
-        id: u64,
-        through: u64,
-        rows: Vec<[u8; 16]>,
-    },
-    /// A `Subscribe` or `Fetch` the server cannot serve, or an active
-    /// subscription whose query failed: the read ends instead of waiting.
+    /// A `Read` the server cannot serve, or an active subscription whose
+    /// query failed: the read ends instead of waiting for an answer.
     Refused {
         id: u64,
         code: ErrorCode,
@@ -948,13 +1014,6 @@ pub enum SyncMessage {
         version: [u8; 16],
     },
     // server → client
-    /// The transactions behind the versions a history read ships, as
-    /// (seq, writer node, writer tx), sent ahead of their `Rows`: a
-    /// replica lists a history version only once it knows its
-    /// `$transactionId`.
-    Origins {
-        commits: Vec<(u64, [u8; 16], u64)>,
-    },
     /// Whether the server has admitted the schema version the session
     /// declared, sent when that changes. Until it is admitted the server
     /// holds the session's messages (a draft awaiting its lens), so a
@@ -963,18 +1022,16 @@ pub enum SyncMessage {
     SchemaAdmission {
         admitted: bool,
     },
-    /// The leading images of a `Rows` message too large for one wire
-    /// frame; the message's final frame is the `Rows` itself. A receiver
-    /// joins the parts and applies them as that one message, so a
-    /// commit's rows reach readers whole (a wire framing only: never sent
-    /// as a message of its own).
-    RowsPart {
-        images: Vec<Image>,
-    },
     /// A relay holds the session's commit `tx` in its store and uploads
     /// it: the commit is `Local` for a non-durable session (a tab over its
     /// worker), whose own store is memory. Its fate follows once the
     /// relay's upstream answers.
+    ///
+    /// This is durability progress, never a decision: a `Stored` commit
+    /// can still be rejected, and a [`SyncMessage::Fate`] always follows
+    /// it. It is not a non-global `Fate` either: that one is the final
+    /// word of a replica with no upstream, which never comes back with a
+    /// global verdict, while a relay's `Stored` promises one.
     Stored {
         tx: u64,
     },
@@ -995,6 +1052,25 @@ pub enum SyncMessage {
     Catalogue {
         versions: Vec<CatalogueVersion>,
         cells: Vec<CatalogueCell>,
+    },
+}
+
+/// How long a [`SyncMessage::Read`] lasts.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum ReadSpan {
+    /// Kept current until `Unsubscribe`: what changes in the result
+    /// ships as it changes, and each settled state is a `Settled`.
+    /// `since`: resumed, the replica holding the result as it settled
+    /// through that seq; the opening ships only what changed after it.
+    Live { since: Option<u64> },
+    /// Answered once, at the current state or as of server seq `at`, in
+    /// branch view `view`, whose window and versions the read observes. A
+    /// view frozen at a snapshot reference is resolved by the receiver (a
+    /// reopened tab's capture, which its worker settled), which also sends
+    /// the origins of the commits it names (see [`SyncMessage::Rows`]).
+    Once {
+        at: Option<u64>,
+        view: Box<ReadViewSourceSpec>,
     },
 }
 
@@ -1022,10 +1098,9 @@ impl SyncMessage {
     /// The variant's name, for errors and diagnostics.
     pub fn kind(&self) -> &'static str {
         match self {
-            Self::Subscribe { .. } => "Subscribe",
+            Self::Read { .. } => "Read",
             Self::Unsubscribe { .. } => "Unsubscribe",
             Self::Hold { .. } => "Hold",
-            Self::Fetch { .. } => "Fetch",
             Self::Commit { .. } => "Commit",
             Self::ChunkRequests { .. } => "ChunkRequests",
             Self::PushChunks { .. } => "PushChunks",
@@ -1033,15 +1108,12 @@ impl SyncMessage {
             Self::Rows { .. } => "Rows",
             Self::Evict { .. } => "Evict",
             Self::Settled { .. } => "Settled",
-            Self::Answer { .. } => "Answer",
             Self::Refused { .. } => "Refused",
             Self::Fate { .. } => "Fate",
             Self::Advise { .. } => "Advise",
             Self::Advice { .. } => "Advice",
             Self::Schema { .. } => "Schema",
-            Self::Origins { .. } => "Origins",
             Self::SchemaAdmission { .. } => "SchemaAdmission",
-            Self::RowsPart { .. } => "RowsPart",
             Self::Stored { .. } => "Stored",
             Self::Holds { .. } => "Holds",
             Self::Catalogue { .. } => "Catalogue",
@@ -1170,7 +1242,7 @@ pub(crate) struct Remote {
     query: Query,
     binding: BTreeMap<String, Value>,
     include_deleted: bool,
-    /// How far it reaches (see `SyncMessage::Subscribe`).
+    /// How far it reaches (see `SyncMessage::Read`).
     reach: RemoteReach,
     pub(crate) answered: Rc<StdCell<bool>>,
     /// Whether the last answer was the global authority's.
@@ -1246,6 +1318,9 @@ pub(crate) struct Client {
     /// Accepted fates from a replica with no server: they order the
     /// commit, but it never becomes `Global`.
     local_fates: HashSet<u64>,
+    /// Fates this replica gives its own commits without sending them (one
+    /// too large to send), applied with the next messages that arrive.
+    refused: Vec<SyncMessage>,
     /// Commits the relay this non-durable replica writes through holds
     /// in its store, their fate still to come ([`SyncMessage::Stored`]).
     stored: HashSet<u64>,
@@ -1320,7 +1395,7 @@ type RelayedAnswer = (
     u64,
 );
 
-/// A session's `Fetch` a relay asked its upstream for.
+/// A session's one-shot `Read` a relay asked its upstream for.
 struct RelayedFetch {
     /// The relay's own fetch id upstream.
     upstream: u64,
@@ -1333,7 +1408,7 @@ struct RelayedFetch {
     /// longer answer, or its wait runs out (`None`: never).
     until: Option<Instant>,
     session: usize,
-    /// The session's `Fetch`, served locally once the upstream answered.
+    /// The session's `Read`, served locally once the upstream answered.
     message: SyncMessage,
 }
 
@@ -1347,7 +1422,7 @@ fn remote_key(
 }
 
 /// How far a read reaches past a relay: its tier, and how long the relay
-/// waits for its upstream (see `SyncMessage::Subscribe` and `Fetch`).
+/// waits for its upstream (see `SyncMessage::Read`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct RemoteReach {
     pub(crate) tier: ReadTier,
@@ -2930,7 +3005,15 @@ impl Inner {
         } else {
             table.to_owned()
         };
-        let sql = format!("SELECT * FROM {} WHERE {filter}", quote(&name));
+        // An as-sent version is no image: it never syncs.
+        let sql = if history {
+            format!(
+                "SELECT * FROM (SELECT * FROM {} WHERE (_st & {STATE_AS_SENT}) = 0) WHERE {filter}",
+                quote(&name)
+            )
+        } else {
+            format!("SELECT * FROM {} WHERE {filter}", quote(&name))
+        };
         let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
         let names: Vec<String> = statement
             .column_names()
@@ -2954,8 +3037,11 @@ impl Inner {
                         "id" => image.id = r.get::<_, Vec<u8>>(i)?.try_into().unwrap_or([0; 16]),
                         "_b" => image.key = r.get(i)?,
                         "_seq" => image.seq = r.get::<_, i64>(i)? as u64,
-                        "_del" => image.deleted = r.get::<_, i64>(i)? != 0,
-                        "_c" => image.content = r.get::<_, i64>(i)? != 0,
+                        "_st" => {
+                            let state = r.get::<_, i64>(i)?;
+                            image.deleted = state & STATE_DELETED != 0;
+                            image.content = state & STATE_NO_CONTENT == 0;
+                        }
                         // The authority's record of what the version was
                         // built on; never replicated.
                         "_base" | "_cols" => {}
@@ -3208,42 +3294,18 @@ impl Inner {
             "id".to_owned(),
             "_b".to_owned(),
             "_seq".to_owned(),
-            "_del".to_owned(),
-            "_c".to_owned(),
+            "_st".to_owned(),
         ];
         let mut values = vec![
             Sql::Blob(image.id.to_vec()),
             Sql::Blob(image.key.clone()),
             Sql::Integer(image.seq as i64),
-            Sql::Integer(image.deleted as i64),
-            Sql::Integer(image.content as i64),
+            Sql::Integer(
+                if image.deleted { STATE_DELETED } else { 0 }
+                    | if image.content { 0 } else { STATE_NO_CONTENT },
+            ),
         ];
-        let physical = self.physical.tables.get(&image.table);
-        let mut cells = self.stored_cells(image)?;
-        // Key columns are this store's: an upstream's keys for columns
-        // indexed here are kept, others dropped, and missing ones derived.
-        if let Some(physical) = physical {
-            cells.retain(|(name, _)| {
-                crate::large::keyed_by(name).is_none() || physical.key_of_key(name).is_some()
-            });
-            for key in &physical.keys {
-                if cells.iter().any(|(name, _)| *name == key.stored) {
-                    continue;
-                }
-                let keyed = crate::large::keyed_by(&key.stored).expect("a key column");
-                let Some((_, cell)) = cells.iter().find(|(name, _)| name == keyed) else {
-                    continue;
-                };
-                let cell = match self.key_cell(cell) {
-                    Ok(cell) => cell,
-                    // A replica may not hold the value's first chunks.
-                    Err(error) if crate::large::is_missing(&error) => Sql::Null,
-                    Err(error) => return Err(error),
-                };
-                cells.push((key.stored.clone(), cell));
-            }
-        }
-        for (column, value) in cells {
+        for (column, value) in self.stored_cells(image)? {
             names.push(quote(&column));
             values.push(value);
         }
@@ -3443,8 +3505,20 @@ impl Inner {
 /// Sync state lives in the store itself, written in the same SQLite
 /// transaction as the rows it describes, so a crash never separates a local
 /// write from its upload record, or a server commit from its dedupe entry.
+///
+/// A pending commit is stored a row per op, not as one encoded message:
+/// `_jazz_pending` keeps its `Commit` with the per-row lists left empty,
+/// `_jazz_pending_items` each op, delta, source, base and serializable read
+/// (by [`PendingPart`]), and `_jazz_pending_rows` the local rows it wrote.
+/// A row's values over the inline limit live in large-value storage, so a
+/// stored op is about the size of the row it writes, however large the
+/// commit: a store with a small value limit (a Durable Object's 2 MiB)
+/// keeps any commit whose rows it can hold, even one that travels in
+/// several frames.
 pub(crate) const SYNC_DDL: &str = "\
-    CREATE TABLE IF NOT EXISTS _jazz_pending (tx INTEGER PRIMARY KEY, commit_msg BLOB NOT NULL, rows BLOB NOT NULL);\
+    CREATE TABLE IF NOT EXISTS _jazz_pending (tx INTEGER PRIMARY KEY, header BLOB NOT NULL);\
+    CREATE TABLE IF NOT EXISTS _jazz_pending_items (tx INTEGER NOT NULL, part INTEGER NOT NULL, n INTEGER NOT NULL, item BLOB NOT NULL, PRIMARY KEY (tx, part, n));\
+    CREATE TABLE IF NOT EXISTS _jazz_pending_rows (tx INTEGER NOT NULL, n INTEGER NOT NULL, tbl TEXT NOT NULL, id BLOB NOT NULL, key BLOB NOT NULL, PRIMARY KEY (tx, n));\
     CREATE TABLE IF NOT EXISTS _jazz_meta (k TEXT PRIMARY KEY, v BLOB NOT NULL);\
     CREATE TABLE IF NOT EXISTS _jazz_authors (n INTEGER PRIMARY KEY, account BLOB NOT NULL, issuer TEXT NOT NULL, subject TEXT NOT NULL, UNIQUE (account, issuer, subject));\
     CREATE TABLE IF NOT EXISTS _jazz_applied (node BLOB NOT NULL, tx INTEGER NOT NULL, result BLOB NOT NULL, PRIMARY KEY (node, tx));\
@@ -3452,11 +3526,44 @@ pub(crate) const SYNC_DDL: &str = "\
     CREATE INDEX IF NOT EXISTS _jazz_settled_by_seq ON _jazz_settled (seq);\
     CREATE TABLE IF NOT EXISTS _jazz_nodes (node BLOB PRIMARY KEY, author INTEGER NOT NULL) WITHOUT ROWID;";
 
-/// The retry store for refused commits. It is created by the first refusal
-/// it keeps, not on open, so that opening an existing store without writing
-/// leaves the file byte-identical.
-const REJECTED_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_rejected \
-    (tx INTEGER PRIMARY KEY, commit_msg BLOB NOT NULL, error BLOB NOT NULL, serializable INTEGER NOT NULL)";
+/// The retry store for refused commits, with each one's ops in
+/// `_jazz_rejected_ops`. It is created by the first refusal it keeps, not
+/// on open, so that opening an existing store without writing leaves the
+/// file byte-identical.
+const REJECTED_DDL: [&str; 2] = [
+    "CREATE TABLE IF NOT EXISTS _jazz_rejected \
+     (tx INTEGER PRIMARY KEY, error BLOB NOT NULL, serializable INTEGER NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS _jazz_rejected_ops \
+     (tx INTEGER NOT NULL, n INTEGER NOT NULL, op BLOB NOT NULL, PRIMARY KEY (tx, n))",
+];
+
+/// Which list of a pending `Commit` a `_jazz_pending_items` row belongs to.
+#[derive(Clone, Copy)]
+enum PendingPart {
+    Op = 0,
+    Delta = 1,
+    Source = 2,
+    Base = 3,
+    Read = 4,
+}
+
+impl PendingPart {
+    fn from_stored(part: i64) -> Result<Self, Error> {
+        Ok(match part {
+            0 => Self::Op,
+            1 => Self::Delta,
+            2 => Self::Source,
+            3 => Self::Base,
+            4 => Self::Read,
+            _ => {
+                return Err(Error::new(
+                    ErrorCode::Storage,
+                    format!("unknown part {part} in _jazz_pending_items"),
+                ));
+            }
+        })
+    }
+}
 
 /// The schema version each pending commit was written under (see
 /// `persist_pending`). Created by the first pending commit, so that
@@ -3491,6 +3598,10 @@ type RowKey = (String, RowUuid, Vec<u8>);
 
 fn encode<T: Serialize>(value: &T) -> Vec<u8> {
     postcard::to_allocvec(value).expect("encode sync state")
+}
+
+fn decode_stored<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, Error> {
+    postcard::from_bytes(bytes).map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))
 }
 
 impl Inner {
@@ -3677,15 +3788,87 @@ impl Inner {
     }
 
     fn persist_pending(&self, tx: u64, commit: &SyncMessage, rows: &[RowKey]) -> Result<(), Error> {
-        let rows: Vec<(String, [u8; 16], Vec<u8>)> = rows
-            .iter()
-            .map(|(t, r, k)| (t.clone(), *r.0.as_bytes(), k.clone()))
-            .collect();
+        let SyncMessage::Commit {
+            node,
+            tx: sent_as,
+            kind,
+            ops,
+            author,
+            session,
+            expect: _,
+            deltas,
+            sources,
+            bases,
+            origin,
+        } = commit
+        else {
+            return Err(Error::new(ErrorCode::Storage, "only a Commit is pending"));
+        };
+        let (kind, reads) = match kind {
+            WireKind::Mergeable => (WireKind::Mergeable, &[][..]),
+            WireKind::Serializable {
+                snapshot,
+                reads,
+                own,
+            } => (
+                WireKind::Serializable {
+                    snapshot: *snapshot,
+                    reads: Vec::new(),
+                    own: own.clone(),
+                },
+                reads.as_slice(),
+            ),
+        };
+        // The rows it expects are not kept: across a reopen the server
+        // ships them.
+        let header = SyncMessage::Commit {
+            node: *node,
+            tx: *sent_as,
+            kind,
+            ops: Vec::new(),
+            author: author.clone(),
+            session: session.clone(),
+            expect: Vec::new(),
+            deltas: Vec::new(),
+            sources: Vec::new(),
+            bases: Vec::new(),
+            origin: *origin,
+        };
         self.exec(
-            "INSERT OR REPLACE INTO _jazz_pending (tx, commit_msg, rows) VALUES (?1, ?2, ?3)",
-            rusqlite::params![tx as i64, encode(commit), encode(&rows)],
+            "INSERT INTO _jazz_pending (tx, header) VALUES (?1, ?2)",
+            rusqlite::params![tx as i64, encode(&header)],
         )
         .map_err(storage)?;
+        let items = (ops.iter().map(encode).map(|item| (PendingPart::Op, item)))
+            .chain(deltas.iter().map(|item| (PendingPart::Delta, encode(item))))
+            .chain(
+                sources
+                    .iter()
+                    .map(|item| (PendingPart::Source, encode(item))),
+            )
+            .chain(bases.iter().map(|item| (PendingPart::Base, encode(item))))
+            .chain(reads.iter().map(|item| (PendingPart::Read, encode(item))));
+        let mut n = 0i64;
+        let mut last = None;
+        for (part, item) in items {
+            if last != Some(part as i64) {
+                last = Some(part as i64);
+                n = 0;
+            }
+            self.exec(
+                "INSERT INTO _jazz_pending_items (tx, part, n, item) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![tx as i64, part as i64, n, item],
+            )
+            .map_err(storage)?;
+            n += 1;
+        }
+        for (n, (table, row, key)) in rows.iter().enumerate() {
+            self.exec(
+                "INSERT INTO _jazz_pending_rows (tx, n, tbl, id, key) VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![tx as i64, n as i64, table, row.0.as_bytes().as_slice(), key],
+            )
+            .map_err(storage)?;
+        }
         // Which version's names its ops use, should the store reopen under
         // another one before it settles.
         self.exec(PENDING_VERSIONS_DDL, []).map_err(storage)?;
@@ -3757,11 +3940,21 @@ impl Inner {
     /// Move refused commit `tx`'s payload from the upload queue into the
     /// retry store.
     fn retain_rejected(&self, tx: u64, error: &Error, serializable: bool) -> Result<(), Error> {
-        self.exec(REJECTED_DDL, []).map_err(storage)?;
+        for ddl in REJECTED_DDL {
+            self.exec(ddl, []).map_err(storage)?;
+        }
         self.exec(
-            "INSERT OR REPLACE INTO _jazz_rejected (tx, commit_msg, error, serializable) \
-             SELECT tx, commit_msg, ?2, ?3 FROM _jazz_pending WHERE tx = ?1",
+            "INSERT OR REPLACE INTO _jazz_rejected (tx, error, serializable) VALUES (?1, ?2, ?3)",
             rusqlite::params![tx as i64, encode(&wire_error(error)), serializable],
+        )
+        .map_err(storage)?;
+        // A commit refused again replaces its ops whole.
+        self.exec("DELETE FROM _jazz_rejected_ops WHERE tx = ?1", [tx as i64])
+            .map_err(storage)?;
+        self.exec(
+            "INSERT INTO _jazz_rejected_ops (tx, n, op) \
+             SELECT tx, n, item FROM _jazz_pending_items WHERE tx = ?1 AND part = ?2",
+            rusqlite::params![tx as i64, PendingPart::Op as i64],
         )
         .map_err(storage)?;
         Ok(())
@@ -3774,32 +3967,34 @@ impl Inner {
         }
         let mut statement = self
             .conn
-            .prepare_cached(
-                "SELECT tx, commit_msg, error, serializable FROM _jazz_rejected ORDER BY tx",
-            )
+            .prepare_cached("SELECT tx, error, serializable FROM _jazz_rejected ORDER BY tx")
             .map_err(storage)?;
         let rows = statement
             .query_map([], |r| {
                 Ok((
                     r.get::<_, i64>(0)? as u64,
                     r.get::<_, Vec<u8>>(1)?,
-                    r.get::<_, Vec<u8>>(2)?,
-                    r.get::<_, bool>(3)?,
+                    r.get::<_, bool>(2)?,
                 ))
             })
             .map_err(storage)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(storage)?;
-        let decode = |e: postcard::Error| Error::new(ErrorCode::Storage, e.to_string());
+        drop(statement);
         rows.into_iter()
-            .map(|(seq, commit, error, serializable)| {
-                let ops = match postcard::from_bytes::<SyncMessage>(&commit).map_err(decode)? {
-                    SyncMessage::Commit { ops, .. } => ops,
-                    _ => Vec::new(),
-                };
+            .map(|(seq, error, serializable)| {
+                let mut statement = self
+                    .conn
+                    .prepare_cached("SELECT op FROM _jazz_rejected_ops WHERE tx = ?1 ORDER BY n")
+                    .map_err(storage)?;
+                let ops = statement
+                    .query_map([seq as i64], |r| r.get::<_, Vec<u8>>(0))
+                    .map_err(storage)?
+                    .map(|op| decode_stored(&op.map_err(storage)?))
+                    .collect::<Result<Vec<_>, _>>()?;
                 Ok(RejectedTransaction {
                     seq,
-                    error: from_wire_error(postcard::from_bytes(&error).map_err(decode)?),
+                    error: from_wire_error(decode_stored(&error)?),
                     serializable,
                     ops,
                 })
@@ -3812,8 +4007,10 @@ impl Inner {
         if !self.has_rejected_store()? {
             return Ok(());
         }
-        self.exec("DELETE FROM _jazz_rejected WHERE tx = ?1", [tx as i64])
-            .map_err(storage)?;
+        for table in ["_jazz_rejected", "_jazz_rejected_ops"] {
+            self.exec(&format!("DELETE FROM {table} WHERE tx = ?1"), [tx as i64])
+                .map_err(storage)?;
+        }
         Ok(())
     }
 
@@ -3828,8 +4025,10 @@ impl Inner {
     }
 
     fn forget_pending(&self, tx: u64) -> Result<(), Error> {
-        self.exec("DELETE FROM _jazz_pending WHERE tx = ?1", [tx as i64])
-            .map_err(storage)?;
+        for table in ["_jazz_pending", "_jazz_pending_items", "_jazz_pending_rows"] {
+            self.exec(&format!("DELETE FROM {table} WHERE tx = ?1"), [tx as i64])
+                .map_err(storage)?;
+        }
         if self.has_table("_jazz_pending_versions")? {
             self.exec(
                 "DELETE FROM _jazz_pending_versions WHERE tx = ?1",
@@ -3843,33 +4042,87 @@ impl Inner {
     /// The rows pending commits recorded in stored table `from`, which is
     /// stored as `to` now.
     pub(crate) fn rename_pending_rows(&self, from: &str, to: &str) -> Result<(), Error> {
-        let stored: Vec<(i64, Vec<u8>)> = self
+        self.exec(
+            "UPDATE _jazz_pending_rows SET tbl = ?2 WHERE tbl = ?1",
+            [from, to],
+        )
+        .map_err(storage)?;
+        Ok(())
+    }
+
+    /// Pending commit `tx` as `persist_pending` stored it: its header
+    /// with its lists filled from `_jazz_pending_items`.
+    fn pending_commit(&self, tx: u64, header: &[u8]) -> Result<SyncMessage, Error> {
+        let mut commit: SyncMessage = decode_stored(header)?;
+        let SyncMessage::Commit {
+            kind,
+            ops,
+            deltas,
+            sources,
+            bases,
+            ..
+        } = &mut commit
+        else {
+            return Err(Error::new(
+                ErrorCode::Storage,
+                "a pending upload is not a Commit",
+            ));
+        };
+        let mut statement = self
             .conn
-            .prepare("SELECT tx, rows FROM _jazz_pending")
-            .and_then(|mut statement| {
-                statement
-                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-                    .collect::<Result<_, _>>()
-            })
-            .map_err(storage)?;
-        for (tx, rows) in stored {
-            let mut rows: Vec<(String, [u8; 16], Vec<u8>)> = postcard::from_bytes(&rows)
-                .map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?;
-            if !rows.iter().any(|(table, ..)| table == from) {
-                continue;
-            }
-            for row in &mut rows {
-                if row.0 == from {
-                    row.0 = to.to_owned();
-                }
-            }
-            self.exec(
-                "UPDATE _jazz_pending SET rows = ?2 WHERE tx = ?1",
-                rusqlite::params![tx, encode(&rows)],
+            .prepare_cached(
+                "SELECT part, item FROM _jazz_pending_items WHERE tx = ?1 ORDER BY part, n",
             )
             .map_err(storage)?;
+        let items = statement
+            .query_map([tx as i64], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?))
+            })
+            .map_err(storage)?;
+        for item in items {
+            let (part, item) = item.map_err(storage)?;
+            match PendingPart::from_stored(part)? {
+                PendingPart::Op => ops.push(decode_stored(&item)?),
+                PendingPart::Delta => deltas.push(decode_stored(&item)?),
+                PendingPart::Source => sources.push(decode_stored(&item)?),
+                PendingPart::Base => bases.push(decode_stored(&item)?),
+                PendingPart::Read => match kind {
+                    WireKind::Serializable { reads, .. } => reads.push(decode_stored(&item)?),
+                    WireKind::Mergeable => {
+                        return Err(Error::new(
+                            ErrorCode::Storage,
+                            "a mergeable pending commit has reads",
+                        ));
+                    }
+                },
+            }
         }
-        Ok(())
+        Ok(commit)
+    }
+
+    /// The local rows pending commit `tx` wrote, in order.
+    fn pending_rows(&self, tx: u64) -> Result<Vec<RowKey>, Error> {
+        let mut statement = self
+            .conn
+            .prepare_cached("SELECT tbl, id, key FROM _jazz_pending_rows WHERE tx = ?1 ORDER BY n")
+            .map_err(storage)?;
+        let rows = statement
+            .query_map([tx as i64], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, Vec<u8>>(2)?,
+                ))
+            })
+            .map_err(storage)?;
+        rows.map(|row| {
+            let (table, id, key) = row.map_err(storage)?;
+            let id: [u8; 16] = id
+                .try_into()
+                .map_err(|_| Error::new(ErrorCode::Storage, "bad row id in _jazz_pending_rows"))?;
+            Ok((table, RowUuid::from_bytes(id), key))
+        })
+        .collect()
     }
 
     fn has_table(&self, name: &str) -> Result<bool, Error> {
@@ -4379,31 +4632,20 @@ impl Inner {
         client.persisted_known = client.known;
         let mut statement = self
             .conn
-            .prepare("SELECT tx, commit_msg, rows FROM _jazz_pending ORDER BY tx")
+            .prepare("SELECT tx, header FROM _jazz_pending ORDER BY tx")
             .map_err(storage)?;
         let pending = statement
             .query_map([], |r| {
-                Ok((
-                    r.get::<_, i64>(0)? as u64,
-                    r.get::<_, Vec<u8>>(1)?,
-                    r.get::<_, Vec<u8>>(2)?,
-                ))
+                Ok((r.get::<_, i64>(0)? as u64, r.get::<_, Vec<u8>>(1)?))
             })
             .map_err(storage)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(storage)?;
         drop(statement);
         let versions = self.pending_versions()?;
-        for (tx, commit, rows) in pending {
-            let mut commit: SyncMessage = postcard::from_bytes(&commit)
-                .map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?;
-            // The rows it expected are not kept across a reopen: the
-            // server ships them.
-            if let SyncMessage::Commit { expect, .. } = &mut commit {
-                expect.clear();
-            }
-            let rows: Vec<(String, [u8; 16], Vec<u8>)> = postcard::from_bytes(&rows)
-                .map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?;
+        for (tx, header) in pending {
+            let commit = self.pending_commit(tx, &header)?;
+            let rows = self.pending_rows(tx)?;
             let SyncMessage::Commit {
                 ops,
                 author,
@@ -4431,10 +4673,7 @@ impl Inner {
             client.pending.push(Pending {
                 tx,
                 ops,
-                rows: rows
-                    .into_iter()
-                    .map(|(t, r, k)| (t, RowUuid::from_bytes(r), k))
-                    .collect(),
+                rows,
                 expected: Vec::new(),
             });
             client.unsent.push(commit);
@@ -4505,6 +4744,7 @@ impl Client {
             unsent: Vec::new(),
             fates: HashMap::new(),
             local_fates: HashSet::new(),
+            refused: Vec::new(),
             stored: HashSet::new(),
             baselines: HashMap::new(),
             known: 0,
@@ -4552,14 +4792,14 @@ impl Db {
         let resubscribe: Vec<SyncMessage> = client
             .remote
             .values_mut()
-            .map(|r| SyncMessage::Subscribe {
+            .map(|r| SyncMessage::Read {
                 id: r.id,
-                query: r.query.clone(),
+                query: Box::new(r.query.clone()),
                 binding: r.binding.clone(),
-                since: r.through,
                 include_deleted: r.include_deleted,
                 tier: r.reach.tier,
                 wait: r.reach.wait,
+                span: ReadSpan::Live { since: r.through },
             })
             .collect();
         // Commits, their chunk pushes and chunk requests a full queue held
@@ -4567,8 +4807,10 @@ impl Db {
         client.outbox.retain(|m| {
             !matches!(
                 m,
-                SyncMessage::Subscribe { .. }
-                    | SyncMessage::Schema { .. }
+                SyncMessage::Read {
+                    span: ReadSpan::Live { .. },
+                    ..
+                } | SyncMessage::Schema { .. }
                     | SyncMessage::Holds { .. }
                     | SyncMessage::Hold { .. }
                     | SyncMessage::Commit { .. }
@@ -4611,7 +4853,7 @@ impl Db {
         let relayed: HashSet<u64> = client.relayed_fetches.iter().map(|f| f.upstream).collect();
         client
             .outbox
-            .retain(|m| !matches!(m, SyncMessage::Fetch { id, .. } if relayed.contains(id)));
+            .retain(|m| !matches!(m, SyncMessage::Read { id, .. } if relayed.contains(id)));
         client.outbox.extend(reask);
         // Sent-but-unsettled commits go first, in their original order.
         let mut resend = client.sent.clone();
@@ -5023,14 +5265,14 @@ impl Db {
         // A replica that cannot read its watermark opens the query fresh.
         let through = inner.watermark(&watermark).ok().flatten();
         let client = inner.client.as_mut()?;
-        client.outbox.push(SyncMessage::Subscribe {
+        client.outbox.push(SyncMessage::Read {
             id,
-            query: query.clone().into_owned(),
+            query: Box::new(query.clone().into_owned()),
             binding: prepared.binding.clone(),
-            since: through,
             include_deleted,
             tier: reach.tier,
             wait: reach.wait,
+            span: ReadSpan::Live { since: through },
         });
         client.remote.insert(
             key.clone(),
@@ -5187,15 +5429,17 @@ impl Db {
                 return Ok(None);
             }
         }
-        let message = |id: u64| SyncMessage::Fetch {
+        let message = |id: u64| SyncMessage::Read {
             id,
-            query: remote_query(&prepared.query).into_owned(),
+            query: Box::new(remote_query(&prepared.query).into_owned()),
             binding: prepared.binding.clone(),
-            at,
             include_deleted,
             tier,
             wait: reach.wait,
-            view: view.clone(),
+            span: ReadSpan::Once {
+                at,
+                view: Box::new(view.clone()),
+            },
         };
         // The request in flight, and the connection it went out on.
         let mut asked: Option<(u64, u64)> = None;
@@ -5610,6 +5854,7 @@ impl Db {
                 }
                 failed = transport.take_failure().is_some();
             }
+            inbound.append(&mut client.refused);
             // An upstream that sent what this client cannot decode is
             // dropped like a lost link; what arrived before it applies.
             if failed {
@@ -5645,7 +5890,12 @@ impl Db {
                 match message {
                     // Rows and evictions name stored tables and columns, as
                     // this store mirrors its upstream's.
-                    SyncMessage::Rows { images } => {
+                    SyncMessage::Rows { images, origins } => {
+                        // A history version is listed once its transaction
+                        // is known.
+                        for (seq, node, tx) in origins {
+                            inner.record_settled(node, tx, Some(seq))?;
+                        }
                         for image in images {
                             let Some(mut image) = inner.stored_image(image) else {
                                 continue;
@@ -5693,11 +5943,18 @@ impl Db {
                     SyncMessage::Settled {
                         id,
                         through,
-                        window,
+                        listing,
                         global,
                     } => {
                         let client = inner.client.as_mut().expect("client");
                         client.known = client.known.max(through);
+                        // A one-shot read's answer.
+                        if let Some(slot) = client.answers.get_mut(&id) {
+                            *slot = Some(Ok((through, listing.unwrap_or_default())));
+                            client.relay_ready |=
+                                client.relayed_fetches.iter().any(|f| f.upstream == id);
+                            continue;
+                        }
                         let Some(key) = client.remote_ids.get(&id).cloned() else {
                             continue;
                         };
@@ -5713,7 +5970,7 @@ impl Db {
                         }
                         let watermark = remote.watermark;
                         // Cached rows the server's result lacks are stale.
-                        if let Some(ids) = window {
+                        if let Some(ids) = listing {
                             answered_remotes.push((
                                 remote.query.clone(),
                                 remote.binding.clone(),
@@ -5727,26 +5984,12 @@ impl Db {
                             inner.store_watermark(&watermark, through)?;
                         }
                     }
-                    SyncMessage::Origins { commits } => {
-                        for (seq, node, tx) in commits {
-                            inner.record_settled(node, tx, Some(seq))?;
-                        }
-                    }
                     SyncMessage::Advice { id, advice } => {
                         let client = inner.client.as_mut().expect("client");
                         // Late answers to cancelled requests are dropped.
                         if let Some(slot @ None) = client.advice.get_mut(&id) {
                             *slot = Some(advice);
                         }
-                    }
-                    SyncMessage::Answer { id, through, rows } => {
-                        let client = inner.client.as_mut().expect("client");
-                        client.known = client.known.max(through);
-                        if let Some(slot) = client.answers.get_mut(&id) {
-                            *slot = Some(Ok((through, rows)));
-                        }
-                        client.relay_ready |=
-                            client.relayed_fetches.iter().any(|f| f.upstream == id);
                     }
                     SyncMessage::SchemaAdmission { admitted } => {
                         inner.client.as_mut().expect("client").unadmitted = !admitted;
@@ -5924,7 +6167,7 @@ impl Db {
         // writer's own earlier writes however its ticks are sliced.
         let first_read = out
             .iter()
-            .position(|m| matches!(m, SyncMessage::Subscribe { .. } | SyncMessage::Fetch { .. }))
+            .position(|m| matches!(m, SyncMessage::Read { .. }))
             .unwrap_or(out.len());
         let reads = out.split_off(first_read);
         let wanted: Vec<ChunkRequest> = std::mem::take(&mut client.wanted)
@@ -5952,8 +6195,42 @@ impl Db {
         }
         let current = *inner.owner_version.as_bytes();
         let waiting = commits.split_off(pushes.len());
+        let trusted = inner.identity.author == AuthorSubject::SYSTEM;
         let client = inner.client.as_mut().expect("client");
         client.unsent = waiting;
+        // An untrusted session's server joins no message over its budget
+        // and would end the session on every resend: a commit that large is
+        // refused here, for good, as a rejected fate.
+        if !trusted {
+            let limit = jazz_protocol::protocol_limits::MAX_UNTRUSTED_MESSAGE_BYTES;
+            let mut kept = Vec::with_capacity(commits.len());
+            for (commit, push) in commits.into_iter().zip(pushes) {
+                let size = postcard::serialize_with_flavor(
+                    &commit,
+                    postcard::ser_flavors::Size::default(),
+                )
+                .unwrap_or(usize::MAX);
+                match &commit {
+                    SyncMessage::Commit { tx, .. } if size > limit => {
+                        client.refused.push(SyncMessage::Fate {
+                            tx: *tx,
+                            through: client.known,
+                            result: Err(WireError::Rejected {
+                                reason: None,
+                                message: format!(
+                                    "a commit of {size} bytes is over the {limit} bytes one \
+                                     message may carry: not supported yet"
+                                ),
+                            }),
+                            held: Vec::new(),
+                            global: false,
+                        });
+                    }
+                    _ => kept.push((commit, push)),
+                }
+            }
+            (commits, pushes) = kept.into_iter().unzip();
+        }
         let transport = client.transport.as_mut().expect("transport");
         for commit in &commits {
             if !client.sent.iter().any(|m| matches!((m, commit), (SyncMessage::Commit { tx: a, .. }, SyncMessage::Commit { tx: b, .. }) if a == b)) {
@@ -6000,7 +6277,12 @@ impl Db {
                 Err(e) => return Err(Error::new(ErrorCode::Storage, format!("{e:?}"))),
             }
         }
-        Ok(())
+        // With nothing new to send, the rest of a split message still goes
+        // out as the queue drains.
+        match transport.flush() {
+            Ok(()) | Err(TransportError::Backpressure) => Ok(()),
+            Err(e) => Err(Error::new(ErrorCode::Storage, format!("{e:?}"))),
+        }
     }
 
     /// Push a settled marker to subscriptions whose remote answered without
@@ -6199,7 +6481,7 @@ impl Inner {
                 continue;
             }
             let answer = client.answers.remove(&fetch.upstream).flatten();
-            let SyncMessage::Fetch { id, .. } = &fetch.message else {
+            let SyncMessage::Read { id, .. } = &fetch.message else {
                 continue;
             };
             match answer {
@@ -6210,20 +6492,19 @@ impl Inner {
                     message: error.message,
                 }),
                 Some(Ok((through, listed))) => {
-                    if let SyncMessage::Fetch {
+                    if let SyncMessage::Read {
                         query,
                         binding,
-                        at: None,
                         include_deleted,
-                        view,
+                        span: ReadSpan::Once { at: None, view },
                         ..
                     } = &fetch.ask
                     {
                         answers.push((
-                            query.clone(),
+                            (**query).clone(),
                             binding.clone(),
                             *include_deleted,
-                            view.clone(),
+                            (**view).clone(),
                             listed,
                             through,
                         ));
@@ -6601,6 +6882,11 @@ impl Db {
             if !session.open {
                 return Ok(());
             }
+            // The rest of a split message a full queue held back goes out
+            // as it drains, ahead of anything this tick sends.
+            if let Err(TransportError::Failed(error)) = session.transport.flush() {
+                return Err(Error::new(ErrorCode::Protocol, error));
+            }
             let mut inbound = std::mem::take(&mut session.backlog);
             inbound.extend(std::iter::from_fn(|| session.transport.try_recv()));
             let failed = session.transport.take_failure().is_some();
@@ -6653,7 +6939,7 @@ impl Db {
                 held.push_back(message);
                 continue;
             }
-            if let SyncMessage::Subscribe { id, .. } | SyncMessage::Fetch { id, .. } = &message {
+            if let SyncMessage::Read { id, .. } = &message {
                 self.inner.borrow_mut().sessions[index]
                     .backlog_reads
                     .1
@@ -6698,10 +6984,17 @@ impl Db {
             // A read the server cannot serve is refused to the client,
             // which would otherwise wait on it.
             let read = match &message {
-                SyncMessage::Subscribe { id, .. } | SyncMessage::Fetch { id, .. } => Some(*id),
+                SyncMessage::Read { id, .. } => Some(*id),
                 _ => None,
             };
-            let fetch = matches!(message, SyncMessage::Fetch { .. }).then(|| message.clone());
+            let fetch = matches!(
+                message,
+                SyncMessage::Read {
+                    span: ReadSpan::Once { .. },
+                    ..
+                }
+            )
+            .then(|| message.clone());
             // A message served while the chunk store fetches the nodes it
             // needs is served again once they arrive.
             let again = (fetch.is_none() && self.inner.borrow().chunks.store().is_some())
@@ -6769,10 +7062,11 @@ impl Db {
             SyncMessage::Advise { .. } => true,
             // A read frozen at a snapshot may name the held commits
             // themselves, which the server cannot resolve until they apply.
-            SyncMessage::Fetch { view, .. } if frozen_at(view).is_some() => {
-                barrier.tables.is_some() && !barrier.commits
-            }
-            SyncMessage::Subscribe { .. } | SyncMessage::Fetch { .. } => {
+            SyncMessage::Read {
+                span: ReadSpan::Once { view, .. },
+                ..
+            } if frozen_at(view).is_some() => barrier.tables.is_some() && !barrier.commits,
+            SyncMessage::Read { .. } => {
                 let Some(written) = &barrier.tables else {
                     return false;
                 };
@@ -6787,7 +7081,7 @@ impl Db {
     fn note_held(&self, index: usize, barrier: &mut HeldWrites, message: &SyncMessage) {
         match message {
             SyncMessage::PushChunks { .. } | SyncMessage::ChunkRequests { .. } => {}
-            SyncMessage::Subscribe { id, .. } | SyncMessage::Fetch { id, .. } => {
+            SyncMessage::Read { id, .. } => {
                 barrier.reads.insert(*id);
             }
             SyncMessage::Unsubscribe { .. } | SyncMessage::Advise { .. } => {}
@@ -6819,12 +7113,9 @@ impl Db {
     /// that session (its policies and claims); `None` when they cannot be
     /// told, so the read is not let ahead of anything.
     fn read_dependencies(&self, index: usize, message: &SyncMessage) -> Option<BTreeSet<String>> {
-        let (SyncMessage::Subscribe {
+        let SyncMessage::Read {
             id, query, binding, ..
-        }
-        | SyncMessage::Fetch {
-            id, query, binding, ..
-        }) = message
+        } = message
         else {
             return None;
         };
@@ -7110,6 +7401,7 @@ impl Db {
                         added,
                         updated,
                         removed,
+                        reset,
                         ..
                     } = event
                     else {
@@ -7132,9 +7424,12 @@ impl Db {
                         // of `since` that was in the result then. A row whose
                         // membership inputs changed may have entered the
                         // result without changing: its seq alone cannot say,
-                        // so the result as of `since` does.
+                        // so the result as of `since` does. Only the opening
+                        // snapshot is judged so: a row a later commit in
+                        // this tick added joined after that judgement.
                         let unchanged = resume.as_ref().is_some_and(|resume| {
-                            history.is_none()
+                            reset
+                                && history.is_none()
                                 && row.seq <= resume.since
                                 && resume
                                     .prior
@@ -7280,7 +7575,7 @@ impl Db {
                     settled.push(SyncMessage::Settled {
                         id,
                         through,
-                        window,
+                        listing: window,
                         global,
                     });
                     // The settled opening listed the result.
@@ -7362,11 +7657,11 @@ impl Db {
             if let Some(catalogue) = inner.catalogue_for(index) {
                 out.push(catalogue);
             }
-            if !history_seqs.is_empty() {
-                out.push(SyncMessage::Origins {
-                    commits: inner.origins(&history_seqs)?,
-                });
-            }
+            let origins = if history_seqs.is_empty() {
+                Vec::new()
+            } else {
+                inner.origins(&history_seqs)?
+            };
             let session = &mut inner.sessions[index];
             session.watch = watch;
             session.held = held_rows;
@@ -7417,9 +7712,7 @@ impl Db {
                     }
                 }
             }
-            if !images.is_empty() {
-                out.push(SyncMessage::Rows { images });
-            }
+            out.extend(rows_messages(images, origins, ROWS_MESSAGE_BYTES));
             out.extend(evictions);
             out.extend(std::mem::take(&mut session.outbox));
             out.extend(settled);
@@ -7451,7 +7744,7 @@ impl Db {
             if !own.is_empty() {
                 let mut shipped = HashSet::new();
                 for message in &mut out {
-                    let SyncMessage::Rows { images } = message else {
+                    let SyncMessage::Rows { images, .. } = message else {
                         continue;
                     };
                     let mut bases = Vec::new();
@@ -7498,16 +7791,17 @@ impl Db {
                         }
                     }
                 }
-                out.retain(
-                    |message| !matches!(message, SyncMessage::Rows { images } if images.is_empty()),
-                );
+                out.retain(|message| {
+                    !matches!(message, SyncMessage::Rows { images, origins }
+                            if images.is_empty() && origins.is_empty())
+                });
             }
             // Chunked cells go as deltas over the version of their row the
             // replica holds (SPEC 19.8).
             let mut shipped = std::mem::take(&mut inner.sessions[index].shipped);
             for message in &mut out {
                 match message {
-                    SyncMessage::Rows { images } => {
+                    SyncMessage::Rows { images, .. } => {
                         for image in images.iter_mut() {
                             inner.ship_deltas(&mut shipped, image)?;
                         }
@@ -7680,14 +7974,14 @@ impl Db {
                 session.version = Some(crate::ids::SchemaVersionId::from_bytes(version));
                 session.schema = None;
             }
-            SyncMessage::Subscribe {
+            SyncMessage::Read {
                 id,
                 query,
                 binding,
-                since,
                 include_deleted,
                 tier,
                 wait,
+                span: ReadSpan::Live { since },
             } => {
                 let local = tier == ReadTier::LocalOnly;
                 let prepared = with_claims(db.prepare_query_bound(&query, binding)?);
@@ -7831,15 +8125,14 @@ impl Db {
                     .outbox
                     .push(SyncMessage::Advice { id, advice });
             }
-            SyncMessage::Fetch {
+            SyncMessage::Read {
                 id,
                 query,
                 binding,
-                at,
                 include_deleted,
                 tier,
                 wait,
-                view,
+                span: ReadSpan::Once { at, view },
             } => {
                 // A relay asks its upstream first for a Remote read, then
                 // serves it from its store once the answer's rows are in
@@ -7872,15 +8165,17 @@ impl Db {
                     let client = inner.client.as_mut().expect("client");
                     let upstream = client.next_id;
                     client.next_id += 1;
-                    client.outbox.push(SyncMessage::Fetch {
+                    client.outbox.push(SyncMessage::Read {
                         id: upstream,
-                        query: remote_query(&prepared.query).into_owned(),
+                        query: Box::new(remote_query(&prepared.query).into_owned()),
                         binding: prepared.binding.clone(),
-                        at,
                         include_deleted,
                         tier: ReadTier::Remote,
                         wait: None,
-                        view: view.clone(),
+                        span: ReadSpan::Once {
+                            at,
+                            view: view.clone(),
+                        },
                     });
                 }
                 if let Some(strict) = relay {
@@ -7890,15 +8185,17 @@ impl Db {
                     let upstream = client.next_id;
                     client.next_id += 1;
                     client.answers.insert(upstream, None);
-                    let ask = SyncMessage::Fetch {
+                    let ask = SyncMessage::Read {
                         id: upstream,
-                        query: remote_query(&prepared.query).into_owned(),
+                        query: Box::new(remote_query(&prepared.query).into_owned()),
                         binding: prepared.binding.clone(),
-                        at,
                         include_deleted,
                         tier: ReadTier::Remote,
                         wait: None,
-                        view: view.clone(),
+                        span: ReadSpan::Once {
+                            at,
+                            view: view.clone(),
+                        },
                     };
                     client.outbox.push(ask.clone());
                     client.relayed_fetches.push(RelayedFetch {
@@ -7907,15 +8204,14 @@ impl Db {
                         ask,
                         strict,
                         until: wait.and_then(wait_until),
-                        message: SyncMessage::Fetch {
+                        message: SyncMessage::Read {
                             id,
                             query,
                             binding,
-                            at,
                             include_deleted,
                             tier,
                             wait,
-                            view,
+                            span: ReadSpan::Once { at, view },
                         },
                     });
                     return Ok(());
@@ -7944,7 +8240,7 @@ impl Db {
                 }
                 let opts = ReadOpts {
                     read_view: crate::protocol::ReadViewSpec {
-                        source: view,
+                        source: *view,
                         include_deleted,
                     },
                     ..ReadOpts::default()
@@ -8042,19 +8338,18 @@ impl Db {
                 let mut origins = inner.origins(&seqs)?;
                 origins.extend(named);
                 let through = at.unwrap_or(inner.served_through());
+                let authority = inner.client.is_none();
                 let session = &mut inner.sessions[index];
-                if !origins.is_empty() {
-                    session
-                        .outbox
-                        .push(SyncMessage::Origins { commits: origins });
-                }
-                if !images.is_empty() {
-                    session.outbox.push(SyncMessage::Rows { images });
-                }
-                session.outbox.push(SyncMessage::Answer {
+                session
+                    .outbox
+                    .extend(rows_messages(images, origins, ROWS_MESSAGE_BYTES));
+                session.outbox.push(SyncMessage::Settled {
                     id,
                     through,
-                    rows: rows.iter().map(|r| *r.id.0.as_bytes()).collect(),
+                    listing: Some(rows.iter().map(|r| *r.id.0.as_bytes()).collect()),
+                    // A strict read at a relay is served once its upstream
+                    // answered, from the settled rows alone.
+                    global: authority || strict,
                 });
             }
             SyncMessage::Commit {
@@ -8630,7 +8925,7 @@ impl Db {
             inner.merging = true;
             inner.possession = Some(possession);
             inner.merge_bases = std::mem::take(&mut built);
-            inner.text_in.borrow_mut().clear();
+            inner.as_sent.borrow_mut().clear();
             let applied = ops
                 .iter()
                 .try_for_each(|op| inner.apply_as(op, who, seq).map(drop))
@@ -8640,6 +8935,7 @@ impl Db {
             inner.merging = false;
             built = std::mem::take(&mut inner.merge_bases);
             if let Err(error) = applied {
+                inner.as_sent.borrow_mut().clear();
                 inner.abandon_checks();
                 inner.changed.borrow_mut().truncate(mark);
                 end_savepoint(&inner.conn, "upload", false).map_err(|e| (e, Vec::new()))?;
@@ -8680,7 +8976,7 @@ impl Db {
             if !relay {
                 let inner = self.inner.borrow();
                 inner.record_bases(&ops, &by_row, &built, seq, &rows)?;
-                inner.record_text_in(seq, origin.0, &built, &rows)?;
+                inner.record_as_sent(seq, origin.0, &built, &rows)?;
             }
             Ok(rows)
         });
@@ -8693,6 +8989,7 @@ impl Db {
                 Ok(rows)
             }
             Err(error) => {
+                inner.as_sent.borrow_mut().clear();
                 inner.changed.borrow_mut().truncate(mark);
                 end_savepoint(&inner.conn, "upload", false).map_err(|e| (e, Vec::new()))?;
                 inner.seq = seq - 1;
@@ -9050,5 +9347,93 @@ impl Db {
                 .collect::<BTreeMap<_, _>>(),
             client.transport.is_some(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn image(id: u8, seq: u64, body: usize) -> Image {
+        Image {
+            table: "notes".to_owned(),
+            id: [id; 16],
+            key: Vec::new(),
+            seq,
+            deleted: false,
+            content: true,
+            cells: vec![("body".to_owned(), Cell::Blob(vec![0; body]))],
+        }
+    }
+
+    fn shipped(messages: &[SyncMessage]) -> Vec<Vec<(u8, u64)>> {
+        messages
+            .iter()
+            .map(|message| match message {
+                SyncMessage::Rows { images, .. } => images
+                    .iter()
+                    .map(|image| (image.id[0], image.seq))
+                    .collect(),
+                other => panic!("not Rows: {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rows_over_the_bound_split_between_commits_in_seq_order() {
+        let images = vec![
+            image(1, 3, 100),
+            image(2, 1, 100),
+            image(3, 3, 100),
+            image(4, 2, 100),
+        ];
+        let origins = vec![(1, [9; 16], 1)];
+        let messages = rows_messages(images, origins.clone(), 300);
+        // seq 1 and 2 fit together; seq 3's two versions stay together.
+        assert_eq!(
+            shipped(&messages),
+            [vec![(2, 1), (4, 2)], vec![(1, 3), (3, 3)]]
+        );
+        let SyncMessage::Rows { origins: first, .. } = &messages[0] else {
+            unreachable!()
+        };
+        assert_eq!(first, &origins, "the origins go with the first part");
+    }
+
+    #[test]
+    fn one_commit_over_the_bound_still_travels_whole() {
+        let images = vec![image(1, 5, 300), image(2, 5, 300)];
+        assert_eq!(
+            shipped(&rows_messages(images, Vec::new(), 250)),
+            [vec![(1, 5), (2, 5)]]
+        );
+    }
+
+    #[test]
+    fn rows_under_the_bound_keep_their_order_in_one_message() {
+        let images = vec![image(1, 3, 10), image(2, 1, 10)];
+        assert_eq!(
+            shipped(&rows_messages(images, Vec::new(), 250)),
+            [vec![(1, 3), (2, 1)]]
+        );
+        assert!(rows_messages(Vec::new(), Vec::new(), 250).is_empty());
+    }
+
+    #[test]
+    fn a_joiner_refuses_a_split_message_over_its_ceiling() {
+        let bytes = postcard::to_allocvec(&SyncMessage::Unsubscribe { id: 7 }).unwrap();
+        let parts = [
+            [&[PART], &bytes[..1]].concat(),
+            [&[LAST_PART], &bytes[1..]].concat(),
+        ];
+        let mut joiner = FrameJoiner::with_ceiling(bytes.len());
+        assert!(joiner.push(&parts[0]).unwrap().is_none());
+        assert!(matches!(
+            joiner.push(&parts[1]).unwrap(),
+            Some(SyncMessage::Unsubscribe { id: 7 })
+        ));
+        let mut joiner = FrameJoiner::with_ceiling(bytes.len() - 1);
+        assert!(joiner.push(&parts[0]).unwrap().is_none());
+        assert!(joiner.push(&parts[1]).is_err());
     }
 }

@@ -1,6 +1,7 @@
-//! A small ordered key-value store for the server's own administrative
-//! state (the schema catalogue and the account journal): one host table in
-//! the app's store file (see [`jazz::host`]).
+//! The server's own administrative state in the app's store file (see
+//! [`jazz::host`]): a small ordered key-value store for the schema
+//! catalogue, and plain SQL for host tables with columns of their own (the
+//! account registry).
 //!
 //! Writes run on the store's thread, on the one connection the runtime's
 //! rows use too, and wait for it (at most the one runtime job or tick slice
@@ -12,26 +13,18 @@
 use std::sync::{Arc, mpsc};
 
 use jazz::host::{HostPair, HostReader, HostTable, HostTables};
+use rusqlite::Connection;
 
 /// Errors are reported as text: callers wrap them in their own error types.
 pub(crate) type KvResult<T> = Result<T, String>;
 
 /// The server catalogue's host table.
 pub(crate) const CATALOGUE: HostTable = HostTable::new("catalogue");
-/// The account journal's host table.
-pub(crate) const ACCOUNTS: HostTable = HostTable::new("accounts");
 
 pub(crate) struct HostKv {
     table: HostTable,
     reader: Arc<HostReader>,
     store: crate::runtime::HostSender,
-    /// Tests: the next conditional write commits and then reports an error,
-    /// the ambiguous outcome a failed flush has.
-    #[cfg(test)]
-    fail_next_write: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    /// Tests: the next read fails.
-    #[cfg(test)]
-    fail_next_read: std::sync::atomic::AtomicBool,
 }
 
 impl HostKv {
@@ -44,10 +37,6 @@ impl HostKv {
             table,
             reader,
             store,
-            #[cfg(test)]
-            fail_next_write: Default::default(),
-            #[cfg(test)]
-            fail_next_read: Default::default(),
         }
     }
 
@@ -66,45 +55,11 @@ impl HostKv {
             .map_err(|_| "server store closed before answering".to_owned())?
     }
 
+    #[cfg(test)]
     pub(crate) fn get(&self, key: &[u8]) -> KvResult<Option<Vec<u8>>> {
-        #[cfg(test)]
-        if self
-            .fail_next_read
-            .swap(false, std::sync::atomic::Ordering::SeqCst)
-        {
-            return Err("injected read failure".to_owned());
-        }
         self.reader
             .get(self.table, key)
             .map_err(|error| error.to_string())
-    }
-
-    /// Write `value` unless `key` exists; returns the existing value if so.
-    pub(crate) fn put_if_absent(&self, key: &[u8], value: &[u8]) -> KvResult<Option<Vec<u8>>> {
-        let (key, value) = (key.to_vec(), value.to_vec());
-        let existing =
-            self.call(move |tables, table| tables.host_put_if_absent(table, &key, &value))?;
-        #[cfg(test)]
-        if self
-            .fail_next_write
-            .swap(false, std::sync::atomic::Ordering::SeqCst)
-        {
-            return Err("injected failure after the write committed".to_owned());
-        }
-        Ok(existing)
-    }
-
-    /// Tests: fail the next read.
-    #[cfg(test)]
-    pub(crate) fn fail_next_read(&self) {
-        self.fail_next_read
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// Tests: the switch that fails the next conditional write.
-    #[cfg(test)]
-    pub(crate) fn failpoint(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
-        std::sync::Arc::clone(&self.fail_next_write)
     }
 
     /// Write every pair in one transaction: all or none.
@@ -124,6 +79,98 @@ impl HostKv {
         self.reader
             .prefix(self.table, prefix)
             .map_err(|error| error.to_string())
+    }
+}
+
+/// SQL on the host tables a server shapes itself. Writes run like
+/// [`HostKv`] writes: on the store's thread, in one savepoint, durable when
+/// they return. Reads run on the read-only connection.
+pub(crate) struct HostSql {
+    reader: Arc<HostReader>,
+    store: crate::runtime::HostSender,
+    /// Tests: the next write commits and then reports an error, the
+    /// ambiguous outcome a failed flush has.
+    #[cfg(test)]
+    fail_next_write: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Tests: the next read fails.
+    #[cfg(test)]
+    fail_next_read: std::sync::atomic::AtomicBool,
+}
+
+impl HostSql {
+    pub(crate) fn new(reader: Arc<HostReader>, store: crate::runtime::HostSender) -> Self {
+        Self {
+            reader,
+            store,
+            #[cfg(test)]
+            fail_next_write: Default::default(),
+            #[cfg(test)]
+            fail_next_read: Default::default(),
+        }
+    }
+
+    /// Run `f` on the read-only connection: it sees what was committed
+    /// when it began.
+    pub(crate) fn read<T>(
+        &self,
+        f: impl FnOnce(&Connection) -> Result<T, jazz::db::Error>,
+    ) -> KvResult<T> {
+        #[cfg(test)]
+        if self
+            .fail_next_read
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err("injected read failure".to_owned());
+        }
+        self.reader.sql(f).map_err(|error| error.to_string())
+    }
+
+    /// Run `f` on the store's thread in one savepoint and wait: what it
+    /// wrote is durable when this returns `Ok`, and nothing is written if
+    /// `f` fails.
+    pub(crate) fn write<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&Connection) -> Result<T, jazz::db::Error> + Send + 'static,
+    ) -> KvResult<T> {
+        let (reply, answer) = mpsc::sync_channel(1);
+        self.store.send(Box::new(move |tables| {
+            let mut f = Some(f);
+            let mut out = None;
+            let committed = tables.host_sql(&mut |conn| {
+                let f = f.take().expect("a host write runs once");
+                out = Some(f(conn)?);
+                Ok(())
+            });
+            let _ = reply.send(
+                committed
+                    .map(|()| out.expect("a committed write answered"))
+                    .map_err(|error| error.to_string()),
+            );
+        }))?;
+        let written = answer
+            .recv()
+            .map_err(|_| "server store closed before answering".to_owned())??;
+        #[cfg(test)]
+        if self
+            .fail_next_write
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err("injected failure after the write committed".to_owned());
+        }
+        Ok(written)
+    }
+
+    /// Tests: fail the next read.
+    #[cfg(test)]
+    pub(crate) fn fail_next_read(&self) {
+        self.fail_next_read
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Tests: the switch that fails the next write after it commits.
+    #[cfg(test)]
+    pub(crate) fn failpoint(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        std::sync::Arc::clone(&self.fail_next_write)
     }
 }
 
@@ -147,11 +194,7 @@ mod tests {
                 (b"a:1".to_vec(), b"one".to_vec()),
             ])
             .unwrap();
-            assert_eq!(
-                kv.put_if_absent(b"a:1", b"x").unwrap(),
-                Some(b"one".to_vec())
-            );
-            assert_eq!(kv.put_if_absent(b"b:1", b"b").unwrap(), None);
+            kv.write_many(&[(b"b:1".to_vec(), b"b".to_vec())]).unwrap();
             store
                 .kv(B)
                 .unwrap()
@@ -179,11 +222,14 @@ mod tests {
                 (b"a:2".to_vec(), b"two".to_vec())
             ]
         );
-        assert_eq!(kv.get(b"b:1").unwrap(), Some(b"b".to_vec()));
-        assert_eq!(kv.get(b"c").unwrap(), None);
         assert_eq!(
-            store.kv(B).unwrap().get(b"a:1").unwrap(),
-            Some(b"other".to_vec())
+            kv.prefix(b"b:").unwrap(),
+            vec![(b"b:1".to_vec(), b"b".to_vec())]
+        );
+        assert_eq!(kv.prefix(b"c").unwrap(), vec![]);
+        assert_eq!(
+            store.kv(B).unwrap().prefix(b"a:").unwrap(),
+            vec![(b"a:1".to_vec(), b"other".to_vec())]
         );
     }
 }

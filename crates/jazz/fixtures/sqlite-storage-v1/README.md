@@ -7,12 +7,13 @@ not read bumps `STORAGE_FORMAT` and adds a new corpus beside this one, and
 never rewrites these. Until then format 1 is still moving, so such a change
 re-runs the producer and re-pins the hashes here and in the test instead
 (for example: per-write timestamps on the wire changed how pending uploads
-are stored, and a rejection's reason name changed how fates are recorded).
+are stored, a rejection's reason name changed how fates are recorded, and
+pending uploads moved from one encoded message to a row per op).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `a7b2f33fa3b2a6c97785ed60e99b6e1b109e553f7d4f32e8081ed669b75cd8c3`.
+  the SQLite file `c87086eff997417f78894479504ac5444a1c6d51a8bd50e18b41bb5af2563c7d`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `b4ef918dd0d3c904ac6e209ba0402e129f5ec35c5c316d11e55694694f082fc7`.
+  `e0280ce7f06c7362a84221b697af0f5b8866affd1eb101622907a090936a7d21`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
@@ -22,6 +23,9 @@ nodes and write times:
   value, bytes, a defaulted column) and `drafts` (branched by `branch_id`);
 - two interned authors, updates (history versions), a soft delete and a row
   on a branch;
+- a client text edit to `documents.body` (text-merging) that the server
+  merged with its own concurrent edit, so its history keeps the client's
+  write as sent (`_st` bit 2, at `_seq` = minus the commit's seq);
 - a client that synced `projects` and `documents`, wrote one row that
   settled, one stamped far ahead of the server's clock that the server
   rejected (so `_jazz_applied` keeps a rejected fate with its reason name),
@@ -37,3 +41,11 @@ in place, without a migration or format bump. Pending writes recover their
 upstream baseline from the current row or the newest history version below
 the replica's local sequence range. Eviction removes current and historical
 versions so reopening cannot restore an evicted baseline.
+
+Dropping the large-value key columns (`$k:<column>`) and `_jazz_lv_scratch`,
+when queries stopped reading chunked values' content, regenerated it the same
+way.
+
+Replacing the authority's `_jazz_text_in` side table with as-sent history
+versions, when `documents.body` became text-merging, regenerated it the same
+way.
