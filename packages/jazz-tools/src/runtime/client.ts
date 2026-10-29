@@ -1001,15 +1001,17 @@ export class WriteResult<T> extends WriteHandle<T, T> {
  */
 export class SerializableWriteHandle extends WriteHandle<void> {
   /**
-   * Wait for the serializable transaction to be accepted or rejected by the authority.
+   * Wait for the selected durability tier. Without options, use global with an
+   * upstream or local otherwise. Explicit global waits never fall back to local.
    *
    * Rejects with a {@link PersistedWriteRejectedError} if the transaction is rejected,
    * or a {@link WriteWaitTimeoutError} once `timeoutMs` passes. Without
    * `timeoutMs`, the wait lasts through network outages and reconnects.
    */
-  override async wait(options: { timeoutMs?: number } = {}): Promise<void> {
+  override async wait(options: Partial<WriteWaitOptions> = {}): Promise<void> {
+    const tier = options.tier === undefined ? undefined : resolveWriteWaitTier(options.tier);
     validateWriteWaitTimeout(options.timeoutMs);
-    await this.client().waitForSerializableTransaction(this.txId, options.timeoutMs);
+    await this.client().waitForSerializableTransaction(this.txId, options.timeoutMs, tier);
   }
 }
 
@@ -1018,15 +1020,17 @@ export class SerializableWriteHandle extends WriteHandle<void> {
  */
 export class SerializableWriteResult<T> extends WriteResult<T> {
   /**
-   * Wait for the serializable transaction to be accepted or rejected by the authority.
+   * Wait for the selected durability tier. Without options, use global with an
+   * upstream or local otherwise. Explicit global waits never fall back to local.
    *
    * Rejects with a {@link PersistedWriteRejectedError} if the transaction is rejected,
    * or a {@link WriteWaitTimeoutError} once `timeoutMs` passes.
    * @returns the callback result.
    */
-  override async wait(options: { timeoutMs?: number } = {}): Promise<T> {
+  override async wait(options: Partial<WriteWaitOptions> = {}): Promise<T> {
+    const tier = options.tier === undefined ? undefined : resolveWriteWaitTier(options.tier);
     validateWriteWaitTimeout(options.timeoutMs);
-    await this.client().waitForSerializableTransaction(this.txId, options.timeoutMs);
+    await this.client().waitForSerializableTransaction(this.txId, options.timeoutMs, tier);
     return this.value;
   }
 
@@ -2222,11 +2226,18 @@ export class JazzClient {
   async waitForSerializableTransaction(
     txId: TxId | Promise<TxId>,
     timeoutMs?: number,
+    requiredTier?: DurabilityTier,
   ): Promise<void> {
-    txId = await txId;
     const hasAuthority =
       Boolean(this.context.serverUrl) || this.runtime.nativeUpstreamConfigured?.() === true;
-    await this.waitForTransaction(txId, hasAuthority ? "global" : "local", undefined, timeoutMs);
+    // Keep the unresolved identity inside the runtime wait so one timeout
+    // budget also covers a commit that has not returned its ID yet.
+    await this.waitForTransaction(
+      txId,
+      requiredTier ?? (hasAuthority ? "global" : "local"),
+      undefined,
+      timeoutMs,
+    );
   }
 
   private normalizeTransactionWaitError(error: unknown): Error {
