@@ -193,13 +193,15 @@ fn a_session_the_server_cannot_send_to_ends_with_why() {
         let alice = client(1, user(1));
         let (a_client, _, up, _) = pipe();
         let _a = block_on(alice.connect_upstream(a_client));
-        let session = server.accept_subscriber(
-            Box::new(Refusing {
-                error: error.clone(),
-                inbound: up,
-            }),
-            user(1),
-        );
+        let session = server
+            .accept_subscriber(
+                Box::new(Refusing {
+                    error: error.clone(),
+                    inbound: up,
+                }),
+                user(1),
+            )
+            .unwrap();
         let prepared = alice.prepare_query(&Query::from("messages")).unwrap();
         let _live = block_on(alice.subscribe(&prepared, ReadOpts::default())).unwrap();
         for _ in 0..4 {
