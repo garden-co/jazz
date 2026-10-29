@@ -380,6 +380,8 @@ pub struct SchemaPublication {
 
 struct Inner {
     conn: Connection,
+    /// One-way, owner-wide fence for new application mutations during close.
+    mutation_admission_closed: bool,
     /// Errors the next ticks fail with, for tests of a tick driver.
     #[cfg(any(test, feature = "testing"))]
     failing_ticks: VecDeque<ErrorCode>,
@@ -1136,6 +1138,7 @@ impl Db {
             view: None,
             inner: Rc::new(Store::new(Inner {
                 conn,
+                mutation_admission_closed: false,
                 #[cfg(any(test, feature = "testing"))]
                 failing_ticks: VecDeque::new(),
                 chunks,
@@ -1619,6 +1622,19 @@ impl Db {
         self.tick().await
     }
 
+    /// Permanently stop admitting application row mutations in this runtime
+    /// and all its schema views. New transactions, further staging, stream
+    /// pushes and commits return a storage error, including a callback
+    /// transaction that was still running when this fence was set.
+    ///
+    /// Reads, transaction abandonment, stream aborts and ordinary sync/cleanup
+    /// ticks remain available so already committed writes can settle. This is
+    /// an in-memory shutdown phase, not a stored policy or storage retirement;
+    /// a new storage owner starts with mutation admission open.
+    pub fn stop_mutation_admission(&self) {
+        self.inner().mutation_admission_closed = true;
+    }
+
     // ---- preparation ----------------------------------------------------
 
     /// Diagnostics: the compiled SQL of a read and SQLite's query plan for
@@ -2044,6 +2060,7 @@ impl Db {
     /// One write. On a client, a local (unauthenticated) write is also an
     /// upload: it is recorded for the authority, which decides its fate.
     fn write_op(&self, mut op: StagedOp, who: Who) -> Result<WriteHandle, Error> {
+        self.inner().require_mutation_admission()?;
         self.with_upload(|| {
             let table = op.table().to_owned();
             let (prior, mark) = {
@@ -2175,6 +2192,7 @@ impl Db {
     ) -> Result<(T, TxReceipt), Error> {
         {
             let mut inner = self.inner();
+            inner.require_mutation_admission()?;
             if inner.tx.is_some() {
                 return Err(unsupported("nested transactions"));
             }
@@ -2184,7 +2202,10 @@ impl Db {
             inner.tx = Some((seq, BTreeSet::new()));
         }
         let mut tx = MergeableTx { db: self, identity };
-        let result = callback(&mut tx).await;
+        let result = callback(&mut tx).await.and_then(|value| {
+            self.inner().require_mutation_admission()?;
+            Ok(value)
+        });
         let captured;
         let prior;
         let changed = {
@@ -3064,6 +3085,16 @@ impl Drop for Inner {
 }
 
 impl Inner {
+    fn require_mutation_admission(&self) -> Result<(), Error> {
+        if self.mutation_admission_closed {
+            return Err(Error::new(
+                ErrorCode::Storage,
+                "database is closing or closed",
+            ));
+        }
+        Ok(())
+    }
+
     /// Undo everything since `SAVEPOINT name`. Its changes are forgotten
     /// first, so no subscriber hears of them whatever happens next.
     fn abandon_savepoint(&self, name: &str) -> Result<(), Error> {
@@ -5767,6 +5798,7 @@ pub(crate) enum StagedOp {
 
 impl Db {
     pub async fn mergeable_tx(&self) -> Result<MergeableTxHandle<'_>, Error> {
+        self.inner().require_mutation_admission()?;
         Ok(MergeableTxHandle {
             db: self,
             identity: WriteIdentity::Database,
@@ -5780,6 +5812,7 @@ impl Db {
         &self,
         author: AuthorSubject,
     ) -> Result<MergeableTxHandle<'_>, Error> {
+        self.inner().require_mutation_admission()?;
         Ok(MergeableTxHandle {
             db: self,
             identity: WriteIdentity::Attribution(author),
@@ -5871,6 +5904,7 @@ impl MergeableTxHandle<'_> {
         cells: BTreeMap<String, Value>,
         mut opts: InsertOptions,
     ) -> Result<WriteHandle, Error> {
+        self.db.inner().require_mutation_admission()?;
         let row = match opts.row_id {
             Some(row) => row,
             None => self.db.inner().ids.next_row_id(),
@@ -5889,6 +5923,7 @@ impl MergeableTxHandle<'_> {
         cells: BTreeMap<String, Value>,
         opts: UpdateOptions,
     ) -> Result<(), Error> {
+        self.db.inner().require_mutation_admission()?;
         self.ops
             .borrow_mut()
             .push(StagedOp::Update(table.to_owned(), row, cells, opts));
@@ -5902,6 +5937,7 @@ impl MergeableTxHandle<'_> {
         cells: BTreeMap<String, Value>,
         opts: UpsertOptions,
     ) -> Result<(), Error> {
+        self.db.inner().require_mutation_admission()?;
         self.ops
             .borrow_mut()
             .push(StagedOp::Upsert(table.to_owned(), row, cells, opts));
@@ -5914,6 +5950,7 @@ impl MergeableTxHandle<'_> {
         row: RowUuid,
         opts: DeleteOptions,
     ) -> Result<(), Error> {
+        self.db.inner().require_mutation_admission()?;
         self.ops
             .borrow_mut()
             .push(StagedOp::Delete(table.to_owned(), row, opts));
@@ -5927,6 +5964,7 @@ impl MergeableTxHandle<'_> {
         content: Option<BTreeMap<String, Value>>,
         opts: RestoreOptions,
     ) -> Result<(), Error> {
+        self.db.inner().require_mutation_admission()?;
         self.ops
             .borrow_mut()
             .push(StagedOp::Restore(table.to_owned(), row, content, opts));
@@ -5942,6 +5980,7 @@ impl MergeableTxHandle<'_> {
         destination: BranchSelector,
         row: RowUuid,
     ) -> Result<(), Error> {
+        self.db.inner().require_mutation_admission()?;
         self.ops
             .borrow_mut()
             .push(StagedOp::Move(table.to_owned(), source, destination, row));
@@ -6614,6 +6653,7 @@ impl Db {
 
     fn begin(&self, id: OpenTransactionId, kind: BatchKind) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
+        inner.require_mutation_admission()?;
         if inner.batches.contains_key(&id) {
             return Err(rejected(format!("transaction {id:?} is already open")));
         }
@@ -6648,6 +6688,7 @@ impl Db {
     }
 
     fn take_batch(&self, id: OpenTransactionId) -> Result<Batch, Error> {
+        self.inner().require_mutation_admission()?;
         self.inner
             .borrow_mut()
             .batches
@@ -6811,6 +6852,7 @@ impl Db {
     }
 
     fn commit_ops_now(&self, batch: &Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
+        self.inner().require_mutation_admission()?;
         let ops = &batch.ops;
         let (seq, prior, mark) = {
             let mut inner = self.inner();
@@ -7078,6 +7120,7 @@ impl Db {
     ) -> Result<(), Error> {
         let marks = {
             let mut inner = self.inner.staging();
+            inner.require_mutation_admission()?;
             inner.schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
             let chunked = inner.chunk_large_cells(&mut op)?;
             edits.pending_nodes.extend(chunked.pending_nodes);
