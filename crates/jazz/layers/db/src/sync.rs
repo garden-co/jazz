@@ -1858,6 +1858,11 @@ pub(crate) struct Session {
     backlog_reads: (Option<Rc<Schema>>, HashMap<u64, Option<BTreeSet<String>>>),
     /// The schema version the client declared (`None`: the current one).
     version: Option<crate::ids::SchemaVersionId>,
+    /// The version the client declared first, the one its own store holds
+    /// rows by: a commit sent under another (written through a view of
+    /// another version) names no row as written, since the client holds no
+    /// image of it to compare.
+    home_version: Option<crate::ids::SchemaVersionId>,
     /// Fetches whose upstream answer arrived, or that this relay already
     /// asked its upstream to refresh: served from this store.
     fetched_upstream: BTreeSet<u64>,
@@ -1923,6 +1928,7 @@ impl Session {
             backlog: VecDeque::new(),
             backlog_reads: (None, HashMap::new()),
             version: None,
+            home_version: None,
             fetched_upstream: BTreeSet::new(),
             parked_pulls: Vec::new(),
             deferred_pulls: Vec::new(),
@@ -3974,6 +3980,35 @@ impl Inner {
         }))
     }
 
+    /// The rows a resent commit that landed at `seq` wrote: each branch key
+    /// its row has now, or had at `seq` (since superseded). They ship to
+    /// the writer as they are now, with the version at `seq` if superseded.
+    fn resent_rows(&self, ops: &[StagedOp], seq: u64) -> Result<Vec<RowKey>, Error> {
+        let mut out = BTreeSet::new();
+        for op in ops {
+            let Some(row) = op.row() else { continue };
+            let table = self.schema.stored_table(op.table())?;
+            let sql = format!(
+                "SELECT _b FROM {} WHERE id = ?1 UNION SELECT _b FROM {} WHERE {ID_AT_SEQ}",
+                quote(table),
+                quote(&format!("{table}__h"))
+            );
+            let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
+            let keys: Vec<Vec<u8>> = statement
+                .query_map(
+                    rusqlite::params![row.0.as_bytes().to_vec(), seq as i64],
+                    |r| r.get(0),
+                )
+                .map_err(storage)?
+                .collect::<Result<_, _>>()
+                .map_err(storage)?;
+            for key in keys {
+                out.insert((table.to_owned(), row, key));
+            }
+        }
+        Ok(out.into_iter().collect())
+    }
+
     /// The (stored table, id, key) of the rows a commit at `seq` wrote.
     fn written_rows(
         &self,
@@ -4799,6 +4834,22 @@ impl Inner {
         Ok(owner == author)
     }
 
+    /// Whether the commit that landed at `seq` was written as a node that
+    /// belongs to `identity` (see [`Inner::claim_node`]).
+    fn committed_by(&self, seq: u64, identity: &AuthorSubject) -> Result<bool, Error> {
+        let author = self.author_code(&author_key(identity))?;
+        match self.conn.cached_row(
+            "SELECT n.author FROM _jazz_transactions AS t JOIN _jazz_nodes AS n \
+             ON n.n = t.n WHERE t.seq = ?1",
+            [seq as i64],
+            |r| r.get::<_, Option<i64>>(0),
+        ) {
+            Ok(owner) => Ok(owner == Some(author)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+            Err(error) => Err(storage(error)),
+        }
+    }
+
     /// `node`'s code in `_jazz_nodes`, interning it on first use.
     fn node_code(&self, node: [u8; 16]) -> Result<i64, Error> {
         self.exec(
@@ -5368,6 +5419,17 @@ impl Client {
                 ((table, id, key), seq)
             })
             .collect();
+        for deferred in &mut self.deferred {
+            if let Some(awaited) = deferred.awaited.as_mut() {
+                *awaited = std::mem::take(awaited)
+                    .into_iter()
+                    .map(|(table, id, key)| {
+                        let table = if table == from { to.to_owned() } else { table };
+                        (table, id, key)
+                    })
+                    .collect();
+            }
+        }
     }
 
     /// Its host says there is no server: it is the last word on its store.
@@ -9066,6 +9128,7 @@ impl Db {
                 let mut inner = self.inner.borrow_mut();
                 let session = &mut inner.sessions[index];
                 session.version = Some(crate::ids::SchemaVersionId::from_bytes(version));
+                session.home_version = session.home_version.or(session.version);
                 session.schema = None;
             }
             SyncMessage::Read {
@@ -9194,11 +9257,19 @@ impl Db {
             // the delta was made over.
             SyncMessage::ResendWhole { rows } => {
                 let mut inner = self.inner.borrow_mut();
+                let identity = inner.sessions[index].identity;
+                // A seq names a version this session's own commit produced:
+                // any other is not the session's to ask for (it may be one
+                // the session could not read when it was current).
+                let mut own = Vec::with_capacity(rows.len());
+                for (.., seq) in &rows {
+                    own.push(*seq > 0 && inner.committed_by(*seq, &identity)?);
+                }
                 let session = &mut inner.sessions[index];
-                for (table, id, key, seq) in rows {
+                for ((table, id, key, seq), own) in rows.into_iter().zip(own) {
                     session.shipped.remove(&(table.clone(), id, key.clone()));
                     let row = (table, RowUuid::from_bytes(id), key);
-                    if seq > 0 {
+                    if own {
                         session
                             .committed
                             .push((row.0.clone(), row.1, row.2.clone(), seq));
@@ -9595,7 +9666,7 @@ impl Db {
                                 .into_iter()
                                 .map(from_wire)
                                 .collect::<Result<Vec<_>, _>>()
-                                .and_then(|ops| self.inner.borrow().written_rows(&ops, seq))
+                                .and_then(|ops| self.inner.borrow().resent_rows(&ops, seq))
                                 .unwrap_or_default(),
                             None => Vec::new(),
                         };
@@ -9696,7 +9767,7 @@ impl Db {
                     // as written: fan-out drops their images if still
                     // current, and the writer checks each by its digest.
                     let session = &mut inner.sessions[index];
-                    if result.is_ok() {
+                    if result.is_ok() && session.version == session.home_version {
                         for Echoable { row: row_key, op } in echoable {
                             let (table, row, key) = row_key;
                             session.echoes.push(Echo {
