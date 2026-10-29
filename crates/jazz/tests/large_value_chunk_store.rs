@@ -345,9 +345,7 @@ fn a_failed_put_keeps_the_bytes_and_is_retried() {
     let db = open(&path, Some(Arc::new(remote.clone()))).unwrap();
     insert(&db, 1, &value);
     remote.objects().failing = true;
-    let error = block_on(db.tick())
-        .err()
-        .expect("the tick reports the failure");
+    let error = block_on(db.tick()).expect_err("the tick reports the failure");
     assert_eq!(error.code, ErrorCode::Storage);
     assert_eq!(file_node_bytes(&path).1, 0, "nothing moved");
     assert_eq!(body(&db, 1), value);

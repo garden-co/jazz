@@ -377,8 +377,7 @@ fn a_lens_may_not_key_rows_by_another_branch_default() {
         let db = open_at(v1());
         write(&db, space("a"), "before");
         let error = block_on(db.activate_schema_with_lenses(v2(), &[add_region("us")]))
-            .err()
-            .expect("a lens keying rows by us");
+            .expect_err("a lens keying rows by us");
         assert!(error.to_string().contains("not supported"), "{error}");
 
         // Planted positive: a lens with the declared default.
@@ -390,9 +389,6 @@ fn a_lens_may_not_key_rows_by_another_branch_default() {
         vec![(text("before"), text("eu"))]
     );
 }
-
-#[path = "common/duplex_transport.rs"]
-mod duplex_transport;
 
 /// Mixed versions agree on the branch: a client still on v1 writes to
 /// space `a`, and a server on v2 holds it in `(a, eu)`.
@@ -420,7 +416,7 @@ fn a_client_on_the_old_version_writes_into_the_default_branch() {
         },
     )))
     .unwrap();
-    let (client_side, server_side) = duplex_transport::duplex();
+    let (client_side, server_side) = jazz::db::duplex();
     block_on(client.connect_upstream(client_side));
     server.accept_subscriber(server_side, alice);
 

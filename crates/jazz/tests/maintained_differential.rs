@@ -34,12 +34,9 @@
 
 mod common;
 
-#[path = "common/duplex_transport.rs"]
-mod duplex_transport;
-
 use std::collections::{BTreeMap, BTreeSet};
 
-use duplex_transport::duplex;
+use jazz::db::duplex;
 use jazz::db::{
     CurrentRow, Db, DbConfig, DbIdentity, InsertOptions, PreparedQuery, ReadOpts,
     SubscriptionEvent, SubscriptionStream, UpdateOptions, WriteIdentity, block_on,

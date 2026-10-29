@@ -4,16 +4,13 @@
 
 use crate::common;
 
-#[path = "common/duplex_transport.rs"]
-mod duplex_transport;
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::path::Path;
 use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
-use duplex_transport::duplex;
+use jazz::db::duplex;
 use jazz::db::{
     Db, DbConfig, DbIdentity, ErrorCode, FileOptions, InsertOptions, LargeValueUpdate,
     LargeValueUpdatePage, LargeValueUpdateSplice, ReadOpts, RemoteLinkHint, block_on,

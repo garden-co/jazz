@@ -5,12 +5,9 @@
 
 use crate::common;
 
-#[path = "common/duplex_transport.rs"]
-mod duplex_transport;
-
 use std::collections::BTreeMap;
 
-use duplex_transport::duplex;
+use jazz::db::duplex;
 use jazz::db::{
     Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadTier, SubscriptionEvent, block_on,
 };
@@ -269,8 +266,8 @@ fn membership_write_cost_with_many_holders() {
         block_on(server.tick()).unwrap();
     }
     let mut times = Vec::new();
-    for round in 0..20usize {
-        membership(&server, &users[round], 19);
+    for user in &users[..20] {
+        membership(&server, user, 19);
         let started = std::time::Instant::now();
         block_on(server.tick()).unwrap();
         times.push(started.elapsed());

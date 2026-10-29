@@ -3,7 +3,6 @@
 //! Tests that need a process of their own (durable_file re-executes and
 //! measures its binary) stay separate targets.
 
-#[allow(dead_code)]
 #[path = "../common/mod.rs"]
 mod common;
 

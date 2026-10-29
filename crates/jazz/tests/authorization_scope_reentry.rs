@@ -82,7 +82,8 @@ fn schema() -> JazzSchema {
 
 fn open_db() -> Db {
     let schema = schema();
-    let db = block_on(Db::open(
+
+    block_on(Db::open(
         DbConfig::new(
             schema,
             DbIdentity {
@@ -92,8 +93,7 @@ fn open_db() -> Db {
         )
         .with_id_source(SeededRowIdSource::new(0x8100)),
     ))
-    .expect("open authorization scope re-entry db");
-    db
+    .expect("open authorization scope re-entry db")
 }
 
 fn opts() -> ReadOpts {

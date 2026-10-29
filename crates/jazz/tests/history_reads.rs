@@ -683,7 +683,7 @@ impl Synced {
             let author = AuthorSubject::for_test_bytes([who; 16]);
             let client = open(schema.clone(), node, author);
             let (client_side, server_side) = duplex();
-            std::mem::forget(block_on(client.connect_upstream(client_side)));
+            let _upstream = block_on(client.connect_upstream(client_side));
             server.accept_subscriber(server_side, author);
             client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
             client

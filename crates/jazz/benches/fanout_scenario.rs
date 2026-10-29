@@ -194,7 +194,7 @@ pub fn run(cfg: &Config) -> Report {
     let subscribe_time = started.elapsed();
     let rss_after = rss_kib();
 
-    let mut drain = |subs: &mut Vec<db::SubscriptionStream>| -> usize {
+    let drain = |subs: &mut Vec<db::SubscriptionStream>| -> usize {
         let mut events = 0;
         for sub in subs.iter_mut() {
             while let Some(event) = sub.try_next_event() {

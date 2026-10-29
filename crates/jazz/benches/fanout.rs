@@ -8,7 +8,6 @@
 use std::time::Duration;
 
 #[path = "../tests/common/mod.rs"]
-#[allow(dead_code)]
 mod common;
 
 pub struct Config {

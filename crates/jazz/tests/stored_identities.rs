@@ -345,7 +345,7 @@ fn a_version_only_the_replica_admitted_has_no_identity_until_the_authority_admit
     let table = server.table_identity("notes").unwrap();
     assert_eq!(client.table_identity("notes").unwrap(), table);
 
-    block_on(client.admit_schema_with_lenses(v2.clone(), &[lens.clone()])).unwrap();
+    block_on(client.admit_schema_with_lenses(v2.clone(), std::slice::from_ref(&lens))).unwrap();
     let ahead = block_on(client.register_schema_view(v2.clone())).unwrap();
     not_observed(ahead.table_identity("tasks"));
 

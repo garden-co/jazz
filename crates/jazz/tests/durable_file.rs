@@ -7,16 +7,13 @@
 
 mod common;
 
-#[path = "common/duplex_transport.rs"]
-mod duplex_transport;
-
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
-use duplex_transport::duplex;
+use jazz::db::duplex;
 use jazz::db::{
     Db, DbConfig, DbIdentity, FileOptions, InsertOptions, LOCAL_BASE, ReadOpts, block_on,
 };
@@ -156,7 +153,7 @@ fn a_new_file_takes_the_page_size_and_an_existing_one_keeps_its_own() {
     };
     let path = scratch("page-size");
     {
-        let db = block_on(Db::open_at(config(1), &path, large.clone())).unwrap();
+        let db = block_on(Db::open_at(config(1), &path, large)).unwrap();
         block_on(db.insert("items", item(1), Default::default())).unwrap();
     }
     assert_eq!(header_page_size(&path), 65536);
