@@ -751,7 +751,6 @@ fn a_relays_commit_a_write_was_built_on_is_what_its_writer_saw() {
         }],
         author: None,
         session: None,
-        echo: false,
         origin: Some(([0xa1; 16], LOCAL_BASE + tx)),
     };
     let tx = |n: u64| LOCAL_BASE + n;

@@ -207,11 +207,6 @@ The commit's other fields:
   writes only if every result and written row is unchanged since the snapshot.
   A stale or partial replica can only cause a conflict, never a
   non-serializable commit.
-- `echo`: ship every written row back. A replica restored after a reopen
-  sets it on its resent commits, as it no longer has its images of what they
-  wrote, and so does a writer that stamped a row as an author other than the
-  one the commit declares. Otherwise the authority infers which rows it need
-  not echo (§8.3).
 - `author`, `session`: provenance or a session a trusted link acts for. Only
   a trusted link may set one other than its own identity.
 - `origin`: the session commit a relay uploads this one for.
@@ -226,8 +221,10 @@ connection. It is stored a row per op, not as one encoded message:
   (`n`).
 - `_jazz_pending_rows (tx, n, tbl, id, key)`: the local rows it wrote.
 
-A replica's images of what its commits wrote are not kept: after a reopen
-the server ships those rows (`echo`). A row's
+What each commit wrote stays in the store at the commit's local seq (the
+row's current version, or history under a later pending write), so a
+reopened replica can still install what the authority holds back (§8.3). A
+row's
 values over the inline limit live in large-value storage, so a stored op is
 about the size of the row it writes, however large the commit. A store with
 a 2 MiB value limit (a Durable Object) therefore keeps any commit whose rows
@@ -304,8 +301,8 @@ hold:
    the commit moves the row between branches.
 3. The author the authority stamps is the one the writer declared: the
    commit's `author`, or its link's identity for a writer's own writes.
-4. The commit does not ask for `echo`, and the version is still the row's
-   current one when fan-out ships the session's rows.
+4. The version is still the row's current one when fan-out ships the
+   session's rows.
 
 Equal inputs then give an equal row: the ops apply the same way to the same
 image under the same schema, the stamps excepted. The inference is checked
@@ -315,10 +312,11 @@ row whose image differs whole (`Hold`, §19.8) instead of installing it. A
 miss therefore costs a round trip, never a divergent cache: a replica whose
 configured author is not the identity its link was accepted as, for one.
 A replica counts these mismatches (`echo_mismatches`); under the `testing`
-feature it panics on one, so the test suites guard the inference. A replica
-that receives a catalogue with new versions while commits are pending asks
-for their held rows whole too: it can no longer vouch for what it made of
-them under the old names.
+feature it panics on one, so the test suites guard the inference. A writer asks for a held row whole, without counting a mismatch, where it
+cannot vouch for its image: it stamped the row as another author than the
+commit declares (ops by several authors), the commit was written under an
+earlier schema version than the one it reopened with, or a catalogue with new
+versions arrived while the commit was pending.
 
 `Stored { tx }` is durability progress from a relay to a non-durable session:
 the relay holds the commit in its store and uploads it, so it is `Local` for a

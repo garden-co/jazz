@@ -207,7 +207,6 @@ fn a_commit_as_another_identitys_node_is_refused_and_claims_nothing() {
         ops: Vec::new(),
         author: None,
         session: None,
-        echo: false,
         origin: None,
     });
     block_on(server.tick()).unwrap();
@@ -284,7 +283,6 @@ fn an_upsert_over_a_row_deleted_in_the_same_commit_is_checked_as_an_insert() {
         ],
         author: None,
         session: None,
-        echo: false,
         origin: None,
     });
     block_on(server.tick()).unwrap();
@@ -317,7 +315,6 @@ fn the_authority_refuses_cells_that_are_not_of_their_columns_type() {
             ],
             author: None,
             session: None,
-            echo: false,
             origin: None,
         });
     }
@@ -358,7 +355,6 @@ fn a_reopened_authority_continues_after_the_seq_of_a_rowless_commit() {
         ops: Vec::new(),
         author: None,
         session: None,
-        echo: false,
         origin: None,
     });
     block_on(server.tick()).unwrap();
@@ -456,7 +452,6 @@ fn the_authority_refuses_misplaced_bases() {
         ops,
         author: None,
         session: None,
-        echo: false,
         origin: None,
     };
     // On the row's second op; twice on its first; then as SPEC 8.2 says.

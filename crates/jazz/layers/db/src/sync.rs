@@ -971,11 +971,6 @@ pub enum SyncMessage {
         /// trusted link acting for it): the authority checks their
         /// policies as that session. Otherwise `author` is provenance only.
         session: Option<BTreeMap<String, Value>>,
-        /// Ship every row the commit writes back, even one the authority
-        /// infers its writer holds as it now is (see [`Held`]): the writer
-        /// no longer has its own images of them (a commit restored after a
-        /// reopen).
-        echo: bool,
         /// The session commit a relay uploads this one for, as (node, tx),
         /// when it is not the sender's own: the writer its bases' unnamed
         /// `pending` nodes stand for.
@@ -1206,9 +1201,13 @@ struct Pending {
 
 /// A row a pending commit wrote, as this replica holds it.
 struct Expected {
-    /// The commit's first op that writes the row.
+    /// The commit's first op that writes the row, and the row's branch key.
     op: u32,
-    image: Image,
+    key: Vec<u8>,
+    /// `None` when the authority stamps it otherwise: this replica stamped
+    /// the row as another author than the commit declares (its ops are by
+    /// several), so it asks for the row whole if held.
+    image: Option<Image>,
     /// Where the row's `$createdAt` comes from.
     created: Created,
     /// The row's last write has no explicit time: this replica's clock
@@ -1236,8 +1235,8 @@ enum Created {
 impl Expected {
     /// The image as the authority holds it: accepted at `at`, over a row
     /// created at `created` if the commit did not create it.
-    fn accepted(&self, at: u64, created: Option<Cell>) -> Image {
-        let mut image = self.image.clone();
+    fn accepted(&self, image: &Image, at: u64, created: Option<Cell>) -> Image {
+        let mut image = image.clone();
         for (name, cell) in &mut image.cells {
             if name == STAMPS[0] {
                 match (self.created, &created) {
@@ -3586,6 +3585,53 @@ impl Inner {
         }
     }
 
+    /// The rows own commit `tx` wrote, each as this store holds it at
+    /// `tx` and by the commit's first op that writes it, for the authority
+    /// to hold (see [`Expected`]). `over`: the rows this replica held a
+    /// version of before (settled, or an own earlier pending commit's),
+    /// which the commit did not create. `author`: the one the commit
+    /// declares, or none for this store's own.
+    fn expected_rows(
+        &self,
+        tx: u64,
+        ops: &[StagedOp],
+        rows: &[RowKey],
+        over: &HashSet<RowKey>,
+        author: Option<AuthorSubject>,
+    ) -> Result<Vec<Expected>, Error> {
+        let by_row = self.row_ops(ops);
+        let declared = crate::values::author_key(&author.unwrap_or_else(|| self.stamp_author()));
+        let mut expected = Vec::new();
+        for row_key @ (table, row, key) in rows {
+            let Some(row_ops) = by_row.get(&(table.clone(), *row)) else {
+                continue;
+            };
+            let (Some(&first), Some(&last)) = (row_ops.first(), row_ops.last()) else {
+                continue;
+            };
+            let Some(image) = self.version_image(table, *row, key, tx)? else {
+                continue;
+            };
+            let clocked = |op: usize| ops[op].updated_at_ms().is_none();
+            let created = if over.contains(row_key) {
+                Created::Beneath
+            } else if clocked(first) {
+                Created::Clocked
+            } else {
+                Created::Explicit
+            };
+            let vouched = stamped_author(&image).is_none_or(|stamped| stamped == declared);
+            expected.push(Expected {
+                op: first as u32,
+                key: key.clone(),
+                image: vouched.then_some(image),
+                created,
+                updated_clocked: clocked(last),
+            });
+        }
+        Ok(expected)
+    }
+
     /// The rows of own commit `tx` the server did not ship (`held`): its
     /// version at `seq` is the one this replica wrote, stamped at
     /// `accepted_at`, so that becomes the settled image. A newer image
@@ -3633,16 +3679,18 @@ impl Inner {
                 Some(expected) => {
                     let Some(entry) = expected
                         .iter()
-                        .find(|e| e.op == held.op && e.image.key == held.key)
+                        .find(|e| e.op == held.op && e.key == held.key)
                     else {
                         return Err(unsupported(format!(
                             "fate of commit {tx} holds a row of op {} it did not expect",
                             held.op
                         )));
                     };
-                    let same = echo_digest(&entry.image) == held.digest;
-                    mismatched += usize::from(!same);
-                    same.then_some(entry)
+                    entry.image.as_ref().and_then(|image| {
+                        let same = echo_digest(image) == held.digest;
+                        mismatched += usize::from(!same);
+                        same.then_some((entry, image))
+                    })
                 }
                 None => None,
             };
@@ -3651,7 +3699,7 @@ impl Inner {
         let mut images = Vec::new();
         for (entry, (table, row, key)) in installs {
             let image = match (entry, accepted_at) {
-                (Some(entry), Some(at)) if entry.created == Created::Beneath => self
+                (Some((entry, image)), Some(at)) if entry.created == Created::Beneath => self
                     .upstream_baseline(&table, row, &key)?
                     .and_then(|beneath| {
                         beneath
@@ -3659,8 +3707,8 @@ impl Inner {
                             .into_iter()
                             .find(|(name, _)| name == STAMPS[0])
                     })
-                    .map(|(_, created)| entry.accepted(at, Some(created))),
-                (Some(entry), Some(at)) => Some(entry.accepted(at, None)),
+                    .map(|(_, created)| entry.accepted(image, at, Some(created))),
+                (Some((entry, image)), Some(at)) => Some(entry.accepted(image, at, None)),
                 _ => None,
             };
             match image {
@@ -4035,7 +4083,6 @@ impl Inner {
             ops,
             author,
             session,
-            echo: _,
             origin,
         } = commit
         else {
@@ -4063,7 +4110,6 @@ impl Inner {
             ops: Vec::new(),
             author: author.clone(),
             session: session.clone(),
-            echo: false,
             origin: *origin,
         };
         self.exec(
@@ -4942,15 +4988,11 @@ impl Inner {
                 ops,
                 author,
                 session,
-                echo,
                 ..
             } = &mut commit
             else {
                 continue;
             };
-            // Its images of the rows it wrote are not kept: the server ships
-            // them back.
-            *echo = true;
             let mut ops = ops
                 .iter()
                 .cloned()
@@ -4966,11 +5008,34 @@ impl Inner {
                 ops.iter_mut()
                     .for_each(|op| op.attribute(author, session.is_some()));
             }
+            // Its rows as this store holds them, each at the commit's local
+            // seq (the current version, or history under a later pending
+            // write), as it held them when it sent it. One written under an
+            // earlier version is not vouched for: the authority applied it
+            // under that version's names.
+            let expected = if client.versions.contains_key(&tx) {
+                None
+            } else {
+                let mut over = HashSet::new();
+                for row_key @ (table, row, key) in &rows {
+                    if client.pending.newest(row_key).is_some()
+                        || self.upstream_baseline(table, *row, key)?.is_some()
+                    {
+                        over.insert(row_key.clone());
+                    }
+                }
+                let author = author
+                    .as_deref()
+                    .map(AuthorSubject::from_canonical)
+                    .transpose()
+                    .map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?;
+                Some(self.expected_rows(tx, &ops, &rows, &over, author)?)
+            };
             client.pending.push(Pending {
                 tx,
                 ops,
                 rows,
-                expected: None,
+                expected,
             });
             client.unsent.push(commit);
         }
@@ -5427,44 +5492,10 @@ impl Db {
             }
             inner.commit_deltas(wire, &rows, &settled_images)?;
         }
-        // Each written row as this replica now holds it, by the op that
-        // first writes it: the authority does not echo a row it infers is
-        // exactly this, and names it `held` instead.
-        let mut expected = Vec::new();
-        for (table, row, key) in &rows {
-            let Some(row_ops) = by_row.get(&(table.clone(), *row)) else {
-                continue;
-            };
-            let (Some(&first), Some(&last)) = (row_ops.first(), row_ops.last()) else {
-                continue;
-            };
-            if let Some(image) = inner.current_image(table, *row, key)? {
-                let clocked = |op: usize| ops[op].updated_at_ms().is_none();
-                let created = if over.contains(&(table.clone(), *row, key.clone())) {
-                    Created::Beneath
-                } else if clocked(first) {
-                    Created::Clocked
-                } else {
-                    Created::Explicit
-                };
-                expected.push(Expected {
-                    op: first as u32,
-                    image,
-                    created,
-                    updated_clocked: clocked(last),
-                });
-            }
-        }
-        // The authority stamps every row with the one author the commit
-        // declares (its own writes declare none: the link's identity is
-        // theirs). A row this replica stamped otherwise (ops by several
-        // authors, or a relay's session commit it stamped as the
-        // session's) is not as it holds it there: the commit asks for its
-        // rows back.
-        let declared = crate::values::author_key(&author.unwrap_or_else(|| inner.stamp_author()));
-        let echo = expected.iter().any(|expected| {
-            stamped_author(&expected.image).is_some_and(|stamped| stamped != declared)
-        });
+        // Each written row as this replica now holds it: the authority
+        // does not echo a row it infers is exactly this, and names it
+        // `held` instead.
+        let expected = inner.expected_rows(seq, &ops, &rows, &over, author)?;
         let client = inner.client.as_mut().expect("client");
         let added: Vec<RowKey> = baselines.iter().map(|(key, _)| key.clone()).collect();
         client.baselines.extend(baselines);
@@ -5489,7 +5520,6 @@ impl Db {
                     ops: wire,
                     author: author.map(|author| author.canonical().to_owned()),
                     session: session_claims,
-                    echo,
                     origin,
                 };
                 client.unsent.push(commit.clone());
@@ -8663,7 +8693,6 @@ impl Db {
                 ops,
                 author,
                 session,
-                echo,
                 origin,
             } => {
                 let identity = self.inner.borrow().sessions[index].identity;
@@ -8804,7 +8833,7 @@ impl Db {
                     // The rows the writer holds as they now are need no
                     // echo: fan-out drops their images if still current.
                     let session = &mut inner.sessions[index];
-                    if result.is_ok() && !echo {
+                    if result.is_ok() {
                         for candidate in echoable {
                             let Echoable {
                                 row: row_key,

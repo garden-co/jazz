@@ -622,7 +622,7 @@ fn a_text_merge_against_a_concurrent_edit_ships() {
 }
 
 #[test]
-fn a_commit_restored_after_a_reopen_ships() {
+fn a_commit_restored_after_a_reopen_is_held() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("replica.sqlite");
     let open_file = || {
@@ -658,11 +658,9 @@ fn a_commit_restored_after_a_reopen_ships() {
     let _live = subscribe(&client);
     pump(&server, &[&client]);
 
-    // The reopened store has no image of what its commit left: the row
-    // ships.
-    let (images, held) = shipped(&down);
-    assert_eq!(held, vec![0]);
-    assert!(images > 0);
+    // The reopened store still holds what its commit left, at the
+    // commit's local seq: the row is held.
+    assert_eq!(shipped(&down), (0, vec![1]));
     assert_eq!(snapshot(&client), snapshot(&server));
 }
 
