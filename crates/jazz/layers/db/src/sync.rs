@@ -868,6 +868,34 @@ const _: () = assert!(
         <= jazz_protocol::protocol_limits::MAX_WIRE_FRAME_BYTES
 );
 
+/// Who a commit's writes, or a preflight, act as. Authors are canonical
+/// author subjects. Only a trusted link may name an author other than its
+/// own identity; the server decides from the link how far it trusts one.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Acting {
+    /// The sender's own: checked and attributed as the link.
+    Own,
+    /// Attributed to `author` (provenance only), checked as the sender.
+    Attributed { author: String },
+    /// `author`'s as a session with these claims: over a trusted link,
+    /// checked and attributed as that session; over a session link,
+    /// checked as the link's own identity.
+    Session {
+        author: String,
+        claims: BTreeMap<String, Value>,
+    },
+}
+
+impl Acting {
+    /// The author it names, if any.
+    fn author(&self) -> Option<&str> {
+        match self {
+            Acting::Own => None,
+            Acting::Attributed { author } | Acting::Session { author, .. } => Some(author),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SyncMessage {
     // client → server
@@ -924,20 +952,13 @@ pub enum SyncMessage {
         members: Option<Vec<[u8; 16]>>,
         global: bool,
     },
-    /// `author`: the provenance the writes carry when it is not the
-    /// sender's own (a trusted session or an attribution), as a canonical
-    /// author subject. Only a trusted link may set one that differs from
-    /// its own identity.
+    /// `acting`: who the writes are (see [`Acting`]).
     Commit {
         node: [u8; 16],
         tx: u64,
         kind: WireKind,
         ops: Vec<WireOp>,
-        author: Option<String>,
-        /// The writes are `author`'s as a session, with these claims (a
-        /// trusted link acting for it): the authority checks their
-        /// policies as that session. Otherwise `author` is provenance only.
-        session: Option<BTreeMap<String, Value>>,
+        acting: Acting,
         /// The rows as the writer's replica holds them after these writes
         /// (see [`Expect`]): the authority skips echoing a row whose new
         /// version is exactly that. Empty when the writer does not know.
@@ -1002,13 +1023,12 @@ pub enum SyncMessage {
     },
     // client → server
     /// A permission preflight: would the session's identity be allowed
-    /// `action` right now? Never writes. `author` and `session` name the
-    /// session a trusted link asks for, as on a [`SyncMessage::Commit`].
+    /// `action` right now? Never writes. `acting` names who asks, as on
+    /// a [`SyncMessage::Commit`].
     CheckAllowed {
         id: u64,
         action: PermissionAdviceAction,
-        author: Option<String>,
-        session: Option<BTreeMap<String, Value>>,
+        acting: Acting,
     },
     // server → client
     /// The answer to a [`SyncMessage::CheckAllowed`]: `Allowed`, `Denied`
@@ -1372,6 +1392,13 @@ pub(crate) struct Client {
     relay_ready: bool,
     /// The server said it has not admitted this client's schema version.
     unadmitted: bool,
+    /// This store committed writes before it became a replica (see
+    /// [`stranded`]): it refuses every upstream.
+    stranded: bool,
+    /// The upstream sent its catalogue on this connection: this store
+    /// knows every version the authority deployed, so its own sessions'
+    /// commits under a version it still lacks are refused (INV-SYNC-52).
+    catalogued: bool,
     /// Rows asked for whole (their shipped deltas did not apply), until a
     /// whole image of each arrives. This store holds a stale version of
     /// each, so no result it settles is the server's: no watermark is
@@ -3609,8 +3636,20 @@ fn encode<T: Serialize>(value: &T) -> Vec<u8> {
     postcard::to_allocvec(value).expect("encode sync state")
 }
 
+/// A stored sync record. One written in another layout is refused as an
+/// unsupported storage format rather than misread: it must decode exactly,
+/// with no bytes left over.
 fn decode_stored<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, Error> {
-    postcard::from_bytes(bytes).map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))
+    match postcard::take_from_bytes(bytes) {
+        Ok((value, [])) => Ok(value),
+        Ok((_, rest)) => Err(crate::format::unsupported(format_args!(
+            "a stored sync record has {} trailing bytes",
+            rest.len()
+        ))),
+        Err(error) => Err(crate::format::unsupported(format_args!(
+            "a stored sync record does not decode ({error})"
+        ))),
+    }
 }
 
 impl Inner {
@@ -3796,14 +3835,19 @@ impl Inner {
         Ok(roots)
     }
 
-    fn persist_pending(&self, tx: u64, commit: &SyncMessage, rows: &[RowKey]) -> Result<(), Error> {
+    fn persist_pending(
+        &self,
+        tx: u64,
+        commit: &SyncMessage,
+        rows: &[RowKey],
+        version: crate::ids::SchemaVersionId,
+    ) -> Result<(), Error> {
         let SyncMessage::Commit {
             node,
             tx: sent_as,
             kind,
             ops,
-            author,
-            session,
+            acting,
             expect: _,
             origin,
         } = commit
@@ -3832,8 +3876,7 @@ impl Inner {
             tx: *sent_as,
             kind,
             ops: Vec::new(),
-            author: author.clone(),
-            session: session.clone(),
+            acting: acting.clone(),
             expect: Vec::new(),
             origin: *origin,
         };
@@ -3865,12 +3908,12 @@ impl Inner {
             )
             .map_err(storage)?;
         }
-        // Which version's names its ops use, should the store reopen under
-        // another one before it settles.
+        // Which version's names its ops use (the schema view that wrote
+        // it), should the store reopen under another one before it settles.
         self.exec(PENDING_VERSIONS_DDL, []).map_err(storage)?;
         self.exec(
             "INSERT OR REPLACE INTO _jazz_pending_versions (tx, version) VALUES (?1, ?2)",
-            rusqlite::params![tx as i64, self.owner_version.as_bytes().to_vec()],
+            rusqlite::params![tx as i64, version.as_bytes().to_vec()],
         )
         .map_err(storage)?;
         Ok(())
@@ -4680,6 +4723,7 @@ impl Inner {
             .map_err(storage)?;
         self.seq = self.seq.max(pending.unwrap_or(0) as u64);
         let mut client = Client::new(me);
+        client.stranded = self.meta("stranded")?.is_some();
         client.known = self.meta("known")?.unwrap_or(0);
         client.persisted_known = client.known;
         let mut statement = self
@@ -4698,13 +4742,7 @@ impl Inner {
         for (tx, header) in pending {
             let commit = self.pending_commit(tx, &header)?;
             let rows = self.pending_rows(tx)?;
-            let SyncMessage::Commit {
-                ops,
-                author,
-                session,
-                ..
-            } = &commit
-            else {
+            let SyncMessage::Commit { ops, acting, .. } = &commit else {
                 continue;
             };
             let mut ops = ops
@@ -4717,10 +4755,10 @@ impl Inner {
             if let Some(version) = versions.get(&tx).filter(|v| **v != self.owner_version) {
                 client.versions.insert(tx, *version.as_bytes());
             }
-            if let Some(author) = author.as_deref().map(AuthorSubject::from_canonical) {
+            if let Some(author) = acting.author().map(AuthorSubject::from_canonical) {
                 let author = author.map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?;
-                ops.iter_mut()
-                    .for_each(|op| op.attribute(author, session.is_some()));
+                let session = matches!(acting, Acting::Session { .. });
+                ops.iter_mut().for_each(|op| op.attribute(author, session));
             }
             client.pending.push(Pending {
                 tx,
@@ -4745,6 +4783,14 @@ impl Inner {
 }
 
 impl Client {
+    /// Pending commits recorded under the current version without saying
+    /// so were written under `version`, about to stop being current.
+    pub(crate) fn keep_version(&mut self, version: [u8; 16]) {
+        for tx in self.pending.iter().map(|p| p.tx) {
+            self.versions.entry(tx).or_insert(version);
+        }
+    }
+
     /// Its host says there is no server: it is the last word on its store.
     fn no_server(&self) -> bool {
         let link = self.hint.get();
@@ -4789,6 +4835,8 @@ impl Client {
             relayed_fetches: Vec::new(),
             relay_ready: false,
             unadmitted: false,
+            stranded: false,
+            catalogued: false,
             whole: HashSet::new(),
             forgotten: false,
         }
@@ -4796,6 +4844,32 @@ impl Client {
 }
 
 // ---- client ---------------------------------------------------------------
+
+/// The refusal of a commit written under a schema version the server has
+/// not deployed (INV-SYNC-52).
+fn schema_version_not_deployed() -> Error {
+    Error {
+        code: ErrorCode::WriteRejected,
+        reason: Some(Reason::SchemaVersionNotDeployed),
+        message: "this write was made through a schema version the server has not deployed: \
+                  deploy the schema before releasing the app that writes through it"
+            .to_owned(),
+    }
+}
+
+/// Why a store that committed writes before it became a replica refuses
+/// every upstream: those commits sit at seqs its upstream numbers its own
+/// versions by, and were never recorded for upload, so syncing would lose
+/// them to the upstream's rows (#4443). They stay local, and so does what
+/// it writes after.
+fn stranded() -> Error {
+    Error::new(
+        ErrorCode::Protocol,
+        "this store committed writes before it became a replica, and uploading them is \
+         not supported yet: a store that will connect upstream becomes a replica \
+         (`become_replica`, or a remote link hint) before it writes",
+    )
+}
 
 impl Db {
     /// Connect this database to its server. Writes from now on upload, and
@@ -4848,12 +4922,15 @@ impl Db {
             )
         });
         let version = *inner.owner_version.as_bytes();
-        // The versions whose names this store keeps: the server sends
-        // those it stores otherwise, or it has and this store lacks.
+        // The versions whose names this store keeps and whose schema it
+        // holds: the server sends those it stores otherwise, or it has and
+        // this store lacks. One only an earlier process admitted is sent
+        // again, so this one holds it and can serve its own sessions by it.
         let versions = inner
             .names
             .in_order()
             .into_iter()
+            .filter(|(version, _)| inner.deployed(*version))
             .map(|(version, names)| (*version.as_bytes(), crate::names::names_digest(names)))
             .collect();
         let client = inner.client.as_mut().expect("client");
@@ -4897,8 +4974,13 @@ impl Db {
         let asked = std::mem::take(&mut client.requested);
         client.wanted.extend(asked);
         client.unadmitted = false;
+        client.catalogued = false;
         client.connection += 1;
-        Upstream(client.connection)
+        let connection = client.connection;
+        if client.stranded {
+            inner.refuse_upstream(stranded());
+        }
+        Upstream(connection)
     }
 
     /// Evict the cached rows of a remote query's settled view that its
@@ -5023,15 +5105,25 @@ impl Db {
     /// Become a replica: optimistic seqs from here on sit above every
     /// server seq, and commits are owed to an upstream (uploaded once one
     /// connects). A store that will connect later becomes one before it
-    /// writes, or its earlier commits stay local.
+    /// writes: what it committed before sits at seqs its upstream numbers
+    /// its own versions by and was never recorded for upload, so such a
+    /// store keeps it and refuses every upstream (see [`stranded`]).
     pub fn become_replica(&self) {
         let mut inner = self.inner.borrow_mut();
         if inner.client.is_some() {
             return;
         }
+        let stranded = !inner.authority && inner.holds_rows().expect("read the store's tables");
         inner.raise_to_local_base();
         let node = *inner.identity.node.as_bytes();
-        inner.client = Some(Client::new(node));
+        let mut client = Client::new(node);
+        client.stranded = stranded;
+        inner.client = Some(client);
+        if stranded {
+            inner
+                .persist_meta("stranded", 1)
+                .expect("persist stranded flag");
+        }
         inner
             .persist_meta("client", 1)
             .expect("persist replica flag");
@@ -5058,19 +5150,24 @@ impl Db {
     /// transaction the ops join it. It reads and writes the store, so
     /// it runs inside the commit's SQLite transaction: an error leaves the
     /// replica's sync state as it was, and the caller rolls the commit back.
+    /// `version`: the schema version whose names `ops` use (the schema
+    /// view that wrote them), which the commit uploads under.
     pub(crate) fn record_upload(
         &self,
         ops: Vec<StagedOp>,
         seq: u64,
         kind: Kind,
         relayed: Option<Relayed>,
+        version: crate::ids::SchemaVersionId,
     ) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
         if inner.client.is_none() {
             return Ok(());
         }
         if inner.tx.is_some() {
-            inner.capture.extend(ops);
+            inner
+                .capture
+                .extend(ops.into_iter().map(|op| (version, op)));
             return Ok(());
         }
         // A read-only serializable commit still goes up: the authority
@@ -5086,9 +5183,16 @@ impl Db {
             (inner.identity.author == AuthorSubject::SYSTEM).then(|| inner.stamp_author())
         });
         // A session's writes carry its claims, for the authority's check.
-        let session_claims = author
-            .filter(|_| session)
-            .map(|author| inner.claims.get(&author).cloned().unwrap_or_default());
+        let acting = match author {
+            None => Acting::Own,
+            Some(author) if session => Acting::Session {
+                author: author.canonical().to_owned(),
+                claims: inner.claims.get(&author).cloned().unwrap_or_default(),
+            },
+            Some(author) => Acting::Attributed {
+                author: author.canonical().to_owned(),
+            },
+        };
         let rows = inner.written_rows(&ops, seq)?;
         let mut baselines = Vec::new();
         // What this replica built each row it wrote on (SPEC 4 §4.6): its
@@ -5169,6 +5273,7 @@ impl Db {
             });
             expected.push(image);
         }
+        let other = version != inner.owner_version;
         let client = inner.client.as_mut().expect("client");
         let added: Vec<RowKey> = baselines.iter().map(|(key, _)| key.clone()).collect();
         client.baselines.extend(baselines);
@@ -5191,8 +5296,7 @@ impl Db {
                     tx: seq,
                     kind,
                     ops: wire,
-                    author: author.map(|author| author.canonical().to_owned()),
-                    session: session_claims,
+                    acting,
                     expect,
                     origin,
                 };
@@ -5203,11 +5307,19 @@ impl Db {
                     rows: rows.clone(),
                     expected,
                 });
-                let persisted = inner.persist_pending(seq, &commit, &rows);
+                // Written through a view of another version: it uploads
+                // under that one, whose names its ops use.
+                if other {
+                    client.versions.insert(seq, *version.as_bytes());
+                }
+                let persisted = inner.persist_pending(seq, &commit, &rows, version);
                 if let Err(error) = persisted {
                     let client = inner.client.as_mut().expect("client");
                     client.unsent.pop();
                     client.pending.pop();
+                    if other {
+                        client.versions.remove(&seq);
+                    }
                     for key in &added {
                         client.baselines.remove(key);
                     }
@@ -5298,7 +5410,7 @@ impl Db {
         let id = client.next_id;
         client.next_id += 1;
         let answered = Rc::new(StdCell::new(false));
-        let refused = Rc::new(RefCell::new(None));
+        let refused = Rc::new(RefCell::new(client.stranded.then(stranded)));
         let global = Rc::new(StdCell::new(false));
         let author = inner.identity.author;
         let watermark = watermark_key(&query, &prepared.binding, include_deleted, author);
@@ -5421,6 +5533,9 @@ impl Db {
         };
         {
             let inner = self.inner.borrow();
+            if tier == ReadTier::Remote {
+                inner.check_not_stranded()?;
+            }
             if inner.client.is_none() || !strict && !answerable(&inner) {
                 return Ok(None);
             }
@@ -5597,6 +5712,10 @@ impl Db {
                 None if tier == DurabilityTier::Local && client.stored.contains(&tx) => {
                     Poll::Ready(Ok(tx))
                 }
+                // A stranded store uploads nothing (INV-SYNC-51).
+                None if client.stranded && client.pending.iter().any(|p| p.tx == tx) => {
+                    Poll::Ready(Err(stranded()))
+                }
                 None if client.pending.iter().any(|p| p.tx == tx) => Poll::Pending,
                 // Not pending and no fate: a local no-op or pre-connection commit.
                 None => Poll::Ready(Ok(tx)),
@@ -5687,16 +5806,16 @@ impl Db {
         client.next_advice += 1;
         if client.transport.is_some() && may_wait(client.hint.get()) {
             client.advice.insert(id, None);
-            let (author, session) = match session {
-                Some((author, claims)) => (Some(author.canonical().to_owned()), Some(claims)),
-                None => (None, None),
+            let acting = match session {
+                Some((author, claims)) => Acting::Session {
+                    author: author.canonical().to_owned(),
+                    claims,
+                },
+                None => Acting::Own,
             };
-            client.outbox.push(SyncMessage::CheckAllowed {
-                id,
-                action,
-                author,
-                session,
-            });
+            client
+                .outbox
+                .push(SyncMessage::CheckAllowed { id, action, acting });
         } else {
             client.advice.insert(id, Some(PermissionAdvice::Unknown));
         }
@@ -5930,7 +6049,10 @@ impl Db {
                         confirmed,
                     } => {
                         match inner.mirror_catalogue(namespace, versions, cells, &confirmed) {
-                            Ok(renamed) => rebase |= renamed,
+                            Ok(renamed) => {
+                                rebase |= renamed;
+                                inner.client.as_mut().expect("client").catalogued = true;
+                            }
                             // This store cannot store rows as its upstream
                             // does: it stops syncing with it, nothing that
                             // follows applies, and its remote reads fail
@@ -6228,12 +6350,11 @@ impl Db {
                 client.sent.push(commit.clone());
             }
         }
-        // A commit written under an earlier version is sent under it: the
+        // A commit is sent under the version it was written under: the
         // server reads its ops by that version's names. An authority keeps
         // admitting every version it published (a server replays its
-        // catalogue on start), so the server holds the session's later
-        // messages behind such a switch only for a version never published
-        // (a draft), as it does for a session declaring one.
+        // catalogue on start); a commit under a version it never deployed
+        // is refused (INV-SYNC-52).
         let mut declared = current;
         for (commit, (hashes, batches)) in commits.into_iter().zip(pushes) {
             if let SyncMessage::Commit { tx, .. } = &commit {
@@ -6290,28 +6411,38 @@ impl Db {
             return Ok(());
         };
         let baseline = std::mem::take(&mut client.baselines);
-        let versions = client.versions.clone();
         let pending: Vec<(u64, Vec<StagedOp>)> = client
             .pending
             .iter()
             .map(|p| (p.tx, p.ops.clone()))
             .collect();
+        // Settled and refused commits no longer name a version.
+        client
+            .versions
+            .retain(|tx, _| pending.iter().any(|(pending, _)| pending == tx));
+        let versions = client.versions.clone();
         let keep: BTreeSet<(String, RowUuid, Vec<u8>)> = client
             .pending
             .iter()
             .flat_map(|p| p.rows.iter().cloned())
             .collect();
-        // A commit written under an earlier version replays by the names
-        // the current one gives what it wrote, as they stand now (an
-        // upstream's catalogue may have renamed them since).
-        let pending: Vec<(u64, Vec<StagedOp>)> = pending
+        // A commit written under another version replays under it, as its
+        // names stand now (an upstream's catalogue may have renamed them
+        // since), while this store holds that version (a schema view): what
+        // it wrote that the current version lacks stays visible through
+        // the view. One written before an upgrade replays by the names the
+        // current version gives what it wrote.
+        let pending: Vec<(u64, Option<Rc<Schema>>, Vec<StagedOp>)> = pending
             .into_iter()
             .map(|(tx, ops)| match versions.get(&tx) {
                 Some(version) => {
                     let version = crate::ids::SchemaVersionId::from_bytes(*version);
-                    (tx, inner.by_current_names(version, ops))
+                    match inner.governed(version) {
+                        Some(schema) => (tx, Some(schema), ops),
+                        None => (tx, None, inner.by_current_names(version, ops)),
+                    }
                 }
-                None => (tx, ops),
+                None => (tx, None, ops),
             })
             .collect();
         for ((table, row, key), image) in &baseline {
@@ -6323,13 +6454,17 @@ impl Db {
                 None => inner.drop_row(table, *row, key, 0)?,
             }
         }
-        for (tx, ops) in pending {
+        let active = inner.schema.clone();
+        let replayed = pending.into_iter().try_for_each(|(tx, schema, ops)| {
             begin_savepoint(&inner.conn, "replay")?;
+            inner.schema = schema.unwrap_or_else(|| inner.owner.clone());
             inner.merging = true;
             let replayed = ops.iter().try_for_each(|op| inner.apply(op, tx).map(drop));
             inner.merging = false;
-            end_savepoint(&inner.conn, "replay", replayed.is_ok())?;
-        }
+            end_savepoint(&inner.conn, "replay", replayed.is_ok())
+        });
+        inner.schema = active;
+        replayed?;
         let client = inner.client.as_mut().expect("client");
         client.baselines = baseline
             .into_iter()
@@ -6340,6 +6475,34 @@ impl Db {
 }
 
 impl Inner {
+    /// A stranded replica (see [`stranded`]) has no upstream to answer a
+    /// `Remote` read: its rows at server-range seqs are its own, never
+    /// confirmed (INV-SYNC-51). A local-first read serves its store.
+    pub(crate) fn check_not_stranded(&self) -> Result<(), Error> {
+        match &self.client {
+            Some(client) if client.stranded => Err(stranded()),
+            _ => Ok(()),
+        }
+    }
+
+    /// Whether any stored table holds a row or a version of one: on a
+    /// store that is not a replica, only its own commits put them there.
+    fn holds_rows(&self) -> Result<bool, Error> {
+        for stored in self.physical.tables.keys() {
+            for table in [stored.clone(), format!("{stored}__h")] {
+                let sql = format!("SELECT EXISTS (SELECT 1 FROM {})", quote(&table));
+                let any: bool = self
+                    .conn
+                    .query_row(&sql, [], |r| r.get(0))
+                    .map_err(storage)?;
+                if any {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
     /// Where this replica's optimistic local seqs start.
     fn local_base(&self) -> u64 {
         if self.non_durable {
@@ -6381,6 +6544,9 @@ impl Inner {
             return;
         };
         client.transport = None;
+        // What the authority deployed is known again once the next
+        // upstream sends its catalogue.
+        client.catalogued = false;
         let mut link = client.hint.get();
         link.detached = true;
         client.hint.set(link);
@@ -6531,9 +6697,65 @@ impl Inner {
     /// Whether session `index` declared a schema version this store has
     /// not admitted.
     fn session_unadmitted(&self, index: usize) -> bool {
-        self.sessions[index].version.is_some_and(|version| {
-            version != self.owner_version && !self.admitted.iter().any(|(id, _)| *id == version)
-        })
+        self.sessions[index]
+            .version
+            .is_some_and(|version| !self.deployed(version))
+    }
+
+    /// Whether this store admitted schema `version`.
+    fn deployed(&self, version: crate::ids::SchemaVersionId) -> bool {
+        version == self.owner_version || self.admitted.iter().any(|(id, _)| *id == version)
+    }
+
+    /// Whether this store knows every version the authority deployed: it
+    /// is the authority (it has no upstream), or its upstream sent its
+    /// catalogue on this connection.
+    /// A store with no upstream link is the top of its tree: a worker
+    /// that will sync becomes a replica (or is given a link hint) before
+    /// its tabs write.
+    fn knows_deployed(&self) -> bool {
+        self.client
+            .as_ref()
+            .is_none_or(|client| client.catalogued && client.transport.is_some())
+    }
+
+    /// Refuse each commit in `held`, messages of session `index` in the
+    /// order it sent them, that it wrote under a version this store has
+    /// not admitted, once it knows every version the authority deployed
+    /// (INV-SYNC-52).
+    fn refuse_undeployed(&mut self, index: usize, held: &mut VecDeque<SyncMessage>) {
+        if !self.knows_deployed() {
+            return;
+        }
+        let mut version = self.sessions[index].version;
+        let mut refused = Vec::new();
+        held.retain(|message| match message {
+            SyncMessage::Schema { version: declared } => {
+                version = Some(crate::ids::SchemaVersionId::from_bytes(*declared));
+                true
+            }
+            SyncMessage::Commit { tx, .. } if version.is_some_and(|v| !self.deployed(v)) => {
+                refused.push(*tx);
+                false
+            }
+            _ => true,
+        });
+        for tx in refused {
+            self.refuse_undeployed_commit(index, tx);
+        }
+    }
+
+    /// Answer session `index`'s commit `tx`, written under a version this
+    /// store has not admitted, with its refusal.
+    fn refuse_undeployed_commit(&mut self, index: usize, tx: u64) {
+        let through = self.served_through();
+        self.sessions[index].outbox.push(SyncMessage::Fate {
+            tx,
+            through,
+            result: Err(wire_error(&schema_version_not_deployed())),
+            held: Vec::new(),
+            global: true,
+        });
     }
 
     /// The schema session `index` declared, governed by the current
@@ -6955,15 +7177,24 @@ impl Db {
             // A session on a schema version this server has not
             // admitted (a draft awaiting its lens) waits: serving it
             // under another version would expose rows it may not read
-            // that way.
-            if !matches!(
-                message,
-                SyncMessage::Schema { .. } | SyncMessage::KnownCatalogue { .. }
-            ) {
-                let inner = self.inner.borrow_mut();
+            // that way. Once it knows every version the authority
+            // deployed, its commits do not wait: they are refused
+            // (INV-SYNC-52).
+            let refuses = matches!(message, SyncMessage::Commit { .. })
+                && self.inner.borrow().knows_deployed();
+            if !refuses
+                && !matches!(
+                    message,
+                    SyncMessage::Schema { .. } | SyncMessage::KnownCatalogue { .. }
+                )
+            {
+                let mut inner = self.inner.borrow_mut();
                 if inner.session_unadmitted(index) {
                     inbound.push_front(message);
                     held.extend(inbound);
+                    // The commits it holds that way are refused now: a
+                    // refused commit changes nothing a read could observe.
+                    inner.refuse_undeployed(index, &mut held);
                     break;
                 }
             }
@@ -8062,21 +8293,16 @@ impl Db {
                     }
                 }
             }
-            SyncMessage::CheckAllowed {
-                id,
-                action,
-                author,
-                session,
-            } => {
+            SyncMessage::CheckAllowed { id, action, acting } => {
                 // As for a commit: a trusted link may ask for a session it
                 // vouches for; a session link only for its own.
-                let result = match commit_who(policy, author.as_deref(), session.is_some()) {
+                let result = match commit_who(policy, &acting) {
                     Ok(who) => {
                         let identity = match who {
                             Who::Session(author) => Some(author),
                             _ => policy,
                         };
-                        let vouched = vouched(policy, who, session);
+                        let vouched = vouched(policy, who, acting);
                         self.with_claims(vouched, || self.advise(identity, action))
                     }
                     Err(_) => PermissionAdvice::Denied,
@@ -8316,8 +8542,7 @@ impl Db {
                 tx,
                 kind,
                 ops,
-                author,
-                session,
+                acting,
                 expect,
                 origin,
             } => {
@@ -8352,9 +8577,16 @@ impl Db {
                 };
                 // A resend after a reconnect gets the recorded fate.
                 let known = self.inner.borrow().applied_fate(node, tx)?;
+                // A commit written under a version this server has not
+                // deployed is refused at once, loudly: the app that wrote
+                // it was released ahead of its schema (INV-SYNC-52).
+                if known.is_none() && self.inner.borrow().session_unadmitted(index) {
+                    self.inner.borrow_mut().refuse_undeployed_commit(index, tx);
+                    return Ok(());
+                }
                 let (result, rows) = match known {
                     Some(result) => (result, Vec::new()),
-                    None => match commit_who(policy, author.as_deref(), session.is_some())
+                    None => match commit_who(policy, &acting)
                         .map_err(|error| (error, Vec::new()))
                         .and_then(|who| {
                             let (ops, mut roots) = db
@@ -8370,7 +8602,7 @@ impl Db {
                                 roots,
                                 settle: Default::default(),
                             };
-                            let vouched = vouched(policy, who, session);
+                            let vouched = vouched(policy, who, acting);
                             self.with_claims(vouched, || {
                                 db.authorize_commit(
                                     who,
@@ -8964,6 +9196,7 @@ impl Db {
                     origin: writer,
                     bases,
                 }),
+                self.write_version(),
             )
         } else {
             Ok(())
@@ -9027,20 +9260,20 @@ impl Db {
 fn vouched(
     policy: Option<AuthorSubject>,
     who: Who,
-    session: Option<BTreeMap<String, Value>>,
+    acting: Acting,
 ) -> Option<(AuthorSubject, BTreeMap<String, Value>)> {
-    match (who, session) {
-        (Who::Session(author), Some(claims)) if policy.is_none() => Some((author, claims)),
+    match (who, acting) {
+        (Who::Session(author), Acting::Session { claims, .. }) if policy.is_none() => {
+            Some((author, claims))
+        }
         _ => None,
     }
 }
 
-fn commit_who(
-    policy: Option<AuthorSubject>,
-    author: Option<&str>,
-    session: bool,
-) -> Result<Who, Error> {
-    let author = author
+fn commit_who(policy: Option<AuthorSubject>, acting: &Acting) -> Result<Who, Error> {
+    let session = matches!(acting, Acting::Session { .. });
+    let author = acting
+        .author()
         .map(AuthorSubject::from_canonical)
         .transpose()
         .map_err(|error| Error::new(ErrorCode::WriteRejected, error.to_string()))?;
@@ -9350,6 +9583,68 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ids::NodeUuid;
+
+    /// A pending `Commit` header in the layout before `acting` (separate
+    /// `author` and `session`), with its lists empty as `persist_pending`
+    /// stores them.
+    fn pre_acting_header(
+        author: Option<&str>,
+        session: Option<BTreeMap<String, Value>>,
+        origin: Option<([u8; 16], u64)>,
+    ) -> Vec<u8> {
+        const COMMIT: u32 = 4;
+        postcard::to_allocvec(&(
+            COMMIT,
+            [7u8; 16],
+            LOCAL_BASE + 1,
+            WireKind::Mergeable,
+            Vec::<WireOp>::new(),
+            author.map(str::to_owned),
+            session,
+            Vec::<Expect>::new(),
+            origin,
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_pending_header_from_before_acting_is_refused_not_misread() {
+        let author = AuthorSubject::system_at(NodeUuid::from_bytes([9; 16]));
+        let headers = [
+            pre_acting_header(None, None, None),
+            pre_acting_header(None, None, Some(([8; 16], 3))),
+            pre_acting_header(Some(author.canonical()), None, Some(([8; 16], 3))),
+            pre_acting_header(Some(author.canonical()), Some(BTreeMap::new()), None),
+        ];
+        for header in headers {
+            let error = decode_stored::<SyncMessage>(&header)
+                .expect_err("an old pending header must not decode");
+            assert_eq!(error.code, ErrorCode::UnsupportedStorageCodecs, "{error:?}");
+            assert!(error.message.contains("resync"), "{error:?}");
+        }
+    }
+
+    #[test]
+    fn a_current_pending_header_round_trips() {
+        let header = SyncMessage::Commit {
+            node: [7; 16],
+            tx: LOCAL_BASE + 1,
+            kind: WireKind::Mergeable,
+            ops: Vec::new(),
+            acting: Acting::Session {
+                author: AuthorSubject::system_at(NodeUuid::from_bytes([9; 16]))
+                    .canonical()
+                    .to_owned(),
+                claims: BTreeMap::from([("role".to_owned(), Value::String("admin".to_owned()))]),
+            },
+            expect: Vec::new(),
+            origin: Some(([8; 16], 3)),
+        };
+        let bytes = encode(&header);
+        let decoded: SyncMessage = decode_stored(&bytes).unwrap();
+        assert_eq!(encode(&decoded), bytes);
+    }
 
     fn image(id: u8, seq: u64, body: usize) -> Image {
         Image {
