@@ -55,6 +55,9 @@ source of truth and names each invariant's tests):
 - `INV-SYNC-48`: A Remote read MUST NOT report rows the server's answer no longer lists.
 - `INV-SYNC-49`: A server MUST process a session's messages in the order sent, so a read sent after a commit is served after that commit.
 - `INV-SYNC-50`: A non-durable client's local seqs MUST NOT collide with its relay's.
+- `INV-SYNC-51`: A store that committed writes before it became a replica MUST keep them and refuse every upstream, saying why.
+- `INV-SYNC-52`: A replica MUST upload each commit under the schema version of the view that wrote it, keeping it pending while offline; a server MUST refuse a commit under a version it has not deployed, at once, with reason `schema_version_not_deployed`.
+- `INV-SYNC-53`: The authority MUST NOT name a writer's own row as written (instead of shipping it) unless the commit applied unmerged over the very version the writer built on and that version is still current (§8.3); every other row ships, and a writer whose image differs from the digest asks for the row whole.
 - `INV-TX-2`, `INV-TX-11`, `INV-TX-23`: commit, seq and relay rules (ch. 3).
 - `INV-WIRE-1`, `INV-WIRE-2`: exact postcard frames and Hello version negotiation (§8.1.1).
 
@@ -94,6 +97,16 @@ serves sessions, a relay); a node without one is the authority for its
 sessions. Only the global authority assigns `Global` fates (ch. 3, ch. 9).
 Only one relay tier is supported: an authority, optionally a durable relay
 (a worker), and its non-durable sessions (tabs) (SPEC 9 §9.5).
+
+A store becomes a replica before it writes anything it will upload
+(`become_replica`, which connecting or a remote link hint does): its writes
+then take local seqs and are recorded as pending commits, uploaded on the
+first connection. A store that committed writes before it became a replica
+has them at seqs its upstream numbers its own versions by, never recorded for
+upload; syncing would let the upstream's rows replace them. Uploading them is
+not supported yet, so such a store keeps them and refuses every upstream,
+failing its remote reads (live and one-shot `Remote` ones) with why, across
+reopens (`INV-SYNC-51`).
 
 Messages, with their postcard variant tags:
 
@@ -206,11 +219,13 @@ The commit's other fields:
   writes only if every result and written row is unchanged since the snapshot.
   A stale or partial replica can only cause a conflict, never a
   non-serializable commit.
-- `expect`: a digest of each written row as the writer's replica holds it
-  afterwards. The authority does not echo a row whose new version matches;
-  the writer installs its own as that version (§8.3).
-- `author`, `session`: provenance or a session a trusted link acts for. Only
-  a trusted link may set one other than its own identity.
+- `acting`: who the writes are. `Own`: the sender's, checked and attributed as
+  the link. `Attributed { author }`: provenance only, checked as the sender.
+  `Session { author, claims }`: a session's writes with its claims. Over a
+  trusted link the authority checks them as that session; over a session link
+  it checks and attributes them as the link's own identity, whatever author
+  they name. A session link's `Attributed` commit naming another author is
+  refused.
 - `origin`: the session commit a relay uploads this one for.
 
 A replica keeps every unsettled commit and uploads it in order on each
@@ -223,7 +238,10 @@ connection. It is stored a row per op, not as one encoded message:
   (`n`).
 - `_jazz_pending_rows (tx, n, tbl, id, key)`: the local rows it wrote.
 
-`expect` is not kept: after a reopen the server ships those rows. A row's
+What each commit wrote stays in the store at the commit's local seq (the
+row's current version, or history under a later pending write), so a
+reopened replica can still install what the authority holds back (§8.3). A
+row's
 values over the inline limit live in large-value storage, so a stored op is
 about the size of the row it writes, however large the commit. A store with
 a 2 MiB value limit (a Durable Object) therefore keeps any commit whose rows
@@ -259,21 +277,65 @@ read-your-writes end to end.
 
 ### 8.3 Fates downstream
 
-`Fate { tx, through, result, held, global }` answers a commit:
+`Fate { tx, outcome, global }` answers a commit. The `outcome` is one of:
 
-- `result`: `Ok`, or `Conflict`, `Rejected { reason, message }` (a `Reason`
-  by stable name; an unknown name arrives as a rejection without a reason) or
-  `Other`.
-- `through`: the server seq the session is complete through after the
-  commit's rows shipped. Applying a fate never moves the replica's settled seq
-  backward (`INV-SYNC-5`).
-- `held`: the `expect` rows the server did not ship, each with the
-  authority's `$createdAt`/`$updatedAt` stamps, so the writer can install its
-  own image as the accepted version. A keystroke-grade edit therefore costs
-  one `Fate` and one `Settled` downstream.
-- `global`: the fate is the global authority's (directly or relayed). A
-  non-global fate is the final word of a replica with no upstream, which
-  orders its sessions' commits but cannot make them `Global`.
+- `Accepted { seq, accepted_at, as_written }`: the commit landed at server seq
+  `seq`, which the replica records as where it settled; applying a fate never
+  moves its settled seq backward (`INV-SYNC-5`). `accepted_at` is the time
+  (Unix ms) the authority's clock stamped the commit's writes with: the
+  `$createdAt`/`$updatedAt` of every write without an explicit time. It is
+  absent only on a resend's recorded fate, which names no rows.
+  Its `as_written` lists the commit's rows the server did not ship, each named
+  as a base is (the commit's first op that writes it) with its branch key, and
+  carrying the authority's digest of its version, so the writer can install
+  its own image as the accepted version: stamped at `accepted_at` where its
+  own clock stamped it (a row's `$updatedAt`, and the `$createdAt` of a row
+  the commit created), and with the create stamp of the row's settled
+  versions over a row it did not. A keystroke-grade edit therefore costs one
+  `Fate` and one `Settled` downstream.
+- `Refused { through, error }`: the commit was refused and landed nowhere.
+  `error` is `Conflict`, `Rejected { reason, message }` (a `Reason` by
+  stable name; an unknown name arrives as a rejection without a reason) or
+  `Other`. The rows the commit wrote shipped back ahead of the fate as they
+  are, and the session is complete through server seq `through` with them: a
+  retry's snapshot reads at it, so a serializable retry sees what the commit
+  conflicted with.
+
+`global` says the fate is the global authority's (directly or relayed). A
+non-global fate is the final word of a replica with no upstream, which orders
+its sessions' commits but cannot make them `Global`.
+
+The authority infers, rather than compares, that a row's new version is
+likely the writer's image of it (`INV-SYNC-53`). It names a row as written
+only if all of these hold:
+
+1. The row's version just before the commit is the one the writer built on:
+   the version its base names (an accepted one, or the version the writer's
+   own earlier commit landed as); or, with no base, no version at all, and
+   every op on the row is an insert or an upsert of an unbranched row. (An
+   upsert into a branch may copy a parent branch's version, create stamp
+   included, which the writer may hold otherwise.)
+2. No text merge changed a value the commit sent (SPEC 4 §4.3), and no op of
+   the commit moves the row between branches.
+3. The version is still the row's current one when fan-out ships the
+   session's rows.
+
+The writer checks the inference on every such row: each carries the
+authority's 16-byte digest of its version (everything but its seq and the
+stamps). A row whose image matches is installed. One whose image differs, or
+that the writer holds no image of to compare (the commit was written under
+another schema version than the store's own, through a view of another
+version or before a reopen with a newer one, or a catalogue with new versions
+arrived while it was pending), or whose create stamp it lacks, is asked for
+with `ResendWhole` (§8.12), naming the fate's seq: the server ships the row
+whole and, if a later version superseded it, that seq's version too. The fate
+waits until those rows arrive, and every later fate waits behind it, so the
+commit stays pending meanwhile: its writes never drop out locally and later
+writes build on it as on any pending commit. A miss therefore costs one fetch
+of the row, never a divergent cache. A replica whose configured author is not
+the identity its link was accepted as has every row stamped otherwise, so each
+of its writes costs that fetch. Mismatches are counted per replica
+(`as_written_mismatches`); tests of honest writers assert there are none.
 
 `Stored { tx }` is durability progress from a relay to a non-durable session:
 the relay holds the commit in its store and uploads it, so it is `Local` for a
@@ -283,7 +345,8 @@ which is final.
 
 A fate lost to a disconnect is recovered on the next connection: the replica
 re-uploads its pending commits, and the authority answers a commit it already
-decided with the known fate.
+decided with the known fate, shipping the rows that commit wrote as they now
+are (a resend's writer may not hold them as the commit left them).
 
 ### 8.4 Downstream: reads and rows
 
@@ -379,7 +442,7 @@ wrote and cannot read (a write-only insert): the commit's fate reports its
 acceptance. Local copies are not a redaction boundary; eviction keeps the
 replica coherent, not secret.
 
-`CheckAllowed { id, action, author, session }` asks whether the session would be
+`CheckAllowed { id, action, acting }` asks whether the session would be
 allowed an action now, without writing; `CheckAllowedResult { id, result }`
 answers it.
 
@@ -449,14 +512,36 @@ not admitted is named like the server's current schema.
 
 `SchemaAdmission { admitted }` tells the session whether its version is
 admitted, whenever that changes. Until it is, the server holds the session's
-messages (a draft awaiting its lens), so a read that needs the server fails
-with the reason rather than waiting out its budget.
+reads (a draft awaiting its lens), so a read that needs the server fails
+with the reason rather than waiting out its budget, and refuses its commits
+(below).
 
 Each pending commit records the schema version it was written under
-(`_jazz_pending_versions`). Before uploading pending commits staged under
+(`_jazz_pending_versions`): the version of the schema view that wrote it, or
+the store's current version. Before uploading pending commits staged under
 another version than the session's current one, the replica sends a `Schema`
-switch for them, so an offline write made before an upgrade is resolved under
-the names it was written with.
+switch for them, so an offline write made before an upgrade, or through a view
+of a version the server has not admitted yet, is resolved under the names it
+was written with (`INV-SYNC-52`). Offline, such a commit stays pending, and
+the replica replays it under its version while it holds it (a registered view),
+so the columns only that version has stay visible there. A commit that reaches
+a server which has not deployed its version is refused there, at once, with
+reason `schema_version_not_deployed` (code `write_rejected`): the app that
+wrote it was released ahead of its schema, a deploy error that waiting would
+hide. The replica rolls it back like any refused write; the session goes on,
+and the commits after it upload. A server holding a session's reads behind an
+unadmitted version refuses the commits behind them the same way. A relay (a
+worker serving tabs) refuses only while it is linked to an upstream that sent
+its catalogue on that connection, so it knows every version the authority
+deployed; until then, and while offline, it holds such commits. A store with no
+upstream at all is the top of its tree and refuses at once, so a worker that
+will sync becomes a replica (or is given a link hint) before its tabs write. Its `KnownCatalogue` lists only the versions whose schema it holds
+in this process, so a version an earlier process mirrored is sent again and
+the relay serves it as before. A pending commit written under the version
+current until a newer one is made current uploads under the version it was
+written under.
+One commit uploads under one version, so a replica refuses a transaction
+written through views of different versions.
 
 The authority evaluates every write against its own policy data. A relay may
 keep and retry pending writes but cannot accept them or make them `Global`.
@@ -554,7 +639,9 @@ chunks are present (`INV-SYNC-46`).
 Within a session the server ships later versions' chunked cells as deltas over
 the version it last shipped of that row. A replica that cannot apply a delta
 (it lacks that base version) sends `ResendWhole { rows }` for those rows, and
-the server ships each whole or evicts it. The replica sends the `ResendWhole`
+the server ships each whole or evicts it. A row also names a seq when the
+replica's own commit produced it there and the replica could not install it
+(§8.3): the server ships that version too, if superseded and still readable. The replica sends the `ResendWhole`
 again on every new connection until the whole image arrives, and stores no watermark
 meanwhile (§8.11). A live read's rows are never declared this way: its opening
 brings them up to date from `since`.

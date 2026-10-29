@@ -26,9 +26,9 @@ use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
 use jazz::db::{
-    CorpusReader, Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadSpan, ReadTier, Reason,
-    SyncMessage, Transport, UpdateOptions, WireError as SyncWireError, block_on, encode_frames,
-    validate_frame_batch_for_corpus,
+    Acting, CorpusReader, Db, DbConfig, DbIdentity, FrameJoiner, InsertOptions, Outcome, ReadOpts,
+    ReadSpan, ReadTier, Reason, SyncMessage, Transport, UpdateOptions, WireError as SyncWireError,
+    WriteIdentity, block_on, encode_frames, validate_frame_batch_for_corpus,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::model::transaction::OpenTransactionId;
@@ -39,7 +39,8 @@ use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::wire::{
     TransportError, WireError, WireErrorCode, WireFrame, WireHello, WirePeerRole, WireRetry,
-    current_wire_features, encode_frame, encode_websocket_frame_batch,
+    current_wire_features, decode_websocket_frame_batch, encode_frame,
+    encode_websocket_frame_batch,
 };
 use serde::{Deserialize, Serialize};
 
@@ -168,6 +169,32 @@ fn every_pinned_sync_frame_decodes_to_its_variant_and_reencodes_exactly() {
     }
 }
 
+/// A commit too large for one frame travels in parts: the pinned split
+/// commit joins back into exactly the pinned `Commit`.
+#[test]
+fn the_pinned_split_commit_joins_into_the_pinned_commit() {
+    let corpus = corpus();
+    let commit = corpus
+        .messages
+        .iter()
+        .find(|m| m.variant == "Commit")
+        .unwrap();
+    let split = corpus
+        .frames
+        .iter()
+        .find(|f| f.name == "a split commit in one batch")
+        .expect("a split commit is pinned");
+    let frames = decode_websocket_frame_batch(&unhex(&split.batch_hex)).unwrap();
+    assert_eq!(frames.len(), 2, "in two parts");
+    let mut joiner = FrameJoiner::default();
+    assert!(joiner.push(&frames[0]).unwrap().is_none(), "a leading part");
+    let joined = joiner.push(&frames[1]).unwrap().expect("the last part");
+    assert_eq!(
+        postcard::to_allocvec(&joined).unwrap(),
+        unhex(&commit.frame_hex)
+    );
+}
+
 /// The rejected-fate layout (a reason name beside the message) is pinned by
 /// real frames: each still decodes to a rejection with its reason name and
 /// re-encodes to the same bytes.
@@ -189,7 +216,11 @@ fn every_pinned_rejected_fate_decodes_with_its_reason_and_reencodes_exactly() {
             )
         });
         let SyncMessage::Fate {
-            result: Err(SyncWireError::Rejected { reason, message }),
+            outcome:
+                Outcome::Refused {
+                    error: SyncWireError::Rejected { reason, message },
+                    ..
+                },
             ..
         } = &decoded
         else {
@@ -293,7 +324,11 @@ impl Transport for Recording {
             );
             let mut recorded = self.recorded.borrow_mut();
             if let SyncMessage::Fate {
-                result: Err(SyncWireError::Rejected { reason, .. }),
+                outcome:
+                    Outcome::Refused {
+                        error: SyncWireError::Rejected { reason, .. },
+                        ..
+                    },
                 ..
             } = &decoded
             {
@@ -330,9 +365,16 @@ impl Transport for Recording {
 
 /// Message shapes the one frame per variant leaves unpinned: a one-shot
 /// `Read` (its span carries a snapshot and a view), `Rows` carrying the
-/// commits behind history versions, and a `Catalogue` carrying versions
-/// with their stored names and a lens's cells.
-const SHAPES: [&str; 3] = ["Read/once", "Rows/tx_ids", "Catalogue/versions"];
+/// commits behind history versions, a `Catalogue` carrying versions
+/// with their stored names and a lens's cells, and a trusted link's
+/// `Commit`s acting as an attributed author and as a session.
+const SHAPES: [&str; 5] = [
+    "Read/once",
+    "Rows/tx_ids",
+    "Catalogue/versions",
+    "Commit/attributed",
+    "Commit/session",
+];
 
 fn shape(message: &SyncMessage) -> Option<&'static str> {
     match message {
@@ -344,6 +386,14 @@ fn shape(message: &SyncMessage) -> Option<&'static str> {
         SyncMessage::Catalogue {
             versions, cells, ..
         } if !versions.is_empty() && !cells.is_empty() => Some(SHAPES[2]),
+        SyncMessage::Commit {
+            acting: Acting::Attributed { author },
+            ..
+        } if *author == user(1).canonical() => Some(SHAPES[3]),
+        SyncMessage::Commit {
+            acting: Acting::Session { claims, .. },
+            ..
+        } if !claims.is_empty() => Some(SHAPES[4]),
         _ => None,
     }
 }
@@ -513,6 +563,33 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     ))
     .unwrap();
     pump(&[&alice, &server, &alice]);
+
+    // Commit acting as an attributed author, then as a session with its
+    // claims: a backend over a trusted link writes for alice.
+    let backend = open(0x55, AuthorSubject::SYSTEM, false);
+    connect(&backend, &server, AuthorSubject::SYSTEM, &recorded);
+    backend.set_identity_claims(
+        user(1),
+        BTreeMap::from([(
+            jazz::query::provider_claim_key("sub"),
+            Value::String("alice".to_owned()),
+        )]),
+    );
+    for identity in [
+        WriteIdentity::Attribution(user(1)),
+        WriteIdentity::Session(user(1)),
+    ] {
+        block_on(backend.insert(
+            "notes",
+            note(1, vec![8]),
+            InsertOptions {
+                identity,
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        pump(&[&backend, &server, &backend]);
+    }
 
     // Read (once), Settled with members: a serializable
     // transaction's second read is pinned to its snapshot, so after a
@@ -746,7 +823,8 @@ fn produce_sqlite_sync_wire_corpus_v1() {
         })
         .collect();
     let rows = shapes[1].2.clone();
-    let mut commit = unhex(&messages[4].frame_hex);
+    let whole_commit = unhex(&messages[4].frame_hex);
+    let mut commit = whole_commit.clone();
     commit.truncate(commit.len() / 2);
     let subscribe = unhex(&messages[0].frame_hex);
     let unsubscribe = unhex(&messages[1].frame_hex);
@@ -799,6 +877,11 @@ fn produce_sqlite_sync_wire_corpus_v1() {
                 "a split message in one batch",
                 "client",
                 batch(&split(&rows)),
+            ),
+            entry(
+                "a split commit in one batch",
+                "server",
+                batch(&split(&whole_commit)),
             ),
         ]
         .into_iter()

@@ -537,7 +537,7 @@ Core resolves each base before it applies the commit: `Seq(S)` is the
 accepted version at `S` (not checked against the row's history: a seq the
 row never had only makes the analysis more conservative); `Own` and `Commit`
 (only of the sender's own node) are where the named commit of the sender
-landed (`_jazz_settled`), and one Core rejected or never received rejects the
+landed (`_jazz_transactions`), and one Core rejected or never received rejects the
 commit (`predecessor_rejected`). It keeps, in the version the commit wrote
 (the row table and history alike), `_base`: the resolved `Seq` as is, or
 the seq the named commit landed at negated; and `_cols`, the authored stored

@@ -437,11 +437,15 @@ pub enum Reason {
     /// The write was built on an unsettled write the authority rejected,
     /// so it is rejected too (code `WriteRejected`, SPEC 4 §4.6).
     PredecessorRejected,
+    /// The write was made through a schema version the server has not
+    /// deployed: the app was released ahead of its schema (code
+    /// `WriteRejected`, SPEC 8.9).
+    SchemaVersionNotDeployed,
 }
 
 impl Reason {
     /// Every reason, in declaration order.
-    pub const ALL: [Reason; 11] = [
+    pub const ALL: [Reason; 12] = [
         Reason::AuthorizationDenied,
         Reason::ClientClockTooFarAhead,
         Reason::SerializationConflict,
@@ -453,6 +457,7 @@ impl Reason {
         Reason::MissingChunks,
         Reason::PermissionsHeadMissing,
         Reason::PredecessorRejected,
+        Reason::SchemaVersionNotDeployed,
     ];
 
     /// The stable, snake_case name of this reason.
@@ -474,6 +479,7 @@ impl Reason {
             Reason::MissingChunks => "missing_chunks",
             Reason::PermissionsHeadMissing => "permissions_head_missing",
             Reason::PredecessorRejected => "predecessor_rejected",
+            Reason::SchemaVersionNotDeployed => "schema_version_not_deployed",
         }
     }
 
