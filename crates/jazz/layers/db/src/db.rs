@@ -7128,7 +7128,7 @@ impl Db {
                     if let Some(row) = op.row()
                         && inner
                             .settled_seq(schema.stored_table(op.table())?, row)?
-                            .is_some_and(|seq| seq > snapshot.seq)
+                            .is_some_and(|seq| Pos::at(seq) > *snapshot)
                     {
                         return Err(conflict(
                             "row visible parent changed since transaction write was staged",
@@ -7785,8 +7785,6 @@ impl TxRef<'_> {
                     &ReadViewSourceSpec::Current,
                 )
                 .await?;
-            // At the positions the replica's server serves now.
-            let n = self.db.inner.borrow().frontier().n;
             if let Some(Batch {
                 kind:
                     BatchKind::Serializable {
@@ -7799,7 +7797,7 @@ impl TxRef<'_> {
                 // Pinned by the authority's answer, or (offline) at the
                 // replica's known cut.
                 if let Some(through) = through {
-                    *snapshot = Pos { n, seq: through };
+                    *snapshot = through;
                 }
                 *pinned = true;
             }

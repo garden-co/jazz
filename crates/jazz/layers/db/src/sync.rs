@@ -1546,7 +1546,7 @@ pub(crate) struct Client {
     pub(crate) known_n: i64,
     /// The `known` cut last written to `_jazz_meta`.
     persisted_known: u64,
-    answers: HashMap<u64, Option<Result<(u64, Vec<[u8; 16]>), Error>>>,
+    answers: HashMap<u64, Option<Result<(Pos, Vec<[u8; 16]>), Error>>>,
     /// Permission preflights asked for; `None` until answered.
     advice: HashMap<u64, Option<PermissionAdvice>>,
     /// The next permission preflight's id. Each client starts at a random
@@ -5417,6 +5417,7 @@ impl Inner {
         &self,
         origin: [u8; 16],
         snapshot: u64,
+        by: Option<[u8; 16]>,
         reads: Vec<WireRead>,
         own: Vec<u64>,
     ) -> Result<Kind, Error> {
@@ -5458,7 +5459,7 @@ impl Inner {
             .collect();
         Ok(Kind::Serializable {
             snapshot,
-            by: None,
+            by,
             reads,
             own: carried
                 .into_values()
@@ -6496,7 +6497,7 @@ impl Db {
         coverage: Option<&dyn Fn() -> bool>,
         strict: bool,
         view: &ReadViewSourceSpec,
-    ) -> Result<Option<u64>, Error> {
+    ) -> Result<Option<Pos>, Error> {
         let tier = reach.tier;
         // Held on a live link: leaving it (even for a new attempt) releases
         // the read, as it releases a gated opening.
@@ -6604,7 +6605,7 @@ impl Db {
                 include_deleted,
                 view,
                 &listed,
-                through,
+                through.seq,
             )?;
         }
         Ok(Some(through))
@@ -7103,11 +7104,12 @@ impl Db {
                         global,
                         by,
                     } => {
-                        inner.learn_known(through, by)?;
+                        let at = inner.learn_known(through, by)?;
                         let client = inner.client.as_mut().expect("client");
-                        // A one-shot read's answer.
+                        // A one-shot read's answer, at the position its
+                        // server counted.
                         if let Some(slot) = client.answers.get_mut(&id) {
-                            *slot = Some(Ok((through, members.unwrap_or_default())));
+                            *slot = Some(Ok((at, members.unwrap_or_default())));
                             client.relay_ready |=
                                 client.relayed_fetches.iter().any(|f| f.upstream == id);
                             continue;
@@ -7306,6 +7308,13 @@ impl Db {
                             crate::large::mark_pushed(&inner.conn, &hashes)?;
                         }
                         inner.record_settled(node, tx, accepted.then_some(landed))?;
+                        // The sessions' commits it carried settle where it
+                        // did: a resend of one gets the upstream's fate.
+                        if accepted && global {
+                            for (origin, session_tx) in inner.relayed_origins(tx)? {
+                                inner.record_settled(origin, session_tx, Some(landed))?;
+                            }
+                        }
                         inner.forget_pending(tx)?;
                         rebase = true;
                         // Sessions whose commits this upload carried learn
@@ -7751,7 +7760,7 @@ impl Inner {
                             *include_deleted,
                             (**view).clone(),
                             listed,
-                            through,
+                            through.seq,
                         ));
                     }
                     ready.push((*id, fetch.message));
@@ -10065,6 +10074,7 @@ impl Db {
                     && inner.client.as_ref().is_some_and(|client| {
                         let link = client.hint.get();
                         !(link.reported && link.hint == RemoteLinkHint::NoServer)
+                            && landed.n == inner.me
                             && client.pending.iter().any(|p| p.tx == through)
                     });
                 if upload {
@@ -10459,15 +10469,6 @@ impl Db {
             }
             out
         };
-        // A session's snapshot counts the positions its server served when
-        // it pinned it. A store that serves another sequencer's now (its
-        // server was added or removed since) cannot place it: a conflict.
-        if let WireKind::Serializable { by, .. } = &kind {
-            let inner = self.inner.borrow();
-            if *by != inner.served_by() {
-                return Err((Error::serialization_conflict(), mentioned(&inner)));
-            }
-        }
         // A relay uploads what its sessions commit as its own. A
         // serializable one goes up as serializable, and its upstream
         // validates it; this store applies it optimistically meanwhile, as
@@ -10478,13 +10479,13 @@ impl Db {
         let upload = match std::mem::replace(&mut kind, WireKind::Mergeable) {
             WireKind::Serializable {
                 snapshot,
+                by,
                 reads,
                 own,
-                ..
             } if forward => self
                 .inner
                 .borrow()
-                .relayed_serializable(origin.0, snapshot, reads, own)
+                .relayed_serializable(origin.0, snapshot, by, reads, own)
                 .map_err(|e| (e, Vec::new()))?,
             unchanged => {
                 kind = unchanged;
@@ -10493,9 +10494,9 @@ impl Db {
         };
         if let WireKind::Serializable {
             snapshot,
+            by,
             reads,
             own,
-            ..
         } = &kind
         {
             let inner = self.inner();
@@ -10512,8 +10513,18 @@ impl Db {
                     settled.insert(tx, seq);
                 }
             }
-            // The session's snapshot counts this store's served positions.
-            let base = inner.served_at(*snapshot);
+            // The session's snapshot is the position its server served it
+            // at. Positions order as main's single seq space did: the
+            // authority's before a replica's own, so a snapshot a replica
+            // numbered holds every authority version (one this store cannot
+            // name holds them all).
+            let base = Pos {
+                n: inner
+                    .known_code(*by)
+                    .map_err(|e| (e, Vec::new()))?
+                    .unwrap_or(i64::MAX),
+                seq: *snapshot,
+            };
             let in_snapshot = |at: Pos| at <= base || settled.values().any(|s| *s == at);
             for op in &ops {
                 if let Some(row) = op.row()
