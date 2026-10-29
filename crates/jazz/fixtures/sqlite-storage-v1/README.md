@@ -11,9 +11,9 @@ are stored, a rejection's reason name changed how fates are recorded, and
 pending uploads moved from one encoded message to a row per op).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `e7dc3144433f4168c9bbf34884c8ed9b62f3f6cc94887e9261fd76728ecd916e`.
+  the SQLite file `dab2523146c0f375498fac1ded2ef700bfedf44d74cf5dcbd8b7101ee4251e8d`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `cbf4a13efdc65c6fd356d51c4ca83a4d2d84e6d7835b2ed45e4334dda5912dab`.
+  `6c39d33c56444429300d7e781e16fd7e9708624f9966e7a90bd4d34f8256f4e4`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
@@ -31,6 +31,9 @@ nodes and write times:
   rejected (so `_jazz_applied` keeps a rejected fate with its reason name),
   then two writes (an insert and an update) that never reached the
   server: its pending uploads;
+- a row of `drafts` on a base branch that the draft branch overrides with a
+  version the client may not read: the client's view of the draft over that
+  base hides the row, so the client keeps a marker of it in `_jazz_withheld`;
 - then the server activated a second schema version that renames
   `documents.title` to `heading` (a stored-names lens) and wrote under it.
 
@@ -65,3 +68,9 @@ Replacing a pending commit's `author` and `session` fields with one `acting`
 enum (`Own`, `Attributed`, `Session`), which changes the encoded
 `_jazz_pending` header, regenerated it the same way. A pending row in the
 earlier layout is refused as an unsupported storage format, never misread.
+
+Hiding branch-view rows whose head version the reader may not read added the
+client's `_jazz_withheld` table (created on the first hidden eviction) and
+gave `drafts` an `owner` column and a read policy, which regenerated it the
+same way. Any storage change re-pins all three corpora: this one,
+`server-data-dir-v1` and the browser corpus.

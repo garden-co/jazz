@@ -333,9 +333,11 @@ impl Transport for Recording {
 /// `Read` (as of a seq or a snapshot), `Rows` carrying the commits behind
 /// history versions, a `Catalogue` carrying versions with their stored
 /// names and a lens's cells, a trusted link's `Commit`s acting as an
-/// attributed author and as a session, and a live `Read` in a branch view
-/// over a live base, over a frozen base, and of a head alone.
-const SHAPES: [&str; 8] = [
+/// attributed author and as a session, a live `Read` in a branch view
+/// over a live base, over a frozen base, and of a head alone, and a hidden
+/// `AccessLost` (a branch view's row whose head version the reader may not
+/// read).
+const SHAPES: [&str; 9] = [
     "Read/once",
     "Rows/tx_ids",
     "Catalogue/versions",
@@ -344,6 +346,7 @@ const SHAPES: [&str; 8] = [
     "Read/live-branch-view",
     "Read/live-branch-view-frozen",
     "Read/live-branch-head",
+    "AccessLost/hidden",
 ];
 
 fn shape(message: &SyncMessage) -> Option<&'static str> {
@@ -390,6 +393,7 @@ fn shape(message: &SyncMessage) -> Option<&'static str> {
             ReadViewSourceSpec::BranchView { base: None, .. } => Some(SHAPES[7]),
             _ => None,
         },
+        SyncMessage::AccessLost { hidden: true, .. } => Some(SHAPES[8]),
         _ => None,
     }
 }
@@ -775,7 +779,69 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
         .borrow_mut()
         .insert("ResendWhole".to_owned(), ("server".to_owned(), frame));
 
+    hidden_in_a_view(&recorded);
     recorded.borrow().clone()
+}
+
+/// AccessLost (hidden): a draft's row over a base row alice reads, whose
+/// draft version she may not read, hides the row in her view of the draft.
+fn hidden_in_a_view(recorded: &Recorded) {
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("drafts")
+                    .column("branch_id", ColumnType::Uuid)
+                    .column("owner", ColumnType::Text)
+                    .branch_by("branch_id")
+                    .policies(read_and_allow_all_writes(session_eq("owner", &ME))),
+            )
+            .build(),
+    );
+    let config = |node: u8, author| {
+        DbConfig::new(
+            schema.clone(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([node; 16]),
+                author,
+            },
+        )
+    };
+    let server = block_on(Db::open(config(0x61, AuthorSubject::SYSTEM))).unwrap();
+    server.set_authority();
+    let selector = |byte: u8| {
+        BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([byte; 16])))])
+    };
+    let (base, head) = (selector(0xe1), selector(0xe2));
+    let row = RowUuid::from_bytes([0x13; 16]);
+    block_on(server.insert(
+        "drafts",
+        BTreeMap::from([("owner".to_owned(), subject(1))]),
+        InsertOptions {
+            row_id: Some(row),
+            target: jazz::db::ExactWriteTarget::Branch(base.clone()),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    block_on(server.update(
+        "drafts",
+        row,
+        BTreeMap::from([("owner".to_owned(), subject(2))]),
+        UpdateOptions {
+            target: jazz::db::WriteTarget::BranchView {
+                head: head.clone(),
+                base: Some(BranchViewBase::Current(base.clone())),
+            },
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    let alice = block_on(Db::open(config(0x62, user(1)))).unwrap();
+    connect(&alice, &server, user(1), recorded);
+    let drafts = alice.prepare_query(&Query::from("drafts")).unwrap();
+    let view = ReadOpts::default().branch_view(head, Some(BranchViewBase::Current(base)));
+    let _view = block_on(alice.subscribe(&drafts, view)).unwrap();
+    pump(&[&alice, &server, &alice]);
 }
 
 /// Writes `fixtures/sqlite_sync_wire_v1.json` when

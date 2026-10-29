@@ -3468,7 +3468,7 @@ impl Inner {
         Ok(())
     }
 
-    fn is_withheld(&self, table: &str, row: RowUuid, key: &[u8]) -> Result<bool, Error> {
+    pub(super) fn is_withheld(&self, table: &str, row: RowUuid, key: &[u8]) -> Result<bool, Error> {
         if !self.withheld.get() {
             return Ok(false);
         }
@@ -7803,15 +7803,19 @@ impl Db {
             // over a base row, or a base row written under a head row, masks
             // (or stops masking) that base row, if the reader may see it
             // through the view; no other reader learns of it.
-            let masks: Vec<fanout::ViewMask> = inner.sessions[index]
+            // Each held by the subscription whose view it masks for.
+            let masks: Vec<(u64, fanout::ViewMask)> = inner.sessions[index]
                 .subs
-                .values()
-                .filter_map(|(_, group, ..)| group.upgrade())
-                .flat_map(|group| group.borrow().masks().to_vec())
+                .iter()
+                .filter_map(|(id, (_, group, ..))| Some((*id, group.upgrade()?)))
+                .flat_map(|(id, group)| {
+                    let masks = group.borrow().masks().to_vec();
+                    masks.into_iter().map(move |mask| (id, mask))
+                })
                 .collect();
-            let mut masking: Vec<(String, RowUuid, Vec<u8>)> = Vec::new();
+            let mut masking: Vec<(u64, String, RowUuid, Vec<u8>)> = Vec::new();
             for ((table, row, key), _) in &written_keys {
-                for mask in masks.iter().filter(|mask| mask.table == *table) {
+                for (owner, mask) in masks.iter().filter(|(_, mask)| mask.table == *table) {
                     let has_head = if *key == mask.head {
                         true
                     } else if *key == mask.base {
@@ -7825,7 +7829,7 @@ impl Db {
                             .masked(inner.session_policy(index), mask, &[*row])?
                             .is_empty()
                     {
-                        masking.push((table.clone(), *row, mask.head.clone()));
+                        masking.push((*owner, table.clone(), *row, mask.head.clone()));
                     }
                 }
             }
@@ -7896,7 +7900,8 @@ impl Db {
                     .any(|event| matches!(event, SubscriptionEvent::Delta { reset: true, .. }))
                     && let Some(group) = group.upgrade()
                 {
-                    opening_masks.extend(group.borrow().masks().iter().cloned());
+                    opening_masks
+                        .extend(group.borrow().masks().iter().map(|mask| (id, mask.clone())));
                 }
                 // A relay's result settles once its upstream answered.
                 let answered = events
@@ -8118,17 +8123,32 @@ impl Db {
                     }
                 }
             }
-            for mask in &opening_masks {
-                masking.extend(inner.masking_rows(policy, mask)?);
-            }
             // A masking head row's readability is rechecked as policies'
             // inputs change: access regained ships its image, which lifts
-            // the replica's marker of it.
-            for (table, row, key) in masking {
+            // the replica's marker of it. A write to a masking row the
+            // client already knows is hidden ships nothing: each edit of a
+            // version it may not read would otherwise reach it (SPEC 8.4).
+            for (owner, table, row, key) in masking {
                 let can = inner.current_image(&table, row, &key)?.is_some()
                     && readable(&inner, &table, row, &key, policy)?;
-                held_rows.keep(SESSION_OWNER, &table, row, &key, can);
-                touched.insert((table, row, key));
+                let hidden_before = held_rows
+                    .of(&table)
+                    .and_then(|rows| rows.get(&(row, key.clone())))
+                    .is_some_and(|(could, _)| !could);
+                held_rows.keep(owner, &table, row, &key, can);
+                if can || !hidden_before {
+                    touched.insert((table, row, key));
+                }
+            }
+            // An opening ships every masking row as of now: the client's
+            // copy may predate a change of access (a resume included).
+            for (owner, mask) in &opening_masks {
+                for (table, row, key) in inner.masking_rows(policy, mask)? {
+                    let can = inner.current_image(&table, row, &key)?.is_some()
+                        && readable(&inner, &table, row, &key, policy)?;
+                    held_rows.keep(*owner, &table, row, &key, can);
+                    touched.insert((table, row, key));
+                }
             }
             // Rows that left a result, and rows a commit wrote: the current
             // image if the client may read it, else an eviction (hidden
@@ -8139,7 +8159,13 @@ impl Db {
                         images.push(image);
                         continue;
                     }
-                    Some(_) => true,
+                    // Hidden only where it masks: the head of one of the
+                    // session's branch views over a base. Elsewhere the
+                    // replica just drops the row and keeps no marker.
+                    Some(_) => masks
+                        .iter()
+                        .chain(&opening_masks)
+                        .any(|(_, mask)| mask.table == table && mask.head == key),
                     None => inner.is_withheld(&table, row, &key)?,
                 };
                 evictions.push(SyncMessage::AccessLost {

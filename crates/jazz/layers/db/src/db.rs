@@ -2901,6 +2901,14 @@ impl Inner {
         self.physical.tables.insert(theirs.to_owned(), table);
         let conn = &self.conn;
         self.names.moved(conn, ours, theirs, None)?;
+        if self.withheld.get() {
+            self.conn
+                .execute(
+                    "UPDATE _jazz_withheld SET tbl = ?2 WHERE tbl = ?1",
+                    [ours, theirs],
+                )
+                .map_err(storage)?;
+        }
         self.rename_pending_rows(ours, theirs)
     }
 
@@ -3751,6 +3759,15 @@ impl Inner {
                         seq,
                         deleted,
                     });
+                }
+                // The head holds a version this replica may not read: the
+                // row is hidden in the view (SPEC 8.4), and a write through
+                // it would land over a version nobody here can see.
+                if base.is_some() && self.is_withheld(&table.stored, row, &head_key)? {
+                    return Err(rejected(format!(
+                        "row {} of `{}` is hidden in this branch view: its head version is not readable here",
+                        row.0, table.name
+                    )));
                 }
                 if let Some(base) = base {
                     let base_key = table.selector_key(base)?;

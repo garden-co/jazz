@@ -1408,3 +1408,275 @@ fn a_views_relations_read_the_heads_rows_over_held_base_rows() {
         }
     }
 }
+
+/// The ids `path`'s `_jazz_withheld` marks, or `None` before any marker
+/// created the table.
+fn withheld_ids(path: &std::path::Path) -> Option<Vec<u8>> {
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let exists: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name = '_jazz_withheld'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    if exists == 0 {
+        return None;
+    }
+    let mut statement = conn.prepare("SELECT id FROM _jazz_withheld").unwrap();
+    Some(
+        statement
+            .query_map([], |r| r.get::<_, Vec<u8>>(0))
+            .unwrap()
+            .map(|id| id.unwrap()[0])
+            .collect(),
+    )
+}
+
+fn file_client(tag: &str) -> (Db, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!(
+        "jazz-branch-view-sync-{tag}-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("store.sqlite");
+    let client = block_on(Db::open_at(
+        DbConfig::new(
+            schema(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x02; 16]),
+                author: alice(),
+            },
+        ),
+        &path,
+        jazz::db::FileOptions::default(),
+    ))
+    .unwrap();
+    (client, path)
+}
+
+/// Once a row is hidden, Bob's further edits of the head version, and
+/// edits of the base row under it, send Alice nothing: she learns that
+/// the row is hidden, not when Bob edits it.
+#[test]
+fn edits_to_a_hidden_head_row_send_nothing_more() {
+    let (server, client, shipped) = connected();
+    let (main, draft) = (branch(0xa1), branch(0xa2));
+    put(&server, &main, 0x45, "x", 1);
+    put(&server, &main, 0x46, "y", 2);
+    set(&server, 0x45, &draft, &main, &[("owner", subject(bob()))]);
+    let view =
+        ReadOpts::default().branch_view(draft.clone(), Some(BranchViewBase::Current(main.clone())));
+    let all = client.prepare_query(&by_rank()).unwrap();
+    let _v = block_on(client.subscribe(&all, view.clone())).unwrap();
+    pump(&server, &client);
+    assert_eq!(titles(&client, &by_rank(), view.clone()), ["y"]);
+    let (images, evictions) = (*shipped.borrow(), EVICTIONS.with(|count| *count.borrow()));
+    for i in 0..3 {
+        set(
+            &server,
+            0x45,
+            &draft,
+            &main,
+            &[("title", Value::String(format!("bob {i}")))],
+        );
+        pump(&server, &client);
+    }
+    set_rank_on(&server, 0x45, &main, 5);
+    pump(&server, &client);
+    assert_eq!(EVICTIONS.with(|count| *count.borrow()), evictions);
+    assert_eq!(*shipped.borrow(), images);
+    assert_eq!(titles(&client, &by_rank(), view.clone()), ["y"]);
+    // A grant still un-hides it: the row's access changed.
+    grant(&server, alice());
+    pump(&server, &client);
+    assert_eq!(titles(&client, &by_rank(), view), ["bob 2", "y"]);
+}
+
+/// Access lost on a read with no branch view over a base evicts the row
+/// and keeps no marker: markers exist only where a view can use them.
+#[test]
+fn a_revoke_without_a_view_keeps_no_marker() {
+    let (client, path) = file_client("plain");
+    let server = open(0x01, AuthorSubject::SYSTEM);
+    server.set_authority();
+    std::mem::forget(connect(&server, &client).0);
+    let main = branch(0xa3);
+    put(&server, &main, 0x45, "x", 1);
+    put(&server, &main, 0x46, "y", 2);
+    let all = client.prepare_query(&by_rank()).unwrap();
+    let opts = ReadOpts::default().branch_view(main.clone(), None);
+    let _m = block_on(client.subscribe(&all, opts.clone())).unwrap();
+    pump(&server, &client);
+    block_on(server.update(
+        "todos",
+        RowUuid::from_bytes([0x45; 16]),
+        BTreeMap::from([("owner".to_owned(), subject(bob()))]),
+        jazz::db::UpdateOptions {
+            target: jazz::db::WriteTarget::BranchView {
+                head: main.clone(),
+                base: None,
+            },
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    pump(&server, &client);
+    assert_eq!(titles(&client, &by_rank(), opts), ["y"]);
+    assert_eq!(withheld_ids(&path), None);
+    // The same revoke on a view's head keeps one, for the view.
+    let draft = branch(0xa4);
+    set(&server, 0x46, &draft, &main, &[("owner", subject(bob()))]);
+    let view =
+        ReadOpts::default().branch_view(draft.clone(), Some(BranchViewBase::Current(main.clone())));
+    let _v = block_on(client.subscribe(&all, view.clone())).unwrap();
+    pump(&server, &client);
+    assert!(titles(&client, &by_rank(), view).is_empty());
+    assert_eq!(withheld_ids(&path), Some(vec![0x46]));
+}
+
+/// A write through the view to a hidden row is refused: it would land
+/// over a head version this replica may not read.
+#[test]
+fn a_write_through_a_view_to_a_hidden_row_is_refused() {
+    let (server, client, _) = connected();
+    let (main, draft) = (branch(0xa5), branch(0xa6));
+    put(&server, &main, 0x45, "x", 1);
+    put(&server, &main, 0x46, "y", 2);
+    set(
+        &server,
+        0x45,
+        &draft,
+        &main,
+        &[
+            ("title", Value::String("bob draft".into())),
+            ("owner", subject(bob())),
+        ],
+    );
+    let view =
+        ReadOpts::default().branch_view(draft.clone(), Some(BranchViewBase::Current(main.clone())));
+    let all = client.prepare_query(&by_rank()).unwrap();
+    let _v = block_on(client.subscribe(&all, view.clone())).unwrap();
+    pump(&server, &client);
+    let target = jazz::db::WriteTarget::BranchView {
+        head: draft.clone(),
+        base: Some(BranchViewBase::Current(main.clone())),
+    };
+    let x = RowUuid::from_bytes([0x45; 16]);
+    let update = block_on(client.update(
+        "todos",
+        x,
+        BTreeMap::from([("rank".to_owned(), Value::I32(3))]),
+        jazz::db::UpdateOptions {
+            target: target.clone(),
+            ..Default::default()
+        },
+    ));
+    let delete = block_on(client.delete(
+        "todos",
+        x,
+        jazz::db::DeleteOptions {
+            target,
+            ..Default::default()
+        },
+    ));
+    for refused in [update.err(), delete.err()] {
+        let refused = refused.expect("refused");
+        assert_eq!(refused.code, jazz::db::ErrorCode::WriteRejected);
+    }
+    pump(&server, &client);
+    assert_eq!(titles(&client, &by_rank(), view.clone()), ["y"]);
+    assert_eq!(server_draft_titles(&server, &draft), ["bob draft"]);
+    // Writes to the view's other rows go through.
+    set(
+        &client,
+        0x46,
+        &draft,
+        &main,
+        &[("title", Value::String("y draft".into()))],
+    );
+    assert_eq!(titles(&client, &by_rank(), view), ["y draft"]);
+}
+
+fn server_draft_titles(server: &Db, draft: &BranchSelector) -> Vec<String> {
+    titles(
+        server,
+        &by_rank(),
+        ReadOpts::default().branch_view(draft.clone(), None),
+    )
+}
+
+/// A dropped view stops following its masking rows: a later grant ships
+/// none of them.
+#[test]
+fn a_dropped_view_stops_following_its_masking_rows() {
+    let (server, client, shipped) = connected();
+    let (main, draft) = (branch(0xa7), branch(0xa8));
+    for i in 0..4u8 {
+        put(&server, &main, 0x50 + i, &format!("m{i}"), 1);
+        set(
+            &server,
+            0x50 + i,
+            &draft,
+            &main,
+            &[("owner", subject(bob()))],
+        );
+    }
+    let view =
+        ReadOpts::default().branch_view(draft.clone(), Some(BranchViewBase::Current(main.clone())));
+    let all = client.prepare_query(&by_rank()).unwrap();
+    let v = block_on(client.subscribe(&all, view)).unwrap();
+    pump(&server, &client);
+    drop(v);
+    pump(&server, &client);
+    let images = *shipped.borrow();
+    grant(&server, alice());
+    pump(&server, &client);
+    assert_eq!(*shipped.borrow(), images);
+}
+
+/// Alice's own write through her view gives the draft's x an owner she
+/// may not read: the server accepts it, and her view then hides the row,
+/// as the authority's evaluation of the view does.
+#[test]
+fn a_readers_own_write_she_may_not_read_hides_the_row() {
+    let (client, path) = file_client("own");
+    let server = open(0x01, AuthorSubject::SYSTEM);
+    server.set_authority();
+    std::mem::forget(connect(&server, &client).0);
+    let (main, draft) = (branch(0xa9), branch(0xaa));
+    put(&server, &main, 0x45, "x", 1);
+    put(&server, &main, 0x46, "y", 2);
+    let view =
+        ReadOpts::default().branch_view(draft.clone(), Some(BranchViewBase::Current(main.clone())));
+    let all = client.prepare_query(&by_rank()).unwrap();
+    let _v = block_on(client.subscribe(&all, view.clone())).unwrap();
+    pump(&server, &client);
+    assert_eq!(titles(&client, &by_rank(), view.clone()), ["x", "y"]);
+    set(&client, 0x45, &draft, &main, &[("owner", subject(bob()))]);
+    pump(&server, &client);
+    assert_eq!(titles(&client, &by_rank(), view.clone()), ["y"]);
+    assert_eq!(
+        titles(&client, &by_rank(), view),
+        server_titles(&server, &draft, &main)
+    );
+    assert_eq!(withheld_ids(&path), Some(vec![0x45]));
+}
+
+/// The authority's evaluation of the draft over `main` for Alice.
+fn server_titles(server: &Db, draft: &BranchSelector, main: &BranchSelector) -> Vec<String> {
+    let opts =
+        ReadOpts::default().branch_view(draft.clone(), Some(BranchViewBase::Current(main.clone())));
+    let prepared = server.prepare_query(&by_rank()).unwrap();
+    block_on(server.all_for_identity(&prepared, opts, alice()))
+        .unwrap()
+        .iter()
+        .map(|row| match row.cell("title") {
+            Some(Value::String(title)) => title,
+            other => panic!("title {other:?}"),
+        })
+        .collect()
+}

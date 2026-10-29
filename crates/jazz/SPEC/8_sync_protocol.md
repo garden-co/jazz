@@ -324,21 +324,28 @@ for one query's result:
   the reader may read. It ships all of them with a live read's opening (a
   resumed one's too, since whether the reader may read one can change
   without it changing) and with a one-shot read's answer, and one again
-  when the head or the base writes it. A row whose base row the reader may
-  not see is never shipped or evicted for this, so a view tells the reader
-  nothing of rows it could not see anyway. These rows follow from the
+  when the head or the base writes it, unless the reader already knows it
+  hidden (below) and still may not read it. A row whose base row the reader
+  may not see is never shipped or evicted for this, so a view tells the
+  reader nothing of rows it could not see anyway. The server follows these
+  rows for the read that masks with them, and stops when that read ends. These rows follow from the
   view's query and the server's state, not from what the session shipped,
   so they hold across reconnects.
 - A head row of these the reader may not read is **hidden**, not absent:
   in the view its effective row is the head's version, which the reader's
   policy denies, so the view leaves the row out, as the authority's own
   evaluation of the view does. The server sends `AccessLost { hidden: true
-}` for it (§8.6), and the replica keeps a marker of it in
+}` for it (§8.6) once: a later write to either version sends nothing
+  while the reader still may not read the head's, so the reader learns that
+  the row is hidden, not when it is edited. The replica keeps a marker of it in
   `_jazz_withheld` that masks the base's row of the id in every branch view
   over a base with that head; reads of any other view (the base itself,
   the head alone, the current state) ignore it, and no read lists it, deleted
   rows included. The marker reveals only what the eviction does: that a
-  version exists. It lifts when an image of the row arrives (the head
+  version exists. A write through the view to a hidden row is refused
+  (`WriteRejected`): it would land over a version the replica cannot see.
+  An eviction is hidden only for the head of one of the session's branch
+  views over a base; any other read's access loss keeps no marker. It lifts when an image of the row arrives (the head
   writes it readably again, or a policy input change grants access: the
   server rechecks masking rows as it does supporting rows, §8.6), or when
   an `AccessLost { hidden: false }` says the row is gone. A view opened or
@@ -623,7 +630,9 @@ again:
 
 - an `AccessLost` for a row the replica held: a result settled earlier may
   have held the row, and a resume from it would count the row as held after it
-  became readable again (one for a row it holds no image of changes no result);
+  became readable again. One for a row it holds no image of changes no
+  result, so the watermarks stay (a hidden one still writes its marker, which
+  masks rows but holds none);
 - a row asked for whole (§8.12): until its whole image arrives the replica holds
   a stale version, so it also stores no watermark meanwhile.
 
