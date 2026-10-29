@@ -11,9 +11,9 @@ are stored, a rejection's reason name changed how fates are recorded, and
 pending uploads moved from one encoded message to a row per op).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `e7dc3144433f4168c9bbf34884c8ed9b62f3f6cc94887e9261fd76728ecd916e`.
+  the SQLite file `64e4f47277e9407839b5b05b0e94c62178a7af77a5e527eac47aa2080b3c5d39`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `cbf4a13efdc65c6fd356d51c4ca83a4d2d84e6d7835b2ed45e4334dda5912dab`.
+  `8b3d1af98e142bed6d63a25137f2a3e4cb6135f66e5b87dcfe03029ae88a3022`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
@@ -29,8 +29,10 @@ nodes and write times:
 - a client that synced `projects` and `documents`, wrote one row that
   settled, one stamped far ahead of the server's clock that the server
   rejected (so `_jazz_applied` keeps a rejected fate with its reason name),
-  then two writes (an insert and an update) that never reached the
-  server: its pending uploads;
+  then two writes (an insert and an update) and a serializable transaction
+  that read one project and inserted two, none of which reached the
+  server: its pending uploads, the last one stored as two op rows and a
+  read row;
 - then the server activated a second schema version that renames
   `documents.title` to `heading` (a stored-names lens) and wrote under it.
 
@@ -65,3 +67,9 @@ Replacing a pending commit's `author` and `session` fields with one `acting`
 enum (`Own`, `Attributed`, `Session`), which changes the encoded
 `_jazz_pending` header, regenerated it the same way. A pending row in the
 earlier layout is refused as an unsupported storage format, never misread.
+
+Deleting a settled commit's pending rows in one statement (the
+`_jazz_pending_forget` trigger on `_jazz_pending`, with
+`_jazz_pending_versions` now created on open) regenerated it the same way,
+adding the serializable pending commit above so the per-op layout is
+pinned with more than one op and a read.
