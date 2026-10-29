@@ -74,7 +74,9 @@ impl Transport for Pipe {
 }
 
 /// (client side, server side, break the server's sends)
-fn pipe() -> (Box<dyn Transport>, Box<dyn Transport>, Rc<RefCell<bool>>) {
+type DisconnectFlag = Rc<RefCell<bool>>;
+
+fn pipe() -> (Box<dyn Transport>, Box<dyn Transport>, DisconnectFlag) {
     let up = Rc::new(RefCell::new(VecDeque::new()));
     let down = Rc::new(RefCell::new(VecDeque::new()));
     let broken = Rc::new(RefCell::new(false));

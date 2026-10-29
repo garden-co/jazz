@@ -3,7 +3,6 @@
 //! Tests that need a process of their own (durable_file re-executes and
 //! measures its binary) stay separate targets.
 
-#[allow(dead_code)]
 #[path = "../common/mod.rs"]
 mod common;
 
@@ -13,6 +12,8 @@ mod aggregate_nullable_keys;
 mod aggregate_ordering;
 #[path = "../array_columns.rs"]
 mod array_columns;
+#[path = "../array_parent_refresh.rs"]
+mod array_parent_refresh;
 #[path = "../authorization_scope_reentry.rs"]
 mod authorization_scope_reentry;
 #[path = "../binding_host.rs"]

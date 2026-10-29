@@ -20,9 +20,11 @@ use super::common::{
 };
 use super::{Config, WireReport, rss_kib};
 
+type MessageQueue = Rc<RefCell<VecDeque<SyncMsg>>>;
+
 struct Duplex {
-    outbound: Rc<RefCell<VecDeque<SyncMsg>>>,
-    inbound: Rc<RefCell<VecDeque<SyncMsg>>>,
+    outbound: MessageQueue,
+    inbound: MessageQueue,
 }
 
 impl db::Transport for Duplex {
@@ -37,11 +39,7 @@ impl db::Transport for Duplex {
 }
 
 /// (client side, server side, server→client queue for counting).
-fn duplex() -> (
-    Box<dyn db::Transport>,
-    Box<dyn db::Transport>,
-    Rc<RefCell<VecDeque<SyncMsg>>>,
-) {
+fn duplex() -> (Box<dyn db::Transport>, Box<dyn db::Transport>, MessageQueue) {
     let up = Rc::new(RefCell::new(VecDeque::new()));
     let down = Rc::new(RefCell::new(VecDeque::new()));
     (

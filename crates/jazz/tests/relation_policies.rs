@@ -425,8 +425,7 @@ fn a_row_id_key_under_an_or_is_refused() {
 /// Why a schema with this `resources` read policy does not compile.
 fn refusal(select: PolicyExpr) -> String {
     let refused = jazz::schema::JazzSchema::new(&schema_with_resource_policy(select))
-        .err()
-        .expect("the policy is refused");
+        .expect_err("the policy is refused");
     format!("{refused:?}")
 }
 

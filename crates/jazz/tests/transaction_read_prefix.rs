@@ -1,8 +1,6 @@
 //! Ordinary transaction reads retain the writes staged at their admission.
 use crate::common;
-#[path = "common/duplex_transport.rs"]
-mod duplex_transport;
-use duplex_transport::duplex;
+use jazz::db::duplex;
 use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, block_on};
 use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::query::Query;

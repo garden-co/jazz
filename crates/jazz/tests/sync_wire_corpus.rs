@@ -23,6 +23,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::pin::pin;
 use std::rc::Rc;
+use std::slice::from_ref;
 use std::task::{Context, Poll, Waker};
 
 use jazz::db::{
@@ -805,7 +806,7 @@ fn produce_sqlite_sync_wire_corpus_v1() {
         .chain(
             shapes
                 .iter()
-                .map(|(name, reader, frame)| entry(name, reader, batch(&[frame.clone()]))),
+                .map(|(name, reader, frame)| entry(name, reader, batch(from_ref(frame)))),
         )
         .collect(),
         rejections: vec![
@@ -833,7 +834,7 @@ fn produce_sqlite_sync_wire_corpus_v1() {
             entry(
                 "a sync message as the opening batch",
                 "server-opening",
-                batch(&[subscribe.clone()]),
+                batch(from_ref(&subscribe)),
             ),
             entry(
                 "unsupported Groove-era v5 hello",

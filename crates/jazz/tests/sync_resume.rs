@@ -75,10 +75,12 @@ fn open(node: u8, author: AuthorSubject) -> Db {
 }
 
 /// A duplex that counts the row images the server ships.
+type ShippedCount = Rc<RefCell<usize>>;
+
 struct Pipe {
     out: Rc<RefCell<VecDeque<SyncMessage>>>,
     inbound: Rc<RefCell<VecDeque<SyncMessage>>>,
-    shipped: Option<Rc<RefCell<usize>>>,
+    shipped: Option<ShippedCount>,
 }
 
 impl Transport for Pipe {
@@ -95,7 +97,7 @@ impl Transport for Pipe {
     }
 }
 
-fn pipe() -> (Box<dyn Transport>, Box<dyn Transport>, Rc<RefCell<usize>>) {
+fn pipe() -> (Box<dyn Transport>, Box<dyn Transport>, ShippedCount) {
     let up = Rc::new(RefCell::new(VecDeque::new()));
     let down = Rc::new(RefCell::new(VecDeque::new()));
     let shipped = Rc::new(RefCell::new(0));

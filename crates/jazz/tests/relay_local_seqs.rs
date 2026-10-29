@@ -4,14 +4,11 @@
 //! never collide in a tab's history: the worker's start at `LOCAL_BASE`,
 //! a tab's at `NON_DURABLE_BASE`.
 
-#[path = "common/duplex_transport.rs"]
-mod duplex_transport;
-
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 
-use duplex_transport::duplex;
+use jazz::db::duplex;
 use jazz::db::{
     Db, DbConfig, DbIdentity, ErrorCode, Image, LOCAL_BASE, NON_DURABLE_BASE, ReadOpts,
     RemoteLinkHint, SyncCell, SyncMessage, Transport, TransportError, Upstream, block_on,
@@ -130,7 +127,7 @@ impl Net {
         };
         net.worker_online();
         for i in 0..tabs {
-            let tab = open_in(schema(), WORKER + 1 + i as u8, tab_author.clone());
+            let tab = open_in(schema(), WORKER + 1 + i as u8, tab_author);
             tab.set_non_durable_client();
             tab.set_remote_link_hint(RemoteLinkHint::Live);
             let (client_side, server_side) = duplex();
@@ -141,7 +138,7 @@ impl Net {
                     inner: server_side,
                     sent: Rc::clone(&sent),
                 }),
-                tab_author.clone(),
+                tab_author,
             );
             net.to_tabs.push(sent);
             net.tabs.push(tab);
@@ -152,8 +149,7 @@ impl Net {
     fn worker_online(&mut self) {
         let (client_side, server_side) = duplex();
         self.worker_up = Some(block_on(self.worker.connect_upstream(client_side)));
-        self.core
-            .accept_subscriber(server_side, self.worker_as.clone());
+        self.core.accept_subscriber(server_side, self.worker_as);
         self.worker.set_remote_link_hint(RemoteLinkHint::Live);
     }
 

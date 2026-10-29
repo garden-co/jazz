@@ -2993,9 +2993,6 @@ fn an_update_cannot_move_a_row_to_another_branch() {
     assert_eq!((on(0xd1), on(0xd2)), (1, 0));
 }
 
-#[path = "common/duplex_transport.rs"]
-mod duplex_transport;
-
 /// A tab over a worker with no server captures a snapshot of its own
 /// writes, changes them, and edits a draft frozen at the snapshot: the
 /// draft's base is what the tab captured, though the worker has settled
@@ -3029,7 +3026,7 @@ fn a_tab_over_its_worker_edits_a_draft_frozen_at_its_capture() {
     tab.set_non_durable_client();
     // As its worker's: no server to wait for.
     tab.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer);
-    let (client_side, server_side) = duplex_transport::duplex();
+    let (client_side, server_side) = jazz::db::duplex();
     block_on(tab.connect_upstream(client_side));
     worker.accept_subscriber(server_side, AuthorSubject::for_test_bytes([0x63; 16]));
     let main = selector(0xe1);
@@ -3125,7 +3122,7 @@ fn a_tab_edits_a_draft_frozen_at_a_capture_it_awaits_after_updating_and_a_new_ta
     tab.set_non_durable_client();
     // As its worker's: no server to wait for.
     tab.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer);
-    let (client_side, server_side) = duplex_transport::duplex();
+    let (client_side, server_side) = jazz::db::duplex();
     block_on(tab.connect_upstream(client_side));
     worker.accept_subscriber(server_side, AuthorSubject::for_test_bytes([0x63; 16]));
     let pump = || {
@@ -3230,7 +3227,7 @@ fn a_tab_edits_a_draft_frozen_at_a_capture_it_awaits_after_updating_and_a_new_ta
     let tab = open(0x72);
     tab.set_non_durable_client();
     tab.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer);
-    let (client_side, server_side) = duplex_transport::duplex();
+    let (client_side, server_side) = jazz::db::duplex();
     block_on(tab.connect_upstream(client_side));
     worker.accept_subscriber(server_side, AuthorSubject::for_test_bytes([0x63; 16]));
     // As the bindings read: the store is empty, so the read asks the worker.

@@ -582,10 +582,12 @@ fn client_edits_push_their_new_nodes_before_the_commit() {
 
 /// A duplex that keeps the encoded size of each commit and `Rows` it
 /// carries, and whether its chunked values crossed as deltas.
+type TransferSizes = Rc<RefCell<Vec<(&'static str, usize, bool)>>>;
+
 struct Spy {
     out: Wire,
     inbound: Wire,
-    sizes: Rc<RefCell<Vec<(&'static str, usize, bool)>>>,
+    sizes: TransferSizes,
 }
 
 impl Transport for Spy {

@@ -325,7 +325,8 @@ fn float_literal_comparisons_match_numeric_order() {
     ))
     .expect("insert metric");
 
-    let operators: [(&str, fn(Operand, Operand) -> Predicate); 6] = [
+    type Comparison = fn(Operand, Operand) -> Predicate;
+    let operators: [(&str, Comparison); 6] = [
         ("eq", eq),
         ("ne", ne),
         ("lt", lt),
@@ -669,10 +670,7 @@ fn ties_break_by_row_id_in_the_last_keys_direction() {
             .expect("the tied row is added")
             .index;
         let position = expected.iter().position(|t| *t == "four").unwrap();
-        assert_eq!(
-            index as usize, position,
-            "{direction:?} subscription insert"
-        );
+        assert_eq!(index, position, "{direction:?} subscription insert");
         assert_eq!(
             read_titles(&db, &query),
             expected,

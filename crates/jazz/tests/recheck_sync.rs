@@ -7,9 +7,6 @@ use std::task::{Context, Poll, Waker};
 
 use crate::common;
 
-#[path = "common/duplex_transport.rs"]
-mod duplex_transport;
-
 use jazz::db::{
     Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadTier, RemoteLinkHint, SubscriptionEvent,
     SubscriptionStream, Upstream, block_on,
@@ -82,7 +79,7 @@ fn authority(schema: JazzSchema) -> Db {
 }
 
 fn connect(db: &Db, server: &Db, author: AuthorSubject) -> Upstream {
-    let (client_side, server_side) = duplex_transport::duplex();
+    let (client_side, server_side) = jazz::db::duplex();
     let upstream = block_on(db.connect_upstream(client_side));
     server.accept_subscriber(server_side, author);
     db.set_remote_link_hint(RemoteLinkHint::Live);
@@ -294,7 +291,7 @@ fn each_connection_writes_under_its_own_claims() {
     let server = authority(schema());
     let device = |node: u8, role: &str| {
         let db = block_on(Db::open(config(schema(), node, alice()))).unwrap();
-        let (client_side, server_side) = duplex_transport::duplex();
+        let (client_side, server_side) = jazz::db::duplex();
         block_on(db.connect_upstream(client_side));
         server.accept_subscriber_with_claims(
             server_side,
@@ -634,7 +631,7 @@ fn writes_complete_in_one_poll_while_another_operation_waits() {
         row(1, 3),
         cells(vec![("title", text("served"))]),
         jazz::db::UpsertOptions {
-            identity: as_alice.clone(),
+            identity: as_alice,
             ..Default::default()
         },
     ))

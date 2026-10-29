@@ -728,11 +728,7 @@ fn a_listing_filtered_and_ordered_by_a_large_column_keeps_its_order() {
     rename_file(&db, row(0xc5), "d2.bin");
     rows.apply(next_event(&mut listing));
     assert_eq!(rows.ids(), vec![row(0xc4), row(0xc3), row(0xc5), row(0xc2)]);
-    let names = rows
-        .rows
-        .iter()
-        .map(|listed| name(listed))
-        .collect::<Vec<_>>();
+    let names = rows.rows.iter().map(name).collect::<Vec<_>>();
     assert_eq!(
         names,
         ["e.bin", "c.bin", "d2.bin", "a.bin"].map(|listed| Some(Value::String(listed.to_owned())))

@@ -11,7 +11,7 @@ use jazz::tools::{
 fn schema(columns: &[&str]) -> Schema {
     let mut table = TableSchema::builder("notes").column("title", ColumnType::Text);
     for column in columns {
-        table = table.column(*column, ColumnType::Text);
+        table = table.column(column, ColumnType::Text);
     }
     SchemaBuilder::new().table(table).build()
 }

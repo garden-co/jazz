@@ -54,7 +54,7 @@ fn open_db() -> Db {
 }
 
 fn big_text(fill: char) -> String {
-    assert!(LARGE_BYTES > INLINE_VALUE_MAX_BYTES);
+    const { assert!(LARGE_BYTES > INLINE_VALUE_MAX_BYTES) };
     std::iter::repeat_n(fill, LARGE_BYTES).collect()
 }
 

@@ -7,12 +7,9 @@
 
 use crate::common;
 
-#[path = "common/duplex_transport.rs"]
-mod duplex_transport;
-
 use std::collections::BTreeMap;
 
-use duplex_transport::duplex;
+use jazz::db::duplex;
 use jazz::db::{
     CurrentRow, Db, DbConfig, DbIdentity, ReadOpts, ReadTier, SubscriptionEvent,
     SubscriptionStream, block_on,

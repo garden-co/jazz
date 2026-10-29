@@ -7,13 +7,10 @@
 
 use crate::common;
 
-#[path = "common/duplex_transport.rs"]
-mod duplex_transport;
-
 use std::collections::BTreeMap;
 
-use duplex_transport::duplex;
 use jazz::db::WriteIdentity;
+use jazz::db::duplex;
 use jazz::db::{
     Db, DbConfig, DbIdentity, DeleteOptions, InsertOptions, ReadOpts, ReadTier, UpdateOptions,
     UpsertOptions, block_on,
@@ -176,8 +173,7 @@ fn with_check_compares_the_new_row_with_the_old_one() {
         BTreeMap::from([("is_public".to_owned(), Value::Bool(true))]),
         as_session(alice),
     ))
-    .err()
-    .expect("visibility may not change");
+    .expect_err("visibility may not change");
     assert!(error.message.contains("WITH CHECK"), "{}", error.message);
 }
 
@@ -197,8 +193,7 @@ fn an_operation_without_a_policy_denies_session_writes() {
             ..Default::default()
         },
     ))
-    .err()
-    .expect("no insert policy");
+    .expect_err("no insert policy");
     assert!(insert.is_authorization_denied(), "{}", insert.message);
     let update = block_on(db.update(
         "drafts",
@@ -206,8 +201,7 @@ fn an_operation_without_a_policy_denies_session_writes() {
         BTreeMap::from([("body".to_owned(), text("edited"))]),
         as_session(alice),
     ))
-    .err()
-    .expect("no update policy");
+    .expect_err("no update policy");
     assert!(update.is_authorization_denied(), "{}", update.message);
     let delete = block_on(db.delete(
         "drafts",
@@ -217,8 +211,7 @@ fn an_operation_without_a_policy_denies_session_writes() {
             ..Default::default()
         },
     ))
-    .err()
-    .expect("no delete policy");
+    .expect_err("no delete policy");
     assert!(delete.is_authorization_denied(), "{}", delete.message);
     assert_eq!(cell(&db, "drafts", "body"), text("first"));
 
@@ -249,8 +242,7 @@ fn an_anonymous_session_cannot_write_where_policies_allow_it() {
             ..Default::default()
         },
     ))
-    .err()
-    .expect("anonymous insert");
+    .expect_err("anonymous insert");
     assert!(insert.is_authorization_denied(), "{}", insert.message);
     let update = block_on(db.update(
         "board",
@@ -258,8 +250,7 @@ fn an_anonymous_session_cannot_write_where_policies_allow_it() {
         BTreeMap::from([("body".to_owned(), text("edited"))]),
         as_session(anonymous),
     ))
-    .err()
-    .expect("anonymous update");
+    .expect_err("anonymous update");
     assert!(update.is_authorization_denied(), "{}", update.message);
     let delete = block_on(db.delete(
         "board",
@@ -269,8 +260,7 @@ fn an_anonymous_session_cannot_write_where_policies_allow_it() {
             ..Default::default()
         },
     ))
-    .err()
-    .expect("anonymous delete");
+    .expect_err("anonymous delete");
     assert!(delete.is_authorization_denied(), "{}", delete.message);
     assert_eq!(cell(&db, "board", "body"), text("first"));
 
@@ -308,8 +298,7 @@ fn a_session_write_timestamped_too_far_ahead_is_rejected() {
         BTreeMap::from([("body".to_owned(), text("future"))]),
         at(ahead),
     ))
-    .err()
-    .expect("too far ahead");
+    .expect_err("too far ahead");
     assert_eq!(
         refused.reason,
         Some(jazz::db::Reason::ClientClockTooFarAhead),
@@ -420,8 +409,7 @@ fn a_replica_leaves_a_relational_read_for_write_upsert_to_the_authority() {
         BTreeMap::from([("data".to_owned(), text("bob"))]),
         as_session(bob),
     ))
-    .err()
-    .expect("an update of a row hidden from the session is refused at once");
+    .expect_err("an update of a row hidden from the session is refused at once");
     assert!(
         error.message.contains("read policy denied UPDATE"),
         "{}",

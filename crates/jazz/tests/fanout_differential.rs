@@ -99,11 +99,13 @@ fn open() -> Db {
     .unwrap()
 }
 
+type Snapshot = Vec<(RowUuid, Vec<(String, Option<Value>)>)>;
+
 struct Live {
     query: jazz::db::PreparedQuery,
     identity: AuthorSubject,
     stream: SubscriptionStream,
-    rows: Vec<(RowUuid, Vec<(String, Option<Value>)>)>,
+    rows: Snapshot,
     /// Includes `room`: a renamed room must update every row in it.
     includes_room: bool,
 }
@@ -114,7 +116,7 @@ fn owned(row: &jazz::db::CurrentRow) -> Vec<(String, Option<Value>)> {
         .collect()
 }
 
-fn snapshot(rows: &[jazz::db::CurrentRow]) -> Vec<(RowUuid, Vec<(String, Option<Value>)>)> {
+fn snapshot(rows: &[jazz::db::CurrentRow]) -> Snapshot {
     rows.iter().map(|r| (r.row_uuid(), owned(r))).collect()
 }
 

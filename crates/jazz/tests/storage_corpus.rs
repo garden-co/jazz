@@ -20,9 +20,6 @@
 
 use crate::common;
 
-#[path = "common/duplex_transport.rs"]
-mod duplex_transport;
-
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::io::{Read, Write};
@@ -31,7 +28,7 @@ use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
 use base64::Engine;
-use duplex_transport::duplex;
+use jazz::db::duplex;
 use jazz::db::{
     CurrentRow, Db, DbConfig, DbIdentity, ErrorCode, ExactWriteTarget, FileOptions, InsertOptions,
     ReadOpts, ReadTier, Reason, UpdateOptions, WireError, WriteIdentity, block_on,

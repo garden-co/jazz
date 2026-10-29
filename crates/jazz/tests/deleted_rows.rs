@@ -835,16 +835,14 @@ fn an_offline_edit_of_a_row_deleted_meanwhile_applies_and_leaves_it_deleted() {
         title("again"),
         Default::default(),
     ))
-    .err()
-    .expect("alice holds the deletion");
+    .expect_err("alice holds the deletion");
     assert!(
         refused.message.contains("row already deleted"),
         "{}",
         refused.message
     );
     let refused = block_on(synced.alice.delete("notes", row(1), Default::default()))
-        .err()
-        .expect("alice holds the deletion");
+        .expect_err("alice holds the deletion");
     assert!(
         refused.message.contains("row already deleted"),
         "{}",

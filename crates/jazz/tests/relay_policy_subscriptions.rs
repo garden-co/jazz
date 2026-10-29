@@ -5,12 +5,9 @@
 
 use crate::common;
 
-#[path = "common/duplex_transport.rs"]
-mod duplex_transport;
-
 use std::collections::BTreeMap;
 
-use duplex_transport::duplex;
+use jazz::db::duplex;
 use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, RemoteLinkHint, block_on};
 use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::query::Query;
@@ -45,12 +42,12 @@ fn open(node: u8, author: AuthorSubject) -> Db {
 
 /// A worker connected to `core`, and one tab over it.
 fn device(core: &Db, node: u8, author: AuthorSubject) -> (Db, Db) {
-    let worker = open(node, author.clone());
+    let worker = open(node, author);
     worker.set_remote_link_hint(RemoteLinkHint::Live);
     let (client_side, server_side) = duplex();
     block_on(worker.connect_upstream(client_side));
-    core.accept_subscriber(server_side, author.clone());
-    let tab = open(node + 1, author.clone());
+    core.accept_subscriber(server_side, author);
+    let tab = open(node + 1, author);
     tab.set_non_durable_client();
     tab.set_remote_link_hint(RemoteLinkHint::Live);
     let (client_side, server_side) = duplex();
@@ -63,7 +60,7 @@ fn device(core: &Db, node: u8, author: AuthorSubject) -> (Db, Db) {
 fn a_second_device_of_the_account_hydrates_its_rows_through_its_worker() {
     let account = AuthorSubject::for_test_bytes([0x41; 16]);
     let core = open(0xc0, AuthorSubject::SYSTEM);
-    let (worker_a, tab_a) = device(&core, 0x10, account.clone());
+    let (worker_a, tab_a) = device(&core, 0x10, account);
     let (worker_b, tab_b) = device(&core, 0x20, account);
     let all = [&tab_a, &worker_a, &core, &worker_b, &tab_b];
     let pump = || {

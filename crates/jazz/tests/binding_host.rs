@@ -1042,7 +1042,7 @@ fn a_refusal_for_a_closed_tabs_write_names_the_tabs_transaction() {
     let refused = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let seen = std::rc::Rc::clone(&refused);
     *worker.hooks.rejected.borrow_mut() = Some(Box::new(move |tx_id, _, _, _| {
-        seen.borrow_mut().push(tx_id.clone());
+        seen.borrow_mut().push(*tx_id);
         true
     }));
     worker.set_remote_link_hint("live").unwrap();
@@ -1117,7 +1117,7 @@ fn a_refusal_nobody_heard_is_kept_until_a_listener_takes_it() {
     let (on, seen) = (std::rc::Rc::clone(&listening), std::rc::Rc::clone(&heard));
     *client.hooks.rejected.borrow_mut() = Some(Box::new(move |tx_id, _, _, _| {
         if on.get() {
-            seen.borrow_mut().push(tx_id.clone());
+            seen.borrow_mut().push(*tx_id);
         }
         on.get()
     }));

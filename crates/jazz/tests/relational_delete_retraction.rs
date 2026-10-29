@@ -20,9 +20,6 @@ use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
 use common::{compile_schema, exists, outer_eq, read_and_allow_all_writes, session_eq};
 
-#[path = "common/duplex_transport.rs"]
-mod duplex_transport;
-
 const ME: [&str; 3] = ["user", "identity", "subject"];
 
 /// Games readable through a participant row naming the reader, and the
@@ -108,7 +105,7 @@ impl Fixture {
     }
 
     fn connect(&self, client: &Db) -> Upstream {
-        let (client_side, server_side) = duplex_transport::duplex();
+        let (client_side, server_side) = jazz::db::duplex();
         let upstream = block_on(client.connect_upstream(client_side));
         self.core.accept_subscriber(server_side, alice());
         upstream
