@@ -243,7 +243,7 @@ exactly as any other string or bytes value. A chunked cell (a value over
 | `=`, `!=`, `IN` against a longer literal  | refused when the query compiles: "comparing `t.c` with a literal over 65536 bytes is not supported yet"           |
 | `=`, `!=` between two columns, joins      | equal only when both name the same cell                                                                           |
 | GROUP BY, DISTINCT                        | one group per cell                                                                                                |
-| `<`, `<=`, `>`, `>=`                      | never matches                                                                                                     |
+| `<`, `<=`, `>`, `>=`                      | never matches, against a literal or another column                                                                |
 | `contains`                                | never matches                                                                                                     |
 | ORDER BY                                  | after NULL and before every inline value ascending (reversed descending), among themselves in no meaningful order |
 
@@ -253,8 +253,10 @@ the same cell when both are tail-free (`n = 0`): a tree is content-defined,
 so the same bytes build the same root, and interning reuses the epoch over
 it. A value written with an edit tail, or interned into a different epoch on
 another replica, is a different cell; equality between such values depends on
-how they were written. Values up to 64 KiB, the common case, have none of
-these limits.
+how they were written. Cells are store-local: a client and the server may
+hold one value as different cells, so a policy that compares two
+large-capable columns can decide a row over 64 KiB differently on each.
+Values up to 64 KiB, the common case, have none of these limits.
 
 These are limits, not a design commitment. A column flag that consolidates
 every write to a tail-free tree (making equality on that column exact, at the

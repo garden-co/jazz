@@ -26,6 +26,7 @@ fn config(indexed: bool) -> DbConfig {
     let mut docs = TableSchemaBuilder::new("docs")
         .column("body", ColumnType::Text)
         .column("blob", ColumnType::Bytea)
+        .nullable_column("tag", ColumnType::Text)
         .policies(allow_all_policies());
     if indexed {
         docs = docs.index_only(["body"]);
@@ -70,6 +71,24 @@ fn insert(db: &Db, n: u8, body: &str, blob: &[u8]) {
         BTreeMap::from([
             ("body".to_owned(), Value::String(body.to_owned())),
             ("blob".to_owned(), Value::Bytes(blob.to_vec())),
+        ]),
+        InsertOptions {
+            row_id: Some(row(n)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+}
+
+/// A row with `body` and a nullable `tag` (`None` leaves it null).
+fn insert_tagged(db: &Db, n: u8, body: &str, tag: Option<&str>) {
+    let tag = Value::Nullable(tag.map(|tag| Box::new(Value::String(tag.to_owned()))));
+    block_on(db.insert(
+        "docs",
+        BTreeMap::from([
+            ("body".to_owned(), Value::String(body.to_owned())),
+            ("blob".to_owned(), Value::Bytes(Vec::new())),
+            ("tag".to_owned(), tag),
         ]),
         InsertOptions {
             row_id: Some(row(n)),
@@ -158,6 +177,7 @@ fn equality_compares_chunked_values_by_cell() {
     );
     for query in [
         Query::from("docs").filter(eq(col("body"), lit(Value::String(body.clone())))),
+        Query::from("docs").filter(ne(col("body"), lit(Value::String(body.clone())))),
         Query::from("docs").filter(in_list(col("body"), [lit(Value::String(body.clone()))])),
     ] {
         let error = db
@@ -171,6 +191,65 @@ fn equality_compares_chunked_values_by_cell() {
             "{error:?}"
         );
     }
+}
+
+/// Null is a value under `eq` and `ne` on a large-capable column, and
+/// equal to no chunked cell.
+#[test]
+fn null_compares_as_a_value_against_chunked_cells() {
+    let db = db();
+    insert_tagged(&db, 1, "a", Some(&text(11, LARGE)));
+    insert_tagged(&db, 2, "b", None);
+    insert_tagged(&db, 3, "c", Some("short"));
+    let null = || lit(Value::Nullable(None));
+    assert_eq!(
+        ids(&db, Query::from("docs").filter(eq(col("tag"), null()))),
+        [row(2)]
+    );
+    assert_eq!(
+        ids(&db, Query::from("docs").filter(ne(col("tag"), null()))),
+        [row(1), row(3)]
+    );
+}
+
+/// Two columns holding the same value written whole share one cell, so
+/// they compare equal; the same value reached through an append is
+/// another cell and compares unequal (SPEC 19.5).
+#[test]
+fn two_columns_with_equal_content_compare_by_cell() {
+    let db = db();
+    let value = text(12, LARGE);
+    insert_tagged(&db, 1, &value, Some(&value));
+    let (head, tail) = value.split_at(LARGE - 5);
+    insert_tagged(&db, 2, head, Some(&value));
+    block_on(db.append_value("docs", row(2), "body", tail.as_bytes().to_vec())).unwrap();
+    insert_tagged(&db, 3, "short", Some("short"));
+    insert_tagged(&db, 4, &value, Some("short"));
+    assert_eq!(
+        ids(&db, Query::from("docs").filter(eq(col("body"), col("tag")))),
+        [row(1), row(3)]
+    );
+    assert_eq!(
+        ids(&db, Query::from("docs").filter(ne(col("tag"), col("body")))),
+        [row(2), row(4)]
+    );
+}
+
+/// A range between a large-capable column and any other column matches
+/// inline cells only, from either side.
+#[test]
+fn ranges_against_other_columns_skip_chunked_cells() {
+    let db = db();
+    insert(&db, 1, &text(13, LARGE), b"");
+    insert(&db, 2, "short", b"");
+    assert_eq!(
+        ids(&db, Query::from("docs").filter(lt(col("body"), col("id")))),
+        [row(2)]
+    );
+    assert_eq!(
+        ids(&db, Query::from("docs").filter(gt(col("id"), col("body")))),
+        [row(2)]
+    );
 }
 
 /// Grouping by a large-capable column groups chunked values by cell

@@ -3015,6 +3015,21 @@ fn cmp_plain(op: &CmpOp, l: &str, r: &str) -> String {
     }
 }
 
+/// A large-capable cell `c` against any other SQL term `r`. Equality is by
+/// cell: a chunked cell is an INTEGER no inline value equals. A chunked cell
+/// takes part in no range, so ranges match inline cells only (SPEC 19.5).
+fn large_against(op: &CmpOp, c: &str, r: &str) -> String {
+    match op {
+        CmpOp::Eq => format!("({c} IS {r})"),
+        CmpOp::Ne => format!("(NOT ({c} IS {r}))"),
+        op => format!(
+            "(NOT {} AND {})",
+            crate::large::chunked_sql(c),
+            cmp_plain(op, c, r)
+        ),
+    }
+}
+
 /// `a op b` as `b flip(op) a`.
 fn flip(op: &CmpOp) -> CmpOp {
     match op {
@@ -3047,7 +3062,7 @@ fn literal_of(value: &Sql) -> Option<&[u8]> {
 }
 
 impl Ctx<'_> {
-    /// A column as an operand: a large-capable column compares by its key.
+    /// A column as an operand: a large-capable column compares by its cell.
     fn column_term(&self, table: &Table, alias: &str, column: &str) -> Result<Term, Error> {
         let sql = column_sql(table, alias, column)?;
         Ok(self.large_term(table, sql, column))
@@ -3152,6 +3167,12 @@ impl Ctx<'_> {
                 self.cmp_large(&flip(&op), &column, &sql, &value)?
             }
             (Term::Large(a), Term::Large(b)) => self.cmp_large_pair(&op, &a, &b)?,
+            (Term::Large(column), other) => {
+                large_against(&op, &column.cell, other.sql().expect("present"))
+            }
+            (other, Term::Large(column)) => {
+                large_against(&flip(&op), &column.cell, other.sql().expect("present"))
+            }
             (left, right) => cmp_plain(
                 &op,
                 left.sql().expect("present"),
@@ -3172,26 +3193,13 @@ impl Ctx<'_> {
         value: &Sql,
     ) -> Result<String, Error> {
         let c = &column.cell;
-        let Some(literal) = literal_of(value) else {
-            return Ok(cmp_plain(op, c, p));
-        };
-        Ok(match op {
-            CmpOp::Eq | CmpOp::Ne => {
-                if literal.len() > jazz_types::large_values::INLINE_VALUE_MAX_BYTES {
-                    return Err(long_literal(column));
-                }
-                if *op == CmpOp::Eq {
-                    format!("({c} IS {p})")
-                } else {
-                    format!("(NOT ({c} IS {p}))")
-                }
-            }
-            op => format!(
-                "(NOT {} AND {})",
-                crate::large::chunked_sql(c),
-                cmp_plain(op, c, p)
-            ),
-        })
+        if literal_of(value)
+            .is_some_and(|literal| literal.len() > jazz_types::large_values::INLINE_VALUE_MAX_BYTES)
+            && matches!(op, CmpOp::Eq | CmpOp::Ne)
+        {
+            return Err(long_literal(column));
+        }
+        Ok(large_against(op, c, p))
     }
 
     /// Two large-capable cells: equal when both are inline and equal, or
@@ -3289,12 +3297,19 @@ impl Ctx<'_> {
         let instr = |l: &str, r: &str| {
             format!("COALESCE(instr(CAST({l} AS BLOB), CAST({r} AS BLOB)) > 0, 0)")
         };
-        // A chunked cell is an INTEGER, not its value: it contains nothing
-        // (SPEC 19.5).
-        match left {
-            Term::Large(_) => format!("(NOT {} AND {})", crate::large::chunked_sql(l), instr(l, r)),
-            _ => instr(l, r),
+        // A chunked cell is an INTEGER, not its value: it contains nothing and
+        // is contained in nothing (SPEC 19.5).
+        let mut guards = Vec::new();
+        if matches!(left, Term::Large(_)) {
+            guards.push(format!("NOT {}", crate::large::chunked_sql(l)));
         }
+        if matches!(right, Term::Large(_)) {
+            guards.push(format!("NOT {}", crate::large::chunked_sql(r)));
+        }
+        if guards.is_empty() {
+            return instr(l, r);
+        }
+        format!("({} AND {})", guards.join(" AND "), instr(l, r))
     }
 
     /// `ORDER BY` keys. Ties break by row id in the last key's direction,
