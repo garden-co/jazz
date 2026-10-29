@@ -1791,7 +1791,7 @@ impl Owner {
             else {
                 continue;
             };
-            tracing::warn!(%error, "closing sync session for a message it sent");
+            tracing::warn!(%error, "closing sync session");
             let _ = self.sessions[&id]
                 .output
                 .send((Err(session_closed_error(&error)), 0));
