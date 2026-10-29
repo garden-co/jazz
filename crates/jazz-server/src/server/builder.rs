@@ -20,7 +20,7 @@ use jazz::tools::public_schema::Schema;
 #[cfg(test)]
 use jazz::tx::DurabilityTier;
 
-/// The one file an app's state lives in: rows, catalogue, account journal.
+/// The one file an app's state lives in: rows, catalogue, account registry.
 const STORE_FILE: &str = "jazz.sqlite";
 /// Stores from before SQLite. A data directory that holds one and no SQLite
 /// store must be migrated first; the server never starts empty beside it.
@@ -156,7 +156,7 @@ impl ServerBuilder {
         let jwt_verifier = build_jwt_verifier(&auth_config).await?;
         log_auth_config(&auth_config);
 
-        // One store per app: the catalogue and the account journal are host
+        // One store per app: the catalogue and the account registry are host
         // tables in the file the runtime's rows live in, all on its thread.
         let store = AppStore::open(&self.build_core_server_shell_storage_config()?)?;
         store.set_app(self.app_id.to_string());
@@ -164,7 +164,7 @@ impl ServerBuilder {
         let core_server_shell = self.build_core_server_shell(latest_catalogue_schema, &store)?;
 
         let accounts = Some(crate::server::accounts::AccountRegistryOwner::open(
-            store.kv(crate::kv::ACCOUNTS)?,
+            store.sql()?,
         )?);
 
         let state = Arc::new(ServerState {
@@ -882,7 +882,7 @@ mod tests {
             subject: "alice".into(),
         };
         let accounts = built.state.accounts.as_ref().unwrap();
-        // The account journal is written before the runtime opens on the
+        // The account registry is written before the runtime opens on the
         // store...
         let first = accounts.login_or_register(alice.clone()).await.unwrap();
         built

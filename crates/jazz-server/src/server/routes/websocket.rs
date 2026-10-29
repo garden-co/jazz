@@ -3224,9 +3224,8 @@ mod tests {
         core.shutdown().await;
     }
 
-    /// A revoke whose journal append lands but whose durable flush fails
-    /// returns an error and poisons the registry; a restart replays the
-    /// revocation. The per-message gate must fail closed, exactly like a
+    /// A revoke whose write lands but whose durable flush fails returns an
+    /// error; the committed revocation is what every later lookup reads. The per-message gate must fail closed, exactly like a
     /// fresh registry lookup, rather than keep trusting Alice's last
     /// successful check. Guards the #3387 gate: the owner announces every
     /// attempted mutation, not only successful ones.
@@ -3296,7 +3295,7 @@ mod tests {
         let state = core.server_state();
         let mut changes = state.accounts.as_ref().map(|registry| registry.subscribe());
         let registry = state.accounts.as_ref().expect("account registry");
-        registry.fail_next_append_for_test();
+        registry.fail_next_write_for_test();
         let revoked = client
             .post(format!("{accounts}/revoke"))
             .bearer_auth(&alice)
@@ -3307,14 +3306,12 @@ mod tests {
             "the injected flush failure surfaces as a failed revoke"
         );
         assert!(
-            !registry.append_failure_pending_for_test(),
+            !registry.write_failure_pending_for_test(),
             "the injected flush failure was consumed by the revoke"
         );
 
-        // The failed revoke was announced; a failed lookup on the poisoned
-        // registry must be announced too.
-        let mut observer = state.accounts.as_ref().map(|registry| registry.subscribe());
-        // The poisoned registry now refuses every fresh lookup.
+        // The revoke committed before its flush failed: a fresh lookup
+        // reads it and refuses Alice.
         let lookup = super::super::accounts::resolve_assignment(
             &core.server_state(),
             jazz::account_registry::Principal {
@@ -3324,14 +3321,6 @@ mod tests {
         )
         .await;
         assert!(lookup.is_err());
-        assert!(
-            observer
-                .as_mut()
-                .expect("registry")
-                .has_changed()
-                .expect("owner alive"),
-            "a lookup on the poisoned registry is announced"
-        );
 
         // The per-message decision the reader/outgoing branches make, on a
         // receiver subscribed before the revoke (as the live socket's is).
@@ -3344,7 +3333,7 @@ mod tests {
         );
         assert!(
             per_message_new.is_err(),
-            "after a journaled revoke poisoned the registry, the per-message gate must not keep admitting Alice (fresh lookup: {per_message_old:?})"
+            "after a revoke whose flush failed was announced, the per-message gate must not keep admitting Alice (fresh lookup: {per_message_old:?})"
         );
         core.shutdown().await;
     }
