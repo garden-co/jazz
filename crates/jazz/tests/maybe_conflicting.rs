@@ -19,9 +19,10 @@ use std::task::{Context, Poll, Waker};
 
 use duplex_transport::duplex;
 use jazz::db::{
-    BuiltOn, Db, DbConfig, DbIdentity, ExactWriteTarget, FileOptions, InsertOptions, LOCAL_BASE,
-    ReadOpts, Reason, RemoteLinkHint, SubscriptionStream, SyncMessage, UpdateOptions, Upstream,
-    WireBase, WireKind, WireOp, WireTarget, WireWrite, WriteConflict, WriteTarget, block_on,
+    Acting, BuiltOn, Db, DbConfig, DbIdentity, ExactWriteTarget, FileOptions, InsertOptions,
+    LOCAL_BASE, ReadOpts, Reason, RemoteLinkHint, SubscriptionStream, SyncMessage, UpdateOptions,
+    Upstream, WireBase, WireKind, WireOp, WireTarget, WireWrite, WriteConflict, WriteTarget,
+    block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::BranchSelector;
@@ -749,8 +750,7 @@ fn a_relays_commit_a_write_was_built_on_is_what_its_writer_saw() {
             }
             .into()
         }],
-        author: None,
-        session: None,
+        acting: Acting::Own,
         expect: Vec::new(),
         origin: Some(([0xa1; 16], LOCAL_BASE + tx)),
     };

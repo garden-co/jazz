@@ -209,8 +209,13 @@ The commit's other fields:
 - `expect`: a digest of each written row as the writer's replica holds it
   afterwards. The authority does not echo a row whose new version matches;
   the writer installs its own as that version (§8.3).
-- `author`, `session`: provenance or a session a trusted link acts for. Only
-  a trusted link may set one other than its own identity.
+- `acting`: who the writes are. `Own`: the sender's, checked and attributed as
+  the link. `Attributed { author }`: provenance only, checked as the sender.
+  `Session { author, claims }`: a session's writes with its claims. Over a
+  trusted link the authority checks them as that session; over a session link
+  it checks and attributes them as the link's own identity, whatever author
+  they name. A session link's `Attributed` commit naming another author is
+  refused.
 - `origin`: the session commit a relay uploads this one for.
 
 A replica keeps every unsettled commit and uploads it in order on each
@@ -298,16 +303,16 @@ for one query's result:
   applies the cut itself.
 - A base row can reach a replica through any of its reads, and a head
   image the view's query would not match (a tombstone, a version outside
-  its filter) still masks it there. So the server tracks, per session, the
-  row ids of branched tables the replica holds on each branch key (rows
-  shipped to it or written by it, until evicted), and for a branch view
-  over a base it also ships the head's image of each id the replica holds
-  on the base: at the view's opening, whenever a base row ships while the
-  view is live, and whenever the head writes such an id. A one-shot read
-  does the same for its answer. Known limits: a head version the replica
-  may not read ships as its eviction, so it does not mask the base row
-  the replica holds; and policy tables the read's policies consult are
-  read as the current state, not in the view.
+  its filter) still masks it there. So for a branch view over a base the
+  server also ships the head's rows of its root table whose base row the
+  query matches, read without its window on the base alone (as of a frozen
+  base's cut): with a live read's opening (a resumed one's written after
+  `since`), with a one-shot read's answer, and again when the head or the
+  base writes such a row. They follow from the view's query, not from what
+  the session shipped, so they hold across reconnects. Known limits: a
+  head version the replica may not read ships as its eviction, so it does
+  not mask the base row the replica holds; joined tables and policy tables
+  are not masked (policy tables are read as the current state).
 - A listing judges only the rows the view holds. A cached row it leaves out
   that the head supplies is evicted; one the live base supplies may be
   another read's, so the replica asks for the head's and the base's row
@@ -402,7 +407,7 @@ wrote and cannot read (a write-only insert): the commit's fate reports its
 acceptance. Local copies are not a redaction boundary; eviction keeps the
 replica coherent, not secret.
 
-`CheckAllowed { id, action, author, session }` asks whether the session would be
+`CheckAllowed { id, action, acting }` asks whether the session would be
 allowed an action now, without writing; `CheckAllowedResult { id, result }`
 answers it.
 
