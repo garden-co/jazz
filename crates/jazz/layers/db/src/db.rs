@@ -490,6 +490,9 @@ struct Inner {
     /// Images a replica dropped since the last dispatch (evictions and
     /// rebases), for keyed invalidation.
     gone: RefCell<Vec<sync::Image>>,
+    /// The app's versions and lenses (see [`DbConfig::migrations`]): a
+    /// version this store lacks is admitted along them.
+    migrations: Migrations,
 }
 
 /// Large-value nodes one tick may reclaim.
@@ -1060,14 +1063,12 @@ impl Db {
                 names.get(version).is_some()
             })
         };
-        let Some(((first, _), rest)) = steps.split_first() else {
+        let Some((first, _)) = steps.first() else {
             return Self::open_named(config, conn, path);
         };
         let target = std::mem::replace(&mut config.schema, first.clone());
         let db = Self::open_named(config, conn, path)?;
-        for (schema, lenses) in rest {
-            db.admit(schema.clone(), lenses, None)?;
-        }
+        db.admit_along_migrations(&target)?;
         {
             let mut inner = db.inner();
             let owner = Rc::new(inner.named(&target));
@@ -1084,6 +1085,25 @@ impl Db {
             }
         }
         Ok(db)
+    }
+
+    /// Admit `schema` along the app's lenses when this store lacks it and
+    /// they lead to it from a version it admitted or from the first one
+    /// (SPEC 10.7); whether they did.
+    fn admit_along_migrations(&self, schema: &JazzSchema) -> Result<bool, Error> {
+        let steps = {
+            let inner = self.inner();
+            migration_path(&inner.migrations, schema, |version| {
+                inner.names.get(version).is_some()
+            })
+        };
+        let along = !steps.is_empty();
+        for (schema, lenses) in steps {
+            if self.inner().names.get(&schema.version_id()).is_none() {
+                self.admit(schema, &lenses, None)?;
+            }
+        }
+        Ok(along)
     }
 
     fn open_named(
@@ -1223,6 +1243,7 @@ impl Db {
                 since_tick: Vec::new(),
                 capture: Vec::new(),
                 gone: RefCell::new(Vec::new()),
+                migrations: config.migrations,
             })),
         };
         {
@@ -5986,6 +6007,9 @@ impl Db {
     /// batches, clock and subscriptions; it reads and writes its own columns
     /// of the physical tables, which hold the union of every admitted view.
     pub async fn register_schema_view(&self, schema: JazzSchema) -> Result<Db, Error> {
+        // A version the app's lenses lead to is admitted as the authority
+        // admits it, not named against the current one.
+        self.admit_along_migrations(&schema)?;
         let logical = {
             let mut inner = self.inner.borrow_mut();
             let version = schema.version_id();

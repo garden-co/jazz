@@ -1,3 +1,4 @@
+import type { ClientMigrations } from "../client-migrations.js";
 import { streamingChunks } from "../streaming-source.js";
 import { isHistoryTable, resolveQueryTable } from "../history-relation.js";
 import { AuxiliaryReceiveDeadline } from "./auxiliary-receive-deadline.js";
@@ -1013,6 +1014,8 @@ export class NativeRuntimeAdapter implements Runtime {
       owner?: NativeRuntimeAdapter;
       /** Where slow queries are reported (`console.warn`): see {@link SlowQueryLogOptions}. */
       slowQueryLog?: SlowQueryLogOptions;
+      /** The app's versions and migrations: see {@link ClientMigrations}. */
+      migrations?: ClientMigrations;
     },
   ) {
     this.ownerRuntime = opts?.owner?.ownerRuntime ?? this;
@@ -1037,6 +1040,7 @@ export class NativeRuntimeAdapter implements Runtime {
       historyComplete,
       opts?.initialSyncFlushEvery,
       opts?.selfSignedClientProof,
+      opts?.migrations,
     );
     this.peerIdentity = author;
     this.schemaHash = serializeRuntimeSchema(schema);

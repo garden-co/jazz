@@ -2,6 +2,7 @@
  * Application context for Jazz client connections.
  */
 
+import type { ClientMigrations } from "./client-migrations.js";
 import type { StorageDriver, WasmSchema } from "../drivers/types.js";
 
 /**
@@ -156,4 +157,10 @@ export interface AppContext {
    * log off).
    */
   slowQueryThresholdMs?: number;
+
+  /**
+   * The app's schema versions and migrations, as `jazz-tools` writes them to
+   * `migrations/bundle.json` (see {@link ClientMigrations}).
+   */
+  migrations?: ClientMigrations;
 }

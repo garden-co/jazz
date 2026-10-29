@@ -1100,3 +1100,48 @@ fn a_replica_with_bundled_lenses_stores_a_renamed_column_where_the_authority_doe
     let old = block_on(server.register_schema_view(v1)).unwrap();
     assert_eq!(read(&old, "text"), [offline]);
 }
+
+/// A schema view of a version the store lacks is admitted along the app's
+/// lenses too (a TS client reads every app version through a view): its
+/// renamed column is the authority's.
+#[test]
+fn a_schema_view_is_admitted_along_the_bundled_lenses() {
+    let v1 = without_rank();
+    let v2 = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("body", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    );
+    let lens = rename(
+        &v1,
+        &v2,
+        vec![LensOp::RenameColumn {
+            from: "text".into(),
+            to: "body".into(),
+        }],
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("client.sqlite");
+    let client = block_on(Db::open_at(
+        config(v1.clone(), 1, AuthorSubject::SYSTEM).with_migrations(vec![v1], vec![lens]),
+        &path,
+        FileOptions::default(),
+    ))
+    .unwrap();
+    let view = block_on(client.register_schema_view(v2)).unwrap();
+    block_on(view.insert(
+        "notes",
+        BTreeMap::from([("body".to_owned(), Value::String("via view".into()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    let columns = notes_columns(&path);
+    assert!(
+        columns.iter().all(|c| common::unhashed(c) != "body"),
+        "{columns:?}"
+    );
+}

@@ -1,3 +1,4 @@
+import type { ClientMigrations } from "./client-migrations.js";
 import { isHistoryTable, resolveQueryTable } from "./history-relation.js";
 import type { ConnectionRequirement } from "./connection-manager/types.js";
 import type { DbAccessContext } from "./db-access-context.js";
@@ -164,6 +165,12 @@ export type DbConfig = {
    * page commit.
    */
   initialSyncFlushEvery?: number;
+  /**
+   * The app's schema versions and migrations, as `jazz-tools` writes them to
+   * `migrations/bundle.json`. With them a client stores renamed and added
+   * columns where the server does, even before it first syncs.
+   */
+  migrations?: ClientMigrations;
   /** Optional WASM tracing level for benchmark/debug scenarios (default: "warn"). */
   logLevel?: WasmLogLevel;
   /** Optional OTLP/HTTP collector URL for WASM trace telemetry. */

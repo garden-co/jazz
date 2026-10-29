@@ -1517,5 +1517,36 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
     });
   }
   if (result.changed) emit(options, { type: "permissions-published", schemaHash: toHash });
+  // Clients ship what the server now holds, so they store each column where
+  // it does, even before their first sync (see ClientMigrations).
+  const bundled = new Map<string, WasmSchema>();
+  for (const hash of [...schemas.keys(), ...edges.flatMap((edge) => [edge.fromHash, edge.toHash])]) {
+    if (!bundled.has(hash)) {
+      bundled.set(hash, mergePermissionsIntoWasmSchema(await loadCanonicalSchema(hash), {}));
+    }
+  }
+  await writeClientMigrations(migrationsDir, {
+    schemas: [...bundled].map(([hash, schema]) => ({ hash, schema })),
+    migrations: edges.map((edge) => ({
+      fromHash: edge.fromHash,
+      toHash: edge.toHash,
+      forward: serializeForwardLenses(edge.migration.forward),
+    })),
+  });
   return { ...result, schema: { ...result.schema, schemaFile: compiled.schemaFile } };
+}
+
+/** The file an app imports and passes as its client's `migrations`. */
+export const CLIENT_MIGRATIONS_FILE = "bundle.json";
+
+async function writeClientMigrations(
+  migrationsDir: string,
+  bundle: { schemas: unknown[]; migrations: unknown[] },
+): Promise<void> {
+  await mkdir(migrationsDir, { recursive: true });
+  await assertNoSymlinkComponents(migrationsDir);
+  await writeFile(
+    join(migrationsDir, CLIENT_MIGRATIONS_FILE),
+    `${JSON.stringify(bundle, runtimeSchemaJsonReplacer, 2)}\n`,
+  );
 }

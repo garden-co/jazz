@@ -218,6 +218,7 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
           appId: this.config.appId,
           thresholdMs: this.config.slowQueryThresholdMs,
         },
+        migrations: this.config.migrations,
       },
     );
 
