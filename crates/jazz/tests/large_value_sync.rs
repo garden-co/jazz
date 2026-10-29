@@ -12,7 +12,8 @@ use std::rc::Rc;
 use jazz::db::{
     BuiltOn, CellDelta, Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadSpan, ReadTier,
     RemoteLinkHint, SubscriptionStream, SyncCell, SyncMessage, Transport, TransportError, WireBase,
-    WireDelta, WireError, WireKind, WireOp, WirePull, WireTarget, block_on, encode_frames,
+    WireDelta, WireError, WireKind, WireOp, WirePull, WireTarget, WireWrite, block_on,
+    encode_frames,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::ReadViewSourceSpec;
@@ -591,7 +592,9 @@ struct Spy {
 impl Transport for Spy {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
         let entry = match &message {
-            SyncMessage::Commit { deltas, .. } => Some(("commit", !deltas.is_empty())),
+            SyncMessage::Commit { ops, .. } => {
+                Some(("commit", ops.iter().any(|op| !op.deltas.is_empty())))
+            }
             SyncMessage::PushChunks { .. } => Some(("push", false)),
             SyncMessage::Rows { images, .. } => {
                 let mut cells = images.iter().flat_map(|image| image.cells.iter());
@@ -912,19 +915,20 @@ fn a_delta_over_a_version_the_writer_cannot_read_is_rejected() {
         node: [9; 16],
         tx,
         kind: WireKind::Mergeable,
-        ops: vec![WireOp::Update {
-            table: "drafts".to_owned(),
-            row: *row(1).0.as_bytes(),
-            cells: [("body".to_owned(), body)].into(),
-            target: WireTarget::Root,
-            at: None,
+        ops: vec![WireOp {
+            deltas,
+            ..WireWrite::Update {
+                table: "drafts".to_owned(),
+                row: *row(1).0.as_bytes(),
+                cells: [("body".to_owned(), body)].into(),
+                target: WireTarget::Root,
+                at: None,
+            }
+            .into()
         }],
         author: None,
         session: None,
         expect: Vec::new(),
-        deltas,
-        sources: Vec::new(),
-        bases: Vec::new(),
         origin: None,
     };
     // Each version the server could have written the draft at, named as a
@@ -934,7 +938,6 @@ fn a_delta_over_a_version_the_writer_cannot_read_is_rejected() {
             seq,
             Value::Nullable(None),
             vec![CellDelta {
-                op: 0,
                 column: "body".to_owned(),
                 depth: 0,
                 key: Vec::new(),
@@ -1167,23 +1170,23 @@ fn naming_a_hidden_trees_hash_reads_nothing() {
         node: [9; 16],
         tx,
         kind: WireKind::Mergeable,
-        ops: vec![WireOp::Insert {
-            table: "docs".to_owned(),
-            row: *row(n).0.as_bytes(),
-            cells: [
-                ("body".to_owned(), Value::Large(Box::new(value.clone()))),
-                ("blob".to_owned(), Value::Bytes(Vec::new())),
-            ]
+        ops: vec![
+            WireWrite::Insert {
+                table: "docs".to_owned(),
+                row: *row(n).0.as_bytes(),
+                cells: [
+                    ("body".to_owned(), Value::Large(Box::new(value.clone()))),
+                    ("blob".to_owned(), Value::Bytes(Vec::new())),
+                ]
+                .into(),
+                target: WireTarget::Root,
+                at: None,
+            }
             .into(),
-            target: WireTarget::Root,
-            at: None,
-        }],
+        ],
         author: None,
         session: None,
         expect: Vec::new(),
-        deltas: Vec::new(),
-        sources: Vec::new(),
-        bases: Vec::new(),
         origin: None,
     };
     up.borrow_mut().push_back(insert(1, 1, &hidden));
@@ -1252,23 +1255,23 @@ fn a_merged_text_write_naming_a_hidden_tree_is_refused() {
         node: [9; 16],
         tx: 1,
         kind: WireKind::Mergeable,
-        ops: vec![WireOp::Update {
-            table: "merged".to_owned(),
-            row: *row(2).0.as_bytes(),
-            cells: [("body".to_owned(), Value::Large(Box::new(hidden)))].into(),
-            target: WireTarget::Root,
-            at: None,
+        ops: vec![WireOp {
+            bases: vec![WireBase {
+                key: Vec::new(),
+                on: BuiltOn::Seq(seed),
+            }],
+            ..WireWrite::Update {
+                table: "merged".to_owned(),
+                row: *row(2).0.as_bytes(),
+                cells: [("body".to_owned(), Value::Large(Box::new(hidden)))].into(),
+                target: WireTarget::Root,
+                at: None,
+            }
+            .into()
         }],
         author: None,
         session: None,
         expect: Vec::new(),
-        deltas: Vec::new(),
-        sources: Vec::new(),
-        bases: vec![WireBase {
-            op: 0,
-            key: Vec::new(),
-            on: BuiltOn::Seq(seed),
-        }],
         origin: None,
     });
     for _ in 0..4 {

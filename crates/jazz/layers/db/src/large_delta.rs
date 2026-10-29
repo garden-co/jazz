@@ -22,12 +22,11 @@ pub struct WireDelta {
     pub edits: Vec<u8>,
 }
 
-/// A commit's chunked cell that travels as a [`WireDelta`]: its op's
-/// cell holds NULL in its place, under `depth` nullable wrappers. `key`
-/// is the written row's branch key (empty unbranched).
+/// An op's chunked cell that travels as a [`WireDelta`]: the op's cell
+/// holds NULL in its place, under `depth` nullable wrappers. `key` is the
+/// written row's branch key (empty unbranched).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CellDelta {
-    pub op: u32,
     pub column: String,
     pub depth: u8,
     pub key: Vec<u8>,

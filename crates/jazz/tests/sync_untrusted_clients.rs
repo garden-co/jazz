@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use jazz::db::{
     Db, DbConfig, DbIdentity, DeleteOptions, FileOptions, InsertOptions, LOCAL_BASE, ReadOpts,
-    ReadTier, SyncMessage, Transport, TransportError, WireKind, WireOp, WireTarget, block_on,
+    ReadTier, SyncMessage, Transport, TransportError, WireKind, WireTarget, WireWrite, block_on,
 };
 use jazz::ids::RowUuid;
 use jazz::ids::{AuthorSubject, NodeUuid};
@@ -207,9 +207,6 @@ fn a_commit_as_another_identitys_node_is_refused_and_claims_nothing() {
         author: None,
         session: None,
         expect: Vec::new(),
-        deltas: Vec::new(),
-        sources: Vec::new(),
-        bases: Vec::new(),
         origin: None,
     });
     block_on(server.tick()).unwrap();
@@ -268,26 +265,25 @@ fn an_upsert_over_a_row_deleted_in_the_same_commit_is_checked_as_an_insert() {
         tx: LOCAL_BASE + 1,
         kind: WireKind::Mergeable,
         ops: vec![
-            WireOp::Delete {
+            WireWrite::Delete {
                 table: "messages".to_owned(),
                 row: [7; 16],
                 target: WireTarget::Root,
                 at: None,
-            },
-            WireOp::Upsert {
+            }
+            .into(),
+            WireWrite::Upsert {
                 table: "messages".to_owned(),
                 row: [7; 16],
                 cells: [("body".to_owned(), Value::String("rewritten".into()))].into(),
                 target: WireTarget::Root,
                 at: None,
-            },
+            }
+            .into(),
         ],
         author: None,
         session: None,
         expect: Vec::new(),
-        deltas: Vec::new(),
-        sources: Vec::new(),
-        bases: Vec::new(),
         origin: None,
     });
     block_on(server.tick()).unwrap();
@@ -308,19 +304,19 @@ fn the_authority_refuses_cells_that_are_not_of_their_columns_type() {
             node: [2; 16],
             tx: LOCAL_BASE + 1 + i as u64,
             kind: WireKind::Mergeable,
-            ops: vec![WireOp::Insert {
-                table: "messages".to_owned(),
-                row: [10 + i as u8; 16],
-                cells: [("body".to_owned(), value)].into(),
-                target: WireTarget::Root,
-                at: None,
-            }],
+            ops: vec![
+                WireWrite::Insert {
+                    table: "messages".to_owned(),
+                    row: [10 + i as u8; 16],
+                    cells: [("body".to_owned(), value)].into(),
+                    target: WireTarget::Root,
+                    at: None,
+                }
+                .into(),
+            ],
             author: None,
             session: None,
             expect: Vec::new(),
-            deltas: Vec::new(),
-            sources: Vec::new(),
-            bases: Vec::new(),
             origin: None,
         });
     }
@@ -362,9 +358,6 @@ fn a_reopened_authority_continues_after_the_seq_of_a_rowless_commit() {
         author: None,
         session: None,
         expect: Vec::new(),
-        deltas: Vec::new(),
-        sources: Vec::new(),
-        bases: Vec::new(),
         origin: None,
     });
     block_on(server.tick()).unwrap();
