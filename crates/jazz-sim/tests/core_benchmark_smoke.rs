@@ -1,5 +1,5 @@
 //! Correctness contracts for the core scenarios: cold subscription over deep
-//! history, four-tier sync through relays, serializable validation against a
+//! history, sync through a worker relay, serializable validation against a
 //! model, relation include delivery, and same-shape route subscriptions. Timing is not
 //! measured here; the scenario benches and CodSpeed own that.
 
@@ -151,24 +151,25 @@ fn owned_todos() -> JazzSchema {
     )
 }
 
-/// core <- relay <- worker <- ui. The UI writes mergeable updates,
-/// serializable transactions, deletes and restores, and one row owned by
-/// someone else. Relay and worker links run as the system and do not
-/// narrow; the UI's link converges to the rows its read policy admits.
+/// core <- worker <- ui, the one relay tier Jazz ships (SPEC 9 §9.5): a
+/// durable worker relay and a non-durable UI behind it. The UI writes
+/// mergeable updates, serializable transactions, deletes and restores, and
+/// one row owned by someone else. The worker's link runs as the system and
+/// does not narrow; the UI's link converges to the rows its read policy
+/// admits.
 #[test]
 fn sync_correctness_smoke() {
     let mut sim = Sim::new(0x510c_4eed, SimulatorTransportCodec::WireFrames);
     sim.add("core", open(owned_todos(), 0, AuthorSubject::SYSTEM));
-    sim.add("relay", open(owned_todos(), 1, AuthorSubject::SYSTEM));
     sim.add("worker", open(owned_todos(), 2, AuthorSubject::SYSTEM));
     let me = user(3);
     let other = user(4);
-    sim.add("ui", open(owned_todos(), 3, me));
-    sim.connect("relay", "core", AuthorSubject::SYSTEM, link());
-    sim.connect("worker", "relay", AuthorSubject::SYSTEM, link());
+    let ui = open(owned_todos(), 3, me);
+    ui.set_non_durable_client();
+    sim.add("ui", ui);
+    sim.connect("worker", "core", AuthorSubject::SYSTEM, link());
     sim.connect("ui", "worker", me, link());
     let all = Query::from("todos");
-    let mut relay = Live::subscribe(sim.db("relay"), &all, ReadOpts::default());
     let mut worker = Live::subscribe(sim.db("worker"), &all, ReadOpts::default());
     let mut ui = Live::subscribe(sim.db("ui"), &all, ReadOpts::default());
     sim.settle();
@@ -212,7 +213,7 @@ fn sync_correctness_smoke() {
             }
             3 => {
                 // A serializable read-modify-write of one of the UI's rows,
-                // validated at the authority through both relays.
+                // validated at the authority through the worker.
                 let target = *expected_ui.keys().next().expect("a row");
                 let tx = sim.drive(ui_db.serializable_tx()).expect("begin");
                 let prepared = ui_db
@@ -229,7 +230,7 @@ fn sync_correctness_smoke() {
                 .expect("stage");
                 let receipt = sim.drive(tx.commit()).expect("commit");
                 sim.drive(ui_db.wait_for_transaction(receipt.0, DurabilityTier::Global))
-                    .expect("a serializable commit through relays is accepted");
+                    .expect("a serializable commit through the worker is accepted");
                 expected_ui.insert(target, format!("serializable-{step}"));
             }
             _ => {
@@ -255,7 +256,6 @@ fn sync_correctness_smoke() {
         }
     }
     sim.settle();
-    relay.poll();
     worker.poll();
     ui.poll();
 
@@ -264,7 +264,6 @@ fn sync_correctness_smoke() {
         core.contains_key(&hidden),
         "the authority holds the row the UI cannot read"
     );
-    assert_eq!(relay.rows, core, "a system relay link does not narrow");
     assert_eq!(worker.rows, core, "a system worker link does not narrow");
     let expected: Rows = expected_ui
         .iter()

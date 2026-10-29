@@ -119,6 +119,15 @@ impl Net {
         self.core.accept_subscriber(server_side, author);
     }
 
+    /// Connect client `i` as `author` (a client added after `new`).
+    fn connect_as(&mut self, i: usize, author: AuthorSubject) {
+        let (client_side, server_side) = duplex();
+        let upstream = block_on(self.clients[i].0.connect_upstream(client_side));
+        self.clients[i].1 = Some(upstream);
+        self.core.accept_subscriber(server_side, author);
+        self.clients[i].0.set_remote_link_hint(RemoteLinkHint::Live);
+    }
+
     fn go_offline(&mut self, i: usize) {
         let upstream = self.clients[i].1.take().expect("online");
         assert!(self.clients[i].0.detach_connection(&upstream));
@@ -970,5 +979,167 @@ fn restoring_or_updating_an_unloaded_row_asks_for_a_read_first() {
             .expect_err("bob holds no copy of the row");
         assert_eq!(error.code, ErrorCode::NotObserved, "{write:?}: {error}");
         assert!(error.message.contains("read or subscribe"), "{error}");
+    }
+}
+
+/// #3696: an invite the backend still holds but the authority revoked
+/// before the snapshot costs at most one conflict: the rejection brings the
+/// revocation, and the next attempt reads the invite as gone.
+#[test]
+fn a_held_invite_revoked_before_the_snapshot_reads_as_gone_after_one_conflict() {
+    let net = Net::new(3);
+    let invite = net.write_invite(OWNER, "abc");
+    assert_eq!(net.redeem(BACKEND, "abc", false, || {}), Redeem::Joined);
+    net.revoke(OWNER, invite);
+    net.unrelated_receipt(BACKEND);
+    let first = net.redeem(BACKEND, "abc", false, || {});
+    assert_ne!(first, Redeem::Joined);
+    if first == Redeem::Conflict {
+        assert_eq!(net.redeem(BACKEND, "abc", false, || {}), Redeem::Invalid);
+    }
+    assert_eq!(net.members("abc"), 1);
+}
+
+/// #3119: a mergeable and a serializable transaction open at once on one
+/// client, their reads and writes interleaved, both commit and settle.
+#[test]
+fn concurrent_transactions_on_one_client_stay_isolated() {
+    let net = Net::new(2);
+    let first = net.write_invite(BACKEND, "first");
+    let second = net.write_invite(BACKEND, "second");
+    let db = net.db(BACKEND);
+    let mergeable = OpenTransactionId::new();
+    let serializable = OpenTransactionId::new();
+    block_on(db.begin_mergeable(mergeable)).unwrap();
+    block_on(db.begin_serializable(serializable)).unwrap();
+    let read = |open, c| {
+        let prepared = db.prepare_query(&invite_query(c)).unwrap();
+        net.drive(db.tx_ref(open).all_prepared(&prepared))
+            .unwrap()
+            .len()
+    };
+    assert_eq!(read(mergeable, "first"), 1);
+    assert_eq!(read(serializable, "second"), 1);
+    let rename = |open, row, c: &str| {
+        net.drive(
+            db.tx_ref(open)
+                .update("invites", row, code(c), Default::default()),
+        )
+        .unwrap();
+    };
+    rename(serializable, second, "second!");
+    rename(mergeable, first, "first!");
+    assert_eq!(
+        read(mergeable, "second!"),
+        0,
+        "the other transaction's write"
+    );
+    assert_eq!(
+        read(serializable, "first!"),
+        0,
+        "the other transaction's write"
+    );
+    let serializable = net
+        .drive(db.commit_serializable_handle(serializable))
+        .unwrap();
+    let mergeable = net.drive(db.commit_mergeable_handle(mergeable)).unwrap();
+    assert!(net.settle(BACKEND, serializable.0).is_ok());
+    assert!(net.settle(BACKEND, mergeable.0).is_ok());
+    let core = |c| {
+        let prepared = net.core.prepare_query(&invite_query(c)).unwrap();
+        block_on(net.core.all(&prepared, ReadOpts::default()))
+            .unwrap()
+            .len()
+    };
+    assert_eq!((core("first!"), core("second!")), (1, 1));
+}
+
+/// #3756: a mergeable transaction's update of a row the client has not
+/// loaded fails at staging with NotObserved, as `db.update` does, instead
+/// of staging a patch over an empty row.
+#[test]
+fn a_transaction_update_of_an_unloaded_row_asks_for_a_read_first() {
+    let net = Net::new(2);
+    let invite = net.write_invite(OWNER, "abc");
+    let db = net.db(BACKEND);
+    let direct = block_on(db.update("invites", invite, code("x"), Default::default()))
+        .expect_err("db.update of an unloaded row");
+    assert_eq!(direct.code, ErrorCode::NotObserved, "{direct}");
+    let open = OpenTransactionId::new();
+    block_on(db.begin_mergeable(open)).unwrap();
+    let staged = block_on(
+        db.tx_ref(open)
+            .update("invites", invite, code("x"), Default::default()),
+    )
+    .expect_err("tx.update of an unloaded row");
+    assert_eq!(staged.code, ErrorCode::NotObserved, "{staged}");
+    db.abandon_transaction_handle(open).unwrap();
+}
+
+/// #3228: a serializable commit prepared offline on a durable replica
+/// keeps its whole read set across a restart. After the relaunch the
+/// authority still validates the original reads: it accepts the commit
+/// while they hold, and rejects it once they no longer do, rather than
+/// accepting a write whose reads were dropped.
+#[test]
+fn an_offline_serializable_commit_keeps_its_reads_across_a_restart() {
+    for revoked_meanwhile in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("backend.sqlite");
+        let author = AuthorSubject::for_test_bytes([0x5b; 16]);
+        let durable = || {
+            block_on(Db::open_at(
+                DbConfig::new(
+                    schema(),
+                    DbIdentity {
+                        node: NodeUuid::from_bytes([0x5b; 16]),
+                        author,
+                    },
+                ),
+                &path,
+                jazz::db::FileOptions::default(),
+            ))
+            .unwrap()
+        };
+        let mut net = Net::new(1);
+        let invite = net.write_invite(OWNER, "abc");
+        net.clients.push((durable(), None));
+        let backend = net.clients.len() - 1;
+        net.connect_as(backend, author);
+        assert_eq!(net.redeem(backend, "abc", false, || {}), Redeem::Joined);
+
+        net.go_offline(backend);
+        let db = net.db(backend);
+        let open = OpenTransactionId::new();
+        block_on(db.begin_serializable(open)).unwrap();
+        let prepared = db.prepare_query(&invite_query("abc")).unwrap();
+        assert_eq!(
+            block_on(db.tx_ref(open).all_prepared(&prepared))
+                .unwrap()
+                .len(),
+            1
+        );
+        block_on(
+            db.tx_ref(open)
+                .insert("members", code("abc"), Default::default()),
+        )
+        .unwrap();
+        let receipt = block_on(db.commit_serializable_handle(open)).unwrap();
+
+        // The process quits with the commit pending, and relaunches.
+        net.clients.pop();
+        if revoked_meanwhile {
+            net.revoke(OWNER, invite);
+        }
+        net.clients.push((durable(), None));
+        net.connect_as(backend, author);
+        let outcome = net.settle(backend, receipt.0);
+        if revoked_meanwhile {
+            common::assert_serialization_conflict(&outcome.expect_err("its read no longer holds"));
+            assert_eq!(net.members("abc"), 1);
+        } else {
+            assert!(outcome.is_ok(), "{outcome:?}");
+            assert_eq!(net.members("abc"), 2);
+        }
     }
 }

@@ -596,10 +596,14 @@ impl Inner {
         let reporter = Rc::clone(&host);
         *binding.hooks.rejected.borrow_mut() =
             Some(Box::new(move |tx_id, error, serializable, _| {
-                if let Some(callback) = reporter.upstream_mutation_errors.borrow().as_ref() {
-                    let event = mutation_error_event(&tx_id.to_string(), error, serializable, true);
-                    callback.call(event, ThreadsafeFunctionCallMode::NonBlocking);
-                }
+                let callbacks = reporter.upstream_mutation_errors.borrow();
+                let Some(callback) = callbacks.as_ref() else {
+                    return false;
+                };
+                let event = mutation_error_event(&tx_id.to_string(), error, serializable, true);
+                // A call the queue dropped did not reach JS: keep the
+                // refusal for the next delivery.
+                callback.call(event, ThreadsafeFunctionCallMode::NonBlocking) == napi::Status::Ok
             }));
         Self { binding, host }
     }
@@ -685,6 +689,35 @@ fn mutation_error_event(
 // ---- pending operations ------------------------------------------------------------
 
 type ReadFuture = Pin<Box<dyn Future<Output = HostResult<Vec<u8>>>>>;
+
+/// The shared upstream link machine (`jazz::link`), which decides when the
+/// runtime's WebSocket connects, backs off and reports an outage. The runtime
+/// owns the socket and the timer and steps the machine with JSON documents.
+#[napi(js_name = "UpstreamLink")]
+pub struct NapiUpstreamLink {
+    link: RefCell<jazz::link::host::HostLink>,
+}
+
+#[napi]
+impl NapiUpstreamLink {
+    /// `seed` drives the retry jitter.
+    #[napi(constructor)]
+    pub fn new(seed: f64) -> Self {
+        Self {
+            link: RefCell::new(jazz::link::host::HostLink::new(seed as u64)),
+        }
+    }
+
+    /// Apply one input observed at `now_ms`; returns the actions, events and
+    /// status as JSON.
+    #[napi]
+    pub fn handle(&self, now_ms: f64, input: String) -> napi::Result<String> {
+        self.link
+            .borrow_mut()
+            .handle_json(now_ms, &input)
+            .map_err(napi::Error::from_reason)
+    }
+}
 
 /// A JavaScript-thread-owned read waiting for the server. NAPI promises
 /// execute on a Send worker pool, whereas a Jazz database is deliberately
@@ -1140,13 +1173,61 @@ impl NapiDb {
 ///
 /// A directory that holds a store from before storage format 1 is refused
 /// with the `unsupported_storage_codecs` code rather than opened empty next to
-/// its data.
+/// its data. `jazz.sqlite.native-root.v1` admits the regular SQLite database
+/// and sidecar files plus unrelated regular files (such as `.DS_Store` or
+/// notes), which are left alone. It refuses symlinks, directories and other
+/// non-regular entries of any name, and regular files named like another
+/// SQLite database or RocksDB store. Validate before SQLite opens or creates
+/// any file.
 fn store_file(data_path: &str) -> napi::Result<std::path::PathBuf> {
     let dir = std::path::Path::new(data_path);
     jazz::format::refuse_groove_store(dir).map_err(|error| host_error(HostError::Engine(error)))?;
     std::fs::create_dir_all(dir)
         .map_err(|error| napi::Error::from_reason(format!("create {data_path}: {error}")))?;
+    let io_error = |error: std::io::Error| {
+        napi::Error::from_reason(format!("inspect native database root {data_path}: {error}"))
+    };
+    for entry in std::fs::read_dir(dir).map_err(io_error)? {
+        let entry = entry.map_err(io_error)?;
+        // DirEntry::file_type does not follow symlinks, so a link of any name
+        // (which could redirect the database or a sidecar into another root)
+        // is refused here, as is any directory.
+        let regular = entry.file_type().map_err(io_error)?.is_file();
+        if !regular || names_foreign_store(&entry.file_name().to_string_lossy()) {
+            return Err(napi_core_error(&CoreError::new(
+                jazz::db::ErrorCode::UnsupportedStorageCodecs,
+                "native database root uses an unsupported storage layout; expected jazz.sqlite.native-root.v1",
+            )));
+        }
+    }
     Ok(dir.join("jazz.sqlite"))
+}
+
+/// Whether a regular file named `name` in a native database root looks like
+/// part of a store other than `jazz.sqlite`: another SQLite database or
+/// sidecar, or a RocksDB (Groove) file. The match is by name only, so a copy
+/// such as `jazz.sqlite.bak` is a harmless stray.
+fn names_foreign_store(name: &str) -> bool {
+    if matches!(
+        name,
+        "jazz.sqlite" | "jazz.sqlite-wal" | "jazz.sqlite-shm" | "jazz.sqlite-journal"
+    ) {
+        return false;
+    }
+    // SQLite databases and their sidecars, and RocksDB table files.
+    const FOREIGN_SUFFIXES: [&str; 8] = [
+        ".sqlite", ".sqlite3", ".db", ".db3", "-wal", "-shm", "-journal", ".sst",
+    ];
+    const ROCKSDB_NAMES: [&str; 3] = ["CURRENT", "IDENTITY", "LOCK"];
+    const ROCKSDB_PREFIXES: [&str; 2] = ["MANIFEST-", "OPTIONS-"];
+    let lower = name.to_ascii_lowercase();
+    FOREIGN_SUFFIXES
+        .iter()
+        .any(|suffix| lower.ends_with(suffix))
+        || ROCKSDB_NAMES.contains(&name)
+        || ROCKSDB_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
 }
 
 #[napi]
@@ -1654,6 +1735,8 @@ impl NapiDb {
             .weak::<true>()
             .build()?;
         *inner.host.upstream_mutation_errors.borrow_mut() = Some(upstream);
+        // Refusals kept while nobody listened reach this callback now.
+        inner.binding.redeliver_rejections();
         Ok(())
     }
 
@@ -1775,6 +1858,12 @@ impl NapiDb {
         Ok(evicted as u32)
     }
 
+    /// How many local commits still wait for the server's verdict.
+    #[napi(js_name = "pendingUploadCount")]
+    pub fn pending_upload_count(&self) -> js::Result<u32> {
+        Ok(self.binding()?.pending_upload_count() as u32)
+    }
+
     /// The optimistic in-memory side of a client/worker pair: its
     /// subscriptions open with the worker's answer.
     #[napi(js_name = "setNonDurableClient")]
@@ -1793,6 +1882,31 @@ impl NapiDb {
             .set_remote_link_hint(&state)
             .map_err(host_error)?;
         settle_promises();
+        Ok(())
+    }
+
+    /// A fresh upstream link machine for this runtime's server connection;
+    /// `seed` drives its retry jitter.
+    #[napi(js_name = "createUpstreamLink")]
+    pub fn create_upstream_link(&self, seed: f64) -> NapiUpstreamLink {
+        NapiUpstreamLink::new(seed)
+    }
+
+    /// The slow-query report due now: one line per slow query shape,
+    /// naming `app`: the first at once, then at most every 10 seconds. The caller
+    /// writes each line with `console.warn`.
+    #[napi(js_name = "takeSlowQueryReport")]
+    pub fn take_slow_query_report(&self, app: Option<String>) -> js::Result<Vec<String>> {
+        Ok(self.binding()?.take_slow_query_report(app.as_deref()))
+    }
+
+    /// Report query runs of at least `ms` milliseconds (default 50); 0
+    /// turns the slow-query log off.
+    #[napi(js_name = "setSlowQueryThresholdMs")]
+    pub fn set_slow_query_threshold_ms(&self, ms: f64) -> js::Result<()> {
+        self.binding()?
+            .set_slow_query_threshold_ms(ms)
+            .map_err(host_error)?;
         Ok(())
     }
 
@@ -2306,5 +2420,48 @@ pub fn verify_local_first_identity_proof_napi(
             id: String::new(),
             error: Some(e),
         },
+    }
+}
+
+#[cfg(test)]
+mod native_root_tests {
+    use super::names_foreign_store;
+
+    #[test]
+    fn jazz_sqlite_files_and_unrelated_strays_are_admitted() {
+        for name in [
+            "jazz.sqlite",
+            "jazz.sqlite-wal",
+            "jazz.sqlite-shm",
+            "jazz.sqlite-journal",
+            ".DS_Store",
+            "notes.txt",
+            "jazz.sqlite.bak",
+            "application.data",
+        ] {
+            assert!(!names_foreign_store(name), "{name} should be admitted");
+        }
+    }
+
+    #[test]
+    fn other_sqlite_and_rocksdb_files_are_refused() {
+        for name in [
+            "other.sqlite",
+            "other.SQLITE3",
+            "app.db",
+            "app.db3",
+            "app.db-wal",
+            "app.db-shm",
+            "app.db-journal",
+            "jazz.sqlite.bak-wal",
+            "CURRENT",
+            "LOCK",
+            "IDENTITY",
+            "MANIFEST-000001",
+            "OPTIONS-000005",
+            "000003.sst",
+        ] {
+            assert!(names_foreign_store(name), "{name} should be refused");
+        }
     }
 }

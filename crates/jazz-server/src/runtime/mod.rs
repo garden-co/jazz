@@ -38,7 +38,7 @@ use jazz::protocol::{
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::public_schema::{TableName, TablePolicies};
-use jazz::wire::{WireAuthorityEndpoint, WireFeatures};
+use jazz::wire::{WireAuthorityEndpoint, WireErrorCode, WireFeatures, WireRetry};
 use tokio::sync::{mpsc as tokio_mpsc, oneshot, watch};
 
 /// Encoded frames exchanged with a host transport.
@@ -127,6 +127,19 @@ pub struct ServerSession(u64);
 /// it are refused (the peer ignored flow control); outbound messages past it
 /// wait in the engine until the socket catches up.
 const SESSION_QUEUE_BUDGET: usize = 8 * 1024 * 1024;
+/// The slow-query threshold: `JAZZ_SLOW_QUERY_MS` (0 turns the log off),
+/// else jazz-db's default.
+fn slow_query_threshold() -> Option<Duration> {
+    match std::env::var("JAZZ_SLOW_QUERY_MS")
+        .ok()
+        .and_then(|ms| ms.trim().parse::<u64>().ok())
+    {
+        Some(0) => None,
+        Some(ms) => Some(Duration::from_millis(ms)),
+        None => Some(jazz::slow::DEFAULT_SLOW_QUERY_THRESHOLD),
+    }
+}
+
 /// How often the owner ticks with no traffic, for time-based engine work
 /// such as expiring staged large-value chunks.
 const IDLE_TICK: Duration = Duration::from_secs(1);
@@ -202,6 +215,8 @@ struct StoreThread {
     join: Mutex<Option<thread::JoinHandle<()>>>,
     tick_queued: Arc<AtomicBool>,
     fault: Arc<Mutex<Option<String>>>,
+    /// The app the store serves (see [`AppStore::set_app`]).
+    app: Arc<Mutex<Option<String>>>,
     /// Tests: runtime ticks so far.
     #[cfg(test)]
     ticks: Arc<AtomicU64>,
@@ -268,8 +283,13 @@ impl AppStore {
         let (opened_tx, opened_rx) = std_mpsc::channel();
         let tick_queued = Arc::new(AtomicBool::new(false));
         let fault = Arc::new(Mutex::new(None));
-        let (thread_source, thread_ticks, thread_fault) =
-            (source.clone(), Arc::clone(&tick_queued), Arc::clone(&fault));
+        let app = Arc::new(Mutex::new(None));
+        let (thread_source, thread_ticks, thread_fault, thread_app) = (
+            source.clone(),
+            Arc::clone(&tick_queued),
+            Arc::clone(&fault),
+            Arc::clone(&app),
+        );
         #[cfg(test)]
         let ticks = Arc::new(AtomicU64::new(0));
         #[cfg(test)]
@@ -294,6 +314,7 @@ impl AppStore {
                     backlog: VecDeque::new(),
                     tick_queued: thread_ticks,
                     fault: thread_fault,
+                    app: thread_app,
                     state: State::Idle(Ok(file)),
                     started: None,
                     restarted: None,
@@ -324,10 +345,19 @@ impl AppStore {
                 join: Mutex::new(Some(join)),
                 tick_queued,
                 fault,
+                app,
                 #[cfg(test)]
                 ticks,
             }),
         })
+    }
+
+    /// Name the app this store serves in its reports (slow queries).
+    /// Takes effect when the runtime next opens.
+    pub fn set_app(&self, app: impl Into<String>) {
+        if let Ok(mut slot) = self.inner.app.lock() {
+            *slot = Some(app.into());
+        }
     }
 
     /// A store that lives as long as its handles.
@@ -529,6 +559,7 @@ struct StoreLoop {
     backlog: VecDeque<HostJob>,
     tick_queued: Arc<AtomicBool>,
     fault: Arc<Mutex<Option<String>>>,
+    app: Arc<Mutex<Option<String>>>,
     state: State,
     /// What the running runtime was opened with, to restart it.
     started: Option<Runtime>,
@@ -680,6 +711,7 @@ impl StoreLoop {
                     file,
                     runtime.any_stored_catalogue,
                     runtime.awaiting_permissions,
+                    self.app.lock().ok().and_then(|app| app.clone()),
                 )
             }))
             .unwrap_or_else(|panic| {
@@ -807,7 +839,8 @@ struct Edge {
     egress: Arc<AtomicUsize>,
 }
 
-type Outbound = (Result<Vec<AbiBytes>, String>, usize);
+/// A session's next frame batch, or the error frame that ends it.
+type Outbound = (Result<Vec<AbiBytes>, jazz::wire::WireError>, usize);
 
 /// Activity subscription for a server runtime.
 pub struct ServerRuntimeActivity {
@@ -824,6 +857,20 @@ impl ServerRuntimeActivity {
     }
 }
 
+/// The error frame for a session the engine closed over a message it sent.
+/// Overload and storage failures are the server's state and can pass, so the
+/// client reconnects with backoff. Anything else fails the same way when the
+/// client reconnects and resends, so asking for that would loop.
+fn session_closed_error(error: &jazz::db::Error) -> jazz::wire::WireError {
+    let (code, retry) = match error.code {
+        jazz::db::ErrorCode::Backpressure | jazz::db::ErrorCode::Storage => {
+            (WireErrorCode::Backpressure, WireRetry::Later)
+        }
+        _ => (WireErrorCode::Internal, WireRetry::Never),
+    };
+    jazz::wire::WireError::new(code, retry, format!("sync session closed: {error}"))
+}
+
 /// One session's ordered outbound frame batches.
 pub struct ServerRuntimeFrameStream {
     receiver: tokio_mpsc::UnboundedReceiver<Outbound>,
@@ -833,7 +880,7 @@ pub struct ServerRuntimeFrameStream {
 
 impl ServerRuntimeFrameStream {
     /// Receive the next batch of outbound frames.
-    pub async fn recv(&mut self) -> Option<Result<Vec<AbiBytes>, String>> {
+    pub async fn recv(&mut self) -> Option<Result<Vec<AbiBytes>, jazz::wire::WireError>> {
         let (result, bytes) = self.receiver.recv().await?;
         let before = self.egress.fetch_sub(bytes, Ordering::AcqRel);
         if before >= SESSION_QUEUE_BUDGET
@@ -1270,6 +1317,8 @@ struct Owner {
     /// No permissions head is published yet: session reads wait in
     /// `OwnerSession::held` and session commits are rejected.
     awaiting_permissions: bool,
+    /// The app this store serves, named in slow-query reports.
+    app: Option<String>,
 }
 
 struct OwnerSession {
@@ -1570,6 +1619,7 @@ impl Owner {
         file: StoreFile,
         any_stored_catalogue: bool,
         awaiting_permissions: bool,
+        app: Option<String>,
     ) -> Result<Self, String> {
         let stored = match file
             .host_get(RUNTIME_CATALOGUE, CATALOGUE_KEY)
@@ -1595,12 +1645,14 @@ impl Owner {
         let db = block_on(Db::open_file(config(genesis), file))
             .map_err(|error| format!("open server store: {error}"))?;
         db.set_authority();
+        db.set_slow_query_threshold(slow_query_threshold());
         let mut owner = Self {
             db,
             sessions: HashMap::new(),
             slice: Rc::default(),
             catalogue: Catalogue::new(&schema),
             awaiting_permissions,
+            app,
         };
         if let Some(snapshot) = stored {
             owner.catalogue = Catalogue::new(&deployment_steps(&snapshot)?.remove(0).0);
@@ -1608,6 +1660,37 @@ impl Owner {
         }
         owner.catalogue.persist(&owner.db)?;
         Ok(owner)
+    }
+
+    /// Log the query shapes that ran slow since the last report, when one
+    /// is due. Each one held the store's only writer for its whole run,
+    /// delaying every session, so the line says how long, what SQLite did,
+    /// and how to make it fast.
+    fn report_slow_queries(&self) {
+        let Some((shapes, dropped)) = self.db.take_due_slow_queries() else {
+            return;
+        };
+        let app = self.app.as_deref().unwrap_or_default();
+        for shape in &shapes {
+            tracing::warn!(
+                app,
+                table = %shape.table,
+                runs = shape.runs,
+                total_ms = shape.total.as_millis() as u64,
+                slowest_ms = shape.slowest.as_millis() as u64,
+                rows = shape.rows,
+                scanned = shape.scanned,
+                sorted = shape.sorted,
+                plan = %shape.plan,
+                sql = %shape.sql,
+                hint = %shape.hint().unwrap_or_default(),
+                "{}",
+                shape.line(self.app.as_deref()),
+            );
+        }
+        if dropped > 0 {
+            tracing::warn!(app, dropped, "more slow query shapes than one report holds");
+        }
     }
 
     /// Close every session (their streams end) and the store's runtime.
@@ -1692,9 +1775,14 @@ impl Owner {
                 Ok(message) => inbound.push_back(message),
                 Err(error) => {
                     drop(inbound);
-                    let _ = owner_session
-                        .output
-                        .send((Err(format!("malformed sync frame: {error}")), 0));
+                    let _ = owner_session.output.send((
+                        Err(jazz::wire::WireError::new(
+                            WireErrorCode::MalformedFrame,
+                            WireRetry::Never,
+                            format!("malformed sync frame: {error}"),
+                        )),
+                        0,
+                    ));
                     self.close_session(session);
                     return;
                 }
@@ -1738,6 +1826,7 @@ impl Owner {
         if let Err(error) = ticked {
             tracing::error!(%error, "server runtime tick failed");
         }
+        self.report_slow_queries();
         for (subscriber, error) in self.db.take_closed_subscribers() {
             let Some(id) = self
                 .sessions
@@ -1749,7 +1838,7 @@ impl Owner {
             tracing::warn!(%error, "closing sync session for a message it sent");
             let _ = self.sessions[&id]
                 .output
-                .send((Err(format!("sync session closed: {error}")), 0));
+                .send((Err(session_closed_error(&error)), 0));
             self.close_session(id);
         }
         let mut gone = Vec::new();
@@ -1875,6 +1964,23 @@ impl Owner {
 mod tests {
     use super::*;
     use jazz::tools::public_schema::{ColumnType, SchemaBuilder, TableSchema};
+
+    #[test]
+    fn only_server_side_failures_ask_the_client_to_reconnect() {
+        let closed = |code| session_closed_error(&jazz::db::Error::new(code, "closed"));
+        assert!(closed(jazz::db::ErrorCode::Backpressure).asks_reconnect_later());
+        assert!(closed(jazz::db::ErrorCode::Storage).asks_reconnect_later());
+        for code in [
+            jazz::db::ErrorCode::Protocol,
+            jazz::db::ErrorCode::Schema,
+            jazz::db::ErrorCode::Query,
+            jazz::db::ErrorCode::WriteRejected,
+        ] {
+            let error = closed(code);
+            assert_eq!(error.retry, WireRetry::Never, "{code:?}");
+            assert!(!error.asks_reconnect_later(), "{code:?}");
+        }
+    }
 
     fn schema() -> JazzSchema {
         JazzSchema::new(

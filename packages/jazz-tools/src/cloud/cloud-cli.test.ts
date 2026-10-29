@@ -162,6 +162,29 @@ function io(overrides: Partial<CloudCommandIo> = {}) {
   };
 }
 
+/** Hold one real HTTP response so another command can complete in between. */
+function holdResponse(path: string) {
+  let entered!: () => void;
+  let release!: () => void;
+  const started = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let held = false;
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const response = await fetch(input, init);
+    if (!held && new URL(String(input)).pathname === path) {
+      held = true;
+      entered();
+      await released;
+    }
+    return response;
+  };
+  return { started, release, fetch: fetchImpl };
+}
+
 async function storeLogin(accessToken: string, refreshToken = "refresh-1") {
   await writeFile(
     join(configDir, "credentials.json"),
@@ -359,6 +382,116 @@ describe("session handling", () => {
     expect(await runCloudCommand(["logout", "--json"], run.io)).toBe(0);
     expect(run.json()).toEqual({ loggedOut: true, sessionRevoked: false, cloudUrl: cloud.url });
     await expect(readFile(join(configDir, "credentials.json"), "utf8")).rejects.toThrow();
+  });
+
+  it.each(["valid", "expired", "rejected", "revoked"] as const)(
+    "logout of a %s token preserves a login completed while its response was pending",
+    async (kind) => {
+      const oldToken =
+        kind === "valid"
+          ? cloud.issueAccessToken()
+          : jwt({ sub: "user_1", exp: nowSeconds() + (kind === "rejected" ? 300 : -10) });
+      await storeLogin(oldToken);
+      if (kind === "revoked") cloud.refreshStatus = 400;
+      const hold = holdResponse(
+        kind === "expired" || kind === "revoked"
+          ? "/workos/user_management/authenticate"
+          : "/api/v1/logout",
+      );
+      const logoutRun = io({ fetch: hold.fetch });
+      const logout = runCloudCommand(["logout", "--json"], logoutRun.io);
+      try {
+        await hold.started;
+        const newToken = cloud.issueAccessToken();
+        cloud.pollResponses.push({
+          status: 200,
+          body: {
+            access_token: newToken,
+            refresh_token: "new-login-refresh",
+            user: { id: "user_1", email: "ada@example.com" },
+          },
+        });
+        const loginRun = io();
+        expect(await runCloudCommand(["login", "--json", "--no-browser"], loginRun.io)).toBe(0);
+        const replacement = await storedProfile();
+        expect(replacement.accessToken).toBe(newToken);
+        hold.release();
+        expect(await logout).toBe(0);
+        expect(logoutRun.json()).toEqual({
+          loggedOut: true,
+          sessionRevoked: kind !== "revoked",
+          cloudUrl: cloud.url,
+        });
+        expect(await storedProfile()).toEqual(replacement);
+        expect(cloud.consumedRefreshTokens).toEqual(new Set(kind === "valid" ? [] : ["refresh-1"]));
+        expect(
+          cloud.requests
+            .filter((request) => request.path === "/api/v1/logout")
+            .every((request) => request.headers.authorization !== `Bearer ${newToken}`),
+        ).toBe(true);
+      } finally {
+        hold.release();
+        await logout;
+      }
+    },
+  );
+
+  it("concurrent logouts retire the stored session only once", async () => {
+    await storeLogin(cloud.issueAccessToken());
+    const hold = holdResponse("/api/v1/logout");
+    const first = runCloudCommand(["logout", "--json"], io({ fetch: hold.fetch }).io);
+    try {
+      await hold.started;
+      const second = io();
+      expect(await runCloudCommand(["logout", "--json"], second.io)).toBe(0);
+      expect(second.json()).toEqual({
+        loggedOut: false,
+        sessionRevoked: false,
+        cloudUrl: cloud.url,
+      });
+      expect(cloud.revokedSessions).toBe(1);
+      await expect(readFile(join(configDir, "credentials.json"), "utf8")).rejects.toThrow();
+    } finally {
+      hold.release();
+      await first;
+    }
+  });
+
+  it("logout waits for an already-owned refresh and revokes its rotated token", async () => {
+    await storeLogin(jwt({ sub: "user_1", exp: nowSeconds() - 10 }));
+    const hold = holdResponse("/workos/user_management/authenticate");
+    const run = io();
+    const refresh = getAccessToken({ cloudUrl: cloud.url, env: run.io.env, fetch: hold.fetch });
+    let logout: Promise<number> | undefined;
+    try {
+      await hold.started;
+      logout = runCloudCommand(["logout", "--json"], run.io);
+      hold.release();
+      const rotatedToken = await refresh;
+      expect(await logout).toBe(0);
+      expect(run.json()).toEqual({ loggedOut: true, sessionRevoked: true, cloudUrl: cloud.url });
+      expect(cloud.refreshCount).toBe(1);
+      expect(cloud.consumedRefreshTokens).toEqual(new Set(["refresh-1"]));
+      expect(
+        cloud.requests.find((request) => request.path === "/api/v1/logout")?.headers.authorization,
+      ).toBe(`Bearer ${rotatedToken}`);
+      await expect(readFile(join(configDir, "credentials.json"), "utf8")).rejects.toThrow();
+    } finally {
+      hold.release();
+      await Promise.all([refresh, logout]);
+    }
+  });
+
+  it("logout ignores JAZZ_CLOUD_TOKEN and revokes only the stored session", async () => {
+    const storedToken = cloud.issueAccessToken();
+    await storeLogin(storedToken);
+    const run = io();
+    run.io.env.JAZZ_CLOUD_TOKEN = cloud.issueAccessToken();
+    expect(await runCloudCommand(["logout", "--json"], run.io)).toBe(0);
+    expect(
+      cloud.requests.find((request) => request.path === "/api/v1/logout")?.headers.authorization,
+    ).toBe(`Bearer ${storedToken}`);
+    expect(run.json()).toMatchObject({ loggedOut: true, sessionRevoked: true });
   });
 
   it("parallel commands with an expired token refresh once and stay logged in", async () => {

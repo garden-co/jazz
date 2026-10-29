@@ -236,6 +236,12 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
           authorBytesForSession(session),
           1,
           false,
+          {
+            slowQueryLog: {
+              appId: context.config.appId,
+              thresholdMs: context.config.slowQueryThresholdMs,
+            },
+          },
         );
         const appContext: AppContext = {
           appId: context.config.appId,
