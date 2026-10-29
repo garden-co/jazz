@@ -454,6 +454,17 @@ fn a_pending_commit_over_one_stored_value_survives_a_reopen() {
     assert_eq!(visible(&server), ROWS);
     drop(writer);
     assert_eq!(items(&path).0, 0, "its rows go once the commit settles");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    for table in [
+        "_jazz_pending",
+        "_jazz_pending_rows",
+        "_jazz_pending_versions",
+    ] {
+        let left: i64 = conn
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0, "{table} keeps nothing of it");
+    }
 }
 
 /// A refused commit too large for one stored value is kept for the host a
@@ -501,4 +512,126 @@ fn a_refused_commit_over_one_stored_value_is_listed_whole_and_discarded() {
         .unwrap();
     assert!(writer.rejected_transactions().unwrap().is_empty());
     assert_eq!(count("_jazz_rejected_ops"), 0, "its ops go with it");
+}
+
+fn commit_serializable_notes(writer: &Db, rows: usize) {
+    let tx = OpenTransactionId::new();
+    block_on(writer.begin_serializable(tx)).unwrap();
+    let body = "x".repeat(BODY);
+    for _ in 0..rows {
+        let values = BTreeMap::from([("body".to_owned(), Value::String(body.clone()))]);
+        block_on(
+            writer
+                .tx_ref(tx)
+                .insert("notes", values, Default::default()),
+        )
+        .unwrap();
+    }
+    block_on(writer.commit_serializable_handle(tx)).unwrap();
+}
+
+fn open_file(path: &std::path::Path, node: u8) -> Db {
+    let db = block_on(Db::open_at(
+        DbConfig::new(
+            schema(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([node; 16]),
+                author: AuthorSubject::for_test_bytes([node; 16]),
+            },
+        ),
+        path,
+        Default::default(),
+    ))
+    .unwrap();
+    db.track_upstream_rejections();
+    db
+}
+
+/// A serializable commit refused before it is sent (over what an
+/// untrusted session may send) is reported as serializable, to the host
+/// and in the retry store.
+#[test]
+fn a_serializable_commit_refused_before_sending_is_reported_serializable() {
+    let dir = tempfile::tempdir().unwrap();
+    let writer = open_file(&dir.path().join("writer.sqlite"), 0x58);
+    let server = open(0xc8, AuthorSubject::SYSTEM);
+    let room = Rc::new(RefCell::new(usize::MAX));
+    let _subscriber = link(
+        &server,
+        &writer,
+        AuthorSubject::for_test_bytes([0x58; 16]),
+        &room,
+    );
+    commit_serializable_notes(&writer, 300);
+    for _ in 0..10 {
+        block_on(writer.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+    }
+    let reported = writer.take_upstream_rejections();
+    assert_eq!(reported.len(), 1, "{reported:?}");
+    assert!(reported[0].serializable, "reported as serializable");
+    let rejected = writer.rejected_transactions().unwrap();
+    assert_eq!(rejected.len(), 1);
+    assert!(rejected[0].serializable, "kept as serializable");
+    assert_eq!(visible(&writer), 0, "rolled back");
+}
+
+/// A commit refused before sending whose refusal has not applied yet when
+/// the link is replaced is not sent on the new one, and is reported and
+/// kept once. One whose store closes first is refused again on reopen,
+/// and is reported and kept once too.
+#[test]
+fn a_commit_refused_twice_is_reported_and_kept_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("writer.sqlite");
+    let author = AuthorSubject::for_test_bytes([0x59; 16]);
+    let server = open(0xc9, AuthorSubject::SYSTEM);
+    let room = Rc::new(RefCell::new(usize::MAX));
+    let settle = |writer: &Db| {
+        let mut reported = Vec::new();
+        for _ in 0..10 {
+            block_on(writer.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+            reported.extend(writer.take_upstream_rejections());
+        }
+        reported
+    };
+    let first_seq = {
+        let writer = open_file(&path, 0x59);
+        let first = link(&server, &writer, author, &room);
+        commit_notes(&writer, 300);
+        // The send refuses it; its fate applies on the next tick.
+        block_on(writer.tick()).unwrap();
+        server.disconnect_subscriber(first);
+        link(&server, &writer, author, &room);
+        let reported = settle(&writer);
+        assert_eq!(reported.len(), 1, "reported once: {reported:?}");
+        assert_eq!(
+            writer.rejected_transactions().unwrap().len(),
+            1,
+            "kept once"
+        );
+        // A second one, and the store closes before its refusal applies.
+        commit_notes(&writer, 300);
+        block_on(writer.tick()).unwrap();
+        assert_eq!(writer.rejected_transactions().unwrap().len(), 1);
+        reported[0].seq
+    };
+    let writer = open_file(&path, 0x59);
+    let _second = link(&server, &writer, author, &room);
+    let reported = settle(&writer);
+    assert_eq!(
+        reported.len(),
+        1,
+        "refused again, reported once: {reported:?}"
+    );
+    assert_ne!(reported[0].seq, first_seq);
+    let rejected = writer.rejected_transactions().unwrap();
+    assert_eq!(
+        rejected.iter().map(|r| r.seq).collect::<Vec<_>>(),
+        vec![first_seq, reported[0].seq],
+        "each kept once"
+    );
+    assert_eq!(visible(&writer), 0);
+    assert_eq!(visible(&server), 0);
 }

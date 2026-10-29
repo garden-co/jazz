@@ -1128,7 +1128,7 @@ impl Db {
         // An accepted upload that wrote no rows still took a seq: its
         // dedupe entry records it.
         let settled: Option<i64> = conn
-            .cached_row("SELECT MAX(seq) FROM _jazz_settled", [], |r| r.get(0))
+            .cached_row("SELECT MAX(seq) FROM _jazz_transactions", [], |r| r.get(0))
             .map_err(storage)?;
         seq = seq.max(settled.unwrap_or(0) as u64);
         let owner = Rc::new(schema.clone());
@@ -4808,8 +4808,8 @@ impl Inner {
             self.exec(
                 &format!(
                     "DELETE FROM {} WHERE id = ?1 AND _b = ?2 AND _seq < 0 \
-                     AND (_st & {STATE_AS_SENT}) <> 0 AND EXISTS (SELECT 1 FROM _jazz_settled AS s \
-                     WHERE s.seq = -_seq AND s.node = ?3)",
+                     AND (_st & {STATE_AS_SENT}) <> 0 AND EXISTS (SELECT 1 FROM _jazz_transactions AS s \
+                     JOIN _jazz_nodes AS n ON n.n = s.n WHERE s.seq = -_seq AND n.node = ?3)",
                     quote(&format!("{stored}__h"))
                 ),
                 rusqlite::params![row.0.as_bytes().to_vec(), key, node.to_vec()],

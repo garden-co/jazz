@@ -41,7 +41,10 @@ use jazz::protocol::{BranchSelector, LensOp, MigrationLens, TableLens};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
-use jazz::tools::{ColumnMergeStrategy, ColumnType, SchemaBuilder, TableName, TableSchemaBuilder};
+use jazz::tools::{
+    ColumnMergeStrategy, ColumnType, OpenTransactionId, SchemaBuilder, TableName,
+    TableSchemaBuilder,
+};
 use jazz::tx::DurabilityTier;
 use sha2::{Digest, Sha256};
 
@@ -56,8 +59,8 @@ const CLIENT_FILE: &str = "sqlite-storage-v1/client.sqlite.gz.base64";
 /// change re-runs the producer and re-pins these; after that the corpus is
 /// immutable and a new storage format gets a new corpus beside it (see
 /// `fixtures/sqlite-storage-v1/README.md`).
-const SERVER_SHA256: &str = "e7dc3144433f4168c9bbf34884c8ed9b62f3f6cc94887e9261fd76728ecd916e";
-const CLIENT_SHA256: &str = "cbf4a13efdc65c6fd356d51c4ca83a4d2d84e6d7835b2ed45e4334dda5912dab";
+const SERVER_SHA256: &str = "2a6a100872ba533a7cd14761c03a93e5ac21a7b9efe1545a7d3916cf6741cb26";
+const CLIENT_SHA256: &str = "98a0024d17a9942ace8fd77cf178b7b357a64a4ed94a1673ba164f4ab8e39e91";
 
 const SERVER_NODE: [u8; 16] = [0xa0; 16];
 const CLIENT_NODE: [u8; 16] = [0xc0; 16];
@@ -504,6 +507,20 @@ fn produce_sqlite_storage_corpus_v1() {
         )
         .expect_err("the server refuses a write from the future");
         assert_eq!(refused.reason, Some(Reason::ClientClockTooFarAhead));
+        // A serializable transaction reads project 1 now; it inserts
+        // two after the writes below, and commits with them, never
+        // reaching the server: one pending commit of two ops and a read,
+        // each stored as its own row.
+        let tx = OpenTransactionId::new();
+        block_on(client.begin_serializable(tx)).unwrap();
+        let projects = client
+            .prepare_query(&Query::from("projects").filter(eq(col("id"), lit(uuid(project(1))))))
+            .unwrap();
+        drive(
+            &[&client, &server],
+            client.tx_ref(tx).all_prepared(&projects),
+        )
+        .unwrap();
         insert_as(
             &client,
             "projects",
@@ -520,6 +537,20 @@ fn produce_sqlite_storage_corpus_v1() {
             11,
             &[("title", string("Notes (offline)"))],
         );
+        for (n, name) in [(8, "Serial A"), (9, "Serial B")] {
+            block_on(client.tx_ref(tx).insert(
+                "projects",
+                cells(&[("name", string(name))]),
+                InsertOptions {
+                    row_id: Some(project(n)),
+                    updated_at_ms: at(u64::from(n) + 7),
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        }
+        // Committed with the server not ticking, so it stays pending.
+        block_on(client.commit_serializable_handle(tx)).unwrap();
         drop(streams);
 
         // Then the server renames a column.
@@ -597,8 +628,26 @@ fn expected_projects(with_client_writes: bool) -> Rows {
     ];
     if with_client_writes {
         expected.push(expect(project(4), &[("name", string("Pending"))]));
+        expected.push(expect(project(8), &[("name", string("Serial A"))]));
+        expected.push(expect(project(9), &[("name", string("Serial B"))]));
     }
     expected
+}
+
+/// (tx, part, items) of each list the client corpus's pending commits keep
+/// in `_jazz_pending_items`.
+fn pending_items(path: &Path) -> Vec<(i64, i64, i64)> {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    let mut statement = conn
+        .prepare(
+            "SELECT tx, part, count(*) FROM _jazz_pending_items GROUP BY tx, part ORDER BY tx, part",
+        )
+        .unwrap();
+    statement
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
 }
 
 fn expected_documents(title: &str, offline_edit: bool) -> Rows {
@@ -713,6 +762,13 @@ fn pinned_sqlite_corpus_reopens_and_accepts_current_writes() {
     let dir = scratch("reopen");
     let server_path = install(SERVER_FILE, SERVER_SHA256, &dir);
     let client_path = install(CLIENT_FILE, CLIENT_SHA256, &dir);
+    // Three pending commits: two of one op, and the serializable one of two
+    // ops and one read.
+    let lists: Vec<_> = pending_items(&client_path)
+        .into_iter()
+        .map(|(_, part, items)| (part, items))
+        .collect();
+    assert_eq!(lists, [(0, 1), (0, 1), (0, 2), (1, 1)], "pinned layout");
     {
         let server = open_server(&server_path).unwrap();
         assert_server_corpus(&server, false);
@@ -780,7 +836,10 @@ fn pinned_sqlite_corpus_reopens_and_accepts_current_writes() {
         .collect();
     assert_eq!(
         names,
-        ["Alpha 2", "Beta", "Gamma", "Pending", "Delta", "Epsilon"].map(string)
+        [
+            "Alpha 2", "Beta", "Gamma", "Pending", "Delta", "Epsilon", "Serial A", "Serial B"
+        ]
+        .map(string)
     );
     let ranks = rows(
         &server,
@@ -799,19 +858,25 @@ fn pinned_sqlite_corpus_reopens_and_accepts_current_writes() {
         .collect();
     assert_eq!(
         names,
-        ["Alpha 2", "Beta", "Gamma", "Pending", "Epsilon"].map(string)
+        [
+            "Alpha 2", "Beta", "Gamma", "Pending", "Epsilon", "Serial A", "Serial B"
+        ]
+        .map(string)
     );
 }
 
 /// The server's recorded fates are format 1 too: the rejected commit's fate
-/// still decodes, with its reason name, from `_jazz_applied`.
+/// still decodes, with its reason name, from `_jazz_transactions`.
 #[test]
 fn pinned_server_corpus_keeps_a_rejected_fate_with_its_reason() {
     let dir = scratch("fates");
     let server_path = install(SERVER_FILE, SERVER_SHA256, &dir);
     let conn = rusqlite::Connection::open(&server_path).unwrap();
     let mut statement = conn
-        .prepare("SELECT node, result FROM _jazz_applied ORDER BY node, tx")
+        .prepare(
+            "SELECT n.node, t.result FROM _jazz_transactions t JOIN _jazz_nodes n USING (n) \
+             WHERE t.result IS NOT NULL ORDER BY n.node, t.tx",
+        )
         .unwrap();
     let fates: Vec<(Vec<u8>, Result<(), WireError>)> = statement
         .query_map([], |row| Ok((row.get(0)?, row.get::<_, Vec<u8>>(1)?)))
@@ -888,6 +953,18 @@ fn another_storage_format_is_refused_without_changing_the_file() {
         (
             "versioned names",
             "ALTER TABLE _jazz_names ADD COLUMN version BLOB",
+        ),
+        // One from before a commit's record was one `_jazz_transactions`
+        // row: fates and landings in their own tables.
+        (
+            "per-table fates",
+            "CREATE TABLE _jazz_applied (node BLOB NOT NULL, tx INTEGER NOT NULL, result BLOB, \
+             PRIMARY KEY (node, tx))",
+        ),
+        (
+            "uninterned nodes",
+            "DROP TABLE _jazz_nodes; \
+             CREATE TABLE _jazz_nodes (node BLOB PRIMARY KEY, author INTEGER) WITHOUT ROWID",
         ),
     ] {
         let path = edited_server_corpus(name, sql);
