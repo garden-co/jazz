@@ -4,11 +4,9 @@
 use crate::common::{
     allow_all_policies, compile_schema, exists, outer_eq, read_and_allow_all_writes, session_eq,
 };
-#[path = "common/duplex_transport.rs"]
-mod duplex_transport;
 use jazz::db::{
     Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, SubscriptionEvent, SubscriptionStream,
-    block_on,
+    block_on, duplex,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{ArraySubquery, ArraySubqueryRequirement, OrderDirection, Query};
@@ -527,7 +525,7 @@ fn queued_child_moves_refresh_the_previously_published_parent() {
         );
     }
     insert(&server, "messages", 4, &[("room", Value::Uuid(id(1).0))]);
-    let (upstream, downstream) = duplex_transport::duplex();
+    let (upstream, downstream) = duplex();
     let _upstream = block_on(client.connect_upstream(upstream));
     server.accept_subscriber(downstream, AuthorSubject::SYSTEM);
     let query = client
