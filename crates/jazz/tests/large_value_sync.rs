@@ -10,10 +10,10 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 
 use jazz::db::{
-    AccessProof, BuiltOn, CellDelta, Db, DbConfig, DbIdentity, InsertOptions, Outcome, ReadOpts,
-    ReadSpan, ReadTier, RemoteLinkHint, SubscriptionStream, SyncCell, SyncMessage, Transport,
-    TransportError, WireBase, WireChunk, WireDelta, WireError, WireKind, WireOp, WirePull,
-    WireTarget, WireWrite, block_on, encode_frames,
+    AccessProof, Acting, BuiltOn, CellDelta, Db, DbConfig, DbIdentity, InsertOptions, Outcome,
+    ReadOpts, ReadSpan, ReadTier, RemoteLinkHint, SubscriptionStream, SyncCell, SyncMessage,
+    Transport, TransportError, WireBase, WireChunk, WireDelta, WireError, WireKind, WireOp,
+    WirePull, WireTarget, WireWrite, block_on, encode_frames,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::ReadViewSourceSpec;
@@ -950,8 +950,7 @@ fn a_delta_over_a_version_the_writer_cannot_read_is_rejected() {
             }
             .into()
         }],
-        author: None,
-        session: None,
+        acting: Acting::Own,
         origin: None,
     };
     // Each version the server could have written the draft at, named as a
@@ -1211,8 +1210,7 @@ fn naming_a_hidden_trees_hash_reads_nothing() {
             }
             .into(),
         ],
-        author: None,
-        session: None,
+        acting: Acting::Own,
         origin: None,
     };
     up.borrow_mut().push_back(insert(1, 1, &hidden));
@@ -1312,8 +1310,7 @@ fn an_access_proof_the_writer_cannot_read_proves_nothing() {
             }
             .into()
         }],
-        author: None,
-        session: None,
+        acting: Acting::Own,
         origin: None,
     };
     up.borrow_mut().push_back(update(1, &hidden));
@@ -1389,8 +1386,7 @@ fn a_push_is_never_answered() {
             }
             .into(),
         ],
-        author: None,
-        session: None,
+        acting: Acting::Own,
         origin: None,
     };
     let fates = || -> Vec<bool> {
@@ -1482,8 +1478,7 @@ fn a_delta_that_does_not_stand_in_for_a_null_cell_is_refused() {
             }
             .into()
         }],
-        author: None,
-        session: None,
+        acting: Acting::Own,
         origin: None,
     };
     up.borrow_mut()
@@ -1572,8 +1567,7 @@ fn a_merged_text_write_naming_a_hidden_tree_is_refused() {
             }
             .into()
         }],
-        author: None,
-        session: None,
+        acting: Acting::Own,
         origin: None,
     });
     for _ in 0..4 {

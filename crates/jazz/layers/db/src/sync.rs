@@ -901,6 +901,34 @@ const _: () = assert!(
         <= jazz_protocol::protocol_limits::MAX_WIRE_FRAME_BYTES
 );
 
+/// Who a commit's writes, or a preflight, act as. Authors are canonical
+/// author subjects. Only a trusted link may name an author other than its
+/// own identity; the server decides from the link how far it trusts one.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Acting {
+    /// The sender's own: checked and attributed as the link.
+    Own,
+    /// Attributed to `author` (provenance only), checked as the sender.
+    Attributed { author: String },
+    /// `author`'s as a session with these claims: over a trusted link,
+    /// checked and attributed as that session; over a session link,
+    /// checked as the link's own identity.
+    Session {
+        author: String,
+        claims: BTreeMap<String, Value>,
+    },
+}
+
+impl Acting {
+    /// The author it names, if any.
+    fn author(&self) -> Option<&str> {
+        match self {
+            Acting::Own => None,
+            Acting::Attributed { author } | Acting::Session { author, .. } => Some(author),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SyncMessage {
     // client → server
@@ -957,20 +985,13 @@ pub enum SyncMessage {
         members: Option<Vec<[u8; 16]>>,
         global: bool,
     },
-    /// `author`: the provenance the writes carry when it is not the
-    /// sender's own (a trusted session or an attribution), as a canonical
-    /// author subject. Only a trusted link may set one that differs from
-    /// its own identity.
+    /// `acting`: who the writes are (see [`Acting`]).
     Commit {
         node: [u8; 16],
         tx: u64,
         kind: WireKind,
         ops: Vec<WireOp>,
-        author: Option<String>,
-        /// The writes are `author`'s as a session, with these claims (a
-        /// trusted link acting for it): the authority checks their
-        /// policies as that session. Otherwise `author` is provenance only.
-        session: Option<BTreeMap<String, Value>>,
+        acting: Acting,
         /// The session commit a relay uploads this one for, as (node, tx),
         /// when it is not the sender's own: the writer its bases' unnamed
         /// `pending` nodes stand for.
@@ -1027,13 +1048,12 @@ pub enum SyncMessage {
     },
     // client → server
     /// A permission preflight: would the session's identity be allowed
-    /// `action` right now? Never writes. `author` and `session` name the
-    /// session a trusted link asks for, as on a [`SyncMessage::Commit`].
+    /// `action` right now? Never writes. `acting` names who asks, as on
+    /// a [`SyncMessage::Commit`].
     CheckAllowed {
         id: u64,
         action: PermissionAdviceAction,
-        author: Option<String>,
-        session: Option<BTreeMap<String, Value>>,
+        acting: Acting,
     },
     // server → client
     /// The answer to a [`SyncMessage::CheckAllowed`]: `Allowed`, `Denied`
@@ -3888,8 +3908,20 @@ fn encode<T: Serialize>(value: &T) -> Vec<u8> {
     postcard::to_allocvec(value).expect("encode sync state")
 }
 
+/// A stored sync record. One written in another layout is refused as an
+/// unsupported storage format rather than misread: it must decode exactly,
+/// with no bytes left over.
 fn decode_stored<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, Error> {
-    postcard::from_bytes(bytes).map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))
+    match postcard::take_from_bytes(bytes) {
+        Ok((value, [])) => Ok(value),
+        Ok((_, rest)) => Err(crate::format::unsupported(format_args!(
+            "a stored sync record has {} trailing bytes",
+            rest.len()
+        ))),
+        Err(error) => Err(crate::format::unsupported(format_args!(
+            "a stored sync record does not decode ({error})"
+        ))),
+    }
 }
 
 impl Inner {
@@ -4081,8 +4113,7 @@ impl Inner {
             tx: sent_as,
             kind,
             ops,
-            author,
-            session,
+            acting,
             origin,
         } = commit
         else {
@@ -4108,8 +4139,7 @@ impl Inner {
             tx: *sent_as,
             kind,
             ops: Vec::new(),
-            author: author.clone(),
-            session: session.clone(),
+            acting: acting.clone(),
             origin: *origin,
         };
         self.exec(
@@ -4982,15 +5012,9 @@ impl Inner {
         drop(statement);
         let versions = self.pending_versions()?;
         for (tx, header) in pending {
-            let mut commit = self.pending_commit(tx, &header)?;
+            let commit = self.pending_commit(tx, &header)?;
             let rows = self.pending_rows(tx)?;
-            let SyncMessage::Commit {
-                ops,
-                author,
-                session,
-                ..
-            } = &mut commit
-            else {
+            let SyncMessage::Commit { ops, acting, .. } = &commit else {
                 continue;
             };
             let mut ops = ops
@@ -5003,10 +5027,10 @@ impl Inner {
             if let Some(version) = versions.get(&tx).filter(|v| **v != self.owner_version) {
                 client.versions.insert(tx, *version.as_bytes());
             }
-            if let Some(author) = author.as_deref().map(AuthorSubject::from_canonical) {
+            if let Some(author) = acting.author().map(AuthorSubject::from_canonical) {
                 let author = author.map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?;
-                ops.iter_mut()
-                    .for_each(|op| op.attribute(author, session.is_some()));
+                let session = matches!(acting, Acting::Session { .. });
+                ops.iter_mut().for_each(|op| op.attribute(author, session));
             }
             // Its rows as this store holds them, each at the commit's local
             // seq (the current version, or history under a later pending
@@ -5024,8 +5048,8 @@ impl Inner {
                         over.insert(row_key.clone());
                     }
                 }
-                let author = author
-                    .as_deref()
+                let author = acting
+                    .author()
                     .map(AuthorSubject::from_canonical)
                     .transpose()
                     .map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?;
@@ -5418,9 +5442,16 @@ impl Db {
             (inner.identity.author == AuthorSubject::SYSTEM).then(|| inner.stamp_author())
         });
         // A session's writes carry its claims, for the authority's check.
-        let session_claims = author
-            .filter(|_| session)
-            .map(|author| inner.claims.get(&author).cloned().unwrap_or_default());
+        let acting = match author {
+            None => Acting::Own,
+            Some(author) if session => Acting::Session {
+                author: author.canonical().to_owned(),
+                claims: inner.claims.get(&author).cloned().unwrap_or_default(),
+            },
+            Some(author) => Acting::Attributed {
+                author: author.canonical().to_owned(),
+            },
+        };
         let rows = inner.written_rows(&ops, seq)?;
         let mut baselines = Vec::new();
         // What this replica built each row it wrote on (SPEC 4 §4.6): its
@@ -5518,8 +5549,7 @@ impl Db {
                     tx: seq,
                     kind,
                     ops: wire,
-                    author: author.map(|author| author.canonical().to_owned()),
-                    session: session_claims,
+                    acting,
                     origin,
                 };
                 client.unsent.push(commit.clone());
@@ -6013,16 +6043,16 @@ impl Db {
         client.next_advice += 1;
         if client.transport.is_some() && may_wait(client.hint.get()) {
             client.advice.insert(id, None);
-            let (author, session) = match session {
-                Some((author, claims)) => (Some(author.canonical().to_owned()), Some(claims)),
-                None => (None, None),
+            let acting = match session {
+                Some((author, claims)) => Acting::Session {
+                    author: author.canonical().to_owned(),
+                    claims,
+                },
+                None => Acting::Own,
             };
-            client.outbox.push(SyncMessage::CheckAllowed {
-                id,
-                action,
-                author,
-                session,
-            });
+            client
+                .outbox
+                .push(SyncMessage::CheckAllowed { id, action, acting });
         } else {
             client.advice.insert(id, Some(PermissionAdvice::Unknown));
         }
@@ -8437,21 +8467,16 @@ impl Db {
                     }
                 }
             }
-            SyncMessage::CheckAllowed {
-                id,
-                action,
-                author,
-                session,
-            } => {
+            SyncMessage::CheckAllowed { id, action, acting } => {
                 // As for a commit: a trusted link may ask for a session it
                 // vouches for; a session link only for its own.
-                let result = match commit_who(policy, author.as_deref(), session.is_some()) {
+                let result = match commit_who(policy, &acting) {
                     Ok(who) => {
                         let identity = match who {
                             Who::Session(author) => Some(author),
                             _ => policy,
                         };
-                        let vouched = vouched(policy, who, session);
+                        let vouched = vouched(policy, who, acting);
                         self.with_claims(vouched, || self.advise(identity, action))
                     }
                     Err(_) => PermissionAdvice::Denied,
@@ -8691,8 +8716,7 @@ impl Db {
                 tx,
                 kind,
                 ops,
-                author,
-                session,
+                acting,
                 origin,
             } => {
                 let identity = self.inner.borrow().sessions[index].identity;
@@ -8728,7 +8752,7 @@ impl Db {
                 };
                 // Whom the writer stamped its writes as: its own writes
                 // travel without an author, as its link's identity's.
-                let stamped = match author.as_deref().map(AuthorSubject::from_canonical) {
+                let stamped = match acting.author().map(AuthorSubject::from_canonical) {
                     Some(Ok(author)) => Some(author),
                     Some(Err(_)) => None,
                     None => policy,
@@ -8738,7 +8762,7 @@ impl Db {
                 let resent = known.is_some();
                 let (result, rows, echoable) = match known {
                     Some(result) => (result, Vec::new(), Vec::new()),
-                    None => match commit_who(policy, author.as_deref(), session.is_some())
+                    None => match commit_who(policy, &acting)
                         .map_err(|error| (error, Vec::new()))
                         .and_then(|who| {
                             let (ops, mut roots) = db
@@ -8754,7 +8778,7 @@ impl Db {
                                 roots,
                                 settle: Default::default(),
                             };
-                            let vouched = vouched(policy, who, session);
+                            let vouched = vouched(policy, who, acting);
                             self.with_claims(vouched, || {
                                 db.authorize_commit(
                                     who,
@@ -9489,10 +9513,12 @@ impl Db {
 fn vouched(
     policy: Option<AuthorSubject>,
     who: Who,
-    session: Option<BTreeMap<String, Value>>,
+    acting: Acting,
 ) -> Option<(AuthorSubject, BTreeMap<String, Value>)> {
-    match (who, session) {
-        (Who::Session(author), Some(claims)) if policy.is_none() => Some((author, claims)),
+    match (who, acting) {
+        (Who::Session(author), Acting::Session { claims, .. }) if policy.is_none() => {
+            Some((author, claims))
+        }
         _ => None,
     }
 }
@@ -9546,12 +9572,10 @@ fn echoable(
         .collect()
 }
 
-fn commit_who(
-    policy: Option<AuthorSubject>,
-    author: Option<&str>,
-    session: bool,
-) -> Result<Who, Error> {
-    let author = author
+fn commit_who(policy: Option<AuthorSubject>, acting: &Acting) -> Result<Who, Error> {
+    let session = matches!(acting, Acting::Session { .. });
+    let author = acting
+        .author()
         .map(AuthorSubject::from_canonical)
         .transpose()
         .map_err(|error| Error::new(ErrorCode::WriteRejected, error.to_string()))?;
@@ -9861,6 +9885,67 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ids::NodeUuid;
+
+    /// A pending `Commit` header in the layout before `acting` (separate
+    /// `author` and `session`), with its lists empty as `persist_pending`
+    /// stores them.
+    fn pre_acting_header(
+        author: Option<&str>,
+        session: Option<BTreeMap<String, Value>>,
+        origin: Option<([u8; 16], u64)>,
+    ) -> Vec<u8> {
+        const COMMIT: u32 = 4;
+        postcard::to_allocvec(&(
+            COMMIT,
+            [7u8; 16],
+            LOCAL_BASE + 1,
+            WireKind::Mergeable,
+            Vec::<WireOp>::new(),
+            author.map(str::to_owned),
+            session,
+            Vec::<()>::new(),
+            origin,
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_pending_header_from_before_acting_is_refused_not_misread() {
+        let author = AuthorSubject::system_at(NodeUuid::from_bytes([9; 16]));
+        let headers = [
+            pre_acting_header(None, None, None),
+            pre_acting_header(None, None, Some(([8; 16], 3))),
+            pre_acting_header(Some(author.canonical()), None, Some(([8; 16], 3))),
+            pre_acting_header(Some(author.canonical()), Some(BTreeMap::new()), None),
+        ];
+        for header in headers {
+            let error = decode_stored::<SyncMessage>(&header)
+                .expect_err("an old pending header must not decode");
+            assert_eq!(error.code, ErrorCode::UnsupportedStorageCodecs, "{error:?}");
+            assert!(error.message.contains("resync"), "{error:?}");
+        }
+    }
+
+    #[test]
+    fn a_current_pending_header_round_trips() {
+        let header = SyncMessage::Commit {
+            node: [7; 16],
+            tx: LOCAL_BASE + 1,
+            kind: WireKind::Mergeable,
+            ops: Vec::new(),
+            acting: Acting::Session {
+                author: AuthorSubject::system_at(NodeUuid::from_bytes([9; 16]))
+                    .canonical()
+                    .to_owned(),
+                claims: BTreeMap::from([("role".to_owned(), Value::String("admin".to_owned()))]),
+            },
+            origin: Some(([8; 16], 3)),
+        };
+        let bytes = encode(&header);
+        let decoded: SyncMessage = decode_stored(&bytes).unwrap();
+        assert_eq!(encode(&decoded), bytes);
+    }
 
     fn image(id: u8, seq: u64, body: usize) -> Image {
         Image {

@@ -26,9 +26,9 @@ use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
 use jazz::db::{
-    CorpusReader, Db, DbConfig, DbIdentity, InsertOptions, Outcome, ReadOpts, ReadSpan, ReadTier,
-    Reason, SyncMessage, Transport, UpdateOptions, WireError as SyncWireError, block_on,
-    encode_frames, validate_frame_batch_for_corpus,
+    Acting, CorpusReader, Db, DbConfig, DbIdentity, InsertOptions, Outcome, ReadOpts, ReadSpan,
+    ReadTier, Reason, SyncMessage, Transport, UpdateOptions, WireError as SyncWireError,
+    WriteIdentity, block_on, encode_frames, validate_frame_batch_for_corpus,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::model::transaction::OpenTransactionId;
@@ -338,9 +338,16 @@ impl Transport for Recording {
 
 /// Message shapes the one frame per variant leaves unpinned: a one-shot
 /// `Read` (its span carries a snapshot and a view), `Rows` carrying the
-/// commits behind history versions, and a `Catalogue` carrying versions
-/// with their stored names and a lens's cells.
-const SHAPES: [&str; 3] = ["Read/once", "Rows/tx_ids", "Catalogue/versions"];
+/// commits behind history versions, a `Catalogue` carrying versions
+/// with their stored names and a lens's cells, and a trusted link's
+/// `Commit`s acting as an attributed author and as a session.
+const SHAPES: [&str; 5] = [
+    "Read/once",
+    "Rows/tx_ids",
+    "Catalogue/versions",
+    "Commit/attributed",
+    "Commit/session",
+];
 
 fn shape(message: &SyncMessage) -> Option<&'static str> {
     match message {
@@ -352,6 +359,14 @@ fn shape(message: &SyncMessage) -> Option<&'static str> {
         SyncMessage::Catalogue {
             versions, cells, ..
         } if !versions.is_empty() && !cells.is_empty() => Some(SHAPES[2]),
+        SyncMessage::Commit {
+            acting: Acting::Attributed { author },
+            ..
+        } if *author == user(1).canonical() => Some(SHAPES[3]),
+        SyncMessage::Commit {
+            acting: Acting::Session { claims, .. },
+            ..
+        } if !claims.is_empty() => Some(SHAPES[4]),
         _ => None,
     }
 }
@@ -521,6 +536,33 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     ))
     .unwrap();
     pump(&[&alice, &server, &alice]);
+
+    // Commit acting as an attributed author, then as a session with its
+    // claims: a backend over a trusted link writes for alice.
+    let backend = open(0x55, AuthorSubject::SYSTEM, false);
+    connect(&backend, &server, AuthorSubject::SYSTEM, &recorded);
+    backend.set_identity_claims(
+        user(1),
+        BTreeMap::from([(
+            jazz::query::provider_claim_key("sub"),
+            Value::String("alice".to_owned()),
+        )]),
+    );
+    for identity in [
+        WriteIdentity::Attribution(user(1)),
+        WriteIdentity::Session(user(1)),
+    ] {
+        block_on(backend.insert(
+            "notes",
+            note(1, vec![8]),
+            InsertOptions {
+                identity,
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        pump(&[&backend, &server, &backend]);
+    }
 
     // Read (once), Settled with members: a serializable
     // transaction's second read is pinned to its snapshot, so after a

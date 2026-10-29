@@ -207,8 +207,13 @@ The commit's other fields:
   writes only if every result and written row is unchanged since the snapshot.
   A stale or partial replica can only cause a conflict, never a
   non-serializable commit.
-- `author`, `session`: provenance or a session a trusted link acts for. Only
-  a trusted link may set one other than its own identity.
+- `acting`: who the writes are. `Own`: the sender's, checked and attributed as
+  the link. `Attributed { author }`: provenance only, checked as the sender.
+  `Session { author, claims }`: a session's writes with its claims. Over a
+  trusted link the authority checks them as that session; over a session link
+  it checks and attributes them as the link's own identity, whatever author
+  they name. A session link's `Attributed` commit naming another author is
+  refused.
 - `origin`: the session commit a relay uploads this one for.
 
 A replica keeps every unsettled commit and uploads it in order on each
@@ -422,7 +427,7 @@ wrote and cannot read (a write-only insert): the commit's fate reports its
 acceptance. Local copies are not a redaction boundary; eviction keeps the
 replica coherent, not secret.
 
-`CheckAllowed { id, action, author, session }` asks whether the session would be
+`CheckAllowed { id, action, acting }` asks whether the session would be
 allowed an action now, without writing; `CheckAllowedResult { id, result }`
 answers it.
 
