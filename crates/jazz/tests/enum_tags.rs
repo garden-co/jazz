@@ -404,9 +404,9 @@ fn added_variants_sort_last_and_removed_tags_are_never_reused() {
     );
 }
 
-/// A replica tags variants itself, as it admits versions: rows travel by
-/// variant name, and a version the replica admits first tags its new
-/// variant there at once.
+/// A replica tags variants itself, as it admits versions: a version it
+/// admits before the authority does tags its new variant there at once,
+/// and rows travel by variant name.
 #[test]
 fn a_replica_tags_variants_itself_and_rows_travel_by_name() {
     let dir = tempfile::tempdir().unwrap();
@@ -421,37 +421,47 @@ fn a_replica_tags_variants_itself_and_rows_travel_by_name() {
     insert(&client, 2, "todo");
     pump(&server, &[&client]);
 
-    // A version only the client has admitted: it tags `blocked` itself.
+    // A version only the client has admitted yet: it tags `blocked` itself.
     block_on(client.admit_schema_with_lenses(v2(), &[lens(&v1(), &v2(), vec![])])).unwrap();
     let ahead = block_on(client.register_schema_view(v2())).unwrap();
+    let tags = |path: &Path| {
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .query_row(
+                "SELECT tag FROM _jazz_enum_tags WHERE name = 'blocked'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .ok()
+    };
+    assert_eq!(tags(&client_path), Some(3));
+    assert_eq!(tags(&dir.path().join("server.sqlite")), None);
+
+    // The authority admits v2 too, and the app updates to it: a row
+    // written under it travels by name.
+    block_on(server.activate_schema_with_lenses(v2(), &[lens(&v1(), &v2(), vec![])])).unwrap();
+    drop((ahead, _sub, _link, client));
+    let client = open_at(v2(), 1, &client_path);
+    let _link = link(&client, &server);
+    let q = client.prepare_query(&Query::from("tasks")).unwrap();
+    let _sub = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
+    pump(&server, &[&client]);
+    let ahead = &client;
     try_insert(
-        &ahead,
+        ahead,
         3,
         &[("title", name("t")), ("status", name("blocked"))],
     )
     .unwrap();
-    assert_eq!(raw_cells(&client_path), integers(&[0, 2, 3]));
-    assert_eq!(
-        statuses(&ahead, by_status()),
-        [
-            (2, "todo".into()),
-            (1, "done".into()),
-            (3, "blocked".into())
-        ]
-    );
-
-    // The authority admits v2 and takes the client's row by name.
-    block_on(server.activate_schema_with_lenses(v2(), &[lens(&v1(), &v2(), vec![])])).unwrap();
     pump(&server, &[&client]);
-    assert_eq!(
-        statuses(&server, by_status()),
-        [
-            (2, "todo".into()),
-            (1, "done".into()),
-            (3, "blocked".into())
-        ]
-    );
     assert_eq!(raw_cells(&client_path), integers(&[0, 2, 3]));
+    let added_last = [
+        (2, "todo".into()),
+        (1, "done".into()),
+        (3, "blocked".into()),
+    ];
+    assert_eq!(statuses(ahead, by_status()), added_last);
+    assert_eq!(statuses(&server, by_status()), added_last);
 }
 
 /// A write is checked against its version's variants, and an enum value
@@ -633,10 +643,11 @@ fn insert_state(db: &Db, n: u8, state: &str) {
     try_insert(db, n, &[("title", name("t")), ("state", name(state))]).unwrap();
 }
 
-/// Tags are never read as text or text as tags: activating a version that
-/// changes a column between enum and text is refused, in place and after a
-/// drop; the store keeps reading its enum after a reopen; and an app opened
-/// with the column as text gets a stored column of its own.
+/// Tags are never read as text or text as tags: changing a required column
+/// between enum and text in place is refused, re-adding it as text after a
+/// drop gives it a stored column of its own, the store keeps reading its
+/// enum after a reopen, and an app opened with the column as nullable text
+/// gets a stored column of its own.
 #[test]
 fn enum_and_text_never_share_a_stored_column() {
     let dir = tempfile::tempdir().unwrap();
@@ -648,8 +659,13 @@ fn enum_and_text_never_share_a_stored_column() {
     let refused = block_on(db.activate_schema(text.clone())).unwrap_err();
     assert!(refused.message.contains("changing the type"), "{refused}");
 
+    // Dropped, then re-added as text: a stored column of its own.
+    let dropped_dir = tempfile::tempdir().unwrap();
+    let dropped_path = dropped_dir.path().join("dropped.sqlite");
+    let dropped = authority_at(v1(), &dropped_path);
+    insert(&dropped, 1, "doing");
     let without = untracked();
-    block_on(db.activate_schema(without.clone())).unwrap();
+    block_on(dropped.activate_schema(without.clone())).unwrap();
     let readd = lens(
         &without,
         &text,
@@ -658,8 +674,12 @@ fn enum_and_text_never_share_a_stored_column() {
             default: name("unknown"),
         }],
     );
-    let refused = block_on(db.activate_schema_with_lenses(text.clone(), &[readd])).unwrap_err();
-    assert!(refused.message.contains("changing the type"), "{refused}");
+    block_on(dropped.activate_schema_with_lenses(text.clone(), &[readd])).unwrap();
+    assert_eq!(raw_cells(&dropped_path), integers(&[1]));
+    assert_eq!(
+        column(&dropped, Query::from("tasks"), "status"),
+        [(1, Some(name("unknown")))]
+    );
 
     // text -> enum, on a store that holds the column as text.
     let notes = tempfile::tempdir().unwrap();
@@ -1270,8 +1290,8 @@ fn a_catalogue_refused_for_another_column_keeps_local_writes() {
     assert_eq!(got, [(2, Some(some("done")))]);
 }
 
-/// A replica with an enum column the authority doesn't have takes the
-/// authority's rows and keeps its own write across a reopen.
+/// A replica on a version the authority hasn't admitted (an enum column
+/// where the authority has text) keeps its own write across a reopen.
 #[test]
 fn a_replica_with_its_own_enum_column_keeps_local_writes() {
     let dir = tempfile::tempdir().unwrap();
@@ -1316,14 +1336,7 @@ fn a_replica_with_its_own_enum_column_keeps_local_writes() {
     drop(client);
     let client = open_at(cs(), 1, &cp);
     let got = column(&client, Query::from("tasks"), "status");
-    assert_eq!(
-        got,
-        [
-            (1, Some(some("doing"))),
-            (2, Some(some("done"))),
-            (9, Some(Value::Nullable(None))),
-        ]
-    );
+    assert_eq!(got, [(2, Some(some("done")))]);
 }
 
 /// A copy lens's column sorts its variants like its source, removed
@@ -1379,4 +1392,29 @@ fn a_copy_sorts_like_its_source() {
     };
     let (s, c) = (by("status"), by("copy"));
     assert_eq!(s, c);
+}
+
+/// A schema's variants, in declared order, are part of its identity:
+/// adding or reordering one makes a new schema version, and so does
+/// changing a column between enum and text.
+#[test]
+fn adding_or_reordering_variants_makes_a_new_schema_version() {
+    let id = |schema: JazzSchema| schema.version_id();
+    assert_eq!(id(v1()), id(v1()));
+    assert_ne!(id(v1()), id(v2()), "a variant added");
+    assert_ne!(
+        id(tasks(&["todo", "doing", "done"])),
+        id(tasks(&["doing", "todo", "done"])),
+        "variants reordered"
+    );
+    assert_ne!(
+        id(v1()),
+        id(tasks_with("status", ColumnType::Text)),
+        "enum to text"
+    );
+    // Pinned: the id addresses every catalogue record, so it never drifts.
+    assert_eq!(
+        id(v1()).0.to_string(),
+        "463e4b11-caaa-5f66-8bc7-8372381bc982"
+    );
 }

@@ -11,9 +11,9 @@ are stored, a rejection's reason name changed how fates are recorded, and
 pending uploads moved from one encoded message to a row per op).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `78517e2ab8ede8ca4f504780eb85ec666c10204aaa9473c7bafd5d55c4521e8e`.
+  the SQLite file `e4fd47809b657a3f582e8044106a5cfd02fbae80ab4de24da92cd857872562c0`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `e68bd64d15273f19683bf8c49d1685f48cf60ff96df32a51cf7b8e3044efd3c6`.
+  `a852eb2bcd97b31b6607ea8d761eb24295af9f2518a5354848f0cc1a94a26d01`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
