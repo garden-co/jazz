@@ -5388,6 +5388,7 @@ const REJECTION_CODES_BY_REASON: Readonly<Record<NativeCoreErrorReason, string>>
   missing_chunks: "write_rejected",
   permissions_head_missing: "write_rejected",
   predecessor_rejected: "write_rejected",
+  schema_version_not_deployed: "write_rejected",
   // A refused subscriber, never a write's fate.
   identity_mismatch: "write_rejected",
 };

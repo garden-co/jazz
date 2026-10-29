@@ -71,6 +71,7 @@ export type NativeCoreErrorReason =
   | "missing_chunks"
   | "permissions_head_missing"
   | "predecessor_rejected"
+  | "schema_version_not_deployed"
   | "identity_mismatch";
 
 /** Every reason this build knows; a test checks it against the engine's `Reason::ALL`. */
@@ -86,6 +87,7 @@ export const NATIVE_CORE_ERROR_REASONS: ReadonlySet<string> = new Set<NativeCore
   "missing_chunks",
   "permissions_head_missing",
   "predecessor_rejected",
+  "schema_version_not_deployed",
   "identity_mismatch",
 ]);
 
