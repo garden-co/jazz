@@ -550,9 +550,7 @@ const STAMPS: [&str; 2] = ["$createdAt", "$updatedAt"];
 
 /// What a writer and the authority must agree on for a row version the
 /// authority does not ship back (see [`Held`]): everything in an image but
-/// its seq and [`STAMPS`]. Nothing compares it on the wire; tests check
-/// each held row with it ([`echo_check`]).
-#[cfg(feature = "testing")]
+/// its seq and [`STAMPS`].
 fn echo_digest(image: &Image) -> [u8; 16] {
     let mut cells: Vec<&(String, Cell)> = image
         .cells
@@ -578,36 +576,6 @@ fn echo_digest(image: &Image) -> [u8; 16] {
 /// installs it: the inference that the two are equal (see
 /// [`SyncMessage::Fate`]) is guarded here, not on the wire. Only a writer
 /// in the authority's process and thread finds an entry.
-#[cfg(feature = "testing")]
-mod echo_check {
-    use std::cell::RefCell;
-    use std::collections::HashMap;
-
-    type Key = ([u8; 16], u64, u32, Vec<u8>);
-
-    thread_local! {
-        static HELD: RefCell<HashMap<Key, super::Image>> = RefCell::new(HashMap::new());
-    }
-
-    pub(super) fn record(key: Key, image: &super::Image) {
-        HELD.with(|held| held.borrow_mut().insert(key, image.clone()));
-    }
-
-    pub(super) fn check(key: Key, image: &super::Image) {
-        let Some(theirs) = HELD.with(|held| held.borrow_mut().remove(&key)) else {
-            return;
-        };
-        assert!(
-            super::echo_digest(image) == super::echo_digest(&theirs),
-            "the authority held row {:?} of commit {} (op {}), but its version differs from \
-             the writer's:\n  writer's:    {image:?}\n  authority's: {theirs:?}",
-            image.id,
-            key.1,
-            key.2
-        );
-    }
-}
-
 /// What the writer of a row version built it on (SPEC 4 §4.6, "Base of a
 /// write"): the version of the row its image was, in names the receiver
 /// knows. A write over no held image (an insert, a blind write) sends none.
@@ -651,11 +619,14 @@ pub enum BuiltOn {
 /// A row of a commit the server did not ship back (see
 /// `SyncMessage::Fate`), named as a [`WireBase`] names it: by the commit's
 /// first op that writes it and its branch key. It carries the authority's
-/// [`STAMPS`] for it: `None` where its version has no such cell.
+/// [`echo_digest`] of its version, which the writer checks its own image
+/// against, and the authority's [`STAMPS`] for it: `None` where its
+/// version has no such cell.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Held {
     pub op: u32,
     pub key: Vec<u8>,
+    pub digest: [u8; 16],
     pub created_at: Option<Cell>,
     pub updated_at: Option<Cell>,
 }
@@ -672,6 +643,7 @@ impl Held {
         Held {
             op,
             key: image.key.clone(),
+            digest: echo_digest(image),
             created_at: stamp(STAMPS[0]),
             updated_at: stamp(STAMPS[1]),
         }
@@ -1299,8 +1271,6 @@ const FAITHFUL_ROWS: usize = 4096;
 /// left it (see `SyncMessage::Fate`): fan-out names it `held` rather than
 /// ship it, if that version is still current.
 struct Echo {
-    #[cfg(feature = "testing")]
-    node: [u8; 16],
     tx: u64,
     op: u32,
     table: String,
@@ -3523,8 +3493,10 @@ impl Inner {
     /// The rows of own commit `tx` the server did not ship (`held`): its
     /// version at `through` is the one this replica wrote, so that becomes
     /// the settled image. A newer image already received stays. A row this
-    /// store no longer has its own image of (its catalogue changed since)
-    /// is asked for whole instead.
+    /// store no longer has its own image of (its catalogue changed since),
+    /// or whose image is not the authority's version (its digest differs:
+    /// the authority's inference missed a difference), is asked for whole
+    /// instead.
     fn install_held(&mut self, tx: u64, through: u64, held: &[Held]) -> Result<(), Error> {
         if held.is_empty() {
             return Ok(());
@@ -3536,18 +3508,31 @@ impl Inner {
         let expected = std::mem::take(&mut pending.expected);
         let mut installs = Vec::new();
         let mut whole = Vec::new();
+        let mut mismatched = 0;
         for held in held {
-            let image = expected.as_ref().and_then(|expected| {
-                expected
-                    .iter()
-                    .find(|(op, image)| *op == held.op && image.key == held.key)
-            });
+            let image = match &expected {
+                Some(expected) => {
+                    let Some((_, image)) = expected
+                        .iter()
+                        .find(|(op, image)| *op == held.op && image.key == held.key)
+                    else {
+                        return Err(unsupported(format!(
+                            "fate of commit {tx} holds a row of op {} it did not expect",
+                            held.op
+                        )));
+                    };
+                    let same = echo_digest(image) == held.digest;
+                    mismatched += usize::from(!same);
+                    same.then_some(image)
+                }
+                None => None,
+            };
             match image {
-                Some((_, image)) => {
+                Some(image) => {
                     let mut image = image.clone();
                     held.stamp(&mut image);
                     image.seq = through;
-                    installs.push((held.op, image));
+                    installs.push(image);
                 }
                 None => {
                     let row = pending
@@ -3570,11 +3555,16 @@ impl Inner {
                 }
             }
         }
-        #[cfg(feature = "testing")]
-        let node = client.node;
-        for (_op, image) in installs {
+        if mismatched > 0 {
             #[cfg(feature = "testing")]
-            echo_check::check((node, tx, _op, image.key.clone()), &image);
+            assert!(
+                self.tolerate_echo_mismatches,
+                "the authority held {mismatched} row(s) of commit {tx} whose version is not this \
+                 replica's image of them"
+            );
+            self.echo_mismatches += mismatched as u64;
+        }
+        for image in installs {
             self.receive_image(image)?;
         }
         for row in whole {
@@ -7020,6 +7010,21 @@ impl Db {
         }
     }
 
+    /// Rows the authority held for this replica's own commits that were
+    /// not this replica's image of them, and were asked for whole instead
+    /// (for tests and metrics): each is a case the authority's inference
+    /// that its writer holds the row missed (SPEC 8 §8.3).
+    pub fn echo_mismatches(&self) -> u64 {
+        self.inner.borrow().echo_mismatches
+    }
+
+    /// Count echo mismatches rather than panic on them, for a test that
+    /// provokes one (see [`Db::echo_mismatches`]).
+    #[cfg(feature = "testing")]
+    pub fn tolerate_echo_mismatches(&self) {
+        self.inner.borrow_mut().tolerate_echo_mismatches = true;
+    }
+
     /// Sessions currently served (for tests and metrics).
     pub fn open_subscribers(&self) -> usize {
         self.inner
@@ -7831,8 +7836,6 @@ impl Db {
                         return true;
                     };
                     let echo = echoes.swap_remove(at);
-                    #[cfg(feature = "testing")]
-                    echo_check::record((echo.node, echo.tx, echo.op, echo.key.clone()), image);
                     held.entry(echo.tx)
                         .or_default()
                         .push(Held::of(echo.op, image));
@@ -8679,8 +8682,6 @@ impl Db {
                             session.faithful.insert(row_key.clone(), through);
                             let (table, row, key) = row_key;
                             session.echoes.push(Echo {
-                                #[cfg(feature = "testing")]
-                                node,
                                 tx,
                                 op,
                                 table,
@@ -9091,12 +9092,13 @@ impl Db {
             let resolved = if relay {
                 // Where the bases landed in this relay's own history, for
                 // the echo inference alone (see `Echoable`).
-                let landed = inner
-                    .resolve_bases(origin, &ops, &bases, true)
-                    .unwrap_or_default();
                 inner
-                    .relay_bases(origin, &ops, bases)
-                    .map(|bases| (bases, HashMap::new(), landed))
+                    .resolve_bases(origin, &ops, &bases, true)
+                    .and_then(|landed| {
+                        inner
+                            .relay_bases(origin, &ops, bases)
+                            .map(|bases| (bases, HashMap::new(), landed))
+                    })
             } else {
                 inner
                     .resolve_bases(origin, &ops, &bases, false)
@@ -9297,15 +9299,16 @@ fn echoable(
             }
             let on = on.get(row_key).copied();
             let previous = previous.get(row_key).copied();
-            // With no base, the writer held no image: an insert, or an
-            // upsert of an unbranched row, made a new row from the ops
-            // alone. An upsert into a branch may take a parent branch's
-            // version, which the writer may hold otherwise.
-            let new_row = match ops[indexes[0]] {
+            // With no base, the writer held no image: inserts, or upserts
+            // of an unbranched row, made a new row from the ops alone. An
+            // upsert into a branch may take a parent branch's version,
+            // which the writer may hold otherwise. (Ops are by row, not
+            // branch key: every op on the row must qualify.)
+            let new_row = indexes.iter().all(|&i| match ops[i] {
                 StagedOp::Insert(..) => true,
                 StagedOp::Upsert(..) => row_key.2.is_empty(),
                 _ => false,
-            };
+            });
             if on.is_none() && !(previous.is_none() && new_row) {
                 return None;
             }

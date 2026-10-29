@@ -3,8 +3,9 @@
 //! (the commit applied cleanly over the version it was built on, stamped as
 //! the writer stamped it), the Fate names the row `held` and the writer
 //! installs its own image at `through`, with the authority's stamps.
-//! Anything else ships the image as before. Under test every held row is
-//! checked against the writer's image as it is installed.
+//! Anything else ships the image as before. Each held row carries the
+//! authority's digest of its version: a writer whose image differs asks for
+//! the row whole (and under test panics, unless the test provokes it).
 
 use crate::common;
 
@@ -352,6 +353,37 @@ fn a_write_stamped_as_another_author_still_ships() {
         "neither write is as the replica stamped it"
     );
     assert!(images >= 2, "{images}");
+    let settled = snapshot(&server);
+    assert!(settled[0].contains(&user(9).principal_parts().1));
+    assert_eq!(snapshot(&client), settled);
+}
+
+#[test]
+fn a_held_row_the_writer_stamped_otherwise_is_asked_for_whole() {
+    // The replica believes it writes as user 1; its link was accepted as
+    // user 9, whom the authority stamps. The authority cannot tell, and
+    // holds the rows: the writer finds its image is not the authority's
+    // version by the digest, and asks for each whole instead.
+    let server = open(0, AuthorSubject::SYSTEM);
+    let client = open(1, user(1));
+    client.tolerate_echo_mismatches();
+    let (_upstream, _down) = connect(&server, &client, user(9));
+    let _live = subscribe(&client);
+    pump(&server, &[&client]);
+    block_on(client.insert(
+        "docs",
+        cells(&[("title", "Doc"), ("body", "")]),
+        InsertOptions {
+            row_id: Some(row(1)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    pump(&server, &[&client]);
+    block_on(client.update("docs", row(1), cells(&[("body", "x")]), Default::default())).unwrap();
+    pump(&server, &[&client]);
+
+    assert_eq!(client.echo_mismatches(), 2);
     let settled = snapshot(&server);
     assert!(settled[0].contains(&user(9).principal_parts().1));
     assert_eq!(snapshot(&client), settled);

@@ -261,9 +261,13 @@ read-your-writes end to end.
   backward (`INV-SYNC-5`).
 - `held`: the commit's rows the server did not ship, each named as a base
   is (the commit's first op that writes it, and its branch key) and carrying
-  the authority's `$createdAt`/`$updatedAt` stamps, so the writer can install
-  its own image as the accepted version. A keystroke-grade edit therefore
-  costs one `Fate` and one `Settled` downstream.
+  the authority's digest of its version and `$createdAt`/`$updatedAt` stamps,
+  so the writer can install its own image as the accepted version. A
+  keystroke-grade edit therefore costs one `Fate` and one `Settled`
+  downstream.
+- `global`: the fate is the global authority's (directly or relayed). A
+  non-global fate is the final word of a replica with no upstream, which
+  orders its sessions' commits but cannot make them `Global`.
 
 The authority infers, rather than compares, that a row's new version is the
 writer's image of it (`INV-SYNC-51`). It holds a row only if all of these
@@ -272,28 +276,27 @@ hold:
 1. The row's version just before the commit is the one the writer built on:
    the accepted version its base names; or, for a base on the writer's own
    earlier commit, the version that commit landed as, which this session
-   itself held for that commit; or, with no base, no version at all, and the
-   op that first writes it is an insert (or an upsert of an unbranched row).
+   itself held for that commit; or, with no base, no version at all, and
+   every op on the row is an insert (or an upsert of an unbranched row).
 2. No text merge changed a value the commit sent (SPEC 4 §4.3), and no op of
    the commit moves the row between branches.
-3. The author the authority stamps is the one the writer did: the commit's
-   `author`, or its link's identity for a writer's own writes (a replica
-   writes as the identity it connects as).
+3. The author the authority stamps is the one the writer declared: the
+   commit's `author`, or its link's identity for a writer's own writes.
 4. The commit does not ask for `echo`, and the version is still the row's
    current one when fan-out ships the session's rows.
 
 Equal inputs then give an equal row: the ops apply the same way to the same
-image under the same schema, the stamps excepted. A replica that receives a
-catalogue with new versions while commits are pending can no longer vouch
-for what it made of them under the old names: a row of such a commit that
-arrives `held` is asked for whole (`Hold`, §19.8) instead of installed. The
-inference is guarded in tests, not on the wire: under the `testing` feature
-the authority records its image of each row it holds, and a writer in the
-same process asserts that its own image matches as it installs it.
-
-- `global`: the fate is the global authority's (directly or relayed). A
-  non-global fate is the final word of a replica with no upstream, which
-  orders its sessions' commits but cannot make them `Global`.
+image under the same schema, the stamps excepted. The inference is checked
+on every held row: each carries the authority's 16-byte digest of its
+version (everything but its seq and the stamps), and the writer asks for a
+row whose image differs whole (`Hold`, §19.8) instead of installing it. A
+miss therefore costs a round trip, never a divergent cache: a replica whose
+configured author is not the identity its link was accepted as, for one.
+A replica counts these mismatches (`echo_mismatches`); under the `testing`
+feature it panics on one, so the test suites guard the inference. A replica
+that receives a catalogue with new versions while commits are pending asks
+for their held rows whole too: it can no longer vouch for what it made of
+them under the old names.
 
 `Stored { tx }` is durability progress from a relay to a non-durable session:
 the relay holds the commit in its store and uploads it, so it is `Local` for a
