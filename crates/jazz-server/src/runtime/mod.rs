@@ -1722,7 +1722,7 @@ impl Owner {
                 Ok(Some(
                     message @ (SyncMessage::Read { .. }
                     | SyncMessage::Unsubscribe { .. }
-                    | SyncMessage::Hold { .. }),
+                    | SyncMessage::ResendWhole { .. }),
                 )) if gated => owner_session.held.push_back(message),
                 Ok(Some(message)) => inbound.push_back(message),
                 Err(error) => {

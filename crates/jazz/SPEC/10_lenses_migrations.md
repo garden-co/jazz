@@ -623,7 +623,7 @@ API/wire boundaries; local resolution happens only at the storage boundary.
 ### 10.7 Stored identities (SQLite engine)
 
 On the SQLite engine the catalogue is the stored names (`_jazz_names`,
-`crates/jazz/layers/db/src/names.rs`) and it syncs as `Holds` and
+`crates/jazz/layers/db/src/names.rs`) and it syncs as `KnownCatalogue` and
 `Catalogue` (ch. 8). There is no second store of identities: a table's
 identity, and each column's, is a name-based UUID (RFC 9562 version 5) of
 the **authority namespace** and the stored table (and stored column) name.
