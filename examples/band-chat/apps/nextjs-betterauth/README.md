@@ -48,17 +48,21 @@ product slice, not another generic Todo tutorial.
   far behind can land before the marker and not count as unread.
 - **Read receipts.** Markers are readable by the room's members: under your own
   messages, one check mark means sent and two mean another member's marker has
-  reached it. Every marker move also appends a `readProgress` row in the same
-  transaction. "Read by" on your message lists the members whose journal
+  reached it. This is a privacy change: a marker used to be private to its
+  reader, and now every member of a room can see how far every other member has
+  read it, and when. Every marker move also appends a `readProgress` row in the
+  same transaction. "Read by" on your message lists the members whose journal
   reaches it, dated by the first entry that did. The journal grows with marker
   moves, not with messages times readers; a member who jumps to the end reads
   everything they skipped at once. BandChat does not limit who may see read
   dates by room size or message age; Telegram, for example, stops at 100
   participants and 7 days.
 - **History.** A room opens on its newest 50 messages, each with its reactions.
-  Older messages load 50 at a time before a cursor (`$createdAt < oldest
-shown`), never by offset; once older pages are loaded, the live window keeps
-  everything from its oldest message on, so new messages cannot open a gap.
+  Older messages load 50 at a time before a cursor: the oldest shown
+  `$createdAt`, skipping only the messages already shown at that same time, so
+  the offset never grows with the history. Once older pages are loaded, the
+  live window keeps everything from its oldest message on, so new messages
+  cannot open a gap.
 - **Attachments** stream into the message row with `db.insertStreaming`. The
   room timeline selects message metadata only. An image or audio attachment
   reads its bytes once it scrolls near the viewport, and any other file only
