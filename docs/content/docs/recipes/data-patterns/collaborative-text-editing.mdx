@@ -1,7 +1,7 @@
 ---
 title: "Collaborative text editing"
 description: Let several people edit the same text, online or offline, with a text merge column.
-reviewedAt: "e39f0156ca"
+reviewedAt: "a955a56742"
 ---
 
 Having text fields that can be edited by multiple users at the same time is a common need. In Jazz,
@@ -31,6 +31,9 @@ const schema = {
     {},
   ),
 };
+
+type AppSchema = s.Schema<typeof schema>;
+export const app: s.App<AppSchema> = s.defineApp(schema);
 ```
 
 Pick the format that matches what the column holds: `"text"` for prose, `"markdown"` for Markdown
@@ -38,8 +41,8 @@ Pick the format that matches what the column holds: `"text"` for prose, `"markdo
 pieces a merge keeps whole, such as Markdown markers or HTML tags; see
 [mergeable text columns](/docs/schemas/column-types#mergeable-text-columns).
 
-Text merge columns must be non-nullable, so give the column a default (`.default("")`) if rows can
-start empty.
+Text merge columns can't be optional (`.optional()` throws when the schema is built). An empty
+string stands for no text; `.default("")` lets inserts leave the column out.
 
 ## Write and read it like any string
 
