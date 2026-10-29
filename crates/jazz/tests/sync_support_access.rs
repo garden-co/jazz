@@ -142,7 +142,7 @@ fn losing_and_regaining_access_to_an_include_target_reaches_the_replica() {
     let client = open(1, alice());
     let (client_side, server_side) = duplex();
     let _upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice());
+    server.accept_subscriber(server_side, alice()).unwrap();
     let prepared = client
         .prepare_query(&Query::from("messages").include("room"))
         .unwrap();
@@ -255,7 +255,7 @@ fn membership_write_cost_with_many_holders() {
         let client = open(1, *user);
         let (client_side, server_side) = duplex();
         let upstream = block_on(client.connect_upstream(client_side));
-        server.accept_subscriber(server_side, *user);
+        server.accept_subscriber(server_side, *user).unwrap();
         let prepared = client
             .prepare_query(&Query::from("messages").include("room"))
             .unwrap();
@@ -304,7 +304,7 @@ fn a_remote_read_after_losing_access_evicts_the_cached_rows() {
         let client = open(1, alice());
         let (client_side, server_side) = duplex();
         let _upstream = block_on(client.connect_upstream(client_side));
-        server.accept_subscriber(server_side, alice());
+        server.accept_subscriber(server_side, alice()).unwrap();
         client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
         for n in 1..=4 {
             block_on(client.insert(
@@ -389,12 +389,12 @@ fn a_remote_read_through_an_edge_after_losing_access_leaves_the_row_out() {
     let edge = open(5, alice());
     let (edge_side, server_side) = duplex();
     let _edge_upstream = block_on(edge.connect_upstream(edge_side));
-    server.accept_subscriber(server_side, alice());
+    server.accept_subscriber(server_side, alice()).unwrap();
     edge.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
     let client = open(1, alice());
     let (client_side, edge_client_side) = duplex();
     let _upstream = block_on(client.connect_upstream(client_side));
-    edge.accept_subscriber(edge_client_side, alice());
+    edge.accept_subscriber(edge_client_side, alice()).unwrap();
     client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
     let pump_all = || {
         for _ in 0..4 {
@@ -510,7 +510,7 @@ fn a_replica_holds_the_parent_its_rows_inherit_read_access_from() {
     let client = open(1, alice());
     let (client_side, server_side) = duplex();
     let _upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice());
+    server.accept_subscriber(server_side, alice()).unwrap();
     let messages = client.prepare_query(&Query::from("messages")).unwrap();
     let _stream = block_on(client.subscribe(&messages, ReadOpts::default())).unwrap();
     pump(&server, &client);

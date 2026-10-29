@@ -484,7 +484,7 @@ fn produce_sqlite_storage_corpus_v1() {
         // its writes never reach the server before it quits.
         let (client_side, server_side) = duplex();
         let _upstream = block_on(client.connect_upstream(client_side));
-        server.accept_subscriber(server_side, user(3));
+        server.accept_subscriber(server_side, user(3)).unwrap();
         let streams: Vec<_> = ["projects", "documents"]
             .into_iter()
             .map(|table| {
@@ -870,7 +870,7 @@ fn pinned_sqlite_corpus_reopens_and_accepts_current_writes() {
         // Its pending uploads are resent and land on the server.
         let (client_side, server_side) = duplex();
         let _upstream = block_on(client.connect_upstream(client_side));
-        server.accept_subscriber(server_side, user(3));
+        server.accept_subscriber(server_side, user(3)).unwrap();
         drive(
             &[&client, &server, &client],
             client.wait_for_pending_writes(DurabilityTier::Global),

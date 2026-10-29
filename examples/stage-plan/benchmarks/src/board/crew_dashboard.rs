@@ -49,7 +49,7 @@ fn schema() -> JazzSchema {
 fn connect(upstream: &Db, downstream: &Db, author: AuthorSubject) {
     let (client, server) = jazz::db::duplex();
     block_on(downstream.connect_upstream(client));
-    upstream.accept_subscriber(server, author);
+    upstream.accept_subscriber(server, author).unwrap();
 }
 fn open(schema: &JazzSchema, tag: u8, author: AuthorSubject, core: bool) -> Db {
     let config = DbConfig::new(

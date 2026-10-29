@@ -402,13 +402,15 @@ fn a_server_serves_chunk_requests_from_an_asynchronous_chunk_store() {
         out: up.clone(),
         inbound: down.clone(),
     })));
-    server.accept_subscriber(
-        Box::new(Pipe {
-            out: down,
-            inbound: up,
-        }),
-        user(1),
-    );
+    server
+        .accept_subscriber(
+            Box::new(Pipe {
+                out: down,
+                inbound: up,
+            }),
+            user(1),
+        )
+        .unwrap();
     let _stream = block_on(alice.subscribe(
         &alice.prepare_query(&Query::from("docs")).unwrap(),
         ReadOpts::default(),

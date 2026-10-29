@@ -455,15 +455,17 @@ fn connect(client: &Db, server: &Db, author: AuthorSubject, recorded: &Recorded)
         peer: "server",
         recorded: recorded.clone(),
     })));
-    server.accept_subscriber(
-        Box::new(Recording {
-            outbound: down,
-            inbound: up,
-            peer: "client",
-            recorded: recorded.clone(),
-        }),
-        author,
-    );
+    server
+        .accept_subscriber(
+            Box::new(Recording {
+                outbound: down,
+                inbound: up,
+                peer: "client",
+                recorded: recorded.clone(),
+            }),
+            author,
+        )
+        .unwrap();
 }
 
 fn user(n: u8) -> AuthorSubject {
@@ -792,15 +794,17 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
             span: ReadSpan::Live { since: None },
         },
     ])));
-    server.accept_subscriber(
-        Box::new(Recording {
-            outbound: Rc::default(),
-            inbound,
-            peer: "client",
-            recorded: recorded.clone(),
-        }),
-        user(3),
-    );
+    server
+        .accept_subscriber(
+            Box::new(Recording {
+                outbound: Rc::default(),
+                inbound,
+                peer: "client",
+                recorded: recorded.clone(),
+            }),
+            user(3),
+        )
+        .unwrap();
     pump(&[&server]);
 
     // ResendWhole: a replica asks for a row whole when a shipped delta does not
