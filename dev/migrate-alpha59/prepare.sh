@@ -20,7 +20,7 @@ repo="${JAZZ_REPO:-https://github.com/garden-co/jazz.git}"
 a59_ref="v2.0.0-alpha.59"
 # Main with the catalogue stored in the app file (#4439). Repin to the
 # alpha.60 release commit before any production run.
-a60_ref="${A60_REF:-82a7d2b3}"
+a60_ref="${A60_REF:-df599ae8}"
 
 checkout() { # dir ref
   local dir="$1" ref="$2"
