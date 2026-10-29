@@ -54,22 +54,22 @@ const FORMAT: &str = "jazz-sqlite-sync-wire-corpus-v1";
 const VARIANTS: [&str; 19] = [
     "Read",
     "Unsubscribe",
-    "Hold",
+    "ResendWhole",
     "Settled",
     "Commit",
     "ChunkRequests",
     "PushChunks",
     "Chunks",
     "Rows",
-    "Evict",
+    "AccessLost",
     "Refused",
     "Fate",
-    "Advise",
-    "Advice",
+    "CheckAllowed",
+    "CheckAllowedResult",
     "Schema",
     "SchemaAdmission",
     "Stored",
-    "Holds",
+    "KnownCatalogue",
     "Catalogue",
 ];
 
@@ -288,8 +288,8 @@ impl Transport for Recording {
             // built on an unsettled commit (bases, origin), else the first.
             let relayed = matches!(
                 &decoded,
-                SyncMessage::Commit { bases, origin: Some(_), .. }
-                    if bases.iter().any(|base| matches!(base.on, jazz::db::BuiltOn::Commit { .. }))
+                SyncMessage::Commit { ops, origin: Some(_), .. }
+                    if ops.iter().flat_map(|op| &op.bases).any(|base| matches!(base.on, jazz::db::BuiltOn::Commit { .. }))
             );
             let mut recorded = self.recorded.borrow_mut();
             if let SyncMessage::Fate {
@@ -311,8 +311,8 @@ impl Transport for Recording {
                 .or_insert_with(|| (self.peer.to_owned(), frame.clone()));
             let pinned_relayed = matches!(
                 postcard::from_bytes(&pinned.1),
-                Ok(SyncMessage::Commit { bases, origin: Some(_), .. })
-                    if bases.iter().any(|base: &jazz::db::WireBase| matches!(base.on, jazz::db::BuiltOn::Commit { .. }))
+                Ok(SyncMessage::Commit { ops, origin: Some(_), .. })
+                    if ops.iter().flat_map(|op: &jazz::db::WireOp| &op.bases).any(|base| matches!(base.on, jazz::db::BuiltOn::Commit { .. }))
             );
             if relayed && !pinned_relayed {
                 *pinned = (self.peer.to_owned(), frame.clone());
@@ -335,7 +335,7 @@ impl Transport for Recording {
 /// generic failures also pin their distinct fate tags.
 const SHAPES: [&str; 5] = [
     "Read/once",
-    "Rows/origins",
+    "Rows/tx_ids",
     "Catalogue/versions",
     "Fate/storage",
     "Fate/other",
@@ -347,7 +347,7 @@ fn shape(message: &SyncMessage) -> Option<&'static str> {
             span: ReadSpan::Once { .. },
             ..
         } => Some(SHAPES[0]),
-        SyncMessage::Rows { origins, .. } if !origins.is_empty() => Some(SHAPES[1]),
+        SyncMessage::Rows { tx_ids, .. } if !tx_ids.is_empty() => Some(SHAPES[1]),
         SyncMessage::Catalogue {
             versions, cells, ..
         } if !versions.is_empty() && !cells.is_empty() => Some(SHAPES[2]),
@@ -529,7 +529,7 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     .unwrap();
     pump(&[&alice, &server, &alice]);
 
-    // Read (once), Settled with a listing: a serializable
+    // Read (once), Settled with members: a serializable
     // transaction's second read is pinned to its snapshot, so after a
     // newer write it answers from history.
     let open_tx = OpenTransactionId::new();
@@ -556,7 +556,7 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     let _history = block_on(alice.subscribe(&history, ReadOpts::default())).unwrap();
     pump(&[&alice, &server, &alice]);
 
-    // Advise, Advice.
+    // CheckAllowed, CheckAllowedResult.
     let id = alice.request_permission_advice(
         PermissionAdviceAction::Read {
             table: "notes".to_owned(),
@@ -580,8 +580,8 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     drop(stream);
     pump(&[&alice, &server, &alice]);
 
-    // Hold, Evict: alice's own note is deleted while she is away; she
-    // reconnects holding it.
+    // ResendWhole, AccessLost: alice's own note is deleted while she is
+    // away; she reconnects holding it.
     block_on(server.delete("notes", mine, Default::default())).unwrap();
     connect(&alice, &server, user(1), &recorded);
     pump(&[&alice, &server, &alice]);
@@ -678,16 +678,16 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     );
     pump(&[&server]);
 
-    // Hold: a replica asks for a row whole when a shipped delta does not
+    // ResendWhole: a replica asks for a row whole when a shipped delta does not
     // apply over the version it holds, which takes a corrupted delta to
     // provoke; its frame is pinned as a replica encodes it.
-    let hold = SyncMessage::Hold {
+    let hold = SyncMessage::ResendWhole {
         rows: vec![("notes".to_owned(), [0x11; 16], Vec::new(), 0)],
     };
     let [frame] = encode_frames(hold).unwrap().try_into().unwrap();
     recorded
         .borrow_mut()
-        .insert("Hold".to_owned(), ("server".to_owned(), frame));
+        .insert("ResendWhole".to_owned(), ("server".to_owned(), frame));
 
     recorded.borrow().clone()
 }
@@ -708,7 +708,7 @@ fn produce_sqlite_sync_wire_corpus_v1() {
     // the production encoder without depending on platform-specific SQL
     // diagnostics. The storage-errors tests exercise actual failed uploads.
     for result in [
-        SyncWireError::Storage("Storage: database or disk is full".to_owned()),
+        SyncWireError::Storage("database or disk is full".to_owned()),
         SyncWireError::Other("legacy generic failure".to_owned()),
     ] {
         let message = SyncMessage::Fate {

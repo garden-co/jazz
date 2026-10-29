@@ -175,26 +175,18 @@ async fn deploy_complete_diamond_reopens_and_rejects_incomplete_history() {
         SchemaHash::compute(&d).to_string()
     );
     assert_eq!(expected["schemas"].as_array().unwrap().len(), 4);
-    let snapshot = server
-        .state
-        .runtime()
-        .unwrap()
-        .trusted_catalogue_snapshot()
-        .await
-        .unwrap();
+    let catalogue = server.state.runtime().unwrap().catalogue().await.unwrap();
+    let head = catalogue.head().unwrap();
     assert_eq!(
-        snapshot.current_write_schema.schema,
-        JazzSchema::new(&d).unwrap().version_id()
+        catalogue.schema(&head.schema).unwrap().version,
+        Some(JazzSchema::new(&d).unwrap().version_id())
     );
     assert_eq!(
-        snapshot
-            .lineages
+        catalogue
+            .lenses
             .iter()
-            .find(|(_, p)| p.schema.id == snapshot.current_write_schema.schema)
-            .unwrap()
-            .1
-            .predecessors
-            .len(),
+            .filter(|lens| lens.target == head.schema)
+            .count(),
         2
     );
     deploy_ok(&router, request(&b, &[], vec![])).await;
@@ -378,6 +370,74 @@ async fn deploy_runtime_predecessor_validation_precedes_storage_writes() {
     server.shutdown().await;
 }
 
+/// A lens from another hash of an admitted predecessor (an index does not
+/// change the version) is the same edge, so it does not count as a new
+/// predecessor of an admitted target.
+#[tokio::test]
+async fn deploy_accepts_a_lens_from_an_equivalent_predecessor_hash() {
+    let server = builder(None).build().await.unwrap();
+    let router = create_router(server.state.clone());
+    let (a, b) = (schema(&[]), schema(&["a"]));
+    deploy_ok(
+        &router,
+        request(&b, &[&a, &b], vec![migration(&a, &b, &["a"])]),
+    )
+    .await;
+    let indexed = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("notes")
+                .column("title", ColumnType::Text)
+                .index_only(["title"]),
+        )
+        .build();
+    assert_ne!(SchemaHash::compute(&indexed), SchemaHash::compute(&a));
+    deploy_ok(
+        &router,
+        request(&b, &[&indexed], vec![migration(&indexed, &b, &["a"])]),
+    )
+    .await;
+    server.shutdown().await;
+}
+
+/// The same edge from an equivalent predecessor hash must carry the same lens:
+/// one that introduces the column with another default would change how rows
+/// of that version read under the admitted target, so it is refused. Path
+/// validation sees the disagreement first; `prepare_catalogue_change` refuses
+/// it again on its own (its unit tests).
+#[tokio::test]
+async fn deploy_refuses_a_different_lens_from_an_equivalent_predecessor_hash() {
+    let server = builder(None).build().await.unwrap();
+    let router = create_router(server.state.clone());
+    let (a, b) = (schema(&[]), schema(&["a"]));
+    deploy_ok(
+        &router,
+        request(&b, &[&a, &b], vec![migration(&a, &b, &["a"])]),
+    )
+    .await;
+    let before = graph(&router).await;
+    let indexed = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("notes")
+                .column("title", ColumnType::Text)
+                .index_only(["title"]),
+        )
+        .build();
+    let mut different = migration(&indexed, &b, &["a"]);
+    different["forward"][0]["operations"][0]["value"] =
+        json!(jazz::tools::public_schema::Value::Text("other".into()));
+    let (status, error) = http(
+        &router,
+        "POST",
+        "/deploy",
+        request(&b, &[&indexed], vec![different]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+    assert_eq!(error["code"], "conflicting_paths", "{error}");
+    assert_eq!(graph(&router).await, before);
+    server.shutdown().await;
+}
+
 /// An administrator deploys compatible revisions without migration files, then
 /// adds a column with an explicit migration and uploads an older compatible snapshot.
 /// Reopening and repeating the deployment must preserve the same graph.
@@ -473,15 +533,16 @@ async fn compatible_defaults_and_indexes_share_runtime_identity() {
         .build();
     deploy_ok(&router, request(&a, &[&a], vec![])).await;
     deploy_ok(&router, request(&b, &[&b], vec![])).await;
-    let snapshot = server
-        .state
-        .runtime()
-        .unwrap()
-        .trusted_catalogue_snapshot()
-        .await
-        .unwrap();
-    assert_eq!(snapshot.schemas.len(), 1);
-    assert!(snapshot.lineages.is_empty());
+    let catalogue = server.state.runtime().unwrap().catalogue().await.unwrap();
+    assert_eq!(
+        catalogue
+            .schemas
+            .iter()
+            .filter(|schema| schema.version.is_some())
+            .count(),
+        1,
+        "one admitted version for both definitions"
+    );
     let c = schema(&["extra"]);
     let before = graph(&router).await;
     assert_eq!(

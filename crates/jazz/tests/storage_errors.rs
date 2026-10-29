@@ -332,7 +332,9 @@ fn a_reopened_replica_resumes_its_subscription_from_its_stored_watermark() {
     block_on(client.tick()).unwrap();
     let sent: Vec<SyncMessage> = sent.borrow_mut().drain(..).collect();
     assert!(
-        !sent.iter().any(|m| matches!(m, SyncMessage::Hold { .. })),
+        !sent
+            .iter()
+            .any(|m| matches!(m, SyncMessage::ResendWhole { .. })),
         "no held rows are declared: {sent:?}"
     );
     let since = sent.iter().find_map(|m| match m {
@@ -413,7 +415,8 @@ fn a_serializable_commit_is_not_validated_against_an_unreadable_store() {
     );
     let error = outcome.expect_err("an unreadable read set is not accepted");
     assert_eq!(error.code, jazz::db::ErrorCode::Storage, "{error:?}");
-    assert!(error.message.contains("Storage"), "{error:?}");
+    assert!(error.message.contains("no such table"), "{error:?}");
+    assert!(!error.message.starts_with("Storage:"), "{error:?}");
     assert_eq!(labels(&server), ["guard"]);
 }
 
@@ -470,6 +473,7 @@ fn a_recorded_storage_failure_keeps_its_code_after_both_stores_reopen() {
 
     let server = open_server();
     let alice = open_file(&client_path, 0xa1);
+    alice.track_upstream_rejections();
     let (client_side, server_side) = duplex();
     let _upstream = block_on(alice.connect_upstream(client_side));
     server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
@@ -479,7 +483,19 @@ fn a_recorded_storage_failure_keeps_its_code_after_both_stores_reopen() {
     )
     .expect_err("restoring storage must not turn the recorded failure into acceptance");
     assert_eq!(error.code, jazz::db::ErrorCode::Storage, "{error:?}");
-    assert!(error.message.contains("Storage"), "{error:?}");
+    assert!(error.message.contains("no such table"), "{error:?}");
+    assert!(!error.message.starts_with("Storage:"), "{error:?}");
     assert!(labels(&alice).is_empty());
     assert!(labels(&server).is_empty());
+    // The originating retry store re-encodes the received verdict. Neither
+    // that hop nor reopening its bytes may add another display prefix.
+    let rejected = alice.rejected_transactions().unwrap();
+    assert_eq!(rejected.len(), 1);
+    assert_eq!(rejected[0].error.message, error.message);
+    drop(alice);
+    let alice = open_file(&client_path, 0xa1);
+    let rejected = alice.rejected_transactions().unwrap();
+    assert_eq!(rejected.len(), 1);
+    assert_eq!(rejected[0].error.code, jazz::db::ErrorCode::Storage);
+    assert_eq!(rejected[0].error.message, error.message);
 }

@@ -36,14 +36,6 @@ through `HostReader::sql`.
   `synchronous = FULL` and WAL (`crates/jazz-server/src/runtime/mod.rs`
   `Source::open`): a returned write is durable.
 
-The server's tables, their keys and values. Each key names its encoding
-version; the value encodings are the ones the side files held before.
-
-| Table                                                                 | Key                                                                                       | Value                                                                                              |
-| --------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `_jazz_host_catalogue` (`crates/jazz-server/src/kv.rs` `CATALOGUE`)   | `cat:v1:` + 16-byte object id (`catalogue_storage.rs` `CatalogueKvStorage::ENTRY_PREFIX`) | catalogue entry row (`catalogue_entry.rs` `CatalogueEntry::encode_storage_row`, magic + version 1) |
-| `_jazz_host_runtime_catalogue` (`runtime/mod.rs` `RUNTIME_CATALOGUE`) | `runtime-catalogue:v1`, one key                                                           | postcard `CatalogueSnapshot`                                                                       |
-
 The account registry keeps its current state in two typed tables
 (`crates/jazz-server/src/server/account_store.rs` `CREATE`), created when
 the server opens the registry. There is no command journal: opening reads
@@ -81,11 +73,23 @@ A row per principal is permanent: revocation clears `active` and never
 frees the assignment. A link request deletes approvals that expired
 unaccepted.
 
-Readers refuse what they do not know: the catalogue rejects other `cat:`
-keys and entry versions; an account row that does not decode (an id that
-is not 16 bytes, a negative counter) makes that lookup or command fail
-unavailable; the runtime refuses to start on an undecodable snapshot (and
-the host tables keep serving).
+The deploy catalogue is not a host table. Schemas, lenses and every
+permissions revision are the store's own catalogue tables (`_jazz_schemas`,
+`_jazz_lenses`, `_jazz_permissions`, beside `_jazz_versions` and
+`_jazz_names`; `crates/jazz/layers/db/src/catalogue.rs`, SPEC ch. 10
+§10.2), so the runtime and the server read one source. The server writes
+them through the store's thread (`crates/jazz-server/src/server/catalogue_storage.rs`
+`CatalogueStorage::put`, `HostTables::catalogue_put`) and a deploy admits
+and activates in the same transaction (`Db::apply_catalogue`); it reads them
+on the read-only connection (`HostReader::catalogue`) and rebuilds its HTTP
+index from the rows (`catalogue.rs` `CatalogueIndex::from_rows`). There is
+no catalogue log and no runtime snapshot: earlier builds of format 1 kept
+them as `_jazz_host_catalogue` (`JCAT` entries) and
+`_jazz_host_runtime_catalogue` (a postcard `CatalogueSnapshot`); no release
+wrote them and nothing reads them now. A definition the server cannot parse
+fails startup. An account row that does not
+decode (an id that is not 16 bytes, a negative counter) makes that lookup
+or command fail unavailable.
 
 ## Pinned evidence
 
@@ -97,8 +101,9 @@ the host tables keep serving).
   Alice's pinned account and both rows, then writes a deployment, an account
   and a row, and reopens again. `dev/gates/storage-compat.sh` runs it by
   exact name.
-- The catalogue key and entry bytes are also pinned by the
-  `catalogue_storage.rs` golden tests.
+- `crates/jazz/tests/catalogue_rows.rs`: a deploy reads back as published,
+  a reopened store admits from its own rows, a failed change leaves nothing,
+  and every permissions revision is kept.
 
 ## Changing it
 
@@ -114,7 +119,7 @@ One thread owns the store's connection and runs both host writes and the
 runtime (the Durable Object model: one writer per file, no `SQLITE_BUSY`).
 Host writes run ahead of queued runtime work, in tick-slice-sized rounds, so
 they wait for at most one runtime job or tick slice. Host reads (a login,
-catalogue loads) use a second, read-only connection and never
+catalogue reads) use a second, read-only connection and never
 wait for the runtime; they see every write that returned before they began.
 If the runtime panics, the thread closes its sessions, reopens the file and
 restarts the runtime; a second panic within a minute leaves it stopped and
