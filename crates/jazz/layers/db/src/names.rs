@@ -1281,14 +1281,27 @@ impl Names {
                 }
                 // A column whose type differs from the one its source column
                 // is stored with is a new column: values of one type are
-                // never read as another's.
-                let source_column =
-                    source_columns
-                        .and_then(|columns| columns.get(from))
-                        .filter(|stored_column| {
-                            self.stored_type(&stored, stored_column)
-                                .is_none_or(|ty| *ty == column.stored_type())
-                        });
+                // never read as another's. The rows already stored have no
+                // value in it, so a required one needs a default.
+                let retyped = source_columns
+                    .and_then(|columns| columns.get(from))
+                    .and_then(|stored_column| self.stored_type(&stored, stored_column))
+                    .is_some_and(|ty| *ty != column.stored_type());
+                if retyped
+                    && !column.nullable()
+                    && column.default.is_none()
+                    && !effects
+                        .defaults
+                        .contains_key(&(name.clone(), column.name.clone()))
+                {
+                    return Err(unsupported(format!(
+                        "changing the type of required column {name}.{} without a default",
+                        column.name
+                    )));
+                }
+                let source_column = source_columns
+                    .and_then(|columns| columns.get(from))
+                    .filter(|_| !retyped);
                 match source_column {
                     Some(stored_column) => {
                         taken.insert(stored_column.clone());

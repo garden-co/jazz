@@ -693,9 +693,20 @@ fn enum_and_text_never_share_a_stored_column() {
     assert_eq!(statuses(&db, by_status()), [(1, "doing".into())]);
     assert_eq!(raw_cells(&path), integers(&[1]));
 
-    // An app opened with `status` as text (shipped ahead of a migration)
-    // gets a stored column of its own: the tags are not its values.
+    // An app opened with `status` as required text and no default is
+    // refused: the stored rows have no text value for it.
     drop(db);
+    let refused = block_on(Db::open_at(
+        config(tasks_with("status", ColumnType::Text), 0),
+        &path,
+        FileOptions::default(),
+    ))
+    .err()
+    .expect("a required retyped column without a default is refused");
+    assert!(refused.message.contains("changing the type"), "{refused}");
+
+    // Opened with `status` as nullable text (shipped ahead of a migration),
+    // it gets a stored column of its own: the tags are not its values.
     let ahead = compile_schema(
         &SchemaBuilder::new()
             .table(
