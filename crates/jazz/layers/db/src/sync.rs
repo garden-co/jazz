@@ -41,6 +41,7 @@
 use crate::schema::history::{history_source_table, is_history_table};
 use crate::values::CachedRow;
 use crate::values::query_error;
+use crate::values::{STATE_DELETED, STATE_NO_CONTENT};
 use rusqlite::OptionalExtension;
 use std::cell::Cell as StdCell;
 use std::cell::RefCell;
@@ -486,7 +487,7 @@ pub struct Image {
     pub key: Vec<u8>,
     pub seq: u64,
     pub deleted: bool,
-    /// Whether the version's commit wrote content (see `_c`): history
+    /// Whether the version's commit wrote content (stored in `_st`): history
     /// reads list only content versions.
     pub content: bool,
     pub cells: Vec<(String, Cell)>,
@@ -3015,8 +3016,11 @@ impl Inner {
                         "id" => image.id = r.get::<_, Vec<u8>>(i)?.try_into().unwrap_or([0; 16]),
                         "_b" => image.key = r.get(i)?,
                         "_seq" => image.seq = r.get::<_, i64>(i)? as u64,
-                        "_del" => image.deleted = r.get::<_, i64>(i)? != 0,
-                        "_c" => image.content = r.get::<_, i64>(i)? != 0,
+                        "_st" => {
+                            let state = r.get::<_, i64>(i)?;
+                            image.deleted = state & STATE_DELETED != 0;
+                            image.content = state & STATE_NO_CONTENT == 0;
+                        }
                         // The authority's record of what the version was
                         // built on; never replicated.
                         "_base" | "_cols" => {}
@@ -3269,15 +3273,16 @@ impl Inner {
             "id".to_owned(),
             "_b".to_owned(),
             "_seq".to_owned(),
-            "_del".to_owned(),
-            "_c".to_owned(),
+            "_st".to_owned(),
         ];
         let mut values = vec![
             Sql::Blob(image.id.to_vec()),
             Sql::Blob(image.key.clone()),
             Sql::Integer(image.seq as i64),
-            Sql::Integer(image.deleted as i64),
-            Sql::Integer(image.content as i64),
+            Sql::Integer(
+                if image.deleted { STATE_DELETED } else { 0 }
+                    | if image.content { 0 } else { STATE_NO_CONTENT },
+            ),
         ];
         for (column, value) in self.stored_cells(image)? {
             names.push(quote(&column));

@@ -82,7 +82,7 @@ struct Version {
     seq: u64,
     built: Option<Built>,
     /// Bitmask over the table's column codes; `None` authors every
-    /// column, `_del` included.
+    /// column, `_st` included.
     cols: Option<Vec<u8>>,
 }
 
@@ -124,10 +124,10 @@ impl Knowledge {
 }
 
 /// The authored-column name a deletion or restore writes.
-const DELETION: &str = "_del";
+const DELETION: &str = "_st";
 
 /// Whether two writes' authored-column bitmasks overlap; `None` authors
-/// every column, `_del` included.
+/// every column, `_st` included.
 fn authored_overlap(left: Option<&[u8]>, right: Option<&[u8]>) -> bool {
     match (left, right) {
         (Some(left), Some(right)) => left.iter().zip(right).any(|(l, r)| l & r != 0),
