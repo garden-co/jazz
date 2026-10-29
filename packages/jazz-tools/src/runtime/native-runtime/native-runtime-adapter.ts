@@ -3052,6 +3052,9 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     // The broker replaces failed workers. Local persistence for this attempt
     // has failed, but authority acceptance can still arrive after replacement.
+    // A pump or watchdog failure may already have stopped the upstream. Its
+    // teardown must preserve that terminal error for subsequent Global waits.
+    if (this.serverTransportError && !this.serverTransportErrorRetrying) return;
     this.handleServerTransportError(error, this.serverConnectionGeneration, true);
   }
 
