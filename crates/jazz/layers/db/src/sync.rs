@@ -3605,6 +3605,20 @@ impl Inner {
         Ok(())
     }
 
+    /// Whether stored table `table` holds a version of `row` on any branch.
+    fn holds_id(&self, table: &str, row: RowUuid) -> Result<bool, Error> {
+        self.conn
+            .cached_row(
+                &format!(
+                    "SELECT EXISTS (SELECT 1 FROM {} WHERE id = ?1)",
+                    quote(table)
+                ),
+                [row.0.as_bytes().to_vec()],
+                |r| r.get::<_, bool>(0),
+            )
+            .map_err(storage)
+    }
+
     pub(super) fn is_withheld(&self, table: &str, row: RowUuid, key: &[u8]) -> Result<bool, Error> {
         if !self.withheld.get() {
             return Ok(false);
@@ -8614,12 +8628,7 @@ impl Db {
                 // not hold the version it evicts at all, while its session
                 // holds the row on another branch: any version of the id
                 // here keeps it watched (#4484).
-                let id = row.0.as_bytes().to_vec();
-                if inner.is_withheld(&table, row, &key)?
-                    || !inner
-                        .images_where(&table, false, "id = ?1", &[&id])?
-                        .is_empty()
-                {
+                if inner.is_withheld(&table, row, &key)? || inner.holds_id(&table, row)? {
                     unreadable.insert((table.clone(), row, key.clone()));
                 } else {
                     gone.push((table.clone(), *row.0.as_bytes()));
