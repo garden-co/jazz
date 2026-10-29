@@ -149,7 +149,7 @@ pub(crate) async fn publish_permissions_and_runtime(
         .catalogue_store
         .refresh()
         .map_err(PermissionsPublicationError::Catalogue)?;
-    applied.map_err(PermissionsPublicationError::Bridge)?;
+    applied.map_err(|error| PermissionsPublicationError::Bridge(error.into()))?;
     let head = state
         .catalogue
         .active_schema(&state.catalogue_store)

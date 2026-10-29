@@ -13,18 +13,22 @@
 
 use std::sync::{Arc, mpsc};
 
-use jazz::host::{HostPair, HostReader, HostTable, HostTables};
+use jazz::host::HostReader;
+#[cfg(test)]
+use jazz::host::{HostPair, HostTable, HostTables};
 use rusqlite::Connection;
 
 /// Errors are reported as text: callers wrap them in their own error types.
 pub(crate) type KvResult<T> = Result<T, String>;
 
+#[cfg(test)]
 pub(crate) struct HostKv {
     table: HostTable,
     reader: Arc<HostReader>,
     store: crate::runtime::HostSender,
 }
 
+#[cfg(test)]
 impl HostKv {
     pub(crate) fn new(
         table: HostTable,
@@ -53,7 +57,6 @@ impl HostKv {
             .map_err(|_| "server store closed before answering".to_owned())?
     }
 
-    #[cfg(test)]
     pub(crate) fn get(&self, key: &[u8]) -> KvResult<Option<Vec<u8>>> {
         self.reader
             .get(self.table, key)
@@ -61,7 +64,6 @@ impl HostKv {
     }
 
     /// Write every pair in one transaction: all or none.
-    #[cfg(test)]
     pub(crate) fn write_many(&self, pairs: &[HostPair]) -> KvResult<()> {
         let pairs = pairs.to_vec();
         self.call(move |tables, table| tables.host_put_many(table, &pairs))

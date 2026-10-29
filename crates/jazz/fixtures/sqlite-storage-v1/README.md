@@ -49,3 +49,10 @@ way.
 Replacing the authority's `_jazz_text_in` side table with as-sent history
 versions, when `documents.body` became text-merging, regenerated it the same
 way.
+
+Keeping the deploy catalogue as typed rows (`_jazz_versions` numbering the
+admitted versions, `_jazz_names` keyed by that number, `_jazz_stored_columns`,
+and `_jazz_schemas`, `_jazz_lenses` and `_jazz_permissions`) regenerated it
+the same way. A development store with the earlier layout (`_jazz_names`
+keyed by version id) is refused at open with "delete the local store and
+resync".

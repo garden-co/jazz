@@ -33,7 +33,7 @@ pub fn prepare_catalogue_change(
         .iter()
         .filter(|schema| seen.insert(schema.version_id()))
         .collect::<Vec<_>>();
-    let mut incoming = BTreeMap::<SchemaVersionId, Vec<(Edge, MigrationLens)>>::new();
+    let mut incoming = BTreeMap::<SchemaVersionId, Vec<(SchemaVersionId, MigrationLens)>>::new();
     for migration in &prepared.migrations {
         let source = hashes[&migration.source_hash];
         let target = hashes[&migration.target_hash];
@@ -42,13 +42,10 @@ pub fn prepare_catalogue_change(
         }
         let lens = compile_lens(migration, source.public_schema(), target.public_schema())
             .map_err(|error| error.to_string())?;
-        incoming.entry(target.version_id()).or_default().push((
-            (
-                *migration.source_hash.as_bytes(),
-                *migration.target_hash.as_bytes(),
-            ),
-            lens,
-        ));
+        incoming
+            .entry(target.version_id())
+            .or_default()
+            .push((source.version_id(), lens));
     }
     let roots = versions
         .iter()
@@ -96,10 +93,17 @@ pub fn prepare_catalogue_change(
     if !admitted.is_empty() && stored_roots != [&root.version_id()] {
         return Err("deployment cannot replace the runtime genesis schema".into());
     }
+    // Edges by version: another hash of an admitted predecessor (defaults
+    // and indexes do not change the version) is the same edge.
     let known = stored
         .lenses
         .iter()
-        .map(|lens| (*lens.source.as_bytes(), *lens.target.as_bytes()))
+        .filter_map(|lens| {
+            Some((
+                *stored_versions.get(&lens.source)?,
+                *stored_versions.get(&lens.target)?,
+            ))
+        })
         .collect::<BTreeSet<_>>();
 
     let lenses_into = |id: SchemaVersionId| {
@@ -120,7 +124,10 @@ pub fn prepare_catalogue_change(
     {
         let id = schema.version_id();
         if admitted.contains(&id) {
-            if incoming[&id].iter().any(|(edge, _)| !known.contains(edge)) {
+            if incoming[&id]
+                .iter()
+                .any(|(source, _)| !known.contains(&(*source, id)))
+            {
                 return Err(format!(
                     "schema {} is already published with different predecessors; publish a new convergent target",
                     SchemaHash::compute(schema.public_schema())

@@ -883,6 +883,12 @@ fn another_storage_format_is_refused_without_changing_the_file() {
         ("older", "UPDATE _jazz_format SET version = 0"),
         // Tables but no stamp: not a file Jazz wrote.
         ("unstamped", "DROP TABLE _jazz_format"),
+        // A development format-1 store from before the catalogue was rows:
+        // stored names keyed by version id.
+        (
+            "versioned names",
+            "ALTER TABLE _jazz_names ADD COLUMN version BLOB",
+        ),
     ] {
         let path = edited_server_corpus(name, sql);
         let before = digest_tree(&path);

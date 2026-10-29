@@ -152,7 +152,14 @@ pub struct CatalogueChange {
 /// `value` as canonical JSON: object keys sorted at every level, no
 /// whitespace. Equal values are equal text, so a definition can be compared
 /// and content-addressed as stored.
-pub fn canonical_json(value: &impl Serialize) -> Result<String, Error> {
+///
+/// A value JSON cannot carry exactly is refused rather than stored lossily:
+/// JSON has no NaN or infinity (serde writes them as `null`), so a default
+/// or literal of a non-finite double would read back as something else, or
+/// not at all, on every later open.
+pub fn canonical_json<T: Serialize + DeserializeOwned + PartialEq>(
+    value: &T,
+) -> Result<String, Error> {
     fn sorted(value: serde_json::Value) -> serde_json::Value {
         match value {
             serde_json::Value::Object(map) => {
@@ -166,18 +173,24 @@ pub fn canonical_json(value: &impl Serialize) -> Result<String, Error> {
             other => other,
         }
     }
-    let value = serde_json::to_value(value).map_err(|error| {
+    let encoded = serde_json::to_value(value).map(sorted).and_then(|value| {
+        let text = serde_json::to_string(&value)?;
+        Ok((value, text))
+    });
+    let (encoded, text) = encoded.map_err(|error| {
         Error::new(
             ErrorCode::Storage,
             format!("encoding a catalogue definition: {error}"),
         )
     })?;
-    serde_json::to_string(&sorted(value)).map_err(|error| {
-        Error::new(
-            ErrorCode::Storage,
-            format!("encoding a catalogue definition: {error}"),
-        )
-    })
+    if serde_json::from_value::<T>(encoded).ok().as_ref() != Some(value) {
+        return Err(Error::new(
+            ErrorCode::Schema,
+            "a catalogue definition does not survive JSON exactly; non-finite doubles \
+             (NaN, infinity) in defaults are not supported yet",
+        ));
+    }
+    Ok(text)
 }
 
 fn decode<T: DeserializeOwned>(def: &str, what: impl std::fmt::Display) -> Result<T, Error> {

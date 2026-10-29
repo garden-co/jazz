@@ -4,7 +4,7 @@ use super::{
     catalogue::DeploymentResponse,
     routes::http::{PublishMigrationRequest, lower_migration},
 };
-use crate::runtime::StorageConfig;
+use crate::runtime::{CatalogueApplyError, StorageConfig};
 use axum::http::StatusCode;
 use jazz::schema::JazzSchema;
 use jazz::tools::{
@@ -195,18 +195,23 @@ pub(crate) async fn deploy(
     let runtime = match state.runtime() {
         Some(runtime) => runtime,
         None => {
-            // Apply on a scratch store first, so a failed deployment never
-            // creates the app's database.
+            // Apply on a scratch store first, so a deployment the catalogue
+            // refuses never creates the app's database. The real store
+            // starts as empty as the scratch one, so the same change
+            // applies there; only a storage failure can still fail it, and
+            // then leaves an empty store that the next deployment reuses.
             let probe =
                 ServerRuntimeHandle::start_with_storage(genesis.clone(), StorageConfig::InMemory)
                     .map_err(DeployError::internal)?;
-            let change = change(&probe, &prepared, staged.put.clone(), revision).await;
-            let applied = match change {
-                Ok(change) => probe.apply_catalogue(change).await,
+            let applied = match change(&probe, &prepared, staged.put.clone(), revision).await {
+                Ok(change) => probe
+                    .apply_catalogue(change)
+                    .await
+                    .map_err(DeployError::from),
                 Err(error) => Err(error),
             };
             probe.shutdown().await.map_err(DeployError::internal)?;
-            applied.map_err(DeployError::invalid)?;
+            applied?;
             state
                 .start_core_server_shell(genesis)
                 .map_err(DeployError::internal)?
@@ -216,9 +221,7 @@ pub(crate) async fn deploy(
         .catalogue_store
         .check_unchanged(&staged)
         .map_err(DeployError::invalid)?;
-    let change = change(&runtime, &prepared, staged.put, revision)
-        .await
-        .map_err(DeployError::invalid)?;
+    let change = change(&runtime, &prepared, staged.put, revision).await?;
     // The deployment's rows, admissions and activation commit together on
     // the store's thread, or not at all.
     let applied = runtime.apply_catalogue(change).await;
@@ -226,7 +229,7 @@ pub(crate) async fn deploy(
         .catalogue_store
         .refresh()
         .map_err(DeployError::internal)?;
-    applied.map_err(DeployError::invalid)?;
+    applied?;
     Ok(staged.response)
 }
 
@@ -236,9 +239,19 @@ async fn change(
     prepared: &deployment::PreparedDeployment,
     put: jazz::catalogue::CataloguePut,
     revision: u64,
-) -> Result<jazz::catalogue::CatalogueChange, String> {
-    let stored = runtime.catalogue().await?;
+) -> Result<jazz::catalogue::CatalogueChange, DeployError> {
+    let stored = runtime.catalogue().await.map_err(DeployError::internal)?;
     deployment::prepare_catalogue_change(prepared, &stored, put, revision)
+        .map_err(DeployError::invalid)
+}
+
+impl From<CatalogueApplyError> for DeployError {
+    fn from(error: CatalogueApplyError) -> Self {
+        match error {
+            CatalogueApplyError::Rejected(message) => DeployError::invalid(message),
+            CatalogueApplyError::Failed(message) => DeployError::internal(message),
+        }
+    }
 }
 
 #[cfg(test)]

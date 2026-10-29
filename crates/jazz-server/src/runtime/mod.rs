@@ -24,7 +24,9 @@ use std::sync::{Arc, Mutex, Weak, mpsc as std_mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::kv::{HostKv, HostSql};
+#[cfg(test)]
+use crate::kv::HostKv;
+use crate::kv::HostSql;
 use jazz::catalogue::{CatalogueChange, CatalogueRows};
 use jazz::db::{
     Db, DbConfig, DbIdentity, FileOptions, LensEffects, Reason, SubscriberId, SyncMessage,
@@ -360,6 +362,7 @@ impl AppStore {
     }
 
     /// Key-value access to one host table.
+    #[cfg(test)]
     pub(crate) fn kv(&self, table: HostTable) -> Result<HostKv, String> {
         Ok(HostKv::new(
             table,
@@ -1224,18 +1227,34 @@ impl ServerRuntimeHandle {
 
     /// Apply `change` to the store's catalogue in one transaction (see
     /// [`Db::apply_catalogue`]): a change that fails leaves nothing behind.
-    pub async fn apply_catalogue(&self, change: CatalogueChange) -> Result<(), String> {
+    pub async fn apply_catalogue(
+        &self,
+        change: CatalogueChange,
+    ) -> Result<(), CatalogueApplyError> {
         let result = self
             .run(move |owner| {
-                if let Some((revision, ..)) = &change.activate {
-                    owner.check_revision(*revision)?;
-                }
-                block_on(owner.db.apply_catalogue(change)).map_err(|error| error.to_string())?;
-                owner.reload_catalogue()?;
-                owner.release_held_reads();
-                Ok(())
+                Ok((|| {
+                    if let Some((revision, ..)) = &change.activate {
+                        owner
+                            .check_revision(*revision)
+                            .map_err(CatalogueApplyError::Rejected)?;
+                    }
+                    block_on(owner.db.apply_catalogue(change)).map_err(|error| {
+                        if error.code == jazz::db::ErrorCode::Storage {
+                            CatalogueApplyError::Failed(error.to_string())
+                        } else {
+                            CatalogueApplyError::Rejected(error.to_string())
+                        }
+                    })?;
+                    owner
+                        .reload_catalogue()
+                        .map_err(CatalogueApplyError::Failed)?;
+                    owner.release_held_reads();
+                    Ok(())
+                })())
             })
-            .await;
+            .await
+            .unwrap_or_else(|error| Err(CatalogueApplyError::Failed(error)));
         if result.is_ok() {
             self.notify_activity();
         }
@@ -1273,6 +1292,30 @@ impl ServerRuntimeHandle {
         response
             .await
             .map_err(|_| "server runtime thread dropped the response".to_owned())?
+    }
+}
+
+/// Why a catalogue change was not applied. Either way nothing of it was.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CatalogueApplyError {
+    /// The change does not fit this catalogue: a stale revision, or a
+    /// schema or lens the store refuses to admit.
+    Rejected(String),
+    /// Storage or the runtime failed.
+    Failed(String),
+}
+
+impl std::fmt::Display for CatalogueApplyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rejected(message) | Self::Failed(message) => f.write_str(message),
+        }
+    }
+}
+
+impl From<CatalogueApplyError> for String {
+    fn from(error: CatalogueApplyError) -> Self {
+        error.to_string()
     }
 }
 

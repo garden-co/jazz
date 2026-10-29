@@ -13,12 +13,16 @@ use jazz::db::{Db, DbConfig, DbIdentity, FileOptions, block_on};
 use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::schema::JazzSchema;
 use jazz::tools::public_schema::{
-    PolicyExpr, RelationCmpOp, RelationColumnRef, RelationExpr, RelationPredicate,
-    RelationValueRef, Schema, SchemaHash, TableName, TablePolicies,
+    ColumnDescriptor, EnumCaseDescriptor, PolicyExpr, RelationCmpOp, RelationColumnRef,
+    RelationExpr, RelationPredicate, RelationValueRef, RowDescriptor, Schema, SchemaHash,
+    TableName, TablePolicies, TableSchema,
 };
 use jazz::tools::schema_lens::runtime::compile_lens;
 use jazz::tools::schema_lens::{Lens, LensOp, LensTransform};
-use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+use jazz::tools::{
+    CmpOp, ColumnMergeStrategy, ColumnType, Operation, PolicyValue, SchemaBuilder,
+    TableSchemaBuilder, Value,
+};
 
 use common::{allow_all_policies, compile_schema};
 
@@ -202,7 +206,7 @@ fn a_reopened_store_admits_its_versions_from_its_own_rows() {
                 table: "notes".into(),
                 column: "tag".into(),
                 column_type: ColumnType::Text,
-                default: jazz::tools::Value::Null,
+                default: Value::Null,
             },
         ]),
     );
@@ -300,4 +304,236 @@ fn every_permissions_revision_is_kept() {
         rows.permissions[2].permissions,
         BTreeMap::from([(TableName::new("notes"), subject_policies())])
     );
+}
+
+/// Publish `put` alone (no admission) and read the catalogue back.
+fn put_and_reopen(put: CataloguePut) -> jazz::catalogue::CatalogueRows {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.sqlite");
+    {
+        let db = open_at(compile_schema(&notes("text")), &path);
+        block_on(db.apply_catalogue(CatalogueChange {
+            put,
+            ..CatalogueChange::default()
+        }))
+        .unwrap();
+    }
+    open_at(compile_schema(&notes("text")), &path)
+        .catalogue()
+        .unwrap()
+}
+
+fn column(name: &str, column_type: ColumnType) -> ColumnDescriptor {
+    ColumnDescriptor::new(name, column_type)
+}
+
+/// Every shape a definition can take reads back equal after a reopen:
+/// column types, defaults, references, merge strategies, indexes, branch
+/// keys and column order in schemas; every lens op, drafts included; and
+/// nested, relation and session policies.
+#[test]
+fn every_definition_shape_reads_back_equal_after_a_reopen() {
+    let case = |name: &str| EnumCaseDescriptor {
+        name: name.to_owned(),
+        fields: vec![column("note", ColumnType::Text).nullable()],
+    };
+    let wide = TableSchema {
+        columns: RowDescriptor::new(vec![
+            // Declared out of name order: column order is kept.
+            column("zeta", ColumnType::Text),
+            column("count", ColumnType::BigInt).merge_strategy(ColumnMergeStrategy::Counter),
+            column("body", ColumnType::Text).merge_strategy(ColumnMergeStrategy::Markdown),
+            column(
+                "tags",
+                ColumnType::Array {
+                    element: Box::new(ColumnType::Text),
+                },
+            )
+            .merge_strategy(ColumnMergeStrategy::GSet),
+            column(
+                "mood",
+                ColumnType::Enum {
+                    variants: vec!["glad".into(), "sad".into()],
+                },
+            )
+            .default(Value::Text("glad".into())),
+            column(
+                "state",
+                ColumnType::EnumPayload {
+                    cases: vec![case("open"), case("closed")],
+                },
+            )
+            .nullable(),
+            column(
+                "doc",
+                ColumnType::Json {
+                    schema: Some(serde_json::json!({"type": "object", "required": ["a"]})),
+                },
+            )
+            .nullable(),
+            column("blob", ColumnType::Bytea).default(Value::Bytea(vec![0, 1, 0xff])),
+            column("score", ColumnType::Double).default(Value::Double(-0.0)),
+            column("ratio", ColumnType::Double).default(Value::Double(1e-300)),
+            column("at", ColumnType::Timestamp).default(Value::Timestamp(u64::MAX)),
+            column("owner", ColumnType::Uuid)
+                .references("people")
+                .nullable(),
+            column("branch", ColumnType::Text),
+        ]),
+        indexed_columns: Some(vec!["zeta".into(), "owner".into()]),
+        composite_indexes: vec![vec!["owner".into(), "at".into()]],
+        policies: TablePolicies::default(),
+        branch_by: vec!["branch".into()],
+    };
+    let people = TableSchemaBuilder::new("people").column("name", ColumnType::Text);
+    let mut schema = SchemaBuilder::new().table(people).build();
+    schema.insert(TableName::new("wide"), wide);
+
+    let mut nested = PolicyExpr::True;
+    for depth in 0..20 {
+        nested = if depth % 2 == 0 {
+            PolicyExpr::And(vec![
+                nested,
+                PolicyExpr::IsNotNull {
+                    column: "zeta".into(),
+                },
+            ])
+        } else {
+            PolicyExpr::Or(vec![PolicyExpr::Not(Box::new(nested)), PolicyExpr::False])
+        };
+    }
+    let policies = TablePolicies::new()
+        .with_select(PolicyExpr::Or(vec![
+            nested,
+            PolicyExpr::SessionCmp {
+                path: vec!["claims".into(), "weight".into()],
+                op: CmpOp::Ge,
+                value: Value::Double(0.5),
+            },
+            PolicyExpr::InList {
+                column: "mood".into(),
+                values: vec![PolicyValue::Literal(Value::Text("glad".into()))],
+            },
+            PolicyExpr::Inherits {
+                operation: Operation::Select,
+                via_column: "owner".into(),
+                max_depth: Some(3),
+            },
+        ]))
+        .with_insert(subject_policies().select.using.unwrap());
+    let permissions = BTreeMap::from([
+        (TableName::new("wide"), policies),
+        (TableName::new("notes"), subject_policies()),
+    ]);
+
+    let ops = vec![
+        LensOp::RenameTable {
+            old_name: "a".into(),
+            new_name: "b".into(),
+        },
+        LensOp::AddColumn {
+            table: "b".into(),
+            column: "n".into(),
+            column_type: ColumnType::Double,
+            default: Value::Double(2.5),
+        },
+        LensOp::RemoveColumn {
+            table: "b".into(),
+            column: "old".into(),
+            column_type: ColumnType::Bytea,
+            default: Value::Bytea(vec![7]),
+        },
+        LensOp::RenameColumn {
+            table: "b".into(),
+            old_name: "x".into(),
+            new_name: "y".into(),
+        },
+        LensOp::AddTable {
+            table: "c".into(),
+            schema: schema[&TableName::new("people")].clone(),
+        },
+        LensOp::RemoveTable {
+            table: "d".into(),
+            schema: schema[&TableName::new("wide")].clone(),
+        },
+    ];
+    let mut forward = LensTransform::with_ops(ops);
+    forward.draft_ops = vec![1, 4];
+    let (source, target) = (
+        SchemaHash::compute(&notes("text")),
+        SchemaHash::compute(&schema),
+    );
+
+    let rows = put_and_reopen(CataloguePut {
+        schemas: vec![(schema.clone(), 7)],
+        lenses: vec![CatalogueLens {
+            source,
+            target,
+            published_at: 8,
+            forward: forward.clone(),
+        }],
+        permissions: vec![(4, target, permissions.clone(), 9)],
+    });
+    assert_eq!(rows.schema(&target).unwrap().schema, schema);
+    assert_eq!(rows.lenses[0].forward, forward);
+    assert_eq!(rows.head().unwrap().permissions, permissions);
+}
+
+/// JSON has no NaN or infinity: a definition holding one is refused when
+/// it is written, with why, instead of making the store unopenable.
+#[test]
+fn a_non_finite_double_is_refused_when_written() {
+    let infinite = SchemaBuilder::new()
+        .table(
+            TableSchemaBuilder::new("notes")
+                .column("text", ColumnType::Text)
+                .column_with_default("score", ColumnType::Double, Value::Double(f64::INFINITY)),
+        )
+        .build();
+    let dir = tempfile::tempdir().unwrap();
+    let error = match block_on(Db::open_at(
+        DbConfig::new(
+            compile_schema(&infinite),
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x5e; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        ),
+        &dir.path().join("store.sqlite"),
+        FileOptions::default(),
+    )) {
+        Ok(_) => panic!("a schema with an infinite default opened"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code, jazz::db::ErrorCode::Schema);
+    assert!(error.to_string().contains("non-finite"), "{error}");
+
+    let db = open_at(
+        compile_schema(&notes("text")),
+        &dir.path().join("other.sqlite"),
+    );
+    let before = db.catalogue().unwrap();
+    for default in [f64::NAN, f64::NEG_INFINITY] {
+        let lens = CatalogueLens {
+            source: SchemaHash::compute(&notes("text")),
+            target: SchemaHash::compute(&notes("body")),
+            published_at: 1,
+            forward: LensTransform::with_ops(vec![LensOp::AddColumn {
+                table: "notes".into(),
+                column: "score".into(),
+                column_type: ColumnType::Double,
+                default: Value::Double(default),
+            }]),
+        };
+        let error = block_on(db.apply_catalogue(CatalogueChange {
+            put: CataloguePut {
+                lenses: vec![lens],
+                ..CataloguePut::default()
+            },
+            ..CatalogueChange::default()
+        }))
+        .unwrap_err();
+        assert_eq!(error.code, jazz::db::ErrorCode::Schema);
+    }
+    assert_eq!(db.catalogue().unwrap(), before);
 }

@@ -370,6 +370,35 @@ async fn deploy_runtime_predecessor_validation_precedes_storage_writes() {
     server.shutdown().await;
 }
 
+/// A lens from another hash of an admitted predecessor (an index does not
+/// change the version) is the same edge, so it does not count as a new
+/// predecessor of an admitted target.
+#[tokio::test]
+async fn deploy_accepts_a_lens_from_an_equivalent_predecessor_hash() {
+    let server = builder(None).build().await.unwrap();
+    let router = create_router(server.state.clone());
+    let (a, b) = (schema(&[]), schema(&["a"]));
+    deploy_ok(
+        &router,
+        request(&b, &[&a, &b], vec![migration(&a, &b, &["a"])]),
+    )
+    .await;
+    let indexed = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("notes")
+                .column("title", ColumnType::Text)
+                .index_only(["title"]),
+        )
+        .build();
+    assert_ne!(SchemaHash::compute(&indexed), SchemaHash::compute(&a));
+    deploy_ok(
+        &router,
+        request(&b, &[&indexed], vec![migration(&indexed, &b, &["a"])]),
+    )
+    .await;
+    server.shutdown().await;
+}
+
 /// An administrator deploys compatible revisions without migration files, then
 /// adds a column with an explicit migration and uploads an older compatible snapshot.
 /// Reopening and repeating the deployment must preserve the same graph.
