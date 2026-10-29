@@ -859,8 +859,11 @@ pub enum WireKind {
     /// `own`: the sender's own commits (by local seq) that were unsettled
     /// when the transaction began; its snapshot includes them, and the
     /// authority resolves each to where it settled.
+    /// `by`: the node whose positions `snapshot` counts (`None`: the
+    /// authority's), as the sender's server served them when it pinned it.
     Serializable {
         snapshot: u64,
+        by: Option<[u8; 16]>,
         reads: Vec<WireRead>,
         own: Vec<u64>,
     },
@@ -1245,6 +1248,7 @@ pub(crate) enum Kind {
     Mergeable,
     Serializable {
         snapshot: u64,
+        by: Option<[u8; 16]>,
         reads: Vec<WireRead>,
         own: Vec<u64>,
     },
@@ -4197,11 +4201,13 @@ impl Inner {
             WireKind::Mergeable => (WireKind::Mergeable, &[][..]),
             WireKind::Serializable {
                 snapshot,
+                by,
                 reads,
                 own,
             } => (
                 WireKind::Serializable {
                     snapshot: *snapshot,
+                    by: *by,
                     reads: Vec::new(),
                     own: own.clone(),
                 },
@@ -4826,11 +4832,8 @@ impl Inner {
     /// state through `snapshot` plus this replica's own commits that were
     /// unsettled at begin (`own`), wherever each is now: settled at a seq,
     /// still pending at its local seq, or rejected (then it never happened).
-    pub(crate) fn serializable_cut(&self, snapshot: u64, own: &[u64]) -> Result<Cut, Error> {
-        let mut cut = Cut::at(Pos {
-            n: self.frontier().n,
-            seq: snapshot,
-        });
+    pub(crate) fn serializable_cut(&self, snapshot: Pos, own: &[u64]) -> Result<Cut, Error> {
+        let mut cut = Cut::at(snapshot);
         let me = *self.identity.node.as_bytes();
         for &tx in own {
             match self.settled(me, tx)? {
@@ -4868,7 +4871,7 @@ impl Inner {
 
     /// The node whose positions [`Self::served_through`] counts, when not
     /// the authority's: a replica's with no server.
-    fn served_by(&self) -> Option<[u8; 16]> {
+    pub(crate) fn served_by(&self) -> Option<[u8; 16]> {
         (self.me != 0 && !self.relays_upstream()).then(|| *self.identity.node.as_bytes())
     }
 
@@ -5155,6 +5158,7 @@ impl Inner {
             .collect();
         Ok(Kind::Serializable {
             snapshot,
+            by: None,
             reads,
             own: carried
                 .into_values()
@@ -5881,10 +5885,12 @@ impl Db {
                     Kind::Mergeable => WireKind::Mergeable,
                     Kind::Serializable {
                         snapshot,
+                        by,
                         reads,
                         own,
                     } => WireKind::Serializable {
                         snapshot,
+                        by,
                         reads,
                         own,
                     },
@@ -9436,16 +9442,14 @@ impl Db {
                 let mut inner = self.inner.borrow_mut();
                 // An accepted commit's fate carries the seq it landed at (a
                 // resend gets the recorded one), so the replica learns it.
-                let (through, by) = match (&result, inner.settled(node, tx)?) {
-                    (Ok(()), Some(Some(at))) => (at.seq, inner.node_of(at.n)?),
-                    _ => (inner.served_through(), inner.served_by()),
+                // Where it landed: this store's own position (the
+                // authority's, or a replica's own node's), or for a resend
+                // of one a relay already settled upstream, the authority's.
+                let (landed, by) = match (&result, inner.settled(node, tx)?) {
+                    (Ok(()), Some(Some(at))) => (at, inner.node_of(at.n)?),
+                    _ => (inner.served_at(inner.served_through()), inner.served_by()),
                 };
-                // The commit landed at this store's own position: the
-                // authority's, or a replica's own node's.
-                let landed = Pos {
-                    n: inner.me,
-                    seq: through,
-                };
+                let through = landed.seq;
                 // The time this store's clock stamped the commit's writes
                 // with, when it just applied it.
                 let accepted_at = match inner.last_stamp {
@@ -9845,28 +9849,6 @@ impl Db {
             Ok(ops) => ops,
             Err(error) => return Err((error, Vec::new())),
         };
-        // A relay uploads what its sessions commit as its own. A
-        // serializable one goes up as serializable, and its upstream
-        // validates it; this store applies it optimistically meanwhile, as
-        // any replica applies its own.
-        let relay = self.is_client();
-        let forward =
-            matches!(kind, WireKind::Serializable { .. }) && self.inner.borrow().relays_upstream();
-        let upload = match std::mem::replace(&mut kind, WireKind::Mergeable) {
-            WireKind::Serializable {
-                snapshot,
-                reads,
-                own,
-            } if forward => self
-                .inner
-                .borrow()
-                .relayed_serializable(origin.0, snapshot, reads, own)
-                .map_err(|e| (e, Vec::new()))?,
-            unchanged => {
-                kind = unchanged;
-                Kind::Mergeable
-            }
-        };
         let mentioned = |inner: &Inner| -> Vec<(String, RowUuid, Vec<u8>)> {
             let mut out = Vec::new();
             for op in &ops {
@@ -9884,10 +9866,43 @@ impl Db {
             }
             out
         };
+        // A session's snapshot counts the positions its server served when
+        // it pinned it. A store that serves another sequencer's now (its
+        // server was added or removed since) cannot place it: a conflict.
+        if let WireKind::Serializable { by, .. } = &kind {
+            let inner = self.inner.borrow();
+            if *by != inner.served_by() {
+                return Err((Error::serialization_conflict(), mentioned(&inner)));
+            }
+        }
+        // A relay uploads what its sessions commit as its own. A
+        // serializable one goes up as serializable, and its upstream
+        // validates it; this store applies it optimistically meanwhile, as
+        // any replica applies its own.
+        let relay = self.is_client();
+        let forward =
+            matches!(kind, WireKind::Serializable { .. }) && self.inner.borrow().relays_upstream();
+        let upload = match std::mem::replace(&mut kind, WireKind::Mergeable) {
+            WireKind::Serializable {
+                snapshot,
+                reads,
+                own,
+                ..
+            } if forward => self
+                .inner
+                .borrow()
+                .relayed_serializable(origin.0, snapshot, reads, own)
+                .map_err(|e| (e, Vec::new()))?,
+            unchanged => {
+                kind = unchanged;
+                Kind::Mergeable
+            }
+        };
         if let WireKind::Serializable {
             snapshot,
             reads,
             own,
+            ..
         } = &kind
         {
             let inner = self.inner();

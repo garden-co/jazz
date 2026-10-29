@@ -616,3 +616,97 @@ fn a_worker_without_a_server_keeps_a_tabs_blind_delete_of_a_row_from_before_its_
         "the worker applied the delete"
     );
 }
+
+/// A tab pins its snapshot while its worker has a server (at an authority
+/// seq). The authority then accepts a foreign update of a seat, which the
+/// worker syncs, and the worker's server is removed. The tab's snapshot
+/// counts the authority's positions, which the worker no longer serves: a
+/// blind delete of the seat it never saw updated is a serialization
+/// conflict, and the update stays.
+#[test]
+fn a_snapshot_pinned_before_the_workers_server_was_removed_misses_an_authority_update() {
+    let mut net = Net::new(2);
+    let _watch = net.watch_seats(&net.worker);
+    let mut cells = holder("");
+    cells.insert("show".to_owned(), Value::String("s".to_owned()));
+    let write = block_on(net.direct.insert("seats", cells, Default::default())).unwrap();
+    let seat = write.row_uuid();
+    net.settle(&net.direct, write.mergeable_tx_id()).unwrap();
+    for _ in 0..5 {
+        net.pump();
+    }
+    let open = net.begin_pinned(net.tab(1));
+    let update = block_on(
+        net.direct
+            .update("seats", seat, holder("direct"), Default::default()),
+    )
+    .unwrap();
+    net.settle(&net.direct, update.mergeable_tx_id()).unwrap();
+    for _ in 0..5 {
+        net.pump();
+    }
+    net.worker_offline();
+    net.worker.set_remote_link_hint(RemoteLinkHint::NoServer);
+    let tab = net.tab(1);
+    net.drive(tab.tx_ref(open).delete("seats", seat, Default::default()))
+        .unwrap();
+    let receipt = net
+        .drive(tab.commit_serializable_handle(open))
+        .expect("the tab holds no version of the seat: no local conflict");
+    common::assert_serialization_conflict(&net.settle(tab, receipt.0).unwrap_err());
+    let seats = net.worker.prepare_query(&Query::from("seats")).unwrap();
+    let rows = block_on(net.worker.all(&seats, ReadOpts::default())).unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "the worker kept the update the tab never saw"
+    );
+}
+
+/// As above, but the write the tab never saw is the other tab's, which the
+/// worker accepted after its server was removed, at its own position.
+#[test]
+fn a_snapshot_pinned_before_the_workers_server_was_removed_misses_another_tabs_write() {
+    let mut net = Net::new(2);
+    let _watch = net.watch_seats(&net.worker);
+    let _watch0 = net.watch_seats(net.tab(0));
+    let mut cells = holder("");
+    cells.insert("show".to_owned(), Value::String("s".to_owned()));
+    let write = block_on(net.direct.insert("seats", cells, Default::default())).unwrap();
+    let seat = write.row_uuid();
+    net.settle(&net.direct, write.mergeable_tx_id()).unwrap();
+    // The authority's seq passes the worker's own counter: the other tab's
+    // write lands at a worker seq below the snapshot's.
+    for i in 0..5 {
+        let note = BTreeMap::from([("note".to_owned(), Value::String(format!("{i}")))]);
+        let audit = block_on(net.direct.insert("audit", note, Default::default())).unwrap();
+        net.settle(&net.direct, audit.mergeable_tx_id()).unwrap();
+    }
+    for _ in 0..5 {
+        net.pump();
+    }
+    let open = net.begin_pinned(net.tab(1));
+    net.worker_offline();
+    net.worker.set_remote_link_hint(RemoteLinkHint::NoServer);
+    for _ in 0..3 {
+        net.pump();
+    }
+    block_on(
+        net.tab(0)
+            .update("seats", seat, holder("tab0"), Default::default()),
+    )
+    .unwrap();
+    for _ in 0..10 {
+        net.pump();
+    }
+    let tab = net.tab(1);
+    net.drive(tab.tx_ref(open).delete("seats", seat, Default::default()))
+        .unwrap();
+    let receipt = net
+        .drive(tab.commit_serializable_handle(open))
+        .expect("the tab holds no version of the seat: no local conflict");
+    common::assert_serialization_conflict(&net.settle(tab, receipt.0).unwrap_err());
+    let seats = net.worker.prepare_query(&Query::from("seats")).unwrap();
+    let rows = block_on(net.worker.all(&seats, ReadOpts::default())).unwrap();
+    assert_eq!(rows.len(), 1, "the worker kept the other tab's write");
+}

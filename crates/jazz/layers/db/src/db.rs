@@ -6397,7 +6397,7 @@ enum BatchKind {
     /// authority's state for an answered remote read, or the replica's
     /// known cut for a LocalOnly read or a LocalFirst offline fallback.
     Serializable {
-        snapshot: u64,
+        snapshot: Pos,
         reads: Vec<ReadRecord>,
         pinned: bool,
         /// On a client, its own commits still unsettled at begin: the
@@ -6707,7 +6707,7 @@ impl Db {
     pub async fn begin_serializable(&self, id: OpenTransactionId) -> Result<(), Error> {
         let (snapshot, own) = {
             let inner = self.inner.borrow();
-            (inner.frontier().seq, inner.unsettled_own())
+            (inner.frontier(), inner.unsettled_own())
         };
         self.begin(
             id,
@@ -6828,7 +6828,7 @@ impl Db {
                     if let Some(row) = op.row()
                         && inner
                             .settled_seq(schema.stored_table(op.table())?, row)?
-                            .is_some_and(|seq| seq > *snapshot)
+                            .is_some_and(|seq| seq > snapshot.seq)
                     {
                         return Err(conflict(
                             "row visible parent changed since transaction write was staged",
@@ -6867,9 +6867,9 @@ impl Db {
                     }
                 }
             }
-            let reads = {
+            let (reads, by) = {
                 let inner = self.inner();
-                reads
+                let reads = reads
                     .iter()
                     .map(|read| {
                         Ok(sync::WireRead {
@@ -6885,12 +6885,14 @@ impl Db {
                                 .collect::<Result<_, Error>>()?,
                         })
                     })
-                    .collect::<Result<Vec<_>, Error>>()?
+                    .collect::<Result<Vec<_>, Error>>()?;
+                (reads, inner.node_of(snapshot.n)?)
             };
             return self.commit_ops(
                 &batch,
                 sync::Kind::Serializable {
-                    snapshot: *snapshot,
+                    snapshot: snapshot.seq,
+                    by,
                     reads,
                     own: own.clone(),
                 },
@@ -6902,7 +6904,7 @@ impl Db {
                 if let Some(row) = op.row()
                     && inner
                         .newest_seq(schema.stored_table(op.table())?, row)?
-                        .is_some_and(|at| at > inner.served_at(*snapshot))
+                        .is_some_and(|at| at > *snapshot)
                 {
                     return Err(conflict(
                         "row visible parent changed since transaction write was staged",
@@ -7464,7 +7466,7 @@ impl TxRef<'_> {
             && self.db.is_client()
             && tier != ReadTier::LocalOnly
         {
-            let at = pinned.then_some(snapshot);
+            let at = pinned.then_some(snapshot.seq);
             self.db.remote_shape(&prepared.query)?;
             let through = self
                 .db
@@ -7483,6 +7485,8 @@ impl TxRef<'_> {
                     &ReadViewSourceSpec::Current,
                 )
                 .await?;
+            // At the positions the replica's server serves now.
+            let n = self.db.inner.borrow().frontier().n;
             if let Some(Batch {
                 kind:
                     BatchKind::Serializable {
@@ -7495,7 +7499,7 @@ impl TxRef<'_> {
                 // Pinned by the authority's answer, or (offline) at the
                 // replica's known cut.
                 if let Some(through) = through {
-                    *snapshot = through;
+                    *snapshot = Pos { n, seq: through };
                 }
                 *pinned = true;
             }
