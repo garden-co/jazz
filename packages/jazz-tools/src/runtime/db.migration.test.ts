@@ -9,7 +9,7 @@ import { type Db } from "./db.js";
 import { createDb } from "./default-create-db.js";
 import { waitForRows } from "./testing/support.js";
 
-import { computeSchemaHash } from "../dev/catalogue.js";
+import { computeSchemaHash, serializeForwardLenses } from "../dev/catalogue.js";
 import { loadDefinedMigration } from "../dev/catalogue-project.js";
 import { fetchMigrationGraph } from "../dev/migration-graph.js";
 import { renderMigrationStub } from "../dev/migrations.js";
@@ -418,5 +418,63 @@ it("publishes generated default-bearing relation migrations and preserves them a
     await oldDb?.shutdown();
     await server?.stop();
     await rm(root, { recursive: true, force: true });
+  }
+}, 60_000);
+
+it("a client shipping the app's migrations writes a renamed column where the server keeps it", async () => {
+  const before = { notes: s.table({ title: s.string() }, {}) };
+  const after = { notes: s.table({ body: s.string() }, {}) };
+  const beforeApp = s.defineApp(before),
+    afterApp = s.defineApp(after);
+  const allow = <A extends typeof beforeApp | typeof afterApp>(app: A) =>
+    s.definePermissions(app, ({ policy }) => [
+      policy.notes.allowRead.always(),
+      policy.notes.allowInsert.always(),
+    ]);
+  const rename = m.defineMigration({
+    from: before,
+    to: after,
+    migrate: { notes: { body: m.renameFrom("title") } },
+  });
+  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let oldDb: Db | undefined, newDb: Db | undefined;
+  try {
+    const { appId, adminSecret, url: serverUrl } = server;
+    await deploy({ appId, adminSecret, serverUrl, schema: beforeApp, permissions: allow(beforeApp) });
+    await deploy({
+      appId,
+      adminSecret,
+      serverUrl,
+      schema: afterApp,
+      permissions: allow(afterApp),
+      migration: rename,
+    });
+    const [fromHash, toHash] = await Promise.all([
+      computeSchemaHash(beforeApp.wasmSchema),
+      computeSchemaHash(afterApp.wasmSchema),
+    ]);
+    // What `jazz-tools deploy` writes to migrations/bundle.json.
+    const migrations = {
+      schemas: [
+        { hash: fromHash, schema: { tables: beforeApp.wasmSchema } },
+        { hash: toHash, schema: { tables: afterApp.wasmSchema } },
+      ],
+      migrations: [{ fromHash, toHash, forward: serializeForwardLenses(rename.forward) }],
+    };
+    newDb = await createDb({ ...(await localAccountConfig(appId, serverUrl)), migrations });
+    oldDb = await createDb({ ...(await localAccountConfig(appId, serverUrl)) });
+    const created = await newDb
+      .insert(afterApp.notes, { body: "written by v2" })
+      .wait({ tier: "global" });
+    const rows = await waitForRows(
+      oldDb,
+      beforeApp.notes.where({ id: { eq: created.id } }),
+      (rows) => rows.length === 1,
+    );
+    expect(rows).toEqual([{ id: created.id, title: "written by v2" }]);
+  } finally {
+    await oldDb?.shutdown();
+    await newDb?.shutdown();
+    await server.stop();
   }
 }, 60_000);

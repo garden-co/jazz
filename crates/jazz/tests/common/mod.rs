@@ -88,12 +88,18 @@ pub fn unhashed(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
     while i < text.len() {
+        // Only a suffix of a name: `~` after a name character, then
+        // exactly six lowercase hex digits and no further name character.
         if bytes[i] == b'~'
+            && i > 0
+            && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_')
             && bytes.len() >= i + 7
             && bytes[i + 1..i + 7]
                 .iter()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
-            && bytes.get(i + 7).is_none_or(|b| !b.is_ascii_alphanumeric())
+            && bytes
+                .get(i + 7)
+                .is_none_or(|b| !b.is_ascii_alphanumeric() && *b != b'_')
         {
             i += 7;
             continue;

@@ -1526,7 +1526,8 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
     }
   }
   await writeClientMigrations(migrationsDir, {
-    schemas: [...bundled].map(([hash, schema]) => ({ hash, schema })),
+    // As a deployment sends them (`{ tables }`), which the bindings decode.
+    schemas: [...bundled].map(([hash, schema]) => ({ hash, schema: { tables: schema } })),
     migrations: edges.map((edge) => ({
       fromHash: edge.fromHash,
       toHash: edge.toHash,

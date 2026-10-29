@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, writeFile, readdir, rm, rename, symlink } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, rename, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -119,4 +119,30 @@ it("keeps concurrent migration bundles isolated across module realms", async () 
     vi.doUnmock("esbuild");
     vi.resetModules();
   }
+});
+it("writes the deployed schemas and migrations for the app's clients", async () => {
+  const { root, migrationsDir } = await fixture();
+  await deploy({ ...options, schemaDir: root });
+  const bundle = JSON.parse(await readFile(join(migrationsDir, "bundle.json"), "utf8"));
+  const before = s.defineApp({ notes: s.table({ title: s.string() }, {}) });
+  const after = s.defineApp({ notes: s.table({ body: s.string() }, {}) });
+  const [fromHash, toHash] = await Promise.all([
+    computeSchemaHash(before.wasmSchema),
+    computeSchemaHash(after.wasmSchema),
+  ]);
+  expect(bundle.schemas.map(({ hash }: { hash: string }) => hash).sort()).toEqual(
+    [fromHash, toHash].sort(),
+  );
+  expect(bundle.migrations).toEqual([
+    {
+      fromHash,
+      toHash,
+      forward: [
+        expect.objectContaining({
+          table: "notes",
+          operations: [{ type: "rename", column: "title", value: "body" }],
+        }),
+      ],
+    },
+  ]);
 });

@@ -238,6 +238,18 @@ pub(crate) struct Names {
     confirmed: HashMap<SchemaVersionId, [u8; 16]>,
 }
 
+/// Two lineages of a table whose derived stored names collide (one in
+/// 2^24 per pair of same-named ones): a store that holds both refuses the
+/// second, with this typed error.
+fn collision(what: String, stored: &str) -> Error {
+    Error::new(
+        ErrorCode::Schema,
+        format!(
+            "{what} would be stored as `{stored}`, which another lineage already uses: stored name collisions are not supported yet"
+        ),
+    )
+}
+
 fn schema_error(message: impl Into<String>) -> Error {
     Error::new(ErrorCode::Schema, message)
 }
@@ -702,21 +714,23 @@ impl Names {
     /// An admitted version keeps the names it was admitted with. Otherwise a
     /// table or column takes the stored name its source has: the source of a
     /// lens into `schema` (`lenses` may name others; only lenses targeting
-    /// `schema` count) where one says it was renamed, else `base`'s table or
-    /// column of the same name, if it has the type that stored column holds
-    /// (a type changed in place makes a new column). A new table is stored
-    /// under its own name
-    /// unless another admitted version stores a differently named one there
-    /// (a rename freed the logical name, not the stored one), when it gets a
-    /// fresh suffix. A column added again without a lens, under a name an
-    /// admitted version stored in its table, continues the stored column the
-    /// last such version kept it in only if it has that column's type: its
-    /// identity is that stored column's, and only values of its type are
-    /// stored there. Any other new column gets a stored name no admitted
-    /// version uses. Where a lens from an admitted source adds a table or
-    /// column, any admitted version storing one there counts: the lens says
-    /// the source lacks it, so one dropped and added again is a new lineage
-    /// with its own default, not the data it held before.
+    /// `schema` count) where one says it was renamed, else the source's
+    /// table or column of the same name, if it has the type that stored
+    /// column holds (a type changed in place starts a new column). Without
+    /// a lens from an admitted source, the source is `base`.
+    ///
+    /// What starts a lineage is named after `schema`'s version (SPEC 10.7):
+    /// a new column `name~<hash>` ([`stored_column`]), a table a lens adds
+    /// `name~<hash>` ([`stored_table`]). Followed along the app's lenses,
+    /// every store derives the same names. Without a lens (a store's first
+    /// version, or one admitted without the app's lenses), a table or column
+    /// added again under a name an admitted version stored continues the
+    /// stored one the last such version kept it in, a column only if it has
+    /// that column's type; a new table otherwise keeps its own name when no
+    /// admitted version stores one there. Those names depend on what the
+    /// store admitted before, so a replica agrees with its authority on them
+    /// only through the app's lenses. Two lineages whose derived names
+    /// collide are refused ([`collision`]).
     pub(crate) fn resolve(
         &self,
         schema: &JazzSchema,
@@ -760,26 +774,27 @@ impl Names {
                         "lens renames table `{from}` to `{name}`, but the source has no `{from}`"
                     )));
                 }
-                // The first version's tables keep their names; a later
-                // version's new table is named after it, alike everywhere.
-                None if source.tables.is_empty() && self.versions.is_empty() => {
-                    (name.clone(), None)
-                }
+                // A table a lens adds is named after the version it adds it
+                // in, alike on every store that follows the lens. One added
+                // without a lens (a store's first version, or a version
+                // admitted without the app's lenses) continues the table the
+                // version last naming one kept it in, else keeps its name.
                 None => {
-                    // Added again without a lens: it continues the table
-                    // the version last naming one so kept it in.
                     let previous = (!lineage)
                         .then(|| self.last_table_stored_as(name))
                         .flatten()
                         .filter(|previous| !taken_tables.contains(*previous));
+                    let plain = lens.is_none()
+                        && !taken_tables.contains(name)
+                        && !self.claims_table(name, "", true);
                     if let Some(previous) = previous {
                         (previous.to_owned(), None)
+                    } else if plain {
+                        (name.clone(), None)
                     } else {
                         let stored = stored_table(&version, name);
                         if taken_tables.contains(&stored) || self.claims_table(&stored, "", true) {
-                            return Err(unsupported(format!(
-                                "table {name} hashing to stored table `{stored}`, which another table uses,"
-                            )));
+                            return Err(collision(format!("table {name}"), &stored));
                         }
                         (stored, None)
                     }
@@ -858,10 +873,10 @@ impl Names {
                         if taken.contains(&candidate)
                             || self.claims_column(&stored, &candidate, "", true)
                         {
-                            return Err(unsupported(format!(
-                                "column {name}.{} hashing to stored column `{candidate}`, which another lineage of the table uses,",
-                                column.name
-                            )));
+                            return Err(collision(
+                                format!("column {name}.{}", column.name),
+                                &candidate,
+                            ));
                         }
                         candidate
                     }

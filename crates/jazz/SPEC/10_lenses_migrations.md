@@ -658,14 +658,33 @@ schema version.
   copies, one whose type changed, one added without a lens that continues
   no stored column) is stored as `name~` and the first six hex digits of
   BLAKE3 over the length-prefixed parts `"column"`, the 16 bytes of `v`'s
-  id, and `name`. Every store derives the same name for the same version,
-  whatever else it admitted and in whatever order, so a replica stores a
-  version's new columns where its authority does without asking, and the
-  authority's `Catalogue.confirmed` digest only checks it. A column a
-  version keeps from its source (untouched or renamed) keeps the source's
-  stored column. Two lineages of one table that share a name collide only
-  if their hashes do (one in 2^24 per pair): a store refuses such a version
-  with "is not supported yet", and every store refuses it alike.
+  id, and `name`. A table a lens adds is stored as `name~` and the same
+  hash over `"table"`, `v`'s id and `name`. A column or table a version
+  keeps from its source (untouched or renamed) keeps the source's stored
+  one.
+- The app's lenses make the names agree. An app ships its schema versions
+  and the lenses between them (`DbConfig::with_migrations`; the JSON a
+  deployment publishes, which `jazz-tools deploy` writes to
+  `migrations/bundle.json`). A store opening, or viewing, a version it has
+  not admitted first admits the versions on a lens path to it, starting at
+  one it admitted or at the app's first version, as the authority admitted
+  them. Along those lenses every store derives the same names, whatever
+  else it admitted and in whatever order, so a replica stores a version's
+  columns where its authority does without asking, and the authority's
+  `Catalogue.confirmed` digest only checks it.
+- A version admitted without a lens (a store's first version, or one
+  opened without the app's lenses into it) is named against the store's
+  current version: a table or column of a name an admitted version stored
+  continues it (a column only with its type), and a new table keeps its
+  own name where no admitted version stores one. Those names depend on
+  what the store admitted before. A replica never renames what it stores:
+  if its upstream's catalogue names a version it admitted otherwise, the
+  replica refuses that catalogue ("not supported yet"); its remote reads
+  say why and its local reads go on.
+- Two lineages of one table that share a name collide only if their hashes
+  do (one in 2^24 per pair). A store that admits both refuses the second
+  with a typed `Schema` error; a store that only admits one cannot tell,
+  and its upstream's catalogue then refuses it as above.
 
 This is how the SQLite engine meets `INV-LENS-24`: an identity is never
 reused for another column epoch, and only a compatible re-addition keeps its
