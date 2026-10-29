@@ -369,6 +369,9 @@ pub struct Column {
     /// How a column that holds JSON (a JSON column or an array of them)
     /// checks the values written to it; `None` for any other column.
     pub json_type: Option<Rc<JsonCheck>>,
+    /// An enum column: it holds one of its declared variant names, so it
+    /// never gets the large-value treatment (SPEC 19.1).
+    pub enumerated: bool,
     /// How concurrent writes to the column merge at the authority.
     pub merge: crate::schema::MergeStrategy,
 }
@@ -510,6 +513,7 @@ fn stored_provenance_columns() -> Vec<Column> {
             default: None,
             json: false,
             json_type: None,
+            enumerated: false,
             merge: Default::default(),
         })
         .collect()
@@ -540,6 +544,7 @@ fn provenance_columns() -> Vec<Column> {
             default: None,
             json: false,
             json_type: None,
+            enumerated: false,
             merge: Default::default(),
         })
         .collect()
@@ -647,27 +652,33 @@ impl Schema {
             let columns = table
                 .columns
                 .iter()
-                .map(|column| Column {
-                    name: column.name.clone(),
-                    stored: column.name.clone(),
-                    ty: column.column_type.clone(),
-                    default: column.default.clone(),
-                    json: column.large_value_kind == crate::schema::LargeValueSemanticKind::Json,
-                    json_type: public
-                        .and_then(|public| {
-                            public
-                                .columns
-                                .columns
-                                .iter()
-                                .find(|declared| declared.name_str() == column.name)
-                        })
-                        .filter(|declared| holds_json(&declared.column_type))
-                        .map(|declared| Rc::new(JsonCheck::new(declared.column_type.clone()))),
-                    merge: table
-                        .merge_strategies
-                        .get(&column.name)
-                        .copied()
-                        .unwrap_or_default(),
+                .map(|column| {
+                    let declared = public.and_then(|public| {
+                        public
+                            .columns
+                            .columns
+                            .iter()
+                            .find(|declared| declared.name_str() == column.name)
+                    });
+                    Column {
+                        name: column.name.clone(),
+                        stored: column.name.clone(),
+                        ty: column.column_type.clone(),
+                        default: column.default.clone(),
+                        json: column.large_value_kind
+                            == crate::schema::LargeValueSemanticKind::Json,
+                        json_type: declared
+                            .filter(|declared| holds_json(&declared.column_type))
+                            .map(|declared| Rc::new(JsonCheck::new(declared.column_type.clone()))),
+                        enumerated: declared.is_some_and(|declared| {
+                            matches!(declared.column_type, crate::tools::ColumnType::Enum { .. })
+                        }),
+                        merge: table
+                            .merge_strategies
+                            .get(&column.name)
+                            .copied()
+                            .unwrap_or_default(),
+                    }
                 })
                 .collect();
             let mut indexes: Vec<Vec<String>> = table
@@ -816,6 +827,7 @@ impl Schema {
                             // A reopened store knows a column by name only.
                             stored.ty = column.ty.clone();
                             stored.json = column.json;
+                            stored.enumerated = column.enumerated;
                             continue;
                         }
                         let default = match &column.default {
@@ -882,6 +894,7 @@ impl Table {
                     default: None,
                     json: false,
                     json_type: None,
+                    enumerated: false,
                     merge: Default::default(),
                 })
                 .collect(),

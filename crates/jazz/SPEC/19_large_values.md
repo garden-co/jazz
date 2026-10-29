@@ -9,6 +9,9 @@ plus an **epoch**: a growing list of edits on top of that tree. A row version's
 cell names an epoch and how many of its edits apply. That prefix never changes,
 so the version's value is immutable while the epoch grows.
 
+An enum column holds one of its declared variant names, so it is never
+large-capable: it stores a plain TEXT cell and gets no refcount triggers.
+
 Writes to a row are linearized by its authority (serializable transactions
 trivially, mergeable ones through their merge strategy), so most edits extend
 the newest version. One edit then costs its few encoded bytes in the epoch
@@ -445,6 +448,10 @@ Reference counts are kept by triggers:
 - every epoch holds its root (`_jazz_lv_root.refs`);
 - every branch holds its children through `_jazz_lv_edge`;
 - leases and receipts hold their staged nodes.
+
+The cell triggers on a table and its `__h` watch exactly its large-capable
+columns, under every schema version the store has held, so a reopened store
+learns from them which stored columns can hold a chunked cell.
 
 An epoch whose `refs` reaches 0 is deleted, releasing its root; a root at 0
 releases its tree; a node no edge, root, lease or receipt holds is reclaimed.
