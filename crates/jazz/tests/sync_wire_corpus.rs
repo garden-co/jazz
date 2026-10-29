@@ -331,8 +331,15 @@ impl Transport for Recording {
 /// Message shapes the one frame per variant leaves unpinned: a one-shot
 /// `Read` (its span carries a snapshot and a view), `Rows` carrying the
 /// commits behind history versions, and a `Catalogue` carrying versions
-/// with their stored names and a lens's cells.
-const SHAPES: [&str; 3] = ["Read/once", "Rows/origins", "Catalogue/versions"];
+/// with their stored names and a lens's cells. Storage failures and legacy
+/// generic failures also pin their distinct fate tags.
+const SHAPES: [&str; 5] = [
+    "Read/once",
+    "Rows/origins",
+    "Catalogue/versions",
+    "Fate/storage",
+    "Fate/other",
+];
 
 fn shape(message: &SyncMessage) -> Option<&'static str> {
     match message {
@@ -344,6 +351,14 @@ fn shape(message: &SyncMessage) -> Option<&'static str> {
         SyncMessage::Catalogue {
             versions, cells, ..
         } if !versions.is_empty() && !cells.is_empty() => Some(SHAPES[2]),
+        SyncMessage::Fate {
+            result: Err(SyncWireError::Storage(_)),
+            ..
+        } => Some(SHAPES[3]),
+        SyncMessage::Fate {
+            result: Err(SyncWireError::Other(_)),
+            ..
+        } => Some(SHAPES[4]),
         _ => None,
     }
 }
@@ -689,6 +704,24 @@ fn produce_sqlite_sync_wire_corpus_v1() {
         "set JAZZ_WRITE_SQLITE_SYNC_WIRE_CORPUS=1 to overwrite the pinned corpus"
     );
     let mut recorded = record();
+    // Pin the appended storage tag and the existing generic tag through
+    // the production encoder without depending on platform-specific SQL
+    // diagnostics. The storage-errors tests exercise actual failed uploads.
+    for result in [
+        SyncWireError::Storage("Storage: database or disk is full".to_owned()),
+        SyncWireError::Other("legacy generic failure".to_owned()),
+    ] {
+        let message = SyncMessage::Fate {
+            tx: jazz::db::LOCAL_BASE + 1,
+            through: 1,
+            result: Err(result),
+            held: Vec::new(),
+            global: true,
+        };
+        let name = shape(&message).expect("an error fate shape");
+        let [frame] = encode_frames(message).unwrap().try_into().unwrap();
+        recorded.insert(name.to_owned(), ("client".to_owned(), frame));
+    }
     let missing: Vec<&str> = VARIANTS
         .iter()
         .copied()

@@ -412,6 +412,74 @@ fn a_serializable_commit_is_not_validated_against_an_unreadable_store() {
         client.wait_for_transaction(receipt.0, DurabilityTier::Global),
     );
     let error = outcome.expect_err("an unreadable read set is not accepted");
+    assert_eq!(error.code, jazz::db::ErrorCode::Storage, "{error:?}");
     assert!(error.message.contains("Storage"), "{error:?}");
     assert_eq!(labels(&server), ["guard"]);
+}
+
+/// Alice's upload cannot be stored, but the authority records its failure.
+/// Alice disconnects before receiving it; after both stores reopen, her
+/// original pending upload receives the stored failure with code `storage`.
+///
+/// ```text
+/// alice ──upload──► authority ──storage failure──► recorded verdict
+///   └── closes before receiving it
+/// alice reopened ──same upload──► authority reopened ──storage error──► alice
+/// ```
+#[test]
+fn a_recorded_storage_failure_keeps_its_code_after_both_stores_reopen() {
+    let server_path = scratch("storage-verdict-server");
+    let client_path = scratch("storage-verdict-alice");
+    let open_server = || {
+        let server = block_on(Db::open_at(
+            config(0xee),
+            &server_path,
+            FileOptions::default(),
+        ))
+        .unwrap();
+        server.set_authority();
+        server
+    };
+    let tx = {
+        let server = open_server();
+        let alice = open_file(&client_path, 0xa1);
+        let (client_side, server_side) = duplex();
+        let _upstream = block_on(alice.connect_upstream(client_side));
+        server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+        let tx = insert(&alice, 1, "not accepted").unwrap();
+
+        // A host fault is injected through a second connection because the
+        // public write API cannot otherwise make the authority's SQL fail.
+        let stored: String = rusqlite::Connection::open(&server_path)
+            .unwrap()
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE '%items%' \
+                 ORDER BY length(name) LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        hide(&server_path, &stored);
+        block_on(alice.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+        restore(&server_path, &stored);
+        assert!(labels(&server).is_empty());
+        assert_eq!(alice.pending_upload_count(), 1, "Alice has no verdict yet");
+        tx
+    };
+
+    let server = open_server();
+    let alice = open_file(&client_path, 0xa1);
+    let (client_side, server_side) = duplex();
+    let _upstream = block_on(alice.connect_upstream(client_side));
+    server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+    let error = drive(
+        &[&alice, &server, &alice],
+        alice.wait_for_transaction(tx, DurabilityTier::Global),
+    )
+    .expect_err("restoring storage must not turn the recorded failure into acceptance");
+    assert_eq!(error.code, jazz::db::ErrorCode::Storage, "{error:?}");
+    assert!(error.message.contains("Storage"), "{error:?}");
+    assert!(labels(&alice).is_empty());
+    assert!(labels(&server).is_empty());
 }
