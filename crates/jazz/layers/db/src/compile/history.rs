@@ -90,14 +90,13 @@ impl Ctx<'_> {
             // Every listed version contributes, current or superseded.
             return self.compile_aggregate(query, aggregate, versions, &source, alias, &wheres);
         }
-        let (order, ranked_order) = self.order_sql(versions, alias, &query.order_by)?;
+        let order = self.order_sql(versions, alias, &query.order_by)?;
         // Versions of one row share its id: their seq orders them.
         let tie = match query.order_by.last().map(|key| key.direction) {
             Some(OrderDirection::Desc) => "DESC",
             _ => "ASC",
         };
         let order = format!("{order}, {alias}._seq {tie}");
-        let ranked_order = ranked_order.map(|ranked| format!("{ranked}, {alias}._seq {tie}"));
         let columns = projection
             .iter()
             .map(|(name, _)| Ok(format!(", {}", column_sql(versions, alias, name)?)))
@@ -115,16 +114,13 @@ impl Ctx<'_> {
         };
         Ok(Compiled {
             sql: statement(&order),
-            ranked_sql: ranked_order.as_deref().map(statement),
             params: self.params,
             projection,
             tables: self.tables,
             aggregate: false,
-            large_group: false,
             joined: 0,
             versioned: true,
             union: false,
-            preps: self.preps,
             partial: Vec::new(),
         })
     }
@@ -218,12 +214,9 @@ impl Ctx<'_> {
 }
 
 /// The table a history source of `table` reads as: its columns plus the
-/// history metadata, under the source's name (large-value preps answer
-/// from the table and its history alike), each version carrying its
+/// history metadata, under the source's name, each version carrying its
 /// current row's deletion.
 pub(super) fn versions_table(table: &Table) -> Table {
-    // The source's columns plus the metadata, under the source's name:
-    // large-value preps answer from the table and its history alike.
     let mut versions = table.clone();
     for metadata in HistoryMetadataColumn::ALL {
         let ty = match metadata {
