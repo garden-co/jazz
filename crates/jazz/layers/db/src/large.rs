@@ -250,12 +250,8 @@ fn key(hash: &[u8]) -> Result<NodeKey, Error> {
 }
 
 /// Whether `ty` (or the type a nullable wraps) is stored by this module.
-/// An enum column holds only its variant names, so it never is.
 pub(crate) fn large_capable(column: &Column) -> bool {
     use crate::records::ValueType;
-    if column.enumerated {
-        return false;
-    }
     let mut ty = &column.ty;
     while let ValueType::Nullable(inner) = ty {
         ty = inner;
@@ -392,29 +388,42 @@ pub(crate) fn stored_large_columns(
     Ok(columns)
 }
 
-/// The quoted column list of a trigger's `AFTER UPDATE OF "a", "b" ON`.
+/// The column list of a trigger [`triggers`] wrote:
+/// `CREATE TRIGGER [IF NOT EXISTS] "name" AFTER UPDATE OF "a", "b" ON ...`.
+/// The quoted name is skipped as a whole, so no name can fake the list.
 fn update_of_columns(sql: &str) -> Option<Vec<String>> {
-    let mut rest = &sql[sql.find("UPDATE OF ")? + "UPDATE OF ".len()..];
+    let rest = sql
+        .trim_start()
+        .strip_prefix("CREATE TRIGGER ")?
+        .trim_start();
+    let rest = rest.strip_prefix("IF NOT EXISTS ").unwrap_or(rest);
+    let (_name, rest) = quoted(rest)?;
+    let mut rest = rest.trim_start().strip_prefix("AFTER UPDATE OF ")?;
     let mut columns = Vec::new();
     loop {
-        rest = rest.trim_start().strip_prefix('"')?;
-        let mut column = String::new();
-        loop {
-            let end = rest.find('"')?;
-            column.push_str(&rest[..end]);
-            rest = &rest[end + 1..];
-            match rest.strip_prefix('"') {
-                Some(escaped) => {
-                    column.push('"');
-                    rest = escaped;
-                }
-                None => break,
-            }
-        }
+        let (column, after) = quoted(rest)?;
         columns.push(column);
-        match rest.trim_start().strip_prefix(',') {
+        match after.trim_start().strip_prefix(',') {
             Some(more) => rest = more,
             None => return Some(columns),
+        }
+    }
+}
+
+/// A leading `"..."` identifier (doubled quotes escaped) and what follows.
+fn quoted(sql: &str) -> Option<(String, &str)> {
+    let mut rest = sql.trim_start().strip_prefix('"')?;
+    let mut name = String::new();
+    loop {
+        let end = rest.find('"')?;
+        name.push_str(&rest[..end]);
+        rest = &rest[end + 1..];
+        match rest.strip_prefix('"') {
+            Some(escaped) => {
+                name.push('"');
+                rest = escaped;
+            }
+            None => return Some((name, rest)),
         }
     }
 }
@@ -2132,29 +2141,38 @@ mod tests {
 
     /// A reopened store learns its large-capable columns from the
     /// refcount triggers, including a set a later schema added and names
-    /// that need quoting.
+    /// that need quoting, even names that read like the column list.
     #[test]
     fn stored_large_columns_reads_every_trigger_set() {
         use crate::records::ValueType;
         let (conn, _chunks) = chunks();
+        let docs = "d AFTER UPDATE OF \"x\"";
         let names = ["body", "odd \"name\", ON x", "count", "late"];
         let mut table = Table::stored_only(
-            "docs".to_owned(),
+            docs.to_owned(),
             names[..3].iter().map(|name| name.to_string()).collect(),
         );
         for column in &mut table.columns[..2] {
             column.ty = ValueType::String;
         }
         crate::db::execute_script(&conn, &table.ddl()).unwrap();
-        let mut late = Table::stored_only("docs".to_owned(), vec![names[3].to_owned()]).columns;
+        let mut late = Table::stored_only(docs.to_owned(), vec![names[3].to_owned()]).columns;
         late[0].ty = ValueType::Bytes;
-        conn.execute_batch(
-            "ALTER TABLE docs ADD COLUMN late; ALTER TABLE docs__h ADD COLUMN late;",
-        )
-        .unwrap();
+        for target in [docs.to_owned(), format!("{docs}__h")] {
+            conn.execute_batch(&format!("ALTER TABLE {} ADD COLUMN late;", quote(&target)))
+                .unwrap();
+        }
         crate::db::execute_script(&conn, &triggers(&table, &[&late[0]], Some("late"))).unwrap();
         let expected: BTreeSet<String> = [names[0], names[1], names[3]].map(str::to_owned).into();
-        assert_eq!(stored_large_columns(&conn, "docs").unwrap(), expected);
+        assert_eq!(stored_large_columns(&conn, docs).unwrap(), expected);
+
+        // A table without large-capable columns has no triggers.
+        let plain = Table::stored_only("plain".to_owned(), vec!["count".to_owned()]);
+        crate::db::execute_script(&conn, &plain.ddl()).unwrap();
+        assert_eq!(
+            stored_large_columns(&conn, "plain").unwrap(),
+            BTreeSet::new()
+        );
     }
 
     fn chunked(conn: &Connection, chunks: &Chunks, kind: LargeValueKind, logical: &[u8]) -> Sql {
@@ -2306,7 +2324,6 @@ mod tests {
             default: None,
             json: false,
             json_type: None,
-            enumerated: false,
             merge: Default::default(),
         };
         conn.execute_batch(&triggers(&table, &[&column], None))
@@ -2364,7 +2381,6 @@ mod tests {
             default: None,
             json: false,
             json_type: None,
-            enumerated: false,
             merge: Default::default(),
         };
         let (a, b, c) = (column("a"), column("b"), column("c"));
@@ -2679,7 +2695,6 @@ mod tests {
             default: None,
             json: false,
             json_type: None,
-            enumerated: false,
             merge: Default::default(),
         };
         conn.execute_batch(&triggers(&table, &[&column], None))

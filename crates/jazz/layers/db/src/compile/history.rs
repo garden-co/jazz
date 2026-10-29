@@ -230,7 +230,6 @@ pub(super) fn versions_table(table: &Table) -> Table {
             default: None,
             json: false,
             json_type: None,
-            enumerated: false,
             merge: Default::default(),
         });
     }
@@ -244,7 +243,6 @@ pub(super) fn versions_table(table: &Table) -> Table {
             default: None,
             json: false,
             json_type: None,
-            enumerated: false,
             merge: Default::default(),
         });
     }
