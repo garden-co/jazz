@@ -744,7 +744,7 @@ fn a_relays_commit_a_write_was_built_on_is_what_its_writer_saw() {
         }],
         author: None,
         session: None,
-        expect: Vec::new(),
+        echo: false,
         deltas: Vec::new(),
         sources: Vec::new(),
         bases: vec![WireBase {

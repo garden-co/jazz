@@ -55,6 +55,7 @@ source of truth and names each invariant's tests):
 - `INV-SYNC-48`: A Remote read MUST NOT report rows the server's answer no longer lists.
 - `INV-SYNC-49`: A server MUST process a session's messages in the order sent, so a read sent after a commit is served after that commit.
 - `INV-SYNC-50`: A non-durable client's local seqs MUST NOT collide with its relay's.
+- `INV-SYNC-51`: The authority MUST NOT hold back a writer's own row unless the commit applied over the very version the writer built on, unmerged and stamped with the author the writer stamped (§8.3); every other row ships.
 - `INV-TX-2`, `INV-TX-11`, `INV-TX-23`: commit, seq and relay rules (ch. 3).
 - `INV-WIRE-1`, `INV-WIRE-2`: exact postcard frames and Hello version negotiation (§8.1.1).
 
@@ -193,9 +194,11 @@ fields:
   non-serializable commit.
 - `bases`: for each row written over an image the writer held, the base of
   that image (SPEC 4 §4.6). Only the authority's conflict derivation reads it.
-- `expect`: a digest of each written row as the writer's replica holds it
-  afterwards. The authority does not echo a row whose new version matches;
-  the writer installs its own as that version (§8.3).
+- `echo`: ship every written row back. A replica restored after a reopen
+  sets it on its resent commits, as it no longer has its images of what they
+  wrote, and so does a writer that stamped a row as an author other than the
+  one the commit declares. Otherwise the authority infers which rows it need
+  not echo (§8.3).
 - `deltas`, `sources`: chunked cells travelling as edits over the writer's
   newest settled version, and the settled versions that trees' unpushed
   nodes sit under (SPEC 19.8).
@@ -211,7 +214,8 @@ connection. It is stored a row per op, not as one encoded message:
   base and serializable read, by list (`part`) and position (`n`).
 - `_jazz_pending_rows (tx, n, tbl, id, key)`: the local rows it wrote.
 
-`expect` is not kept: after a reopen the server ships those rows. A row's
+A replica's images of what its commits wrote are not kept: after a reopen
+the server ships those rows (`echo`). A row's
 values over the inline limit live in large-value storage, so a stored op is
 about the size of the row it writes, however large the commit. A store with
 a 2 MiB value limit (a Durable Object) therefore keeps any commit whose rows
@@ -255,10 +259,38 @@ read-your-writes end to end.
 - `through`: the server seq the session is complete through after the
   commit's rows shipped. Applying a fate never moves the replica's settled seq
   backward (`INV-SYNC-5`).
-- `held`: the `expect` rows the server did not ship, each with the
-  authority's `$createdAt`/`$updatedAt` stamps, so the writer can install its
-  own image as the accepted version. A keystroke-grade edit therefore costs
-  one `Fate` and one `Settled` downstream.
+- `held`: the commit's rows the server did not ship, each named as a base
+  is (the commit's first op that writes it, and its branch key) and carrying
+  the authority's `$createdAt`/`$updatedAt` stamps, so the writer can install
+  its own image as the accepted version. A keystroke-grade edit therefore
+  costs one `Fate` and one `Settled` downstream.
+
+The authority infers, rather than compares, that a row's new version is the
+writer's image of it (`INV-SYNC-51`). It holds a row only if all of these
+hold:
+
+1. The row's version just before the commit is the one the writer built on:
+   the accepted version its base names; or, for a base on the writer's own
+   earlier commit, the version that commit landed as, which this session
+   itself held for that commit; or, with no base, no version at all, and the
+   op that first writes it is an insert (or an upsert of an unbranched row).
+2. No text merge changed a value the commit sent (SPEC 4 §4.3), and no op of
+   the commit moves the row between branches.
+3. The author the authority stamps is the one the writer did: the commit's
+   `author`, or its link's identity for a writer's own writes (a replica
+   writes as the identity it connects as).
+4. The commit does not ask for `echo`, and the version is still the row's
+   current one when fan-out ships the session's rows.
+
+Equal inputs then give an equal row: the ops apply the same way to the same
+image under the same schema, the stamps excepted. A replica that receives a
+catalogue with new versions while commits are pending can no longer vouch
+for what it made of them under the old names: a row of such a commit that
+arrives `held` is asked for whole (`Hold`, §19.8) instead of installed. The
+inference is guarded in tests, not on the wire: under the `testing` feature
+the authority records its image of each row it holds, and a writer in the
+same process asserts that its own image matches as it installs it.
+
 - `global`: the fate is the global authority's (directly or relayed). A
   non-global fate is the final word of a replica with no upstream, which
   orders its sessions' commits but cannot make them `Global`.

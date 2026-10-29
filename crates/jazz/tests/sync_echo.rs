@@ -1,8 +1,10 @@
-//! A writer's own rows are not echoed back: when the authority's new
-//! version of a row is exactly what the writer's commit produced there (its
-//! digest in the commit's `expect`), the Fate names the row `held` and the
-//! writer installs its own image at `through`, with the authority's stamps.
-//! Anything else ships the image as before.
+//! A writer's own rows are not echoed back: when the authority infers its
+//! new version of a row is exactly what the writer's commit produced there
+//! (the commit applied cleanly over the version it was built on, stamped as
+//! the writer stamped it), the Fate names the row `held` and the writer
+//! installs its own image at `through`, with the authority's stamps.
+//! Anything else ships the image as before. Under test every held row is
+//! checked against the writer's image as it is installed.
 
 use crate::common;
 
@@ -12,13 +14,16 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, SyncMessage, Transport, TransportError,
-    Upstream, block_on,
+    Db, DbConfig, DbIdentity, FileOptions, InsertOptions, ReadOpts, SyncMessage, Transport,
+    TransportError, Upstream, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::Query;
 use jazz::records::Value;
-use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+use jazz::tools::{
+    ColumnDescriptor, ColumnMergeStrategy, ColumnType, RowDescriptor, Schema, SchemaBuilder,
+    TableName, TableSchema, TableSchemaBuilder, Value as PublicValue,
+};
 
 use common::{allow_all_policies, compile_schema};
 
@@ -31,19 +36,47 @@ const COLUMNS: [&str; 6] = [
     "$updatedBy.identity.subject",
 ];
 
-fn open(node: u8, author: AuthorSubject) -> Db {
+fn config(node: u8, author: AuthorSubject) -> DbConfig {
     let docs = TableSchemaBuilder::new("docs")
         .column("title", ColumnType::Text)
         .column("body", ColumnType::Text)
         .policies(allow_all_policies());
-    let config = DbConfig::new(
+    DbConfig::new(
         compile_schema(&SchemaBuilder::new().table(docs).build()),
         DbIdentity {
             node: NodeUuid::from_bytes([node; 16]),
             author,
         },
-    );
-    block_on(Db::open(config)).unwrap()
+    )
+}
+
+fn open(node: u8, author: AuthorSubject) -> Db {
+    block_on(Db::open(config(node, author))).unwrap()
+}
+
+/// `docs` with `body` merging as text (SPEC 4 §4.3).
+fn open_merging(node: u8, author: AuthorSubject) -> Db {
+    let text = |name: &str| {
+        ColumnDescriptor::new(name, ColumnType::Text).default(PublicValue::Text(String::new()))
+    };
+    let schema = compile_schema(&Schema::from([(
+        TableName::new("docs"),
+        TableSchema {
+            columns: RowDescriptor::new(vec![
+                text("title"),
+                text("body").merge_strategy(ColumnMergeStrategy::Text),
+            ]),
+            indexed_columns: None,
+            composite_indexes: Vec::new(),
+            policies: allow_all_policies(),
+            branch_by: Vec::new(),
+        },
+    )]));
+    let identity = DbIdentity {
+        node: NodeUuid::from_bytes([node; 16]),
+        author,
+    };
+    block_on(Db::open(DbConfig::new(schema, identity))).unwrap()
 }
 
 fn user(n: u8) -> AuthorSubject {
@@ -291,11 +324,11 @@ fn a_write_landing_between_ships_the_image() {
 }
 
 #[test]
-fn a_server_filled_column_still_ships() {
-    // The authority stamps the connection's identity as the writer, not
-    // the one the replica stamped locally.
+fn a_write_stamped_as_another_author_still_ships() {
+    // The replica writes as the system at its node; its link is a user's,
+    // and the authority stamps that user as the writer.
     let server = open(0, AuthorSubject::SYSTEM);
-    let client = open(1, user(1));
+    let client = open(1, AuthorSubject::SYSTEM);
     let (_upstream, down) = connect(&server, &client, user(9));
     let _live = subscribe(&client);
     pump(&server, &[&client]);
@@ -313,11 +346,145 @@ fn a_server_filled_column_still_ships() {
     pump(&server, &[&client]);
 
     let (images, held) = shipped(&down);
-    assert_eq!(held, vec![0, 0], "neither write matched");
+    assert_eq!(
+        held,
+        vec![0, 0],
+        "neither write is as the replica stamped it"
+    );
     assert!(images >= 2, "{images}");
     let settled = snapshot(&server);
     assert!(settled[0].contains(&user(9).principal_parts().1));
     assert_eq!(snapshot(&client), settled);
+}
+
+#[test]
+fn a_chain_of_pending_writes_is_held() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let client = open(1, user(1));
+    let (_upstream, down) = connect(&server, &client, user(1));
+    let _live = subscribe(&client);
+    pump(&server, &[&client]);
+    block_on(client.insert(
+        "docs",
+        cells(&[("title", "Doc"), ("body", "")]),
+        InsertOptions {
+            row_id: Some(row(1)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    pump(&server, &[&client]);
+    down.borrow_mut().clear();
+
+    // Three keystrokes, each written before the fate of the one before
+    // arrives and so built on it. Each lands in its own tick: a version
+    // superseded before fan-out ships as history either way.
+    for body in ["a", "ab", "abc"] {
+        block_on(client.update("docs", row(1), cells(&[("body", body)]), Default::default()))
+            .unwrap();
+        block_on(client.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+    }
+    pump(&server, &[&client]);
+    assert_eq!(shipped(&down), (0, vec![1, 1, 1]));
+    assert_eq!(snapshot(&client), snapshot(&server));
+}
+
+#[test]
+fn a_chain_over_a_write_landing_between_ships() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let a = open(1, user(1));
+    let b = open(2, user(2));
+    let (_a_up, a_down) = connect(&server, &a, user(1));
+    let (_b_up, _b_down) = connect(&server, &b, user(2));
+    let (_a_live, _b_live) = (subscribe(&a), subscribe(&b));
+    block_on(a.insert(
+        "docs",
+        cells(&[("title", "Doc"), ("body", "")]),
+        InsertOptions {
+            row_id: Some(row(1)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    pump(&server, &[&a, &b]);
+    a_down.borrow_mut().clear();
+
+    // a writes twice, the second over its first; b's write lands before
+    // either. Neither of a's is over the version before it.
+    block_on(a.update("docs", row(1), cells(&[("title", "A")]), Default::default())).unwrap();
+    block_on(b.update("docs", row(1), cells(&[("body", "B")]), Default::default())).unwrap();
+    block_on(b.tick()).unwrap();
+    block_on(server.tick()).unwrap();
+    block_on(a.update(
+        "docs",
+        row(1),
+        cells(&[("title", "AA")]),
+        Default::default(),
+    ))
+    .unwrap();
+    pump(&server, &[&a, &b]);
+
+    let (images, held) = shipped(&a_down);
+    assert!(images > 0, "a's base was stale");
+    assert_eq!(held, vec![0, 0]);
+    let settled = snapshot(&server);
+    assert!(settled[0].contains("\"AA\"") && settled[0].contains("\"B\""));
+    assert_eq!(snapshot(&a), settled);
+    assert_eq!(snapshot(&b), settled);
+}
+
+#[test]
+fn an_upsert_of_a_new_row_is_held() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let client = open(1, user(1));
+    let (_upstream, down) = connect(&server, &client, user(1));
+    let _live = subscribe(&client);
+    pump(&server, &[&client]);
+    write_late(&server, &client, || {
+        block_on(client.upsert(
+            "docs",
+            row(1),
+            cells(&[("title", "Doc"), ("body", "")]),
+            Default::default(),
+        ))
+        .unwrap();
+    });
+    pump(&server, &[&client]);
+    assert_eq!(shipped(&down), (0, vec![1]));
+    assert_eq!(snapshot(&client), snapshot(&server));
+}
+
+#[test]
+fn a_serializable_commit_is_held() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let client = open(1, user(1));
+    let (_upstream, down) = connect(&server, &client, user(1));
+    let _live = subscribe(&client);
+    block_on(client.insert(
+        "docs",
+        cells(&[("title", "Doc"), ("body", "")]),
+        InsertOptions {
+            row_id: Some(row(1)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    pump(&server, &[&client]);
+    down.borrow_mut().clear();
+
+    let tx = jazz::tools::OpenTransactionId::new();
+    block_on(client.begin_serializable(tx)).unwrap();
+    block_on(
+        client
+            .tx_ref(tx)
+            .update("docs", row(1), cells(&[("body", "x")]), Default::default()),
+    )
+    .unwrap();
+    block_on(client.commit_serializable_handle(tx)).unwrap();
+    pump(&server, &[&client]);
+    assert_eq!(shipped(&down), (0, vec![1]));
+    assert_eq!(snapshot(&client), snapshot(&server));
 }
 
 #[test]
@@ -358,6 +525,104 @@ fn a_lost_fate_resumes_correctly() {
     block_on(client.update("docs", row(1), cells(&[("body", "xy")]), Default::default())).unwrap();
     pump(&server, &[&client]);
     assert_eq!(shipped(&down), (0, vec![1]));
+    assert_eq!(snapshot(&client), snapshot(&server));
+}
+
+#[test]
+fn a_text_merge_against_a_concurrent_edit_ships() {
+    let server = open_merging(0, AuthorSubject::SYSTEM);
+    let a = open_merging(1, user(1));
+    let b = open_merging(2, user(2));
+    let (_a_up, a_down) = connect(&server, &a, user(1));
+    let (_b_up, b_down) = connect(&server, &b, user(2));
+    let (_a_live, _b_live) = (subscribe(&a), subscribe(&b));
+    block_on(a.insert(
+        "docs",
+        cells(&[("title", "Doc"), ("body", "middle")]),
+        InsertOptions {
+            row_id: Some(row(1)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    pump(&server, &[&a, &b]);
+    a_down.borrow_mut().clear();
+    b_down.borrow_mut().clear();
+
+    // b's edit lands first; a's, over the same base, merges with it.
+    block_on(b.update(
+        "docs",
+        row(1),
+        cells(&[("body", "middle end")]),
+        Default::default(),
+    ))
+    .unwrap();
+    block_on(b.tick()).unwrap();
+    block_on(server.tick()).unwrap();
+    block_on(a.update(
+        "docs",
+        row(1),
+        cells(&[("body", "start middle")]),
+        Default::default(),
+    ))
+    .unwrap();
+    pump(&server, &[&a, &b]);
+
+    let (a_images, a_held) = shipped(&a_down);
+    assert!(a_images > 0 && a_held == vec![0], "{a_images} {a_held:?}");
+    assert_eq!(
+        shipped(&b_down).1,
+        vec![1],
+        "b's edit was over the current version"
+    );
+    let settled = snapshot(&server);
+    assert!(settled[0].contains("start middle end"), "{settled:?}");
+    assert_eq!(snapshot(&a), settled);
+    assert_eq!(snapshot(&b), settled);
+}
+
+#[test]
+fn a_commit_restored_after_a_reopen_ships() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("replica.sqlite");
+    let open_file = || {
+        block_on(Db::open_at(
+            config(1, user(1)),
+            &path,
+            FileOptions::default(),
+        ))
+        .unwrap()
+    };
+    let server = open(0, AuthorSubject::SYSTEM);
+    {
+        let client = open_file();
+        let (upstream, _down) = connect(&server, &client, user(1));
+        let _live = subscribe(&client);
+        block_on(client.insert(
+            "docs",
+            cells(&[("title", "Doc"), ("body", "")]),
+            InsertOptions {
+                row_id: Some(row(1)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        pump(&server, &[&client]);
+        // Written offline: it is pending when the store closes.
+        assert!(client.detach_connection(&upstream));
+        block_on(client.update("docs", row(1), cells(&[("body", "x")]), Default::default()))
+            .unwrap();
+    }
+    let client = open_file();
+    let (_upstream, down) = connect(&server, &client, user(1));
+    let _live = subscribe(&client);
+    pump(&server, &[&client]);
+
+    // The reopened store has no image of what its commit left: the row
+    // ships.
+    let (images, held) = shipped(&down);
+    assert_eq!(held, vec![0]);
+    assert!(images > 0);
     assert_eq!(snapshot(&client), snapshot(&server));
 }
 
