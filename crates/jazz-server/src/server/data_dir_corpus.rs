@@ -41,9 +41,9 @@ const FIXTURE: &str = concat!(
     "/fixtures/server-data-dir-v1/jazz.sqlite.gz.base64"
 );
 /// SHA-256 of the decoded file.
-const SHA256: &str = "eeab989cd5213fecdc08783e118bed23b16f39a91bab0c8bd8e82ffbb24edf3e";
+const SHA256: &str = "16282b9826f46b1ffbe3d7bcf846d6fbfcf258d6cf3d03e128cc2602d5eee1b0";
 /// The account the producer registered for Alice.
-const ALICE_ACCOUNT: &str = "1451c1d2-2d6f-4d4a-a788-9479861be1a9";
+const ALICE_ACCOUNT: &str = "44e1117f-1886-4155-8419-ccd9b1e10841";
 const ADMIN_SECRET: &str = "corpus-admin";
 
 fn app_id() -> AppId {

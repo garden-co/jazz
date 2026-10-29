@@ -652,18 +652,12 @@ fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> 
             })
             .collect();
         let mut table = Table::stored_only(name.clone(), columns);
-        // A large-capable column has a partial index of its chunked rows
-        // (`large::triggers`): its kind comes from the schemas unioned in.
+        // A large-capable column is one the large-value refcount triggers
+        // watch (`large::triggers`): its kind comes from the schemas unioned
+        // in.
+        let large = crate::large::stored_large_columns(conn, &name)?;
         for column in &mut table.columns {
-            let index = format!("{name}__lv_{}", column.stored);
-            let large: bool = conn
-                .query_row(
-                    "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1)",
-                    [&index],
-                    |row| row.get(0),
-                )
-                .map_err(storage)?;
-            if large {
+            if large.contains(&column.stored) {
                 column.ty = ValueType::Nullable(Box::new(ValueType::String));
             }
         }

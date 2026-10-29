@@ -446,6 +446,10 @@ Reference counts are kept by triggers:
 - every branch holds its children through `_jazz_lv_edge`;
 - leases and receipts hold their staged nodes.
 
+The cell triggers on a table and its `__h` watch exactly its large-capable
+columns, under every schema version the store has held, so a reopened store
+learns from them which stored columns can hold a chunked cell.
+
 An epoch whose `refs` reaches 0 is deleted, releasing its root; a root at 0
 releases its tree; a node no edge, root, lease or receipt holds is reclaimed.
 Reclamation is queued in the transaction that released the last reference and
