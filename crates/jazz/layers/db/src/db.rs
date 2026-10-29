@@ -2438,31 +2438,14 @@ impl Inner {
         Ok(renamed)
     }
 
+    /// Take the upstream's versions, names, lens cells and tags: whole or
+    /// not at all, in memory as in the file (the caller's savepoint). Every
+    /// step that may refuse runs before anything outside this store's names
+    /// changes: a client's moved queue and the sessions hear of a move only
+    /// once the tags are taken too.
     fn mirror_tags_and_versions(
         &mut self,
         tags: Vec<crate::names::Tag>,
-        versions: Vec<sync::CatalogueVersion>,
-        cells: Vec<sync::CatalogueCell>,
-    ) -> Result<(), Error> {
-        // Versions first: the tags are keyed by the authority's stored
-        // names, which this store's own stored columns take only now. A
-        // column a version adds stores its default as TEXT until then, and
-        // a copy its source's names; both become tags below.
-        if !versions.is_empty() {
-            self.mirror_versions(versions, cells)?;
-        }
-        let learned = {
-            let conn = &self.conn;
-            self.names.learn(conn, &tags)?
-        };
-        self.tags_learned(learned)
-    }
-
-    /// Take the upstream's versions, names and lens cells: whole or not at
-    /// all, in the file and in memory. A catalogue this store cannot take
-    /// (a stored column it keeps with another type) leaves it unchanged.
-    fn mirror_versions(
-        &mut self,
         versions: Vec<sync::CatalogueVersion>,
         cells: Vec<sync::CatalogueCell>,
     ) -> Result<(), Error> {
@@ -2471,18 +2454,46 @@ impl Inner {
             self.names.clone(),
             self.admitted.clone(),
         );
+        let mirrors = !versions.is_empty();
         let mut moved = Vec::new();
-        begin_savepoint(&self.conn, "jazz_mirror")?;
-        let mirrored = self.mirror_versions_steps(versions, cells, &mut moved);
-        let ended = end_savepoint(&self.conn, "jazz_mirror", mirrored.is_ok());
-        if let Err(error) = mirrored.and(ended) {
+        if let Err(error) = self.take_tags_and_versions(tags, versions, cells, &mut moved) {
             self.physical = physical;
             self.names = names;
             self.admitted = admitted;
             return Err(error);
         }
+        if mirrors {
+            self.versions_mirrored(&moved);
+        }
+        Ok(())
+    }
+
+    fn take_tags_and_versions(
+        &mut self,
+        tags: Vec<crate::names::Tag>,
+        versions: Vec<sync::CatalogueVersion>,
+        cells: Vec<sync::CatalogueCell>,
+        moved: &mut Vec<(String, String)>,
+    ) -> Result<(), Error> {
+        // Versions first: the tags are keyed by the authority's stored
+        // names, which this store's own stored columns take only now. A
+        // column a version adds stores its default as TEXT until then, and
+        // a copy its source's names; both become tags below.
+        if !versions.is_empty() {
+            self.mirror_versions_steps(versions, cells, moved)?;
+        }
+        let learned = {
+            let conn = &self.conn;
+            self.names.learn(conn, &tags)?
+        };
+        self.tags_learned(learned)
+    }
+
+    /// The upstream's versions are taken: a client's queue follows its
+    /// moved tables, and every schema is rebuilt by the new names.
+    fn versions_mirrored(&mut self, moved: &[(String, String)]) {
         if let Some(client) = self.client.as_mut() {
-            for (ours, theirs) in &moved {
+            for (ours, theirs) in moved {
                 client.moved_table(ours, theirs);
             }
         }
@@ -2496,7 +2507,6 @@ impl Inner {
         for session in &mut self.sessions {
             session.owe_catalogue();
         }
-        Ok(())
     }
 
     fn mirror_versions_steps(

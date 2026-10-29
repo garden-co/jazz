@@ -1150,52 +1150,89 @@ fn a_replica_never_folds_another_columns_tags_into_a_moved_one() {
     assert_eq!(ids(&client, Query::from("tasks")), [1, 3, 9]);
 }
 
-/// A catalogue refused after mirroring moved a stored column leaves the
-/// tags, in the file and in memory, as they were.
+/// A catalogue whose versions move a stored column, and whose tags are
+/// then refused, leaves the store as it was: the column keeps its stored
+/// name, in the file and in memory, and keeps its tags.
 #[test]
 fn a_catalogue_refused_after_a_move_leaves_the_tags_as_they_were() {
     let dir = tempfile::tempdir().unwrap();
-    let sp = dir.path().join("server.sqlite");
     let e = || enumeration(&["todo", "doing", "done"]);
-    let server = authority_at(small_schema(ColumnType::Boolean, None), &sp);
-    try_insert(
-        &server,
-        9,
-        &[
-            ("title", name("t")),
-            ("status", Value::Nullable(Some(Box::new(Value::Bool(true))))),
-        ],
-    )
-    .unwrap();
-    drop(server);
+    let with_rank = |rank: &str| small_schema(e(), Some(enumeration(&[rank])));
+    // Two authorities of one app: copies of one file, which then tag
+    // `rank` differently, the second at another stored column.
+    let sp = dir.path().join("server.sqlite");
     let server = authority_at(small_schema(e(), None), &sp);
     try_insert(
         &server,
-        1,
-        &[("title", name("t")), ("status", some("doing"))],
+        9,
+        &[("title", name("t")), ("status", some("todo"))],
     )
     .unwrap();
-    drop(server);
-    let server = authority_at(small_schema(e(), Some(ColumnType::Boolean)), &sp);
+    // Serving a catalogue mints the app's namespace, which the copy keeps.
+    let other = open_at(small_schema(e(), None), 2, &dir.path().join("other.sqlite"));
+    let other_link = link(&other, &server);
+    pump(&server, &[&other]);
+    drop((other_link, other, server));
+    let sp2 = dir.path().join("server2.sqlite");
+    for suffix in ["", "-wal"] {
+        let from = dir.path().join(format!("server.sqlite{suffix}"));
+        if from.exists() {
+            std::fs::copy(from, dir.path().join(format!("server2.sqlite{suffix}"))).unwrap();
+        }
+    }
+    let server = authority_at(with_rank("x"), &sp);
     let cp = dir.path().join("client.sqlite");
-    drop(open_at(small_schema(e(), None), 1, &cp));
-    let client = open_at(small_schema(e(), Some(ColumnType::Text)), 1, &cp);
+    let client = open_at(with_rank("x"), 1, &cp);
+    let link1 = link(&client, &server);
+    let q = client.prepare_query(&Query::from("tasks")).unwrap();
+    let sub = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
+    pump(&server, &[&client]);
+    drop((sub, link1, client, server));
+    drop(authority_at(
+        small_schema(e(), Some(ColumnType::Boolean)),
+        &sp2,
+    ));
+    let server = authority_at(with_rank("y"), &sp2);
+    let before = raw_tags_named(&cp);
+    assert!(before.contains(&("rank".to_owned(), 0, "x".to_owned())));
+    // The client's `rank` moves to the second authority's stored column,
+    // whose tag 0 is `y`, not `x`: the catalogue is refused.
+    let client = open_at(with_rank("y"), 1, &cp);
     let _link = link(&client, &server);
     let q = client.prepare_query(&Query::from("tasks")).unwrap();
     let _sub = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
     pump(&server, &[&client]);
+    assert_eq!(raw_tags_named(&cp), before);
     try_insert(
         &client,
         2,
-        &[("title", name("t")), ("status", some("done"))],
+        &[
+            ("title", name("t")),
+            ("status", some("done")),
+            ("rank", some("y")),
+        ],
     )
     .unwrap();
-    drop(_sub);
-    drop(_link);
-    drop(client);
-    let client = open_at(small_schema(e(), Some(ColumnType::Text)), 1, &cp);
-    let got = column(&client, Query::from("tasks"), "status");
-    assert_eq!(got, [(2, Some(some("done")))]);
+    let got = column(&client, Query::from("tasks"), "rank");
+    drop((_sub, _link, client));
+    let client = open_at(with_rank("y"), 1, &cp);
+    assert_eq!(column(&client, Query::from("tasks"), "rank"), got);
+    assert_eq!(
+        column(&client, Query::from("tasks"), "status"),
+        [(2, Some(some("done"))), (9, Some(some("todo")))]
+    );
+}
+
+/// Every `(stored column, tag, name)` in `_jazz_enum_tags`.
+fn raw_tags_named(path: &Path) -> Vec<(String, i64, String)> {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    let mut stmt = conn
+        .prepare("SELECT col, tag, name FROM _jazz_enum_tags ORDER BY col, tag")
+        .unwrap();
+    stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
 }
 
 /// A replica whose column moved to the authority's stored name keeps a
