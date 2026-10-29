@@ -11,9 +11,9 @@ are stored, a rejection's reason name changed how fates are recorded, and
 pending uploads moved from one encoded message to a row per op).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `417c3ebbd989a3b52a20d1d87e0c339f0c000c4cdd0df5b38b291f358bb04faf`.
+  the SQLite file `428915c0eb13138871f03e00bc302cc5c222e02e810059e09f77a5f07e7db304`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `bc910c6a42d09475f85a7cf2cb8841a685ab3004a4e2266bd6f64a375bcb2098`.
+  `22ea051c9c3e2cc6a23f75c4a47ef493e4b9b7ed74a1cb44d62eac1a05889be8`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
@@ -56,6 +56,10 @@ and `_jazz_schemas`, `_jazz_lenses` and `_jazz_permissions`) regenerated it
 the same way. A development store with the earlier layout (`_jazz_names`
 keyed by version id) is refused at open with "delete the local store and
 resync".
+
+Moving a commit's bases, access proofs (formerly sources) and deltas onto its
+ops, so each pending op is stored with them and `_jazz_pending_items` keeps
+only ops and serializable reads, regenerated it the same way.
 
 Merging `_jazz_applied` and `_jazz_settled` into one `_jazz_transactions`
 table keyed by an interned node code (`_jazz_nodes.n`) regenerated it the

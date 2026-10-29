@@ -347,7 +347,7 @@ fn a_tab_refuses_an_upstream_version_numbered_in_its_own_range() {
                 content: true,
                 cells: Vec::new(),
             }],
-            origins: Vec::new(),
+            tx_ids: Vec::new(),
         })
         .unwrap();
     let error = block_on(tab.tick()).expect_err("the tab refuses the version");
