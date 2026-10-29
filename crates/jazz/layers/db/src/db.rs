@@ -4587,6 +4587,9 @@ impl Inner {
                 MergeStrategy::Lww => continue,
                 MergeStrategy::Text | MergeStrategy::Markdown | MergeStrategy::Html => {
                     match self.text_merged(table, row, held, at, column, value)? {
+                        Some(merged) if column.nullable() => {
+                            Value::Nullable(Some(Box::new(Value::String(merged))))
+                        }
                         Some(merged) => Value::String(merged),
                         None => continue,
                     }
@@ -4668,10 +4671,16 @@ impl Inner {
         let Some(held) = held else {
             return Ok(None);
         };
+        // A clear (a NULL write) is never merged, and an edit that a clear
+        // overtook stands as sent: either way the later write wins.
+        if matches!(value, Value::Nullable(None)) {
+            return Ok(None);
+        }
         let current = |db: &Self| -> Result<Option<String>, Error> {
-            db.cell_at(table, row, held, &column.name)?
-                .map(|current| db.logical_text(&column.name, &current))
-                .transpose()
+            Ok(match db.cell_at(table, row, held, &column.name)? {
+                Some(current) => db.optional_text(&column.name, &current)?,
+                None => None,
+            })
         };
         let earlier = self
             .as_sent
@@ -4696,10 +4705,13 @@ impl Inner {
                 else {
                     return Ok(None);
                 };
-                let Some(base) = from_sql(&column.ty, base.as_ref(), &self.chunks)? else {
-                    return Ok(None);
+                // A NULL base merges as "": additions to an empty optional
+                // column are all kept, as they are over an empty string.
+                let base = match from_sql(&column.ty, base.as_ref(), &self.chunks)? {
+                    Some(base) => self.optional_text(&column.name, &base)?.unwrap_or_default(),
+                    None if column.nullable() => String::new(),
+                    None => return Ok(None),
                 };
-                let base = self.logical_text(&column.name, &base)?;
                 let Some(current) = current(self)? else {
                     return Ok(None);
                 };
@@ -4813,10 +4825,19 @@ impl Inner {
         Ok(count)
     }
 
+    /// [`Self::logical_text`] of a cell that may be NULL (`None`).
+    fn optional_text(&self, column: &str, value: &Value) -> Result<Option<String>, Error> {
+        match value {
+            Value::Nullable(None) => Ok(None),
+            value => self.logical_text(column, value).map(Some),
+        }
+    }
+
     /// The whole string a text column's value holds.
     fn logical_text(&self, column: &str, value: &Value) -> Result<String, Error> {
         match value {
             Value::String(text) => Ok(text.clone()),
+            Value::Nullable(Some(value)) => self.logical_text(column, value),
             Value::Large(large) => String::from_utf8(self.chunks.value_bytes(large)?)
                 .map_err(|_| rejected(format!("`{column}` holds a value that is not UTF-8"))),
             _ => Err(rejected(format!("`{column}` is not a string"))),
