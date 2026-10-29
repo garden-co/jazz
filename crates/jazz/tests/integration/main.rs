@@ -23,6 +23,8 @@ mod branch_column_evolution;
 mod branch_view_sync;
 #[path = "../branch_views.rs"]
 mod branch_views;
+#[path = "../catalogue_rows.rs"]
+mod catalogue_rows;
 #[path = "../claims_change.rs"]
 mod claims_change;
 #[path = "../column_defaults.rs"]
