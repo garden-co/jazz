@@ -1652,7 +1652,7 @@ pub(crate) struct Gate {
     /// Whether the answer is the global authority's.
     pub(crate) global: Rc<StdCell<bool>>,
     pub(crate) hint: Rc<StdCell<Link>>,
-    /// AsWritten on a live link: leaving it (even for a new attempt) releases.
+    /// Held on a live link: leaving it (even for a new attempt) releases.
     pub(crate) live: bool,
     /// `None`: wait for the server however long (the Remote tier).
     pub(crate) deadline: Option<Instant>,
@@ -3513,7 +3513,19 @@ impl Inner {
                     .borrow_mut()
                     .push((image.table.clone(), row, image.key.clone()));
             }
-            Some(current) if current.seq == image.seq => {}
+            // A settled version stands in for itself only until the
+            // upstream's own image of it arrives: a writer's image of its
+            // own commit that the authority did not ship (see
+            // `install_as_written`).
+            Some(current) if current.seq == image.seq => {
+                if image.seq < LOCAL_BASE && image.content && current != *image {
+                    self.drop_row(&image.table, row, &image.key, image.seq)?;
+                    self.put_image(image, false)?;
+                    self.changed
+                        .borrow_mut()
+                        .push((image.table.clone(), row, image.key.clone()));
+                }
+            }
             Some(current) if relay_older(current.seq, image.seq) => {
                 if self.non_durable {
                     self.put_image(image, true)?;
@@ -3613,11 +3625,14 @@ impl Inner {
     /// The rows of own commit `tx` the server did not ship (`as_written`): its
     /// version at `seq` is the one this replica wrote, stamped at
     /// `accepted_at`, so that becomes the settled image. A newer image
-    /// already received stays. A row this store no longer has its own
-    /// image of (its catalogue changed since), whose image is not the
-    /// authority's version (its digest differs: the authority's inference
-    /// missed a difference, such as a stamp by another author), or whose
-    /// create stamp it does not hold, is asked for whole instead.
+    /// already received stays. A row whose image is not the authority's
+    /// version (its digest differs: the authority's inference missed a
+    /// difference, such as a stamp by another author), that this store has
+    /// no image of as the upstream names it (written under another schema
+    /// version, or its catalogue changed since), or whose create stamp it
+    /// does not hold, is asked for whole. Until the whole image arrives,
+    /// this replica's own image stands in for the version at `seq`
+    /// (see [`Inner::merge_image`]), so the row never drops out locally.
     fn install_as_written(
         &mut self,
         tx: u64,
@@ -3634,7 +3649,6 @@ impl Inner {
         };
         let expected = std::mem::take(&mut pending.expected);
         let mut installs = Vec::new();
-        let mut whole = Vec::new();
         let mut mismatched = 0;
         for written in as_written {
             let row = pending
@@ -3666,27 +3680,32 @@ impl Inner {
                     };
                     let same = echo_digest(&entry.image) == written.digest;
                     mismatched += usize::from(!same);
-                    same.then_some(entry)
+                    Some((entry, same))
                 }
                 None => None,
             };
             installs.push((entry, (table.clone(), *row, key.clone())));
         }
         let mut images = Vec::new();
+        let mut whole = Vec::new();
         for (entry, (table, row, key)) in installs {
-            let image = match (entry, accepted_at) {
-                (Some(entry), Some(at)) if entry.created == Created::Beneath => self
-                    .settled_created(&table, row, &key)?
-                    .map(|created| entry.accepted(at, Some(created))),
-                (Some(entry), Some(at)) => Some(entry.accepted(at, None)),
-                _ => None,
-            };
-            match image {
-                Some(mut image) => {
-                    image.seq = seq;
-                    images.push(image);
+            let (image, exact) = match (entry, accepted_at) {
+                (Some((entry, same)), Some(at)) if entry.created == Created::Beneath => {
+                    match self.settled_created(&table, row, &key)? {
+                        Some(created) => (Some(entry.accepted(at, Some(created))), same),
+                        None => (Some(entry.accepted(at, None)), false),
+                    }
                 }
-                None => whole.push((table, *row.0.as_bytes(), key)),
+                (Some((entry, same)), Some(at)) => (Some(entry.accepted(at, None)), same),
+                (Some((entry, _)), None) => (Some(entry.image.clone()), false),
+                (None, _) => (self.version_image(&table, row, &key, tx)?, false),
+            };
+            if let Some(mut image) = image {
+                image.seq = seq;
+                images.push(image);
+            }
+            if !exact {
+                whole.push((table, *row.0.as_bytes(), key));
             }
         }
         self.as_written_mismatches += mismatched as u64;
@@ -5795,7 +5814,7 @@ impl Db {
         view: &ReadViewSourceSpec,
     ) -> Result<Option<u64>, Error> {
         let tier = reach.tier;
-        // AsWritten on a live link: leaving it (even for a new attempt) releases
+        // Held on a live link: leaving it (even for a new attempt) releases
         // the read, as it releases a gated opening.
         let live = self.inner.borrow().client.as_ref().is_some_and(|client| {
             let link = client.hint.get();
@@ -7255,6 +7274,19 @@ impl Inner {
         let overlaid = (image.table.clone(), row, image.key.clone());
         if let Some(baseline) = client.baselines.get_mut(&overlaid) {
             match baseline {
+                // The upstream's own image of a version this replica's
+                // image stood in for (see `merge_image`).
+                Some(old)
+                    if old.seq == image.seq
+                        && image.seq < LOCAL_BASE
+                        && image.content
+                        && *old != image =>
+                {
+                    *old = image.clone();
+                    self.drop_row(&image.table, row, &image.key, image.seq)?;
+                    self.put_image(&image, true)?;
+                    return Ok(true);
+                }
                 Some(old) if old.seq >= image.seq && old.seq < LOCAL_BASE => {
                     self.put_image(&image, true)?;
                     return Ok(false);
@@ -7756,7 +7788,7 @@ impl Db {
             if !inner.sessions[index].open {
                 continue;
             }
-            // AsWritten supporting rows whose readability may have changed: their
+            // Held supporting rows whose readability may have changed: their
             // table's read policy reads a written table, or the row itself
             // was written.
             let mut recheck: Vec<(String, RowUuid, Vec<u8>)> = Vec::new();
@@ -9638,8 +9670,8 @@ fn vouched(
 
 /// The rows of an applied commit its writer likely holds as they now are:
 /// rows written over the version they were built on (`on`, by where it
-/// landed here) or, built on nothing, created where there was no version,
-/// with no text merge changing what was sent. The writer checks each by its
+/// landed here) or, built on nothing, created by its ops alone where there
+/// was no version, with no text merge changing what was sent. The writer checks each by its
 /// digest, so a row it holds otherwise costs a round trip, never a wrong
 /// cache. A row a `Move` writes is not inferred (it spans two branches).
 fn echoable(
@@ -9663,6 +9695,19 @@ fn echoable(
             let built = on.get(row_key).map(|built| match built {
                 Built::Seq(seq) | Built::On(seq) => *seq,
             });
+            // With no base, the writer held no image: inserts, or upserts
+            // of an unbranched row, made a new row from the ops alone. An
+            // upsert into a branch may copy a parent branch's version (and
+            // its create stamp), which the writer may hold otherwise. (Ops
+            // are by row, not branch key: every op on the row must qualify.)
+            let new_row = indexes.iter().all(|&i| match ops[i] {
+                StagedOp::Insert(..) => true,
+                StagedOp::Upsert(..) => row_key.2.is_empty(),
+                _ => false,
+            });
+            if built.is_none() && !new_row {
+                return None;
+            }
             (previous.get(row_key).copied() == built).then(|| Echoable {
                 row: row_key.clone(),
                 op: indexes[0] as u32,
@@ -9769,7 +9814,7 @@ struct HeldWrites {
     tables: Option<BTreeSet<String>>,
     /// A commit is held: a snapshot read may name it.
     commits: bool,
-    /// AsWritten reads, which their unsubscribes must not overtake.
+    /// Held reads, which their unsubscribes must not overtake.
     reads: HashSet<u64>,
 }
 

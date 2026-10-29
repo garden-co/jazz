@@ -16,10 +16,11 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, FileOptions, InsertOptions, Outcome, ReadOpts, SyncMessage,
-    Transport, TransportError, UpdateOptions, Upstream, block_on,
+    Db, DbConfig, DbIdentity, ExactWriteTarget, FileOptions, InsertOptions, Outcome, ReadOpts,
+    SyncMessage, Transport, TransportError, UpdateOptions, Upstream, WriteTarget, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
+use jazz::protocol::{BranchSelector, BranchViewBase};
 use jazz::query::Query;
 use jazz::records::Value;
 use jazz::tools::{
@@ -43,8 +44,14 @@ fn config(node: u8, author: AuthorSubject) -> DbConfig {
         .column("title", ColumnType::Text)
         .column("body", ColumnType::Text)
         .policies(allow_all_policies());
+    let todos = TableSchemaBuilder::new("todos")
+        .column("branch_id", ColumnType::Uuid)
+        .column("title", ColumnType::Text)
+        .column("body", ColumnType::Text)
+        .branch_by("branch_id")
+        .policies(allow_all_policies());
     DbConfig::new(
-        compile_schema(&SchemaBuilder::new().table(docs).build()),
+        compile_schema(&SchemaBuilder::new().table(docs).table(todos).build()),
         DbIdentity {
             node: NodeUuid::from_bytes([node; 16]),
             author,
@@ -87,6 +94,10 @@ fn user(n: u8) -> AuthorSubject {
 
 fn row(n: u8) -> RowUuid {
     RowUuid::from_bytes([n; 16])
+}
+
+fn branch(n: u8) -> BranchSelector {
+    BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([n; 16])))])
 }
 
 fn cells(pairs: &[(&str, &str)]) -> BTreeMap<String, Value> {
@@ -174,10 +185,15 @@ fn pump_counting(server: &Db, clients: &[&Db]) {
 
 /// Every row with its version and cells, provenance included.
 fn snapshot(db: &Db) -> Vec<String> {
+    snapshot_of(db, "docs", ReadOpts::default())
+}
+
+/// Every row of `table` as `opts` reads it, as [`snapshot`] lists them.
+fn snapshot_of(db: &Db, table: &str, opts: ReadOpts) -> Vec<String> {
     let prepared = db
-        .prepare_query(&Query::from("docs").select(COLUMNS))
+        .prepare_query(&Query::from(table).select(COLUMNS))
         .unwrap();
-    block_on(db.all(&prepared, ReadOpts::default()))
+    block_on(db.all(&prepared, opts))
         .unwrap()
         .iter()
         .map(|r| {
@@ -794,5 +810,100 @@ fn a_commit_writing_rows_twice_ships_as_written_with_each_writes_stamps() {
         .map(|row| row.contains("1704067200001"))
         .collect();
     assert_eq!(explicit, [true, false, true, false], "{settled:?}");
+    assert_eq!(snapshot(&client), settled);
+}
+
+#[test]
+fn a_row_its_head_branch_copies_from_a_base_ships() {
+    // The first write on a head branch copies the base branch's row, and
+    // with it the base's `$createdAt`: the commit did not create the row
+    // from its ops alone, so the writer's image is not inferred.
+    let server = open(0, AuthorSubject::SYSTEM);
+    let client = open(1, user(1));
+    let (_upstream, down) = connect(&server, &client, user(1));
+    let _base = client
+        .prepare_query(&Query::from("todos").select(COLUMNS))
+        .unwrap();
+    let _base =
+        block_on(client.subscribe(&_base, ReadOpts::default().branch_view(branch(1), None)))
+            .unwrap();
+    let _head = client
+        .prepare_query(&Query::from("todos").select(COLUMNS))
+        .unwrap();
+    let _head =
+        block_on(client.subscribe(&_head, ReadOpts::default().branch_view(branch(2), None)))
+            .unwrap();
+    pump(&server, &[&client]);
+    block_on(client.insert(
+        "todos",
+        cells(&[("title", "seed"), ("body", "")]),
+        InsertOptions {
+            row_id: Some(row(1)),
+            target: ExactWriteTarget::Branch(branch(1)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    pump(&server, &[&client]);
+    std::thread::sleep(Duration::from_millis(5));
+    down.borrow_mut().clear();
+    write_late(&server, &client, || {
+        block_on(client.update(
+            "todos",
+            row(1),
+            cells(&[("title", "draft")]),
+            UpdateOptions {
+                target: WriteTarget::BranchView {
+                    head: branch(2),
+                    base: Some(BranchViewBase::Current(branch(1))),
+                },
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    });
+    pump(&server, &[&client]);
+    let (images, as_written) = shipped(&down);
+    assert_eq!(as_written, vec![0]);
+    assert!(images > 0, "{images}");
+    let head = || ReadOpts::default().branch_view(branch(2), None);
+    assert_eq!(
+        snapshot_of(&client, "todos", head()),
+        snapshot_of(&server, "todos", head())
+    );
+}
+
+#[test]
+fn a_mismatched_row_stays_until_its_whole_image_arrives() {
+    // The authority stamps the link's user 9, the replica its own user 1:
+    // the digest differs. Until the whole image arrives, even offline, the
+    // replica keeps its own image as the accepted version, and writes on.
+    let server = open(0, AuthorSubject::SYSTEM);
+    let client = open(1, user(1));
+    let (upstream, _down) = connect(&server, &client, user(9));
+    let _live = subscribe(&client);
+    pump_counting(&server, &[&client]);
+    block_on(client.insert(
+        "docs",
+        cells(&[("title", "Doc"), ("body", "")]),
+        InsertOptions {
+            row_id: Some(row(1)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    block_on(client.tick()).unwrap();
+    block_on(server.tick()).unwrap();
+    block_on(client.tick()).unwrap();
+    assert_eq!(client.as_written_mismatches(), 1);
+    assert_eq!(snapshot(&client).len(), 1, "the row stays");
+    assert!(client.detach_connection(&upstream));
+    assert_eq!(snapshot(&client).len(), 1, "the row stays offline");
+    block_on(client.update("docs", row(1), cells(&[("body", "y")]), Default::default())).unwrap();
+    let (_upstream, _down) = connect(&server, &client, user(9));
+    pump_counting(&server, &[&client]);
+    let settled = snapshot(&server);
+    assert!(settled[0].contains(&user(9).principal_parts().1));
+    assert!(settled[0].contains("\"y\""), "{settled:?}");
     assert_eq!(snapshot(&client), settled);
 }

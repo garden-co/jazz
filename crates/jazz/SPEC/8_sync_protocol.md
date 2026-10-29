@@ -320,14 +320,19 @@ only if all of these hold:
 The writer checks the inference on every such row: each carries the
 authority's 16-byte digest of its version (everything but its seq and the
 stamps), and the writer asks for a row whose image differs whole (`Hold`,
-§19.8) instead of installing it. A miss costs one round trip, never a
-divergent cache: a replica whose configured author is not the identity its
-link was accepted as, for one, has every row stamped otherwise. Mismatches are
-a normal path, counted per replica (`as_written_mismatches`); tests of honest
-writers assert there are none. A writer also asks for a row whole when it
-holds no image to compare: the commit was written under an earlier schema
-version than the one it reopened with, or a catalogue with new versions
-arrived while the commit was pending.
+§19.8) instead of installing it as final. A writer also asks for a row whole
+when it holds no image to compare: the commit was written under another schema
+version than the store's own (through a view of another version, or before a
+reopen with a newer one), or a catalogue with new versions arrived while the
+commit was pending. Until the whole image arrives (after a reconnect, if the
+link drops first), the writer's own image, stamped as above, stands in for the
+accepted version: the row never drops out locally, later writes build on it,
+and the upstream's image of that seq replaces it once it arrives. A miss
+therefore costs one fetch of the row, never a divergent cache. A replica
+whose configured author is not the identity its link was accepted as has
+every row stamped otherwise, so each of its writes costs that fetch.
+Mismatches are counted per replica (`as_written_mismatches`); tests of honest
+writers assert there are none.
 
 `Stored { tx }` is durability progress from a relay to a non-durable session:
 the relay holds the commit in its store and uploads it, so it is `Local` for a
