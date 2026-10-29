@@ -97,27 +97,27 @@ Only one relay tier is supported: an authority, optionally a durable relay
 
 Messages, with their postcard variant tags:
 
-| Tag | Message           | Direction       | Purpose                                                          |
-| --- | ----------------- | --------------- | ---------------------------------------------------------------- |
-| 0   | `Read`            | client → server | A read, live or once (§8.4)                                      |
-| 1   | `Unsubscribe`     | client → server | End a live read (§8.5)                                           |
-| 2   | `ResendWhole`     | client → server | Rows whose shipped deltas did not apply: ship them whole (§8.12) |
-| 3   | `Settled`         | server → client | A read is complete through a seq (§8.4)                          |
-| 4   | `Commit`          | client → server | One transaction's writes (§8.2)                                  |
-| 5   | `ChunkRequests`   | client → server | Pull large-value nodes (§8.12)                                   |
-| 6   | `PushChunks`      | client → server | Large-value nodes ahead of a commit (§8.12)                      |
-| 7   | `Chunks`          | server → client | Pulled nodes, and the ones the server cannot answer              |
-| 8   | `Rows`            | server → client | Row images, with the tx ids of history versions                  |
-| 9   | `AccessLost`      | server → client | Drop a row the reader may no longer read                         |
-| 10  | `Refused`         | server → client | A read the server cannot serve, with why                         |
-| 11  | `Fate`            | server → client | A commit's outcome (§8.3)                                        |
-| 12  | `CheckAllowed`    | client → server | Permission preflight                                             |
-| 13  | `Allowed`         | server → client | Its answer                                                       |
-| 14  | `Schema`          | client → server | The schema version the session reads and writes by (§8.9)        |
-| 15  | `SchemaAdmission` | server → client | Whether that version is admitted                                 |
-| 16  | `Stored`          | relay → session | A relay holds the session's commit and uploads it (§8.3)         |
-| 17  | `KnownCatalogue`  | client → server | The schema versions and names the replica keeps (§8.10)          |
-| 18  | `Catalogue`       | server → client | Admitted versions, stored names and lens cells (§8.10)           |
+| Tag | Message              | Direction       | Purpose                                                          |
+| --- | -------------------- | --------------- | ---------------------------------------------------------------- |
+| 0   | `Read`               | client → server | A read, live or once (§8.4)                                      |
+| 1   | `Unsubscribe`        | client → server | End a live read (§8.5)                                           |
+| 2   | `ResendWhole`        | client → server | Rows whose shipped deltas did not apply: ship them whole (§8.12) |
+| 3   | `Settled`            | server → client | A read is complete through a seq (§8.4)                          |
+| 4   | `Commit`             | client → server | One transaction's writes (§8.2)                                  |
+| 5   | `ChunkRequests`      | client → server | Pull large-value nodes (§8.12)                                   |
+| 6   | `PushChunks`         | client → server | Large-value nodes ahead of a commit (§8.12)                      |
+| 7   | `Chunks`             | server → client | Pulled nodes, and the ones the server cannot answer              |
+| 8   | `Rows`               | server → client | Row images, with the tx ids of history versions                  |
+| 9   | `AccessLost`         | server → client | Drop a row the reader may no longer read                         |
+| 10  | `Refused`            | server → client | A read the server cannot serve, with why                         |
+| 11  | `Fate`               | server → client | A commit's outcome (§8.3)                                        |
+| 12  | `CheckAllowed`       | client → server | Permission preflight                                             |
+| 13  | `CheckAllowedResult` | server → client | Its answer: `Allowed`, `Denied` or `Unknown`                     |
+| 14  | `Schema`             | client → server | The schema version the session reads and writes by (§8.9)        |
+| 15  | `SchemaAdmission`    | server → client | Whether that version is admitted                                 |
+| 16  | `Stored`             | relay → session | A relay holds the session's commit and uploads it (§8.3)         |
+| 17  | `KnownCatalogue`     | client → server | The schema versions and names the replica keeps (§8.10)          |
+| 18  | `Catalogue`          | server → client | Admitted versions, stored names and lens cells (§8.10)           |
 
 Tags before `Commit` keep their numbers: a replica stores each pending
 upload's header as an encoded `Commit` message (`_jazz_pending`, see §8.3),
@@ -368,7 +368,8 @@ acceptance. Local copies are not a redaction boundary; eviction keeps the
 replica coherent, not secret.
 
 `CheckAllowed { id, action, author, session }` asks whether the session would be
-allowed an action now, without writing; `Allowed` answers it.
+allowed an action now, without writing; `CheckAllowedResult { id, result }`
+answers it.
 
 ### 8.7 Mergeable and serializable delivery
 

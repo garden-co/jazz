@@ -986,9 +986,11 @@ pub enum SyncMessage {
         session: Option<BTreeMap<String, Value>>,
     },
     // server → client
-    Allowed {
+    /// The answer to a [`SyncMessage::CheckAllowed`]: `Allowed`, `Denied`
+    /// or `Unknown`.
+    CheckAllowedResult {
         id: u64,
-        advice: PermissionAdvice,
+        result: PermissionAdvice,
     },
     // client → server
     /// The schema version the client reads and writes by, sent first on
@@ -1108,7 +1110,7 @@ impl SyncMessage {
             Self::Refused { .. } => "Refused",
             Self::Fate { .. } => "Fate",
             Self::CheckAllowed { .. } => "CheckAllowed",
-            Self::Allowed { .. } => "Allowed",
+            Self::CheckAllowedResult { .. } => "CheckAllowedResult",
             Self::Schema { .. } => "Schema",
             Self::SchemaAdmission { .. } => "SchemaAdmission",
             Self::Stored { .. } => "Stored",
@@ -6028,11 +6030,11 @@ impl Db {
                             inner.store_watermark(&watermark, through)?;
                         }
                     }
-                    SyncMessage::Allowed { id, advice } => {
+                    SyncMessage::CheckAllowedResult { id, result } => {
                         let client = inner.client.as_mut().expect("client");
                         // Late answers to cancelled requests are dropped.
                         if let Some(slot @ None) = client.advice.get_mut(&id) {
-                            *slot = Some(advice);
+                            *slot = Some(result);
                         }
                     }
                     SyncMessage::SchemaAdmission { admitted } => {
@@ -8117,7 +8119,7 @@ impl Db {
             } => {
                 // As for a commit: a trusted link may ask for a session it
                 // vouches for; a session link only for its own.
-                let advice = match commit_who(policy, author.as_deref(), session.is_some()) {
+                let result = match commit_who(policy, author.as_deref(), session.is_some()) {
                     Ok(who) => {
                         let identity = match who {
                             Who::Session(author) => Some(author),
@@ -8130,7 +8132,7 @@ impl Db {
                 };
                 self.inner.borrow_mut().sessions[index]
                     .outbox
-                    .push(SyncMessage::Allowed { id, advice });
+                    .push(SyncMessage::CheckAllowedResult { id, result });
             }
             SyncMessage::Read {
                 id,

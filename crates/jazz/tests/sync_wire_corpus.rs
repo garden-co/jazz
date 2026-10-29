@@ -65,7 +65,7 @@ const VARIANTS: [&str; 19] = [
     "Refused",
     "Fate",
     "CheckAllowed",
-    "Allowed",
+    "CheckAllowedResult",
     "Schema",
     "SchemaAdmission",
     "Stored",
@@ -541,7 +541,7 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     let _history = block_on(alice.subscribe(&history, ReadOpts::default())).unwrap();
     pump(&[&alice, &server, &alice]);
 
-    // CheckAllowed, Allowed.
+    // CheckAllowed, CheckAllowedResult.
     let id = alice.request_permission_advice(
         PermissionAdviceAction::Read {
             table: "notes".to_owned(),

@@ -393,8 +393,8 @@ fn an_answer_resolves_only_the_request_it_was_asked_for() {
     );
 }
 
-/// An `Allowed` answer is a bare verdict: it discloses no rows, no policy
-/// reasons and no hidden facts. Asking to change a row the session cannot
+/// A `CheckAllowedResult` is a bare verdict: it discloses no rows, no
+/// policy reasons and no hidden facts. Asking to change a row the session cannot
 /// see is `Denied` exactly as for a row that does not exist.
 ///
 /// ```text

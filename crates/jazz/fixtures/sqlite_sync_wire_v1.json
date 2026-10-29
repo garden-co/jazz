@@ -67,7 +67,7 @@
       "frame_hex": "0c9bc5d9c2a7fffa0101056e6f74657310111111111111111111111111111111110000"
     },
     {
-      "variant": "Allowed",
+      "variant": "CheckAllowedResult",
       "reader": "client",
       "frame_hex": "0d9bc5d9c2a7fffa0100"
     },
