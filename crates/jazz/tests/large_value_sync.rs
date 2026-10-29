@@ -740,13 +740,13 @@ fn writers_get_each_others_edits_as_deltas_over_their_own() {
 
 /// A server-side duplex that names, in its first delta, a version the
 /// replica does not hold (as after it evicted the row unannounced,
-/// INV-SYNC-14), and logs the `Hold`s it receives.
+/// INV-SYNC-14), and logs the `ResendWhole`s it receives.
 struct Spoil {
     out: Wire,
     inbound: Wire,
     spoiled: Rc<RefCell<bool>>,
     holds: Rc<RefCell<Vec<Vec<u64>>>>,
-    /// The `Hold`s are lost on the way, as in a link that drops.
+    /// The `ResendWhole`s are lost on the way, as in a link that drops.
     lose_holds: bool,
 }
 
@@ -768,7 +768,7 @@ impl Transport for Spoil {
 
     fn try_recv(&mut self) -> Option<SyncMessage> {
         let message = self.inbound.borrow_mut().pop_front()?;
-        if let SyncMessage::Hold { rows } = &message {
+        if let SyncMessage::ResendWhole { rows } = &message {
             self.holds
                 .borrow_mut()
                 .push(rows.iter().map(|row| row.3).collect());
@@ -834,7 +834,7 @@ fn a_delta_over_a_version_the_replica_lacks_heals_by_asking_for_the_row() {
     );
 }
 
-/// A replica whose `Hold` is lost (the link drops with it in flight)
+/// A replica whose `ResendWhole` is lost (the link drops with it in flight)
 /// holds a stale version that no resume may count as held: the results it
 /// settled meanwhile are not stored as resume points, and the row is asked
 /// for again on the next connection.
@@ -1016,7 +1016,7 @@ fn pulls_after_read_access_is_lost_are_answered_with_nothing() {
     let evicted = down
         .borrow()
         .iter()
-        .any(|message| matches!(message, SyncMessage::Evict { .. }));
+        .any(|message| matches!(message, SyncMessage::AccessLost { .. }));
     down.borrow_mut().clear();
     up.borrow_mut().push_back(SyncMessage::ChunkRequests {
         pulls: vec![WirePull {

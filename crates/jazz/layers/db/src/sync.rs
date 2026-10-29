@@ -498,14 +498,14 @@ pub struct Image {
 /// reader joins split frames up to.
 const ROWS_MESSAGE_BYTES: usize = jazz_protocol::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES / 4;
 
-/// `images` (and the `origins` they come with) as `Rows` messages of at
+/// `images` (and the `tx_ids` they come with) as `Rows` messages of at
 /// most `limit` ([`ROWS_MESSAGE_BYTES`]) of images each. A reader installs each
 /// message whole, so a commit's versions (one seq) never straddle two: a
 /// result that needs more than one goes in seq order, and a single
 /// commit larger than the bound still travels as one.
 fn rows_messages(
     mut images: Vec<Image>,
-    origins: Vec<(u64, [u8; 16], u64)>,
+    tx_ids: Vec<(u64, [u8; 16], u64)>,
     limit: usize,
 ) -> Vec<SyncMessage> {
     let size = |image: &Image| {
@@ -514,15 +514,15 @@ fn rows_messages(
     };
     let sizes: Vec<usize> = images.iter().map(size).collect();
     if sizes.iter().fold(0usize, |sum, n| sum.saturating_add(*n)) <= limit {
-        if images.is_empty() && origins.is_empty() {
+        if images.is_empty() && tx_ids.is_empty() {
             return Vec::new();
         }
-        return vec![SyncMessage::Rows { images, origins }];
+        return vec![SyncMessage::Rows { images, tx_ids }];
     }
     let mut sized: Vec<(usize, Image)> = sizes.into_iter().zip(images.drain(..)).collect();
     sized.sort_by_key(|(_, image)| image.seq);
     let mut out = Vec::new();
-    let mut origins = Some(origins);
+    let mut tx_ids = Some(tx_ids);
     let mut batch: Vec<Image> = Vec::new();
     let mut bytes = 0usize;
     for (n, image) in sized {
@@ -530,7 +530,7 @@ fn rows_messages(
         if !batch.is_empty() && !same_commit && bytes.saturating_add(n) > limit {
             out.push(SyncMessage::Rows {
                 images: std::mem::take(&mut batch),
-                origins: origins.take().unwrap_or_default(),
+                tx_ids: tx_ids.take().unwrap_or_default(),
             });
             bytes = 0;
         }
@@ -539,7 +539,7 @@ fn rows_messages(
     }
     out.push(SyncMessage::Rows {
         images: batch,
-        origins: origins.take().unwrap_or_default(),
+        tx_ids: tx_ids.take().unwrap_or_default(),
     });
     out
 }
@@ -872,20 +872,20 @@ pub enum SyncMessage {
     /// over (SPEC 19.8). The server ships each whole, or evicts it. Sent
     /// when a delta fails, and again on each connection until the row
     /// arrives whole. The seq is not read.
-    Hold {
+    ResendWhole {
         rows: Vec<(String, [u8; 16], Vec<u8>, u64)>,
     },
     /// A read's result is complete through server seq `through`.
-    /// `listing`: the result's rows, in order: always for a one-shot
+    /// `members`: the result's rows, in order: always for a one-shot
     /// read, and for a live one's opening and window changes when it is
     /// limited or its opening could not tell what left it; the replica
-    /// drops cached rows a listing leaves out. `global`: the result is the
+    /// drops cached rows `members` leaves out. `global`: the result is the
     /// global authority's (directly, or through relays that settle by
     /// their upstream), not a relay's own store.
     Settled {
         id: u64,
         through: u64,
-        listing: Option<Vec<[u8; 16]>>,
+        members: Option<Vec<[u8; 16]>>,
         global: bool,
     },
     /// `author`: the provenance the writes carry when it is not the
@@ -939,18 +939,18 @@ pub enum SyncMessage {
         nodes: Vec<WireChunk>,
         missing: Vec<WireChunkRef>,
     },
-    /// Row images. `origins` names the transactions behind the history
+    /// Row images. `tx_ids` names the transactions behind the history
     /// versions among them, as (seq, writer node, writer tx): a replica
     /// lists a history version only once it knows its `$transactionId`,
     /// and a one-shot read frozen at a snapshot names the commits that
     /// snapshot holds. Empty for current rows.
     Rows {
         images: Vec<Image>,
-        origins: Vec<(u64, [u8; 16], u64)>,
+        tx_ids: Vec<(u64, [u8; 16], u64)>,
     },
     /// The row is unavailable to this reader (a write or a policy change
     /// took its read access): the replica drops its copy (INV-SYNC-14).
-    Evict {
+    AccessLost {
         table: String,
         id: [u8; 16],
         key: Vec<u8>,
@@ -979,14 +979,14 @@ pub enum SyncMessage {
     /// A permission preflight: would the session's identity be allowed
     /// `action` right now? Never writes. `author` and `session` name the
     /// session a trusted link asks for, as on a [`SyncMessage::Commit`].
-    Advise {
+    CheckAllowed {
         id: u64,
         action: PermissionAdviceAction,
         author: Option<String>,
         session: Option<BTreeMap<String, Value>>,
     },
     // server → client
-    Advice {
+    Allowed {
         id: u64,
         advice: PermissionAdvice,
     },
@@ -1026,7 +1026,7 @@ pub enum SyncMessage {
     /// whose stored names this replica keeps, each with
     /// [`names_digest`] of them. The server answers with the
     /// [`SyncMessage::Catalogue`] entries it lacks or keeps otherwise.
-    Holds {
+    KnownCatalogue {
         versions: Vec<([u8; 16], [u8; 16])>,
     },
     /// Server → client: schema versions this store admitted, in admission
@@ -1034,9 +1034,9 @@ pub enum SyncMessage {
     /// cells its lenses made. A replica stores rows as its upstream does
     /// (rows travel by stored names, untranslated), so it admits each
     /// version under these names, renaming what it named otherwise while
-    /// it did not know them. Sent ahead of any row after a `Holds`, and
-    /// again when the store admits a version or learns more of its
-    /// authority's catalogue.
+    /// it did not know them. Sent ahead of any row after a
+    /// `KnownCatalogue`, and again when the store admits a version or learns
+    /// more of its authority's catalogue.
     ///
     /// `namespace`: the authority's (see `Inner::namespace`), once the
     /// sender knows it; a replica that holds another one is another app's
@@ -1064,7 +1064,7 @@ pub enum ReadSpan {
     /// branch view `view`, whose window and versions the read observes. A
     /// view frozen at a snapshot reference is resolved by the receiver (a
     /// reopened tab's capture, which its worker settled), which also sends
-    /// the origins of the commits it names (see [`SyncMessage::Rows`]).
+    /// the tx ids of the commits it names (see [`SyncMessage::Rows`]).
     Once {
         at: Option<u64>,
         view: Box<ReadViewSourceSpec>,
@@ -1097,22 +1097,22 @@ impl SyncMessage {
         match self {
             Self::Read { .. } => "Read",
             Self::Unsubscribe { .. } => "Unsubscribe",
-            Self::Hold { .. } => "Hold",
+            Self::ResendWhole { .. } => "ResendWhole",
             Self::Commit { .. } => "Commit",
             Self::ChunkRequests { .. } => "ChunkRequests",
             Self::PushChunks { .. } => "PushChunks",
             Self::Chunks { .. } => "Chunks",
             Self::Rows { .. } => "Rows",
-            Self::Evict { .. } => "Evict",
+            Self::AccessLost { .. } => "AccessLost",
             Self::Settled { .. } => "Settled",
             Self::Refused { .. } => "Refused",
             Self::Fate { .. } => "Fate",
-            Self::Advise { .. } => "Advise",
-            Self::Advice { .. } => "Advice",
+            Self::CheckAllowed { .. } => "CheckAllowed",
+            Self::Allowed { .. } => "Allowed",
             Self::Schema { .. } => "Schema",
             Self::SchemaAdmission { .. } => "SchemaAdmission",
             Self::Stored { .. } => "Stored",
-            Self::Holds { .. } => "Holds",
+            Self::KnownCatalogue { .. } => "KnownCatalogue",
             Self::Catalogue { .. } => "Catalogue",
         }
     }
@@ -1657,8 +1657,9 @@ pub(crate) struct Session {
     /// The client was told its declared version is not admitted.
     told_unadmitted: bool,
     /// The versions the client keeps names for, with their digests
-    /// (`None` until its `Holds`), and whether it is owed a `Catalogue`.
-    holds: Option<HashMap<[u8; 16], [u8; 16]>>,
+    /// (`None` until its `KnownCatalogue`), and whether it is owed a
+    /// `Catalogue`.
+    known_catalogue: Option<HashMap<[u8; 16], [u8; 16]>>,
     catalogue_owed: bool,
     /// The namespace and confirmations the client was last sent.
     told: Option<(Option<[u8; 16]>, Vec<([u8; 16], [u8; 16])>)>,
@@ -1709,7 +1710,7 @@ impl Session {
             parked_pulls: Vec::new(),
             deferred_pulls: Vec::new(),
             told_unadmitted: false,
-            holds: None,
+            known_catalogue: None,
             catalogue_owed: false,
             told: None,
             schema: None,
@@ -1737,7 +1738,7 @@ impl Session {
     /// A version was admitted: a client that declared its holdings is
     /// told of it.
     pub(super) fn owe_catalogue(&mut self) {
-        if self.holds.is_some() {
+        if self.known_catalogue.is_some() {
             self.catalogue_owed = true;
         }
     }
@@ -2601,7 +2602,7 @@ impl Inner {
     /// The images a history read ships for its result `versions` (row and
     /// seq, of `source`): each version, then the current image of its row
     /// in its branch, so a replica never takes an old version for its
-    /// current one. The versions' seqs go to `seqs`, for their origins.
+    /// current one. The versions' seqs go to `seqs`, for their tx ids.
     fn history_versions(
         &self,
         source: &str,
@@ -2668,7 +2669,7 @@ impl Inner {
 
     /// Who committed each of `seqs`, as (seq, node, tx): `_jazz_settled`
     /// for uploads, this authority's node for its own commits.
-    fn origins(&self, seqs: &BTreeSet<u64>) -> Result<Vec<(u64, [u8; 16], u64)>, Error> {
+    fn tx_ids(&self, seqs: &BTreeSet<u64>) -> Result<Vec<(u64, [u8; 16], u64)>, Error> {
         let mut statement = self
             .conn
             .prepare_cached("SELECT node, tx FROM _jazz_settled WHERE seq = ?1")
@@ -4408,7 +4409,7 @@ impl Inner {
         if !std::mem::take(&mut self.sessions[index].catalogue_owed) {
             return Ok(None);
         }
-        if self.sessions[index].holds.is_none() {
+        if self.sessions[index].known_catalogue.is_none() {
             return Ok(None);
         }
         let namespace = self.namespace()?;
@@ -4426,8 +4427,11 @@ impl Inner {
         for (version, names) in self.names.in_order() {
             let digest = crate::names::names_digest(names);
             let bytes = *version.as_bytes();
-            let holds = self.sessions[index].holds.as_ref().expect("holds");
-            if holds.get(&bytes) == Some(&digest) {
+            let known_catalogue = self.sessions[index]
+                .known_catalogue
+                .as_ref()
+                .expect("known catalogue");
+            if known_catalogue.get(&bytes) == Some(&digest) {
                 continue;
             }
             let jazz = if version == self.owner_version {
@@ -4483,8 +4487,10 @@ impl Inner {
                 }
             })
             .collect();
-        let holds = self.sessions[index].holds.get_or_insert_with(HashMap::new);
-        holds.extend(sent);
+        let known_catalogue = self.sessions[index]
+            .known_catalogue
+            .get_or_insert_with(HashMap::new);
+        known_catalogue.extend(sent);
         let (namespace, confirmed) = told.clone();
         self.sessions[index].told = Some(told);
         Ok(Some(SyncMessage::Catalogue {
@@ -4886,8 +4892,8 @@ impl Db {
                     span: ReadSpan::Live { .. },
                     ..
                 } | SyncMessage::Schema { .. }
-                    | SyncMessage::Holds { .. }
-                    | SyncMessage::Hold { .. }
+                    | SyncMessage::KnownCatalogue { .. }
+                    | SyncMessage::ResendWhole { .. }
                     | SyncMessage::Commit { .. }
                     | SyncMessage::PushChunks { .. }
                     | SyncMessage::ChunkRequests { .. }
@@ -4904,7 +4910,9 @@ impl Db {
             .collect();
         let client = inner.client.as_mut().expect("client");
         client.outbox.insert(0, SyncMessage::Schema { version });
-        client.outbox.insert(1, SyncMessage::Holds { versions });
+        client
+            .outbox
+            .insert(1, SyncMessage::KnownCatalogue { versions });
         // What the old session could not answer, the new one may.
         client.unavailable.clear();
         client.outbox.extend(resubscribe);
@@ -4915,7 +4923,7 @@ impl Db {
                 .iter()
                 .map(|(table, id, key)| (table.clone(), *id, key.clone(), 0))
                 .collect();
-            client.outbox.push(SyncMessage::Hold { rows });
+            client.outbox.push(SyncMessage::ResendWhole { rows });
         }
         // Relayed reads still waiting are asked again: the old session's
         // answers are lost with it.
@@ -5726,7 +5734,7 @@ impl Db {
                 Some((author, claims)) => (Some(author.canonical().to_owned()), Some(claims)),
                 None => (None, None),
             };
-            client.outbox.push(SyncMessage::Advise {
+            client.outbox.push(SyncMessage::CheckAllowed {
                 id,
                 action,
                 author,
@@ -5771,9 +5779,9 @@ impl Db {
             return;
         };
         if client.advice.remove(&id).is_some() {
-            client
-                .outbox
-                .retain(|m| !matches!(m, SyncMessage::Advise { id: asked, .. } if *asked == id));
+            client.outbox.retain(
+                |m| !matches!(m, SyncMessage::CheckAllowed { id: asked, .. } if *asked == id),
+            );
         }
     }
 
@@ -5908,7 +5916,7 @@ impl Db {
                 matches!(
                     message,
                     SyncMessage::Rows { .. }
-                        | SyncMessage::Evict { .. }
+                        | SyncMessage::AccessLost { .. }
                         | SyncMessage::Settled { .. }
                 )
             }) && !inner.sessions.is_empty()
@@ -5921,10 +5929,10 @@ impl Db {
                 match message {
                     // Rows and evictions name stored tables and columns, as
                     // this store mirrors its upstream's.
-                    SyncMessage::Rows { images, origins } => {
+                    SyncMessage::Rows { images, tx_ids } => {
                         // A history version is listed once its transaction
                         // is known.
-                        for (seq, node, tx) in origins {
+                        for (seq, node, tx) in tx_ids {
                             inner.record_settled(node, tx, Some(seq))?;
                         }
                         for image in images {
@@ -5946,7 +5954,7 @@ impl Db {
                             rebase |= overlaid;
                         }
                     }
-                    SyncMessage::Evict { table, id, key } => {
+                    SyncMessage::AccessLost { table, id, key } => {
                         if !inner.physical.tables.contains_key(&table) {
                             continue;
                         }
@@ -5979,14 +5987,14 @@ impl Db {
                     SyncMessage::Settled {
                         id,
                         through,
-                        listing,
+                        members,
                         global,
                     } => {
                         let client = inner.client.as_mut().expect("client");
                         client.known = client.known.max(through);
                         // A one-shot read's answer.
                         if let Some(slot) = client.answers.get_mut(&id) {
-                            *slot = Some(Ok((through, listing.unwrap_or_default())));
+                            *slot = Some(Ok((through, members.unwrap_or_default())));
                             client.relay_ready |=
                                 client.relayed_fetches.iter().any(|f| f.upstream == id);
                             continue;
@@ -6006,7 +6014,7 @@ impl Db {
                         }
                         let watermark = remote.watermark;
                         // Cached rows the server's result lacks are stale.
-                        if let Some(ids) = listing {
+                        if let Some(ids) = members {
                             answered_remotes.push((
                                 remote.query.clone(),
                                 remote.binding.clone(),
@@ -6020,7 +6028,7 @@ impl Db {
                             inner.store_watermark(&watermark, through)?;
                         }
                     }
-                    SyncMessage::Advice { id, advice } => {
+                    SyncMessage::Allowed { id, advice } => {
                         let client = inner.client.as_mut().expect("client");
                         // Late answers to cancelled requests are dropped.
                         if let Some(slot @ None) = client.advice.get_mut(&id) {
@@ -6721,8 +6729,8 @@ impl Inner {
         Ok((deltas, sources))
     }
 
-    /// Ask the upstream for a row whole: a `Hold` of it, which it answers
-    /// with the row whole or its eviction (SPEC 19.8). Until it arrives
+    /// Ask the upstream for a row whole: a `ResendWhole` of it, which it
+    /// answers with the row whole or its eviction (SPEC 19.8). Until it arrives
     /// this store holds a stale version, so every watermark is forgotten
     /// and none is stored (see `Client::whole`).
     fn ask_whole(&mut self, (table, id, key): (String, [u8; 16], Vec<u8>)) -> Result<(), Error> {
@@ -6730,12 +6738,12 @@ impl Inner {
         let client = self.client.as_mut().expect("client");
         client.whole.insert((table.clone(), id, key.clone()));
         let asked = client.outbox.iter().any(|message| {
-            matches!(message, SyncMessage::Hold { rows } if rows.iter().any(|held| {
+            matches!(message, SyncMessage::ResendWhole { rows } if rows.iter().any(|held| {
                 held.0 == table && held.1 == id && held.2 == key && held.3 == 0
             }))
         });
         if !asked {
-            client.outbox.push(SyncMessage::Hold {
+            client.outbox.push(SyncMessage::ResendWhole {
                 rows: vec![(table, id, key, 0)],
             });
         }
@@ -6997,7 +7005,7 @@ impl Db {
             // that way.
             if !matches!(
                 message,
-                SyncMessage::Schema { .. } | SyncMessage::Holds { .. }
+                SyncMessage::Schema { .. } | SyncMessage::KnownCatalogue { .. }
             ) {
                 let inner = self.inner.borrow_mut();
                 if inner.session_unadmitted(index) {
@@ -7083,7 +7091,7 @@ impl Db {
     fn overtakes(&self, index: usize, barrier: &HeldWrites, message: &SyncMessage) -> bool {
         match message {
             SyncMessage::Unsubscribe { id } => !barrier.reads.contains(id),
-            SyncMessage::Advise { .. } => true,
+            SyncMessage::CheckAllowed { .. } => true,
             // A read frozen at a snapshot may name the held commits
             // themselves, which the server cannot resolve until they apply.
             SyncMessage::Read {
@@ -7108,7 +7116,7 @@ impl Db {
             SyncMessage::Read { id, .. } => {
                 barrier.reads.insert(*id);
             }
-            SyncMessage::Unsubscribe { .. } | SyncMessage::Advise { .. } => {}
+            SyncMessage::Unsubscribe { .. } | SyncMessage::CheckAllowed { .. } => {}
             SyncMessage::Commit { ops, .. } => {
                 barrier.commits = true;
                 let schema = {
@@ -7336,7 +7344,7 @@ impl Db {
                 })
                 .collect();
             let mut images = Vec::new();
-            // Seqs of shipped history versions: their origins go first.
+            // Seqs of shipped history versions: their tx ids go first.
             let mut history_seqs = BTreeSet::new();
             for (id, queue, group, list) in subs {
                 let events: Vec<SubscriptionEvent> = queue.borrow_mut().drain(..).collect();
@@ -7554,7 +7562,7 @@ impl Db {
                     settled.push(SyncMessage::Settled {
                         id,
                         through,
-                        listing: window,
+                        members: window,
                         global,
                     });
                     // The settled opening listed the result.
@@ -7570,7 +7578,7 @@ impl Db {
                     Some(image) if readable(&inner, &table, row, &key, policy)? => {
                         images.push(image)
                     }
-                    _ => evictions.push(SyncMessage::Evict {
+                    _ => evictions.push(SyncMessage::AccessLost {
                         table,
                         id: *row.0.as_bytes(),
                         key,
@@ -7610,7 +7618,7 @@ impl Db {
             let evicted: HashSet<(&str, [u8; 16], &[u8])> = evictions
                 .iter()
                 .filter_map(|eviction| match eviction {
-                    SyncMessage::Evict { table, id, key } => {
+                    SyncMessage::AccessLost { table, id, key } => {
                         Some((table.as_str(), *id, key.as_slice()))
                     }
                     _ => None,
@@ -7622,7 +7630,7 @@ impl Db {
                 });
             }
             for eviction in &evictions {
-                if let SyncMessage::Evict { table, id, .. } = eviction {
+                if let SyncMessage::AccessLost { table, id, .. } = eviction {
                     watch.forget(wk((
                         table.clone(),
                         "id".to_owned(),
@@ -7636,10 +7644,10 @@ impl Db {
             if let Some(catalogue) = inner.catalogue_for(index)? {
                 out.push(catalogue);
             }
-            let origins = if history_seqs.is_empty() {
+            let tx_ids = if history_seqs.is_empty() {
                 Vec::new()
             } else {
-                inner.origins(&history_seqs)?
+                inner.tx_ids(&history_seqs)?
             };
             let session = &mut inner.sessions[index];
             session.watch = watch;
@@ -7691,7 +7699,7 @@ impl Db {
                     }
                 }
             }
-            out.extend(rows_messages(images, origins, ROWS_MESSAGE_BYTES));
+            out.extend(rows_messages(images, tx_ids, ROWS_MESSAGE_BYTES));
             out.extend(evictions);
             out.extend(std::mem::take(&mut session.outbox));
             out.extend(settled);
@@ -7759,8 +7767,8 @@ impl Db {
                     }
                 }
                 out.retain(|message| {
-                    !matches!(message, SyncMessage::Rows { images, origins }
-                            if images.is_empty() && origins.is_empty())
+                    !matches!(message, SyncMessage::Rows { images, tx_ids }
+                            if images.is_empty() && tx_ids.is_empty())
                 });
             }
             // Chunked cells go as deltas over the version of their row the
@@ -7773,7 +7781,7 @@ impl Db {
                             inner.ship_deltas(&mut shipped, image)?;
                         }
                     }
-                    SyncMessage::Evict { table, id, key } => {
+                    SyncMessage::AccessLost { table, id, key } => {
                         shipped.remove(&(table.clone(), *id, key.clone()));
                     }
                     _ => {}
@@ -8044,7 +8052,7 @@ impl Db {
             // Rows the replica could not apply a delta to: each ships
             // whole (or as an eviction), as the replica lacks the version
             // the delta was made over.
-            SyncMessage::Hold { rows } => {
+            SyncMessage::ResendWhole { rows } => {
                 let mut inner = self.inner.borrow_mut();
                 let session = &mut inner.sessions[index];
                 for (table, id, key, _) in rows {
@@ -8054,10 +8062,10 @@ impl Db {
                         .insert((table, RowUuid::from_bytes(id), key));
                 }
             }
-            SyncMessage::Holds { versions } => {
+            SyncMessage::KnownCatalogue { versions } => {
                 let mut inner = self.inner.borrow_mut();
                 let session = &mut inner.sessions[index];
-                session.holds = Some(versions.into_iter().collect());
+                session.known_catalogue = Some(versions.into_iter().collect());
                 session.catalogue_owed = true;
             }
             SyncMessage::Unsubscribe { id } => {
@@ -8101,7 +8109,7 @@ impl Db {
                     }
                 }
             }
-            SyncMessage::Advise {
+            SyncMessage::CheckAllowed {
                 id,
                 action,
                 author,
@@ -8122,7 +8130,7 @@ impl Db {
                 };
                 self.inner.borrow_mut().sessions[index]
                     .outbox
-                    .push(SyncMessage::Advice { id, advice });
+                    .push(SyncMessage::Allowed { id, advice });
             }
             SyncMessage::Read {
                 id,
@@ -8264,7 +8272,7 @@ impl Db {
                 };
                 let rows = inner.run(&prepared, policy, &read)?;
                 let mut images = Vec::new();
-                // Seqs of shipped history versions, for their origins.
+                // Seqs of shipped history versions, for their tx ids.
                 let mut seqs = BTreeSet::new();
                 // A flat join ships each occurrence's joined rows.
                 let joined_tables = query
@@ -8333,18 +8341,18 @@ impl Db {
                 let session = &mut inner.sessions[index];
                 session.watch = watch;
                 session.held = held;
-                let mut origins = inner.origins(&seqs)?;
-                origins.extend(named);
+                let mut tx_ids = inner.tx_ids(&seqs)?;
+                tx_ids.extend(named);
                 let through = at.unwrap_or(inner.served_through());
                 let authority = inner.client.is_none();
                 let session = &mut inner.sessions[index];
                 session
                     .outbox
-                    .extend(rows_messages(images, origins, ROWS_MESSAGE_BYTES));
+                    .extend(rows_messages(images, tx_ids, ROWS_MESSAGE_BYTES));
                 session.outbox.push(SyncMessage::Settled {
                     id,
                     through,
-                    listing: Some(rows.iter().map(|r| *r.id.0.as_bytes()).collect()),
+                    members: Some(rows.iter().map(|r| *r.id.0.as_bytes()).collect()),
                     // A strict read at a relay is served once its upstream
                     // answered, from the settled rows alone.
                     global: authority || strict,
@@ -9385,17 +9393,17 @@ mod tests {
             image(3, 3, 100),
             image(4, 2, 100),
         ];
-        let origins = vec![(1, [9; 16], 1)];
-        let messages = rows_messages(images, origins.clone(), 300);
+        let tx_ids = vec![(1, [9; 16], 1)];
+        let messages = rows_messages(images, tx_ids.clone(), 300);
         // seq 1 and 2 fit together; seq 3's two versions stay together.
         assert_eq!(
             shipped(&messages),
             [vec![(2, 1), (4, 2)], vec![(1, 3), (3, 3)]]
         );
-        let SyncMessage::Rows { origins: first, .. } = &messages[0] else {
+        let SyncMessage::Rows { tx_ids: first, .. } = &messages[0] else {
             unreachable!()
         };
-        assert_eq!(first, &origins, "the origins go with the first part");
+        assert_eq!(first, &tx_ids, "the tx ids go with the first part");
     }
 
     #[test]
