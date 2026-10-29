@@ -4,4 +4,4 @@
 "jazz-rn-ios": patch
 ---
 
-Preserve safe native foreground tick failure categories through the lease-scoped V2 ABI and include actionable fixed wording in the JSI exception. The postcard `execute(Tick)` path remains unchanged.
+Explain local foreground processing failures in the native tick exception using the existing lifecycle status, without changing the native artifact ABI.

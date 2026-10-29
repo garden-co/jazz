@@ -1,8 +1,9 @@
-//! Ordered account-assignment state machine.
+//! Account-assignment decisions over the registry's current state.
 //!
 //! Authentication and durable commit belong to the caller: principals passed
-//! here must come from verified credentials, and a proposed state must be
-//! durably committed before it replaces the admitted state or is acknowledged.
+//! here must come from verified credentials, and a command's writes to its
+//! [`AccountState`] must be durably committed, all together, before its
+//! result is acknowledged.
 
 use serde::{Deserialize, Serialize};
 
@@ -70,23 +71,6 @@ pub struct Assignment {
     pub manage_identities: bool,
     /// Admission generation; old approvals cannot survive revocation.
     pub generation: u64,
-}
-
-#[derive(Clone, Debug)]
-struct LinkIntent {
-    account: AccountId,
-    approver: Principal,
-    approver_generation: u64,
-    candidate: Principal,
-    expires_at: u64,
-    completed: bool,
-}
-
-/// Registry decisions are applied serially by one application authority.
-#[derive(Clone, Debug, Default)]
-pub struct AccountRegistry {
-    assignments: BTreeMap<Principal, Assignment>,
-    intents: BTreeMap<Uuid, LinkIntent>,
 }
 
 /// Stable protocol failures, with no credential material.
@@ -176,69 +160,292 @@ pub enum AccountCommandResult {
     Recorded,
 }
 
+/// A manager's approval for one exact identity to join their account.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkIntent {
+    /// Account the candidate joins.
+    pub account: AccountId,
+    /// Manager who approved.
+    pub approver: Principal,
+    /// The approver's admission generation when approving; a revocation
+    /// since voids the approval.
+    pub approver_generation: u64,
+    /// Exact identity that may accept.
+    pub candidate: Principal,
+    /// Exclusive expiry in Unix seconds.
+    pub expires_at: u64,
+    /// Accepted already; accepting again answers the assignment.
+    pub completed: bool,
+}
+
+/// The registry's current state, wherever it is kept: the decisions below
+/// read and write only through this. A durable owner runs one command's
+/// reads and writes in one transaction, so the state it leaves is always
+/// the result of whole commands; a decision error comes before any write.
+pub trait AccountState {
+    /// Storage failures, and the registry's own refusals.
+    type Error: From<AccountError>;
+    /// The principal's assignment.
+    fn assignment(&mut self, principal: &Principal) -> Result<Option<Assignment>, Self::Error>;
+    /// Whether any principal is assigned to `account`.
+    fn account_assigned(&mut self, account: AccountId) -> Result<bool, Self::Error>;
+    /// The approval with `nonce`.
+    fn link(&mut self, nonce: Uuid) -> Result<Option<LinkIntent>, Self::Error>;
+    /// Set the principal's assignment.
+    fn put_assignment(
+        &mut self,
+        principal: &Principal,
+        assignment: &Assignment,
+    ) -> Result<(), Self::Error>;
+    /// Set the approval with `nonce`.
+    fn put_link(&mut self, nonce: Uuid, link: &LinkIntent) -> Result<(), Self::Error>;
+    /// Forget approvals that expired at or before `now` without being
+    /// accepted; accepting one afterwards finds no intent.
+    fn prune_links(&mut self, now: u64) -> Result<(), Self::Error>;
+}
+
+/// Apply one authenticated command to `state`.
+pub fn apply<S: AccountState>(
+    state: &mut S,
+    command: &AccountCommand,
+) -> Result<AccountCommandResult, S::Error> {
+    match command {
+        AccountCommand::FoundLocalFirst { principal, app } => {
+            principal.validate(true)?;
+            if principal.issuer != crate::identity::LOCAL_FIRST_ISSUER {
+                return Err(AccountError::InvalidPrincipal.into());
+            }
+            let account = local_first_account_id(*app, &principal.subject);
+            if let Some(existing) = state.assignment(principal)? {
+                if existing.account != account {
+                    return Err(AccountError::AlreadyAssigned.into());
+                }
+                return login(state, principal).map(AccountCommandResult::Assignment);
+            }
+            register_inner(state, principal, account).map(AccountCommandResult::Assignment)
+        }
+        AccountCommand::Register { principal, account } => {
+            principal.validate(false)?;
+            register_inner(state, principal, *account).map(AccountCommandResult::Assignment)
+        }
+        AccountCommand::RequestLink {
+            approver,
+            candidate,
+            nonce,
+            now,
+            expires_at,
+        } => {
+            request_link(state, approver, candidate, *nonce, *now, *expires_at)?;
+            Ok(AccountCommandResult::Recorded)
+        }
+        AccountCommand::AcceptLink {
+            candidate,
+            nonce,
+            now,
+        } => accept_link(state, candidate, *nonce, *now).map(AccountCommandResult::Assignment),
+        AccountCommand::Revoke { approver, target } => {
+            revoke(state, approver, target)?;
+            Ok(AccountCommandResult::Recorded)
+        }
+    }
+}
+
+/// Resolve an admitted identity without enrolling it.
+pub fn login<S: AccountState>(
+    state: &mut S,
+    principal: &Principal,
+) -> Result<Assignment, S::Error> {
+    let assignment = state
+        .assignment(principal)?
+        .ok_or(AccountError::NotAssigned)?;
+    if !assignment.active {
+        return Err(AccountError::NotAuthorized.into());
+    }
+    Ok(assignment)
+}
+
+fn register_inner<S: AccountState>(
+    state: &mut S,
+    principal: &Principal,
+    account: AccountId,
+) -> Result<Assignment, S::Error> {
+    if account.is_system() {
+        return Err(AccountError::ReservedAccount.into());
+    }
+    if state.assignment(principal)?.is_some() {
+        return Err(AccountError::AlreadyAssigned.into());
+    }
+    if state.account_assigned(account)? {
+        return Err(AccountError::IdentifierCollision.into());
+    }
+    let assignment = Assignment {
+        account,
+        active: true,
+        manage_identities: true,
+        generation: 0,
+    };
+    state.put_assignment(principal, &assignment)?;
+    Ok(assignment)
+}
+
+/// Record a targeted approval. The authority generates nonce and expiry.
+fn request_link<S: AccountState>(
+    state: &mut S,
+    approver: &Principal,
+    candidate: &Principal,
+    nonce: Uuid,
+    now: u64,
+    expires_at: u64,
+) -> Result<(), S::Error> {
+    candidate.validate(false)?;
+    let assignment = login(state, approver)?;
+    if !assignment.manage_identities {
+        return Err(AccountError::NotAuthorized.into());
+    }
+    if expires_at <= now {
+        return Err(AccountError::Expired.into());
+    }
+    if state.assignment(candidate)?.is_some() {
+        return Err(AccountError::AlreadyAssigned.into());
+    }
+    if state.link(nonce)?.is_some() {
+        return Err(AccountError::IdentifierCollision.into());
+    }
+    state.prune_links(now)?;
+    state.put_link(
+        nonce,
+        &LinkIntent {
+            account: assignment.account,
+            approver: approver.clone(),
+            approver_generation: assignment.generation,
+            candidate: candidate.clone(),
+            expires_at,
+            completed: false,
+        },
+    )
+}
+
+/// Accept as exactly the candidate principal and atomically reserve its
+/// assignment. Repeats never reactivate a revoked assignment.
+fn accept_link<S: AccountState>(
+    state: &mut S,
+    candidate: &Principal,
+    nonce: Uuid,
+    now: u64,
+) -> Result<Assignment, S::Error> {
+    let mut intent = state.link(nonce)?.ok_or(AccountError::InvalidIntent)?;
+    if &intent.candidate != candidate {
+        return Err(AccountError::InvalidIntent.into());
+    }
+    if intent.completed {
+        return login(state, candidate);
+    }
+    if now >= intent.expires_at {
+        return Err(AccountError::Expired.into());
+    }
+    let approver = login(state, &intent.approver)?;
+    if !approver.manage_identities
+        || approver.account != intent.account
+        || approver.generation != intent.approver_generation
+    {
+        return Err(AccountError::NotAuthorized.into());
+    }
+    if state.assignment(candidate)?.is_some() {
+        return Err(AccountError::AlreadyAssigned.into());
+    }
+    let assignment = Assignment {
+        account: intent.account,
+        active: true,
+        manage_identities: true,
+        generation: 0,
+    };
+    state.put_assignment(candidate, &assignment)?;
+    intent.completed = true;
+    state.put_link(nonce, &intent)?;
+    Ok(assignment)
+}
+
+/// Revoke admission while retaining the permanent assignment.
+fn revoke<S: AccountState>(
+    state: &mut S,
+    approver: &Principal,
+    target: &Principal,
+) -> Result<(), S::Error> {
+    let approval = login(state, approver)?;
+    let mut target_binding = state.assignment(target)?.ok_or(AccountError::NotAssigned)?;
+    if !approval.manage_identities || approval.account != target_binding.account {
+        return Err(AccountError::NotAuthorized.into());
+    }
+    if target_binding.active {
+        target_binding.active = false;
+        target_binding.generation = target_binding
+            .generation
+            .checked_add(1)
+            .expect("admission generation exhausted");
+        state.put_assignment(target, &target_binding)?;
+    }
+    Ok(())
+}
+
+/// The registry state in memory, for tests and simulations.
+#[derive(Clone, Debug, Default)]
+pub struct AccountRegistry {
+    assignments: BTreeMap<Principal, Assignment>,
+    intents: BTreeMap<Uuid, LinkIntent>,
+}
+
+impl AccountState for AccountRegistry {
+    type Error = AccountError;
+
+    fn assignment(&mut self, principal: &Principal) -> Result<Option<Assignment>, AccountError> {
+        Ok(self.assignments.get(principal).cloned())
+    }
+
+    fn account_assigned(&mut self, account: AccountId) -> Result<bool, AccountError> {
+        Ok(self
+            .assignments
+            .values()
+            .any(|binding| binding.account == account))
+    }
+
+    fn link(&mut self, nonce: Uuid) -> Result<Option<LinkIntent>, AccountError> {
+        Ok(self.intents.get(&nonce).cloned())
+    }
+
+    fn put_assignment(
+        &mut self,
+        principal: &Principal,
+        assignment: &Assignment,
+    ) -> Result<(), AccountError> {
+        self.assignments
+            .insert(principal.clone(), assignment.clone());
+        Ok(())
+    }
+
+    fn put_link(&mut self, nonce: Uuid, link: &LinkIntent) -> Result<(), AccountError> {
+        self.intents.insert(nonce, link.clone());
+        Ok(())
+    }
+
+    fn prune_links(&mut self, now: u64) -> Result<(), AccountError> {
+        self.intents
+            .retain(|_, link| link.completed || link.expires_at > now);
+        Ok(())
+    }
+}
+
 impl AccountRegistry {
-    /// Apply one ordered authenticated command. Durable owners first apply to
-    /// a candidate clone, persist the command, then publish that candidate.
+    /// Apply one ordered authenticated command.
     pub fn apply(
         &mut self,
         command: &AccountCommand,
     ) -> Result<AccountCommandResult, AccountError> {
-        match command {
-            AccountCommand::FoundLocalFirst { principal, app } => {
-                principal.validate(true)?;
-                if principal.issuer != crate::identity::LOCAL_FIRST_ISSUER {
-                    return Err(AccountError::InvalidPrincipal);
-                }
-                let account = local_first_account_id(*app, &principal.subject);
-                if let Some(existing) = self.assignments.get(principal) {
-                    if existing.account != account {
-                        return Err(AccountError::AlreadyAssigned);
-                    }
-                    return self
-                        .login(principal)
-                        .cloned()
-                        .map(AccountCommandResult::Assignment);
-                }
-                self.register_inner(principal.clone(), account)
-                    .map(AccountCommandResult::Assignment)
-            }
-            AccountCommand::Register { principal, account } => self
-                .register(principal.clone(), *account)
-                .map(AccountCommandResult::Assignment),
-            AccountCommand::RequestLink {
-                approver,
-                candidate,
-                nonce,
-                now,
-                expires_at,
-            } => {
-                self.request_link(approver, candidate.clone(), *nonce, *now, *expires_at)?;
-                Ok(AccountCommandResult::Recorded)
-            }
-            AccountCommand::AcceptLink {
-                candidate,
-                nonce,
-                now,
-            } => self
-                .accept_link(candidate, *nonce, *now)
-                .map(AccountCommandResult::Assignment),
-            AccountCommand::Revoke { approver, target } => {
-                self.revoke(approver, target)?;
-                Ok(AccountCommandResult::Recorded)
-            }
-        }
+        apply(self, command)
     }
 
     /// Resolve an admitted identity without enrolling it.
-    pub fn login(&self, principal: &Principal) -> Result<&Assignment, AccountError> {
-        let assignment = self
-            .assignments
-            .get(principal)
-            .ok_or(AccountError::NotAssigned)?;
-        if !assignment.active {
-            return Err(AccountError::NotAuthorized);
-        }
-        Ok(assignment)
+    pub fn login(&mut self, principal: &Principal) -> Result<Assignment, AccountError> {
+        login(self, principal)
     }
 
     /// Explicitly register a fresh principal and account.
@@ -249,35 +456,7 @@ impl AccountRegistry {
         account: AccountId,
     ) -> Result<Assignment, AccountError> {
         principal.validate(false)?;
-        self.register_inner(principal, account)
-    }
-
-    fn register_inner(
-        &mut self,
-        principal: Principal,
-        account: AccountId,
-    ) -> Result<Assignment, AccountError> {
-        if account.is_system() {
-            return Err(AccountError::ReservedAccount);
-        }
-        if self.assignments.contains_key(&principal) {
-            return Err(AccountError::AlreadyAssigned);
-        }
-        if self
-            .assignments
-            .values()
-            .any(|binding| binding.account == account)
-        {
-            return Err(AccountError::IdentifierCollision);
-        }
-        let assignment = Assignment {
-            account,
-            active: true,
-            manage_identities: true,
-            generation: 0,
-        };
-        self.assignments.insert(principal, assignment.clone());
-        Ok(assignment)
+        register_inner(self, &principal, account)
     }
 
     /// Record a targeted approval. The authority generates nonce and expiry.
@@ -289,99 +468,22 @@ impl AccountRegistry {
         now: u64,
         expires_at: u64,
     ) -> Result<(), AccountError> {
-        candidate.validate(false)?;
-        let assignment = self.login(approver)?;
-        if !assignment.manage_identities {
-            return Err(AccountError::NotAuthorized);
-        }
-        if expires_at <= now {
-            return Err(AccountError::Expired);
-        }
-        if self.assignments.contains_key(&candidate) {
-            return Err(AccountError::AlreadyAssigned);
-        }
-        if self.intents.contains_key(&nonce) {
-            return Err(AccountError::IdentifierCollision);
-        }
-        self.intents.insert(
-            nonce,
-            LinkIntent {
-                account: assignment.account,
-                approver: approver.clone(),
-                approver_generation: assignment.generation,
-                candidate,
-                expires_at,
-                completed: false,
-            },
-        );
-        Ok(())
+        request_link(self, approver, &candidate, nonce, now, expires_at)
     }
 
-    /// Accept as exactly the candidate principal and atomically reserve its
-    /// assignment. Replays never reactivate a revoked assignment.
+    /// Accept as exactly the candidate principal.
     pub fn accept_link(
         &mut self,
         candidate: &Principal,
         nonce: Uuid,
         now: u64,
     ) -> Result<Assignment, AccountError> {
-        let intent = self
-            .intents
-            .get(&nonce)
-            .ok_or(AccountError::InvalidIntent)?;
-        if &intent.candidate != candidate {
-            return Err(AccountError::InvalidIntent);
-        }
-        if intent.completed {
-            return self.login(candidate).cloned();
-        }
-        if now >= intent.expires_at {
-            return Err(AccountError::Expired);
-        }
-        let approver = self.login(&intent.approver)?;
-        if !approver.manage_identities
-            || approver.account != intent.account
-            || approver.generation != intent.approver_generation
-        {
-            return Err(AccountError::NotAuthorized);
-        }
-        if self.assignments.contains_key(candidate) {
-            return Err(AccountError::AlreadyAssigned);
-        }
-        let assignment = Assignment {
-            account: intent.account,
-            active: true,
-            manage_identities: true,
-            generation: 0,
-        };
-        self.assignments
-            .insert(candidate.clone(), assignment.clone());
-        self.intents
-            .get_mut(&nonce)
-            .expect("validated intent")
-            .completed = true;
-        Ok(assignment)
+        accept_link(self, candidate, nonce, now)
     }
 
     /// Revoke admission while retaining the permanent assignment.
     pub fn revoke(&mut self, approver: &Principal, target: &Principal) -> Result<(), AccountError> {
-        let approval = self.login(approver)?;
-        let target_binding = self
-            .assignments
-            .get(target)
-            .ok_or(AccountError::NotAssigned)?;
-        if !approval.manage_identities || approval.account != target_binding.account {
-            return Err(AccountError::NotAuthorized);
-        }
-        let target_binding = self.assignments.get_mut(target).expect("validated target");
-        if target_binding.active {
-            target_binding.active = false;
-            target_binding.generation = target_binding
-                .generation
-                .checked_add(1)
-                .expect("admission generation exhausted");
-        }
-        Ok(())
+        revoke(self, approver, target)
     }
 }
 

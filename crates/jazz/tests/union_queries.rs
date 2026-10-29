@@ -643,10 +643,10 @@ fn a_union_arms_own_window_applies_before_the_union() {
     );
 }
 
-/// Titles past the inline sort prefix that share it order by their whole
-/// value, in a union as in a plain read.
+/// Long inline titles sharing a long prefix order by their whole value, in
+/// a union as in a plain read.
 #[test]
-fn a_union_orders_long_values_sharing_their_sort_prefix() {
+fn a_union_orders_long_values_sharing_a_prefix() {
     let db = open(schema(None), 1);
     let prefix = "p".repeat(5000);
     insert(&db, 1, &format!("{prefix}c"), false, "ada");

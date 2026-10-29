@@ -23,7 +23,8 @@ readers of a version whose tree contains them.
 Invariant digest:
 
 - `INV-CONTENT-1`: large values have one implementation, and a chunked value
-  reads, filters, orders and indexes as its logical value.
+  reads as its logical value. Queries compare it by cell, never by content
+  (19.5).
 - `INV-CONTENT-2`: a version's cell is immutable: `(epoch, n)` always names the
   same logical value, however the epoch grows.
 - `INV-CONTENT-3`: nodes and edits are disclosed only through a readable row
@@ -67,17 +68,8 @@ logical length exceeds `INLINE_VALUE_MAX_BYTES`. So an inline cell never equals
 a chunked one, and a write that brings a chunked value back under the limit
 stores it inline.
 
-A column that an index names additionally has a hidden key column
-`$k:<column>` in the table and its history (`$` names are the engine's). It
-holds the value's sort prefix (its first `SORT_PREFIX_BYTES` = 256 logical
-bytes, cut on a code point for text, in the column's storage class) for
-chunked cells and NULL otherwise. The column's indexes, orderings and ranges
-are on `COALESCE("$k:<column>", <column>)`. A key column is store-local: a
-store writes it with the cell, fills it for cells stored before an index
-named the column, and an image carries it under the column's wire name, which
-the receiving store keeps for the columns it indexes. Unindexed columns have
-no key column; their orderings take each chunked value's sort key from the
-Rust prep.
+A large-capable column has no other stored column: its indexes are on the
+cell itself, and no query reads a chunked value's bytes (19.5).
 
 ## 19.2 Trees and nodes
 
@@ -217,13 +209,53 @@ verified, its lengths match, and the writer **possesses** it.
 
 A node held by the store proves nothing about the writer, since hashes are
 not secret: a writer possesses a tree when each node is either under the tree
-of a row version it may read that its commit names (the version a delta
-extends, or the settled version its pushes assumed, §19.8), or pushed by the
-writer itself under its own receipt with its children possessed in turn. A
-tree the writer does not possess is refused exactly as one with absent nodes,
-so a write never tells whether the store holds a tree, and never copies
-content the writer cannot read. A trusted link's writes are not checked.
-Relays check their sessions' writes the same way.
+of a row version it may read that its commit names (the version one of its
+ops' deltas extends, or an op's access proof: the version of that op's row
+its pushes assumed, §19.8), or pushed by the writer itself under its own
+receipt with its children possessed in turn. The versions count for every op
+of the commit: each is content the writer may read, so one op's proof
+vouching for another op's tree copies only what the writer could copy anyway
+(item 7 below). A tree the writer does not possess is refused
+exactly as one with absent nodes, so a write never tells whether the store
+holds a tree, and never copies content the writer cannot read. A trusted
+link's writes are not checked. Relays check their sessions' writes the same
+way.
+
+**What possession prevents.** Content hashes leak: through old descriptors a
+reader kept, a share since revoked, logs, or guessing. Possession makes a
+known hash worth nothing without read access:
+
+1. **Read bypass by known hash.** A writer that lost access to a row, or never
+   had it, writes that row's root into a row of its own and then reads or
+   pulls it back. The write is refused: the tree is under no version the
+   writer may read and none of its nodes are under its receipt.
+2. **Existence oracle.** A writer hashes guessed content (confirmation of a
+   file) and watches whether a write naming it is accepted. A tree the writer
+   does not possess is refused with the same error, at the same point, as one
+   whose nodes the store never held. Only a possessed tree reaches the step
+   that may wait on a chunk store fetch, so the wait tells the writer only
+   about content it may read.
+3. **Silent pushes.** `PushChunks` has no answer: a node the store already
+   holds for someone else is taken exactly as a new one, and still proves
+   nothing until the writer pushed it under its own receipt.
+4. **Row-gated pulls.** A pull is answered only through a row version the
+   requester may read, only when that version holds the cited root, and only
+   with nodes under that root (§19.8). A node held for another row and a node
+   never held both come back in `missing`.
+5. **Access checked at apply time.** A delta's base and an access proof count
+   only if the writer may read that version and the row as it stands when the
+   commit applies (`still_readable_version`), including a commit retried after
+   a chunk store fetch. Access lost after the writer saw the version proves
+   nothing.
+6. **A delta's base is its own proof.** The edits extend a version the writer
+   names, so that version must be readable too: a delta over a version the
+   writer may not read rejects the commit, with the same error whether or not
+   the version exists.
+7. **Scope.** A trusted link's writes are not checked. A relay checks its
+   sessions' writes as an authority does before uploading them as its own.
+   Copying content the writer may read into a row others may read is allowed
+   by design: the writer pushes its nodes (or names a readable version of the
+   written row) like any other value it could have typed in.
 
 JSON validity is a writer's responsibility: anyone allowed to write a value is
 trusted not to produce malformed JSON, and Jazz's JSON mutation APIs and JSON
@@ -241,23 +273,45 @@ A chunked value is read by replaying its prefix over the parts of its tree the
 read needs. Partial reads (byte, UTF-8 and UTF-16 ranges, JSON pointers) map
 their range through the edits and read only the leaves it covers.
 
-| Operation                                            | How it runs                                                                                        |
-| ---------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `=` against an inline-size literal                   | SQL: an inline cell compares directly; a chunked cell never matches                                |
-| `=`, `IN`, DISTINCT, GROUP BY between chunked values | equal cells are equal values; unequal cells are compared by length, then content, in the Rust prep |
-| `=` against a literal over 64 KiB                    | the Rust prep                                                                                      |
-| length                                               | the Rust prep: tree length plus the prefix's net edits                                             |
-| ORDER BY and ranges, indexed column                  | the index on `COALESCE(c__k, c)`; the Rust prep orders values sharing a prefix                     |
-| ORDER BY and ranges, unindexed column                | the Rust prep ranks the column's chunked values                                                    |
-| `contains`, LIKE, JSON pointer                       | the Rust prep reads the content                                                                    |
+Queries compare cells, in plain SQL. An inline cell compares as its value,
+exactly as any other string or bytes value. A chunked cell (a value over
+`INLINE_VALUE_MAX_BYTES`, 64 KiB) is compared by identity, never by content:
 
-The prep answers before the statement runs and hands its answers to the
-statement as parameters, so every query, trigger and schema object uses only
-SQLite built-ins and runs on any SQLite, Durable Objects included.
+| Operation on a value over 64 KiB          | Result                                                                                                            |
+| ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `=`, `!=`, `IN` against an inline literal | never equal: an inline literal is under the threshold, a chunked value over it                                    |
+| `=`, `!=`, `IN` against a longer literal  | refused when the query compiles: "comparing `t.c` with a literal over 65536 bytes is not supported yet"           |
+| `=`, `!=` between two columns, joins      | equal only when both name the same cell                                                                           |
+| GROUP BY, DISTINCT                        | one group per cell                                                                                                |
+| `<`, `<=`, `>`, `>=`                      | never matches, against a literal or another column                                                                |
+| `contains`                                | never matches                                                                                                     |
+| ORDER BY                                  | after NULL and before every inline value ascending (reversed descending), among themselves in no meaningful order |
 
-`INV-CONTENT-1`: every read, comparison, edit and sync path goes through the
-one implementation in `jazz-db`, and its answers equal those of the
-materialized logical value.
+Equal cells always hold equal values (`INV-CONTENT-2`), so cell equality can
+under-report equality but never over-report it. Two cells of one value are
+the same cell when both are tail-free (`n = 0`): a tree is content-defined,
+so the same bytes build the same root, and interning reuses the epoch over
+it. A value written with an edit tail, or interned into a different epoch on
+another replica, is a different cell; equality between such values depends on
+how they were written. Cells are store-local: a client and the server may
+hold one value as different cells, so a policy that compares two
+large-capable columns can decide a row over 64 KiB differently on each.
+Values up to 64 KiB, the common case, have none of these limits.
+
+These are limits, not a design commitment. A column flag that consolidates
+every write to a tail-free tree (making equality on that column exact, at the
+cost of cheap edits) is the planned escape hatch; content `contains` would
+need a write-time index (SQLite FTS5 with the trigram tokenizer runs on every
+target, Durable Objects included).
+
+The only Rust-side query work on chunked values is reading them: whole
+projections, partial selections (19.12), splices and deltas. Every query,
+trigger and schema object uses only SQLite built-ins and runs on any SQLite,
+Durable Objects included, and reads never write.
+
+`INV-CONTENT-1`: every read, edit and sync path goes through the one
+implementation in `jazz-db`, and every read returns the materialized logical
+value.
 
 ## 19.6 Deltas
 
@@ -312,28 +366,29 @@ the seq of the version last shipped this session, or held for an own commit
 (`Fate.held`). A new session starts with none, so its first image of each row
 goes whole. A row version with chunked cells goes out as
 `Delta` against that seq where the stored base value allows, else as `Tree`.
-An `Evict` drops the recorded seq.
+An `AccessLost` drops the recorded seq.
 
 **Self-healing.** A client may drop a row without telling the authority
 (INV-SYNC-14 evictions), so a `Delta` can name a version it no longer holds.
 A client that cannot place a `Delta` (no version at that seq, or an edit
-count that differs) skips that image and sends `Hold` for the row with seq 0,
-saying it holds no version. The authority then ships the row's current image
-whole, or an `Evict` if it is no longer readable. Until that arrives the
+count that differs) skips that image and sends `ResendWhole` for the row with
+seq 0, saying it holds no version. The authority then ships the row's current image
+whole, or an `AccessLost` if it is no longer readable. Until that arrives the
 client holds a stale version of the row, so it stores no resume point and
 forgets the ones it had (a resume from them would count the row as held), and
-it sends the `Hold` again on its next connection. A `Delta` is never applied
-to any version but the one it names.
+it sends the `ResendWhole` again on its next connection. A `Delta` is never
+applied to any version but the one it names.
 
 **Client to authority.** A client's settled versions all came from the
 authority, so it bases a commit's chunked values on the newest settled
 version of the row it holds: a value extending that version's value travels
-as `Delta` beside the commit's ops, anything else as `Tree`. The authority
+as `Delta` on its op, anything else as `Tree`. The authority
 keeps every version (§19.11), so it holds the base. It resolves the delta only when the writer may read that version
-(`readable_version`): otherwise naming a version would copy content the
+and the row as it stands (`still_readable_version`): otherwise naming a version would copy content the
 writer cannot read into its write. A delta it cannot resolve rejects the
 commit. The rebuilt descriptor is admitted as any other (§19.4). A `Tree`
-travels with the settled version of its row as its source, and is preceded
+travels with the settled version of its row as its access proof, and is
+preceded
 by every node of its tree not under that version's trees, pushed under the
 writer's receipt (§19.4). Nodes the authority holds for others are pushed
 anyway: deduplication is silent. A node the client lacks (a value copied
@@ -432,6 +487,10 @@ Reference counts are kept by triggers:
 - every branch holds its children through `_jazz_lv_edge`;
 - leases and receipts hold their staged nodes.
 
+The cell triggers on a table and its `__h` watch exactly its large-capable
+columns, under every schema version the store has held, so a reopened store
+learns from them which stored columns can hold a chunked cell.
+
 An epoch whose `refs` reaches 0 is deleted, releasing its root; a root at 0
 releases its tree; a node no edge, root, lease or receipt holds is reclaimed.
 Reclamation is queued in the transaction that released the last reference and
@@ -496,9 +555,18 @@ db.update(
   { name: "renamed" },
   {
     applyDiffs: {
-      byteField: { within: bytePage, splices: [{ at: 4, delete: 3, insert: bytes }] },
-      textField: { within: textPage, splices: [{ at: 3, delete: 1, insert: "x" }] },
-      textFieldUtf8: { within: utf8Page, splices: [{ atUtf8: 3, deleteUtf8: 1, insert: "x" }] },
+      byteField: {
+        within: bytePage,
+        splices: [{ at: 4, delete: 3, insert: bytes }],
+      },
+      textField: {
+        within: textPage,
+        splices: [{ at: 3, delete: 1, insert: "x" }],
+      },
+      textFieldUtf8: {
+        within: utf8Page,
+        splices: [{ atUtf8: 3, deleteUtf8: 1, insert: "x" }],
+      },
       jsonField: { edits: [{ op: "set", at: "/someKey/11", value: next }] },
     },
   },
@@ -579,7 +647,7 @@ not expose epochs, cells, node hashes, tree nodes, leases or retry state.
   check, with short-lived presigned URLs so revealed names expire.
 - Store-local leaf patches (a new leaf kept as its base leaf plus edits until
   it is offloaded), as a storage optimization outside the format.
-- A lazily filled content-hash table, if exact equality between chunked values
-  in plain SQL turns out to matter.
+- Exact equality, ranges and `contains` on values over 64 KiB (19.5): a
+  consolidating column flag, and a write-time FTS5 trigram index.
 - Retention and history thinning: removal of old versions must be ordinary
   refcounted row deletions, never direct node deletion.

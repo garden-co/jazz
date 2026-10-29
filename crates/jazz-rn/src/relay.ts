@@ -1,9 +1,5 @@
 import nativeRelay from "./NativeJazzRelay";
-import {
-  NATIVE_RELAY_ABI,
-  NATIVE_RELAY_ABI_V1,
-  NATIVE_RELAY_ABI_V2,
-} from "./native-relay-abi";
+import { NATIVE_RELAY_ABI, NATIVE_RELAY_ABI_V1 } from "./native-relay-abi";
 
 /**
  * Versioned private global installed by the native JSI bridge.
@@ -20,7 +16,7 @@ export interface NativeRelayAbiRange {
   maximum: number;
 }
 
-export { NATIVE_RELAY_ABI, NATIVE_RELAY_ABI_V1, NATIVE_RELAY_ABI_V2 };
+export { NATIVE_RELAY_ABI, NATIVE_RELAY_ABI_V1 };
 
 function requireNativeRelay() {
   if (nativeRelay == null) {

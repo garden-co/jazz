@@ -1,7 +1,7 @@
 //! Chunked large values: a `string`, `json` or `bytes` value above
 //! the inline threshold is stored as a descriptor over a content-defined
-//! chunk tree, and still reads, filters, orders and indexes as its logical
-//! value (`INV-CONTENT-1`).
+//! chunk tree, and still reads as its logical value (`INV-CONTENT-1`).
+//! Queries compare it by cell, never by content (SPEC 19.5).
 
 use crate::common;
 
@@ -13,7 +13,7 @@ use jazz::db::{
     LargeValueUpdatePage, LargeValueUpdateSplice, ReadOpts, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::query::{OrderDirection, Query, col, contains, eq, lit};
+use jazz::query::{OrderDirection, Query, col, contains, eq, gt, in_list, lit, lt, ne};
 use jazz::records::Value;
 use jazz::tools::{ColumnType, OpenTransactionId, SchemaBuilder, TableSchemaBuilder};
 
@@ -26,6 +26,7 @@ fn config(indexed: bool) -> DbConfig {
     let mut docs = TableSchemaBuilder::new("docs")
         .column("body", ColumnType::Text)
         .column("blob", ColumnType::Bytea)
+        .nullable_column("tag", ColumnType::Text)
         .policies(allow_all_policies());
     if indexed {
         docs = docs.index_only(["body"]);
@@ -79,6 +80,24 @@ fn insert(db: &Db, n: u8, body: &str, blob: &[u8]) {
     .unwrap();
 }
 
+/// A row with `body` and a nullable `tag` (`None` leaves it null).
+fn insert_tagged(db: &Db, n: u8, body: &str, tag: Option<&str>) {
+    let tag = Value::Nullable(tag.map(|tag| Box::new(Value::String(tag.to_owned()))));
+    block_on(db.insert(
+        "docs",
+        BTreeMap::from([
+            ("body".to_owned(), Value::String(body.to_owned())),
+            ("blob".to_owned(), Value::Bytes(Vec::new())),
+            ("tag".to_owned(), tag),
+        ]),
+        InsertOptions {
+            row_id: Some(row(n)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+}
+
 fn cell(row: &jazz::db::CurrentRow, name: &str) -> Value {
     row.cells()
         .find(|(n, _)| *n == name)
@@ -121,138 +140,227 @@ fn large_values_are_chunked_and_read_back_whole() {
     assert_eq!(cell(&rows[1], "blob"), Value::Bytes(b"\x00\xff".to_vec()));
 }
 
+/// A chunked value equals no inline literal, a literal over the threshold
+/// is refused, and a chunked cell equals itself.
 #[test]
-fn equality_compares_logical_values_across_arms() {
+fn equality_compares_chunked_values_by_cell() {
     let db = db();
     let body = text(3, LARGE);
     insert(&db, 1, &body, b"");
     insert(&db, 2, &text(4, LARGE), b"");
     insert(&db, 3, "short", b"");
-    // The literal is bound inline; the stored cell is chunked.
-    let found = ids(
-        &db,
+    let short = || lit(Value::String("short".into()));
+    assert_eq!(
+        ids(&db, Query::from("docs").filter(eq(col("body"), short()))),
+        [row(3)]
+    );
+    assert_eq!(
+        ids(&db, Query::from("docs").filter(ne(col("body"), short()))),
+        [row(1), row(2)]
+    );
+    assert_eq!(
+        ids(
+            &db,
+            Query::from("docs").filter(in_list(
+                col("body"),
+                [short(), lit(Value::String("x".into()))]
+            ))
+        ),
+        [row(3)]
+    );
+    assert_eq!(
+        ids(
+            &db,
+            Query::from("docs").filter(eq(col("body"), col("body")))
+        ),
+        [row(1), row(2), row(3)]
+    );
+    for query in [
         Query::from("docs").filter(eq(col("body"), lit(Value::String(body.clone())))),
-    );
-    assert_eq!(found, vec![row(1)]);
-    // Same prefix, one byte longer: not equal.
-    let longer = format!("{body}x");
-    let found = ids(
-        &db,
-        Query::from("docs").filter(eq(col("body"), lit(Value::String(longer)))),
-    );
-    assert!(found.is_empty());
+        Query::from("docs").filter(ne(col("body"), lit(Value::String(body.clone())))),
+        Query::from("docs").filter(in_list(col("body"), [lit(Value::String(body.clone()))])),
+    ] {
+        let error = db
+            .prepare_query(&query)
+            .and_then(|prepared| block_on(db.all(&prepared, ReadOpts::default())).map(|_| ()));
+        let error = error.expect_err("a literal over the inline threshold");
+        assert!(
+            error
+                .message
+                .contains("over 65536 bytes is not supported yet"),
+            "{error:?}"
+        );
+    }
 }
 
-fn ordered(db: &Db) -> Vec<RowUuid> {
-    ids(
-        db,
-        Query::from("docs").order_by("body", OrderDirection::Asc),
-    )
-}
-
+/// Null is a value under `eq` and `ne` on a large-capable column, and
+/// equal to no chunked cell.
 #[test]
-fn ordering_and_indexes_follow_logical_bytes() {
+fn null_compares_as_a_value_against_chunked_cells() {
+    let db = db();
+    insert_tagged(&db, 1, "a", Some(&text(11, LARGE)));
+    insert_tagged(&db, 2, "b", None);
+    insert_tagged(&db, 3, "c", Some("short"));
+    let null = || lit(Value::Nullable(None));
+    assert_eq!(
+        ids(&db, Query::from("docs").filter(eq(col("tag"), null()))),
+        [row(2)]
+    );
+    assert_eq!(
+        ids(&db, Query::from("docs").filter(ne(col("tag"), null()))),
+        [row(1), row(3)]
+    );
+}
+
+/// Two columns holding the same value written whole share one cell, so
+/// they compare equal; the same value reached through an append is
+/// another cell and compares unequal (SPEC 19.5).
+#[test]
+fn two_columns_with_equal_content_compare_by_cell() {
+    let db = db();
+    let value = text(12, LARGE);
+    insert_tagged(&db, 1, &value, Some(&value));
+    let (head, tail) = value.split_at(LARGE - 5);
+    insert_tagged(&db, 2, head, Some(&value));
+    block_on(db.append_value("docs", row(2), "body", tail.as_bytes().to_vec())).unwrap();
+    insert_tagged(&db, 3, "short", Some("short"));
+    insert_tagged(&db, 4, &value, Some("short"));
+    assert_eq!(
+        ids(&db, Query::from("docs").filter(eq(col("body"), col("tag")))),
+        [row(1), row(3)]
+    );
+    assert_eq!(
+        ids(&db, Query::from("docs").filter(ne(col("tag"), col("body")))),
+        [row(2), row(4)]
+    );
+}
+
+/// A range between a large-capable column and any other column matches
+/// inline cells only, from either side.
+#[test]
+fn ranges_against_other_columns_skip_chunked_cells() {
+    let db = db();
+    insert(&db, 1, &text(13, LARGE), b"");
+    insert(&db, 2, "short", b"");
+    assert_eq!(
+        ids(&db, Query::from("docs").filter(lt(col("body"), col("id")))),
+        [row(2)]
+    );
+    assert_eq!(
+        ids(&db, Query::from("docs").filter(gt(col("id"), col("body")))),
+        [row(2)]
+    );
+}
+
+/// Grouping by a large-capable column groups chunked values by cell
+/// (SPEC 19.5): copies written whole share their tree and so their cell,
+/// while the same value reached through an appended edit is another cell.
+#[test]
+fn grouping_by_a_chunked_column_groups_by_cell() {
+    let db = db();
+    let body = text(9, LARGE);
+    insert(&db, 1, &body, b"");
+    insert(&db, 2, &body, b"");
+    let (head, tail) = body.split_at(LARGE - 5);
+    insert(&db, 3, head, b"");
+    block_on(db.append_value("docs", row(3), "body", tail.as_bytes().to_vec())).unwrap();
+    insert(&db, 4, "short", b"");
+    insert(&db, 5, "short", b"");
+    let groups = ids(&db, Query::from("docs").count().group_by("body"));
+    assert_eq!(groups.len(), 3, "{groups:?}");
+    assert_eq!(
+        groups,
+        ids(&db, Query::from("docs").count().group_by("body"))
+    );
+}
+
+fn ordered(db: &Db, direction: OrderDirection) -> Vec<RowUuid> {
+    ids(db, Query::from("docs").order_by("body", direction))
+}
+
+/// Chunked values sort before every inline value ascending (after them
+/// descending) and take part in no range, with or without an index.
+#[test]
+fn chunked_values_sort_first_and_never_match_ranges() {
     for indexed in [false, true] {
         let db = block_on(Db::open(config(indexed))).unwrap();
-        let base = text(5, LARGE);
-        // Values that share long prefixes, differ deep inside a chunk, or
-        // only in length, mixed with inline values.
-        let mut deep = base.clone().into_bytes();
-        deep[LARGE - 10] = b'A';
         let values = [
-            base.clone(),
-            format!("{base}z"),
-            String::from_utf8(deep).unwrap(),
-            base[..LARGE / 2].to_owned(),
             "zzz".to_owned(),
-            base[..10].to_owned(),
+            text(5, LARGE),
+            "b".repeat(1000),
             text(6, LARGE),
+            "a".to_owned(),
         ];
         for (n, value) in values.iter().enumerate() {
             insert(&db, n as u8 + 1, value, b"");
         }
-        let mut expected: Vec<(String, RowUuid)> = values
-            .iter()
-            .enumerate()
-            .map(|(n, value)| (value.clone(), row(n as u8 + 1)))
-            .collect();
-        expected.sort();
+        let ascending = ordered(&db, OrderDirection::Asc);
+        let mut chunked = ascending[..2].to_vec();
+        chunked.sort();
+        assert_eq!(chunked, [row(2), row(4)], "indexed: {indexed}");
         assert_eq!(
-            ordered(&db),
-            expected.iter().map(|(_, id)| *id).collect::<Vec<_>>(),
+            ascending[2..],
+            [row(5), row(3), row(1)],
             "indexed: {indexed}"
         );
-        // A range seek on the column reads through the same collation.
-        let found = ids(
+        let mut descending = ordered(&db, OrderDirection::Desc);
+        descending.reverse();
+        assert_eq!(descending, ascending, "indexed: {indexed}");
+        let first_two = ids(
             &db,
             Query::from("docs")
-                .filter(jazz::query::gt(
-                    col("body"),
-                    lit(Value::String(base.clone())),
-                ))
-                .order_by("body", OrderDirection::Asc),
+                .order_by("body", OrderDirection::Asc)
+                .limit(2),
         );
-        let greater: Vec<RowUuid> = expected
-            .iter()
-            .filter(|(value, _)| *value > base)
-            .map(|(_, id)| *id)
-            .collect();
-        assert_eq!(found, greater, "indexed: {indexed}");
-        // A bounded page cuts inside values that share their whole sort
-        // prefix, in both directions.
-        for (direction, mut want) in [
-            (OrderDirection::Asc, expected.clone()),
-            (
-                OrderDirection::Desc,
-                expected.iter().rev().cloned().collect(),
-            ),
-        ] {
-            want.truncate(3);
-            let found = ids(
+        assert_eq!(first_two, ascending[..2], "indexed: {indexed}");
+        let lit = |text: &str| lit(Value::String(text.into()));
+        assert_eq!(
+            ids(&db, Query::from("docs").filter(gt(col("body"), lit("")))),
+            [row(1), row(3), row(5)],
+            "indexed: {indexed}"
+        );
+        assert_eq!(
+            ids(
                 &db,
-                Query::from("docs").order_by("body", direction).limit(3),
-            );
-            assert_eq!(
-                found,
-                want.iter().map(|(_, id)| *id).collect::<Vec<_>>(),
-                "indexed: {indexed}, {direction:?}"
-            );
-        }
+                Query::from("docs").filter(lt(col("body"), lit("zzzz")))
+            ),
+            [row(1), row(3), row(5)],
+            "indexed: {indexed}"
+        );
     }
 }
 
 #[test]
-fn contains_scans_chunked_values_across_boundaries() {
+fn contains_never_matches_chunked_values() {
     let db = db();
     let body = text(7, LARGE);
     let blob = text(8, LARGE).into_bytes();
     insert(&db, 1, &body, &blob);
-    insert(&db, 2, "nothing here", b"none");
-    for at in [0, 1, 64 * 1024 - 3, 100_000, LARGE - 20] {
-        let needle = body[at..at + 20].to_owned();
-        assert_eq!(
-            ids(
-                &db,
-                Query::from("docs").filter(contains(col("body"), lit(Value::String(needle))))
-            ),
-            vec![row(1)],
-            "string needle at {at}"
-        );
-        let needle = blob[at..at + 20].to_vec();
-        assert_eq!(
-            ids(
-                &db,
-                Query::from("docs").filter(contains(col("blob"), lit(Value::Bytes(needle))))
-            ),
-            vec![row(1)],
-            "bytes needle at {at}"
-        );
-    }
-    let absent = ids(
-        &db,
-        Query::from("docs").filter(contains(col("body"), lit(Value::String("0".repeat(5))))),
+    insert(&db, 2, &body[..20], &blob[..20]);
+    let needle = body[..10].to_owned();
+    assert_eq!(
+        ids(
+            &db,
+            Query::from("docs").filter(contains(col("body"), lit(Value::String(needle))))
+        ),
+        [row(2)]
     );
-    assert!(absent.is_empty());
+    let needle = blob[..10].to_vec();
+    assert_eq!(
+        ids(
+            &db,
+            Query::from("docs").filter(contains(col("blob"), lit(Value::Bytes(needle))))
+        ),
+        [row(2)]
+    );
+    // A chunked cell is an INTEGER: its digits are not its content.
+    assert!(
+        ids(
+            &db,
+            Query::from("docs").filter(contains(col("body"), lit(Value::String("1".into()))))
+        )
+        .is_empty()
+    );
 }
 
 #[test]
@@ -314,31 +422,25 @@ fn a_file_store_reads_chunks_back_after_reopening() {
                 insert(&db, n as u8 + 1, value, b"");
             }
             // Read back within the same session, through the reader.
-            assert_eq!(ordered(&db).len(), values.len(), "{journal:?}");
+            for (n, value) in values.iter().enumerate() {
+                assert_eq!(body(&db, n as u8 + 1), *value, "{journal:?}");
+            }
         }
         let db = block_on(Db::open_at(config(true), &path, options)).unwrap();
-        let mut expected: Vec<(String, RowUuid)> = values
-            .iter()
-            .enumerate()
-            .map(|(n, value)| (value.clone(), row(n as u8 + 1)))
-            .collect();
-        expected.sort();
+        for (n, value) in values.iter().enumerate() {
+            assert_eq!(body(&db, n as u8 + 1), *value, "{journal:?}");
+        }
         assert_eq!(
-            ordered(&db),
-            expected.iter().map(|(_, id)| *id).collect::<Vec<_>>(),
+            ordered(&db, OrderDirection::Asc).len(),
+            values.len(),
             "{journal:?}"
         );
-        let found = ids(
-            &db,
-            Query::from("docs").filter(eq(col("body"), lit(Value::String(values[2].clone())))),
-        );
-        assert_eq!(found, vec![row(3)], "{journal:?}");
     }
 }
 
 /// The file needs nothing but SQLite: a plain connection, with no Jazz
 /// collation or functions registered, opens the schema, checks every index
-/// (expression indexes over sort keys included), prepares the statements
+/// included), prepares the statements
 /// large-value operators compile to, and fires the refcount triggers.
 #[test]
 fn a_plain_sqlite_connection_runs_the_schema_queries_and_triggers() {
@@ -353,7 +455,7 @@ fn a_plain_sqlite_connection_runs_the_schema_queries_and_triggers() {
             Query::from("docs").filter(contains(col("body"), lit(Value::String("x".into())))),
             Query::from("docs").filter(contains(col("blob"), lit(Value::Bytes(vec![1])))),
             Query::from("docs").filter(eq(col("body"), lit(Value::String("x".into())))),
-            Query::from("docs").filter(eq(col("body"), lit(Value::String(text(41, LARGE))))),
+            Query::from("docs").filter(gt(col("body"), lit(Value::String("x".into())))),
             Query::from("docs").order_by("body", OrderDirection::Desc),
         ] {
             let prepared = db.prepare_query(&query).unwrap();
@@ -466,21 +568,6 @@ fn appends_extend_the_edit_tail_until_consolidation() {
     let (after, _) = db.large_value_nodes_for_test().unwrap();
     assert_eq!(after, nodes, "a tail append writes no chunks");
     assert_eq!(body(&db, 1), expected);
-    // The appended value compares and contains as its logical bytes.
-    assert_eq!(
-        ids(
-            &db,
-            Query::from("docs").filter(eq(col("body"), lit(Value::String(expected.clone()))))
-        ),
-        vec![row(1)]
-    );
-    assert_eq!(
-        ids(
-            &db,
-            Query::from("docs").filter(contains(col("body"), lit(Value::String("<6><7>".into()))))
-        ),
-        vec![row(1)]
-    );
     // Past an epoch's edit bytes the value is consolidated into new nodes.
     for n in 8..(8 + jazz::large_values::epoch::EPOCH_EDIT_BYTES / 4) {
         let suffix = format!("[{n}]");

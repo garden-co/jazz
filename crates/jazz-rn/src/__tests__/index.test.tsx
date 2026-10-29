@@ -3,7 +3,7 @@ type FixtureNativeRelay = {
   execute(commandBase64: string): Promise<string>;
 };
 
-import { NATIVE_RELAY_ABI_V1, NATIVE_RELAY_ABI_V2 } from "../native-relay-abi";
+import { NATIVE_RELAY_ABI_V1 } from "../native-relay-abi";
 
 const foregroundRuntimeGlobal = "__jazzNativeForegroundRuntimeV1";
 
@@ -116,20 +116,20 @@ it("tells Expo Go and old development builds that a native artifact is required"
 
 it("rejects an installed native build with an incompatible ABI before executing a command", async () => {
   const nativeRelay: FixtureNativeRelay = {
-    getAbiVersion: () => NATIVE_RELAY_ABI_V2 + 1,
+    getAbiVersion: () => NATIVE_RELAY_ABI_V1 + 1,
     execute: jest.fn(),
   };
   const relay = loadRelay(nativeRelay);
 
   await expect(relay.executeNativeRelayCommand("AA==")).rejects.toThrow(
-    `Jazz native relay ABI ${NATIVE_RELAY_ABI_V2 + 1} is incompatible with JavaScript ABI ${NATIVE_RELAY_ABI_V2}..=${NATIVE_RELAY_ABI_V2}; install a matching native development or release build.`,
+    `Jazz native relay ABI ${NATIVE_RELAY_ABI_V1 + 1} is incompatible with JavaScript ABI ${NATIVE_RELAY_ABI_V1}..=${NATIVE_RELAY_ABI_V1}; install a matching native development or release build.`,
   );
   expect(nativeRelay.execute).not.toHaveBeenCalled();
 });
 
 it("forwards opaque commands only after the embedded relay ABI matches", async () => {
   const nativeRelay: FixtureNativeRelay = {
-    getAbiVersion: () => NATIVE_RELAY_ABI_V2,
+    getAbiVersion: () => NATIVE_RELAY_ABI_V1,
     execute: jest.fn().mockResolvedValue("AQ=="),
   };
   const relay = loadRelay(nativeRelay);
@@ -140,7 +140,7 @@ it("forwards opaque commands only after the embedded relay ABI matches", async (
 
 it("requires the matching bindings-installed foreground factory instead of attempting browser WASM", () => {
   const nativeRelay: FixtureNativeRelay = {
-    getAbiVersion: () => NATIVE_RELAY_ABI_V2,
+    getAbiVersion: () => NATIVE_RELAY_ABI_V1,
     execute: jest.fn(),
   };
   const relay = loadRelay(nativeRelay);
@@ -155,18 +155,18 @@ it("accepts only the matching capability-only JSI foreground factory", () => {
   const foreground = foregroundFixture();
   const openAttached = jest.fn(() => foreground);
   (globalThis as Record<string, unknown>)[foregroundRuntimeGlobal] = {
-    abiVersion: NATIVE_RELAY_ABI_V2,
+    abiVersion: NATIVE_RELAY_ABI_V1,
     openAttached,
   };
   const nativeRelay: FixtureNativeRelay = {
-    getAbiVersion: () => NATIVE_RELAY_ABI_V2,
+    getAbiVersion: () => NATIVE_RELAY_ABI_V1,
     execute: jest.fn(),
   };
   const relay = loadRelay(nativeRelay);
 
   const factory = relay.installNativeForegroundRuntime();
 
-  expect(factory.abiVersion).toBe(NATIVE_RELAY_ABI_V2);
+  expect(factory.abiVersion).toBe(NATIVE_RELAY_ABI_V1);
   const capability = new Uint8Array(32);
   expect(factory.openAttached(capability)).toMatchObject({
     execute: expect.any(Function),
@@ -182,11 +182,11 @@ it.each([undefined, false, true])(
   (supportsSnapshotCapture) => {
     const foreground = { ...foregroundFixture(), supportsSnapshotCapture };
     const nativeRelay: FixtureNativeRelay = {
-      getAbiVersion: () => NATIVE_RELAY_ABI_V2,
+      getAbiVersion: () => NATIVE_RELAY_ABI_V1,
       execute: jest.fn(),
     };
     (globalThis as Record<string, unknown>)[foregroundRuntimeGlobal] = {
-      abiVersion: NATIVE_RELAY_ABI_V2,
+      abiVersion: NATIVE_RELAY_ABI_V1,
       openAttached: jest.fn(() => foreground),
     };
     const runtime = loadRelay(nativeRelay)
@@ -202,11 +202,11 @@ it("forwards the private wake trace switch only when the native handle provides 
   const setWakeTrace = jest.fn();
   const foreground = { ...foregroundFixture(), setWakeTrace };
   const nativeRelay: FixtureNativeRelay = {
-    getAbiVersion: () => NATIVE_RELAY_ABI_V2,
+    getAbiVersion: () => NATIVE_RELAY_ABI_V1,
     execute: jest.fn(),
   };
   (globalThis as Record<string, unknown>)[foregroundRuntimeGlobal] = {
-    abiVersion: NATIVE_RELAY_ABI_V2,
+    abiVersion: NATIVE_RELAY_ABI_V1,
     openAttached: jest.fn(() => foreground),
   };
   const runtime = loadRelay(nativeRelay)
@@ -222,11 +222,11 @@ it("forwards the private wake trace switch only when the native handle provides 
 
 it("keeps wake tracing absent for an older private native handle", () => {
   const nativeRelay: FixtureNativeRelay = {
-    getAbiVersion: () => NATIVE_RELAY_ABI_V2,
+    getAbiVersion: () => NATIVE_RELAY_ABI_V1,
     execute: jest.fn(),
   };
   (globalThis as Record<string, unknown>)[foregroundRuntimeGlobal] = {
-    abiVersion: NATIVE_RELAY_ABI_V2,
+    abiVersion: NATIVE_RELAY_ABI_V1,
     openAttached: jest.fn(foregroundFixture),
   };
 
@@ -241,10 +241,10 @@ it("rejects a missing, malformed, or ABI-incompatible bindings-installed JSI for
   for (const factory of [
     undefined,
     {},
-    { abiVersion: NATIVE_RELAY_ABI_V2 + 1, openAttached: () => foregroundFixture() },
+    { abiVersion: NATIVE_RELAY_ABI_V1 + 1, openAttached: () => foregroundFixture() },
   ]) {
     const nativeRelay: FixtureNativeRelay = {
-      getAbiVersion: () => NATIVE_RELAY_ABI_V2,
+      getAbiVersion: () => NATIVE_RELAY_ABI_V1,
       execute: jest.fn(),
     };
     if (factory !== undefined)
@@ -261,11 +261,11 @@ it("rejects a missing, malformed, or ABI-incompatible bindings-installed JSI for
 it("keeps malformed capability input out of the JSI foreground factory", () => {
   const openAttached = jest.fn(() => foregroundFixture());
   const nativeRelay: FixtureNativeRelay = {
-    getAbiVersion: () => NATIVE_RELAY_ABI_V2,
+    getAbiVersion: () => NATIVE_RELAY_ABI_V1,
     execute: jest.fn(),
   };
   (globalThis as Record<string, unknown>)[foregroundRuntimeGlobal] = {
-    abiVersion: NATIVE_RELAY_ABI_V2,
+    abiVersion: NATIVE_RELAY_ABI_V1,
     openAttached,
   };
   const relay = loadRelay(nativeRelay);
@@ -285,7 +285,7 @@ it("keeps malformed capability input out of the JSI foreground factory", () => {
 
 it("uses the compact canonical byte vocabulary for the foreground NativeDb slice", () => {
   const relay = loadRelay({
-    getAbiVersion: () => NATIVE_RELAY_ABI_V2,
+    getAbiVersion: () => NATIVE_RELAY_ABI_V1,
     execute: jest.fn(),
   });
 

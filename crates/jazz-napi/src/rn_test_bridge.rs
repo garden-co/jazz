@@ -219,13 +219,8 @@ impl RnTestForeground {
 
     pub fn tick(&self) -> Result<()> {
         let host = self.host()?;
-        let mut diagnostic = JazzNativeRelayTickDiagnostic::None as u32;
         check(unsafe {
-            jazz_native_relay_host_lease_tick_attached_foreground_v2(
-                host.lease,
-                self.handle,
-                &mut diagnostic,
-            )
+            jazz_native_relay_host_lease_tick_attached_foreground(host.lease, self.handle)
         })
     }
 

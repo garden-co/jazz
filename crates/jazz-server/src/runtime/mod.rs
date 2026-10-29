@@ -9,13 +9,13 @@
 //!
 //! One app's state is one SQLite file: the owner thread is also the only
 //! connection to it. It starts before the runtime does (an [`AppStore`]),
-//! serving the server's host tables (catalogue, account journal), and the
+//! serving the server's host tables (catalogue, account registry), and the
 //! runtime's [`Db`] opens on the same connection once a schema is known.
 
 pub mod auth_admission;
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -24,17 +24,17 @@ use std::sync::{Arc, Mutex, Weak, mpsc as std_mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
 use crate::kv::HostKv;
+use crate::kv::HostSql;
+use jazz::catalogue::{CatalogueChange, CatalogueRows};
 use jazz::db::{
     Db, DbConfig, DbIdentity, FileOptions, LensEffects, Reason, SubscriberId, SyncMessage,
     Transport, TransportError, WireError, block_on,
 };
 use jazz::host::{HostReader, HostTable, HostTables, StoreFile};
 use jazz::ids::{AuthorSubject, MigrationLensId, NodeUuid, SchemaVersionId};
-use jazz::protocol::{
-    CatalogueSnapshot, CurrentWriteSchema, MigrationLens, PhysicalIdentityManifest,
-    SchemaLineagePublication, SchemaVersion,
-};
+use jazz::protocol::MigrationLens;
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::public_schema::{TableName, TablePolicies};
@@ -158,10 +158,6 @@ const INBOUND_MESSAGES_PER_TICK: usize = 16;
 /// ticks cost no throughput: each message commits on its own either way.
 const TICK_SLICE: Duration = Duration::from_millis(4);
 
-/// The runtime catalogue's host table, and its one key.
-const RUNTIME_CATALOGUE: HostTable = HostTable::new("runtime_catalogue");
-const CATALOGUE_KEY: &[u8] = b"runtime-catalogue:v1";
-
 type Job = Box<dyn FnOnce(&mut Owner) + Send>;
 /// Work on the store's host tables, before or after the runtime opened.
 pub(crate) type HostJob = Box<dyn FnOnce(&dyn HostTables) + Send>;
@@ -251,7 +247,7 @@ impl Source {
                     std::fs::create_dir_all(parent)
                         .map_err(|error| format!("create {}: {error}", parent.display()))?;
                 }
-                // Every commit (rows, catalogue, account journal) is durable
+                // Every commit (rows, catalogue, account registry) is durable
                 // when it returns.
                 StoreFile::open(
                     path,
@@ -366,9 +362,32 @@ impl AppStore {
     }
 
     /// Key-value access to one host table.
+    #[cfg(test)]
     pub(crate) fn kv(&self, table: HostTable) -> Result<HostKv, String> {
         Ok(HostKv::new(
             table,
+            Arc::clone(&self.inner.reader),
+            HostSender {
+                host: self.inner.host.clone(),
+                wake: self.sender()?,
+            },
+        ))
+    }
+
+    /// The store's catalogue tables.
+    pub(crate) fn catalogue(&self) -> Result<crate::server::CatalogueStorage, String> {
+        Ok(crate::server::CatalogueStorage::new(
+            Arc::clone(&self.inner.reader),
+            HostSender {
+                host: self.inner.host.clone(),
+                wake: self.sender()?,
+            },
+        ))
+    }
+
+    /// SQL access to the host tables a server shapes itself.
+    pub(crate) fn sql(&self) -> Result<HostSql, String> {
+        Ok(HostSql::new(
             Arc::clone(&self.inner.reader),
             HostSender {
                 host: self.inner.host.clone(),
@@ -514,6 +533,14 @@ impl HostSender {
 struct Unavailable(String);
 
 impl HostTables for Unavailable {
+    fn catalogue(&self) -> Result<CatalogueRows, jazz::db::Error> {
+        Err(self.error())
+    }
+
+    fn catalogue_put(&self, _: &jazz::catalogue::CataloguePut) -> Result<(), jazz::db::Error> {
+        Err(self.error())
+    }
+
     fn host_get(&self, _: HostTable, _: &[u8]) -> Result<Option<Vec<u8>>, jazz::db::Error> {
         Err(self.error())
     }
@@ -540,6 +567,12 @@ impl HostTables for Unavailable {
         Err(self.error())
     }
     fn host_delete(&self, _: HostTable, _: &[u8]) -> Result<(), jazz::db::Error> {
+        Err(self.error())
+    }
+    fn host_sql(
+        &self,
+        _: &mut dyn FnMut(&rusqlite::Connection) -> Result<(), jazz::db::Error>,
+    ) -> Result<(), jazz::db::Error> {
         Err(self.error())
     }
 }
@@ -811,10 +844,6 @@ fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
         "unknown panic".to_owned()
     }
 }
-
-/// One activation: a schema and the migration lenses into it (its new
-/// columns' defaults, and the tables and columns it renames).
-type Step = (JazzSchema, Vec<MigrationLens>);
 
 /// Sendable handle for the thread that owns the runtime's store.
 #[derive(Clone)]
@@ -1116,22 +1145,23 @@ impl ServerRuntimeHandle {
         &self,
         schema: JazzSchema,
         lens: MigrationLens,
-        new_tables: Vec<String>,
-        dropped_tables: Vec<String>,
     ) -> Result<SchemaVersionId, String> {
         self.run(move |owner| {
-            let id = owner
-                .catalogue
-                .publish(schema.clone(), lens, new_tables, dropped_tables)?;
+            LensEffects::of(&lens).map_err(|error| error.to_string())?;
+            if !owner.catalogue.schemas.contains_key(&lens.source) {
+                return Err("lens source schema is not admitted".to_owned());
+            }
+            let id = schema.version_id();
+            let mut lenses = owner.catalogue.lenses_for(id);
+            if !lenses.iter().any(|admitted| admitted.id == lens.id) {
+                lenses.push(lens.clone());
+            }
             // Clients on the published version read and write by it before
             // (and without) it becoming current.
-            block_on(
-                owner
-                    .db
-                    .admit_schema_with_lenses(schema, &owner.catalogue.lenses_for(id)),
-            )
-            .map_err(|error| error.to_string())?;
-            owner.catalogue.persist(&owner.db)?;
+            block_on(owner.db.admit_schema_with_lenses(schema, &lenses))
+                .map_err(|error| error.to_string())?;
+            owner.reload_catalogue()?;
+            owner.catalogue.admit_lens(id, lens);
             Ok(id)
         })
         .await
@@ -1156,26 +1186,13 @@ impl ServerRuntimeHandle {
         self.run(move |owner| {
             Ok((
                 owner.catalogue.schemas.contains_key(&schema),
-                owner.catalogue.lenses.contains(&lens),
+                owner
+                    .catalogue
+                    .incoming
+                    .values()
+                    .flatten()
+                    .any(|admitted| admitted.id == lens),
             ))
-        })
-        .await
-    }
-
-    /// Check that activating `schema` would succeed, without changing the
-    /// store: it is replayed on a scratch store after everything activated
-    /// so far.
-    #[doc(hidden)]
-    pub async fn validate_schema_activation(
-        &self,
-        revision: u64,
-        schema: JazzSchema,
-    ) -> Result<(), String> {
-        self.run(move |owner| {
-            owner.check_revision(revision)?;
-            let mut steps = owner.catalogue.activated.clone();
-            steps.push(schema);
-            owner.catalogue.replay(&steps)
         })
         .await
     }
@@ -1196,43 +1213,48 @@ impl ServerRuntimeHandle {
         result
     }
 
-    /// The installed deployment catalogue.
-    pub async fn trusted_catalogue_snapshot(&self) -> Result<CatalogueSnapshot, String> {
-        self.run(|owner| Ok(owner.catalogue.snapshot.clone())).await
+    /// The store's catalogue: every schema, lens and permissions revision.
+    pub async fn catalogue(&self) -> Result<CatalogueRows, String> {
+        self.run(|owner| owner.db.catalogue().map_err(|error| error.to_string()))
+            .await
     }
 
+    /// The current schema, with its policies.
     #[doc(hidden)]
-    pub async fn trusted_catalogue_snapshot_for_test(&self) -> Result<CatalogueSnapshot, String> {
-        self.trusted_catalogue_snapshot().await
+    pub async fn current_schema(&self) -> Result<JazzSchema, String> {
+        self.run(|owner| Ok(owner.db.current_schema())).await
     }
 
-    /// Check a deployment by replaying it on a scratch store.
-    #[doc(hidden)]
-    pub async fn validate_deployment_snapshot(
+    /// Apply `change` to the store's catalogue in one transaction (see
+    /// [`Db::apply_catalogue`]): a change that fails leaves nothing behind.
+    pub async fn apply_catalogue(
         &self,
-        snapshot: CatalogueSnapshot,
-    ) -> Result<(), String> {
-        self.run(move |owner| {
-            let steps = deployment_steps(&snapshot)?;
-            owner.catalogue.replay_with_lenses(&steps)
-        })
-        .await
-    }
-
-    /// Install a complete deployment: every lineage step not yet activated,
-    /// then its current write schema.
-    #[doc(hidden)]
-    pub async fn apply_deployment_snapshot(
-        &self,
-        snapshot: CatalogueSnapshot,
-    ) -> Result<(), String> {
+        change: CatalogueChange,
+    ) -> Result<(), CatalogueApplyError> {
         let result = self
             .run(move |owner| {
-                owner.apply_snapshot(snapshot)?;
-                owner.release_held_reads();
-                Ok(())
+                Ok((|| {
+                    if let Some((revision, ..)) = &change.activate {
+                        owner
+                            .check_revision(*revision)
+                            .map_err(CatalogueApplyError::Rejected)?;
+                    }
+                    block_on(owner.db.apply_catalogue(change)).map_err(|error| {
+                        if error.code == jazz::db::ErrorCode::Storage {
+                            CatalogueApplyError::Failed(error.to_string())
+                        } else {
+                            CatalogueApplyError::Rejected(error.to_string())
+                        }
+                    })?;
+                    owner
+                        .reload_catalogue()
+                        .map_err(CatalogueApplyError::Failed)?;
+                    owner.release_held_reads();
+                    Ok(())
+                })())
             })
-            .await;
+            .await
+            .unwrap_or_else(|error| Err(CatalogueApplyError::Failed(error)));
         if result.is_ok() {
             self.notify_activity();
         }
@@ -1273,37 +1295,28 @@ impl ServerRuntimeHandle {
     }
 }
 
-/// A deployment as ordered activation steps: each lineage schema with the
-/// incoming lenses, then the write schema.
-fn deployment_steps(snapshot: &CatalogueSnapshot) -> Result<Vec<Step>, String> {
-    let genesis = snapshot
-        .schemas
-        .iter()
-        .find(|schema| {
-            !snapshot
-                .lineages
-                .iter()
-                .any(|(_, publication)| publication.schema.id == schema.id)
-        })
-        .ok_or("deployment has no genesis schema")?;
-    let mut steps = vec![(genesis.schema.clone(), Vec::new())];
-    let mut lenses = Vec::new();
-    let mut lineages = snapshot.lineages.iter().collect::<Vec<_>>();
-    lineages.sort_by_key(|(seq, _)| *seq);
-    for (_, publication) in lineages {
-        for predecessor in &publication.predecessors {
-            LensEffects::of(&predecessor.lens).map_err(|e| e.to_string())?;
-            lenses.push(predecessor.lens.clone());
+/// Why a catalogue change was not applied. Either way nothing of it was.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CatalogueApplyError {
+    /// The change does not fit this catalogue: a stale revision, or a
+    /// schema or lens the store refuses to admit.
+    Rejected(String),
+    /// Storage or the runtime failed.
+    Failed(String),
+}
+
+impl std::fmt::Display for CatalogueApplyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rejected(message) | Self::Failed(message) => f.write_str(message),
         }
-        steps.push((publication.schema.schema.clone(), lenses.clone()));
     }
-    let current = snapshot
-        .schemas
-        .iter()
-        .find(|schema| schema.id == snapshot.current_write_schema.schema)
-        .ok_or("deployment write schema is missing from its schemas")?;
-    steps.push((current.schema.clone(), lenses));
-    Ok(steps)
+}
+
+impl From<CatalogueApplyError> for String {
+    fn from(error: CatalogueApplyError) -> Self {
+        error.to_string()
+    }
 }
 
 // ---- owner thread -------------------------------------------------------------
@@ -1328,6 +1341,8 @@ struct OwnerSession {
     untrusted: bool,
     /// Reads held until the permissions head is published, in order.
     held: VecDeque<SyncMessage>,
+    /// The parts of a message split across frames, until its last part.
+    joiner: jazz::db::FrameJoiner,
     queues: Rc<SessionQueues>,
     output: tokio_mpsc::UnboundedSender<Outbound>,
     egress: Arc<AtomicUsize>,
@@ -1441,111 +1456,56 @@ impl Transport for SessionTransport {
     }
 }
 
-/// What the runtime admitted, in the order it was activated.
+/// What the store's catalogue admitted, read from its rows (see
+/// [`jazz::catalogue`]) after every change.
+#[derive(Default)]
 struct Catalogue {
     schemas: BTreeMap<SchemaVersionId, JazzSchema>,
-    lenses: BTreeSet<MigrationLensId>,
     /// Every admitted lens, keyed by target schema.
     incoming: BTreeMap<SchemaVersionId, Vec<MigrationLens>>,
-    activated: Vec<JazzSchema>,
-    snapshot: CatalogueSnapshot,
+    /// The current permissions revision (0 before the first).
+    revision: u64,
 }
 
 impl Catalogue {
-    fn new(genesis: &JazzSchema) -> Self {
-        let version = SchemaVersion::new(genesis.clone());
-        Self {
-            schemas: BTreeMap::from([(version.id, genesis.clone())]),
-            lenses: BTreeSet::new(),
-            incoming: BTreeMap::new(),
-            activated: vec![genesis.clone()],
-            snapshot: CatalogueSnapshot {
-                genesis_physical_identities: PhysicalIdentityManifest::allocate(genesis),
-                schemas: vec![version.clone()],
-                lineages: Vec::new(),
-                current_write_schema: CurrentWriteSchema {
-                    revision: 0,
-                    schema: version.id,
-                },
-            },
-        }
-    }
-
-    fn publish(
-        &mut self,
-        schema: JazzSchema,
-        lens: MigrationLens,
-        new_tables: Vec<String>,
-        dropped_tables: Vec<String>,
-    ) -> Result<SchemaVersionId, String> {
-        LensEffects::of(&lens).map_err(|error| error.to_string())?;
-        let Some(source) = self.schemas.get(&lens.source).cloned() else {
-            return Err("lens source schema is not admitted".to_owned());
+    fn load(rows: &CatalogueRows) -> Result<Self, String> {
+        let compile = |schema: &jazz::tools::public_schema::Schema| {
+            JazzSchema::new(schema).map_err(|error| format!("catalogue schema: {error}"))
         };
-        let id = schema.version_id();
-        if !self.snapshot.schemas.iter().any(|version| version.id == id) {
-            let publication = SchemaLineagePublication::author_from_prior_with_history(
-                &source,
-                &self.identities(lens.source)?,
-                self.history(),
-                SchemaVersion::new(schema.clone()),
-                lens.clone(),
-                new_tables,
-                dropped_tables,
+        let mut catalogue = Self {
+            revision: rows.head().map_or(0, |head| head.revision),
+            ..Self::default()
+        };
+        for schema in &rows.schemas {
+            if let Some(version) = schema.version {
+                catalogue.schemas.insert(version, compile(&schema.schema)?);
+            }
+        }
+        for lens in &rows.lenses {
+            let (Some(source), Some(target)) =
+                (rows.schema(&lens.source), rows.schema(&lens.target))
+            else {
+                continue;
+            };
+            let target_version = compile(&target.schema)?.version_id();
+            if compile(&source.schema)?.version_id() == target_version
+                || !catalogue.schemas.contains_key(&target_version)
+            {
+                continue;
+            }
+            let lens = jazz::tools::schema_lens::runtime::compile_lens(
+                &jazz::tools::schema_lens::Lens::new(
+                    lens.source,
+                    lens.target,
+                    lens.forward.clone(),
+                ),
+                &source.schema,
+                &target.schema,
             )
-            .map_err(str::to_owned)?;
-            let sequence = self
-                .snapshot
-                .lineages
-                .iter()
-                .map(|(seq, _)| *seq)
-                .max()
-                .unwrap_or(0)
-                + 1;
-            self.snapshot.lineages.push((sequence, publication));
-            self.snapshot
-                .schemas
-                .push(SchemaVersion::new(schema.clone()));
+            .map_err(|error| format!("catalogue lens: {error}"))?;
+            catalogue.admit_lens(target_version, lens);
         }
-        self.admit_lens(id, lens.clone());
-        self.lenses.insert(lens.id);
-        self.schemas.entry(id).or_insert(schema);
-        Ok(id)
-    }
-
-    /// The physical identities `schema` was published with.
-    fn identities(&self, schema: SchemaVersionId) -> Result<PhysicalIdentityManifest, String> {
-        if let Some((_, publication)) = self
-            .snapshot
-            .lineages
-            .iter()
-            .find(|(_, publication)| publication.schema.id == schema)
-        {
-            return Ok(publication.physical_identities.clone());
-        }
-        if self.snapshot.schemas.first().map(|version| version.id) == Some(schema) {
-            return Ok(self.snapshot.genesis_physical_identities.clone());
-        }
-        Err("lens source schema has no published identities".to_owned())
-    }
-
-    fn history(&self) -> Vec<PhysicalIdentityManifest> {
-        std::iter::once(self.snapshot.genesis_physical_identities.clone())
-            .chain(
-                self.snapshot
-                    .lineages
-                    .iter()
-                    .map(|(_, publication)| publication.physical_identities.clone()),
-            )
-            .collect()
-    }
-
-    /// Keep the snapshot in the store's file for the next run.
-    fn persist(&self, db: &Db) -> Result<(), String> {
-        let bytes = postcard::to_allocvec(&self.snapshot)
-            .map_err(|error| format!("encode runtime catalogue: {error}"))?;
-        db.host_put_many(RUNTIME_CATALOGUE, &[(CATALOGUE_KEY.to_vec(), bytes)])
-            .map_err(|error| format!("persist runtime catalogue: {error}"))
+        Ok(catalogue)
     }
 
     fn admit_lens(&mut self, target: SchemaVersionId, lens: MigrationLens) {
@@ -1557,27 +1517,6 @@ impl Catalogue {
 
     fn lenses_for(&self, schema: SchemaVersionId) -> Vec<MigrationLens> {
         self.incoming.get(&schema).cloned().unwrap_or_default()
-    }
-
-    fn replay(&self, steps: &[JazzSchema]) -> Result<(), String> {
-        let steps = steps
-            .iter()
-            .map(|schema| (schema.clone(), self.lenses_for(schema.version_id())))
-            .collect::<Vec<_>>();
-        self.replay_with_lenses(&steps)
-    }
-
-    /// Activate `steps` in order on an empty scratch store.
-    fn replay_with_lenses(&self, steps: &[Step]) -> Result<(), String> {
-        let Some(((first, _), rest)) = steps.split_first() else {
-            return Ok(());
-        };
-        let scratch = block_on(Db::open(config(first.clone()))).map_err(|e| e.to_string())?;
-        for (schema, lenses) in rest {
-            block_on(scratch.activate_schema_with_lenses(schema.clone(), lenses))
-                .map_err(|error| error.to_string())?;
-        }
-        Ok(())
     }
 }
 
@@ -1608,12 +1547,11 @@ fn with_permissions(
 }
 
 impl Owner {
-    /// Open the runtime on `file`. A reopened store also reopens the
-    /// catalogue it admitted before: its genesis schema opens the store and
-    /// every later schema is activated again (each a no-op on the stored
-    /// tables), so the catalogue and its lineage survive restarts. `schema`
-    /// starts a fresh catalogue only when the store has none, or (unless
-    /// `any_stored_catalogue`) none that admits it.
+    /// Open the runtime on `file`. A reopened store admits every version
+    /// it admitted before (the engine reads them from its catalogue) and
+    /// makes its current permissions revision current again. `schema` is
+    /// current instead when the store has no revision yet, or (unless
+    /// `any_stored_catalogue`) none whose catalogue admits `schema`.
     fn open(
         schema: JazzSchema,
         file: StoreFile,
@@ -1621,45 +1559,50 @@ impl Owner {
         awaiting_permissions: bool,
         app: Option<String>,
     ) -> Result<Self, String> {
-        let stored = match file
-            .host_get(RUNTIME_CATALOGUE, CATALOGUE_KEY)
-            .map_err(|error| format!("read runtime catalogue: {error}"))?
-        {
-            Some(bytes) => Some(
-                postcard::from_bytes::<CatalogueSnapshot>(&bytes)
-                    .map_err(|error| format!("decode runtime catalogue: {error}"))?,
-            ),
-            None => None,
-        }
-        .filter(|snapshot| {
-            any_stored_catalogue
-                || snapshot
-                    .schemas
-                    .iter()
-                    .any(|version| version.id == schema.version_id())
-        });
-        let genesis = match &stored {
-            Some(snapshot) => deployment_steps(snapshot)?.remove(0).0,
-            None => schema.clone(),
+        let rows = file
+            .catalogue()
+            .map_err(|error| format!("read catalogue: {error}"))?;
+        let stored = any_stored_catalogue
+            || rows
+                .schemas
+                .iter()
+                .any(|stored| stored.version == Some(schema.version_id()));
+        let head = rows.head().filter(|_| stored);
+        let compile = |hash: &jazz::tools::public_schema::SchemaHash| {
+            let structural = rows
+                .schema(hash)
+                .ok_or("the current permissions revision's schema is missing")?;
+            JazzSchema::new(&structural.schema)
+                .map_err(|error| format!("catalogue schema: {error}"))
         };
-        let db = block_on(Db::open_file(config(genesis), file))
+        // Every activation records a revision: without one, the store's
+        // genesis is current.
+        let current = match (head, rows.genesis().filter(|_| any_stored_catalogue)) {
+            (Some(head), _) => with_permissions(
+                &compile(&head.schema)?,
+                &head.permissions.clone().into_iter().collect(),
+            )?,
+            (None, Some(genesis)) => compile(&genesis.hash)?,
+            (None, None) => schema,
+        };
+        let db = block_on(Db::open_file(config(current), file))
             .map_err(|error| format!("open server store: {error}"))?;
         db.set_authority();
         db.set_slow_query_threshold(slow_query_threshold());
-        let mut owner = Self {
+        let catalogue = Catalogue::load(&db.catalogue().map_err(|error| error.to_string())?)?;
+        Ok(Self {
             db,
             sessions: HashMap::new(),
             slice: Rc::default(),
-            catalogue: Catalogue::new(&schema),
-            awaiting_permissions,
+            catalogue,
+            awaiting_permissions: awaiting_permissions && head.is_none(),
             app,
-        };
-        if let Some(snapshot) = stored {
-            owner.catalogue = Catalogue::new(&deployment_steps(&snapshot)?.remove(0).0);
-            owner.apply_snapshot(snapshot)?;
-        }
-        owner.catalogue.persist(&owner.db)?;
-        Ok(owner)
+        })
+    }
+
+    fn reload_catalogue(&mut self) -> Result<(), String> {
+        self.catalogue = Catalogue::load(&self.db.catalogue().map_err(|error| error.to_string())?)?;
+        Ok(())
     }
 
     /// Log the query shapes that ran slow since the last report, when one
@@ -1731,6 +1674,15 @@ impl Owner {
                 subscriber,
                 untrusted: identity != AuthorSubject::SYSTEM,
                 held: VecDeque::new(),
+                // An untrusted peer's split message must fit the budget
+                // its frames are admitted against (SPEC 8.1).
+                joiner: if identity != AuthorSubject::SYSTEM {
+                    jazz::db::FrameJoiner::with_ceiling(
+                        jazz::protocol_limits::MAX_UNTRUSTED_MESSAGE_BYTES,
+                    )
+                } else {
+                    jazz::db::FrameJoiner::default()
+                },
                 queues,
                 output,
                 egress,
@@ -1748,8 +1700,9 @@ impl Owner {
         };
         let mut inbound = owner_session.queues.inbound.borrow_mut();
         for frame in frames {
-            match jazz::db::decode_message(&frame) {
-                Ok(SyncMessage::Commit { tx, .. }) if gated => {
+            match owner_session.joiner.push(&frame) {
+                Ok(None) => {}
+                Ok(Some(SyncMessage::Commit { tx, .. })) if gated => {
                     owner_session
                         .queues
                         .outbound
@@ -1766,20 +1719,19 @@ impl Owner {
                             global: true,
                         });
                 }
-                Ok(
-                    message @ (SyncMessage::Subscribe { .. }
+                Ok(Some(
+                    message @ (SyncMessage::Read { .. }
                     | SyncMessage::Unsubscribe { .. }
-                    | SyncMessage::Fetch { .. }
-                    | SyncMessage::Hold { .. }),
-                ) if gated => owner_session.held.push_back(message),
-                Ok(message) => inbound.push_back(message),
+                    | SyncMessage::ResendWhole { .. }),
+                )) if gated => owner_session.held.push_back(message),
+                Ok(Some(message)) => inbound.push_back(message),
                 Err(error) => {
                     drop(inbound);
                     let _ = owner_session.output.send((
                         Err(jazz::wire::WireError::new(
                             WireErrorCode::MalformedFrame,
                             WireRetry::Never,
-                            format!("malformed sync frame: {error}"),
+                            error.to_string(),
                         )),
                         0,
                     ));
@@ -1846,6 +1798,7 @@ impl Owner {
             let mut outbound = session.queues.outbound.borrow_mut();
             let mut frames = Vec::new();
             let mut bytes = 0;
+            let mut failed = None;
             while session.egress.load(Ordering::Acquire) + bytes < SESSION_QUEUE_BUDGET
                 && let Some(message) = outbound.pop_front()
             {
@@ -1854,10 +1807,27 @@ impl Owner {
                         bytes += encoded.iter().map(Vec::len).sum::<usize>();
                         frames.extend(encoded);
                     }
+                    // Dropped, the message would leave the client waiting
+                    // on it: the session ends with why instead.
                     Err(error) => {
                         tracing::error!(%error, "encode outbound sync message");
+                        failed = Some(error.to_string());
+                        break;
                     }
                 }
+            }
+            if let Some(error) = failed {
+                drop(outbound);
+                let _ = session.output.send((
+                    Err(jazz::wire::WireError::new(
+                        WireErrorCode::Internal,
+                        WireRetry::Never,
+                        format!("sync session closed: {error}"),
+                    )),
+                    0,
+                ));
+                gone.push(*id);
+                continue;
             }
             if frames.is_empty() {
                 continue;
@@ -1875,7 +1845,7 @@ impl Owner {
     /// An activation at a revision older than the current one is stale: the
     /// runtime is ahead of whoever proposed it.
     fn check_revision(&self, revision: u64) -> Result<(), String> {
-        let current = self.catalogue.snapshot.current_write_schema.revision;
+        let current = self.catalogue.revision;
         if revision < current {
             return Err(format!(
                 "stale active schema revision {revision}: the runtime is at revision {current}"
@@ -1894,69 +1864,14 @@ impl Owner {
         let id = schema.version_id();
         let lenses = self.catalogue.lenses_for(id);
         let selected = with_permissions(&schema, permissions)?;
-        block_on(
-            self.db
-                .activate_schema_with_lenses(selected.clone(), &lenses),
-        )
+        block_on(self.db.apply_catalogue(CatalogueChange {
+            activate: Some((revision, selected, lenses)),
+            ..CatalogueChange::default()
+        }))
         .map_err(|error| error.to_string())?;
-        self.catalogue
-            .schemas
-            .entry(id)
-            .or_insert_with(|| schema.clone());
-        self.catalogue.activated.push(schema);
-        // The snapshot carries the write schema with its installed policies.
-        let snapshot = &mut self.catalogue.snapshot;
-        let selected = SchemaVersion::new(selected);
-        match snapshot.schemas.iter_mut().find(|version| version.id == id) {
-            Some(version) => *version = selected,
-            None => snapshot.schemas.push(selected),
-        }
-        snapshot.current_write_schema = CurrentWriteSchema {
-            revision,
-            schema: id,
-        };
-        self.catalogue.persist(&self.db)?;
+        self.reload_catalogue()?;
         self.release_held_reads();
         Ok(id)
-    }
-
-    fn apply_snapshot(&mut self, snapshot: CatalogueSnapshot) -> Result<(), String> {
-        let steps = deployment_steps(&snapshot)?;
-        for (schema, lenses) in &steps {
-            block_on(self.db.activate_schema_with_lenses(schema.clone(), lenses))
-                .map_err(|error| error.to_string())?;
-            self.catalogue
-                .schemas
-                .entry(schema.version_id())
-                .or_insert_with(|| schema.clone());
-            self.catalogue.activated.push(schema.clone());
-        }
-        for (_, publication) in &snapshot.lineages {
-            for predecessor in &publication.predecessors {
-                self.catalogue.lenses.insert(predecessor.lens.id);
-                self.catalogue
-                    .admit_lens(publication.schema.id, predecessor.lens.clone());
-            }
-        }
-        // Published versions that were never made current stay readable by
-        // the clients that declare them.
-        let mut lineages = snapshot.lineages.iter().collect::<Vec<_>>();
-        lineages.sort_by_key(|(sequence, _)| *sequence);
-        for (_, publication) in lineages {
-            let id = publication.schema.id;
-            if self.catalogue.schemas.contains_key(&id) {
-                continue;
-            }
-            let schema = publication.schema.schema.clone();
-            block_on(
-                self.db
-                    .admit_schema_with_lenses(schema.clone(), &self.catalogue.lenses_for(id)),
-            )
-            .map_err(|error| error.to_string())?;
-            self.catalogue.schemas.insert(id, schema);
-        }
-        self.catalogue.snapshot = snapshot;
-        self.catalogue.persist(&self.db)
     }
 }
 
@@ -2222,16 +2137,31 @@ mod tests {
         let store = AppStore::memory().unwrap();
         let kv = store.kv(PROBE).unwrap();
         kv.write_many(&[(b"a".to_vec(), b"1".to_vec())]).unwrap();
+        let error = store
+            .start_runtime(schema(), NodeRole::Relay, false, false)
+            .err()
+            .expect("a relay cannot start");
+        assert!(error.contains("relay"), "{error}");
+        let corrupt = SchemaBuilder::new().build();
         store
-            .kv(RUNTIME_CATALOGUE)
+            .catalogue()
             .unwrap()
-            .write_many(&[(CATALOGUE_KEY.to_vec(), b"not a catalogue".to_vec())])
+            .put(jazz::catalogue::CataloguePut {
+                schemas: vec![(corrupt, 1)],
+                permissions: vec![(
+                    1,
+                    jazz::tools::public_schema::SchemaHash::from_bytes([7; 32]),
+                    Default::default(),
+                    1,
+                )],
+                ..Default::default()
+            })
             .unwrap();
         let error = store
-            .start_runtime(schema(), NodeRole::Core, false, false)
+            .start_runtime(schema(), NodeRole::Core, true, false)
             .err()
-            .expect("an undecodable catalogue fails the start");
-        assert!(error.contains("decode runtime catalogue"), "{error}");
+            .expect("a revision of a missing schema fails the start");
+        assert!(error.contains("schema is missing"), "{error}");
         assert_eq!(kv.get(b"a").unwrap(), Some(b"1".to_vec()));
         kv.write_many(&[(b"b".to_vec(), b"2".to_vec())]).unwrap();
         assert_eq!(kv.get(b"b").unwrap(), Some(b"2".to_vec()));

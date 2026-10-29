@@ -5,6 +5,7 @@ import { isInspectorLocalQueryOptions } from "../internal/inspector-query.js";
 import type { JazzClient, Row } from "./client.js";
 import { RuntimeSource, type RuntimeClientContext } from "./runtime-source.js";
 import type { WasmSchema } from "../drivers/types.js";
+import { ownerPreparation } from "./write-preparation.js";
 
 const todoSchema = {
   todos: s.table(
@@ -115,6 +116,28 @@ describe("Db.one", () => {
     expect(query.mock.calls[0]?.[1]).toMatchObject({
       openTransactionId: "00000000000070008000000000000001",
     });
+  });
+
+  it("preserves the public opening method and reserved ID after owner preparation", async () => {
+    const { client, query, beginTransaction } = makeClient();
+    const db = new TestDb(client);
+    await db.one(app.todos);
+    query.mockClear();
+    let release!: () => void;
+    ownerPreparation(client).run(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const tx = db.beginTransaction();
+    const id = tx.openTransactionId();
+    const reading = tx.one(app.todos);
+    expect(beginTransaction).not.toHaveBeenCalled();
+    release();
+    await reading;
+    expect(beginTransaction).toHaveBeenCalledExactlyOnceWith("mergeable", undefined, undefined, id);
+    expect(query.mock.calls[0]?.[1]).toMatchObject({ openTransactionId: id });
   });
 
   it("lowers public options before adding transaction-owned read controls", async () => {
