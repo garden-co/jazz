@@ -751,7 +751,6 @@ fn a_relays_commit_a_write_was_built_on_is_what_its_writer_saw() {
             .into()
         }],
         acting: Acting::Own,
-        expect: Vec::new(),
         origin: Some(([0xa1; 16], LOCAL_BASE + tx)),
     };
     let tx = |n: u64| LOCAL_BASE + n;
@@ -807,8 +806,8 @@ fn a_relays_commit_a_write_was_built_on_is_what_its_writer_saw() {
 
     let mut fates = BTreeMap::new();
     while let Some(message) = relay.try_recv() {
-        if let SyncMessage::Fate { tx, result, .. } = message {
-            fates.insert(tx, result);
+        if let SyncMessage::Fate { tx, outcome, .. } = message {
+            fates.insert(tx, outcome.result());
         }
     }
     assert!(fates[&tx(1)].is_ok() && fates[&tx(2)].is_ok());

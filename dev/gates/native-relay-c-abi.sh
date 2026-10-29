@@ -18,6 +18,7 @@ cc \
 
 c++ \
   -I"$root/crates/jazz-native-relay/include" \
+  -I"$root/crates/jazz-rn/native" \
   "$root/crates/jazz-native-relay/tests/cpp_abi_probe.cpp" \
   "$root/target/release/libjazz_native_relay.a" \
   -ldl -lm -lpthread \
