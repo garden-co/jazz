@@ -26,6 +26,92 @@ const oneShot = (name: string, title: string, predicate: string): BenchmarkMetad
   source,
 });
 
+const textSource = "examples/band-book/benchmarks/benches/walltime.rs";
+const textNightlySource = "examples/band-book/benchmarks/benches/text_merge.rs";
+const textFixture =
+  'An authority and two devices in one process, connected over in-memory transports, all subscribed to a `blocks` table whose `text` column is `s.string().merge("markdown")`. A song paragraph is a 270-character lyric with Markdown emphasis; a long note is generated prose with Markdown runs and a line break every 40 words.';
+const textStorage = "In-memory databases on every replica (no file I/O)";
+const textIncludes = [
+  "The device reconnecting, uploading its pending writes and each one settling at the authority (Global tier), merged where it missed a version",
+  "Delivery of the result to both devices",
+];
+const textExcludes = [
+  "Seeding the block, taking the devices offline and making the edits",
+  "The other device's write, accepted before the timed reconnect",
+  "Network: transports are in-memory queues",
+];
+const oneMerge = (explanation: string) => ({
+  count: 1,
+  unit: "merges/s",
+  explanation,
+});
+
+const textMergeBenchmarks: BenchmarkMetadata[] = [
+  {
+    name: "band_book_text_fast_path",
+    title: "BandBook · reconnect with an edit nobody else made",
+    description:
+      "A device edited a block while offline and nobody else changed it. It reconnects; the authority finds no version it missed and applies the write as is (the text merge fast path).",
+    fixture: textFixture,
+    storage: textStorage,
+    includes: textIncludes,
+    excludes: textExcludes,
+    work: oneMerge("One write accepted without merging; the baseline for the merge cases."),
+    source: textSource,
+  },
+  {
+    name: "band_book_text_concurrent_paragraph",
+    title: "BandBook · merge two offline edits to one paragraph",
+    description:
+      "Two devices edited the same song paragraph while offline, one at the start and one at the end. The first has reconnected and its write was accepted; the second reconnects and its write is merged with it, keeping both edits.",
+    fixture: textFixture,
+    storage: textStorage,
+    includes: textIncludes,
+    excludes: textExcludes,
+    work: oneMerge("One three-way merge of a paragraph, plus accepting and delivering it."),
+    source: textSource,
+  },
+  {
+    name: "band_book_text_offline_chain[20]",
+    title: "BandBook · reconnect with 20 offline writes to one paragraph",
+    description:
+      "A device typed into a paragraph offline, one write per pause (20 writes), while the other device edited the start of the same paragraph five times online. It reconnects; each of its 20 writes is merged over what it had seen.",
+    fixture: textFixture,
+    storage: textStorage,
+    includes: textIncludes,
+    excludes: textExcludes,
+    work: {
+      count: 20,
+      unit: "merged writes/s",
+      explanation: "Twenty chained writes, each merged on arrival.",
+    },
+    source: textNightlySource,
+  },
+  ...[100_000, 1_000_000].map((bytes) => ({
+    name: `band_book_text_long_note[${bytes}]`,
+    title: `BandBook · merge two offline edits to a ${bytes / 1_000} KB note`,
+    description: `Two devices made 200 scattered word insertions each to a ${bytes.toLocaleString("en-US")}-byte tour note while offline, interleaved through the note. The first has reconnected; the second reconnects and its write is merged, keeping all 400 insertions.`,
+    fixture: textFixture,
+    storage: textStorage,
+    includes: textIncludes,
+    excludes: textExcludes,
+    work: oneMerge("One three-way merge of a long value with 200 edits per side."),
+    source: textNightlySource,
+  })),
+  {
+    name: "band_book_text_over_budget[1000000]",
+    title: "BandBook · a 1 MB merge past the work budget",
+    description:
+      "One device replaced a 1,000,000-byte note with different text while the other made 200 scattered insertions offline. Merging them would exceed the merge's work budget (100 million diff steps), so the authority stops and the later write's whole value wins: the worst case a merge can cost.",
+    fixture: textFixture,
+    storage: textStorage,
+    includes: textIncludes,
+    excludes: textExcludes,
+    work: oneMerge("One merge attempt that runs out of budget, then the later write wins."),
+    source: textNightlySource,
+  },
+];
+
 export const bandBookBenchmarks: BenchmarkMetadata[] = [
   oneShot(
     "band_book_workspace_pages_unrestricted",
@@ -62,4 +148,5 @@ export const bandBookBenchmarks: BenchmarkMetadata[] = [
     },
     source,
   },
+  ...textMergeBenchmarks,
 ];

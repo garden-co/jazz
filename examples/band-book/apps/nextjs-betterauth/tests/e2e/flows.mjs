@@ -63,10 +63,9 @@ try {
   // Blocks are editable in place and new ones append at the end.
   await sidebarItem(owner, "Songs").click();
   await sidebarItem(owner, "Harbour lights").click();
-  await owner.getByRole("textbox", { name: "Page title" }).waitFor();
-  assert.equal(
-    await owner.getByRole("textbox", { name: "Page title" }).inputValue(),
-    "Harbour lights",
+  // The title box stays mounted across pages, so wait for its value.
+  await owner.waitForFunction(
+    () => document.querySelector('textarea[aria-label="Page title"]')?.value === "Harbour lights",
   );
   await owner.getByRole("button", { name: "Add block" }).click();
   await owner.getByRole("menuitem", { name: "Text" }).click();
@@ -78,7 +77,7 @@ try {
   await owner.getByRole("table").waitFor();
   assert.ok(await owner.getByText("Confirm backline with Porto venue").isVisible());
   await shoot(owner, "issues-table");
-  await owner.getByRole("tab", { name: "Board" }).click();
+  await owner.getByText("Board", { exact: true }).first().click();
   await owner.getByRole("region", { name: "In progress" }).waitFor();
   await shoot(owner, "issues-board");
 
@@ -103,14 +102,14 @@ try {
     await guest.getByRole("textbox", { name: "Page title" }).inputValue(),
     "Harbour lights",
   );
-  await guest
-    .getByText("Bridge: stay on the IV chord")
-    .or(guest.locator("textarea", { hasText: "Bridge" }))
-    .first()
-    .waitFor();
-  const guestNav = await guest.getByRole("navigation", { name: "Pages" }).innerText();
-  assert.ok(guestNav.includes("Harbour lights"), "guest sees the shared song");
-  assert.ok(!guestNav.includes("Tour notes"), "guest does not see the rest of the band");
+  await guest.getByText("Bridge: stay on the IV chord").first().waitFor();
+  await sidebarItem(guest, "Harbour lights").waitFor();
+  await guest.getByText("Shared with you").waitFor();
+  assert.equal(
+    await sidebarItem(guest, "Tour notes").count(),
+    0,
+    "guest does not see the rest of the band",
+  );
   await shoot(guest, "guest");
 
   // Live collaboration: the owner's edit reaches the guest without a reload.
@@ -122,6 +121,34 @@ try {
     undefined,
     { timeout },
   );
+
+  // Block text is a Markdown merge column: edits both make to the same
+  // paragraph while the guest is offline both survive, and formatting stays.
+  const block = (page, needle) =>
+    page.locator(".bb-rich-text [contenteditable]", { hasText: needle }).first();
+  await guestContext.setOffline(true);
+  await block(guest, "Key of D").click();
+  await guest.keyboard.press("Home");
+  await guest.keyboard.type("Intro: four bars. ");
+  await block(owner, "Key of D").click();
+  await owner.keyboard.press("End");
+  await owner.keyboard.type(" Tuning: drop D.");
+  await owner.waitForTimeout(1_000);
+  await guestContext.setOffline(false);
+  for (const page of [owner, guest]) {
+    await page.waitForFunction(
+      () =>
+        [...document.querySelectorAll(".bb-rich-text [contenteditable]")].some(
+          (element) =>
+            element.textContent.startsWith("Intro: four bars. Key of D") &&
+            element.textContent.endsWith("acoustic. Tuning: drop D."),
+        ),
+      undefined,
+      { timeout },
+    );
+    assert.equal(await block(page, "Key of D").locator("strong").innerText(), "Capo 2");
+  }
+
   console.log("BandBook browser receipt passed");
 } finally {
   await browser.close();

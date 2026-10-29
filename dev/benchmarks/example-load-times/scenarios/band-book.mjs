@@ -4,8 +4,10 @@ import { clickUntil, device, poll, random, rateLimitGate, visible } from "../har
 
 const side = (page, name) => page.getByRole("button", { name, exact: true }).first();
 const title = (page) => page.getByRole("textbox", { name: "Page title" });
+// Block text is a rich text editor per block.
+const blocks = (page) => page.locator(".bb-rich-text [contenteditable]");
 const hasText = (page, needle) =>
-  page.locator("textarea").evaluateAll((els, n) => els.some((e) => e.value.includes(n)), needle);
+  blocks(page).evaluateAll((els, n) => els.some((e) => e.textContent.includes(n)), needle);
 const pageText = (page) => poll(() => hasText(page, "Key of D"), { what: '"Key of D"' });
 
 export default function bandBook({ server, browser }) {
@@ -101,10 +103,10 @@ export default function bandBook({ server, browser }) {
       live_edit: {
         async prepare() {
           const { page } = owner;
-          const i = await page
-            .locator("textarea")
-            .evaluateAll((els) => els.findIndex((e) => e.value.includes("Key of D")));
-          await page.locator("textarea").nth(i).click();
+          const i = await blocks(page).evaluateAll((els) =>
+            els.findIndex((e) => e.textContent.includes("Key of D")),
+          );
+          await blocks(page).nth(i).click();
           await page.keyboard.press("End");
           return { needle: `Count ${random()}` };
         },
