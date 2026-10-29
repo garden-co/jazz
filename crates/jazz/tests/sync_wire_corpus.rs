@@ -26,8 +26,8 @@ use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
 use jazz::db::{
-    CorpusReader, Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadSpan, ReadTier, Reason,
-    SyncMessage, Transport, UpdateOptions, WireError as SyncWireError, block_on, encode_frames,
+    CorpusReader, Db, DbConfig, DbIdentity, InsertOptions, Outcome, ReadOpts, ReadSpan, ReadTier,
+    Reason, SyncMessage, Transport, UpdateOptions, block_on, encode_frames,
     validate_frame_batch_for_corpus,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
@@ -189,7 +189,7 @@ fn every_pinned_rejected_fate_decodes_with_its_reason_and_reencodes_exactly() {
             )
         });
         let SyncMessage::Fate {
-            result: Err(SyncWireError::Rejected { reason, message }),
+            outcome: Outcome::Rejected { reason, message },
             ..
         } = &decoded
         else {
@@ -293,7 +293,7 @@ impl Transport for Recording {
             );
             let mut recorded = self.recorded.borrow_mut();
             if let SyncMessage::Fate {
-                result: Err(SyncWireError::Rejected { reason, .. }),
+                outcome: Outcome::Rejected { reason, .. },
                 ..
             } = &decoded
             {

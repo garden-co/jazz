@@ -127,7 +127,7 @@ fn fates(down: &Q) -> Vec<(u64, bool)> {
     down.borrow()
         .iter()
         .filter_map(|m| match m {
-            SyncMessage::Fate { tx, result, .. } => Some((*tx, result.is_ok())),
+            SyncMessage::Fate { tx, outcome, .. } => Some((*tx, outcome.result().is_ok())),
             _ => None,
         })
         .collect()

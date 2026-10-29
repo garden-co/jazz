@@ -2,7 +2,8 @@
 //! new version of a row is exactly what the writer's commit produced there
 //! (the commit applied cleanly over the version it was built on, stamped as
 //! the writer stamped it), the Fate names the row `held` and the writer
-//! installs its own image at `through`, with the authority's stamps.
+//! installs its own image at the seq it landed at, stamped at the time the
+//! authority accepted it.
 //! Anything else ships the image as before. Each held row carries the
 //! authority's digest of its version: a writer whose image differs asks for
 //! the row whole (and under test panics, unless the test provokes it).
@@ -15,8 +16,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, FileOptions, InsertOptions, ReadOpts, SyncMessage, Transport,
-    TransportError, Upstream, block_on,
+    Db, DbConfig, DbIdentity, FileOptions, InsertOptions, Outcome, ReadOpts, SyncMessage,
+    Transport, TransportError, UpdateOptions, Upstream, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::Query;
@@ -179,7 +180,11 @@ fn shipped(log: &Down) -> (usize, Vec<usize>) {
     for message in log.borrow().iter() {
         match message {
             SyncMessage::Rows { images: i, .. } => images += i.len(),
-            SyncMessage::Fate { held: h, .. } => held.push(h.len()),
+            SyncMessage::Fate {
+                outcome: Outcome::Accepted { held: h, .. },
+                ..
+            } => held.push(h.len()),
+            SyncMessage::Fate { .. } => held.push(0),
             _ => {}
         }
     }
@@ -228,7 +233,10 @@ fn one_keystroke_sends_only_fate_and_settled() {
         .borrow()
         .iter()
         .map(|m| match m {
-            SyncMessage::Fate { held, .. } if held.len() == 1 => "fate+held",
+            SyncMessage::Fate {
+                outcome: Outcome::Accepted { held, .. },
+                ..
+            } if held.len() == 1 => "fate+held",
             SyncMessage::Settled { .. } => "settled",
             _ => "other",
         })
@@ -691,4 +699,103 @@ fn explicit_timestamps_reach_the_authority_per_write() {
         .collect();
     assert_eq!(created, [true, true], "{:?}", snapshot(&server));
     assert_eq!(snapshot(&client), snapshot(&server));
+}
+
+#[test]
+fn a_write_over_a_pending_create_is_held_with_the_authoritys_stamps() {
+    // The create's fate has not arrived when the update is written: the
+    // update's image holds the create stamp this replica's clock gave it,
+    // and both landed later on the authority's clock.
+    let server = open(0, AuthorSubject::SYSTEM);
+    let client = open(1, user(1));
+    let (_upstream, down) = connect(&server, &client, user(1));
+    let _live = subscribe(&client);
+    pump(&server, &[&client]);
+    down.borrow_mut().clear();
+    write_late(&server, &client, || {
+        block_on(client.insert(
+            "docs",
+            cells(&[("title", "Doc"), ("body", "")]),
+            InsertOptions {
+                row_id: Some(row(1)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    });
+    write_late(&server, &client, || {
+        block_on(client.update("docs", row(1), cells(&[("body", "x")]), Default::default()))
+            .unwrap();
+    });
+    pump(&server, &[&client]);
+    assert_eq!(shipped(&down), (0, vec![1, 1]));
+    assert_eq!(snapshot(&client), snapshot(&server));
+}
+
+#[test]
+fn a_commit_writing_rows_twice_is_held_with_each_writes_stamps() {
+    // One commit writes two rows twice each, the last write of one at an
+    // explicit time and of the other on the clock, and creates a row at
+    // an explicit time and one on the clock: each stamp is the one of the
+    // write that set it.
+    let server = open(0, AuthorSubject::SYSTEM);
+    let client = open(1, user(1));
+    let (_upstream, down) = connect(&server, &client, user(1));
+    let _live = subscribe(&client);
+    pump(&server, &[&client]);
+    for n in [1, 2] {
+        block_on(client.insert(
+            "docs",
+            cells(&[("title", "Doc"), ("body", "")]),
+            InsertOptions {
+                row_id: Some(row(n)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    }
+    pump(&server, &[&client]);
+    down.borrow_mut().clear();
+    let at = 1_704_067_200_001u64;
+    write_late(&server, &client, || {
+        let batch = jazz::tools::OpenTransactionId::new();
+        block_on(client.begin_mergeable(batch)).unwrap();
+        let tx = client.tx_ref(batch);
+        for (n, first, last) in [(1u8, None, Some(at)), (2, Some(at), None)] {
+            for (body, updated_at_ms) in [("x", first), ("xy", last)] {
+                block_on(tx.update(
+                    "docs",
+                    row(n),
+                    cells(&[("body", body)]),
+                    UpdateOptions {
+                        updated_at_ms,
+                        ..Default::default()
+                    },
+                ))
+                .unwrap();
+            }
+        }
+        for (n, updated_at_ms) in [(3u8, Some(at)), (4, None)] {
+            block_on(tx.insert(
+                "docs",
+                cells(&[("title", "Doc"), ("body", "")]),
+                InsertOptions {
+                    row_id: Some(row(n)),
+                    updated_at_ms,
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        }
+        block_on(client.commit_mergeable_handle(batch)).unwrap();
+    });
+    pump(&server, &[&client]);
+    assert_eq!(shipped(&down), (0, vec![4]));
+    let settled = snapshot(&server);
+    let explicit: Vec<bool> = settled
+        .iter()
+        .map(|row| row.contains("1704067200001"))
+        .collect();
+    assert_eq!(explicit, [true, false, true, false], "{settled:?}");
+    assert_eq!(snapshot(&client), settled);
 }

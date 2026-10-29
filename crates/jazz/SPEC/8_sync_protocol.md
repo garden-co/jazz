@@ -251,23 +251,29 @@ read-your-writes end to end.
 
 ### 8.3 Fates downstream
 
-`Fate { tx, through, result, held, global }` answers a commit:
+`Fate { tx, outcome, global }` answers a commit. The `outcome` is one of:
 
-- `result`: `Ok`, or `Conflict`, `Rejected { reason, message }` (a `Reason`
-  by stable name; an unknown name arrives as a rejection without a reason) or
-  `Other`.
-- `through`: the server seq the session is complete through after the
-  commit's rows shipped. Applying a fate never moves the replica's settled seq
-  backward (`INV-SYNC-5`).
-- `held`: the commit's rows the server did not ship, each named as a base
-  is (the commit's first op that writes it, and its branch key) and carrying
-  the authority's digest of its version and `$createdAt`/`$updatedAt` stamps,
-  so the writer can install its own image as the accepted version. A
-  keystroke-grade edit therefore costs one `Fate` and one `Settled`
-  downstream.
-- `global`: the fate is the global authority's (directly or relayed). A
-  non-global fate is the final word of a replica with no upstream, which
-  orders its sessions' commits but cannot make them `Global`.
+- `Accepted { seq, accepted_at, held }`: the commit landed at server seq
+  `seq`, which the replica records as where it settled; applying a fate never
+  moves its settled seq backward (`INV-SYNC-5`). `accepted_at` is the time
+  (Unix ms) the authority's clock stamped the commit's writes with: the
+  `$createdAt`/`$updatedAt` of every write without an explicit time. It is
+  absent only on a resend's recorded fate, which holds no rows.
+  Its `held` lists the commit's rows the server did not ship, each named as a
+  base is (the commit's first op that writes it, and its branch key) and
+  carrying the authority's digest of its version, so the writer can install
+  its own image as the accepted version: stamped at `accepted_at` where its
+  own clock stamped it (a row's `$updatedAt`, and the `$createdAt` of a row
+  the commit created), and with the create stamp of the row's settled
+  versions over a row it did not. A keystroke-grade edit therefore costs one
+  `Fate` and one `Settled` downstream.
+- `Conflict`, `Rejected { reason, message }` (a `Reason` by stable name; an
+  unknown name arrives as a rejection without a reason) or `Other`: the
+  commit was refused. A refusal carries no seq: the commit landed nowhere.
+
+`global` says the fate is the global authority's (directly or relayed). A
+non-global fate is the final word of a replica with no upstream, which orders
+its sessions' commits but cannot make them `Global`.
 
 The authority infers, rather than compares, that a row's new version is the
 writer's image of it (`INV-SYNC-51`). It holds a row only if all of these

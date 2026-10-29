@@ -26,8 +26,8 @@ use std::time::{Duration, Instant};
 
 use crate::kv::{HostKv, HostSql};
 use jazz::db::{
-    Db, DbConfig, DbIdentity, FileOptions, LensEffects, Reason, SubscriberId, SyncMessage,
-    Transport, TransportError, WireError, block_on,
+    Db, DbConfig, DbIdentity, FileOptions, LensEffects, Outcome, Reason, SubscriberId, SyncMessage,
+    Transport, TransportError, block_on,
 };
 use jazz::host::{HostReader, HostTable, HostTables, StoreFile};
 use jazz::ids::{AuthorSubject, MigrationLensId, NodeUuid, SchemaVersionId};
@@ -1785,13 +1785,11 @@ impl Owner {
                         .borrow_mut()
                         .push_back(SyncMessage::Fate {
                             tx,
-                            through: self.db.seq_high_water(),
-                            result: Err(WireError::Rejected {
+                            outcome: Outcome::Rejected {
                                 reason: Some(Reason::PermissionsHeadMissing.as_str().to_owned()),
                                 message: "permissions_head_missing: no published permissions head"
                                     .to_owned(),
-                            }),
-                            held: Vec::new(),
+                            },
                             global: true,
                         });
                 }
