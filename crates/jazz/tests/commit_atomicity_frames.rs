@@ -152,3 +152,347 @@ fn a_commit_split_across_frames_is_applied_whole() {
     }
     panic!("the commit never arrived: {seen:?}");
 }
+
+/// A wire whose outbound queue takes `room` frames, then refuses with
+/// `Backpressure` until the test makes room again.
+struct NarrowWire {
+    outbound: Queue,
+    inbound: Queue,
+    room: Rc<RefCell<usize>>,
+}
+
+impl WireTransport for NarrowWire {
+    fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
+        let mut room = self.room.borrow_mut();
+        if *room == 0 {
+            return Err(TransportError::Backpressure);
+        }
+        *room -= 1;
+        self.outbound.borrow_mut().push_back(frame);
+        Ok(())
+    }
+
+    fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+        self.inbound.borrow_mut().pop_front()
+    }
+}
+
+#[test]
+fn a_split_commit_a_full_queue_interrupts_arrives_whole() {
+    let server = open(0xc1, AuthorSubject::SYSTEM);
+    let writer_author = AuthorSubject::for_test_bytes([0x52; 16]);
+    let writer = open(0x52, writer_author);
+
+    let to_server: Queue = Rc::default();
+    let to_writer: Queue = Rc::default();
+    let room = Rc::new(RefCell::new(usize::MAX));
+    let writer_side = NarrowWire {
+        outbound: Rc::clone(&to_server),
+        inbound: Rc::clone(&to_writer),
+        room: Rc::clone(&room),
+    };
+    let server_side = GatedWire {
+        outbound: to_writer,
+        inbound: to_server,
+        released: Rc::new(RefCell::new(usize::MAX)),
+    };
+    block_on(writer.connect_upstream(Box::new(WireTransportAdapter::current(writer_side))));
+    server.accept_subscriber(
+        Box::new(WireTransportAdapter::current(server_side)),
+        writer_author,
+    );
+    for _ in 0..20 {
+        block_on(writer.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+    }
+
+    // One commit of about 3 MB: more than one 2 MiB frame carries, so it
+    // leaves in parts.
+    let tx = OpenTransactionId::new();
+    block_on(writer.begin_mergeable(tx)).unwrap();
+    let body = "x".repeat(BODY);
+    for _ in 0..ROWS {
+        let values = BTreeMap::from([("body".to_owned(), Value::String(body.clone()))]);
+        block_on(
+            writer
+                .tx_ref(tx)
+                .insert("notes", values, Default::default()),
+        )
+        .unwrap();
+    }
+    block_on(writer.commit_mergeable_handle(tx)).unwrap();
+
+    // The queue takes one frame per tick: the commit's first part goes
+    // out, the rest are refused and must follow, not restart it.
+    for _ in 0..50 {
+        *room.borrow_mut() = 1;
+        block_on(writer.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+        if visible(&server) == ROWS {
+            return;
+        }
+    }
+    panic!("the server has {} of {ROWS} rows", visible(&server));
+}
+
+/// A writer linked to a fresh server through a [`NarrowWire`] with `room`.
+struct Narrow {
+    server: Db,
+    writer: Db,
+    room: Rc<RefCell<usize>>,
+    subscriber: jazz::db::SubscriberId,
+}
+
+fn narrow(server_node: u8, writer_node: u8) -> Narrow {
+    let server = open(server_node, AuthorSubject::SYSTEM);
+    let writer_author = AuthorSubject::for_test_bytes([writer_node; 16]);
+    let writer = open(writer_node, writer_author);
+    let room = Rc::new(RefCell::new(usize::MAX));
+    let subscriber = link(&server, &writer, writer_author, &room);
+    for _ in 0..20 {
+        block_on(writer.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+    }
+    Narrow {
+        server,
+        writer,
+        room,
+        subscriber,
+    }
+}
+
+/// A new connection between `writer` and `server`: fresh queues, a fresh
+/// adapter and joiner on each side.
+fn link(
+    server: &Db,
+    writer: &Db,
+    writer_author: AuthorSubject,
+    room: &Rc<RefCell<usize>>,
+) -> jazz::db::SubscriberId {
+    let to_server: Queue = Rc::default();
+    let to_writer: Queue = Rc::default();
+    block_on(
+        writer.connect_upstream(Box::new(WireTransportAdapter::current(NarrowWire {
+            outbound: Rc::clone(&to_server),
+            inbound: Rc::clone(&to_writer),
+            room: Rc::clone(room),
+        }))),
+    );
+    server.accept_subscriber(
+        Box::new(WireTransportAdapter::current(GatedWire {
+            outbound: to_writer,
+            inbound: to_server,
+            released: Rc::new(RefCell::new(usize::MAX)),
+        })),
+        writer_author,
+    )
+}
+
+fn commit_notes(writer: &Db, rows: usize) {
+    let tx = OpenTransactionId::new();
+    block_on(writer.begin_mergeable(tx)).unwrap();
+    let body = "x".repeat(BODY);
+    for _ in 0..rows {
+        let values = BTreeMap::from([("body".to_owned(), Value::String(body.clone()))]);
+        block_on(
+            writer
+                .tx_ref(tx)
+                .insert("notes", values, Default::default()),
+        )
+        .unwrap();
+    }
+    block_on(writer.commit_mergeable_handle(tx)).unwrap();
+}
+
+/// A commit in three parts, with a second commit queued behind it: every
+/// part drains in order as the queue makes room, and the commit behind
+/// arrives after it, whole.
+#[test]
+fn a_commit_in_three_parts_drains_ahead_of_the_commit_behind_it() {
+    let link = narrow(0xc2, 0x53);
+    commit_notes(&link.writer, 160);
+    commit_notes(&link.writer, 1);
+    let mut seen = Vec::new();
+    for _ in 0..80 {
+        *link.room.borrow_mut() = 1;
+        block_on(link.writer.tick()).unwrap();
+        block_on(link.server.tick()).unwrap();
+        let count = visible(&link.server);
+        seen.push(count);
+        assert!(
+            [0, 160, 161].contains(&count),
+            "the server saw {count} rows (per tick: {seen:?})"
+        );
+        if count == 161 {
+            return;
+        }
+    }
+    panic!("the commits never arrived: {seen:?}");
+}
+
+/// A connection lost with a split commit's later parts unsent: the new
+/// connection sends the commit again, from its first part, and the server
+/// applies it once.
+#[test]
+fn a_split_commit_cut_off_by_a_disconnect_arrives_whole_on_the_next_connection() {
+    let link_ = narrow(0xc3, 0x54);
+    commit_notes(&link_.writer, ROWS);
+    *link_.room.borrow_mut() = 1;
+    block_on(link_.writer.tick()).unwrap();
+    block_on(link_.server.tick()).unwrap();
+    assert_eq!(visible(&link_.server), 0, "only the first part went out");
+    link_.server.disconnect_subscriber(link_.subscriber);
+    *link_.room.borrow_mut() = usize::MAX;
+    link(
+        &link_.server,
+        &link_.writer,
+        AuthorSubject::for_test_bytes([0x54; 16]),
+        &link_.room,
+    );
+    for _ in 0..20 {
+        block_on(link_.writer.tick()).unwrap();
+        block_on(link_.server.tick()).unwrap();
+        if visible(&link_.server) == ROWS {
+            return;
+        }
+    }
+    panic!("the server has {} of {ROWS} rows", visible(&link_.server));
+}
+
+/// An untrusted writer's commit over what its server joins is rejected for
+/// good, here, rather than ending the session on every resend: the writer
+/// rolls it back and later commits still sync.
+#[test]
+fn an_untrusted_commit_over_the_session_budget_is_rejected_without_sending() {
+    let link = narrow(0xc4, 0x55);
+    // About 9 MB: over the 8 MiB an untrusted session may send.
+    commit_notes(&link.writer, 300);
+    for _ in 0..10 {
+        block_on(link.writer.tick()).unwrap();
+        block_on(link.server.tick()).unwrap();
+    }
+    assert_eq!(
+        visible(&link.writer),
+        0,
+        "the refused commit is rolled back"
+    );
+    assert_eq!(visible(&link.server), 0);
+    commit_notes(&link.writer, 1);
+    for _ in 0..10 {
+        block_on(link.writer.tick()).unwrap();
+        block_on(link.server.tick()).unwrap();
+    }
+    assert_eq!(visible(&link.server), 1, "the session survives the refusal");
+}
+
+/// A pending commit too large for one stored value (a Durable Object keeps
+/// at most 2 MiB in one) is kept a row per op: it survives a reopen whole
+/// and uploads as one commit, and its rows go once it settles.
+#[test]
+fn a_pending_commit_over_one_stored_value_survives_a_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("writer.sqlite");
+    let writer_author = AuthorSubject::for_test_bytes([0x56; 16]);
+    let open_writer = || {
+        block_on(Db::open_at(
+            DbConfig::new(
+                schema(),
+                DbIdentity {
+                    node: NodeUuid::from_bytes([0x56; 16]),
+                    author: writer_author,
+                },
+            ),
+            &path,
+            Default::default(),
+        ))
+        .unwrap()
+    };
+    {
+        // A replica whose link sends nothing: about 3 MB stays pending.
+        let writer = open_writer();
+        let unreachable = open(0xc6, AuthorSubject::SYSTEM);
+        let _subscriber = link(
+            &unreachable,
+            &writer,
+            writer_author,
+            &Rc::new(RefCell::new(0)),
+        );
+        commit_notes(&writer, ROWS);
+        block_on(writer.tick()).unwrap();
+    }
+    let items = |path: &std::path::Path| -> (i64, i64) {
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .query_row(
+                "SELECT count(*), coalesce(max(length(item)), 0) FROM _jazz_pending_items \
+                 WHERE part = 0",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+    };
+    let (ops, largest) = items(&path);
+    assert_eq!(ops, ROWS as i64, "kept a row per op");
+    assert!(
+        largest < 64 * 1024,
+        "no stored op near the value limit: {largest}"
+    );
+    let writer = open_writer();
+    let server = open(0xc5, AuthorSubject::SYSTEM);
+    let room = Rc::new(RefCell::new(usize::MAX));
+    let _subscriber = link(&server, &writer, writer_author, &room);
+    for _ in 0..20 {
+        block_on(writer.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+    }
+    assert_eq!(visible(&server), ROWS);
+    drop(writer);
+    assert_eq!(items(&path).0, 0, "its rows go once the commit settles");
+}
+
+/// A refused commit too large for one stored value is kept for the host a
+/// row per op: listed whole, and its rows go when the host discards it.
+#[test]
+fn a_refused_commit_over_one_stored_value_is_listed_whole_and_discarded() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("writer.sqlite");
+    let writer_author = AuthorSubject::for_test_bytes([0x57; 16]);
+    let writer = block_on(Db::open_at(
+        DbConfig::new(
+            schema(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x57; 16]),
+                author: writer_author,
+            },
+        ),
+        &path,
+        Default::default(),
+    ))
+    .unwrap();
+    writer.track_upstream_rejections();
+    let server = open(0xc7, AuthorSubject::SYSTEM);
+    let room = Rc::new(RefCell::new(usize::MAX));
+    let _subscriber = link(&server, &writer, writer_author, &room);
+    // About 9 MB: over what an untrusted session may send, so refused.
+    commit_notes(&writer, 300);
+    for _ in 0..10 {
+        block_on(writer.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+    }
+    let count = |table: &str| -> i64 {
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap()
+    };
+    let rejected = writer.rejected_transactions().unwrap();
+    assert_eq!(rejected.len(), 1);
+    assert_eq!(rejected[0].ops.len(), 300, "listed whole");
+    assert_eq!(count("_jazz_rejected_ops"), 300, "kept a row per op");
+    assert_eq!(count("_jazz_pending_items"), 0, "and no longer pending");
+    writer
+        .discard_rejected_transaction(rejected[0].seq)
+        .unwrap();
+    assert!(writer.rejected_transactions().unwrap().is_empty());
+    assert_eq!(count("_jazz_rejected_ops"), 0, "its ops go with it");
+}

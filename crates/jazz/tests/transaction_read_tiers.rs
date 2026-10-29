@@ -2,7 +2,7 @@
 
 use crate::common::{allow_all_policies, compile_schema};
 use jazz::db::{
-    CurrentRow, Db, DbConfig, DbIdentity, Error, ReadOpts, ReadTier, RemoteLinkHint,
+    CurrentRow, Db, DbConfig, DbIdentity, Error, ReadOpts, ReadSpan, ReadTier, RemoteLinkHint,
     SerializedReadResult, SyncMessage, Transport, TransportError, block_on, duplex,
 };
 use jazz::ids::{AuthorSubject, NodeUuid};
@@ -54,7 +54,14 @@ struct CountFetches {
 }
 impl Transport for CountFetches {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
-        if matches!(message, SyncMessage::Fetch { .. }) {
+        // A one-shot read is the fetch round trip a transaction read makes.
+        if matches!(
+            message,
+            SyncMessage::Read {
+                span: ReadSpan::Once { .. },
+                ..
+            }
+        ) {
             self.sent.set(self.sent.get() + 1);
         }
         self.transport.send(message)
@@ -144,7 +151,7 @@ async fn read(
 
 /// Alice's LocalOnly read returns her staging before Bob answers, through both
 /// core and binding entry points. Recording the public transport is necessary
-/// because returned rows alone cannot prove that no Fetch was sent to Bob.
+/// because returned rows alone cannot prove that no one-shot Read was sent to Bob.
 #[test]
 fn local_only_reads_finish_without_contacting_the_connected_authority() {
     for serialized in [false, true] {

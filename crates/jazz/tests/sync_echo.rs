@@ -144,7 +144,7 @@ fn shipped(log: &Down) -> (usize, Vec<usize>) {
     let mut held = Vec::new();
     for message in log.borrow().iter() {
         match message {
-            SyncMessage::Rows { images: i } => images += i.len(),
+            SyncMessage::Rows { images: i, .. } => images += i.len(),
             SyncMessage::Fate { held: h, .. } => held.push(h.len()),
             _ => {}
         }

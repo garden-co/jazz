@@ -259,7 +259,7 @@ impl Room {
             "{phase}: the spy got no shape deltas"
         );
         for message in self.sim.downstream_log("spy") {
-            if let jazz::db::SyncMessage::Rows { images } = message {
+            if let jazz::db::SyncMessage::Rows { images, .. } = message {
                 assert!(
                     images.iter().all(|image| image.deleted
                         || ![SHAPES, CANVASES, INVITES].contains(&image.table.as_str())),

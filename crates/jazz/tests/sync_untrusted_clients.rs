@@ -144,9 +144,10 @@ fn a_message_the_server_does_not_serve_ends_only_that_session() {
     server.accept_subscriber(a_server, user(1));
 
     post(&alice, "hello");
-    bad_up
-        .borrow_mut()
-        .push_back(SyncMessage::Rows { images: Vec::new() });
+    bad_up.borrow_mut().push_back(SyncMessage::Rows {
+        images: Vec::new(),
+        origins: Vec::new(),
+    });
     for _ in 0..4 {
         block_on(alice.tick()).unwrap();
         block_on(server.tick()).unwrap();
