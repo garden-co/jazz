@@ -2358,7 +2358,9 @@ mod tests {
         let addr = start_ws_test_server(state.clone()).await;
         let mut ws =
             open_negotiated_ws(addr, &state, AuthorSubject::for_test_bytes([0x7b; 16])).await;
-        ws.send(WsMessage::Binary(ws_frame_batch(&[vec![0xff; 8]]).into()))
+        // 0x7f is no sync message's tag (0xff would begin a split
+        // message's leading part, which waits for the rest).
+        ws.send(WsMessage::Binary(ws_frame_batch(&[vec![0x7f; 8]]).into()))
             .await
             .expect("send malformed sync frame");
         let error = tokio::time::timeout(Duration::from_secs(5), async {

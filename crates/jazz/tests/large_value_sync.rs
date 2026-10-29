@@ -10,9 +10,9 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 
 use jazz::db::{
-    CellDelta, Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadTier, RemoteLinkHint,
-    SubscriptionStream, SyncCell, SyncMessage, Transport, TransportError, WireDelta, WireError,
-    WireKind, WireOp, WirePull, WireTarget, block_on, encode_frames,
+    CellDelta, Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadSpan, ReadTier,
+    RemoteLinkHint, SubscriptionStream, SyncCell, SyncMessage, Transport, TransportError,
+    WireDelta, WireError, WireKind, WireOp, WirePull, WireTarget, block_on, encode_frames,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::ReadViewSourceSpec;
@@ -430,7 +430,7 @@ fn pulls_answer_only_for_versions_the_reader_may_read() {
         .borrow()
         .iter()
         .find_map(|message| match message {
-            SyncMessage::Rows { images } => images.iter().find_map(|image| {
+            SyncMessage::Rows { images, .. } => images.iter().find_map(|image| {
                 let cell = image.cells.iter().find_map(|(name, cell)| match cell {
                     SyncCell::Large(descriptor) if name.ends_with("body") => Some(descriptor),
                     _ => None,
@@ -578,7 +578,7 @@ impl Transport for Spy {
         let entry = match &message {
             SyncMessage::Commit { deltas, .. } => Some(("commit", !deltas.is_empty())),
             SyncMessage::PushChunks { .. } => Some(("push", false)),
-            SyncMessage::Rows { images } => {
+            SyncMessage::Rows { images, .. } => {
                 let mut cells = images.iter().flat_map(|image| image.cells.iter());
                 let large = cells
                     .clone()
@@ -737,7 +737,7 @@ struct Spoil {
 
 impl Transport for Spoil {
     fn send(&mut self, mut message: SyncMessage) -> Result<(), TransportError> {
-        if let SyncMessage::Rows { images } = &mut message
+        if let SyncMessage::Rows { images, .. } = &mut message
             && !*self.spoiled.borrow()
         {
             for (_, cell) in images.iter_mut().flat_map(|image| image.cells.iter_mut()) {
@@ -982,7 +982,7 @@ fn pulls_after_read_access_is_lost_are_answered_with_nothing() {
         .borrow()
         .iter()
         .find_map(|message| match message {
-            SyncMessage::Rows { images } => images.iter().find_map(|image| {
+            SyncMessage::Rows { images, .. } => images.iter().find_map(|image| {
                 let cell = image.cells.iter().find_map(|(name, cell)| match cell {
                     SyncCell::Large(descriptor) if name.ends_with("text") => Some(descriptor),
                     _ => None,
@@ -1057,7 +1057,7 @@ fn an_answer_to_many_pulls_is_bounded_and_the_rest_follows() {
         .borrow()
         .iter()
         .find_map(|message| match message {
-            SyncMessage::Rows { images } => images.iter().find_map(|image| {
+            SyncMessage::Rows { images, .. } => images.iter().find_map(|image| {
                 let cell = image.cells.iter().find_map(|(name, cell)| match cell {
                     SyncCell::Large(descriptor) if name.ends_with("blob") => Some(descriptor),
                     _ => None,
@@ -1556,19 +1556,21 @@ fn a_snapshot_read_naming_a_held_commit_waits_for_it() {
     // Alice's own store answers that read itself, so the read goes up as a
     // relay would send it: on the wire, behind the held commit.
     const READ: u64 = 9_999;
-    up.borrow_mut().push_back(SyncMessage::Fetch {
+    up.borrow_mut().push_back(SyncMessage::Read {
         id: READ,
-        query: Query::from("titled"),
+        query: Box::new(Query::from("titled")),
         binding: BTreeMap::new(),
-        at: None,
         include_deleted: false,
         tier: ReadTier::Remote,
         wait: None,
-        view: ReadViewSourceSpec::Snapshot { snapshot },
+        span: ReadSpan::Once {
+            at: None,
+            view: Box::new(ReadViewSourceSpec::Snapshot { snapshot }),
+        },
     });
     let reply = || {
         down.borrow().iter().find_map(|message| match message {
-            SyncMessage::Answer { id: READ, .. } => Some(Ok(())),
+            SyncMessage::Settled { id: READ, .. } => Some(Ok(())),
             SyncMessage::Refused {
                 id: READ, message, ..
             } => Some(Err(message.clone())),
@@ -1749,7 +1751,7 @@ fn a_relay_forwards_no_pull_its_tab_may_not_make() {
         .borrow()
         .iter()
         .find_map(|message| match message {
-            SyncMessage::Rows { images } => images
+            SyncMessage::Rows { images, .. } => images
                 .iter()
                 .find(|image| image.id == *row(1).0.as_bytes())
                 .map(|image| (image.seq, image.key.clone())),

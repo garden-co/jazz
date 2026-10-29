@@ -84,7 +84,7 @@ pub(crate) fn admit(conn: &Connection) -> Result<(), Error> {
         })
         .map_err(storage)?;
     match versions.as_slice() {
-        [rusqlite::types::Value::Integer(STORAGE_FORMAT)] => Ok(()),
+        [rusqlite::types::Value::Integer(STORAGE_FORMAT)] => refuse_message_outbox(conn),
         [rusqlite::types::Value::Integer(version)] => Err(unsupported(format!(
             "this store was written in Jazz SQLite storage format {version}"
         ))),
@@ -93,6 +93,28 @@ pub(crate) fn admit(conn: &Connection) -> Result<(), Error> {
             format!("corrupt storage format stamp: {STAMP_TABLE} holds {other:?}"),
         )),
     }
+}
+
+/// Refuse a development store of format 1 from before it kept pending
+/// uploads a row per op (SPEC 8.3): its `_jazz_pending` holds each one as
+/// an encoded message (`commit_msg`), which this build does not read.
+/// Format 1 had not shipped then, so no released store has that layout.
+fn refuse_message_outbox(conn: &Connection) -> Result<(), Error> {
+    let old: bool = conn
+        .query_row(
+            "SELECT count(*) > 0 FROM sqlite_master WHERE type = 'table' \
+             AND name = '_jazz_pending' AND sql LIKE '%commit\\_msg%' ESCAPE '\\'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(storage)?;
+    if old {
+        return Err(unsupported(
+            "this development store keeps pending uploads as encoded messages, \
+             a layout from before format 1 shipped",
+        ));
+    }
+    Ok(())
 }
 
 /// Whether `dir` is a RocksDB directory: the Groove engine's native store.

@@ -77,6 +77,8 @@ mod maybe_conflicting;
 mod order_by_unselected_column;
 #[path = "../parameterized_subscription_routing.rs"]
 mod parameterized_subscription_routing;
+#[path = "../pending_commit_reopen.rs"]
+mod pending_commit_reopen;
 #[path = "../permission_advice.rs"]
 mod permission_advice;
 #[path = "../policy_activation.rs"]

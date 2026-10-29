@@ -51,10 +51,10 @@ use crate::values::{
 };
 pub use sync::{
     BuiltOn, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad, FrameJoiner, Image, LOCAL_BASE,
-    NON_DURABLE_BASE, RejectedTransaction, RelationSnapshot, RemoteLinkHint, SerializedReadResult,
-    SubscriberId, SyncMessage, Transport, TransportError, Upstream, WireBase, WireChunk,
-    WireChunkRef, WireDelta, WireError, WireKind, WireOp, WirePull, WireTarget, WireTransport,
-    WireTransportAdapter, WriteConflict, decode_message, duplex, encode_frames,
+    NON_DURABLE_BASE, ReadSpan, RejectedTransaction, RelationSnapshot, RemoteLinkHint,
+    SerializedReadResult, SubscriberId, SyncMessage, Transport, TransportError, Upstream, WireBase,
+    WireChunk, WireChunkRef, WireDelta, WireError, WireKind, WireOp, WirePull, WireTarget,
+    WireTransport, WireTransportAdapter, WriteConflict, decode_message, duplex, encode_frames,
     validate_frame_batch_for_corpus,
 };
 
@@ -1983,10 +1983,16 @@ impl Db {
                 inner.clear_derived();
                 applied
             })?;
+            // A standalone write that changed nothing made no commit: its
+            // handle names the row's current version, which may be the
+            // newest commit's own seq, so recording it would upload a
+            // second commit under that commit's transaction id.
+            let committed = notify || self.inner().tx.is_some();
             // The upload record joins the write's SQLite transaction: if it
             // fails, `with_upload` rolls both back, and nobody has been told.
-            if let Err(error) =
-                self.record_upload(vec![op], handle.seq, sync::Kind::Mergeable, None)
+            if let Err(error) = committed
+                .then(|| self.record_upload(vec![op], handle.seq, sync::Kind::Mergeable, None))
+                .transpose()
             {
                 let mut inner = self.inner();
                 inner.seq = prior;
