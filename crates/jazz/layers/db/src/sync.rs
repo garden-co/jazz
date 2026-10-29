@@ -8234,8 +8234,11 @@ impl Db {
                 };
                 // A version that exists but is unreadable leaves the id
                 // watched: the replica may hold the row on another branch
-                // (a branch view's base, the main row under a draft).
-                if inner.current_image(&table, row, &key)?.is_some() {
+                // (a branch view's base, the main row under a draft). A
+                // relay's marker stands for such a version too.
+                if inner.current_image(&table, row, &key)?.is_some()
+                    || inner.is_withheld(&table, row, &key)?
+                {
                     unreadable.insert((table.clone(), row, key.clone()));
                 } else {
                     gone.push((table.clone(), *row.0.as_bytes()));
@@ -8431,23 +8434,37 @@ impl Db {
                 });
             }
             // Chunked cells go as deltas over the version of their row the
-            // replica holds (SPEC 19.8).
+            // replica holds (SPEC 19.8). Whatever ships last of a version,
+            // its image or its eviction, is what the replica knows of it.
             let mut shipped = std::mem::take(&mut inner.sessions[index].shipped);
+            let mut unreadable = std::mem::take(&mut inner.sessions[index].unreadable);
             for message in &mut out {
                 match message {
                     SyncMessage::Rows { images, .. } => {
                         for image in images.iter_mut() {
+                            unreadable.remove(&(
+                                image.table.clone(),
+                                RowUuid::from_bytes(image.id),
+                                image.key.clone(),
+                            ));
                             inner.ship_deltas(&mut shipped, image)?;
                         }
                     }
                     SyncMessage::AccessLost { table, id, key, .. } => {
                         shipped.remove(&(table.clone(), *id, key.clone()));
+                        let row = RowUuid::from_bytes(*id);
+                        if inner.current_image(table, row, key)?.is_some()
+                            || inner.is_withheld(table, row, key)?
+                        {
+                            unreadable.insert((table.clone(), row, key.clone()));
+                        }
                     }
                     _ => {}
                 }
             }
             let session = &mut inner.sessions[index];
             session.shipped = shipped;
+            session.unreadable = unreadable;
             let subscriber = SubscriberId {
                 slot: index,
                 generation: session.generation,

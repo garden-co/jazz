@@ -1814,3 +1814,85 @@ fn a_head_only_write_to_a_hidden_row_is_refused() {
         jazz::db::ErrorCode::WriteRejected
     );
 }
+
+/// An insert with a given id onto a branch whose version of that id is
+/// hidden here is refused, like any other write to that version.
+#[test]
+fn an_insert_with_an_id_onto_a_hidden_version_is_refused() {
+    let (server, client, _) = connected();
+    let (main, draft) = (branch(0xb9), branch(0xba));
+    put(&server, &main, 0x45, "x", 1);
+    set(&server, 0x45, &draft, &main, &[("owner", subject(bob()))]);
+    let view =
+        ReadOpts::default().branch_view(draft.clone(), Some(BranchViewBase::Current(main.clone())));
+    let all = client.prepare_query(&by_rank()).unwrap();
+    let _v = block_on(client.subscribe(&all, view.clone())).unwrap();
+    pump(&server, &client);
+    let insert = block_on(client.insert(
+        "todos",
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("alice insert".into())),
+            ("rank".to_owned(), Value::I32(0)),
+        ]),
+        InsertOptions {
+            row_id: Some(RowUuid::from_bytes([0x45; 16])),
+            target: ExactWriteTarget::Branch(draft.clone()),
+            ..Default::default()
+        },
+    ));
+    assert_eq!(
+        insert.expect_err("refused").code,
+        jazz::db::ErrorCode::WriteRejected
+    );
+    assert!(titles(&client, &by_rank(), view).is_empty());
+}
+
+/// Alice loses main's x, gets it back through a grant (shipped by her
+/// subscription), drops the subscription, and loses it again: the second
+/// loss still reaches her, though her own write keeps x watched.
+#[test]
+fn a_row_regained_through_a_subscription_is_evicted_again() {
+    let (server, client, _) = connected();
+    let main = branch(0xbb);
+    put(&server, &main, 0x45, "x", 1);
+    put(&server, &main, 0x46, "y", 2);
+    let on_main = ReadOpts::default().branch_view(main.clone(), None);
+    let all = client.prepare_query(&by_rank()).unwrap();
+    let subscription = block_on(client.subscribe(&all, on_main.clone())).unwrap();
+    pump(&server, &client);
+    set(
+        &client,
+        0x45,
+        &main,
+        &main,
+        &[("title", Value::String("x alice".into()))],
+    );
+    pump(&server, &client);
+    set(&server, 0x45, &main, &main, &[("owner", subject(bob()))]);
+    pump(&server, &client);
+    assert_eq!(titles(&client, &by_rank(), on_main.clone()), ["y"]);
+    grant(&server, alice());
+    pump(&server, &client);
+    assert_eq!(
+        titles(&client, &by_rank(), on_main.clone()),
+        ["x alice", "y"]
+    );
+    drop(subscription);
+    pump(&server, &client);
+    block_on(server.delete(
+        "grants",
+        RowUuid::from_bytes([0x99; 16]),
+        Default::default(),
+    ))
+    .unwrap();
+    pump(&server, &client);
+    set(
+        &server,
+        0x45,
+        &main,
+        &main,
+        &[("title", Value::String("bob secret".into()))],
+    );
+    pump(&server, &client);
+    assert_eq!(titles(&client, &by_rank(), on_main), ["y"]);
+}

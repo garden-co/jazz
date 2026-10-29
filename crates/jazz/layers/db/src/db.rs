@@ -5148,6 +5148,7 @@ impl Inner {
         let key = table.row_branch_key(&cells);
         let row = row_id.unwrap_or_else(|| self.ids.next_row_id());
         let cells = self.merged_cells(table, row, None, None, cells)?;
+        self.refuse_withheld(table, row, &key)?;
         match self.existing(&table.stored, row, &key)? {
             Some((_, true)) => return Err(row_already_deleted(row)),
             Some((_, false)) => return Err(row_already_exists(row)),
