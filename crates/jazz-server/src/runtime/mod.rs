@@ -9,7 +9,7 @@
 //!
 //! One app's state is one SQLite file: the owner thread is also the only
 //! connection to it. It starts before the runtime does (an [`AppStore`]),
-//! serving the server's host tables (catalogue, account journal), and the
+//! serving the server's host tables (catalogue, account registry), and the
 //! runtime's [`Db`] opens on the same connection once a schema is known.
 
 pub mod auth_admission;
@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex, Weak, mpsc as std_mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::kv::HostKv;
+use crate::kv::{HostKv, HostSql};
 use jazz::db::{
     Db, DbConfig, DbIdentity, FileOptions, LensEffects, Reason, SubscriberId, SyncMessage,
     Transport, TransportError, WireError, block_on,
@@ -251,7 +251,7 @@ impl Source {
                     std::fs::create_dir_all(parent)
                         .map_err(|error| format!("create {}: {error}", parent.display()))?;
                 }
-                // Every commit (rows, catalogue, account journal) is durable
+                // Every commit (rows, catalogue, account registry) is durable
                 // when it returns.
                 StoreFile::open(
                     path,
@@ -369,6 +369,17 @@ impl AppStore {
     pub(crate) fn kv(&self, table: HostTable) -> Result<HostKv, String> {
         Ok(HostKv::new(
             table,
+            Arc::clone(&self.inner.reader),
+            HostSender {
+                host: self.inner.host.clone(),
+                wake: self.sender()?,
+            },
+        ))
+    }
+
+    /// SQL access to the host tables a server shapes itself.
+    pub(crate) fn sql(&self) -> Result<HostSql, String> {
+        Ok(HostSql::new(
             Arc::clone(&self.inner.reader),
             HostSender {
                 host: self.inner.host.clone(),
@@ -540,6 +551,12 @@ impl HostTables for Unavailable {
         Err(self.error())
     }
     fn host_delete(&self, _: HostTable, _: &[u8]) -> Result<(), jazz::db::Error> {
+        Err(self.error())
+    }
+    fn host_sql(
+        &self,
+        _: &mut dyn FnMut(&rusqlite::Connection) -> Result<(), jazz::db::Error>,
+    ) -> Result<(), jazz::db::Error> {
         Err(self.error())
     }
 }
