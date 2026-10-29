@@ -12,10 +12,26 @@ use jazz::schema::JazzSchema;
 use super::ServerRuntimeHandle;
 
 impl ServerRuntimeHandle {
-    /// Every schema version the runtime catalogue admitted.
+    /// Every schema version the runtime catalogue admitted. The catalogue
+    /// stores schemas without policies; the store's current schema carries
+    /// the active permissions, and a view of that version must bring them.
     pub async fn migrate_import_schemas(&self) -> Result<Vec<JazzSchema>, String> {
-        self.run(|owner| Ok(owner.catalogue.schemas.values().cloned().collect()))
-            .await
+        self.run(|owner| {
+            let current = owner.db.current_schema();
+            Ok(owner
+                .catalogue
+                .schemas
+                .values()
+                .map(|schema| {
+                    if schema.version_id() == current.version_id() {
+                        current.clone()
+                    } else {
+                        schema.clone()
+                    }
+                })
+                .collect())
+        })
+        .await
     }
 
     /// Run `job` on the owner thread with the runtime store.
