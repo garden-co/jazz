@@ -3509,9 +3509,11 @@ impl Inner {
 /// `_jazz_pending` keeps its `Commit` with the per-row lists left empty,
 /// `_jazz_pending_items` each op, delta, source, base and serializable read
 /// (by [`PendingPart`]), and `_jazz_pending_rows` the local rows it wrote.
-/// A row's values over the inline limit live in large-value storage, so no
-/// stored value grows with the commit, and a store with a small value limit
-/// (a Durable Object's 2 MiB) keeps commits that travel in several frames.
+/// A row's values over the inline limit live in large-value storage, so a
+/// stored op is about the size of the row it writes, however large the
+/// commit: a store with a small value limit (a Durable Object's 2 MiB)
+/// keeps any commit whose rows it can hold, even one that travels in
+/// several frames.
 pub(crate) const SYNC_DDL: &str = "\
     CREATE TABLE IF NOT EXISTS _jazz_pending (tx INTEGER PRIMARY KEY, header BLOB NOT NULL);\
     CREATE TABLE IF NOT EXISTS _jazz_pending_items (tx INTEGER NOT NULL, part INTEGER NOT NULL, n INTEGER NOT NULL, item BLOB NOT NULL, PRIMARY KEY (tx, part, n));\
@@ -3945,8 +3947,11 @@ impl Inner {
             rusqlite::params![tx as i64, encode(&wire_error(error)), serializable],
         )
         .map_err(storage)?;
+        // A commit refused again replaces its ops whole.
+        self.exec("DELETE FROM _jazz_rejected_ops WHERE tx = ?1", [tx as i64])
+            .map_err(storage)?;
         self.exec(
-            "INSERT OR REPLACE INTO _jazz_rejected_ops (tx, n, op) \
+            "INSERT INTO _jazz_rejected_ops (tx, n, op) \
              SELECT tx, n, item FROM _jazz_pending_items WHERE tx = ?1 AND part = ?2",
             rusqlite::params![tx as i64, PendingPart::Op as i64],
         )

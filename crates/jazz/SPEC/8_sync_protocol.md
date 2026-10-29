@@ -212,9 +212,12 @@ connection. It is stored a row per op, not as one encoded message:
 - `_jazz_pending_rows (tx, n, tbl, id, key)`: the local rows it wrote.
 
 `expect` is not kept: after a reopen the server ships those rows. A row's
-values over the inline limit live in large-value storage, so no stored value
-grows with the commit, and a store with a 2 MiB value limit (a Durable
-Object) keeps commits that travel in several frames. A refused commit moves
+values over the inline limit live in large-value storage, so a stored op is
+about the size of the row it writes, however large the commit. A store with
+a 2 MiB value limit (a Durable Object) therefore keeps any commit whose rows
+it can hold, even one that travels in several frames. An op is bounded by
+its row, not by a limit of its own: a row of 33 or more inline cells near
+64 KiB each is over 2 MiB, and such a store refuses it as a row too. A refused commit moves
 to the retry store, `_jazz_rejected (tx, error, serializable)` with its ops
 in `_jazz_rejected_ops (tx, n, op)`, until the host discards it. A build
 from before this layout cannot open a store written by one after it, nor the
