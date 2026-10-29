@@ -5156,7 +5156,9 @@ impl Db {
             return Ok(());
         }
         if inner.tx.is_some() {
-            inner.capture.extend(ops);
+            inner
+                .capture
+                .extend(ops.into_iter().map(|op| (version, op)));
             return Ok(());
         }
         // A read-only serializable commit still goes up: the authority
@@ -5507,6 +5509,9 @@ impl Db {
         };
         {
             let inner = self.inner.borrow();
+            if tier == ReadTier::Remote {
+                inner.check_not_stranded()?;
+            }
             if inner.client.is_none() || !strict && !answerable(&inner) {
                 return Ok(None);
             }
@@ -6263,8 +6268,15 @@ impl Db {
         let mut commits = std::mem::take(&mut client.unsent);
         // Each commit's large-value nodes go ahead of it. A commit whose
         // nodes must be fetched first waits, and so do those after it.
+        // So does one written through a view of a version its upstream has
+        // not confirmed admitting (INV-SYNC-52): a `Schema` switch to it
+        // would hold the whole session there, reads included, until the
+        // server admits it.
         let mut pushes = Vec::with_capacity(commits.len());
         for commit in &commits {
+            if inner.awaits_admission(commit) {
+                break;
+            }
             match inner.pushes_for(commit)? {
                 Some(push) => pushes.push(push),
                 None => break,
@@ -6376,12 +6388,16 @@ impl Db {
             return Ok(());
         };
         let baseline = std::mem::take(&mut client.baselines);
-        let versions = client.versions.clone();
         let pending: Vec<(u64, Vec<StagedOp>)> = client
             .pending
             .iter()
             .map(|p| (p.tx, p.ops.clone()))
             .collect();
+        // Settled and refused commits no longer name a version.
+        client
+            .versions
+            .retain(|tx, _| pending.iter().any(|(pending, _)| pending == tx));
+        let versions = client.versions.clone();
         let keep: BTreeSet<(String, RowUuid, Vec<u8>)> = client
             .pending
             .iter()
@@ -6416,15 +6432,16 @@ impl Db {
             }
         }
         let active = inner.schema.clone();
-        for (tx, schema, ops) in pending {
+        let replayed = pending.into_iter().try_for_each(|(tx, schema, ops)| {
             begin_savepoint(&inner.conn, "replay")?;
             inner.schema = schema.unwrap_or_else(|| inner.owner.clone());
             inner.merging = true;
             let replayed = ops.iter().try_for_each(|op| inner.apply(op, tx).map(drop));
             inner.merging = false;
-            end_savepoint(&inner.conn, "replay", replayed.is_ok())?;
-        }
+            end_savepoint(&inner.conn, "replay", replayed.is_ok())
+        });
         inner.schema = active;
+        replayed?;
         let client = inner.client.as_mut().expect("client");
         client.baselines = baseline
             .into_iter()
@@ -6435,6 +6452,30 @@ impl Db {
 }
 
 impl Inner {
+    /// A stranded replica (see [`stranded`]) has no upstream to answer a
+    /// `Remote` read: its rows at server-range seqs are its own, never
+    /// confirmed (INV-SYNC-51). A local-first read serves its store.
+    pub(crate) fn check_not_stranded(&self) -> Result<(), Error> {
+        match &self.client {
+            Some(client) if client.stranded => Err(stranded()),
+            _ => Ok(()),
+        }
+    }
+
+    /// Whether pending `commit` was written under a version other than
+    /// the current one that this replica's upstream has not confirmed
+    /// admitting: it uploads once the upstream's catalogue confirms it.
+    fn awaits_admission(&self, commit: &SyncMessage) -> bool {
+        let SyncMessage::Commit { tx, .. } = commit else {
+            return false;
+        };
+        let Some(version) = self.client.as_ref().and_then(|c| c.versions.get(tx)) else {
+            return false;
+        };
+        let version = crate::ids::SchemaVersionId::from_bytes(*version);
+        version != self.owner_version && !self.names.confirmed(&version)
+    }
+
     /// Whether any stored table holds a row or a version of one: on a
     /// store that is not a replica, only its own commits put them there.
     fn holds_rows(&self) -> Result<bool, Error> {

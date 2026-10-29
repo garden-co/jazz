@@ -259,6 +259,9 @@ impl ReadSpec {
                 None
             }
         };
+        if opts.tier == ReadTier::Remote {
+            inner.check_not_stranded()?;
+        }
         Ok(Self {
             include_deleted: opts.read_view.include_deleted,
             settled_only: inner.client.is_some() && opts.tier == ReadTier::Remote,
@@ -483,8 +486,9 @@ struct Inner {
     accepted: u64,
     /// Rows written since the last server tick (only while serving).
     since_tick: Vec<(String, RowUuid, Vec<u8>)>,
-    /// Ops of the open local transaction, for upload.
-    capture: Vec<StagedOp>,
+    /// Ops of the open local transaction, for upload, each with the
+    /// schema version whose names it uses.
+    pub(crate) capture: Vec<(crate::ids::SchemaVersionId, StagedOp)>,
     /// Images a replica dropped since the last dispatch (evictions and
     /// rebases), for keyed invalidation.
     gone: RefCell<Vec<sync::Image>>,
@@ -2193,13 +2197,18 @@ impl Db {
         let value = result?;
         let (seq, _) = changed.expect("committed");
         // The upload record joins the transaction's SQLite savepoint.
-        if let Err(error) = self.record_upload(
-            captured,
-            seq,
-            sync::Kind::Mergeable,
-            None,
-            self.write_version(),
-        ) {
+        let recorded = self
+            .upload_version(captured.iter().map(|(version, _)| *version))
+            .and_then(|version| {
+                self.record_upload(
+                    captured.into_iter().map(|(_, op)| op).collect(),
+                    seq,
+                    sync::Kind::Mergeable,
+                    None,
+                    version,
+                )
+            });
+        if let Err(error) = recorded {
             let mut inner = self.inner();
             inner.seq = prior;
             inner.abandon_savepoint("tx")?;
@@ -5943,15 +5952,16 @@ fn schema_error(message: impl Into<String>) -> Error {
 }
 
 impl Db {
-    /// The schema version a batch's commit uploads under: the one every
-    /// staged write names its tables and columns by. A replica cannot
-    /// upload one commit under several, so a batch staged through views of
-    /// different versions is refused there; elsewhere nothing uploads.
-    fn batch_version(
+    /// The schema version a transaction's commit uploads under: the one
+    /// every write in it (each with its `versions` entry) names its tables
+    /// and columns by. A replica cannot upload one commit under several, so
+    /// a transaction written through views of different versions is
+    /// refused there; elsewhere nothing uploads.
+    fn upload_version(
         &self,
-        ops: &[(Rc<Schema>, StagedOp)],
+        versions: impl IntoIterator<Item = crate::ids::SchemaVersionId>,
     ) -> Result<crate::ids::SchemaVersionId, Error> {
-        let mut versions = ops.iter().map(|(schema, _)| schema.version);
+        let mut versions = versions.into_iter();
         let Some(first) = versions.next() else {
             return Ok(self.write_version());
         };
@@ -6730,15 +6740,17 @@ impl Db {
         };
         // `commit_ops` holds the upload record and the commit in one SQLite
         // transaction and rolls both back on an error.
-        let recorded = self.batch_version(ops).and_then(|version| {
-            self.record_upload(
-                ops.iter().map(|(_, op)| op.clone()).collect(),
-                seq,
-                kind,
-                None,
-                version,
-            )
-        });
+        let recorded = self
+            .upload_version(ops.iter().map(|(schema, _)| schema.version))
+            .and_then(|version| {
+                self.record_upload(
+                    ops.iter().map(|(_, op)| op.clone()).collect(),
+                    seq,
+                    kind,
+                    None,
+                    version,
+                )
+            });
         if let Err(error) = recorded {
             let mut inner = self.inner();
             inner.seq = prior;
