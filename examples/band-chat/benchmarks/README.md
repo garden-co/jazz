@@ -63,7 +63,28 @@ preparation occur before each Divan measured closure. Only the read and returned
 row count are measured and black-boxed. Tests separately assert exact result
 cardinality, pagination, filtering, and order.
 
+## Deep-room nightly suite
+
+CodSpeed's nightly suite also runs Xelson's deep-room benchmark from
+[#3978](https://github.com/garden-co/jazz/pull/3978). Its band has 303,695 messages
+across 1,000 rooms, including one room with 100,000 messages. The reader belongs
+to 100 rooms, and the schema declares the message and read-journal indexes.
+
+`band_chat_live_window_new_message[100000]` measures a new message reaching an
+open 50-message page with senders and reactions.
+`band_chat_inbox_new_message[100]` measures it reaching the reader's room list,
+which includes each room's newest message and the reader's own marker. Seeding
+and opening the subscriptions happen outside timing; the write, notification
+and subscription delta delivery are timed. These cases cover affected-parent
+refresh without measuring shared execution across users.
+
+The same target also measures opening, scrolling, jumping, searching, unread
+counts, read receipts and marker-update fan-out. It runs on the scheduled
+CodSpeed job or a manual dispatch with `suite=nightly`. The per-merge suite is
+unchanged.
+
 ```sh
 cargo test -p jazz-example-band-chat-benchmark
 cargo bench -p jazz-example-band-chat-benchmark --bench walltime
+cargo bench -p jazz-example-band-chat-benchmark --bench nightly
 ```
