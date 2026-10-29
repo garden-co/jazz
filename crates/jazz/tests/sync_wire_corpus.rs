@@ -476,12 +476,21 @@ fn subject(n: u8) -> Value {
 
 const ME: [&str; 3] = ["user", "identity", "subject"];
 
-/// `notes(owner, body)`, readable by their owner. `draft` adds a column,
+/// `notes.kind`: an enum, which rows carry by variant name whatever tags a
+/// store keeps it as.
+fn kind() -> ColumnType {
+    ColumnType::Enum {
+        variants: vec!["note".to_owned(), "todo".to_owned()],
+    }
+}
+
+/// `notes(owner, body, kind)`, readable by their owner. `draft` adds a column,
 /// a schema version the server has not admitted.
 fn schema(draft: bool) -> JazzSchema {
     let mut notes = TableSchemaBuilder::new("notes")
         .column("owner", ColumnType::Text)
-        .column("body", ColumnType::Bytea);
+        .column("body", ColumnType::Bytea)
+        .column("kind", kind());
     if draft {
         notes = notes.column("title", ColumnType::Text);
     }
@@ -500,6 +509,7 @@ fn schema_with_copy() -> JazzSchema {
                 TableSchemaBuilder::new("notes")
                     .column("owner", ColumnType::Text)
                     .column("body", ColumnType::Bytea)
+                    .column("kind", kind())
                     .column("first_owner", ColumnType::Text)
                     .policies(read_and_allow_all_writes(session_eq("owner", &ME))),
             )
@@ -511,6 +521,7 @@ fn note(owner: u8, body: Vec<u8>) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("owner".to_owned(), subject(owner)),
         ("body".to_owned(), Value::Bytes(body)),
+        ("kind".to_owned(), Value::String("todo".to_owned())),
     ])
 }
 

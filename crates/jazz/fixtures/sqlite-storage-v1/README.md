@@ -6,21 +6,22 @@ Once alpha.60 ships they are immutable: a change that a format-1 file would
 not read bumps `STORAGE_FORMAT` and adds a new corpus beside this one, and
 never rewrites these. Until then format 1 is still moving, so such a change
 re-runs the producer and re-pins the hashes here and in the test instead
-(for example: per-write timestamps on the wire changed how pending uploads
+(for example: enum columns stored as tags, per-write timestamps on the wire changed how pending uploads
 are stored, a rejection's reason name changed how fates are recorded, and
 pending uploads moved from one encoded message to a row per op).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `1c8043a5539e33bf83bfc55471828b05c08c3faa0e8f26e337bf8855f60a6783`.
+  the SQLite file `0bd49cd130a2a205eadac2356299665f49eb6569cd2caee8bfbe360b31dc69f3`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `f8e09e8044c2f4b41ac1743611e96f4ba149bb3a27929d97440b9c4b5ebf34a7`.
+  `fcbd981b7c8e257e0c383fbeb37542c49cb720b9fcde1dda326479ab25c13034`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
 nodes and write times:
 
 - `projects`, `documents` (reference, indexed title, a 300 KiB chunked large
-  value, bytes, a defaulted column) and `drafts` (branched by `branch_id`);
+  value, bytes, a defaulted column, a defaulted enum stored as tags in
+  `_jazz_enum_tags`) and `drafts` (branched by `branch_id`);
 - two interned authors, updates (history versions), a soft delete and a row
   on a branch;
 - a client text edit to `documents.body` (text-merging) that the server

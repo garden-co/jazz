@@ -47,7 +47,8 @@ use crate::result_tree::{ResultNode, ResultRelation, ResultTree};
 pub use crate::values::CurrentRow;
 use crate::values::{
     AuthorKey, STATE_AS_SENT, STATE_DELETED, STATE_NO_CONTENT, Schema, Sql, Table, author_key,
-    begin_savepoint, end_savepoint, from_sql, in_savepoint, quote, storage, to_sql, unsupported,
+    begin_savepoint, cell_from_sql, column_from_sql, end_savepoint, in_savepoint, quote, storage,
+    to_sql, unsupported,
 };
 pub use sync::{
     AccessProof, Acting, BuiltOn, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad,
@@ -1107,12 +1108,20 @@ impl Db {
         // A version this file admitted keeps its names; another one is
         // named against the most recently admitted.
         let mut names = crate::names::Names::load(&conn)?;
+        // The newest version (one new to this file, or the one it admitted
+        // last) is current from now on; an older one (a server reopening
+        // under its genesis schema, before it activates its current one)
+        // leaves the tags as they are.
+        let version = config.schema.version_id();
+        let newest = names.get(&version).is_none() || names.latest_version() == Some(version);
         // Every version an earlier process admitted is admitted again, with
         // the names it was stored under.
         let mut admitted = crate::catalogue::admitted(&conn)?;
         let schema = names.resolve(&config.schema, &[], names.latest())?;
         names.check_branches(&schema)?;
         names.check_types(&schema)?;
+        // Variants are tagged before any DDL: an enum default is its tag.
+        names.mint(&conn, &schema)?;
         let chunks = crate::large::Chunks::install(path, config.chunk_store.clone())?;
         // Statements are keyed per table and verb; the default 16 entries
         // thrash as soon as a schema has a few tables.
@@ -1246,6 +1255,14 @@ impl Db {
         };
         {
             let mut inner = db.inner.borrow_mut();
+            // The newest schema is current: its declaration order is tag
+            // order.
+            if newest {
+                let owner = inner.owner.clone();
+                crate::values::in_savepoint(&inner.conn, "jazz_align", || {
+                    inner.align_tags(&owner)
+                })?;
+            }
             inner.seq = seq;
             inner.load_client()?;
             if inner.client.is_some() {
@@ -2546,7 +2563,7 @@ impl Db {
                     }
                 }
             }
-            inner.write_admission(&target, cells)?;
+            inner.write_admission(&target, cells, make_current)?;
             if make_current {
                 // Pending commits written under the version current until
                 // now keep uploading under it (INV-SYNC-52).
@@ -2653,6 +2670,7 @@ impl Inner {
             self.names.clone(),
             self.admitted.clone(),
         );
+        let tags = self.names.tags().snapshot();
         let mut moved = Vec::new();
         begin_savepoint(&self.conn, "jazz_mirror")?;
         let mirrored = self.mirror_versions_steps(versions, cells, &mut moved);
@@ -2661,6 +2679,7 @@ impl Inner {
             self.physical = physical;
             self.names = names;
             self.admitted = admitted;
+            self.names.tags().restore(tags);
             return Err(error);
         }
         if let Some(client) = self.client.as_mut() {
@@ -2742,7 +2761,7 @@ impl Inner {
             } else {
                 schema
             };
-            let target = Schema::stored_as(&jazz, &names);
+            let target = Schema::stored_as(&jazz, &names, self.names.tags());
             // A copy is filled once, when its version is first admitted.
             let fills = if fresh.contains(&version) {
                 cells
@@ -2757,7 +2776,7 @@ impl Inner {
             // with another type (each re-added it while apart): its values
             // are never read as this store's.
             self.names.check_types(&target)?;
-            self.write_admission(&target, fills)?;
+            self.write_admission(&target, fills, version == self.owner_version)?;
             if !self.admitted.iter().any(|(id, _)| *id == version) {
                 self.admitted.push((version, jazz));
             }
@@ -2952,21 +2971,25 @@ impl Inner {
     }
 
     /// Write an admitted version's stored tables and columns, its lens
-    /// copies, names and lens cells: whole or not at all, in the file and
-    /// in memory.
+    /// copies, names, lens cells and enum tags: whole or not at all, in the
+    /// file and in memory. A `current` target (the schema made current)
+    /// has its enum columns' tags put in its declaration order.
     fn write_admission(
         &mut self,
         target: &Schema,
         cells: Vec<crate::names::LensCell>,
+        current: bool,
     ) -> Result<(), Error> {
         let (physical, names) = (self.physical.clone(), self.names.clone());
+        let tags = self.names.tags().snapshot();
         begin_savepoint(&self.conn, "jazz_admit")?;
-        let written = self.write_admission_steps(target, cells);
+        let written = self.write_admission_steps(target, cells, current);
         let ended = end_savepoint(&self.conn, "jazz_admit", written.is_ok());
         let written = written.and(ended);
         if written.is_err() {
             self.physical = physical;
             self.names = names;
+            self.names.tags().restore(tags);
         }
         written
     }
@@ -2975,29 +2998,121 @@ impl Inner {
         &mut self,
         target: &Schema,
         cells: Vec<crate::names::LensCell>,
+        current: bool,
     ) -> Result<(), Error> {
+        // Variants are tagged before any DDL, so an enum column added with
+        // a default stores the default's tag. A new copy starts with its
+        // source's tags.
+        for cell in &cells {
+            if let crate::names::LensCellRule::Copy(source) = &cell.rule {
+                self.names
+                    .copy_tags(&self.conn, &cell.table, source, &cell.column)?;
+            }
+        }
+        self.names.mint(&self.conn, target)?;
+        // The current schema's declaration order is tag order, before any
+        // DDL, so a column added with a default stores the default's tag.
+        if current {
+            self.align_tags(target)?;
+        }
         let ddl = self.physical.union(target)?;
         execute_script(&self.conn, &ddl)?;
         // A new copy holds its source's values, in every row version.
         for cell in &cells {
             if let crate::names::LensCellRule::Copy(source) = &cell.rule {
-                for table in [cell.table.clone(), format!("{}__h", cell.table)] {
-                    self.conn
-                        .execute(
-                            &format!(
-                                "UPDATE {} SET {} = {}",
-                                quote(&table),
-                                quote(&cell.column),
-                                quote(source)
-                            ),
-                            [],
-                        )
-                        .map_err(storage)?;
-                }
+                self.fill_copy(&cell.table, &cell.column, source)?;
             }
         }
         self.names.admit(&self.conn, target)?;
         self.names.record_lens_cells(&self.conn, cells)
+    }
+
+    /// Fill copy `column` of stored table `table`, in every row version,
+    /// from `source`. An enum copy's tags are its own: a source cell is
+    /// mapped to the copy's tag for the same name, which is the same tag
+    /// unless the copy's column had tags before.
+    fn fill_copy(&self, table: &str, column: &str, source: &str) -> Result<(), Error> {
+        let (from, to) = (
+            self.names.tags().column(table, source),
+            self.names.tags().column(table, column),
+        );
+        let arms: String = {
+            let (from, to) = (from.borrow(), to.borrow());
+            from.iter()
+                .filter_map(|(tag, name)| {
+                    let copied = to.tag(name)?;
+                    (copied != tag).then(|| format!(" WHEN {tag} THEN {copied}"))
+                })
+                .collect()
+        };
+        self.write_enum_cells(table, column, source, &arms)
+    }
+
+    /// Renumber the tags of every enum column of `schema` (the current
+    /// schema) so its declared variants are in tag order (see
+    /// [`crate::names::Names::align`]), rewriting each changed column's
+    /// cells in every row version.
+    fn align_tags(&self, schema: &Schema) -> Result<(), Error> {
+        for table in schema.tables.values() {
+            for column in &table.columns {
+                let Some(variants) = &column.variants else {
+                    continue;
+                };
+                let changed =
+                    self.names
+                        .align(&self.conn, &table.stored, &column.stored, variants)?;
+                // A column not stored yet has no cells.
+                let stored = self
+                    .physical
+                    .tables
+                    .get(&table.stored)
+                    .is_some_and(|t| t.columns.iter().any(|c| c.stored == column.stored));
+                if changed.is_empty() || !stored {
+                    continue;
+                }
+                let arms: String = changed
+                    .iter()
+                    .map(|(old, new)| format!(" WHEN {old} THEN {new}"))
+                    .collect();
+                self.write_enum_cells(&table.stored, &column.stored, &column.stored, &arms)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Set enum column `column` of stored table `table`, in every row
+    /// version, to `source`'s cells with each tag `arms` (`WHEN old THEN
+    /// new` arms) names mapped.
+    fn write_enum_cells(
+        &self,
+        table: &str,
+        column: &str,
+        source: &str,
+        arms: &str,
+    ) -> Result<(), Error> {
+        let array = self
+            .names
+            .stored_type(table, source)
+            .is_some_and(crate::values::is_array_type);
+        for stored in [table.to_owned(), format!("{table}__h")] {
+            let source_sql = format!("{}.{}", quote(&stored), quote(source));
+            let value = match (arms.is_empty(), array) {
+                (true, _) => source_sql,
+                (false, false) => format!("(CASE {source_sql}{arms} ELSE {source_sql} END)"),
+                (false, true) => format!(
+                    "CASE WHEN {source_sql} IS NULL THEN NULL ELSE (SELECT json_group_array(\
+                     CASE j.value{arms} ELSE j.value END ORDER BY j.key) \
+                     FROM json_each({source_sql}) AS j) END"
+                ),
+            };
+            self.conn
+                .execute(
+                    &format!("UPDATE {} SET {} = {value}", quote(&stored), quote(column)),
+                    [],
+                )
+                .map_err(storage)?;
+        }
+        Ok(())
     }
 }
 
@@ -3158,6 +3273,7 @@ impl Drop for Inner {
         self.settle_overlay();
         // Before `conn` closes, so it closes last and checkpoints the WAL.
         self.chunks.close_reader();
+        crate::values::forget_tag_undo(&self.conn);
     }
 }
 
@@ -3182,8 +3298,8 @@ impl Inner {
     /// An admitted schema under the names this store keeps it by.
     fn named(&self, schema: &JazzSchema) -> Schema {
         match self.names.get(&schema.version_id()) {
-            Some(names) => Schema::stored_as(schema, names),
-            None => Schema::new(schema),
+            Some(names) => Schema::stored_as(schema, names, self.names.tags()),
+            None => Schema::new(schema, self.names.tags()),
         }
     }
 
@@ -3446,7 +3562,7 @@ impl Inner {
         let types: Arc<[ValueType]> = compiled
             .projection
             .iter()
-            .map(|(_, ty)| ty.clone())
+            .map(|(_, ty, _)| ty.clone())
             .collect();
         let mut rows = statement
             .query(params_from_iter(compiled.params.iter()))
@@ -3520,11 +3636,11 @@ impl Inner {
                 .projection
                 .iter()
                 .enumerate()
-                .map(|(i, (name, ty))| {
+                .map(|(i, (name, ty, tags))| {
                     let cell = row.get_ref(first + i).map_err(storage)?;
                     let value = match compiled.partial.get(i).and_then(Option::as_ref) {
                         Some(part) => self.partial_cell(ty, cell, part),
-                        None => from_sql(ty, cell, &self.chunks),
+                        None => cell_from_sql(ty, tags.as_ref(), cell, &self.chunks),
                     };
                     match value {
                         Err(error) if crate::large::is_missing(&error) => {
@@ -3631,16 +3747,16 @@ impl Inner {
             let parent = if array.outer_column == "id" {
                 Value::Uuid(row.id.0)
             } else {
-                let (sql, params, ty) = ctx().compile_cell(table, &array.outer_column, row.id)?;
+                let (sql, params, ty, tags) =
+                    ctx().compile_cell(table, &array.outer_column, row.id)?;
                 let cell: Option<Sql> = self
                     .conn
                     .cached_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
                     .optional()
                     .map_err(storage)?;
                 match cell {
-                    Some(cell) => {
-                        from_sql(&ty, cell.as_ref(), &self.chunks)?.unwrap_or(Value::Nullable(None))
-                    }
+                    Some(cell) => cell_from_sql(&ty, tags.as_ref(), cell.as_ref(), &self.chunks)?
+                        .unwrap_or(Value::Nullable(None)),
                     None => Value::Nullable(None),
                 }
             };
@@ -4423,8 +4539,18 @@ impl Inner {
                     table.name
                 )));
             }
-            if table.column(name).is_none() {
+            let Some(column) = table.column(name) else {
                 return Err(rejected(format!("unknown column `{}.{name}`", table.name)));
+            };
+            if let Some(variants) = &column.variants {
+                for variant in crate::values::enum_names(&cells[name]) {
+                    if !variants.iter().any(|v| v == variant) {
+                        return Err(rejected(format!(
+                            "`{}.{name}`: `{variant}` is not one of its variants",
+                            table.name
+                        )));
+                    }
+                }
             }
         }
         Ok(())
@@ -4470,6 +4596,53 @@ impl Inner {
         Ok(())
     }
 
+    /// A cell for stored column `column` of stored table `table` written
+    /// as plain SQL keeps a value (a lens's cell, an image from another
+    /// store): an enum variant's name as its tag here.
+    pub(crate) fn enum_cell(&self, table: &str, column: &str, cell: Sql) -> Result<Sql, Error> {
+        let Sql::Text(text) = &cell else {
+            return Ok(cell);
+        };
+        let Some(ty) = self
+            .names
+            .stored_type(table, column)
+            .filter(|ty| crate::values::is_enum_type(ty))
+        else {
+            return Ok(cell);
+        };
+        // The cell is the value as plain SQL stores it: a name, or a JSON
+        // array of them.
+        let value = if crate::values::is_array_type(ty) {
+            let json: serde_json::Value = serde_json::from_slice(text)
+                .map_err(|e| Error::new(ErrorCode::Storage, format!("array cell: {e}")))?;
+            let serde_json::Value::Array(items) = json else {
+                return Ok(cell);
+            };
+            Value::Array(
+                items
+                    .into_iter()
+                    .map(|item| match item {
+                        serde_json::Value::String(name) => Value::String(name),
+                        _ => Value::Nullable(None),
+                    })
+                    .collect(),
+            )
+        } else {
+            Value::String(String::from_utf8_lossy(text).into_owned())
+        };
+        self.enum_value_cell(table, column, &value)
+    }
+
+    /// Enum `value` as stored enum column `column` of stored table
+    /// `table`'s cell: its variants' tags there, interned if new.
+    fn enum_value_cell(&self, table: &str, column: &str, value: &Value) -> Result<Sql, Error> {
+        self.names
+            .intern(&self.conn, table, column, &crate::values::enum_names(value))?;
+        let tags = self.names.tags().column(table, column);
+        let cell = crate::values::enum_cell(&tags.borrow(), value)?;
+        Ok(cell.unwrap_or(Sql::Null))
+    }
+
     fn bind_value(value: &Value) -> Result<Sql, Error> {
         to_sql(value)?.ok_or_else(|| unsupported("storing NaN"))
     }
@@ -4479,11 +4652,26 @@ impl Inner {
     /// transaction and the cell holds their descriptor.
     fn bind_cell(
         &self,
+        table: &Table,
         column: &crate::values::Column,
         value: &Value,
         cells: Cells,
     ) -> Result<Sql, Error> {
         Self::check_cell(column, value, cells)?;
+        if column.is_enum() {
+            // Every variant a version declares has a tag; a write's are
+            // checked against them, but a lens or merge may still carry a
+            // removed one.
+            self.names.intern(
+                &self.conn,
+                &table.stored,
+                &column.stored,
+                &crate::values::enum_names(value),
+            )?;
+            return column
+                .cell_sql(value)?
+                .ok_or_else(|| unsupported("storing NaN"));
+        }
         let mut inner = value;
         while let Value::Nullable(Some(value)) = inner {
             inner = value;
@@ -4646,7 +4834,7 @@ impl Inner {
             .optional()
             .map_err(storage)?;
         match cell {
-            Some(cell) => from_sql(&column.ty, cell.as_ref(), &self.chunks),
+            Some(cell) => column_from_sql(column, cell.as_ref(), &self.chunks),
             None => Ok(None),
         }
     }
@@ -4878,7 +5066,7 @@ impl Inner {
                 };
                 // A NULL base merges as "": additions to an empty optional
                 // column are all kept, as they are over an empty string.
-                let base = match from_sql(&column.ty, base.as_ref(), &self.chunks)? {
+                let base = match column_from_sql(column, base.as_ref(), &self.chunks)? {
                     Some(base) => self.optional_text(&column.name, &base)?.unwrap_or_default(),
                     None if column.nullable() => String::new(),
                     None => return Ok(None),
@@ -4889,7 +5077,7 @@ impl Inner {
                 (base, current)
             }
         };
-        let cell = self.bind_cell(column, value, Cells::Authored)?;
+        let cell = self.bind_cell(table, column, value, Cells::Authored)?;
         let incoming = self.logical_text(&column.name, value)?;
         let format = column.merge.text_format().expect("a text strategy");
         let merged = crate::text_merge::merge3(format, &base, &current, &incoming);
@@ -5122,7 +5310,7 @@ impl Inner {
         ];
         for (name, value) in cells {
             let cell = match table.column(name) {
-                Some(column) => self.bind_cell(column, value, source)?,
+                Some(column) => self.bind_cell(table, column, value, source)?,
                 None => Self::bind_value(value)?,
             };
             values.push(cell);
@@ -5211,22 +5399,43 @@ impl Inner {
             Sql::Integer(seq as i64),
         ];
         for column in &table.columns {
-            let value = match (cells.get(&column.name), &column.default) {
-                (Some(value), _) => self.bind_cell(column, value, source)?,
-                (None, Some(default)) => self.bind_cell(column, default, Cells::Authored)?,
-                (None, None) if column.nullable() => Sql::Null,
+            let given = match (cells.get(&column.name), &column.default) {
+                (Some(value), _) => Some((value, source)),
+                (None, Some(default)) => Some((default, Cells::Authored)),
+                (None, None) if column.nullable() => None,
                 (None, None) => {
                     return Err(missing_required(table_name, &column.name));
                 }
             };
+            let value = match given {
+                Some((value, cells)) => self.bind_cell(table, column, value, cells)?,
+                None => Sql::Null,
+            };
             for (_, copy) in copies.iter().filter(|(c, _)| *c == column.name) {
                 names.push(quote(copy));
-                values.push(value.clone());
+                // An enum copy's tags are its own.
+                values.push(match given {
+                    Some((given, _)) if column.is_enum() => {
+                        self.enum_value_cell(&table.stored, copy, given)?
+                    }
+                    _ => value.clone(),
+                });
             }
             names.push(quote(&column.stored));
             values.push(value);
         }
         for (stored, default) in dropped {
+            let default = self.enum_cell(&table.stored, &stored, default)?;
+            names.push(quote(&stored));
+            values.push(default);
+        }
+        // An enum column this version leaves out whose `DEFAULT` tag is
+        // stale takes its default by name.
+        for (stored, default) in self.names.enum_defaults(&table.stored) {
+            if names.contains(&quote(&stored)) {
+                continue;
+            }
+            let default = self.enum_value_cell(&table.stored, &stored, &Value::String(default))?;
             names.push(quote(&stored));
             values.push(default);
         }
@@ -5962,7 +6171,7 @@ impl Inner {
                     |r| r.get(0),
                 )
                 .map_err(|_| rejected(format!("move source {row:?} does not exist")))?;
-            let value = from_sql(&column.ty, cell.as_ref(), &self.chunks)?;
+            let value = column_from_sql(column, cell.as_ref(), &self.chunks)?;
             if let Some(value) = value {
                 cells.insert(column.name.clone(), value);
             }
@@ -6304,7 +6513,7 @@ impl Db {
             let logical = inner.names.resolve(&schema, &[], Some(&base))?;
             inner.names.check_branches(&logical)?;
             inner.names.check_types(&logical)?;
-            inner.write_admission(&logical, Vec::new())?;
+            inner.write_admission(&logical, Vec::new(), false)?;
             if !inner.admitted.iter().any(|(id, _)| *id == version) {
                 inner.admitted.push((version, schema.clone()));
             }

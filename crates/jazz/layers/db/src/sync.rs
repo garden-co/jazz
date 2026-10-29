@@ -3280,8 +3280,50 @@ impl Inner {
         for image in &mut images {
             self.resolve_authors(image)?;
             self.portable_large(image)?;
+            self.portable_enums(image)?;
         }
         Ok(images)
+    }
+
+    /// Images carry enum cells by their variant names: a store's tags are
+    /// its own (SPEC 10.8).
+    fn portable_enums(&self, image: &mut Image) -> Result<(), Error> {
+        for (name, cell) in &mut image.cells {
+            let Some(ty) = self
+                .names
+                .stored_type(&image.table, name)
+                .filter(|ty| crate::values::is_enum_type(ty))
+            else {
+                continue;
+            };
+            let tags = self.names.tags().column(&image.table, name);
+            let tags = tags.borrow();
+            let named = |tag: i64| {
+                tags.name(tag).map(str::to_owned).ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::Storage,
+                        format!("enum tag {tag} names no variant this store knows"),
+                    )
+                })
+            };
+            *cell = match cell {
+                Cell::Int(tag) => Cell::Text(named(*tag)?.into_bytes()),
+                Cell::Text(json) if crate::values::is_array_type(ty) => {
+                    let items: Vec<serde_json::Value> = serde_json::from_slice(json)
+                        .map_err(|e| Error::new(ErrorCode::Storage, format!("array cell: {e}")))?;
+                    let items = items
+                        .into_iter()
+                        .map(|item| match item.as_i64() {
+                            Some(tag) => named(tag).map(serde_json::Value::String),
+                            None => Ok(item),
+                        })
+                        .collect::<Result<Vec<_>, Error>>()?;
+                    Cell::Text(serde_json::Value::Array(items).to_string().into_bytes())
+                }
+                _ => continue,
+            };
+        }
+        Ok(())
     }
 
     /// Images carry chunked values by their descriptors: epochs are local
@@ -3461,6 +3503,18 @@ impl Inner {
                         )
                     })?;
                 cells.push((name.clone(), self.large_cell(&value)?));
+                continue;
+            }
+            // An enum cell travels by variant name (see `portable_enums`).
+            if self
+                .names
+                .stored_type(&image.table, name)
+                .is_some_and(crate::values::is_enum_type)
+            {
+                cells.push((
+                    name.clone(),
+                    self.enum_cell(&image.table, name, Sql::from(cell))?,
+                ));
                 continue;
             }
             let Some((stored, part)) = crate::values::author_part(name) else {

@@ -39,6 +39,8 @@ mod deleted_rows;
 mod deployment_preparation;
 #[path = "../dynamic_schema_views.rs"]
 mod dynamic_schema_views;
+#[path = "../enum_tags.rs"]
+mod enum_tags;
 #[path = "../error_code_strings.rs"]
 mod error_code_strings;
 #[path = "../existential_joins.rs"]
