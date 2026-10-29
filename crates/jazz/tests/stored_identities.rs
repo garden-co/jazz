@@ -812,3 +812,92 @@ fn a_required_column_changed_in_place_reads_its_default_in_existing_rows() {
         [Some(Value::I64(7)), Some(Value::I64(7))]
     );
 }
+
+/// `tasks(title: text, status: ty?)`.
+fn tasks(status: ColumnType) -> JazzSchema {
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("tasks")
+                    .column("title", ColumnType::Text)
+                    .nullable_column("status", status)
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    )
+}
+
+fn task_rows(db: &Db) -> Vec<(String, Option<Value>)> {
+    let prepared = db.prepare_query(&Query::from("tasks")).unwrap();
+    let mut rows: Vec<_> = block_on(db.all(&prepared, ReadOpts::default()))
+        .unwrap()
+        .iter()
+        .map(|row| {
+            let cell = |name: &str| {
+                row.cells()
+                    .find(|(n, _)| *n == name)
+                    .and_then(|(_, value)| value.cloned())
+            };
+            let Some(Value::String(title)) = cell("title") else {
+                panic!("title")
+            };
+            (title, cell("status"))
+        })
+        .collect();
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    rows
+}
+
+/// A replica writes before its first sync under a version whose column the
+/// authority stores elsewhere (its type changed there, so `status~2`):
+/// mirroring the catalogue renames the replica's column, and its pending
+/// write still uploads, settles and reads back on both sides.
+#[test]
+fn a_pending_write_survives_the_catalogue_renaming_its_column() {
+    let server = authority(tasks(ColumnType::Boolean), 0);
+    block_on(server.insert(
+        "tasks",
+        BTreeMap::from([
+            ("title".to_owned(), text("one")),
+            (
+                "status".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Bool(true)))),
+            ),
+        ]),
+        Default::default(),
+    ))
+    .unwrap();
+    block_on(server.activate_schema(tasks(ColumnType::Text))).unwrap();
+    let client = block_on(Db::open(config(
+        tasks(ColumnType::Text),
+        1,
+        AuthorSubject::SYSTEM,
+    )))
+    .unwrap();
+    client.become_replica();
+    let doing = Value::Nullable(Some(Box::new(text("doing"))));
+    block_on(client.insert(
+        "tasks",
+        BTreeMap::from([
+            ("title".to_owned(), text("two")),
+            ("status".to_owned(), doing.clone()),
+        ]),
+        Default::default(),
+    ))
+    .unwrap();
+    let _link = link(&client, &server);
+    let all = client.prepare_query(&Query::from("tasks")).unwrap();
+    let _held = block_on(client.subscribe(&all, ReadOpts::default())).unwrap();
+    pump(&server, &[&client]);
+    assert!(client.take_upstream_rejections().is_empty());
+    let expected = vec![
+        ("one".to_owned(), Some(Value::Nullable(None))),
+        ("two".to_owned(), Some(doing)),
+    ];
+    assert_eq!(task_rows(&server), expected);
+    assert_eq!(task_rows(&client), expected);
+    assert_eq!(
+        client.column_identity("tasks", "status").unwrap(),
+        server.column_identity("tasks", "status").unwrap()
+    );
+}
