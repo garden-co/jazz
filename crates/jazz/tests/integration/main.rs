@@ -171,3 +171,6 @@ mod uuid_page_probe;
 mod write_check_evidence;
 #[path = "../write_receipt_owner.rs"]
 mod write_receipt_owner;
+
+#[path = "../transaction_read_prefix.rs"]
+mod transaction_read_prefix;
