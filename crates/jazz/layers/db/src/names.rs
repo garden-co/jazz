@@ -898,7 +898,9 @@ impl Names {
     /// table or column takes the stored name its source has: the source of a
     /// lens into `schema` (`lenses` may name others; only lenses targeting
     /// `schema` count) where one says it was renamed, else `base`'s table or
-    /// column of the same name. A new table is stored under its own name
+    /// column of the same name, if it has the type that stored column holds
+    /// (a type changed in place makes a new column). A new table is stored
+    /// under its own name
     /// unless another admitted version stores a differently named one there
     /// (a rename freed the logical name, not the stored one), when it gets a
     /// fresh suffix. A column added again without a lens, under a name an
@@ -972,12 +974,24 @@ impl Names {
                 if from != &column.name && table.branch_by.contains(&column.name) {
                     return Err(unsupported(format!("renaming branch column {name}.{from}")));
                 }
-                match source_columns.and_then(|columns| columns.get(from)) {
+                // A column whose type differs from the one its source column
+                // is stored with is a new column: values of one type are
+                // never read as another's.
+                let source_column =
+                    source_columns
+                        .and_then(|columns| columns.get(from))
+                        .filter(|stored_column| {
+                            self.stored_type(&stored, stored_column)
+                                .is_none_or(|ty| *ty == column.ty)
+                        });
+                match source_column {
                     Some(stored_column) => {
                         taken.insert(stored_column.clone());
                         columns.insert(column.name.clone(), stored_column.clone());
                     }
-                    None if from != &column.name => {
+                    None if from != &column.name
+                        && !source_columns.is_some_and(|columns| columns.contains_key(from)) =>
+                    {
                         return Err(schema_error(format!(
                             "lens renames column `{from}` of `{name}` to `{}`, but the source has no `{from}`",
                             column.name

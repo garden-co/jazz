@@ -485,31 +485,32 @@ fn a_column_added_again_with_another_type_is_a_new_column() {
     assert_eq!(ranks(&old), [Some(Value::I64(7))]);
 }
 
-/// A column's type cannot change under its stored column, also when only
-/// the file knows the type it was stored with.
+/// A column whose type changes in place is a new column, also when only
+/// the file knows the type it was stored with: a store opened on such a
+/// schema (an app shipped ahead of its server's deploy) gives it a stored
+/// column of its own, and the old version still reads the values before.
 #[test]
-fn a_reopened_store_refuses_a_type_change() {
+fn a_type_changed_in_place_is_a_new_column() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store.sqlite");
-    drop(open_at(notes("notes", "text"), 1, &path));
-    let changed = compile_schema(
-        &SchemaBuilder::new()
-            .table(
-                TableSchemaBuilder::new("notes")
-                    .column("text", ColumnType::Text)
-                    .nullable_column("rank", ColumnType::Text)
-                    .policies(allow_all_policies()),
-            )
-            .build(),
+    let db = open_at(notes("notes", "text"), 1, &path);
+    db.set_authority();
+    insert(
+        &db,
+        1,
+        &[("text", Value::String("a".into())), ("rank", Value::I64(7))],
     );
-    let error = block_on(Db::open_at(
-        config(changed, 1, AuthorSubject::SYSTEM),
-        &path,
-        FileOptions::default(),
-    ))
-    .err()
-    .expect("a type change is refused");
-    assert!(error.to_string().contains("changing the type"), "{error}");
+    let rank = db.column_identity("notes", "rank").unwrap();
+    drop(db);
+    let db = open_at(text_rank(), 1, &path);
+    db.set_authority();
+    let text = db.column_identity("notes", "rank").unwrap();
+    assert!(text.is_some());
+    assert_ne!(text, rank);
+    assert_eq!(ranks(&db), [Some(Value::Nullable(None))]);
+    let old = block_on(db.register_schema_view(notes("notes", "text"))).unwrap();
+    assert_eq!(old.column_identity("notes", "rank").unwrap(), rank);
+    assert_eq!(ranks(&old), [Some(Value::I64(7))]);
 }
 
 /// `notes(text, rank: boolean?)`: `rank` added again with a third type.
