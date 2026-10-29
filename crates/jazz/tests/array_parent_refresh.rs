@@ -573,3 +573,78 @@ fn queued_child_moves_refresh_the_previously_published_parent() {
         );
     }
 }
+
+/// alice watches rooms with messages that can reference several rooms.
+/// Moving a child between array-valued correlations keeps the full refresh
+/// until that correlation has a specialised parent-routing proof.
+#[test]
+fn array_valued_correlations_keep_the_full_refresh() {
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("rooms")
+                    .column("name", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("messages")
+                    .array_fk_column("rooms", "rooms")
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    );
+    let db = block_on(Db::open(DbConfig::new(
+        schema,
+        DbIdentity {
+            node: NodeUuid::from_bytes([23; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    for n in 1..=2 {
+        insert(
+            &db,
+            "rooms",
+            n,
+            &[("name", Value::String(format!("room {n}")))],
+        );
+    }
+    insert(
+        &db,
+        "messages",
+        3,
+        &[("rooms", Value::Array(vec![Value::Uuid(id(1).0)]))],
+    );
+    let query = db
+        .prepare_query(
+            &Query::from("rooms")
+                .array_subquery(ArraySubquery::new("messages", "messages", "rooms", "id")),
+        )
+        .unwrap();
+    let mut stream = block_on(db.subscribe(&query, ReadOpts::default())).unwrap();
+    drain(&mut stream);
+    let before = db.fanout_stats();
+    block_on(db.update(
+        "messages",
+        id(3),
+        [("rooms".to_owned(), Value::Array(vec![Value::Uuid(id(2).0)]))].into(),
+        Default::default(),
+    ))
+    .unwrap();
+    let events = drain(&mut stream);
+    assert!(
+        !events.is_empty(),
+        "array-valued correlation must refresh both parents"
+    );
+    let SubscriptionEvent::Delta { updated, .. } = &events[0] else {
+        panic!("{events:?}")
+    };
+    assert_eq!(updated.len(), 2);
+    for row in updated {
+        let expected = usize::from(row.row_uuid() == id(2));
+        assert!(
+            matches!(row.cell("messages"), Some(Value::Array(children)) if children.len() == expected)
+        );
+    }
+    assert_eq!(db.fanout_stats().reran, before.reran + 1);
+}
