@@ -553,11 +553,11 @@ async fn activate_legacy_fixture(
     }
     let runtime = server.server_state().runtime().unwrap();
     let revision = runtime
-        .trusted_catalogue_snapshot_for_test()
+        .catalogue()
         .await
         .unwrap()
-        .current_write_schema
-        .revision
+        .head()
+        .map_or(0, |head| head.revision)
         + 1;
     runtime
         .activate_schema(

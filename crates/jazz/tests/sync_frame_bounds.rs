@@ -23,7 +23,7 @@ fn image(actor: u8, bytes: usize) -> Image {
 fn rows_message(images: Vec<Image>) -> SyncMessage {
     SyncMessage::Rows {
         images,
-        origins: vec![],
+        tx_ids: vec![],
     }
 }
 fn raw(message: &SyncMessage) -> Vec<u8> {

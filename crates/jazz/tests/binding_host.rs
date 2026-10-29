@@ -593,7 +593,7 @@ fn a_message_larger_than_one_wire_frame_travels_in_parts() {
     let images: Vec<Image> = (0..20).map(image).collect();
     let frames = encode_frames(SyncMessage::Rows {
         images: images.clone(),
-        origins: Vec::new(),
+        tx_ids: Vec::new(),
     })
     .unwrap();
     assert!(frames.len() > 1);
@@ -617,7 +617,7 @@ fn a_message_larger_than_one_wire_frame_travels_in_parts() {
     // A message that fits stays one frame: its plain encoding.
     let small = SyncMessage::Rows {
         images: vec![image(1)],
-        origins: Vec::new(),
+        tx_ids: Vec::new(),
     };
     assert_eq!(
         encode_frames(small.clone()).unwrap(),

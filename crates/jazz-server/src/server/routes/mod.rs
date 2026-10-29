@@ -817,20 +817,14 @@ mod tests {
             Some(&PolicyExpr::False)
         );
 
-        let runtime_snapshot = state
+        let active_schema = state
             .runtime()
             .expect("runtime shell started")
-            .trusted_catalogue_snapshot_for_test()
+            .current_schema()
             .await
-            .expect("read runtime catalogue");
-        let active_schema = runtime_snapshot
-            .schemas
-            .iter()
-            .find(|schema| schema.id == runtime_snapshot.current_write_schema.schema)
-            .expect("active runtime schema");
+            .expect("read runtime schema");
         assert_eq!(
             active_schema
-                .schema
                 .public_schema()
                 .get(&users)
                 .expect("runtime users table")
@@ -1714,17 +1708,14 @@ mod tests {
             .build()
             .await
             .expect("restart after publishing a schema without a lens");
-        let snapshot = restarted
+        let current = restarted
             .state
             .runtime()
             .expect("restarted core runtime")
-            .trusted_catalogue_snapshot_for_test()
+            .current_schema()
             .await
             .unwrap();
-        assert_eq!(
-            snapshot.current_write_schema.schema,
-            first_runtime.version_id()
-        );
+        assert_eq!(current.version_id(), first_runtime.version_id());
         restarted.shutdown().await;
 
         let restarted_again = persistent_dynamic_builder(dir.path(), name)
@@ -1756,11 +1747,8 @@ mod tests {
             .await
             .expect("restart after publishing a schema without a lens");
         let runtime = restarted.state.runtime().expect("restarted core runtime");
-        let snapshot = runtime.trusted_catalogue_snapshot_for_test().await.unwrap();
-        assert_eq!(
-            snapshot.current_write_schema.schema,
-            first_runtime.version_id()
-        );
+        let current = runtime.current_schema().await.unwrap();
+        assert_eq!(current.version_id(), first_runtime.version_id());
         assert!(
             !runtime
                 .runtime_catalogue_contains_schema(
