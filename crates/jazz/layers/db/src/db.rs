@@ -51,7 +51,7 @@ use crate::values::{
 };
 pub use sync::{
     AccessProof, Acting, BuiltOn, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad,
-    FrameJoiner, Image, LOCAL_BASE, NON_DURABLE_BASE, ReadSpan, RejectedTransaction,
+    FrameJoiner, Image, LOCAL_BASE, NON_DURABLE_BASE, Outcome, ReadSpan, RejectedTransaction,
     RelationSnapshot, RemoteLinkHint, SerializedReadResult, SubscriberId, SyncMessage, Transport,
     TransportError, Upstream, WireBase, WireChunk, WireChunkRef, WireDelta, WireError, WireKind,
     WireOp, WirePull, WireTarget, WireTransport, WireTransportAdapter, WireWrite, WriteConflict,
@@ -468,6 +468,10 @@ struct Inner {
     /// A replica whose store does not outlive it (a foreground over a
     /// durable relay): its local reads wait for the upstream's view too.
     non_durable: bool,
+    /// Rows the authority named as written for this replica's own commits
+    /// whose version was not this replica's image of them (see
+    /// `Inner::as_written_images`), asked for whole instead.
+    pub(crate) as_written_mismatches: u64,
     /// The global authority: what it settles is durable at `Global`.
     authority: bool,
     /// Uploads the authority refused, by commit seq, kept for a host that
@@ -1179,6 +1183,7 @@ impl Db {
                 publications: Vec::new(),
                 client: None,
                 non_durable: false,
+                as_written_mismatches: 0,
                 authority: false,
                 upstream_rejections: None,
                 sessions: Vec::new(),
