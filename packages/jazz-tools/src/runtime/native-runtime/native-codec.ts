@@ -13,6 +13,7 @@ import {
 } from "./native-row-codec.js";
 import { parseCanonicalAuthorSubject } from "../author-id.js";
 import { exactSignedI64 } from "./exact-integer.js";
+import { runtimeSchemaJsonReplacer } from "../../drivers/schema-wire.js";
 import { encodeRelationQueryPostcard, type RelExpr } from "../../ir.js";
 import type { ClientMigrations } from "../client-migrations.js";
 
@@ -123,7 +124,9 @@ export function openConfig(
   if (migrations == null) {
     writer.none();
   } else {
-    writer.some((value) => value.bytes(utf8(JSON.stringify(migrations))));
+    writer.some((value) =>
+      value.bytes(utf8(JSON.stringify(migrations, runtimeSchemaJsonReplacer))),
+    );
   }
   return writer.finish();
 }

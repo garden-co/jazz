@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { defineMigration, exportLocalFirstSecret, schema as s } from "../index.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
+import { bundleFor } from "../runtime/testing/client-migrations.js";
 import { createJazzSession } from "./index.js";
 
 const before = { entries: s.table({ text: s.string() }, {}) };
@@ -18,6 +19,7 @@ const newPermissions = s.definePermissions(newApp, ({ policy }) => {
   policy.entries.allowRead.always();
   policy.controls.allowRead.always();
 });
+const migration = defineMigration({ from: before, to: after, createTables: { controls: true } });
 
 describe("offline persistent schema bootstrap", () => {
   for (const reader of [false, true]) {
@@ -39,6 +41,9 @@ describe("offline persistent schema bootstrap", () => {
         type Session = Awaited<ReturnType<typeof createJazzSession>>;
         const sessions = new Set<Session>();
         let readerSecret: string | undefined;
+        // The app ships its versions and lenses, as `jazz-tools deploy`
+        // writes them (SPEC 10.7).
+        const migrations = await bundleFor(oldApp, newApp, migration);
         async function open(
           clientApp: Parameters<typeof createJazzSession>[0]["app"],
           name: string,
@@ -49,6 +54,7 @@ describe("offline persistent schema bootstrap", () => {
             serverUrl: server.url,
             app: clientApp,
             permissions: clientApp === newApp ? newPermissions : oldPermissions,
+            migrations,
             driver: { type: "persistent", dataPath: join(directory, name) },
             initial: asReader ? "local-first" : { backendSecret: settings.backendSecret },
           });
@@ -86,11 +92,7 @@ describe("offline persistent schema bootstrap", () => {
             serverUrl: server.url,
             schema: newApp,
             permissions: newPermissions,
-            migration: defineMigration({
-              from: before,
-              to: after,
-              createTables: { controls: true },
-            }),
+            migration,
           });
           if (restart) {
             const port = server.port;

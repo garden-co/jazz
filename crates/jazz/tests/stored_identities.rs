@@ -546,7 +546,8 @@ fn remote_read_rejection(client: &Db, server: &Db) -> Option<String> {
 /// and as a boolean. Each version's new column is stored under a name
 /// derived from that version (SPEC 10.7), so the two never share a stored
 /// column: the replica mirrors the authority's catalogue beside its own,
-/// its remote reads go on, and text is never read as booleans.
+/// its remote reads go on, and its text write under a version the
+/// authority never deployed is refused (#4450), never read as a boolean.
 #[test]
 fn a_column_re_added_with_another_type_while_apart_gets_its_own_stored_column() {
     let server = authority(notes("notes", "text"), 0);
@@ -571,10 +572,6 @@ fn a_column_re_added_with_another_type_while_apart_gets_its_own_stored_column() 
             ),
         ],
     );
-    block_on(server.activate_schema(bool_rank())).unwrap();
-
-    let _link = link(&client, &server);
-    assert_eq!(remote_read_rejection(&client, &server), None);
     assert_eq!(
         ranks(&client),
         [Some(Value::Nullable(Some(Box::new(Value::String(
@@ -582,15 +579,11 @@ fn a_column_re_added_with_another_type_while_apart_gets_its_own_stored_column() 
         )))))],
         "local reads go on"
     );
-    drop(client);
-    let reopened = open_at(text_rank(), 1, &path);
-    assert_eq!(
-        ranks(&reopened),
-        [Some(Value::Nullable(Some(Box::new(Value::String(
-            "high".into()
-        )))))],
-        "the text column is still the replica's"
-    );
+    block_on(server.activate_schema(bool_rank())).unwrap();
+
+    let _link = link(&client, &server);
+    assert_eq!(remote_read_rejection(&client, &server), None);
+    assert_eq!(ranks(&server), [], "text is never read as a boolean");
 }
 
 /// `table(text)`, with `rank` of `ty` defaulting to `default` when given.

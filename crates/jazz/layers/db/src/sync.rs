@@ -1395,6 +1395,9 @@ pub(crate) struct Client {
     /// This store committed writes before it became a replica (see
     /// [`stranded`]): it refuses every upstream.
     stranded: bool,
+    /// Why this store refused its upstream's catalogue, until one is
+    /// mirrored: remote reads opened meanwhile fail with it at once.
+    uncatalogued: Option<Error>,
     /// The upstream sent its catalogue on this connection: this store
     /// knows every version the authority deployed, so its own sessions'
     /// commits under a version it still lacks are refused (INV-SYNC-52).
@@ -4836,6 +4839,7 @@ impl Client {
             relay_ready: false,
             unadmitted: false,
             stranded: false,
+            uncatalogued: None,
             catalogued: false,
             whole: HashSet::new(),
             forgotten: false,
@@ -5410,7 +5414,12 @@ impl Db {
         let id = client.next_id;
         client.next_id += 1;
         let answered = Rc::new(StdCell::new(false));
-        let refused = Rc::new(RefCell::new(client.stranded.then(stranded)));
+        let refused = Rc::new(RefCell::new(
+            client
+                .stranded
+                .then(stranded)
+                .or_else(|| client.uncatalogued.clone()),
+        ));
         let global = Rc::new(StdCell::new(false));
         let author = inner.identity.author;
         let watermark = watermark_key(&query, &prepared.binding, include_deleted, author);
@@ -6051,13 +6060,17 @@ impl Db {
                         match inner.mirror_catalogue(namespace, versions, cells, &confirmed) {
                             Ok(renamed) => {
                                 rebase |= renamed;
-                                inner.client.as_mut().expect("client").catalogued = true;
+                                let client = inner.client.as_mut().expect("client");
+                                client.catalogued = true;
+                                client.uncatalogued = None;
                             }
                             // This store cannot store rows as its upstream
                             // does: it stops syncing with it, nothing that
                             // follows applies, and its remote reads fail
                             // with why. Local reads are served as before.
                             Err(error) => {
+                                inner.client.as_mut().expect("client").uncatalogued =
+                                    Some(error.clone());
                                 inner.refuse_upstream(error);
                                 queue.clear();
                             }

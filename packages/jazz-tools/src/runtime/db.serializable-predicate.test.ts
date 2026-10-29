@@ -5,6 +5,7 @@ import { definePermissions } from "../permissions/index.js";
 import { PersistedWriteRejectedError } from "./client.js";
 import { createDb } from "./default-create-db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
+import { bundleFor } from "./testing/client-migrations.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 
 it("inserts an ordinary parent and child atomically after adding a table", async () => {
@@ -38,13 +39,9 @@ it("inserts an ordinary parent and child atomically after adding a table", async
     await db.insert(oldApp.projects, { title: "Existing project" }).wait({ tier: "global" });
     await db.shutdown();
     db = undefined;
-    await deploy({
-      ...target,
-      schema: newApp,
-      permissions: newPermissions,
-      migration: m.defineMigration({ from: before, to: after, createTables: { notes: true } }),
-    });
-    db = await createDb(account);
+    const migration = m.defineMigration({ from: before, to: after, createTables: { notes: true } });
+    await deploy({ ...target, schema: newApp, permissions: newPermissions, migration });
+    db = await createDb({ ...account, migrations: await bundleFor(oldApp, newApp, migration) });
     await db.all(newApp.projects, { tier: "remote" });
     const tx = db.beginSerializableTransaction();
     const project = tx.insert(newApp.projects, { title: "New project" });

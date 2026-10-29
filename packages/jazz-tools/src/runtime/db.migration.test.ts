@@ -6,6 +6,7 @@ import { schema as s, migration as m } from "../index.js";
 import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "../testing/index.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
 import { type Db } from "./db.js";
+import { bundleFor } from "./testing/client-migrations.js";
 import { createDb } from "./default-create-db.js";
 import { waitForRows } from "./testing/support.js";
 
@@ -96,11 +97,14 @@ describe("schema migrations", () => {
       migration,
     });
 
+    const migrations = await bundleFor(oldApp, newApp, migration);
     oldDb = await createDb({
       ...(await localAccountConfig(appId, serverUrl)),
+      migrations,
     });
     newDb = await createDb({
       ...(await localAccountConfig(appId, serverUrl)),
+      migrations,
     });
   });
 
@@ -218,7 +222,10 @@ it("publishes UUID reference identity lenses and relates rows written before pub
       permissions: permissionsAfter,
       migration,
     });
-    newDb = await createDb({ ...(await localAccountConfig(appId, serverUrl)) });
+    newDb = await createDb({
+      ...(await localAccountConfig(appId, serverUrl)),
+      migrations: await bundleFor(beforeApp, afterApp, migration),
+    });
     const rows = await waitForRows(
       newDb,
       afterApp.records
@@ -376,7 +383,10 @@ it("publishes generated default-bearing relation migrations and preserves them a
       expect(wasmSchemasEqual(stored.schema, expected)).toBe(true);
       expect(await computeSchemaHash(stored.schema)).toBe(schemaHash);
     }
-    newDb = await createDb(await localAccountConfig(appId, server.url));
+    newDb = await createDb({
+      ...(await localAccountConfig(appId, server.url)),
+      migrations: await bundleFor(beforeApp, afterApp, await loadDefinedMigration(migrationFile)),
+    });
     const rows = await waitForRows(
       newDb,
       afterApp.records.where({ id: existing.id }).include({ owner: true }),
@@ -440,7 +450,13 @@ it("a client shipping the app's migrations writes a renamed column where the ser
   let oldDb: Db | undefined, newDb: Db | undefined;
   try {
     const { appId, adminSecret, url: serverUrl } = server;
-    await deploy({ appId, adminSecret, serverUrl, schema: beforeApp, permissions: allow(beforeApp) });
+    await deploy({
+      appId,
+      adminSecret,
+      serverUrl,
+      schema: beforeApp,
+      permissions: allow(beforeApp),
+    });
     await deploy({
       appId,
       adminSecret,
@@ -449,18 +465,7 @@ it("a client shipping the app's migrations writes a renamed column where the ser
       permissions: allow(afterApp),
       migration: rename,
     });
-    const [fromHash, toHash] = await Promise.all([
-      computeSchemaHash(beforeApp.wasmSchema),
-      computeSchemaHash(afterApp.wasmSchema),
-    ]);
-    // What `jazz-tools deploy` writes to migrations/bundle.json.
-    const migrations = {
-      schemas: [
-        { hash: fromHash, schema: { tables: beforeApp.wasmSchema } },
-        { hash: toHash, schema: { tables: afterApp.wasmSchema } },
-      ],
-      migrations: [{ fromHash, toHash, forward: serializeForwardLenses(rename.forward) }],
-    };
+    const migrations = await bundleFor(beforeApp, afterApp, rename);
     newDb = await createDb({ ...(await localAccountConfig(appId, serverUrl)), migrations });
     oldDb = await createDb({ ...(await localAccountConfig(appId, serverUrl)) });
     const created = await newDb

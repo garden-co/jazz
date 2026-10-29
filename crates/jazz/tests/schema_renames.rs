@@ -1195,6 +1195,20 @@ fn a_catalogue_the_store_cannot_mirror_refuses_remote_reads_and_keeps_local_ones
         reason.contains("not supported") && !reason.contains("before it became a replica"),
         "{reason}"
     );
+    // One opened after the refusal says why at once, never waiting on an
+    // upstream this store stopped syncing with.
+    let later = client
+        .prepare_query(&Query::from("tasks").filter(eq(col("name"), lit(text("x")))))
+        .unwrap();
+    let mut stream = block_on(client.subscribe(&later, ReadOpts::default())).unwrap();
+    pump(&server, &[&client]);
+    let mut rejected = None;
+    while let Some(event) = stream.try_next_event() {
+        if let jazz::db::SubscriptionEvent::Rejected { reason } = event {
+            rejected = Some(reason);
+        }
+    }
+    assert_eq!(rejected.as_deref(), Some(reason.as_str()));
     assert_eq!(
         read_query(&client, Query::from("tasks"), "name", local()),
         [text("local task")]
