@@ -1387,6 +1387,7 @@ impl Binding {
     /// none.
     pub fn next_event<'a>(&'a self, stream: &'a mut SubscriptionStream) -> NextEvent<'a> {
         NextEvent {
+            db: &self.db,
             stream,
             progress: &self.hooks.progress,
         }
@@ -1747,6 +1748,7 @@ pub mod advice {
 
 /// The next event of a subscription (see [`Binding::next_event`]).
 pub struct NextEvent<'a> {
+    db: &'a Db,
     stream: &'a mut SubscriptionStream,
     progress: &'a Progress,
 }
@@ -1755,6 +1757,9 @@ impl Future for NextEvent<'_> {
     type Output = SubscriptionEvent;
 
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<SubscriptionEvent> {
+        if self.db.ensure_storage_owner_active().is_err() {
+            return Poll::Ready(SubscriptionEvent::Closed);
+        }
         match self.stream.try_next_event() {
             Some(event) => Poll::Ready(event),
             None => {

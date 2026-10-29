@@ -38,6 +38,20 @@ the follower rejects its Local waits without manufacturing an authority
 rejection. Upstream traffic stays independent so it can continue supplying
 chunks to a pending core read. Wire bytes and message order are unchanged.
 
+## Reload after physical owner changes
+
+`RelaxedIdbUtil::reload_db(filename)` reloads exactly one file from IndexedDB,
+replacing its cached blocks or removing the cache entry if the file disappeared.
+The original `preload_db` skips cached paths; reusing it after a new owner acquires
+the physical lock could hide external corruption or deletion. Reload requires
+exclusive ownership, all previous SQLite connections closed or irrevocably
+retired, and their commits flushed. Existing latched persistence errors still reject reopening. It does not
+write IndexedDB or change the durable format.
+
+`packages/jazz-tools/src/runtime/wasm-sqlite-reopen.test.ts` replaces, corrupts
+and deletes persisted blocks between real WASM opens. Reopening must read a valid
+replacement and reject corruption without altering its bytes. A required file
+that disappeared must stay absent. Explicit creation remains available.
 The downstream carrier checks `is_flushed` before creating an asynchronous
 barrier. A clean file with no queued or in-flight VFS operations publishes
 immediately. A pending operation conservatively requires the FIFO barrier;
