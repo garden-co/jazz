@@ -3602,10 +3602,9 @@ impl PendingPart {
             0 => Self::Op,
             1 => Self::Read,
             _ => {
-                return Err(Error::new(
-                    ErrorCode::Storage,
-                    format!("unknown part {part} in _jazz_pending_items"),
-                ));
+                return Err(crate::format::unsupported(format_args!(
+                    "unknown part {part} in _jazz_pending_items"
+                )));
             }
         })
     }
@@ -4098,8 +4097,7 @@ impl Inner {
     fn pending_commit(&self, tx: u64, header: &[u8]) -> Result<SyncMessage, Error> {
         let mut commit: SyncMessage = decode_stored(header)?;
         let SyncMessage::Commit { kind, ops, .. } = &mut commit else {
-            return Err(Error::new(
-                ErrorCode::Storage,
+            return Err(crate::format::unsupported(
                 "a pending upload is not a Commit",
             ));
         };
@@ -4121,8 +4119,7 @@ impl Inner {
                 PendingPart::Read => match kind {
                     WireKind::Serializable { reads, .. } => reads.push(decode_stored(&item)?),
                     WireKind::Mergeable => {
-                        return Err(Error::new(
-                            ErrorCode::Storage,
+                        return Err(crate::format::unsupported(
                             "a mergeable pending commit has reads",
                         ));
                     }
@@ -4151,7 +4148,7 @@ impl Inner {
             let (table, id, key) = row.map_err(storage)?;
             let id: [u8; 16] = id
                 .try_into()
-                .map_err(|_| Error::new(ErrorCode::Storage, "bad row id in _jazz_pending_rows"))?;
+                .map_err(|_| crate::format::unsupported("bad row id in _jazz_pending_rows"))?;
             Ok((table, RowUuid::from_bytes(id), key))
         })
         .collect()
@@ -4186,10 +4183,7 @@ impl Inner {
         for row in rows {
             let (tx, version) = row.map_err(storage)?;
             let version: [u8; 16] = version.try_into().map_err(|_| {
-                Error::new(
-                    ErrorCode::Storage,
-                    "bad schema version in _jazz_pending_versions",
-                )
+                crate::format::unsupported("bad schema version in _jazz_pending_versions")
             })?;
             versions.insert(tx as u64, crate::ids::SchemaVersionId::from_bytes(version));
         }
@@ -4279,14 +4273,10 @@ impl Inner {
             rusqlite::params![node.to_vec(), tx as i64],
             |r| r.get::<_, Vec<u8>>(0),
         ) {
-            // An unreadable fate is a damaged store, not an unseen commit:
-            // treating it as unseen would authorize a resend afresh.
-            Ok(bytes) => postcard::from_bytes(&bytes).map(Some).map_err(|error| {
-                Error::new(
-                    ErrorCode::Storage,
-                    format!("undecodable recorded fate of commit {tx}: {error}"),
-                )
-            }),
+            // An unreadable fate is a store this build cannot read, not an
+            // unseen commit: treating it as unseen would authorize a resend
+            // afresh.
+            Ok(bytes) => decode_stored(&bytes).map(Some),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(error) => Err(storage(error)),
         }
@@ -4774,7 +4764,9 @@ impl Inner {
                 client.versions.insert(tx, *version.as_bytes());
             }
             if let Some(author) = acting.author().map(AuthorSubject::from_canonical) {
-                let author = author.map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?;
+                let author = author.map_err(|e| {
+                    crate::format::unsupported(format_args!("a pending commit's author: {e}"))
+                })?;
                 let session = matches!(acting, Acting::Session { .. });
                 ops.iter_mut().for_each(|op| op.attribute(author, session));
             }
