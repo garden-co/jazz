@@ -482,13 +482,15 @@ fn pulls_answer_only_for_versions_the_reader_may_read() {
     assert!(missing.contains(&draft));
 }
 
+/// A replica orders synced chunked values as the authority does: by cell,
+/// before every inline value (SPEC 19.5), with no chunk read.
 #[test]
-fn indexed_large_values_are_prefetched_before_the_row_is_installed() {
+fn synced_chunked_values_sort_before_inline_ones() {
     let server = open(0, AuthorSubject::SYSTEM);
     let alice = open(1, user(1));
     let _log = connect(&server, &alice, user(1));
     let base = text(2, LARGE);
-    let titles = [format!("{base}b"), format!("{base}a"), "short".to_owned()];
+    let titles = ["short".to_owned(), format!("{base}b"), format!("{base}a")];
     for (n, title) in titles.iter().enumerate() {
         insert(
             &server,
@@ -499,20 +501,22 @@ fn indexed_large_values_are_prefetched_before_the_row_is_installed() {
     }
     let _stream = subscribe(&alice, Query::from("titled"));
     pump(&server, &[&alice]);
-    // Every chunk is local, so ordering through the index never waits.
-    let (nodes, _) = alice.large_value_nodes_for_test().unwrap();
-    assert_eq!(nodes, server.large_value_nodes_for_test().unwrap().0);
-    let query = Query::from("titled").order_by("title", OrderDirection::Asc);
-    let rows = block_on(alice.all(
-        &alice.prepare_query(&query).unwrap(),
-        ReadOpts {
-            tier: ReadTier::LocalOnly,
-            ..ReadOpts::default()
-        },
-    ))
-    .unwrap();
-    let ids: Vec<RowUuid> = rows.iter().map(|r| r.row_uuid()).collect();
-    assert_eq!(ids, vec![row(2), row(1), row(3)]);
+    let query = Query::from("titled")
+        .select(["id"])
+        .order_by("title", OrderDirection::Asc);
+    for db in [&server, &alice] {
+        let rows = block_on(db.all(
+            &db.prepare_query(&query).unwrap(),
+            ReadOpts {
+                tier: ReadTier::LocalOnly,
+                ..ReadOpts::default()
+            },
+        ))
+        .unwrap();
+        let ids: Vec<RowUuid> = rows.iter().map(|r| r.row_uuid()).collect();
+        assert_eq!(ids.len(), 3);
+        assert_eq!(ids[2], row(1), "the inline title sorts last");
+    }
 }
 
 #[test]

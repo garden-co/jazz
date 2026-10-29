@@ -90,3 +90,21 @@ tie-breaker so page boundaries are stable.
     </include>
   </Tab>
 </Tabs>
+
+## Values over 64 KB
+
+A `string`, `bytes` or `json` value over 64 KB is stored in chunks, and filters and sorting
+never read those chunks. Shorter values filter and sort as described above. A value over
+64 KB is compared by identity instead of by content:
+
+- A filter literal over 64 KB in `eq`, `ne` or `in` is rejected with a "not supported yet"
+  error, and a literal of 64 KB or less never equals such a value. Comparing two columns, joining on them, or grouping by them only
+  treats two such values as equal when they are the same stored value. Two equal values
+  written separately, or one edited in place, may compare as different.
+- `contains` never matches it.
+- In ascending order it sorts before every shorter value, after rows where the column is
+  null. It sorts in no meaningful order relative to other values over 64 KB.
+
+Reading the value, in whole or [in part](/docs/reading/includes-and-relations#partial-large-values),
+always returns its full content. If you need content equality, search, or ordering on long
+values, let us know: these are limits we plan to lift when someone needs them.

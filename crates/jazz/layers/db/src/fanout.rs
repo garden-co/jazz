@@ -1030,9 +1030,16 @@ impl Inner {
                             .as_ref()
                         {
                             None => Sql::Null,
-                            Some(value) => match self.logical_key(to_sql(value).ok()??, None) {
-                                Ok(value) => value,
-                                Err(error) => return Some(Err(error)),
+                            // A value over the inline threshold sorts by its
+                            // chunked cell, which the row does not carry.
+                            Some(value) => match to_sql(value).ok()?? {
+                                Sql::Text(bytes) | Sql::Blob(bytes)
+                                    if bytes.len()
+                                        > jazz_types::large_values::INLINE_VALUE_MAX_BYTES =>
+                                {
+                                    return None;
+                                }
+                                value => value,
                             },
                         }
                     };
@@ -1083,53 +1090,24 @@ impl Inner {
             Err(error) => return Some(Err(storage(error))),
         };
         let mut keys = Vec::with_capacity(rows.len());
-        // Reads on past missing chunks, so one round trip asks for them all.
-        let mut blocked = false;
         for row in rows {
             let values = found.remove(row.id.0.as_bytes().as_slice())?;
-            let mut key: SortKey = Vec::with_capacity(order.len() + 1);
-            for (value, by) in values.into_iter().zip(order) {
-                let kind = table
-                    .column(&by.column)
-                    .filter(|column| crate::large::large_capable(column))
-                    .map(crate::large::kind);
-                let value = match self.logical_key(value, kind) {
-                    Ok(value) => value,
-                    Err(error) if crate::large::is_missing(&error) => {
-                        blocked = true;
-                        Sql::Null
-                    }
-                    Err(error) => return Some(Err(error)),
-                };
-                key.push((
-                    value,
-                    matches!(by.direction, crate::query::OrderDirection::Desc),
-                ));
-            }
+            // Stored cells order as the compiled ORDER BY orders them: a
+            // chunked cell by itself (SPEC 19.5).
+            let mut key: SortKey = values
+                .into_iter()
+                .zip(order)
+                .map(|(value, by)| {
+                    (
+                        value,
+                        matches!(by.direction, crate::query::OrderDirection::Desc),
+                    )
+                })
+                .collect();
             key.push(id_key(row));
             keys.push(key);
         }
-        if blocked {
-            return Some(Err(crate::large::missing()));
-        }
         Some(Ok(keys))
-    }
-
-    /// A sort-key cell as its logical value, so keys compare as the values
-    /// do: a chunked cell of a large-capable column of `kind` is read whole.
-    fn logical_key(
-        &self,
-        value: Sql,
-        kind: Option<jazz_types::large_values::LargeValueKind>,
-    ) -> Result<Sql, Error> {
-        Ok(match (value, kind) {
-            (Sql::Integer(cell), Some(kind)) => crate::large::inline_cell(
-                kind,
-                self.chunks
-                    .materialize(rusqlite::types::ValueRef::Integer(cell))?,
-            ),
-            (value, _) => value,
-        })
     }
 
     /// Re-run every result that waited for large-value chunks.

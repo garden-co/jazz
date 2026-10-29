@@ -10,9 +10,9 @@ re-runs the producer and re-pins the hashes here and in the test instead
 are stored, and a rejection's reason name changed how fates are recorded).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `a7b2f33fa3b2a6c97785ed60e99b6e1b109e553f7d4f32e8081ed669b75cd8c3`.
+  the SQLite file `42f90ef04657e3e254a1b0c4f8f53dcf7def0bc5251802c3b8b7731f1fb1d833`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `b4ef918dd0d3c904ac6e209ba0402e129f5ec35c5c316d11e55694694f082fc7`.
+  `f77cf3e7c0900f7c50f1ec9f6abd0cb8708583d6e9ef6effbc6f9f974b5a2d23`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
@@ -37,3 +37,7 @@ in place, without a migration or format bump. Pending writes recover their
 upstream baseline from the current row or the newest history version below
 the replica's local sequence range. Eviction removes current and historical
 versions so reopening cannot restore an evicted baseline.
+
+Dropping the large-value key columns (`$k:<column>`) and `_jazz_lv_scratch`,
+when queries stopped reading chunked values' content, regenerated it the same
+way.

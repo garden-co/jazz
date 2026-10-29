@@ -433,8 +433,10 @@ fn update_cells(db: &Db, table: &str, id: RowUuid, cells: BTreeMap<String, Value
 
 /// Large notes that sort by `prefix`: the prefix leads, and the filler keeps
 /// every value indirect.
+/// Long notes that stay inline: a chunked value sorts by its cell, not its
+/// content (SPEC 19.5), so ordering tests use values under the threshold.
 fn sorting_notes(prefix: &str) -> String {
-    format!("{prefix}{}", "n".repeat(LEAF_MAX_BYTES * 2))
+    format!("{prefix}{}", "n".repeat(8 * 1024))
 }
 
 /// The public event parts these tests fold.

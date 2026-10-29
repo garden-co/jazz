@@ -125,8 +125,7 @@ fn unwrap_nullable(value: Value) -> Option<Value> {
 /// An operand ready for SQL.
 enum Term {
     Sql(String),
-    /// A large-capable column's cell: compared through its sort key, with
-    /// what the key cannot answer decided in Rust ([`Prep`]).
+    /// A large-capable column's cell ([`LargeColumn`]).
     Large(LargeColumn),
     /// A bound value (literal, parameter, session or claim value): its
     /// placeholder and the value itself.
@@ -148,102 +147,14 @@ impl Term {
     }
 }
 
+/// A large-capable column's cell. An inline cell compares as its value;
+/// a chunked one (over the inline threshold, SPEC 19.5) is an INTEGER
+/// that equals only itself and takes part in no range.
 #[derive(Clone)]
 struct LargeColumn {
     cell: String,
     table: String,
     column: String,
-    kind: jazz_types::large_values::LargeValueKind,
-    /// The key column, as SQL, when an index names the column.
-    key: Option<String>,
-}
-
-impl LargeColumn {
-    /// The stored name of the key column, when there is one.
-    fn key_column(&self) -> Option<String> {
-        self.key
-            .as_ref()
-            .map(|_| crate::large::key_column(&self.column))
-    }
-}
-
-/// A question about chunked cells that their sort key cannot answer,
-/// answered in Rust before the statement runs. Each writes its answers to
-/// `_jazz_lv_scratch` under its slot, which the statement reads. The slot
-/// is a hash of the question, so the same query compiles to the same SQL.
-#[derive(Clone, Debug)]
-pub enum Prep {
-    /// The chunked cells of `table.column` that pass `test`.
-    Match {
-        slot: i64,
-        table: String,
-        column: String,
-        test: MatchTest,
-    },
-    /// The sort key of every chunked cell of `table.column` (read from its
-    /// key column `key`, or its first chunks), and ranks for those that
-    /// share a sort key with another: their order by full logical value.
-    Rank {
-        slot: i64,
-        table: String,
-        column: String,
-        key: Option<String>,
-    },
-    /// A content id for every chunked cell of these columns, so cells of
-    /// one logical value (built differently) compare equal.
-    Class {
-        slot: i64,
-        columns: Vec<(String, String)>,
-    },
-}
-
-/// What a chunked cell is matched against: logical bytes.
-#[derive(Clone, Debug)]
-pub enum MatchTest {
-    Contains(Vec<u8>),
-    Cmp(CmpOp, Vec<u8>),
-}
-
-impl MatchTest {
-    /// Names the test by its literal's hash, so a long literal costs one
-    /// hash, not a formatted dump.
-    fn question(&self) -> String {
-        match self {
-            MatchTest::Contains(literal) => format!("contains {}", blake3::hash(literal)),
-            MatchTest::Cmp(op, literal) => format!("{op:?} {}", blake3::hash(literal)),
-        }
-    }
-}
-
-impl Prep {
-    fn new(make: impl FnOnce(i64) -> Prep, question: &str) -> Prep {
-        let hash = blake3::hash(question.as_bytes());
-        // 52 bits: exact as a JS number (Durable Objects).
-        let slot =
-            i64::from_le_bytes(hash.as_bytes()[..8].try_into().expect("8 bytes")) & ((1 << 52) - 1);
-        make(slot)
-    }
-
-    pub fn slot(&self) -> i64 {
-        match self {
-            Prep::Match { slot, .. } | Prep::Rank { slot, .. } | Prep::Class { slot, .. } => *slot,
-        }
-    }
-}
-
-/// SQL: whether `cell` is among a prep's answers.
-fn scratch_has(slot: i64, cell: &str) -> String {
-    format!("EXISTS (SELECT 1 FROM _jazz_lv_scratch WHERE slot = {slot} AND cell = {cell})")
-}
-
-/// SQL: a prep's answer value for `cell`.
-fn scratch_value(slot: i64, cell: &str) -> String {
-    format!("(SELECT v FROM _jazz_lv_scratch WHERE slot = {slot} AND cell = {cell})")
-}
-
-/// SQL: a rank prep's sort key for `cell`.
-fn scratch_key(slot: i64, cell: &str) -> String {
-    format!("(SELECT k FROM _jazz_lv_scratch WHERE slot = {slot} AND cell = {cell})")
 }
 
 /// SQL text plus its positional parameters.
@@ -264,8 +175,6 @@ pub struct Ctx<'a> {
     /// The cut is a replica's last server seq: the read leaves out its
     /// pending local versions (which history reads do anyway).
     pub settled_only: bool,
-    /// Questions the statement needs answered first.
-    pub preps: Vec<Prep>,
     /// The authority's node, whose own commits history reads name by their
     /// seq; `None` on a replica, which lists only versions whose
     /// transaction it knows.
@@ -339,9 +248,6 @@ pub struct Compiled {
     pub tables: BTreeSet<String>,
     /// Rows are aggregate groups: column 0 is the group key, hashed to an id.
     pub aggregate: bool,
-    /// The group key is a large-capable cell: a chunked one is hashed by its
-    /// value.
-    pub large_group: bool,
     /// Joined source row ids each row carries after its root's id, seq and
     /// deletion flag (a flat join's occurrence; 0 otherwise).
     pub joined: usize,
@@ -351,11 +257,6 @@ pub struct Compiled {
     pub versioned: bool,
     /// Rows are union rows: column 3 is the arm's label.
     pub union: bool,
-    /// Run before the statement.
-    pub preps: Vec<Prep>,
-    /// The statement with prefix-tie ranks in its order, used instead when
-    /// a rank prep finds chunked values sharing a sort key.
-    pub ranked_sql: Option<String>,
     /// The part each projected column is read in, if only a part
     /// (SPEC 19.12); empty when none is.
     pub partial: Vec<Option<crate::query::Part>>,
@@ -378,7 +279,6 @@ impl<'a> Ctx<'a> {
             view: None,
             cut: None,
             settled_only: false,
-            preps: Vec::new(),
             history_origin: None,
             overlaid_rows: 0,
             overlay_tables: BTreeSet::new(),
@@ -616,32 +516,15 @@ impl<'a> Ctx<'a> {
         use crate::query::AggregateFunction as F;
         let mut projection = Vec::new();
         let mut outputs = Vec::new();
-        // (the group's cell, what rows group by, what groups order by)
-        let mut large_group = false;
+        // The group cell. A chunked one groups only the rows naming that
+        // cell (SPEC 19.5).
         let group = match &aggregate.group_by {
             Some(column) => {
                 let sql = column_sql(table, alias, column)?;
                 let ty = table.column(column).expect("checked").ty.clone();
                 projection.push((column.clone(), ty));
                 outputs.push(sql.clone());
-                Some(match self.column_term(table, alias, column)? {
-                    // Cells of one logical value group together even when
-                    // their chunk trees differ.
-                    Term::Large(large) => {
-                        large_group = true;
-                        let columns = vec![(large.table.clone(), large.column.clone())];
-                        let question = format!("class {columns:?}");
-                        let slot = self.prep(|slot| Prep::Class { slot, columns }, question);
-                        let by = format!(
-                            "(CASE WHEN {} THEN {} ELSE {sql} END)",
-                            crate::large::chunked_sql(&sql),
-                            scratch_value(slot, &sql)
-                        );
-                        let (key, _) = self.order_key(&large);
-                        (sql.clone(), by, key)
-                    }
-                    _ => (sql.clone(), sql.clone(), sql),
-                })
+                Some(sql)
             }
             None => None,
         };
@@ -711,7 +594,7 @@ impl<'a> Ctx<'a> {
                 OrderDirection::Desc => "DESC",
             };
             let term = if aggregate.group_by.as_deref() == Some(key.column.as_str()) {
-                group.clone().expect("grouped").2
+                group.clone().expect("grouped")
             } else if aggregate.aggregates.iter().any(|a| a.alias == key.column) {
                 quote(&key.column)
             } else {
@@ -723,9 +606,9 @@ impl<'a> Ctx<'a> {
             keys.push(format!("{term} {direction}"));
         }
         let (key, group_by) = match &group {
-            Some((sql, by, order)) => {
-                keys.push(format!("{order} ASC"));
-                (sql.clone(), format!(" GROUP BY {by}"))
+            Some(sql) => {
+                keys.push(format!("{sql} ASC"));
+                (sql.clone(), format!(" GROUP BY {sql}"))
             }
             None => ("NULL".to_owned(), String::new()),
         };
@@ -744,17 +627,14 @@ impl<'a> Ctx<'a> {
         );
         Ok(Compiled {
             sql,
-            ranked_sql: None,
             partial: Vec::new(),
             params: self.params,
             projection,
             tables: self.tables,
             aggregate: true,
-            large_group,
             joined: 0,
             versioned: false,
             union: false,
-            preps: self.preps,
         })
     }
 
@@ -816,7 +696,7 @@ impl<'a> Ctx<'a> {
             let from = self.source(table)?;
             return self.compile_aggregate(query, aggregate, table, &from, alias, &wheres);
         }
-        let (order, ranked_order) = self.order_sql(table, alias, &query.order_by)?;
+        let order = self.order_sql(table, alias, &query.order_by)?;
         let columns = projection
             .iter()
             .map(|(name, _)| Ok(format!(", {}", column_sql(table, alias, name)?)))
@@ -833,16 +713,13 @@ impl<'a> Ctx<'a> {
         };
         Ok(Compiled {
             sql: statement(&order),
-            ranked_sql: ranked_order.as_deref().map(statement),
             params: self.params,
             projection,
             tables: self.tables,
             aggregate: false,
-            large_group: false,
             joined: 0,
             versioned: false,
             union: false,
-            preps: self.preps,
             partial: Vec::new(),
         })
     }
@@ -912,7 +789,6 @@ impl<'a> Ctx<'a> {
     ) -> Result<Compiled, Error> {
         let alias = "t";
         let mut projection = Vec::new();
-        // Each arm as (plain, ranked) statement text.
         let mut arms = Vec::with_capacity(plan.arms.len());
         let mut keys = Vec::new();
         for (label, arm) in &plan.arms {
@@ -950,83 +826,58 @@ impl<'a> Ctx<'a> {
                 .collect::<Result<String, Error>>()?;
             let label = self.bind(Sql::Text(label.as_bytes().to_vec()));
             keys = self.order_terms(table, alias, &plan.order_by)?;
-            let mut plain_keys = String::new();
-            let mut ranked_keys = String::new();
-            for (i, key) in keys.iter().enumerate() {
-                plain_keys.push_str(&format!(", {} AS k{i}", key.sql));
-                ranked_keys.push_str(&format!(", {} AS k{i}", key.sql));
-                if let Some(rank) = &key.rank {
-                    ranked_keys.push_str(&format!(", {rank} AS r{i}"));
-                }
-            }
+            let keys_sql: String = keys
+                .iter()
+                .enumerate()
+                .map(|(i, key)| format!(", {} AS k{i}", key.sql))
+                .collect();
             let source = self.source(table)?;
-            let body = |keys: &str| {
-                format!(
-                    "SELECT {alias}.id AS id, {alias}._seq AS _seq, {alias}._del AS _del, \
-                     {label} AS _arm{columns}{keys} FROM {source} AS {alias} WHERE {}",
-                    and(&wheres)
-                )
-            };
-            let (mut plain, mut ranked) = (body(&plain_keys), body(&ranked_keys));
+            let mut body = format!(
+                "SELECT {alias}.id AS id, {alias}._seq AS _seq, {alias}._del AS _del, \
+                 {label} AS _arm{columns}{keys_sql} FROM {source} AS {alias} WHERE {}",
+                and(&wheres)
+            );
             // An arm's own window applies before the union.
             if arm.limit.is_some() || arm.offset != 0 {
-                let (order, ranked_order) = self.order_sql(table, alias, &arm.order_by)?;
-                let ranked_order = ranked_order.unwrap_or_else(|| order.clone());
+                let order = self.order_sql(table, alias, &arm.order_by)?;
                 let limit = self.bind(Sql::Integer(arm.limit.map_or(-1, |l| l as i64)));
                 let offset = self.bind(Sql::Integer(arm.offset as i64));
-                let window = |body: &str, order: &str| {
-                    format!("SELECT * FROM ({body} ORDER BY {order} LIMIT {limit} OFFSET {offset})")
-                };
-                plain = window(&plain, &order);
-                ranked = window(&ranked, &ranked_order);
+                body = format!(
+                    "SELECT * FROM ({body} ORDER BY {order} LIMIT {limit} OFFSET {offset})"
+                );
             }
             projection = arm_projection;
-            arms.push((plain, ranked));
+            arms.push(body);
         }
         let tie = match plan.order_by.last().map(|key| key.direction) {
             Some(OrderDirection::Desc) => "DESC",
             _ => "ASC",
         };
-        let order = |ranked: bool| {
-            let mut order = Vec::new();
-            for (i, key) in keys.iter().enumerate() {
-                order.push(format!("k{i} {}", key.direction));
-                if ranked && key.rank.is_some() {
-                    order.push(format!("r{i} {}", key.direction));
-                }
-            }
-            order.push(format!("id {tie}"));
-            order.push(format!("_arm {tie}"));
-            order.join(", ")
-        };
+        let mut order: Vec<String> = keys
+            .iter()
+            .enumerate()
+            .map(|(i, key)| format!("k{i} {}", key.direction))
+            .collect();
+        order.push(format!("id {tie}"));
+        order.push(format!("_arm {tie}"));
         let limit = self.bind(Sql::Integer(plan.limit.map_or(-1, |l| l as i64)));
         let offset = self.bind(Sql::Integer(plan.offset as i64));
         let columns: String = (0..projection.len()).map(|i| format!(", c{i}")).collect();
-        let statement = |ranked: bool| {
-            let arms: Vec<&str> = arms
-                .iter()
-                .map(|(plain, with_ranks)| if ranked { with_ranks } else { plain }.as_str())
-                .collect();
-            format!(
-                "SELECT id, _seq, _del, _arm{columns} FROM ({}) ORDER BY {} \
-                 LIMIT {limit} OFFSET {offset}",
-                arms.join(" UNION ALL "),
-                order(ranked)
-            )
-        };
-        let ranked = keys.iter().any(|key| key.rank.is_some());
+        let sql = format!(
+            "SELECT id, _seq, _del, _arm{columns} FROM ({}) ORDER BY {} \
+             LIMIT {limit} OFFSET {offset}",
+            arms.join(" UNION ALL "),
+            order.join(", ")
+        );
         Ok(Compiled {
-            sql: statement(false),
-            ranked_sql: ranked.then(|| statement(true)),
+            sql,
             params: self.params,
             projection,
             tables: self.tables,
             aggregate: false,
-            large_group: false,
             joined: 0,
             versioned: false,
             union: true,
-            preps: self.preps,
             partial: Vec::new(),
         })
     }
@@ -1274,17 +1125,14 @@ impl<'a> Ctx<'a> {
         );
         Ok(Compiled {
             sql,
-            ranked_sql: None,
             partial: Vec::new(),
             params: self.params,
             projection,
             tables: self.tables,
             aggregate: false,
-            large_group: false,
             joined: sources.len() - 1,
             versioned: true,
             union: false,
-            preps: self.preps,
         })
     }
 
@@ -1427,7 +1275,7 @@ impl<'a> Ctx<'a> {
         if let Some(session) = self.policy {
             wheres.push(self.read_policy(child, alias, session)?);
         }
-        let (order, ranked_order) = self.order_sql(child, alias, &array.order_by)?;
+        let order = self.order_sql(child, alias, &array.order_by)?;
         let columns = projection
             .iter()
             .map(|(name, _)| Ok(format!(", {}", column_sql(child, alias, name)?)))
@@ -1455,16 +1303,13 @@ impl<'a> Ctx<'a> {
         let schema = self.schema;
         let mut compiled = Compiled {
             sql: statement(&order),
-            ranked_sql: ranked_order.as_deref().map(statement),
             params: self.params,
             projection,
             tables: self.tables,
             aggregate: false,
-            large_group: false,
             joined: 0,
             versioned: false,
             union: false,
-            preps: self.preps,
             partial: Vec::new(),
         };
         if !array.partial.is_empty() {
@@ -3027,6 +2872,18 @@ fn flip(op: &CmpOp) -> CmpOp {
     }
 }
 
+/// Comparing a large-capable column with a literal over the inline
+/// threshold: the literal could only equal a chunked value, which compares
+/// by identity (SPEC 19.5).
+fn long_literal(column: &LargeColumn) -> Error {
+    unsupported(format!(
+        "comparing `{}.{}` with a literal over {} bytes",
+        column.table,
+        column.column,
+        jazz_types::large_values::INLINE_VALUE_MAX_BYTES
+    ))
+}
+
 /// The logical bytes of a bound string or bytes literal.
 fn literal_of(value: &Sql) -> Option<&[u8]> {
     match value {
@@ -3051,29 +2908,14 @@ impl Ctx<'_> {
                     && crate::values::author_record(column).is_none()
                     && crate::large::large_capable(col) =>
             {
-                let key = table.key_of(&col.stored).and_then(|key| {
-                    sql.strip_suffix(&quote(&col.stored))
-                        .map(|alias| format!("{alias}{}", quote(&key.stored)))
-                });
                 Term::Large(LargeColumn {
                     cell: sql,
                     table: table.stored.clone(),
                     column: col.stored.clone(),
-                    kind: crate::large::kind(col),
-                    key,
                 })
             }
             _ => Term::Sql(sql),
         }
-    }
-
-    fn prep(&mut self, make: impl FnOnce(i64) -> Prep, question: String) -> i64 {
-        let prep = Prep::new(make, &question);
-        let slot = prep.slot();
-        if !self.preps.iter().any(|p| p.slot() == slot) {
-            self.preps.push(prep);
-        }
-        slot
     }
 
     /// An author record (`$createdBy`, `$updatedBy.identity`, ...) against
@@ -3150,10 +2992,10 @@ impl Ctx<'_> {
         Ok(match (left, right) {
             (Term::Missing | Term::NaN, _) | (_, Term::Missing | Term::NaN) => "0".to_owned(),
             (Term::Large(column), Term::Bound(sql, value)) => {
-                self.cmp_large(&op, &column, &sql, &value)
+                self.cmp_large(&op, &column, &sql, &value)?
             }
             (Term::Bound(sql, value), Term::Large(column)) => {
-                self.cmp_large(&flip(&op), &column, &sql, &value)
+                self.cmp_large(&flip(&op), &column, &sql, &value)?
             }
             (Term::Large(a), Term::Large(b)) => self.cmp_large_pair(&op, &a, &b)?,
             (left, right) => cmp_plain(
@@ -3164,147 +3006,57 @@ impl Ctx<'_> {
         })
     }
 
-    /// A large-capable cell against a bound value.
-    fn cmp_large(&mut self, op: &CmpOp, column: &LargeColumn, p: &str, value: &Sql) -> String {
+    /// A large-capable cell against a bound value. Every value up to the
+    /// inline threshold has one inline cell, which compares as SQLite
+    /// compares the value; a chunked cell equals no such literal and takes
+    /// part in no range (SPEC 19.5).
+    fn cmp_large(
+        &mut self,
+        op: &CmpOp,
+        column: &LargeColumn,
+        p: &str,
+        value: &Sql,
+    ) -> Result<String, Error> {
         let c = &column.cell;
-        let Some(logical) = literal_of(value) else {
-            return cmp_plain(op, c, p);
+        let Some(literal) = literal_of(value) else {
+            return Ok(cmp_plain(op, c, p));
         };
-        let chunked = crate::large::chunked_sql(c);
-        let key = column.key.as_ref().map(|key| crate::large::key_sql(c, key));
-        let negate = |eq: String| {
-            if *op == CmpOp::Eq {
-                eq
-            } else {
-                format!("(NOT {eq})")
+        Ok(match op {
+            CmpOp::Eq | CmpOp::Ne => {
+                if literal.len() > jazz_types::large_values::INLINE_VALUE_MAX_BYTES {
+                    return Err(long_literal(column));
+                }
+                if *op == CmpOp::Eq {
+                    format!("({c} IS {p})")
+                } else {
+                    format!("(NOT ({c} IS {p}))")
+                }
             }
-        };
-        match (op, &key) {
-            // Every value up to the inline threshold has one inline cell, so
-            // a chunked cell never equals such a literal. The key term lets
-            // SQLite use an index on it.
-            (CmpOp::Eq | CmpOp::Ne, _)
-                if logical.len() <= jazz_types::large_values::INLINE_VALUE_MAX_BYTES =>
-            {
-                negate(match &key {
-                    Some(key) => format!("({key} IS {p} AND {c} IS {p})"),
-                    None => format!("({c} IS {p})"),
-                })
-            }
-            (CmpOp::Eq | CmpOp::Ne, _) => {
-                let slot = self.prep_match(column, MatchTest::Cmp(CmpOp::Eq, logical.to_vec()));
-                negate(match &key {
-                    Some(key) => {
-                        let prefix = crate::large::sort_prefix(column.kind, logical);
-                        let k = self.bind(prefix);
-                        format!("({key} IS {k} AND {chunked} AND {})", scratch_has(slot, c))
-                    }
-                    None => format!("({chunked} AND {})", scratch_has(slot, c)),
-                })
-            }
-            // A chunked value's key is a prefix of it at least as long as
-            // the literal: it orders against the literal as the value does,
-            // except that a key equal to the literal is the longer value.
-            (_, Some(key)) if logical.len() <= crate::large::EXACT_RANGE_BYTES => match op {
-                CmpOp::Lt => format!("({key} < {p})"),
-                CmpOp::Ge => format!("({key} >= {p})"),
-                CmpOp::Le => format!("({key} < {p} OR {c} = {p})"),
-                CmpOp::Gt => format!("({key} >= {p} AND {c} IS NOT {p})"),
-                CmpOp::Eq | CmpOp::Ne => unreachable!("handled above"),
-            },
-            _ => {
-                let slot = self.prep_match(column, MatchTest::Cmp(op.clone(), logical.to_vec()));
-                format!(
-                    "(CASE WHEN {chunked} THEN {} ELSE {} END)",
-                    scratch_has(slot, c),
-                    cmp_plain(op, c, p)
-                )
-            }
-        }
-    }
-
-    /// A large-capable column's order: its sort key (the key column, or
-    /// for an unindexed column the key a rank prep read), and the rank of
-    /// values sharing a key.
-    fn order_key(&mut self, column: &LargeColumn) -> (String, String) {
-        let key = column.key_column();
-        let question = format!("rank {} {} {key:?}", column.table, column.column);
-        let slot = self.prep(
-            |slot| Prep::Rank {
-                slot,
-                table: column.table.clone(),
-                column: column.column.clone(),
-                key,
-            },
-            question,
-        );
-        let c = &column.cell;
-        let sql = match &column.key {
-            Some(key) => crate::large::key_sql(c, key),
-            None => format!(
-                "(CASE WHEN {} THEN {} ELSE {c} END)",
+            op => format!(
+                "(NOT {} AND {})",
                 crate::large::chunked_sql(c),
-                scratch_key(slot, c)
+                cmp_plain(op, c, p)
             ),
-        };
-        (sql, scratch_value(slot, c))
+        })
     }
 
-    fn prep_match(&mut self, column: &LargeColumn, test: MatchTest) -> i64 {
-        let question = format!(
-            "match {} {} {}",
-            column.table,
-            column.column,
-            test.question()
-        );
-        let (table, name) = (column.table.clone(), column.column.clone());
-        self.prep(
-            |slot| Prep::Match {
-                slot,
-                table,
-                column: name,
-                test,
-            },
-            question,
-        )
-    }
-
-    /// Two large-capable cells: equal when both inline and equal, or both
-    /// chunked with one content id.
+    /// Two large-capable cells: equal when both are inline and equal, or
+    /// both name the same chunked cell (SPEC 19.5).
     fn cmp_large_pair(
         &mut self,
         op: &CmpOp,
         a: &LargeColumn,
         b: &LargeColumn,
     ) -> Result<String, Error> {
-        if !matches!(op, CmpOp::Eq | CmpOp::Ne) {
-            return Err(unsupported(format!(
+        let eq = format!("({} IS {})", a.cell, b.cell);
+        match op {
+            CmpOp::Eq => Ok(eq),
+            CmpOp::Ne => Ok(format!("(NOT {eq})")),
+            _ => Err(unsupported(format!(
                 "ordering comparisons between two string or bytes columns (`{}.{}`, `{}.{}`)",
                 a.table, a.column, b.table, b.column
-            )));
+            ))),
         }
-        let mut columns = vec![
-            (a.table.clone(), a.column.clone()),
-            (b.table.clone(), b.column.clone()),
-        ];
-        columns.sort();
-        columns.dedup();
-        let question = format!("class {columns:?}");
-        let slot = self.prep(|slot| Prep::Class { slot, columns }, question);
-        let eq = format!(
-            "(CASE WHEN COALESCE({} OR {}, 0) THEN {} IS {} ELSE {} IS {} END)",
-            crate::large::chunked_sql(&a.cell),
-            crate::large::chunked_sql(&b.cell),
-            scratch_value(slot, &a.cell),
-            scratch_value(slot, &b.cell),
-            a.cell,
-            b.cell
-        );
-        Ok(if *op == CmpOp::Eq {
-            eq
-        } else {
-            format!("(NOT {eq})")
-        })
     }
 
     fn in_list(&mut self, left: Term, options: Vec<Term>) -> Result<String, Error> {
@@ -3315,34 +3067,20 @@ impl Ctx<'_> {
         if options.is_empty() || matches!(left, Term::Missing | Term::NaN) {
             return Ok("0".to_owned());
         }
-        let list = self.bound_list(&options);
         if let Term::Large(column) = &left {
-            let small = |option: &Term| match option {
-                Term::Bound(_, value) => literal_of(value).is_none_or(|literal| {
-                    literal.len() <= jazz_types::large_values::INLINE_VALUE_MAX_BYTES
+            // A chunked cell is in no list of inline values; a longer
+            // literal is refused as `=` refuses it.
+            let long = |option: &Term| match option {
+                Term::Bound(_, value) => literal_of(value).is_some_and(|literal| {
+                    literal.len() > jazz_types::large_values::INLINE_VALUE_MAX_BYTES
                 }),
                 _ => false,
             };
-            if !options.iter().all(small) {
-                let parts = options
-                    .into_iter()
-                    .map(|option| self.cmp(CmpOp::Eq, Term::Large(column.clone()), option))
-                    .collect::<Result<Vec<_>, _>>()?;
-                return Ok(or(&parts));
+            if options.iter().any(long) {
+                return Err(long_literal(column));
             }
-            let list = list.unwrap_or_else(|| {
-                let list: Vec<&str> = options.iter().filter_map(Term::sql).collect();
-                list.join(", ")
-            });
-            return Ok(match &column.key {
-                Some(key) => format!(
-                    "({} IN ({list}) AND {} IN ({list}))",
-                    crate::large::key_sql(&column.cell, key),
-                    column.cell
-                ),
-                None => format!("({} IN ({list}))", column.cell),
-            });
         }
+        let list = self.bound_list(&options);
         let list = list.unwrap_or_else(|| {
             let list: Vec<&str> = options.iter().filter_map(Term::sql).collect();
             list.join(", ")
@@ -3397,58 +3135,41 @@ impl Ctx<'_> {
         let instr = |l: &str, r: &str| {
             format!("COALESCE(instr(CAST({l} AS BLOB), CAST({r} AS BLOB)) > 0, 0)")
         };
-        let (Term::Large(column), Term::Bound(_, value)) = (&left, &right) else {
-            return instr(l, r);
-        };
-        let Some(needle) = literal_of(value) else {
-            return instr(l, r);
-        };
-        let slot = self.prep_match(column, MatchTest::Contains(needle.to_vec()));
-        format!(
-            "(CASE WHEN {} THEN {} ELSE {} END)",
-            crate::large::chunked_sql(l),
-            scratch_has(slot, l),
-            instr(l, r)
-        )
+        // A chunked cell is an INTEGER, not its value: it contains nothing
+        // (SPEC 19.5).
+        match left {
+            Term::Large(_) => format!("(NOT {} AND {})", crate::large::chunked_sql(l), instr(l, r)),
+            _ => instr(l, r),
+        }
     }
 
-    /// `ORDER BY` keys, and the same keys with prefix-tie ranks (`None`
-    /// when no key is large-capable). Ties break by row id in the last
-    /// key's direction, so a declared index (which ends in `id`) supplies
-    /// the whole order in one scan, in either direction, with no sort step.
+    /// `ORDER BY` keys. Ties break by row id in the last key's direction,
+    /// so a declared index (which ends in `id`) supplies the whole order in
+    /// one scan, in either direction, with no sort step.
     fn order_sql(
         &mut self,
         table: &Table,
         alias: &str,
         order: &[crate::query::OrderBy],
-    ) -> Result<(String, Option<String>), Error> {
-        let mut keys = Vec::new();
-        let mut ranked = Vec::new();
-        let mut any_large = false;
-        for key in self.order_terms(table, alias, order)? {
-            let direction = key.direction;
-            keys.push(format!("{} {direction}", key.sql));
-            ranked.push(format!("{} {direction}", key.sql));
-            if let Some(rank) = key.rank {
-                any_large = true;
-                ranked.push(format!("{rank} {direction}"));
-            }
-        }
-        // Ties break by row id in the direction of the last key, so a declared
-        // index (which ends in `id`) supplies the whole order in one scan, in
-        // either direction, with no sort step.
+    ) -> Result<String, Error> {
+        let mut keys: Vec<String> = self
+            .order_terms(table, alias, order)?
+            .into_iter()
+            .map(|key| format!("{} {}", key.sql, key.direction))
+            .collect();
         let tie = match order.last().map(|key| key.direction) {
             Some(OrderDirection::Desc) => "DESC",
             _ => "ASC",
         };
         keys.push(format!("{alias}.id {tie}"));
-        ranked.push(format!("{alias}.id {tie}"));
-        Ok((keys.join(", "), any_large.then(|| ranked.join(", "))))
+        Ok(keys.join(", "))
     }
 
-    /// Each order key's SQL and direction; a large-capable column's key is
-    /// its sort prefix, with the rank of prefix ties (answered by a prep)
-    /// as its second part.
+    /// Each order key's SQL and direction. A large-capable column orders by
+    /// its cell: SQLite puts a chunked cell (an INTEGER) after NULL and
+    /// before every inline value, so values over the inline threshold sort
+    /// first ascending, among themselves in no meaningful order
+    /// (SPEC 19.5).
     fn order_terms(
         &mut self,
         table: &Table,
@@ -3467,31 +3188,16 @@ impl Ctx<'_> {
                     key.column
                 )));
             }
-            terms.push(match self.column_term(table, alias, &key.column)? {
-                Term::Large(column) => {
-                    let (sql, rank) = self.order_key(&column);
-                    OrderTerm {
-                        sql,
-                        rank: Some(rank),
-                        direction,
-                    }
-                }
-                term => OrderTerm {
-                    sql: term.sql().expect("column").to_owned(),
-                    rank: None,
-                    direction,
-                },
-            });
+            let sql = column_sql(table, alias, &key.column)?;
+            terms.push(OrderTerm { sql, direction });
         }
         Ok(terms)
     }
 }
 
-/// One order key: its SQL, the rank breaking its prefix ties (a
-/// large-capable column), and its direction.
+/// One order key: its SQL and its direction.
 struct OrderTerm {
     sql: String,
-    rank: Option<String>,
     direction: &'static str,
 }
 
