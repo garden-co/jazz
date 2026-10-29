@@ -583,23 +583,22 @@ fn echo_digest(image: &Image) -> [u8; 16] {
 /// What the writer of a row version built it on (SPEC 4 §4.6, "Base of a
 /// write"): the version of the row its image was, in names the receiver
 /// knows. A write over no held image (an insert, a blind write) sends none.
+/// It travels on the commit's first op that writes the row.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireBase {
-    /// The commit's first op that writes the row.
-    pub op: u32,
     /// The row's branch key (empty unbranched).
     pub key: Vec<u8>,
     pub on: BuiltOn,
 }
 
-/// The settled version of a row a commit writes that its writer holds, so
-/// that the writer did not push the nodes of its chunked values' trees
-/// (SPEC 19.4): the authority counts that version's trees as the writer's
-/// when it may read the version.
+/// A version of the row an op writes that its writer may read, whose
+/// chunked values' trees vouch for the nodes the writer did not push
+/// (SPEC 19.4): the authority counts that version's trees as possessed by
+/// the writer, for every op of the commit, only while the writer may still
+/// read the version, so naming a root never gets the writer a tree it could
+/// not read anyway.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WireSource {
-    /// The op that writes the row.
-    pub op: u32,
+pub struct AccessProof {
     /// The row's branch key (empty unbranched).
     pub key: Vec<u8>,
     pub seq: u64,
@@ -674,10 +673,47 @@ pub enum WireTarget {
     },
 }
 
+/// A replicated write with what its writer knew of the row it writes:
+/// what it was built on, the settled version its chunked values' trees sit
+/// under, and the chunked cells that travel as edits.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WireOp {
+    pub write: WireWrite,
+    /// The base of each row this op is the commit's first to write, where
+    /// its writer held an image (SPEC 4 §4.6): one per branch key it
+    /// writes the row under (a move writes two). Only the authority's
+    /// conflict derivation reads it (INV-HIST-21).
+    pub bases: Vec<WireBase>,
+    /// Set when the op's chunked values travel as trees: the settled
+    /// version of its row their unpushed nodes sit under.
+    pub access_proof: Option<AccessProof>,
+    /// The op's chunked cells that travel as edits extending the writer's
+    /// newest settled version of its row (SPEC 19.8).
+    pub deltas: Vec<CellDelta>,
+}
+
+impl From<WireWrite> for WireOp {
+    fn from(write: WireWrite) -> Self {
+        WireOp {
+            write,
+            bases: Vec::new(),
+            access_proof: None,
+            deltas: Vec::new(),
+        }
+    }
+}
+
+impl WireOp {
+    /// The table the op writes, as the sender's schema names it.
+    pub fn table(&self) -> &str {
+        self.write.table()
+    }
+}
+
 /// A replicated write. `at`: its explicit provenance timestamp (Unix ms),
 /// if the writer gave one; each write in a commit carries its own.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum WireOp {
+pub enum WireWrite {
     Insert {
         table: String,
         row: [u8; 16],
@@ -720,16 +756,16 @@ pub enum WireOp {
     },
 }
 
-impl WireOp {
-    /// The table the op writes, as the sender's schema names it.
+impl WireWrite {
+    /// The table the write names, as the sender's schema names it.
     pub fn table(&self) -> &str {
         match self {
-            WireOp::Insert { table, .. }
-            | WireOp::Update { table, .. }
-            | WireOp::Upsert { table, .. }
-            | WireOp::Delete { table, .. }
-            | WireOp::Restore { table, .. }
-            | WireOp::Move { table, .. } => table,
+            WireWrite::Insert { table, .. }
+            | WireWrite::Update { table, .. }
+            | WireWrite::Upsert { table, .. }
+            | WireWrite::Delete { table, .. }
+            | WireWrite::Restore { table, .. }
+            | WireWrite::Move { table, .. } => table,
         }
     }
 }
@@ -906,17 +942,6 @@ pub enum SyncMessage {
         /// (see [`Expect`]): the authority skips echoing a row whose new
         /// version is exactly that. Empty when the writer does not know.
         expect: Vec<Expect>,
-        /// The ops' chunked cells that travel as edits extending the
-        /// writer's newest settled version of their row (SPEC 19.8).
-        deltas: Vec<CellDelta>,
-        /// For each op whose chunked values travel as trees, the settled
-        /// version of its row their unpushed nodes sit under.
-        sources: Vec<WireSource>,
-        /// The base of each row the commit writes over an image its
-        /// writer held (SPEC 4 §4.6); a row it inserted, or wrote without
-        /// holding, has none. Only the authority's conflict derivation
-        /// reads it (INV-HIST-21).
-        bases: Vec<WireBase>,
         /// The session commit a relay uploads this one for, as (node, tx),
         /// when it is not the sender's own: the writer its bases' unnamed
         /// `pending` nodes stand for.
@@ -1372,10 +1397,11 @@ pub(crate) struct Client {
 }
 
 /// A session's commit a relay uploads as its own, for its upload: the
-/// session commit's (node, tx) and its bases in this store's terms.
+/// session commit's (node, tx) and its bases in this store's terms, by
+/// the op each travels on.
 pub(crate) struct Relayed {
     origin: ([u8; 16], u64),
-    bases: Vec<WireBase>,
+    bases: Vec<(usize, WireBase)>,
 }
 
 /// A session's commit a relay uploads as its own: (session, the session's
@@ -2205,48 +2231,49 @@ fn exact_target(target: &ExactWriteTarget) -> WireTarget {
 
 fn to_wire(op: &StagedOp) -> Result<WireOp, Error> {
     let bytes = |row: &RowUuid| *row.0.as_bytes();
-    Ok(match op {
-        StagedOp::Insert(table, cells, opts) => WireOp::Insert {
+    let write = match op {
+        StagedOp::Insert(table, cells, opts) => WireWrite::Insert {
             table: table.clone(),
             row: bytes(&opts.row_id.expect("inserts carry their row id")),
             cells: cells.clone(),
             target: exact_target(&opts.target),
             at: opts.updated_at_ms,
         },
-        StagedOp::Update(table, row, cells, opts) => WireOp::Update {
+        StagedOp::Update(table, row, cells, opts) => WireWrite::Update {
             table: table.clone(),
             row: bytes(row),
             cells: cells.clone(),
             target: wire_target(&opts.target)?,
             at: opts.updated_at_ms,
         },
-        StagedOp::Upsert(table, row, cells, opts) => WireOp::Upsert {
+        StagedOp::Upsert(table, row, cells, opts) => WireWrite::Upsert {
             table: table.clone(),
             row: bytes(row),
             cells: cells.clone(),
             target: wire_target(&opts.target)?,
             at: opts.updated_at_ms,
         },
-        StagedOp::Delete(table, row, opts) => WireOp::Delete {
+        StagedOp::Delete(table, row, opts) => WireWrite::Delete {
             table: table.clone(),
             row: bytes(row),
             target: wire_target(&opts.target)?,
             at: opts.updated_at_ms,
         },
-        StagedOp::Restore(table, row, cells, opts) => WireOp::Restore {
+        StagedOp::Restore(table, row, cells, opts) => WireWrite::Restore {
             table: table.clone(),
             row: bytes(row),
             cells: cells.clone(),
             target: exact_target(&opts.target),
             at: opts.updated_at_ms,
         },
-        StagedOp::Move(table, from, to, row) => WireOp::Move {
+        StagedOp::Move(table, from, to, row) => WireWrite::Move {
             table: table.clone(),
             row: bytes(row),
             from: from.clone(),
             to: to.clone(),
         },
-    })
+    };
+    Ok(write.into())
 }
 
 fn view_target(target: WireTarget) -> WriteTarget {
@@ -2279,8 +2306,8 @@ fn exact(target: WireTarget) -> ExactWriteTarget {
 
 fn from_wire(op: WireOp) -> Result<StagedOp, Error> {
     let id = |row: [u8; 16]| RowUuid::from_bytes(row);
-    Ok(match op {
-        WireOp::Insert {
+    Ok(match op.write {
+        WireWrite::Insert {
             table,
             row,
             cells,
@@ -2296,7 +2323,7 @@ fn from_wire(op: WireOp) -> Result<StagedOp, Error> {
                 ..Default::default()
             },
         ),
-        WireOp::Update {
+        WireWrite::Update {
             table,
             row,
             cells,
@@ -2312,7 +2339,7 @@ fn from_wire(op: WireOp) -> Result<StagedOp, Error> {
                 ..Default::default()
             },
         ),
-        WireOp::Upsert {
+        WireWrite::Upsert {
             table,
             row,
             cells,
@@ -2328,7 +2355,7 @@ fn from_wire(op: WireOp) -> Result<StagedOp, Error> {
                 ..Default::default()
             },
         ),
-        WireOp::Delete {
+        WireWrite::Delete {
             table,
             row,
             target,
@@ -2342,7 +2369,7 @@ fn from_wire(op: WireOp) -> Result<StagedOp, Error> {
                 ..Default::default()
             },
         ),
-        WireOp::Restore {
+        WireWrite::Restore {
             table,
             row,
             cells,
@@ -2360,7 +2387,7 @@ fn from_wire(op: WireOp) -> Result<StagedOp, Error> {
         ),
         // A move checks no policy locally; the authority would need the
         // source DELETE and destination INSERT policies under the session.
-        WireOp::Move { .. } => return Err(unsupported("branch moves over sync")),
+        WireWrite::Move { .. } => return Err(unsupported("branch moves over sync")),
     })
 }
 
@@ -3508,9 +3535,10 @@ impl Inner {
 /// write from its upload record, or a server commit from its dedupe entry.
 ///
 /// A pending commit is stored a row per op, not as one encoded message:
-/// `_jazz_pending` keeps its `Commit` with the per-row lists left empty,
-/// `_jazz_pending_items` each op, delta, source, base and serializable read
-/// (by [`PendingPart`]), and `_jazz_pending_rows` the local rows it wrote.
+/// `_jazz_pending` keeps its `Commit` with its ops and reads left out,
+/// `_jazz_pending_items` each op (with its bases, access proof and deltas) and
+/// serializable read (by [`PendingPart`]), and `_jazz_pending_rows` the
+/// local rows it wrote.
 /// A row's values over the inline limit live in large-value storage, so a
 /// stored op is about the size of the row it writes, however large the
 /// commit: a store with a small value limit (a Durable Object's 2 MiB)
@@ -3542,20 +3570,14 @@ const REJECTED_DDL: [&str; 2] = [
 #[derive(Clone, Copy)]
 enum PendingPart {
     Op = 0,
-    Delta = 1,
-    Source = 2,
-    Base = 3,
-    Read = 4,
+    Read = 1,
 }
 
 impl PendingPart {
     fn from_stored(part: i64) -> Result<Self, Error> {
         Ok(match part {
             0 => Self::Op,
-            1 => Self::Delta,
-            2 => Self::Source,
-            3 => Self::Base,
-            4 => Self::Read,
+            1 => Self::Read,
             _ => {
                 return Err(Error::new(
                     ErrorCode::Storage,
@@ -3675,7 +3697,7 @@ impl Inner {
 
     /// The nodes a commit's large values need pushed first: (their
     /// hashes, the batches carrying them). Every node goes but those under
-    /// the trees of the settled version each op names as its source
+    /// the trees of the settled version each op names as its access proof
     /// (SPEC 19.4). `None` when this replica must first fetch nodes it
     /// lacks (a value copied from a row it holds only partly): they are
     /// asked for, and the commit waits.
@@ -3683,7 +3705,7 @@ impl Inner {
         &mut self,
         commit: &SyncMessage,
     ) -> Result<Option<(Vec<jazz_types::large_values::ContentHash>, Vec<SyncMessage>)>, Error> {
-        let SyncMessage::Commit { ops, sources, .. } = commit else {
+        let SyncMessage::Commit { ops, .. } = commit else {
             return Ok(Some((Vec::new(), Vec::new())));
         };
         fn large(value: &Value, out: &mut Vec<jazz_types::large_values::LargeValueRef>) {
@@ -3698,12 +3720,12 @@ impl Inner {
         let mut batch = Vec::new();
         let mut size = 0;
         let mut absent = Vec::new();
-        for (index, op) in ops.iter().enumerate() {
-            let (row, cells) = match op {
-                WireOp::Insert { row, cells, .. }
-                | WireOp::Update { row, cells, .. }
-                | WireOp::Upsert { row, cells, .. }
-                | WireOp::Restore {
+        for op in ops {
+            let (row, cells) = match &op.write {
+                WireWrite::Insert { row, cells, .. }
+                | WireWrite::Update { row, cells, .. }
+                | WireWrite::Upsert { row, cells, .. }
+                | WireWrite::Restore {
                     row,
                     cells: Some(cells),
                     ..
@@ -3718,9 +3740,9 @@ impl Inner {
                 continue;
             }
             let mut named = BTreeSet::new();
-            if let Some(source) = sources.iter().find(|source| source.op as usize == index)
+            if let Some(proof) = &op.access_proof
                 && let Ok(table) = self.schema.stored_table(op.table())
-                && let Some(image) = self.held_version(table, row, &source.key, source.seq)?
+                && let Some(image) = self.held_version(table, row, &proof.key, proof.seq)?
             {
                 named = self.large_roots(table, &image)?;
             }
@@ -3797,9 +3819,6 @@ impl Inner {
             author,
             session,
             expect: _,
-            deltas,
-            sources,
-            bases,
             origin,
         } = commit
         else {
@@ -3830,9 +3849,6 @@ impl Inner {
             author: author.clone(),
             session: session.clone(),
             expect: Vec::new(),
-            deltas: Vec::new(),
-            sources: Vec::new(),
-            bases: Vec::new(),
             origin: *origin,
         };
         self.exec(
@@ -3841,13 +3857,6 @@ impl Inner {
         )
         .map_err(storage)?;
         let items = (ops.iter().map(encode).map(|item| (PendingPart::Op, item)))
-            .chain(deltas.iter().map(|item| (PendingPart::Delta, encode(item))))
-            .chain(
-                sources
-                    .iter()
-                    .map(|item| (PendingPart::Source, encode(item))),
-            )
-            .chain(bases.iter().map(|item| (PendingPart::Base, encode(item))))
             .chain(reads.iter().map(|item| (PendingPart::Read, encode(item))));
         let mut n = 0i64;
         let mut last = None;
@@ -4055,15 +4064,7 @@ impl Inner {
     /// with its lists filled from `_jazz_pending_items`.
     fn pending_commit(&self, tx: u64, header: &[u8]) -> Result<SyncMessage, Error> {
         let mut commit: SyncMessage = decode_stored(header)?;
-        let SyncMessage::Commit {
-            kind,
-            ops,
-            deltas,
-            sources,
-            bases,
-            ..
-        } = &mut commit
-        else {
+        let SyncMessage::Commit { kind, ops, .. } = &mut commit else {
             return Err(Error::new(
                 ErrorCode::Storage,
                 "a pending upload is not a Commit",
@@ -4084,9 +4085,6 @@ impl Inner {
             let (part, item) = item.map_err(storage)?;
             match PendingPart::from_stored(part)? {
                 PendingPart::Op => ops.push(decode_stored(&item)?),
-                PendingPart::Delta => deltas.push(decode_stored(&item)?),
-                PendingPart::Source => sources.push(decode_stored(&item)?),
-                PendingPart::Base => bases.push(decode_stored(&item)?),
                 PendingPart::Read => match kind {
                     WireKind::Serializable { reads, .. } => reads.push(decode_stored(&item)?),
                     WireKind::Mergeable => {
@@ -5176,11 +5174,13 @@ impl Db {
                     .get(&(table.clone(), *row))
                     .and_then(|ops| ops.first())
             {
-                bases.push(WireBase {
-                    op: op as u32,
-                    key: key.clone(),
-                    on,
-                });
+                bases.push((
+                    op,
+                    WireBase {
+                        key: key.clone(),
+                        on,
+                    },
+                ));
             }
         }
         let (bases, origin) = match relayed {
@@ -5188,9 +5188,19 @@ impl Db {
             None => (bases, None),
         };
         let mut wire: Result<Vec<WireOp>, Error> = ops.iter().map(to_wire).collect();
-        let (mut deltas, mut sources) = (Vec::new(), Vec::new());
         if let Ok(wire) = &mut wire {
-            (deltas, sources) = inner.commit_deltas(wire, &rows, &settled_images)?;
+            for (op, base) in bases {
+                // A relay's bases come from `relay_bases`, which refused any
+                // naming no op of the commit.
+                let op = wire.get_mut(op).ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::Protocol,
+                        "a relayed base names no op of its commit",
+                    )
+                })?;
+                op.bases.push(base);
+            }
+            inner.commit_deltas(wire, &rows, &settled_images)?;
         }
         // Each written row as this replica now holds it, so the authority
         // can skip echoing a version that is exactly this.
@@ -5232,9 +5242,6 @@ impl Db {
                     author: author.map(|author| author.canonical().to_owned()),
                     session: session_claims,
                     expect,
-                    deltas,
-                    sources,
-                    bases,
                     origin,
                 };
                 client.unsent.push(commit.clone());
@@ -6657,24 +6664,22 @@ impl Inner {
     /// their row's settled image, as deltas over it: each op's cell holds
     /// NULL in its place (SPEC 19.8). The upstream holds every settled
     /// version, as it shipped them. The rest travel as trees, named with
-    /// that settled image as their source (SPEC 19.4).
+    /// that settled image as their access proof (SPEC 19.4).
     fn commit_deltas(
         &self,
         ops: &mut [WireOp],
         rows: &[RowKey],
         settled: &HashMap<RowKey, Image>,
-    ) -> Result<(Vec<CellDelta>, Vec<WireSource>), Error> {
-        let mut deltas = Vec::new();
-        let mut sources = Vec::new();
-        for (index, op) in ops.iter_mut().enumerate() {
+    ) -> Result<(), Error> {
+        for op in ops.iter_mut() {
             let Ok(table) = self.schema.table(op.table()) else {
                 continue;
             };
-            let (row, cells) = match op {
-                WireOp::Insert { row, cells, .. }
-                | WireOp::Update { row, cells, .. }
-                | WireOp::Upsert { row, cells, .. }
-                | WireOp::Restore {
+            let (row, cells) = match &mut op.write {
+                WireWrite::Insert { row, cells, .. }
+                | WireWrite::Update { row, cells, .. }
+                | WireWrite::Upsert { row, cells, .. }
+                | WireWrite::Restore {
                     row,
                     cells: Some(cells),
                     ..
@@ -6705,8 +6710,7 @@ impl Inner {
                 let delta = old.and_then(|old| large_delta::extend(base.seq, &old, large));
                 if let Some(delta) = delta {
                     *value = Value::Nullable(None);
-                    deltas.push(CellDelta {
-                        op: index as u32,
+                    op.deltas.push(CellDelta {
                         column: column.clone(),
                         depth,
                         key: row_key.2.clone(),
@@ -6717,14 +6721,13 @@ impl Inner {
                 }
             }
             if trees {
-                sources.push(WireSource {
-                    op: index as u32,
+                op.access_proof = Some(AccessProof {
                     key: row_key.2.clone(),
                     seq: base.seq,
                 });
             }
         }
-        Ok((deltas, sources))
+        Ok(())
     }
 
     /// Ask the upstream for a row whole: a `ResendWhole` of it, which it
@@ -8364,9 +8367,6 @@ impl Db {
                 author,
                 session,
                 expect,
-                deltas,
-                sources,
-                bases,
                 origin,
             } => {
                 let identity = self.inner.borrow().sessions[index].identity;
@@ -8406,10 +8406,10 @@ impl Db {
                         .map_err(|error| (error, Vec::new()))
                         .and_then(|who| {
                             let (ops, mut roots) = db
-                                .resolve_deltas(policy, ops, deltas)
+                                .resolve_deltas(policy, ops)
                                 .map_err(|error| (error, Vec::new()))?;
                             roots.extend(
-                                db.source_roots(policy, &ops, &sources)
+                                db.proof_roots(policy, &ops)
                                     .map_err(|error| (error, Vec::new()))?,
                             );
                             let possession = crate::large::Possession {
@@ -8426,7 +8426,7 @@ impl Db {
                                     kind,
                                     ops,
                                     (node, tx),
-                                    (bases, writer),
+                                    writer,
                                     possession,
                                 )
                             })
@@ -8574,7 +8574,6 @@ impl Db {
         &self,
         identity: Option<AuthorSubject>,
         mut ops: Vec<WireOp>,
-        deltas: Vec<CellDelta>,
     ) -> Result<(Vec<WireOp>, BTreeSet<[u8; 32]>), Error> {
         let mut roots = BTreeSet::new();
         let unresolved = || {
@@ -8583,41 +8582,76 @@ impl Db {
                 "a large-value delta names no version of its row the writer may read",
             )
         };
-        let inner = self.inner();
-        for delta in deltas {
-            let op = ops.get_mut(delta.op as usize).ok_or_else(unresolved)?;
-            let table = inner.schema.table(op.table())?;
-            let stored = table.stored_name(&delta.column).to_owned();
-            let (row, cells) = match op {
-                WireOp::Insert { row, cells, .. }
-                | WireOp::Update { row, cells, .. }
-                | WireOp::Upsert { row, cells, .. }
-                | WireOp::Restore {
-                    row,
-                    cells: Some(cells),
-                    ..
-                } => (RowUuid::from_bytes(*row), cells),
-                _ => return Err(unresolved()),
-            };
-            let seq = delta.delta.seq;
-            if !still_readable_version(&inner, &table.stored, row, &delta.key, seq, identity)? {
-                return Err(unresolved());
+        // A delta stands in for its op's cell, which holds the NULL it
+        // replaces, once per column. Checked on the commit alone, before
+        // anything stored is read.
+        let malformed = |what: &str| {
+            Error::new(
+                ErrorCode::WriteRejected,
+                format!("a large-value delta {what}"),
+            )
+        };
+        for op in &mut ops {
+            let mut columns = BTreeSet::new();
+            for delta in &op.deltas {
+                if !columns.insert(delta.column.as_str()) {
+                    return Err(malformed("names a column another delta of its op names"));
+                }
+                let cell = match &mut op.write {
+                    WireWrite::Insert { cells, .. }
+                    | WireWrite::Update { cells, .. }
+                    | WireWrite::Upsert { cells, .. }
+                    | WireWrite::Restore {
+                        cells: Some(cells), ..
+                    } => cells.get_mut(&delta.column),
+                    _ => None,
+                };
+                let placeholder = cell.is_some_and(|cell| {
+                    let (inner, depth) = large_delta::unwrap(cell);
+                    matches!(inner, Value::Nullable(None)) && depth == delta.depth
+                });
+                if !placeholder {
+                    return Err(malformed("stands in for no NULL cell of its op"));
+                }
             }
-            let base = inner
-                .version_image(&table.stored, row, &delta.key, seq)?
-                .ok_or_else(unresolved)?;
-            let (_, old) = base
-                .cells
-                .iter()
-                .find(|(name, _)| *name == stored)
-                .ok_or_else(unresolved)?;
-            let old = inner
-                .large_of(&table.stored, &stored, old)?
-                .ok_or_else(unresolved)?;
-            let value = large_delta::apply(&old, &delta.delta).ok_or_else(unresolved)?;
-            roots.insert(value.root.object_hash.0);
-            let cell = cells.get_mut(&delta.column).ok_or_else(unresolved)?;
-            *cell = large_delta::wrap(Value::Large(Box::new(value)), delta.depth);
+        }
+        let inner = self.inner();
+        for op in &mut ops {
+            let deltas = std::mem::take(&mut op.deltas);
+            for delta in deltas {
+                let table = inner.schema.table(op.table())?;
+                let stored = table.stored_name(&delta.column).to_owned();
+                let (row, cells) = match &mut op.write {
+                    WireWrite::Insert { row, cells, .. }
+                    | WireWrite::Update { row, cells, .. }
+                    | WireWrite::Upsert { row, cells, .. }
+                    | WireWrite::Restore {
+                        row,
+                        cells: Some(cells),
+                        ..
+                    } => (RowUuid::from_bytes(*row), cells),
+                    _ => return Err(unresolved()),
+                };
+                let seq = delta.delta.seq;
+                if !still_readable_version(&inner, &table.stored, row, &delta.key, seq, identity)? {
+                    return Err(unresolved());
+                }
+                let base = inner
+                    .version_image(&table.stored, row, &delta.key, seq)?
+                    .ok_or_else(unresolved)?;
+                let (_, old) = base
+                    .cells
+                    .iter()
+                    .find(|(name, _)| *name == stored)
+                    .ok_or_else(unresolved)?;
+                let old = inner
+                    .large_of(&table.stored, &stored, old)?
+                    .ok_or_else(unresolved)?;
+                let value = large_delta::apply(&old, &delta.delta).ok_or_else(unresolved)?;
+                roots.insert(value.root.object_hash.0);
+                let cell = cells.get_mut(&delta.column).ok_or_else(unresolved)?;
+                *cell = large_delta::wrap(Value::Large(Box::new(value)), delta.depth);
+            }
         }
         Ok((ops, roots))
     }
@@ -8747,30 +8781,29 @@ impl Db {
         Ok((replies, parked, deferred))
     }
 
-    /// The roots of the chunked values of the settled versions a commit
-    /// names as its sources, each where `identity` may read it: the trees
-    /// the writer holds without pushing them (SPEC 19.4). A source it may
-    /// not read, or this store lacks, counts for nothing.
-    fn source_roots(
+    /// The roots of the chunked values of the versions a commit's ops name
+    /// as their access proofs, each where `identity` may read it: the trees
+    /// the writer holds without pushing them (SPEC 19.4). A proof naming a
+    /// version it may not read, or this store lacks, counts for nothing.
+    fn proof_roots(
         &self,
         identity: Option<AuthorSubject>,
         ops: &[WireOp],
-        sources: &[WireSource],
     ) -> Result<BTreeSet<[u8; 32]>, Error> {
         let inner = self.inner();
         let mut roots = BTreeSet::new();
-        for source in sources {
-            let Some(op) = ops.get(source.op as usize) else {
+        for op in ops {
+            let Some(proof) = &op.access_proof else {
                 continue;
             };
             let (Ok(table), Some(row)) = (inner.schema.stored_table(op.table()), wire_row(op))
             else {
                 continue;
             };
-            if !still_readable_version(&inner, table, row, &source.key, source.seq, identity)? {
+            if !still_readable_version(&inner, table, row, &proof.key, proof.seq, identity)? {
                 continue;
             }
-            if let Some(image) = inner.version_image(table, row, &source.key, source.seq)? {
+            if let Some(image) = inner.version_image(table, row, &proof.key, proof.seq)? {
                 roots.extend(inner.large_roots(table, &image)?);
             }
         }
@@ -8785,9 +8818,15 @@ impl Db {
         mut kind: WireKind,
         ops: Vec<WireOp>,
         origin: ([u8; 16], u64),
-        (bases, writer): (Vec<WireBase>, ([u8; 16], u64)),
+        writer: ([u8; 16], u64),
         possession: crate::large::Possession,
     ) -> Result<Vec<(String, RowUuid, Vec<u8>)>, (Error, Vec<(String, RowUuid, Vec<u8>)>)> {
+        // Each base by the op it travels on; the ops apply without them.
+        let bases: Vec<(usize, WireBase)> = ops
+            .iter()
+            .enumerate()
+            .flat_map(|(index, op)| op.bases.iter().map(move |base| (index, base.clone())))
+            .collect();
         let ops: Vec<StagedOp> = match ops.into_iter().map(from_wire).collect::<Result<_, _>>() {
             Ok(ops) => ops,
             Err(error) => return Err((error, Vec::new())),
@@ -8903,7 +8942,9 @@ impl Db {
         let by_row = self.inner().row_ops(&ops);
         let (bases, mut built) = {
             let inner = self.inner();
-            let resolved = if relay {
+            let resolved = if let Err(error) = inner.check_bases(&ops, &by_row, &bases) {
+                Err(error)
+            } else if relay {
                 inner
                     .relay_bases(origin, &ops, bases)
                     .map(|bases| (bases, HashMap::new()))
@@ -9163,13 +9204,13 @@ fn receipt_author(identity: &AuthorSubject) -> Vec<u8> {
 
 /// The row a write names.
 fn wire_row(op: &WireOp) -> Option<RowUuid> {
-    match op {
-        WireOp::Insert { row, .. }
-        | WireOp::Update { row, .. }
-        | WireOp::Upsert { row, .. }
-        | WireOp::Delete { row, .. }
-        | WireOp::Restore { row, .. }
-        | WireOp::Move { row, .. } => Some(RowUuid::from_bytes(*row)),
+    match &op.write {
+        WireWrite::Insert { row, .. }
+        | WireWrite::Update { row, .. }
+        | WireWrite::Upsert { row, .. }
+        | WireWrite::Delete { row, .. }
+        | WireWrite::Restore { row, .. }
+        | WireWrite::Move { row, .. } => Some(RowUuid::from_bytes(*row)),
     }
 }
 

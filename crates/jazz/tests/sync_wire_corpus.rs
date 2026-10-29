@@ -288,8 +288,8 @@ impl Transport for Recording {
             // built on an unsettled commit (bases, origin), else the first.
             let relayed = matches!(
                 &decoded,
-                SyncMessage::Commit { bases, origin: Some(_), .. }
-                    if bases.iter().any(|base| matches!(base.on, jazz::db::BuiltOn::Commit { .. }))
+                SyncMessage::Commit { ops, origin: Some(_), .. }
+                    if ops.iter().flat_map(|op| &op.bases).any(|base| matches!(base.on, jazz::db::BuiltOn::Commit { .. }))
             );
             let mut recorded = self.recorded.borrow_mut();
             if let SyncMessage::Fate {
@@ -311,8 +311,8 @@ impl Transport for Recording {
                 .or_insert_with(|| (self.peer.to_owned(), frame.clone()));
             let pinned_relayed = matches!(
                 postcard::from_bytes(&pinned.1),
-                Ok(SyncMessage::Commit { bases, origin: Some(_), .. })
-                    if bases.iter().any(|base: &jazz::db::WireBase| matches!(base.on, jazz::db::BuiltOn::Commit { .. }))
+                Ok(SyncMessage::Commit { ops, origin: Some(_), .. })
+                    if ops.iter().flat_map(|op: &jazz::db::WireOp| &op.bases).any(|base| matches!(base.on, jazz::db::BuiltOn::Commit { .. }))
             );
             if relayed && !pinned_relayed {
                 *pinned = (self.peer.to_owned(), frame.clone());

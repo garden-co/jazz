@@ -209,13 +209,53 @@ verified, its lengths match, and the writer **possesses** it.
 
 A node held by the store proves nothing about the writer, since hashes are
 not secret: a writer possesses a tree when each node is either under the tree
-of a row version it may read that its commit names (the version a delta
-extends, or the settled version its pushes assumed, §19.8), or pushed by the
-writer itself under its own receipt with its children possessed in turn. A
-tree the writer does not possess is refused exactly as one with absent nodes,
-so a write never tells whether the store holds a tree, and never copies
-content the writer cannot read. A trusted link's writes are not checked.
-Relays check their sessions' writes the same way.
+of a row version it may read that its commit names (the version one of its
+ops' deltas extends, or an op's access proof: the version of that op's row
+its pushes assumed, §19.8), or pushed by the writer itself under its own
+receipt with its children possessed in turn. The versions count for every op
+of the commit: each is content the writer may read, so one op's proof
+vouching for another op's tree copies only what the writer could copy anyway
+(item 7 below). A tree the writer does not possess is refused
+exactly as one with absent nodes, so a write never tells whether the store
+holds a tree, and never copies content the writer cannot read. A trusted
+link's writes are not checked. Relays check their sessions' writes the same
+way.
+
+**What possession prevents.** Content hashes leak: through old descriptors a
+reader kept, a share since revoked, logs, or guessing. Possession makes a
+known hash worth nothing without read access:
+
+1. **Read bypass by known hash.** A writer that lost access to a row, or never
+   had it, writes that row's root into a row of its own and then reads or
+   pulls it back. The write is refused: the tree is under no version the
+   writer may read and none of its nodes are under its receipt.
+2. **Existence oracle.** A writer hashes guessed content (confirmation of a
+   file) and watches whether a write naming it is accepted. A tree the writer
+   does not possess is refused with the same error, at the same point, as one
+   whose nodes the store never held. Only a possessed tree reaches the step
+   that may wait on a chunk store fetch, so the wait tells the writer only
+   about content it may read.
+3. **Silent pushes.** `PushChunks` has no answer: a node the store already
+   holds for someone else is taken exactly as a new one, and still proves
+   nothing until the writer pushed it under its own receipt.
+4. **Row-gated pulls.** A pull is answered only through a row version the
+   requester may read, only when that version holds the cited root, and only
+   with nodes under that root (§19.8). A node held for another row and a node
+   never held both come back in `missing`.
+5. **Access checked at apply time.** A delta's base and an access proof count
+   only if the writer may read that version and the row as it stands when the
+   commit applies (`still_readable_version`), including a commit retried after
+   a chunk store fetch. Access lost after the writer saw the version proves
+   nothing.
+6. **A delta's base is its own proof.** The edits extend a version the writer
+   names, so that version must be readable too: a delta over a version the
+   writer may not read rejects the commit, with the same error whether or not
+   the version exists.
+7. **Scope.** A trusted link's writes are not checked. A relay checks its
+   sessions' writes as an authority does before uploading them as its own.
+   Copying content the writer may read into a row others may read is allowed
+   by design: the writer pushes its nodes (or names a readable version of the
+   written row) like any other value it could have typed in.
 
 JSON validity is a writer's responsibility: anyone allowed to write a value is
 trusted not to produce malformed JSON, and Jazz's JSON mutation APIs and JSON
@@ -342,12 +382,13 @@ applied to any version but the one it names.
 **Client to authority.** A client's settled versions all came from the
 authority, so it bases a commit's chunked values on the newest settled
 version of the row it holds: a value extending that version's value travels
-as `Delta` beside the commit's ops, anything else as `Tree`. The authority
+as `Delta` on its op, anything else as `Tree`. The authority
 keeps every version (§19.11), so it holds the base. It resolves the delta only when the writer may read that version
-(`readable_version`): otherwise naming a version would copy content the
+and the row as it stands (`still_readable_version`): otherwise naming a version would copy content the
 writer cannot read into its write. A delta it cannot resolve rejects the
 commit. The rebuilt descriptor is admitted as any other (§19.4). A `Tree`
-travels with the settled version of its row as its source, and is preceded
+travels with the settled version of its row as its access proof, and is
+preceded
 by every node of its tree not under that version's trees, pushed under the
 writer's receipt (§19.4). Nodes the authority holds for others are pushed
 anyway: deduplication is silent. A node the client lacks (a value copied
@@ -514,9 +555,18 @@ db.update(
   { name: "renamed" },
   {
     applyDiffs: {
-      byteField: { within: bytePage, splices: [{ at: 4, delete: 3, insert: bytes }] },
-      textField: { within: textPage, splices: [{ at: 3, delete: 1, insert: "x" }] },
-      textFieldUtf8: { within: utf8Page, splices: [{ atUtf8: 3, deleteUtf8: 1, insert: "x" }] },
+      byteField: {
+        within: bytePage,
+        splices: [{ at: 4, delete: 3, insert: bytes }],
+      },
+      textField: {
+        within: textPage,
+        splices: [{ at: 3, delete: 1, insert: "x" }],
+      },
+      textFieldUtf8: {
+        within: utf8Page,
+        splices: [{ atUtf8: 3, deleteUtf8: 1, insert: "x" }],
+      },
       jsonField: { edits: [{ op: "set", at: "/someKey/11", value: next }] },
     },
   },

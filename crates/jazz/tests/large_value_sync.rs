@@ -10,17 +10,18 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 
 use jazz::db::{
-    BuiltOn, CellDelta, Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadSpan, ReadTier,
-    RemoteLinkHint, SubscriptionStream, SyncCell, SyncMessage, Transport, TransportError, WireBase,
-    WireDelta, WireError, WireKind, WireOp, WirePull, WireTarget, block_on, encode_frames,
+    AccessProof, BuiltOn, CellDelta, Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadSpan,
+    ReadTier, RemoteLinkHint, SubscriptionStream, SyncCell, SyncMessage, Transport, TransportError,
+    WireBase, WireChunk, WireDelta, WireError, WireKind, WireOp, WirePull, WireTarget, WireWrite,
+    block_on, encode_frames,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::ReadViewSourceSpec;
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::records::Value;
 use jazz::tools::{
-    ColumnMergeStrategy, ColumnType, Operation, PolicyExpr, SchemaBuilder, TableName,
-    TableSchemaBuilder,
+    CmpOp, ColumnMergeStrategy, ColumnType, Operation, PolicyExpr, PolicyValue, SchemaBuilder,
+    TableName, TableSchemaBuilder,
 };
 
 use common::{allow_all_policies, compile_schema};
@@ -60,6 +61,16 @@ fn open(node: u8, author: AuthorSubject) -> Db {
     let drafts = TableSchemaBuilder::new("drafts")
         .column("body", ColumnType::Text)
         .policies(allow_all_policies().with_select(PolicyExpr::False));
+    // Readable while `public`: a reader may see some of a row's versions
+    // and not others.
+    let shared = TableSchemaBuilder::new("shared")
+        .column("body", ColumnType::Text)
+        .column("public", ColumnType::Boolean)
+        .policies(allow_all_policies().with_select(PolicyExpr::Cmp {
+            column: "public".to_owned(),
+            op: CmpOp::Eq,
+            value: PolicyValue::Literal(jazz::tools::Value::Boolean(true)),
+        }));
     // Its `body` merges concurrent text edits (SPEC 4 §4.3).
     let merged = TableSchemaBuilder::new("merged")
         .column("body", ColumnType::Text)
@@ -72,6 +83,7 @@ fn open(node: u8, author: AuthorSubject) -> Db {
         .table(links)
         .table(drafts)
         .table(merged)
+        .table(shared)
         .build();
     for column in &mut schema
         .get_mut(&TableName::new("merged"))
@@ -436,6 +448,16 @@ fn pulls_answer_only_for_versions_the_reader_may_read() {
     .root
     .object_hash
     .0;
+    // A node this store never held.
+    let unknown = jazz::large_values::prepare(
+        jazz::large_values::LargeValueKind::String,
+        text(9, LARGE).as_bytes(),
+    )
+    .unwrap()
+    .value_ref
+    .root
+    .object_hash
+    .0;
     // The doc's version as shipped to Mallory, read off the wire before
     // her replica takes it.
     for _ in 0..4 {
@@ -473,6 +495,7 @@ fn pulls_answer_only_for_versions_the_reader_may_read() {
         // a node under the doc's: neither is that version's.
         pull("docs", 1, seq, draft, vec![draft]),
         pull("docs", 1, seq, doc, vec![draft]),
+        pull("docs", 1, seq, doc, vec![unknown]),
     ];
     // Through the draft's own row, at any version: she may read none.
     pulls.extend((0..seq + 4).map(|seq| pull("drafts", 2, seq, draft, vec![draft])));
@@ -494,7 +517,9 @@ fn pulls_answer_only_for_versions_the_reader_may_read() {
     assert!(sent.contains(&doc), "the doc's tree is answered");
     assert!(sent.len() > 1, "with the nodes beneath it the span covers");
     assert!(!sent.contains(&draft), "the draft's tree never is");
+    // Held for a row she cannot read, or never held: answered alike.
     assert!(missing.contains(&draft));
+    assert!(missing.contains(&unknown));
 }
 
 /// A replica orders synced chunked values as the authority does: by cell,
@@ -591,7 +616,9 @@ struct Spy {
 impl Transport for Spy {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
         let entry = match &message {
-            SyncMessage::Commit { deltas, .. } => Some(("commit", !deltas.is_empty())),
+            SyncMessage::Commit { ops, .. } => {
+                Some(("commit", ops.iter().any(|op| !op.deltas.is_empty())))
+            }
             SyncMessage::PushChunks { .. } => Some(("push", false)),
             SyncMessage::Rows { images, .. } => {
                 let mut cells = images.iter().flat_map(|image| image.cells.iter());
@@ -912,19 +939,20 @@ fn a_delta_over_a_version_the_writer_cannot_read_is_rejected() {
         node: [9; 16],
         tx,
         kind: WireKind::Mergeable,
-        ops: vec![WireOp::Update {
-            table: "drafts".to_owned(),
-            row: *row(1).0.as_bytes(),
-            cells: [("body".to_owned(), body)].into(),
-            target: WireTarget::Root,
-            at: None,
+        ops: vec![WireOp {
+            deltas,
+            ..WireWrite::Update {
+                table: "drafts".to_owned(),
+                row: *row(1).0.as_bytes(),
+                cells: [("body".to_owned(), body)].into(),
+                target: WireTarget::Root,
+                at: None,
+            }
+            .into()
         }],
         author: None,
         session: None,
         expect: Vec::new(),
-        deltas,
-        sources: Vec::new(),
-        bases: Vec::new(),
         origin: None,
     };
     // Each version the server could have written the draft at, named as a
@@ -934,7 +962,6 @@ fn a_delta_over_a_version_the_writer_cannot_read_is_rejected() {
             seq,
             Value::Nullable(None),
             vec![CellDelta {
-                op: 0,
                 column: "body".to_owned(),
                 depth: 0,
                 key: Vec::new(),
@@ -1167,23 +1194,23 @@ fn naming_a_hidden_trees_hash_reads_nothing() {
         node: [9; 16],
         tx,
         kind: WireKind::Mergeable,
-        ops: vec![WireOp::Insert {
-            table: "docs".to_owned(),
-            row: *row(n).0.as_bytes(),
-            cells: [
-                ("body".to_owned(), Value::Large(Box::new(value.clone()))),
-                ("blob".to_owned(), Value::Bytes(Vec::new())),
-            ]
+        ops: vec![
+            WireWrite::Insert {
+                table: "docs".to_owned(),
+                row: *row(n).0.as_bytes(),
+                cells: [
+                    ("body".to_owned(), Value::Large(Box::new(value.clone()))),
+                    ("blob".to_owned(), Value::Bytes(Vec::new())),
+                ]
+                .into(),
+                target: WireTarget::Root,
+                at: None,
+            }
             .into(),
-            target: WireTarget::Root,
-            at: None,
-        }],
+        ],
         author: None,
         session: None,
         expect: Vec::new(),
-        deltas: Vec::new(),
-        sources: Vec::new(),
-        bases: Vec::new(),
         origin: None,
     };
     up.borrow_mut().push_back(insert(1, 1, &hidden));
@@ -1209,6 +1236,274 @@ fn naming_a_hidden_trees_hash_reads_nothing() {
     assert_eq!(fates[0].1, fates[1].1, "{fates:?}");
     assert!(fates[0].1.contains("does not hold"), "{fates:?}");
     assert_eq!(local_cell(&server, "docs", 1, "body").unwrap(), None);
+}
+
+/// An access proof names a version of the written row, and proves its trees
+/// only while the writer may read that version: naming a version the writer
+/// may not read, of a row it may read now, proves nothing, and is refused
+/// exactly as a tree nobody stored is (SPEC 19.4, "What possession
+/// prevents").
+#[test]
+fn an_access_proof_the_writer_cannot_read_proves_nothing() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let mallory = open(9, user(9));
+    let (_, up, down) = connect_wires(&server, &mallory, user(9));
+    // The row held a secret body while private, then went public with
+    // another.
+    insert(
+        &server,
+        "shared",
+        1,
+        vec![
+            ("body", Value::String(text(8, LARGE))),
+            ("public", Value::Bool(false)),
+        ],
+    );
+    let secret = server.write_conflicts("shared", row(1), None).unwrap()[0].seq;
+    block_on(
+        server.update(
+            "shared",
+            row(1),
+            [
+                ("body".to_owned(), Value::String("public".into())),
+                ("public".to_owned(), Value::Bool(true)),
+            ]
+            .into(),
+            Default::default(),
+        ),
+    )
+    .unwrap();
+    let hidden = jazz::large_values::prepare(
+        jazz::large_values::LargeValueKind::String,
+        text(8, LARGE).as_bytes(),
+    )
+    .unwrap()
+    .value_ref;
+    let unknown = jazz::large_values::prepare(
+        jazz::large_values::LargeValueKind::String,
+        text(9, LARGE).as_bytes(),
+    )
+    .unwrap()
+    .value_ref;
+    pump(&server, &[&mallory]);
+    // Mallory writes the secret body's tree back into the row, naming the
+    // private version as her proof; then a tree nobody stored.
+    let update = |tx: u64, value: &jazz::large_values::LargeValueRef| SyncMessage::Commit {
+        node: [9; 16],
+        tx,
+        kind: WireKind::Mergeable,
+        ops: vec![WireOp {
+            access_proof: Some(AccessProof {
+                key: Vec::new(),
+                seq: secret,
+            }),
+            ..WireWrite::Update {
+                table: "shared".to_owned(),
+                row: *row(1).0.as_bytes(),
+                cells: [("body".to_owned(), Value::Large(Box::new(value.clone())))].into(),
+                target: WireTarget::Root,
+                at: None,
+            }
+            .into()
+        }],
+        author: None,
+        session: None,
+        expect: Vec::new(),
+        origin: None,
+    };
+    up.borrow_mut().push_back(update(1, &hidden));
+    up.borrow_mut().push_back(update(2, &unknown));
+    for _ in 0..4 {
+        block_on(server.tick()).unwrap();
+    }
+    let fates: Vec<String> = down
+        .borrow()
+        .iter()
+        .filter_map(|message| match message {
+            SyncMessage::Fate {
+                result: Err(WireError::Rejected { message, .. }),
+                ..
+            } => Some(message.clone()),
+            SyncMessage::Fate { .. } => Some("accepted".to_owned()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(fates.len(), 2, "{fates:?}");
+    assert_eq!(fates[0], fates[1], "{fates:?}");
+    assert!(fates[0].contains("does not hold"), "{fates:?}");
+    assert_eq!(
+        local_cell(&server, "shared", 1, "body").unwrap(),
+        Some(Value::String("public".into()))
+    );
+}
+
+/// Pushed nodes are taken silently: the server answers a push of nodes it
+/// already holds (for a row the pusher cannot read) as it answers a push of
+/// new ones, with nothing (SPEC 19.9, "No existence oracle"). A node held
+/// for someone else proves nothing until the writer pushed it itself
+/// (SPEC 19.4, "What possession prevents").
+#[test]
+fn a_push_is_never_answered() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let mallory = open(9, user(9));
+    let (_, up, down) = connect_wires(&server, &mallory, user(9));
+    insert(
+        &server,
+        "drafts",
+        1,
+        vec![("body", Value::String(text(8, LARGE)))],
+    );
+    pump(&server, &[&mallory]);
+    let prepared = |seed| {
+        jazz::large_values::prepare(
+            jazz::large_values::LargeValueKind::String,
+            text(seed, LARGE).as_bytes(),
+        )
+        .unwrap()
+    };
+    let hidden = prepared(8).value_ref;
+    let insert = |tx: u64, n: u8| SyncMessage::Commit {
+        node: [9; 16],
+        tx,
+        kind: WireKind::Mergeable,
+        ops: vec![
+            WireWrite::Insert {
+                table: "docs".to_owned(),
+                row: *row(n).0.as_bytes(),
+                cells: [
+                    ("body".to_owned(), Value::Large(Box::new(hidden.clone()))),
+                    ("blob".to_owned(), Value::Bytes(Vec::new())),
+                ]
+                .into(),
+                target: WireTarget::Root,
+                at: None,
+            }
+            .into(),
+        ],
+        author: None,
+        session: None,
+        expect: Vec::new(),
+        origin: None,
+    };
+    let fates = || -> Vec<bool> {
+        down.borrow()
+            .iter()
+            .filter_map(|message| match message {
+                SyncMessage::Fate { result, .. } => Some(result.is_ok()),
+                _ => None,
+            })
+            .collect()
+    };
+    // Held for the draft only: naming it proves nothing.
+    up.borrow_mut().push_back(insert(1, 1));
+    for _ in 0..2 {
+        block_on(server.tick()).unwrap();
+    }
+    assert_eq!(fates(), [false]);
+    let before = down.borrow().len();
+    for seed in [8, 9] {
+        up.borrow_mut().push_back(SyncMessage::PushChunks {
+            nodes: prepared(seed)
+                .staged_chunks
+                .into_iter()
+                .map(|chunk| WireChunk {
+                    hash: chunk.node_ref.object_hash.0,
+                    bytes: chunk.encoded,
+                })
+                .collect(),
+        });
+        for _ in 0..2 {
+            block_on(server.tick()).unwrap();
+        }
+        assert_eq!(
+            down.borrow().len(),
+            before,
+            "{:?}",
+            down.borrow().iter().skip(before).collect::<Vec<_>>()
+        );
+    }
+    // Pushed by Mallory herself, the same tree is hers to write: she holds
+    // its content, as the push shows.
+    up.borrow_mut().push_back(insert(2, 2));
+    for _ in 0..2 {
+        block_on(server.tick()).unwrap();
+    }
+    assert_eq!(fates(), [false, true]);
+}
+
+/// A delta stands in for its op's NULL cell, once per column: a second
+/// delta for a column, or one over a cell holding a value, refuses the
+/// commit rather than replacing what was sent (SPEC 8.2).
+#[test]
+fn a_delta_that_does_not_stand_in_for_a_null_cell_is_refused() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let mallory = open(9, user(9));
+    let (_, up, down) = connect_wires(&server, &mallory, user(9));
+    insert(
+        &server,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String(text(7, LARGE))),
+            ("blob", Value::Bytes(Vec::new())),
+        ],
+    );
+    pump(&server, &[&mallory]);
+    let delta = || CellDelta {
+        column: "body".to_owned(),
+        depth: 0,
+        key: Vec::new(),
+        delta: WireDelta {
+            seq: 1,
+            base: 0,
+            edits: Vec::new(),
+        },
+    };
+    let update = |tx: u64, body: Value, deltas: Vec<CellDelta>| SyncMessage::Commit {
+        node: [9; 16],
+        tx,
+        kind: WireKind::Mergeable,
+        ops: vec![WireOp {
+            deltas,
+            ..WireWrite::Update {
+                table: "docs".to_owned(),
+                row: *row(1).0.as_bytes(),
+                cells: [("body".to_owned(), body)].into(),
+                target: WireTarget::Root,
+                at: None,
+            }
+            .into()
+        }],
+        author: None,
+        session: None,
+        expect: Vec::new(),
+        origin: None,
+    };
+    up.borrow_mut()
+        .push_back(update(1, Value::Nullable(None), vec![delta(), delta()]));
+    up.borrow_mut()
+        .push_back(update(2, Value::String("sent".into()), vec![delta()]));
+    for _ in 0..4 {
+        block_on(server.tick()).unwrap();
+    }
+    let fates: Vec<String> = down
+        .borrow()
+        .iter()
+        .filter_map(|message| match message {
+            SyncMessage::Fate {
+                result: Err(WireError::Rejected { message, .. }),
+                ..
+            } => Some(message.clone()),
+            SyncMessage::Fate { .. } => Some("accepted".to_owned()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(fates.len(), 2, "{fates:?}");
+    assert!(
+        fates[0].contains("names a column another delta"),
+        "{fates:?}"
+    );
+    assert!(fates[1].contains("stands in for no NULL cell"), "{fates:?}");
 }
 
 /// A text write the authority merges is checked like any other: its
@@ -1252,23 +1547,23 @@ fn a_merged_text_write_naming_a_hidden_tree_is_refused() {
         node: [9; 16],
         tx: 1,
         kind: WireKind::Mergeable,
-        ops: vec![WireOp::Update {
-            table: "merged".to_owned(),
-            row: *row(2).0.as_bytes(),
-            cells: [("body".to_owned(), Value::Large(Box::new(hidden)))].into(),
-            target: WireTarget::Root,
-            at: None,
+        ops: vec![WireOp {
+            bases: vec![WireBase {
+                key: Vec::new(),
+                on: BuiltOn::Seq(seed),
+            }],
+            ..WireWrite::Update {
+                table: "merged".to_owned(),
+                row: *row(2).0.as_bytes(),
+                cells: [("body".to_owned(), Value::Large(Box::new(hidden)))].into(),
+                target: WireTarget::Root,
+                at: None,
+            }
+            .into()
         }],
         author: None,
         session: None,
         expect: Vec::new(),
-        deltas: Vec::new(),
-        sources: Vec::new(),
-        bases: vec![WireBase {
-            op: 0,
-            key: Vec::new(),
-            on: BuiltOn::Seq(seed),
-        }],
         origin: None,
     });
     for _ in 0..4 {
