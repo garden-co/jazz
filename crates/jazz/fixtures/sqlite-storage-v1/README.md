@@ -11,9 +11,9 @@ are stored, a rejection's reason name changed how fates are recorded, and
 pending uploads moved from one encoded message to a row per op).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `dab2523146c0f375498fac1ded2ef700bfedf44d74cf5dcbd8b7101ee4251e8d`.
+  the SQLite file `d1303ff8760d785241b5d8e7cef9d84866ae54166c2c268378211ad27772f404`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `6c39d33c56444429300d7e781e16fd7e9708624f9966e7a90bd4d34f8256f4e4`.
+  `48d25fea2df42965e9f836f76f46f83a78da472ceab62966a485d28b1bbe6321`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
@@ -28,7 +28,7 @@ nodes and write times:
   write as sent (`_st` bit 2, at `_seq` = minus the commit's seq);
 - a client that synced `projects` and `documents`, wrote one row that
   settled, one stamped far ahead of the server's clock that the server
-  rejected (so `_jazz_applied` keeps a rejected fate with its reason name),
+  rejected (so `_jazz_transactions` keeps a rejected fate with its reason name),
   then two writes (an insert and an update) that never reached the
   server: its pending uploads;
 - a row of `drafts` on a base branch that the draft branch overrides with a
@@ -68,6 +68,10 @@ Replacing a pending commit's `author` and `session` fields with one `acting`
 enum (`Own`, `Attributed`, `Session`), which changes the encoded
 `_jazz_pending` header, regenerated it the same way. A pending row in the
 earlier layout is refused as an unsupported storage format, never misread.
+
+Merging `_jazz_applied` and `_jazz_settled` into one `_jazz_transactions`
+table keyed by an interned node code (`_jazz_nodes.n`) regenerated it the
+same way.
 
 Hiding branch-view rows whose head version the reader may not read added the
 client's `_jazz_withheld` table (created on the first hidden eviction) and

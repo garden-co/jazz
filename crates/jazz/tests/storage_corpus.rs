@@ -56,8 +56,8 @@ const CLIENT_FILE: &str = "sqlite-storage-v1/client.sqlite.gz.base64";
 /// change re-runs the producer and re-pins these; after that the corpus is
 /// immutable and a new storage format gets a new corpus beside it (see
 /// `fixtures/sqlite-storage-v1/README.md`).
-const SERVER_SHA256: &str = "dab2523146c0f375498fac1ded2ef700bfedf44d74cf5dcbd8b7101ee4251e8d";
-const CLIENT_SHA256: &str = "6c39d33c56444429300d7e781e16fd7e9708624f9966e7a90bd4d34f8256f4e4";
+const SERVER_SHA256: &str = "d1303ff8760d785241b5d8e7cef9d84866ae54166c2c268378211ad27772f404";
+const CLIENT_SHA256: &str = "48d25fea2df42965e9f836f76f46f83a78da472ceab62966a485d28b1bbe6321";
 
 const SERVER_NODE: [u8; 16] = [0xa0; 16];
 const CLIENT_NODE: [u8; 16] = [0xc0; 16];
@@ -886,14 +886,17 @@ fn pinned_sqlite_corpus_reopens_and_accepts_current_writes() {
 }
 
 /// The server's recorded fates are format 1 too: the rejected commit's fate
-/// still decodes, with its reason name, from `_jazz_applied`.
+/// still decodes, with its reason name, from `_jazz_transactions`.
 #[test]
 fn pinned_server_corpus_keeps_a_rejected_fate_with_its_reason() {
     let dir = scratch("fates");
     let server_path = install(SERVER_FILE, SERVER_SHA256, &dir);
     let conn = rusqlite::Connection::open(&server_path).unwrap();
     let mut statement = conn
-        .prepare("SELECT node, result FROM _jazz_applied ORDER BY node, tx")
+        .prepare(
+            "SELECT n.node, t.result FROM _jazz_transactions t JOIN _jazz_nodes n USING (n) \
+             WHERE t.result IS NOT NULL ORDER BY n.node, t.tx",
+        )
         .unwrap();
     let fates: Vec<(Vec<u8>, Result<(), WireError>)> = statement
         .query_map([], |row| Ok((row.get(0)?, row.get::<_, Vec<u8>>(1)?)))
@@ -970,6 +973,18 @@ fn another_storage_format_is_refused_without_changing_the_file() {
         (
             "versioned names",
             "ALTER TABLE _jazz_names ADD COLUMN version BLOB",
+        ),
+        // One from before a commit's record was one `_jazz_transactions`
+        // row: fates and landings in their own tables.
+        (
+            "per-table fates",
+            "CREATE TABLE _jazz_applied (node BLOB NOT NULL, tx INTEGER NOT NULL, result BLOB, \
+             PRIMARY KEY (node, tx))",
+        ),
+        (
+            "uninterned nodes",
+            "DROP TABLE _jazz_nodes; \
+             CREATE TABLE _jazz_nodes (node BLOB PRIMARY KEY, author INTEGER) WITHOUT ROWID",
         ),
     ] {
         let path = edited_server_corpus(name, sql);
