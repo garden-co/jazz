@@ -19,9 +19,10 @@ use std::task::{Context, Poll, Waker};
 
 use duplex_transport::duplex;
 use jazz::db::{
-    BuiltOn, Db, DbConfig, DbIdentity, ExactWriteTarget, FileOptions, InsertOptions, LOCAL_BASE,
-    ReadOpts, Reason, RemoteLinkHint, SubscriptionStream, SyncMessage, UpdateOptions, Upstream,
-    WireBase, WireKind, WireOp, WireTarget, WireWrite, WriteConflict, WriteTarget, block_on,
+    Acting, BuiltOn, Db, DbConfig, DbIdentity, ExactWriteTarget, FileOptions, InsertOptions,
+    LOCAL_BASE, ReadOpts, Reason, RemoteLinkHint, SubscriptionStream, SyncMessage, UpdateOptions,
+    Upstream, WireBase, WireKind, WireOp, WireTarget, WireWrite, WriteConflict, WriteTarget,
+    block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::BranchSelector;
@@ -749,9 +750,7 @@ fn a_relays_commit_a_write_was_built_on_is_what_its_writer_saw() {
             }
             .into()
         }],
-        author: None,
-        session: None,
-        expect: Vec::new(),
+        acting: Acting::Own,
         origin: Some(([0xa1; 16], LOCAL_BASE + tx)),
     };
     let tx = |n: u64| LOCAL_BASE + n;
@@ -807,8 +806,8 @@ fn a_relays_commit_a_write_was_built_on_is_what_its_writer_saw() {
 
     let mut fates = BTreeMap::new();
     while let Some(message) = relay.try_recv() {
-        if let SyncMessage::Fate { tx, result, .. } = message {
-            fates.insert(tx, result);
+        if let SyncMessage::Fate { tx, outcome, .. } = message {
+            fates.insert(tx, outcome.result());
         }
     }
     assert!(fates[&tx(1)].is_ok() && fates[&tx(2)].is_ok());

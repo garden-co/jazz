@@ -378,18 +378,20 @@ impl Inner {
     /// What each based row of an upload was built on, in this authority's
     /// history, keyed by the row: an accepted seq, or where the commit it
     /// names landed. A base on a commit rejected or never received rejects
-    /// the upload.
+    /// the upload. `local`: this store is a relay, whose sessions build on
+    /// its unsettled versions too (by their local seqs).
     pub(super) fn resolve_bases(
         &self,
         sender: ([u8; 16], u64),
         ops: &[StagedOp],
         bases: &[(usize, WireBase)],
+        local: bool,
     ) -> Result<HashMap<RowKey, Built>, Error> {
         let mut built = HashMap::new();
         for (op, base) in bases {
             let (table, row) = self.based_row(ops, *op)?;
             let on = match base.on {
-                BuiltOn::Seq(seq) if seq < LOCAL_BASE => Built::Seq(seq),
+                BuiltOn::Seq(seq) if local || seq < LOCAL_BASE => Built::Seq(seq),
                 BuiltOn::Seq(_) => return Err(unknown_base("a version")),
                 BuiltOn::Own { back } => {
                     let tx = sender
@@ -438,6 +440,24 @@ impl Inner {
             .map_err(storage)?;
         }
         Ok(())
+    }
+
+    /// The current version of each branch of a row, as (key, seq).
+    pub(super) fn current_versions(
+        &self,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<Vec<(Vec<u8>, u64)>, Error> {
+        let sql = format!("SELECT _b, _seq FROM {} WHERE id = ?1", quote(table));
+        let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
+        let versions = statement
+            .query_map([row.0.as_bytes().to_vec()], |r| {
+                Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)? as u64))
+            })
+            .map_err(storage)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage)?;
+        Ok(versions)
     }
 
     /// The accepted versions of a row, in seq order.
