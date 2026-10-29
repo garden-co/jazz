@@ -3628,3 +3628,149 @@ fn a_branch_move_carries_json_stored_under_an_earlier_schema() {
     assert_eq!(moved.len(), 1);
     assert_eq!(moved[0].cell("payload"), Some(payload));
 }
+
+/// `_st` of `row`'s current version on the branch `selector(byte)` names,
+/// read raw from the store file.
+fn stored_state(directory: &std::path::Path, row: RowUuid, byte: u8) -> i64 {
+    let conn = rusqlite::Connection::open(directory.join("jazz.sqlite")).unwrap();
+    conn.query_row(
+        "SELECT _st FROM todos WHERE id = ?1 AND branch_id = ?2",
+        rusqlite::params![row.0.as_bytes().to_vec(), [byte; 16].to_vec()],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
+#[test]
+fn row_state_bits_record_deletion_and_content_per_version() {
+    let (_template, schema) = open_db();
+    let directory = tempfile::tempdir().unwrap();
+    let db = open_file_db(directory.path(), &schema);
+    let title = |text: &str| BTreeMap::from([("title".to_owned(), Value::String(text.to_owned()))]);
+    let on = |byte: u8| jazz::db::WriteTarget::BranchView {
+        head: selector(byte),
+        base: None,
+    };
+    let insert = |row: RowUuid, byte: u8| {
+        db.insert(
+            "todos",
+            title("first"),
+            jazz::db::InsertOptions {
+                row_id: Some(row),
+                target: jazz::db::ExactWriteTarget::Branch(selector(byte)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    };
+    let delete = |row: RowUuid, byte: u8| {
+        db.delete(
+            "todos",
+            row,
+            jazz::db::DeleteOptions {
+                target: on(byte),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    };
+    let state = |row: RowUuid, byte: u8| stored_state(directory.path(), row, byte);
+
+    // A content write is 0; a delete authors no content (3); a restore
+    // without content leaves it deleted-bit clear, still no content (1).
+    let plain = RowUuid::from_bytes([0xd1; 16]);
+    insert(plain, 0xd0);
+    assert_eq!(state(plain, 0xd0), 0, "insert");
+    db.update(
+        "todos",
+        plain,
+        title("second"),
+        jazz::db::UpdateOptions {
+            target: on(0xd0),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(state(plain, 0xd0), 0, "update");
+    delete(plain, 0xd0);
+    assert_eq!(state(plain, 0xd0), 3, "delete");
+    db.restore(
+        "todos",
+        plain,
+        None,
+        jazz::db::RestoreOptions {
+            target: jazz::db::ExactWriteTarget::Branch(selector(0xd0)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(state(plain, 0xd0), 1, "restore without content");
+
+    // An update and a delete in one commit: the version is deleted and its
+    // commit wrote content (2).
+    let both = RowUuid::from_bytes([0xd2; 16]);
+    insert(both, 0xd0);
+    let tx = db.mergeable_tx().unwrap();
+    tx.update(
+        "todos",
+        both,
+        title("edited"),
+        jazz::db::UpdateOptions {
+            target: on(0xd0),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    tx.delete(
+        "todos",
+        both,
+        jazz::db::DeleteOptions {
+            target: on(0xd0),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    assert_eq!(state(both, 0xd0), 2, "update and delete in one commit");
+
+    // A move leaves a source tombstone without content (3) and inserts
+    // the destination (0).
+    let moved = RowUuid::from_bytes([0xd3; 16]);
+    insert(moved, 0xd0);
+    let tx = db.mergeable_tx().unwrap();
+    tx.move_between_branches("todos", selector(0xd0), selector(0xd4), moved)
+        .unwrap();
+    tx.commit().unwrap();
+    assert_eq!(state(moved, 0xd0), 3, "move source");
+    assert_eq!(state(moved, 0xd4), 0, "move destination");
+
+    // Deleting an inherited row copies it into the head without content
+    // and marks it deleted (3); updating one writes content (0).
+    let inherited = RowUuid::from_bytes([0xd5; 16]);
+    insert(inherited, 0xd0);
+    let over_base = |byte: u8| jazz::db::WriteTarget::BranchView {
+        head: selector(byte),
+        base: Some(BranchViewBase::Current(selector(0xd0))),
+    };
+    db.delete(
+        "todos",
+        inherited,
+        jazz::db::DeleteOptions {
+            target: over_base(0xd6),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(state(inherited, 0xd6), 3, "inherited delete");
+    db.update(
+        "todos",
+        inherited,
+        title("head edit"),
+        jazz::db::UpdateOptions {
+            target: over_base(0xd7),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(state(inherited, 0xd7), 0, "inherited update");
+}
