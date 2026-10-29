@@ -439,6 +439,12 @@ pub(crate) const DELETION: [&str; 6] = [
 pub(crate) const STATE_NO_CONTENT: i64 = 1;
 /// `_st` bit: the version is a tombstone. Live versions are `_st < 2`.
 pub(crate) const STATE_DELETED: i64 = 2;
+/// `_st` bit: the version is an authority text merge's write as its writer
+/// sent it, superseded by the merged version at the same seq (SPEC 4
+/// §4.3). Kept only in `__h`, at `_seq` = minus the commit's seq, as the
+/// base of its writer's next chained write; never read as a version, so
+/// every read of `__h` that is not by exact seq requires this bit clear.
+pub(crate) const STATE_AS_SENT: i64 = 4;
 
 /// Whether `column` names deletion metadata (`$deletedAt`, `$deletedBy...`).
 pub(crate) fn is_deletion(column: &str) -> bool {
@@ -940,11 +946,11 @@ impl Table {
         // `_b` is the canonical branch key ('' for unbranched tables).
         // Rows are unique per (id, branch); branch views select by `_b`
         // first, so every index leads with it. `_st` is the version's state
-        // bits ([`STATE_NO_CONTENT`], [`STATE_DELETED`]): 0 for a live
-        // version whose commit wrote content. `_base` and `_cols` are what the
-        // authority keeps of the version an accepted upload wrote: what it
-        // was built on and the columns it authored (SPEC 4 §4.6); NULL
-        // everywhere else.
+        // bits ([`STATE_NO_CONTENT`], [`STATE_DELETED`], and in history
+        // [`STATE_AS_SENT`]): 0 for a live version whose commit wrote
+        // content. `_base` and `_cols` are what the authority keeps of the
+        // version an accepted upload wrote: what it was built on and the
+        // columns it authored (SPEC 4 §4.6); NULL everywhere else.
         sql.push_str(&format!(
             "CREATE TABLE {name} (rid INTEGER PRIMARY KEY, id BLOB NOT NULL, \
              _b BLOB NOT NULL DEFAULT X'', _seq INTEGER NOT NULL, \
