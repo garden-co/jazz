@@ -245,8 +245,7 @@ core's, and through it the binding host, the browser worker and the native
 relay) refuses such a session with reason `identity_mismatch`; only a system
 store (a server) serves any identity. Each accept names the session's own
 replica author: the browser worker admits a tab as the author the tab
-connected with, never as the worker's own. For the same reason a replica
-configured as a user refuses a local write as another session. A server
+connected with, never as the worker's own. A server
 checks a replica's declared identity against the one it authenticated when it
 admits the link (`INV-EDGE-26`).
 
