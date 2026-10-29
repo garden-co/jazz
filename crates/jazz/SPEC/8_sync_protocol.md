@@ -466,7 +466,14 @@ reason `schema_version_not_deployed` (code `write_rejected`): the app that
 wrote it was released ahead of its schema, a deploy error that waiting would
 hide. The replica rolls it back like any refused write; the session goes on,
 and the commits after it upload. A server holding a session's reads behind an
-unadmitted version refuses the commits behind them the same way.
+unadmitted version refuses the commits behind them the same way. A relay (a
+worker serving tabs) refuses only once its upstream sent its catalogue on the
+connection, so it knows every version the authority deployed; until then it
+holds such commits. Its `Holds` lists only the versions whose schema it holds
+in this process, so a version an earlier process mirrored is sent again and
+the relay serves it as before. A pending commit written under the version
+current until a newer one is made current uploads under the version it was
+written under.
 One commit uploads under one version, so a replica refuses a transaction
 written through views of different versions.
 

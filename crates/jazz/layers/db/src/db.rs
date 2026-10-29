@@ -2371,6 +2371,12 @@ impl Db {
             }
             inner.write_admission(&target, cells)?;
             if make_current {
+                // Pending commits written under the version current until
+                // now keep uploading under it (INV-SYNC-52).
+                let previous = *inner.owner_version.as_bytes();
+                if let Some(client) = inner.client.as_mut() {
+                    client.keep_version(previous);
+                }
                 inner.owner_version = target.jazz.version_id();
                 inner.owner = Rc::new(target);
                 // Read policies that changed may read differently from

@@ -1362,6 +1362,10 @@ pub(crate) struct Client {
     /// This store committed writes before it became a replica (see
     /// [`stranded`]): it refuses every upstream.
     stranded: bool,
+    /// The upstream sent its catalogue on this connection: this store
+    /// knows every version the authority deployed, so its own sessions'
+    /// commits under a version it still lacks are refused (INV-SYNC-52).
+    catalogued: bool,
     /// Rows asked for whole (their shipped deltas did not apply), until a
     /// whole image of each arrives. This store holds a stale version of
     /// each, so no result it settles is the server's: no watermark is
@@ -4778,6 +4782,14 @@ impl Inner {
 }
 
 impl Client {
+    /// Pending commits recorded under the current version without saying
+    /// so were written under `version`, about to stop being current.
+    pub(crate) fn keep_version(&mut self, version: [u8; 16]) {
+        for tx in self.pending.iter().map(|p| p.tx) {
+            self.versions.entry(tx).or_insert(version);
+        }
+    }
+
     /// Stored table `from` is stored as `to` now (a replica took its
     /// upstream's name for it).
     pub(crate) fn moved_table(&mut self, from: &str, to: &str) {
@@ -4846,6 +4858,7 @@ impl Client {
             relay_ready: false,
             unadmitted: false,
             stranded: false,
+            catalogued: false,
             whole: HashSet::new(),
             forgotten: false,
         }
@@ -4931,12 +4944,15 @@ impl Db {
             )
         });
         let version = *inner.owner_version.as_bytes();
-        // The versions whose names this store keeps: the server sends
-        // those it stores otherwise, or it has and this store lacks.
+        // The versions whose names this store keeps and whose schema it
+        // holds: the server sends those it stores otherwise, or it has and
+        // this store lacks. One only an earlier process admitted is sent
+        // again, so this one holds it and can serve its own sessions by it.
         let versions = inner
             .names
             .in_order()
             .into_iter()
+            .filter(|(version, _)| inner.deployed(*version))
             .map(|(version, names)| (*version.as_bytes(), crate::names::names_digest(names)))
             .collect();
         let client = inner.client.as_mut().expect("client");
@@ -4978,6 +4994,7 @@ impl Db {
         let asked = std::mem::take(&mut client.requested);
         client.wanted.extend(asked);
         client.unadmitted = false;
+        client.catalogued = false;
         client.connection += 1;
         let connection = client.connection;
         if client.stranded {
@@ -5700,6 +5717,10 @@ impl Db {
                 None if tier == DurabilityTier::Local && client.stored.contains(&tx) => {
                     Poll::Ready(Ok(tx))
                 }
+                // A stranded store uploads nothing (INV-SYNC-51).
+                None if client.stranded && client.pending.iter().any(|p| p.tx == tx) => {
+                    Poll::Ready(Err(stranded()))
+                }
                 None if client.pending.iter().any(|p| p.tx == tx) => Poll::Pending,
                 // Not pending and no fate: a local no-op or pre-connection commit.
                 None => Poll::Ready(Ok(tx)),
@@ -6033,7 +6054,10 @@ impl Db {
                         confirmed,
                     } => {
                         match inner.mirror_catalogue(namespace, versions, cells, &confirmed) {
-                            Ok(renamed) => rebase |= renamed,
+                            Ok(renamed) => {
+                                rebase |= renamed;
+                                inner.client.as_mut().expect("client").catalogued = true;
+                            }
                             // This store cannot store rows as its upstream
                             // does: it stops syncing with it, nothing that
                             // follows applies, and its remote reads fail
@@ -6685,10 +6709,21 @@ impl Inner {
         version == self.owner_version || self.admitted.iter().any(|(id, _)| *id == version)
     }
 
+    /// Whether this store knows every version the authority deployed: it
+    /// is the authority (it has no upstream), or its upstream sent its
+    /// catalogue on this connection.
+    fn knows_deployed(&self) -> bool {
+        self.client.as_ref().is_none_or(|client| client.catalogued)
+    }
+
     /// Refuse each commit in `held`, messages of session `index` in the
     /// order it sent them, that it wrote under a version this store has
-    /// not admitted (INV-SYNC-52).
+    /// not admitted, once it knows every version the authority deployed
+    /// (INV-SYNC-52).
     fn refuse_undeployed(&mut self, index: usize, held: &mut VecDeque<SyncMessage>) {
+        if !self.knows_deployed() {
+            return;
+        }
         let mut version = self.sessions[index].version;
         let mut refused = Vec::new();
         held.retain(|message| match message {
@@ -7143,12 +7178,17 @@ impl Db {
             // A session on a schema version this server has not
             // admitted (a draft awaiting its lens) waits: serving it
             // under another version would expose rows it may not read
-            // that way. Its commits do not wait: they are refused
+            // that way. Once it knows every version the authority
+            // deployed, its commits do not wait: they are refused
             // (INV-SYNC-52).
-            if !matches!(
-                message,
-                SyncMessage::Schema { .. } | SyncMessage::Holds { .. } | SyncMessage::Commit { .. }
-            ) {
+            let refuses = matches!(message, SyncMessage::Commit { .. })
+                && self.inner.borrow().knows_deployed();
+            if !refuses
+                && !matches!(
+                    message,
+                    SyncMessage::Schema { .. } | SyncMessage::Holds { .. }
+                )
+            {
                 let mut inner = self.inner.borrow_mut();
                 if inner.session_unadmitted(index) {
                     inbound.push_front(message);

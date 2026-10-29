@@ -14,7 +14,7 @@ use std::task::{Context, Poll};
 
 use jazz::db::{
     Db, DbConfig, DbIdentity, Error, FileOptions, InsertOptions, ReadOpts, ReadTier, Reason,
-    SubscriptionEvent, SyncMessage, Transport, TransportError, block_on,
+    RemoteLinkHint, SubscriptionEvent, SyncMessage, Transport, TransportError, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::{MigrationLens, TableLens};
@@ -478,6 +478,12 @@ fn remote_read(server: &Db, client: &Db) -> Option<Result<Vec<u8>, String>> {
 /// Transaction `tx`'s fate at the server, pumping `client` and `server`
 /// until it is known.
 fn fate(server: &Db, client: &Db, tx: u64) -> Result<(), Error> {
+    fate_by(client, tx, || pump(server, &[client]))
+}
+
+/// Transaction `tx`'s fate at the authority, calling `pump` until it is
+/// known.
+fn fate_by(client: &Db, tx: u64, mut pump: impl FnMut()) -> Result<(), Error> {
     let mut wait = pin!(client.wait_for_transaction(tx, DurabilityTier::Global));
     let waker = futures::task::noop_waker();
     let mut cx = Context::from_waker(&waker);
@@ -485,7 +491,7 @@ fn fate(server: &Db, client: &Db, tx: u64) -> Result<(), Error> {
         if let Poll::Ready(result) = wait.as_mut().poll(&mut cx) {
             return result.map(drop);
         }
-        pump(server, &[client]);
+        pump();
     }
     panic!("transaction {tx} has no fate yet");
 }
@@ -613,4 +619,164 @@ fn interleaved_versions_upload_in_order() {
     assert_eq!(ids(&server), vec![1, 2, 3, 4]);
     assert_eq!(tag(&server, 2), some("t2"));
     assert_eq!(tag(&server, 4), some("t4"));
+}
+
+/// A write a stranded store makes after it became a replica never
+/// uploads: a durable wait on it says why rather than hanging.
+#[test]
+fn a_stranded_store_fails_durable_waits() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = authority_at(v1(), &dir.path().join("server.sqlite"));
+    let client = open_at(v1(), 1, &dir.path().join("client.sqlite"));
+    insert(&client, 2, &[("title", "standalone")]);
+    let _link = link(&client, &server);
+    pump(&server, &[&client]);
+    let tx = insert(&client, 3, &[("title", "after")]);
+    let error = fate(&server, &client, tx).expect_err("never uploads");
+    assert!(
+        error.message.contains("before it became a replica"),
+        "{error:?}"
+    );
+}
+
+/// A v1 write still pending when the client makes v2 (renaming `title`)
+/// current uploads under v1, the version it was written under.
+#[test]
+fn a_pending_write_uploads_under_its_version_after_an_upgrade() {
+    use jazz::protocol::LensOp;
+    let renamed = || {
+        compile_schema(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("notes")
+                        .column("heading", ColumnType::Text)
+                        .policies(allow_all_policies()),
+                )
+                .build(),
+        )
+    };
+    let rename = MigrationLens::new(
+        v1().version_id(),
+        renamed().version_id(),
+        vec![TableLens {
+            source_table: "notes".into(),
+            target_table: "notes".into(),
+            ops: vec![LensOp::RenameColumn {
+                from: "title".into(),
+                to: "heading".into(),
+            }],
+        }],
+    )
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let server = authority_at(v1(), &dir.path().join("server.sqlite"));
+    block_on(server.admit_schema_with_lenses(renamed(), std::slice::from_ref(&rename))).unwrap();
+    let client = open_at(v1(), 1, &dir.path().join("client.sqlite"));
+    client.become_replica();
+    let tx = insert(&client, 7, &[("title", "offline v1 write")]);
+    block_on(client.activate_schema_with_lenses(renamed(), &[rename])).unwrap();
+    let _link = link(&client, &server);
+    fate(&server, &client, tx).expect("uploads under v1");
+    assert_eq!(ids(&server), vec![7]);
+    assert_eq!(ids(&client), vec![7]);
+}
+
+fn open_mem(schema: JazzSchema, node: u8) -> Db {
+    block_on(Db::open(DbConfig::new(
+        schema,
+        DbIdentity {
+            node: NodeUuid::from_bytes([node; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap()
+}
+
+/// Tick tab, worker and core in turn.
+fn pump3(core: &Db, worker: &Db, tab: &Db) {
+    for _ in 0..6 {
+        block_on(tab.tick()).unwrap();
+        block_on(worker.tick()).unwrap();
+        block_on(core.tick()).unwrap();
+        block_on(worker.tick()).unwrap();
+        block_on(tab.tick()).unwrap();
+    }
+}
+
+/// A tab on v1 relayed by `worker`, with a v2 view.
+fn tab_on(worker: &Db) -> (Db, Db, jazz::db::Upstream) {
+    let tab = open_mem(v1(), 0xa1);
+    tab.set_non_durable_client();
+    tab.set_remote_link_hint(RemoteLinkHint::Live);
+    let link = link(&tab, worker);
+    block_on(tab.admit_schema_with_lenses(v2(), &[lens()])).unwrap();
+    let ahead = block_on(tab.register_schema_view(v2())).unwrap();
+    (tab, ahead, link)
+}
+
+/// A worker that mirrored v2 in an earlier page load and reopens under v1
+/// holds v2 again from its upstream: a tab's write through a v2 view
+/// lands, and so does the plain write after it.
+#[test]
+fn a_reopened_worker_relays_a_view_write_its_core_has() {
+    for reopened in [false, true] {
+        relay_view_write(reopened);
+    }
+}
+
+fn relay_view_write(reopened: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let core = authority_at(v1(), &dir.path().join("core.sqlite"));
+    block_on(core.admit_schema_with_lenses(v2(), &[lens()])).unwrap();
+    insert(&core, 1, &[("title", "core")]);
+    let path = dir.path().join("worker.sqlite");
+    if reopened {
+        let worker = open_at(v1(), 0xa0, &path);
+        let _link = link(&worker, &core);
+        worker.set_remote_link_hint(RemoteLinkHint::Live);
+        let q = worker.prepare_query(&Query::from("notes")).unwrap();
+        let _sub = block_on(worker.subscribe(&q, ReadOpts::default())).unwrap();
+        pump(&core, &[&worker]);
+    }
+    let worker = open_at(v1(), 0xa0, &path);
+    let _link = link(&worker, &core);
+    worker.set_remote_link_hint(RemoteLinkHint::Live);
+    let (tab, ahead, _tab_link) = tab_on(&worker);
+    let q = tab.prepare_query(&Query::from("notes")).unwrap();
+    let _sub = block_on(tab.subscribe(&q, ReadOpts::default())).unwrap();
+    pump3(&core, &worker, &tab);
+    let view_write = insert(&ahead, 2, &[("title", "a"), ("tag", "t")]);
+    let plain = insert(&tab, 3, &[("title", "b")]);
+    fate_by(&tab, view_write, || pump3(&core, &worker, &tab)).expect("lands");
+    fate_by(&tab, plain, || pump3(&core, &worker, &tab)).expect("lands");
+    assert_eq!(ids(&core), vec![1, 2, 3]);
+    let core_v2 = block_on(core.register_schema_view(v2())).unwrap();
+    assert_eq!(tag(&core_v2, 2), some("t"), "reopened: {reopened}");
+}
+
+/// A tab's write through a v2 view, relayed by a worker whose core lacks
+/// v2, is refused with the typed reason once the worker has its core's
+/// catalogue; the plain write after it lands.
+#[test]
+fn a_relayed_view_write_its_core_lacks_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = authority_at(v1(), &dir.path().join("core.sqlite"));
+    insert(&core, 1, &[("title", "core")]);
+    let worker = open_at(v1(), 0xa0, &dir.path().join("worker.sqlite"));
+    let _link = link(&worker, &core);
+    worker.set_remote_link_hint(RemoteLinkHint::Live);
+    let (tab, ahead, _tab_link) = tab_on(&worker);
+    let q = tab.prepare_query(&Query::from("notes")).unwrap();
+    let _sub = block_on(tab.subscribe(&q, ReadOpts::default())).unwrap();
+    let view_write = insert(&ahead, 2, &[("title", "a"), ("tag", "t")]);
+    let plain = insert(&tab, 3, &[("title", "b")]);
+    let error = fate_by(&tab, view_write, || pump3(&core, &worker, &tab)).expect_err("refused");
+    assert_eq!(
+        error.reason,
+        Some(Reason::SchemaVersionNotDeployed),
+        "{error:?}"
+    );
+    fate_by(&tab, plain, || pump3(&core, &worker, &tab)).expect("lands");
+    assert_eq!(ids(&core), vec![1, 3]);
+    assert_eq!(ids(&tab), vec![1, 3]);
 }
