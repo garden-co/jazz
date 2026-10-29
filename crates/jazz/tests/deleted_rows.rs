@@ -742,7 +742,7 @@ fn a_row_arriving_with_an_earlier_empty_answer_stays_listed() {
         .unwrap();
     let mut subscription =
         block_on(synced.alice.subscribe(&prepared, ReadOpts::default())).unwrap();
-    // The Subscribe goes out and the server answers it, empty.
+    // The live Read goes out and the server answers it, empty.
     block_on(synced.alice.tick()).unwrap();
     block_on(synced.server.tick()).unwrap();
     // A write lands before Alice reads that answer.
