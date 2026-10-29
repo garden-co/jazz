@@ -101,7 +101,7 @@ impl Ctx<'_> {
         let order = format!("{order}, {alias}._seq {tie}");
         let columns = projection
             .iter()
-            .map(|(name, _)| Ok(format!(", {}", column_sql(versions, alias, name)?)))
+            .map(|(name, ..)| Ok(format!(", {}", column_sql(versions, alias, name)?)))
             .collect::<Result<String, Error>>()?;
         let limit = self.bind(Sql::Integer(query.limit.map_or(-1, |l| l as i64)));
         let offset = self.bind(Sql::Integer(query.offset as i64));
@@ -233,6 +233,8 @@ pub(super) fn versions_table(table: &Table) -> Table {
             default: None,
             json: false,
             json_type: None,
+            variants: None,
+            tags: None,
             merge: Default::default(),
         });
     }
@@ -246,6 +248,8 @@ pub(super) fn versions_table(table: &Table) -> Table {
             default: None,
             json: false,
             json_type: None,
+            variants: None,
+            tags: None,
             merge: Default::default(),
         });
     }

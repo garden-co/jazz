@@ -19,6 +19,8 @@ mod authorization_scope_reentry;
 mod binding_host;
 #[path = "../branch_column_evolution.rs"]
 mod branch_column_evolution;
+#[path = "../branch_view_sync.rs"]
+mod branch_view_sync;
 #[path = "../branch_views.rs"]
 mod branch_views;
 #[path = "../catalogue_rows.rs"]
@@ -37,6 +39,8 @@ mod deleted_rows;
 mod deployment_preparation;
 #[path = "../dynamic_schema_views.rs"]
 mod dynamic_schema_views;
+#[path = "../enum_tags.rs"]
+mod enum_tags;
 #[path = "../error_code_strings.rs"]
 mod error_code_strings;
 #[path = "../existential_joins.rs"]

@@ -250,8 +250,13 @@ fn key(hash: &[u8]) -> Result<NodeKey, Error> {
 }
 
 /// Whether `ty` (or the type a nullable wraps) is stored by this module.
+/// An enum column never is: it stores tags, and a name is never long (it
+/// is one of the column's variants).
 pub(crate) fn large_capable(column: &Column) -> bool {
     use crate::records::ValueType;
+    if column.is_enum() {
+        return false;
+    }
     let mut ty = &column.ty;
     while let ValueType::Nullable(inner) = ty {
         ty = inner;
@@ -2329,6 +2334,8 @@ mod tests {
             default: None,
             json: false,
             json_type: None,
+            variants: None,
+            tags: None,
             merge: Default::default(),
         };
         conn.execute_batch(&triggers(&table, &[&column], None))
@@ -2386,6 +2393,8 @@ mod tests {
             default: None,
             json: false,
             json_type: None,
+            variants: None,
+            tags: None,
             merge: Default::default(),
         };
         let (a, b, c) = (column("a"), column("b"), column("c"));
@@ -2700,6 +2709,8 @@ mod tests {
             default: None,
             json: false,
             json_type: None,
+            variants: None,
+            tags: None,
             merge: Default::default(),
         };
         conn.execute_batch(&triggers(&table, &[&column], None))
