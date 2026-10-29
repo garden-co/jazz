@@ -447,6 +447,27 @@ Policy dependency tables project the same named selectors as user-query tables.
 Tables whose projected head and base branch keys are equal have one maintained source,
 preventing duplicate shared evidence.
 
+A write wakes a branch-view subscription only when it lands on a branch key the
+view reads: the head's, or the live base's, per branched table. Writes to other
+branch keys of the same table, and to a frozen base, never re-run it. Other
+wakes re-run the view's whole query: the per-row re-check of current reads does
+not apply under a view yet, and one write to a base wakes every view over it.
+
+Across sync, a replica's live branch-view read carries its view
+(ch. 8 §8.4). The upstream keeps the result in that view, so the replica
+receives the view's own window rather than every branch key's matching rows.
+Other branch keys' rows can still arrive: a supporting row is followed by id
+under any branch key, a row leaving the result ships with all its branch
+keys' images, and so can a resumed read's prior diff. A resumed read diffs
+its view as of `since` (§8.11), the frozen base keeping its own cut. The
+upstream also ships the head rows that mask base rows the view's query
+matches (ch. 8 §8.4), so a base row arriving through another read is masked
+by a head image the view's own result would not ship, within the limits
+§8.4 lists. A head version the reader's policy denies hides the row from the
+view rather than exposing the base's version it overrides: the replica keeps
+a marker of it (ch. 8 §8.4), as the authority's evaluation of the view hides
+it.
+
 ### 11.6 Cross-branch-key merge helper
 
 Cross-branch-key merge is a high-level local calculation, not an admission or
