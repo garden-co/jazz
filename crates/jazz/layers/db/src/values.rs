@@ -436,8 +436,9 @@ impl Column {
         }
     }
 
-    /// A value as the cell this column stores. An enum variant is stored
-    /// as its tag, or as its name while it has none here (see [`EnumTags`]).
+    /// A value as the cell this column stores: an enum variant as its tag
+    /// (see [`EnumTags`]). A name with no tag (only a filter's can lack
+    /// one: writes intern theirs first) stays a name and matches no cell.
     pub(crate) fn cell_sql(&self, value: &Value) -> Result<Option<Sql>, Error> {
         match &self.tags {
             Some(tags) => enum_cell(&tags.borrow(), value),
@@ -471,14 +472,12 @@ pub(crate) fn is_array_type(ty: &ValueType) -> bool {
 /// One stored enum column's tags: each variant name a version storing the
 /// column declared, with the integer its cells store it as (SPEC 10.8).
 ///
-/// Tags are the authority's. It gives each new variant the next tag when it
-/// admits a version declaring it, in declaration order, and never reuses
-/// one: a removed variant keeps its tag. Replicas mirror them from the
-/// catalogue (see `_jazz_enum_tags`). A cell of a variant with no tag on
-/// this store holds the variant's name as TEXT until its tag arrives, when
-/// the store rewrites those cells to it. Tags order the column: `ORDER BY`
-/// sorts variants in the order they were added, and a name with no tag yet
-/// after every tagged one.
+/// Tags are a store's own, like interned strings: values travel and are
+/// compared by name everywhere above SQLite, and no other store sees a
+/// tag. A store gives each new variant the next tag when it admits a
+/// version declaring it, in declaration order, and never reuses one: a
+/// removed variant keeps its tag. Tags order the column: `ORDER BY` sorts
+/// variants in the order they were added.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EnumTags {
     by_name: BTreeMap<String, i64>,
@@ -529,7 +528,7 @@ pub type ColumnTags = Rc<RefCell<EnumTags>>;
 
 /// Every stored enum column's tags on a store, by (stored table, stored
 /// column). Schemas built for the store take their columns' entries from
-/// it, so a tag the store learns reaches every schema at once.
+/// it, so a tag the store interns reaches every schema at once.
 #[derive(Clone, Debug, Default)]
 pub struct TagRegistry(Rc<RefCell<BTreeMap<(String, String), ColumnTags>>>);
 
@@ -542,16 +541,6 @@ impl TagRegistry {
             .entry((table.to_owned(), column.to_owned()))
             .or_default()
             .clone()
-    }
-
-    /// Every stored enum column with tags, with them.
-    pub(crate) fn all(&self) -> Vec<((String, String), EnumTags)> {
-        self.0
-            .borrow()
-            .iter()
-            .filter(|(_, tags)| !tags.borrow().by_tag.is_empty())
-            .map(|(key, tags)| (key.clone(), tags.borrow().clone()))
-            .collect()
     }
 
     /// What every column's tags are now, and which entry holds them, to put
@@ -620,7 +609,7 @@ pub(crate) fn enum_names(value: &Value) -> Vec<&str> {
 }
 
 /// `value` as an enum column's cell: a variant (also inside an array) as
-/// its tag where it has one, else as its name.
+/// its tag, or as its name where it has none (see [`Column::cell_sql`]).
 pub(crate) fn enum_cell(tags: &EnumTags, value: &Value) -> Result<Option<Sql>, Error> {
     Ok(Some(match value {
         Value::Nullable(None) => Sql::Null,
@@ -1170,33 +1159,6 @@ impl Schema {
         Ok(&self.table(name)?.stored)
     }
 
-    /// The enum columns [`Self::union`] would add to `self` for `other`
-    /// whose default has no tag here, so is their DDL default as a name:
-    /// (stored table, stored column, name).
-    pub(crate) fn untagged_defaults(&self, other: &Schema) -> Vec<(String, String, String)> {
-        let mut out = Vec::new();
-        for table in other.tables.values() {
-            let Some(physical) = self.tables.get(&table.stored) else {
-                continue;
-            };
-            for column in &table.columns {
-                if !column.is_enum() || physical.columns.iter().any(|c| c.stored == column.stored) {
-                    continue;
-                }
-                if let Some(Ok(Some(Sql::Text(name)))) =
-                    column.default.as_ref().map(|value| column.cell_sql(value))
-                {
-                    out.push((
-                        table.stored.clone(),
-                        column.stored.clone(),
-                        String::from_utf8_lossy(&name).into_owned(),
-                    ));
-                }
-            }
-        }
-        out
-    }
-
     /// The physical store for `self` plus `other`: tables and columns are
     /// unioned by their stored names, so every schema view reads and writes
     /// one set of rows. `self` is keyed and named by stored names. Returns
@@ -1227,8 +1189,7 @@ impl Schema {
                             stored.tags = column.tags.clone();
                             continue;
                         }
-                        // An enum default is its tag here, or its name until
-                        // it has one (see [`EnumTags`]).
+                        // An enum default is its tag (see [`EnumTags`]).
                         let default = match &column.default {
                             Some(value) => sql_literal(column.cell_sql(value)?)?,
                             None => "NULL".to_owned(),

@@ -357,7 +357,7 @@ fn a_reopened_replica_resumes_its_subscription_from_its_stored_watermark() {
 fn a_serializable_commit_is_not_validated_against_an_unreadable_store() {
     let path = scratch("serializable-validation");
     let server = block_on(Db::open_at(config(0xee), &path, FileOptions::default())).unwrap();
-    server.set_authority().unwrap();
+    server.set_authority();
     let client = block_on(Db::open(config(0x11))).unwrap();
     let (client_side, server_side) = duplex();
     let _upstream = block_on(client.connect_upstream(client_side));

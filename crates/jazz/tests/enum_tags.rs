@@ -1,9 +1,7 @@
-//! Enum columns are stored as INTEGER tags: the authority numbers each
-//! stored column's variants in the order they were added, records them in
-//! `_jazz_enum_tags`, and sends them in its catalogue. Reads, filters and
-//! writes keep using variant names; a column sorts in tag order. A replica
-//! never mints a tag: a variant it has no tag for is stored as its name
-//! until the authority's tag arrives, then rewritten.
+//! Enum columns are stored as INTEGER tags, which each store keeps for
+//! itself in `_jazz_enum_tags`, numbering each stored column's variants in
+//! the order they were added. Everything above SQLite, sync included, uses
+//! variant names; a column sorts in tag order.
 
 use crate::common;
 
@@ -99,7 +97,7 @@ fn open_at(schema: JazzSchema, node: u8, path: &Path) -> Db {
 
 fn authority_at(schema: JazzSchema, path: &Path) -> Db {
     let db = open_at(schema, 0, path);
-    db.set_authority().unwrap();
+    db.set_authority();
     db
 }
 
@@ -406,11 +404,11 @@ fn added_variants_sort_last_and_removed_tags_are_never_reused() {
     );
 }
 
-/// A replica mirrors the authority's tags; it stores a variant only it has
-/// admitted as its name, sorted after every tag, and rewrites it to the
-/// authority's tag once the authority admits the version too.
+/// A replica tags variants itself, as it admits versions: rows travel by
+/// variant name, and a version the replica admits first tags its new
+/// variant there at once.
 #[test]
-fn a_replica_uses_the_authoritys_tags_and_rewrites_names_it_learns() {
+fn a_replica_tags_variants_itself_and_rows_travel_by_name() {
     let dir = tempfile::tempdir().unwrap();
     let server = authority_at(v1(), &dir.path().join("server.sqlite"));
     insert(&server, 1, "done");
@@ -420,14 +418,10 @@ fn a_replica_uses_the_authoritys_tags_and_rewrites_names_it_learns() {
     let q = client.prepare_query(&Query::from("tasks")).unwrap();
     let _sub = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
     pump(&server, &[&client]);
-    assert_eq!(
-        raw_tags(&client_path),
-        raw_tags(&dir.path().join("server.sqlite"))
-    );
     insert(&client, 2, "todo");
     pump(&server, &[&client]);
 
-    // A version only the client has admitted: `blocked` has no tag yet.
+    // A version only the client has admitted: it tags `blocked` itself.
     block_on(client.admit_schema_with_lenses(v2(), &[lens(&v1(), &v2(), vec![])])).unwrap();
     let ahead = block_on(client.register_schema_view(v2())).unwrap();
     try_insert(
@@ -436,16 +430,7 @@ fn a_replica_uses_the_authoritys_tags_and_rewrites_names_it_learns() {
         &[("title", name("t")), ("status", name("blocked"))],
     )
     .unwrap();
-    let mut cells = raw_cells(&client_path);
-    cells.sort();
-    assert_eq!(
-        cells,
-        [
-            ("integer".to_owned(), "0".to_owned()),
-            ("integer".to_owned(), "2".to_owned()),
-            ("text".to_owned(), "blocked".to_owned()),
-        ]
-    );
+    assert_eq!(raw_cells(&client_path), integers(&[0, 2, 3]));
     assert_eq!(
         statuses(&ahead, by_status()),
         [
@@ -455,14 +440,9 @@ fn a_replica_uses_the_authoritys_tags_and_rewrites_names_it_learns() {
         ]
     );
 
-    // The authority admits v2 and mints `blocked`; the client rewrites.
+    // The authority admits v2 and takes the client's row by name.
     block_on(server.activate_schema_with_lenses(v2(), &[lens(&v1(), &v2(), vec![])])).unwrap();
     pump(&server, &[&client]);
-    assert_eq!(raw_cells(&client_path), integers(&[0, 2, 3]));
-    assert_eq!(
-        raw_tags(&client_path),
-        raw_tags(&dir.path().join("server.sqlite"))
-    );
     assert_eq!(
         statuses(&server, by_status()),
         [
@@ -471,6 +451,7 @@ fn a_replica_uses_the_authoritys_tags_and_rewrites_names_it_learns() {
             (3, "blocked".into())
         ]
     );
+    assert_eq!(raw_cells(&client_path), integers(&[0, 2, 3]));
 }
 
 /// A write is checked against its version's variants, and an enum value
@@ -838,8 +819,7 @@ fn status_is_some(value: &str) -> Predicate {
 
 /// The authority stores `status` under another stored name (it was a
 /// boolean there first); a replica that stored it under its own name moves it to
-/// the authority's while it mirrors the catalogue, and keeps the tags it
-/// learned for that name.
+/// the authority's while it mirrors the catalogue, and keeps its tags.
 #[test]
 fn a_replica_moving_its_column_to_the_authoritys_name_keeps_the_tags() {
     let dir = tempfile::tempdir().unwrap();
@@ -888,7 +868,7 @@ fn a_replica_moving_its_column_to_the_authoritys_name_keeps_the_tags() {
         [2]
     );
     pump(&server, &[&client]);
-    // Its own write holds the authority's tag.
+    // Its own write holds its tag.
     let conn = rusqlite::Connection::open(&client_path).unwrap();
     let todo: Option<i64> = conn
         .query_row(
@@ -987,27 +967,19 @@ fn a_copy_and_its_source_tag_later_variants_independently() {
     }
 }
 
-/// A store that has never had the authority's tags (a client before its
-/// first sync) stores names and sorts them by name; once it syncs it
-/// holds the authority's tags and sorts in their order.
+/// A client tags its variants before it ever syncs: its cells are tags and
+/// sort in declaration order from the start, and syncing changes neither.
 #[test]
-fn a_store_without_the_authoritys_tags_stores_names_until_it_syncs() {
+fn a_client_tags_its_variants_before_it_ever_syncs() {
     let dir = tempfile::tempdir().unwrap();
     let client_path = dir.path().join("client.sqlite");
     let client = open_at(v1(), 1, &client_path);
     insert(&client, 1, "done");
     insert(&client, 2, "todo");
     insert(&client, 3, "doing");
-    let mut cells = raw_cells_of(&client_path, "tasks");
-    cells.sort();
-    assert_eq!(
-        cells,
-        ["doing", "done", "todo"].map(|n| ("text".to_owned(), n.to_owned()))
-    );
-    assert_eq!(
-        statuses(&client, by_status()),
-        [(3, "doing".into()), (1, "done".into()), (2, "todo".into())]
-    );
+    let declared = [(2, "todo".into()), (3, "doing".into()), (1, "done".into())];
+    assert_eq!(raw_cells(&client_path), integers(&[0, 1, 2]));
+    assert_eq!(statuses(&client, by_status()), declared);
     assert_eq!(
         ids(&client, Query::from("tasks").filter(status_is("todo"))),
         [2]
@@ -1019,62 +991,7 @@ fn a_store_without_the_authoritys_tags_stores_names_until_it_syncs() {
     let _sub = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
     pump(&server, &[&client]);
     assert_eq!(raw_cells(&client_path), integers(&[0, 1, 2]));
-    assert_eq!(
-        statuses(&client, by_status()),
-        [(2, "todo".into()), (3, "doing".into()), (1, "done".into())]
-    );
-}
-
-/// A catalogue this store refuses (it keeps a column of the authority's
-/// with another type) leaves no tag learned: its own TEXT cells keep
-/// matching their names.
-#[test]
-fn a_refused_catalogue_learns_no_tags() {
-    let with_rank = |rank: ColumnType| {
-        compile_schema(
-            &SchemaBuilder::new()
-                .table(
-                    TableSchemaBuilder::new("tasks")
-                        .column("title", ColumnType::Text)
-                        .column("status", enumeration(&["todo", "doing", "done"]))
-                        .nullable_column("rank", rank)
-                        .policies(allow_all_policies()),
-                )
-                .build(),
-        )
-    };
-    let dir = tempfile::tempdir().unwrap();
-    let server = authority_at(
-        with_rank(ColumnType::Boolean),
-        &dir.path().join("server.sqlite"),
-    );
-    let client_path = dir.path().join("client.sqlite");
-    let client = open_at(with_rank(ColumnType::Text), 1, &client_path);
-    insert(&client, 1, "done");
-    let _link = link(&client, &server);
-    let q = client.prepare_query(&Query::from("tasks")).unwrap();
-    let _sub = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
-    pump(&server, &[&client]);
-    let conn = rusqlite::Connection::open(&client_path).unwrap();
-    let tags: i64 = conn
-        .query_row(
-            "SELECT count(*) FROM sqlite_master WHERE name = '_jazz_enum_tags'",
-            [],
-            |row| row.get(0),
-        )
-        .and_then(|exists: i64| {
-            if exists == 0 {
-                Ok(0)
-            } else {
-                conn.query_row("SELECT count(*) FROM _jazz_enum_tags", [], |row| row.get(0))
-            }
-        })
-        .unwrap();
-    assert_eq!(tags, 0, "the refused catalogue's tags are not kept");
-    assert_eq!(
-        ids(&client, Query::from("tasks").filter(status_is("done"))),
-        [1]
-    );
+    assert_eq!(statuses(&client, by_status()), declared);
 }
 
 /// The raw `status` cells of stored table `table`, as `(SQLite type, cell
@@ -1113,7 +1030,7 @@ fn small_schema(status: ColumnType, rank: Option<ColumnType>) -> JazzSchema {
 
 /// The authority keeps an old enum column under the stored name a replica
 /// moves its own column away from: each keeps its own tags, and the
-/// replica takes the authority's later ones.
+/// replica takes the authority's later rows.
 #[test]
 fn a_replica_never_folds_another_columns_tags_into_a_moved_one() {
     let dir = tempfile::tempdir().unwrap();
@@ -1150,11 +1067,12 @@ fn a_replica_never_folds_another_columns_tags_into_a_moved_one() {
     assert_eq!(ids(&client, Query::from("tasks")), [1, 3, 9]);
 }
 
-/// A catalogue whose versions move a stored column, and whose tags are
-/// then refused, leaves the store as it was: the column keeps its stored
-/// name, in the file and in memory, and keeps its tags.
+/// Tags are each store's own: a client that tagged `rank`'s `x` 0 takes
+/// rows from an authority that tags `y` 0, through a catalogue that moves
+/// the client's `rank` to another stored column. The rows come by name;
+/// the client tags `y` itself and both read the same values.
 #[test]
-fn a_catalogue_refused_after_a_move_leaves_the_tags_as_they_were() {
+fn each_store_keeps_its_own_tags() {
     let dir = tempfile::tempdir().unwrap();
     let e = || enumeration(&["todo", "doing", "done"]);
     let with_rank = |rank: &str| small_schema(e(), Some(enumeration(&[rank])));
@@ -1196,31 +1114,45 @@ fn a_catalogue_refused_after_a_move_leaves_the_tags_as_they_were() {
     let before = raw_tags_named(&cp);
     assert!(before.contains(&("rank".to_owned(), 0, "x".to_owned())));
     // The client's `rank` moves to the second authority's stored column,
-    // whose tag 0 is `y`, not `x`: the catalogue is refused.
+    // where the authority tags `y` 0 and the client keeps `x` 0.
     let client = open_at(with_rank("y"), 1, &cp);
     let _link = link(&client, &server);
     let q = client.prepare_query(&Query::from("tasks")).unwrap();
     let _sub = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
     pump(&server, &[&client]);
-    assert_eq!(raw_tags_named(&cp), before);
     try_insert(
-        &client,
-        2,
+        &server,
+        3,
         &[
             ("title", name("t")),
-            ("status", some("done")),
+            ("status", some("doing")),
             ("rank", some("y")),
         ],
     )
     .unwrap();
-    let got = column(&client, Query::from("tasks"), "rank");
+    pump(&server, &[&client]);
+    let client_tags = raw_tags_named(&cp);
+    assert!(
+        client_tags.contains(&("rank~2".to_owned(), 0, "x".to_owned())),
+        "{client_tags:?}"
+    );
+    assert!(
+        client_tags.contains(&("rank~2".to_owned(), 1, "y".to_owned())),
+        "{client_tags:?}"
+    );
+    assert!(raw_tags_named(&sp2).contains(&("rank~2".to_owned(), 0, "y".to_owned())));
+    let read = |db: &Db| {
+        column(
+            db,
+            Query::from("tasks").filter(status_is_some("doing")),
+            "rank",
+        )
+    };
+    assert_eq!(read(&client), [(3, Some(some("y")))]);
+    assert_eq!(read(&client), read(&server));
     drop((_sub, _link, client));
     let client = open_at(with_rank("y"), 1, &cp);
-    assert_eq!(column(&client, Query::from("tasks"), "rank"), got);
-    assert_eq!(
-        column(&client, Query::from("tasks"), "status"),
-        [(2, Some(some("done"))), (9, Some(some("todo")))]
-    );
+    assert_eq!(read(&client), [(3, Some(some("y")))]);
 }
 
 /// Every `(stored column, tag, name)` in `_jazz_enum_tags`.

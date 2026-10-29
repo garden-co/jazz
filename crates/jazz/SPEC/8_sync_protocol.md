@@ -452,7 +452,7 @@ keep and retry pending writes but cannot accept them or make them `Global`.
 
 After its first `Schema`, a replica sends `Holds { versions }`: the schema
 versions whose stored names it keeps, each with `names_digest` of those names.
-The server answers with `Catalogue { namespace, versions, cells, confirmed, tags }`,
+The server answers with `Catalogue { namespace, versions, cells, confirmed }`,
 carrying every admitted version the replica lacks or names otherwise, in
 admission order, ahead of any row; and again whenever its store admits a
 version or learns more of its authority's catalogue.
@@ -470,10 +470,6 @@ version or learns more of its authority's catalogue.
   its upstream confirmed. Only a confirmed version's tables and columns have an
   identity; a version only the replica admitted has none until the authority
   admits it too.
-- `tags` lists every enum variant tag the sender keeps, by stored table and
-  column (10.8). Rows carry enum cells as these tags, so the replica takes
-  them before the versions and rows that follow, and rewrites the cells it
-  held by name for want of one. It sends the list again when it changes.
 
 The replica admits each version under the authority's stored names, renaming
 tables and columns it had named otherwise while it did not know them (for
@@ -488,8 +484,7 @@ fails with why; local reads are served as before. That is a table it stores
 under the name the upstream stores another table as, another app's namespace,
 or a stored column it keeps with another type than the upstream's (each added
 a column again under the same fresh stored name while apart): values of one
-type are never read as another's. A tag the upstream gives a variant otherwise
-than the replica keeps it is refused the same way.
+type are never read as another's.
 
 ### 8.11 Resuming live reads from `since`
 

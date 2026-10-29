@@ -153,11 +153,10 @@ impl Term {
     }
 }
 
-/// An enum column's cell: a variant's tag, or the name of one with no tag
-/// on this store yet (see [`crate::values::EnumTags`]). A variant name it is
-/// compared with is bound as its tag where it has one, so the comparison
-/// keeps the column's index and order; anything else reads the cell as its
-/// name.
+/// An enum column's cell: a variant's tag (see
+/// [`crate::values::EnumTags`]). A variant name it is compared with is
+/// bound as its tag, so the comparison keeps the column's index and order;
+/// anything else reads the cell as its name.
 #[derive(Clone)]
 struct EnumColumn {
     cell: String,
@@ -3388,7 +3387,7 @@ impl Ctx<'_> {
     /// An array cell (JSON text, see [`crate::values::to_sql`]) holding an
     /// element equal to `right`.
     fn array_contains(&mut self, left: Term, right: Term) -> String {
-        // An enum array holds its variants' tags (or names with none yet).
+        // An enum array holds its variants' tags.
         let right = match &left {
             Term::Enum(column) => match self.tagged(column, right) {
                 Term::Bound(placeholder, Sql::Integer(_)) => {

@@ -531,7 +531,7 @@ fn a_subscription_survives_a_server_restart_and_receives_the_pending_write() {
             jazz::db::FileOptions::default(),
         ))
         .unwrap();
-        db.set_authority().unwrap();
+        db.set_authority();
         db
     };
     let server = start();

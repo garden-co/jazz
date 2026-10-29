@@ -37,7 +37,7 @@ fn fixture() -> (Db, Db) {
         .unwrap()
     };
     let bob = open(2, AuthorSubject::SYSTEM);
-    bob.set_authority().unwrap();
+    bob.set_authority();
     block_on(bob.insert("notes", cells("authority"), Default::default())).unwrap();
     let alice = open(1, AuthorSubject::for_test_bytes([1; 16]));
     alice.set_remote_link_hint(RemoteLinkHint::Failed);

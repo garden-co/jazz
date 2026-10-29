@@ -348,7 +348,7 @@ fn a_reopened_authority_continues_after_the_seq_of_a_rowless_commit() {
             FileOptions::default(),
         ))
         .unwrap();
-        db.set_authority().unwrap();
+        db.set_authority();
         db
     };
     let server = open();

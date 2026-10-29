@@ -74,11 +74,6 @@ alphabetically. Variants declared together sort in declaration order, and a vari
 later schema version sorts after every earlier one, wherever you declare it. Removing a variant
 does not change how the others sort.
 
-A client learns this order from the server. Until it has synced with the server for the first
-time, it sorts the variants it has written by name. A variant the server has not seen yet, such
-as one added by a schema version the server has not received, sorts after every variant the
-server knows about, on the client that wrote it, until the server receives that version.
-
 ## Pagination
 
 `limit(n)` caps the number of rows returned; `offset(n)` skips that many rows. Combine them with a

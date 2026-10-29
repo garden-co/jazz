@@ -1061,6 +1061,8 @@ impl Db {
         let schema = names.resolve(&config.schema, &[], names.latest())?;
         names.check_branches(&schema)?;
         names.check_types(&schema)?;
+        // Variants are tagged before any DDL: an enum default is its tag.
+        names.mint(&conn, &schema)?;
         let chunks = crate::large::Chunks::install(path, config.chunk_store.clone())?;
         // Statements are keyed per table and verb; the default 16 entries
         // thrash as soon as a schema has a few tables.
@@ -1095,12 +1097,8 @@ impl Db {
             physical
         } else {
             let mut physical = stored_schema(&conn, &config.schema)?;
-            let untagged = physical.untagged_defaults(&schema);
             let ddl = physical.union(&schema)?;
             execute_script(&conn, &ddl)?;
-            for (table, column, name) in untagged {
-                names.note_ddl_text(&conn, &table, &column, &name)?;
-            }
             physical
         };
         names.admit(&conn, &schema)?;
@@ -1218,7 +1216,7 @@ impl Db {
     /// global authority (see [`Db::set_authority`]).
     pub async fn open_history_complete(config: DbConfig) -> Result<Self, Error> {
         let db = Self::open(config).await?;
-        db.set_authority()?;
+        db.set_authority();
         Ok(db)
     }
 
@@ -1287,12 +1285,8 @@ impl Db {
     /// Serve as the global authority: subscriptions this store settles,
     /// its own and its subscribers', report `DurabilityTier::Global`. A
     /// store without the role (a relay with no upstream) settles at `Local`.
-    pub fn set_authority(&self) -> Result<(), Error> {
-        let mut inner = self.inner.borrow_mut();
-        inner.authority = true;
-        // Its catalogue may be its own now: it tags the variants of the
-        // versions it admitted before.
-        inner.mint_tags()
+    pub fn set_authority(&self) {
+        self.inner.borrow_mut().authority = true;
     }
 
     /// Whether this store is the global authority.
@@ -2399,7 +2393,6 @@ impl Inner {
         versions: Vec<sync::CatalogueVersion>,
         cells: Vec<sync::CatalogueCell>,
         confirmed: &[([u8; 16], [u8; 16])],
-        tags: Vec<crate::names::Tag>,
     ) -> Result<bool, Error> {
         let known = self.namespace()?;
         if let (Some(known), Some(namespace)) = (known, namespace)
@@ -2410,17 +2403,9 @@ impl Inner {
                 "the upstream's catalogue is another app's: this store keeps a different authority namespace",
             ));
         }
-        // The tags, the versions and the cells they retag are taken whole or
-        // not at all: a refused catalogue leaves no tag learned whose TEXT
-        // cells were not rewritten.
         let renamed = !versions.is_empty();
-        let snapshot = self.names.tags().snapshot();
-        begin_savepoint(&self.conn, "jazz_catalogue")?;
-        let mirrored = self.mirror_tags_and_versions(tags, versions, cells);
-        let ended = end_savepoint(&self.conn, "jazz_catalogue", mirrored.is_ok());
-        if let Err(error) = mirrored.and(ended) {
-            self.names.tags().restore(snapshot);
-            return Err(error);
+        if renamed {
+            self.mirror_versions(versions, cells)?;
         }
         let learned = known.is_none() && namespace.is_some();
         if let (true, Some(namespace)) = (learned, namespace) {
@@ -2438,14 +2423,11 @@ impl Inner {
         Ok(renamed)
     }
 
-    /// Take the upstream's versions, names, lens cells and tags: whole or
-    /// not at all, in memory as in the file (the caller's savepoint). Every
-    /// step that may refuse runs before anything outside this store's names
-    /// changes: a client's moved queue and the sessions hear of a move only
-    /// once the tags are taken too.
-    fn mirror_tags_and_versions(
+    /// Take the upstream's versions, names and lens cells: whole or not at
+    /// all, in the file and in memory. A catalogue this store cannot take
+    /// (a stored column it keeps with another type) leaves it unchanged.
+    fn mirror_versions(
         &mut self,
-        tags: Vec<crate::names::Tag>,
         versions: Vec<sync::CatalogueVersion>,
         cells: Vec<sync::CatalogueCell>,
     ) -> Result<(), Error> {
@@ -2454,46 +2436,20 @@ impl Inner {
             self.names.clone(),
             self.admitted.clone(),
         );
-        let mirrors = !versions.is_empty();
+        let tags = self.names.tags().snapshot();
         let mut moved = Vec::new();
-        if let Err(error) = self.take_tags_and_versions(tags, versions, cells, &mut moved) {
+        begin_savepoint(&self.conn, "jazz_mirror")?;
+        let mirrored = self.mirror_versions_steps(versions, cells, &mut moved);
+        let ended = end_savepoint(&self.conn, "jazz_mirror", mirrored.is_ok());
+        if let Err(error) = mirrored.and(ended) {
             self.physical = physical;
             self.names = names;
             self.admitted = admitted;
+            self.names.tags().restore(tags);
             return Err(error);
         }
-        if mirrors {
-            self.versions_mirrored(&moved);
-        }
-        Ok(())
-    }
-
-    fn take_tags_and_versions(
-        &mut self,
-        tags: Vec<crate::names::Tag>,
-        versions: Vec<sync::CatalogueVersion>,
-        cells: Vec<sync::CatalogueCell>,
-        moved: &mut Vec<(String, String)>,
-    ) -> Result<(), Error> {
-        // Versions first: the tags are keyed by the authority's stored
-        // names, which this store's own stored columns take only now. A
-        // column a version adds stores its default as TEXT until then, and
-        // a copy its source's names; both become tags below.
-        if !versions.is_empty() {
-            self.mirror_versions_steps(versions, cells, moved)?;
-        }
-        let learned = {
-            let conn = &self.conn;
-            self.names.learn(conn, &tags)?
-        };
-        self.tags_learned(learned)
-    }
-
-    /// The upstream's versions are taken: a client's queue follows its
-    /// moved tables, and every schema is rebuilt by the new names.
-    fn versions_mirrored(&mut self, moved: &[(String, String)]) {
         if let Some(client) = self.client.as_mut() {
-            for (ours, theirs) in moved {
+            for (ours, theirs) in &moved {
                 client.moved_table(ours, theirs);
             }
         }
@@ -2507,6 +2463,7 @@ impl Inner {
         for session in &mut self.sessions {
             session.owe_catalogue();
         }
+        Ok(())
     }
 
     fn mirror_versions_steps(
@@ -2772,8 +2729,8 @@ impl Inner {
     }
 
     /// Write an admitted version's stored tables and columns, its lens
-    /// copies, names and lens cells: whole or not at all, in the file and
-    /// in memory.
+    /// copies, names, lens cells and enum tags: whole or not at all, in the
+    /// file and in memory.
     fn write_admission(
         &mut self,
         target: &Schema,
@@ -2784,200 +2741,81 @@ impl Inner {
         begin_savepoint(&self.conn, "jazz_admit")?;
         let written = self.write_admission_steps(target, cells);
         let ended = end_savepoint(&self.conn, "jazz_admit", written.is_ok());
-        let minted = match written.and_then(|minted| ended.map(|()| minted)) {
-            Ok(minted) => minted,
-            Err(error) => {
-                self.physical = physical;
-                self.names = names;
-                self.names.tags().restore(tags);
-                return Err(error);
-            }
-        };
-        self.tags_learned(minted)
+        let written = written.and(ended);
+        if written.is_err() {
+            self.physical = physical;
+            self.names = names;
+            self.names.tags().restore(tags);
+        }
+        written
     }
 
-    /// Returns the tags whose TEXT cells may now become them: the ones it
-    /// minted and an enum copy's.
     fn write_admission_steps(
         &mut self,
         target: &Schema,
         cells: Vec<crate::names::LensCell>,
-    ) -> Result<Vec<crate::names::Tag>, Error> {
-        // An authority tags new variants first, so an enum column added
-        // with a default stores the default's tag. A new copy starts with
-        // its source's tags.
-        let minted = if self.publishes_catalogue() {
-            let mut minted = Vec::new();
-            for cell in &cells {
-                if let crate::names::LensCellRule::Copy(source) = &cell.rule {
-                    minted.extend(self.names.copy_tags(
-                        &self.conn,
-                        &cell.table,
-                        source,
-                        &cell.column,
-                    )?);
-                }
-            }
-            minted.extend(self.names.mint(&self.conn, target)?);
-            minted
-        } else {
-            Vec::new()
-        };
-        let untagged = self.physical.untagged_defaults(target);
-        let ddl = self.physical.union(target)?;
-        execute_script(&self.conn, &ddl)?;
-        for (table, column, name) in untagged {
-            self.names
-                .note_ddl_text(&self.conn, &table, &column, &name)?;
-        }
-        // A new copy holds its source's values, in every row version.
-        let mut retag = minted.clone();
+    ) -> Result<(), Error> {
+        // Variants are tagged before any DDL, so an enum column added with
+        // a default stores the default's tag. A new copy starts with its
+        // source's tags.
         for cell in &cells {
             if let crate::names::LensCellRule::Copy(source) = &cell.rule {
-                retag.extend(self.fill_copy(target, &cell.table, &cell.column, source)?);
+                self.names
+                    .copy_tags(&self.conn, &cell.table, source, &cell.column)?;
+            }
+        }
+        self.names.mint(&self.conn, target)?;
+        let ddl = self.physical.union(target)?;
+        execute_script(&self.conn, &ddl)?;
+        // A new copy holds its source's values, in every row version.
+        for cell in &cells {
+            if let crate::names::LensCellRule::Copy(source) = &cell.rule {
+                self.fill_copy(&cell.table, &cell.column, source)?;
             }
         }
         self.names.admit(&self.conn, target)?;
-        self.names.record_lens_cells(&self.conn, cells)?;
-        Ok(retag)
+        self.names.record_lens_cells(&self.conn, cells)
     }
 
     /// Fill copy `column` of stored table `table`, in every row version,
-    /// from `source`. An enum copy has tags of its own (it starts with its
-    /// source's, but either may add variants the other lacks, and a replica
-    /// may know more of the source's than the copy had), so it is filled
-    /// with the variant names and returns its tags, for those names to
-    /// become them.
-    fn fill_copy(
-        &mut self,
-        target: &Schema,
-        table: &str,
-        column: &str,
-        source: &str,
-    ) -> Result<Vec<crate::names::Tag>, Error> {
-        let copy = target
-            .tables
-            .values()
-            .find(|t| t.stored == table)
-            .and_then(|t| t.columns.iter().find(|c| c.stored == column))
-            .filter(|c| c.is_enum());
-        let source_tags = self.names.tags().column(table, source);
-        for history in [false, true] {
-            let stored = if history {
-                format!("{table}__h")
-            } else {
-                table.to_owned()
-            };
-            let (target_sql, column_sql, source_sql) = (
-                quote(&stored),
-                quote(column),
-                format!("{}.{}", quote(&stored), quote(source)),
-            );
-            let value = match copy {
-                None => source_sql,
-                Some(copy) if crate::values::is_array_type(&copy.ty) => format!(
-                    "CASE WHEN {source_sql} IS NULL THEN NULL ELSE (SELECT json_group_array({} \
-                     ORDER BY j.key) FROM json_each({source_sql}) AS j) END",
-                    source_tags.borrow().name_sql("j.value")
+    /// from `source`. An enum copy's tags are its own: a source cell is
+    /// mapped to the copy's tag for the same name, which is the same tag
+    /// unless the copy's column had tags before.
+    fn fill_copy(&self, table: &str, column: &str, source: &str) -> Result<(), Error> {
+        let array = self
+            .names
+            .stored_type(table, source)
+            .is_some_and(crate::values::is_array_type);
+        let (from, to) = (
+            self.names.tags().column(table, source),
+            self.names.tags().column(table, column),
+        );
+        let arms: String = {
+            let (from, to) = (from.borrow(), to.borrow());
+            from.iter()
+                .filter_map(|(tag, name)| {
+                    let copied = to.tag(name)?;
+                    (copied != tag).then(|| format!(" WHEN {tag} THEN {copied}"))
+                })
+                .collect()
+        };
+        for stored in [table.to_owned(), format!("{table}__h")] {
+            let source_sql = format!("{}.{}", quote(&stored), quote(source));
+            let value = match (arms.is_empty(), array) {
+                (true, _) => source_sql,
+                (false, false) => format!("(CASE {source_sql}{arms} ELSE {source_sql} END)"),
+                (false, true) => format!(
+                    "CASE WHEN {source_sql} IS NULL THEN NULL ELSE (SELECT json_group_array(\
+                     CASE j.value{arms} ELSE j.value END ORDER BY j.key) \
+                     FROM json_each({source_sql}) AS j) END"
                 ),
-                Some(_) => source_tags.borrow().name_sql(&source_sql),
             };
             self.conn
                 .execute(
-                    &format!("UPDATE {target_sql} SET {column_sql} = {value}"),
+                    &format!("UPDATE {} SET {} = {value}", quote(&stored), quote(column)),
                     [],
                 )
                 .map_err(storage)?;
-            if let Some(copy) = copy {
-                let names = if crate::values::is_array_type(&copy.ty) {
-                    format!(
-                        "SELECT DISTINCT j.value FROM {target_sql}, json_each({target_sql}.{column_sql}) AS j \
-                         WHERE j.type = 'text'"
-                    )
-                } else {
-                    format!(
-                        "SELECT DISTINCT {column_sql} FROM {target_sql} WHERE typeof({column_sql}) = 'text'"
-                    )
-                };
-                let names: Vec<String> = self
-                    .conn
-                    .prepare(&names)
-                    .and_then(|mut select| {
-                        select
-                            .query_map([], |row| row.get(0))?
-                            .collect::<Result<_, _>>()
-                    })
-                    .map_err(storage)?;
-                for name in names {
-                    crate::names::Names::note_text(&self.conn, table, column, &name)?;
-                }
-            }
-        }
-        let Some(copy) = copy.and_then(|c| c.tags.as_ref()) else {
-            return Ok(Vec::new());
-        };
-        Ok(copy
-            .borrow()
-            .iter()
-            .map(|(tag, name)| (table.to_owned(), column.to_owned(), tag, name.to_owned()))
-            .collect())
-    }
-
-    /// Tag the variants the admitted versions declare that have none yet,
-    /// on a store whose catalogue is its own (see
-    /// [`crate::names::Names::mint`]).
-    pub(crate) fn mint_tags(&mut self) -> Result<(), Error> {
-        if !self.publishes_catalogue() {
-            return Ok(());
-        }
-        let mut schemas = vec![self.owner.clone()];
-        for (_, jazz) in self.admitted.clone() {
-            schemas.push(Rc::new(self.named(&jazz)));
-        }
-        let mut minted = Vec::new();
-        for schema in schemas {
-            minted.extend(self.names.mint(&self.conn, &schema)?);
-        }
-        self.tags_learned(minted)
-    }
-
-    /// This store has the tags `new` now (minted or mirrored): the TEXT
-    /// cells it keeps of their variants become them, every read compiled
-    /// with their names runs again, and this store's own sessions are sent
-    /// them.
-    pub(crate) fn tags_learned(&mut self, new: Vec<crate::names::Tag>) -> Result<(), Error> {
-        if new.is_empty() {
-            return Ok(());
-        }
-        let rewrite = crate::names::Names::untagged(&self.conn, &new)?;
-        in_savepoint(&self.conn, "jazz_tags", || {
-            for (table, column, tag, name) in &rewrite {
-                let array = self
-                    .names
-                    .stored_type(table, column)
-                    .is_some_and(crate::values::is_array_type);
-                for target in [table.clone(), format!("{table}__h")] {
-                    let (target, column) = (quote(&target), quote(column));
-                    let sql = if array {
-                        format!(
-                            "UPDATE {target} SET {column} = (SELECT json_group_array(CASE \
-                             WHEN j.type = 'text' AND j.value = ?2 THEN ?1 ELSE j.value END \
-                             ORDER BY j.key) FROM json_each({target}.{column}) AS j) WHERE EXISTS (SELECT 1 \
-                             FROM json_each({target}.{column}) WHERE type = 'text' AND value = ?2)"
-                        )
-                    } else {
-                        format!("UPDATE {target} SET {column} = ?1 WHERE {column} = ?2")
-                    };
-                    self.conn
-                        .execute(&sql, rusqlite::params![tag, name])
-                        .map_err(storage)?;
-                }
-            }
-            Ok(())
-        })?;
-        self.reset_everything();
-        for session in &mut self.sessions {
-            session.owe_catalogue();
         }
         Ok(())
     }
@@ -4433,10 +4271,10 @@ impl Inner {
         Ok(())
     }
 
-    /// A lens's cell for stored column `column` of stored table `table`
-    /// (kept as the value's plain SQL): an enum variant's name as its tag
-    /// where it has one.
-    fn enum_cell(&self, table: &str, column: &str, cell: Sql) -> Result<Sql, Error> {
+    /// A cell for stored column `column` of stored table `table` written
+    /// as plain SQL keeps a value (a lens's cell, an image from another
+    /// store): an enum variant's name as its tag here.
+    pub(crate) fn enum_cell(&self, table: &str, column: &str, cell: Sql) -> Result<Sql, Error> {
         let Sql::Text(text) = &cell else {
             return Ok(cell);
         };
@@ -4467,12 +4305,13 @@ impl Inner {
         } else {
             Value::String(String::from_utf8_lossy(text).into_owned())
         };
+        self.names.intern(
+            &self.conn,
+            table,
+            column,
+            &crate::values::enum_names(&value),
+        )?;
         let tags = self.names.tags().column(table, column);
-        for name in crate::values::enum_names(&value) {
-            if tags.borrow().tag(name).is_none() {
-                crate::names::Names::note_text(&self.conn, table, column, name)?;
-            }
-        }
         let cell = crate::values::enum_cell(&tags.borrow(), &value)?;
         Ok(cell.unwrap_or(Sql::Null))
     }
@@ -4493,26 +4332,18 @@ impl Inner {
     ) -> Result<Sql, Error> {
         Self::check_cell(column, value, cells)?;
         if column.is_enum() {
-            let cell = column
+            // Every variant a version declares has a tag; a write's are
+            // checked against them, but a lens or merge may still carry a
+            // removed one.
+            self.names.intern(
+                &self.conn,
+                &table.stored,
+                &column.stored,
+                &crate::values::enum_names(value),
+            )?;
+            return column
                 .cell_sql(value)?
-                .ok_or_else(|| unsupported("storing NaN"))?;
-            // A variant with no tag here is stored by name until its tag
-            // arrives, when the cell is rewritten (see `tags_learned`).
-            for name in crate::values::enum_names(value) {
-                if column
-                    .tags
-                    .as_ref()
-                    .is_some_and(|tags| tags.borrow().tag(name).is_none())
-                {
-                    crate::names::Names::note_text(
-                        &self.conn,
-                        &table.stored,
-                        &column.stored,
-                        name,
-                    )?;
-                }
-            }
-            return Ok(cell);
+                .ok_or_else(|| unsupported("storing NaN"));
         }
         let mut inner = value;
         while let Value::Nullable(Some(value)) = inner {
@@ -5238,25 +5069,6 @@ impl Inner {
             let default = self.enum_cell(&table.stored, &stored, default)?;
             names.push(quote(&stored));
             values.push(default);
-        }
-        // An enum column added here while its default had no tag reads that
-        // default as its name: a row written without the column stores the
-        // tag it has now instead.
-        for (stored, name) in self.names.ddl_text(&table.stored) {
-            let Some(tag) = self
-                .names
-                .tags()
-                .column(&table.stored, stored)
-                .borrow()
-                .tag(name)
-            else {
-                continue;
-            };
-            let stored = quote(stored);
-            if !names.contains(&stored) {
-                names.push(stored);
-                values.push(Sql::Integer(tag));
-            }
         }
         let stamp = self.stamp()?;
         // The update stamp stays NULL until the row is updated.

@@ -800,45 +800,34 @@ predecessor's.
 
 An enum column (`s.enum(...)`, or an array of one) stores each variant as an
 INTEGER **tag**, kept per stored column in `_jazz_enum_tags (tbl, col, tag,
-name)` (`crates/jazz/layers/db/src/values.rs`, `EnumTags`). Values are
-variant names everywhere above SQLite: in writes, commits, filters, policies
-and reads. Only stored cells hold tags.
+name)` (`crates/jazz/layers/db/src/values.rs`, `EnumTags`). Tags are an
+interning optimisation private to each store. Values are variant names
+everywhere above SQLite: in writes, commits, row images on the wire, the
+catalogue, filters, policies and reads. Only a store's own cells hold tags,
+and no other store ever sees one.
 
-- **Tags are the authority's.** An authority with no upstream tags each
-  variant a version declares when it admits the version, before any column
-  is added, so an added enum column's DDL default is a tag too. A column's
-  next tag is one past its highest, in declaration order, and a tag is never
-  reused: a removed variant keeps its tag, and every name a version ever
-  declared for the stored column still reads back. A copy lens's column is
-  a stored column with tags of its own (its source may add variants the
-  copy does not, and the other way round); it is filled by variant name,
-  and those names become its tags like any other TEXT cell.
-- **Replicas mirror them.** `Catalogue.tags` carries every tag the sender
-  keeps, and a replica takes them before the catalogue's versions and rows.
-  Row images travel as stored cells, so they carry tags. Commits carry
-  variant names, which the authority binds as its tags. A replica never
-  mints a tag, and refuses a catalogue that tags a variant otherwise than it
-  does. It takes a catalogue's tags, versions and the cells they retag
-  whole or not at all, and a stored column it moves to the authority's
-  stored name keeps the tags it learned for that name.
-- **A variant without a tag here** (on a store that has not had the
-  authority's catalogue yet, such as a client before its first sync, or for
-  a version only this store admitted) is stored as its TEXT name, and noted
-  in `_jazz_enum_text` (once per name, not per write). When its tag arrives, the store rewrites those cells
-  (row and history tables, inside arrays too) to the tag. An enum column a
-  store added while its default had no tag keeps that name as its SQLite
-  default, so a row inserted without the column writes the tag explicitly
-  once there is one.
+- **Every store tags its own variants.** A store tags each variant a version
+  declares when it admits the version, before any column is added, so an
+  added enum column's DDL default is a tag too. A column's next tag is one
+  past its highest, in declaration order, and a tag is never reused: a
+  removed variant keeps its tag, and every name a version ever declared for
+  the stored column still reads back. A name a row carries that no admitted
+  version declares (a removed variant, say) is tagged when it is stored.
+- **On the wire.** Row images carry enum cells as variant names (a JSON
+  array of names for an array column); the receiving store stores each as
+  its own tag. Two stores may tag a variant differently.
+- **Copies and renames.** A rename keeps the stored column, so it keeps the
+  tags. A copy lens's column is a stored column with tags of its own: it
+  starts with its source's tags, removed variants included, so its cells
+  are its source's and it sorts like its source; either may add variants
+  later.
 - **Order.** `ORDER BY`, `MIN`, `MAX` and range comparisons on an enum
-  column follow tag order: the order variants were added, which an index on
-  the column serves. TEXT cells sort after every tag, by name, so on a
-  replica a variant it has no tag for yet sorts after the ones it has, and
-  a store with no tags yet sorts its variants by name until it syncs.
+  column follow tag order: the order the store admitted variants in, which
+  an index on the column serves.
 - **Comparisons.** A variant name compared with an enum column (`=`, `IN`,
-  array containment, a policy literal or session value) is bound as its tag,
-  or as its name while it has none here. Anything else, such as text
-  containment or a comparison with another enum column's cells, reads the
-  cell as its name.
+  array containment, a policy literal or session value) is bound as its
+  tag. Anything else, such as text containment or a comparison with another
+  enum column's cells, reads the cell as its name.
 - **Type.** `_jazz_column_types` records an enum column as an enum
   (whatever its variants), so a stored column never holds both tags and
   another type's values: a column changed between enum and another type is
