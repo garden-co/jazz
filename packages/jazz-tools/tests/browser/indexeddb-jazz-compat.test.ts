@@ -69,11 +69,14 @@ const app = s.defineApp({
     )
     .branchBy("branch"),
   notes: s
-    .table({
-      branch: s.string(),
-      title: s.string(),
-      secret: s.boolean(),
-    })
+    .table(
+      {
+        branch: s.string(),
+        title: s.string(),
+        secret: s.boolean(),
+      },
+      {},
+    )
     .branchBy("branch"),
 });
 
