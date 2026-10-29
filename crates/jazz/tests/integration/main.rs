@@ -85,6 +85,8 @@ mod pending_commit_reopen;
 mod permission_advice;
 #[path = "../policy_activation.rs"]
 mod policy_activation;
+#[path = "../pre_sync_writes.rs"]
+mod pre_sync_writes;
 #[path = "../prepared_claim_routing.rs"]
 mod prepared_claim_routing;
 #[path = "../provenance.rs"]
