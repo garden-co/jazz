@@ -55,6 +55,8 @@ source of truth and names each invariant's tests):
 - `INV-SYNC-48`: A Remote read MUST NOT report rows the server's answer no longer lists.
 - `INV-SYNC-49`: A server MUST process a session's messages in the order sent, so a read sent after a commit is served after that commit.
 - `INV-SYNC-50`: A non-durable client's local seqs MUST NOT collide with its relay's.
+- `INV-SYNC-51`: A store that committed writes before it became a replica MUST keep them and refuse every upstream, saying why.
+- `INV-SYNC-52`: A replica MUST upload each commit under the schema version of the view that wrote it, keeping it pending while offline; a server MUST refuse a commit under a version it has not deployed, at once, with reason `schema_version_not_deployed`.
 - `INV-TX-2`, `INV-TX-11`, `INV-TX-23`: commit, seq and relay rules (ch. 3).
 - `INV-WIRE-1`, `INV-WIRE-2`: exact postcard frames and Hello version negotiation (§8.1.1).
 
@@ -94,6 +96,16 @@ serves sessions, a relay); a node without one is the authority for its
 sessions. Only the global authority assigns `Global` fates (ch. 3, ch. 9).
 Only one relay tier is supported: an authority, optionally a durable relay
 (a worker), and its non-durable sessions (tabs) (SPEC 9 §9.5).
+
+A store becomes a replica before it writes anything it will upload
+(`become_replica`, which connecting or a remote link hint does): its writes
+then take local seqs and are recorded as pending commits, uploaded on the
+first connection. A store that committed writes before it became a replica
+has them at seqs its upstream numbers its own versions by, never recorded for
+upload; syncing would let the upstream's rows replace them. Uploading them is
+not supported yet, so such a store keeps them and refuses every upstream,
+failing its remote reads (live and one-shot `Remote` ones) with why, across
+reopens (`INV-SYNC-51`).
 
 Messages, with their postcard variant tags:
 
@@ -454,14 +466,36 @@ not admitted is named like the server's current schema.
 
 `SchemaAdmission { admitted }` tells the session whether its version is
 admitted, whenever that changes. Until it is, the server holds the session's
-messages (a draft awaiting its lens), so a read that needs the server fails
-with the reason rather than waiting out its budget.
+reads (a draft awaiting its lens), so a read that needs the server fails
+with the reason rather than waiting out its budget, and refuses its commits
+(below).
 
 Each pending commit records the schema version it was written under
-(`_jazz_pending_versions`). Before uploading pending commits staged under
+(`_jazz_pending_versions`): the version of the schema view that wrote it, or
+the store's current version. Before uploading pending commits staged under
 another version than the session's current one, the replica sends a `Schema`
-switch for them, so an offline write made before an upgrade is resolved under
-the names it was written with.
+switch for them, so an offline write made before an upgrade, or through a view
+of a version the server has not admitted yet, is resolved under the names it
+was written with (`INV-SYNC-52`). Offline, such a commit stays pending, and
+the replica replays it under its version while it holds it (a registered view),
+so the columns only that version has stay visible there. A commit that reaches
+a server which has not deployed its version is refused there, at once, with
+reason `schema_version_not_deployed` (code `write_rejected`): the app that
+wrote it was released ahead of its schema, a deploy error that waiting would
+hide. The replica rolls it back like any refused write; the session goes on,
+and the commits after it upload. A server holding a session's reads behind an
+unadmitted version refuses the commits behind them the same way. A relay (a
+worker serving tabs) refuses only while it is linked to an upstream that sent
+its catalogue on that connection, so it knows every version the authority
+deployed; until then, and while offline, it holds such commits. A store with no
+upstream at all is the top of its tree and refuses at once, so a worker that
+will sync becomes a replica (or is given a link hint) before its tabs write. Its `KnownCatalogue` lists only the versions whose schema it holds
+in this process, so a version an earlier process mirrored is sent again and
+the relay serves it as before. A pending commit written under the version
+current until a newer one is made current uploads under the version it was
+written under.
+One commit uploads under one version, so a replica refuses a transaction
+written through views of different versions.
 
 The authority evaluates every write against its own policy data. A relay may
 keep and retry pending writes but cannot accept them or make them `Global`.
