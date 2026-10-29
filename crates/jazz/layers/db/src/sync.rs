@@ -3561,7 +3561,9 @@ impl Inner {
 /// `_jazz_pending` keeps its `Commit` with its ops and reads left out,
 /// `_jazz_pending_items` each op (with its bases, access proof and deltas) and
 /// serializable read (by [`PendingPart`]), and `_jazz_pending_rows` the
-/// local rows it wrote.
+/// local rows it wrote, and `_jazz_pending_versions` the schema version
+/// its ops name tables and columns by. Deleting a commit's `_jazz_pending`
+/// row once it settles deletes the rest with it.
 /// A row's values over the inline limit live in large-value storage, so a
 /// stored op is about the size of the row it writes, however large the
 /// commit: a store with a small value limit (a Durable Object's 2 MiB)
@@ -3571,6 +3573,11 @@ pub(crate) const SYNC_DDL: &str = "\
     CREATE TABLE IF NOT EXISTS _jazz_pending (tx INTEGER PRIMARY KEY, header BLOB NOT NULL);\
     CREATE TABLE IF NOT EXISTS _jazz_pending_items (tx INTEGER NOT NULL, part INTEGER NOT NULL, n INTEGER NOT NULL, item BLOB NOT NULL, PRIMARY KEY (tx, part, n));\
     CREATE TABLE IF NOT EXISTS _jazz_pending_rows (tx INTEGER NOT NULL, n INTEGER NOT NULL, tbl TEXT NOT NULL, id BLOB NOT NULL, key BLOB NOT NULL, PRIMARY KEY (tx, n));\
+    CREATE TABLE IF NOT EXISTS _jazz_pending_versions (tx INTEGER PRIMARY KEY, version BLOB NOT NULL);\
+    CREATE TRIGGER IF NOT EXISTS _jazz_pending_forget AFTER DELETE ON _jazz_pending BEGIN \
+     DELETE FROM _jazz_pending_items WHERE tx = OLD.tx; \
+     DELETE FROM _jazz_pending_rows WHERE tx = OLD.tx; \
+     DELETE FROM _jazz_pending_versions WHERE tx = OLD.tx; END;\
     CREATE TABLE IF NOT EXISTS _jazz_meta (k TEXT PRIMARY KEY, v BLOB NOT NULL);\
     CREATE TABLE IF NOT EXISTS _jazz_authors (n INTEGER PRIMARY KEY, account BLOB NOT NULL, issuer TEXT NOT NULL, subject TEXT NOT NULL, UNIQUE (account, issuer, subject));\
     CREATE TABLE IF NOT EXISTS _jazz_applied (node BLOB NOT NULL, tx INTEGER NOT NULL, result BLOB NOT NULL, PRIMARY KEY (node, tx));\
@@ -3609,13 +3616,6 @@ impl PendingPart {
         })
     }
 }
-
-/// The schema version each pending commit was written under (see
-/// `persist_pending`). Created by the first pending commit, so that
-/// opening an existing store without writing leaves the file
-/// byte-identical.
-const PENDING_VERSIONS_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_pending_versions \
-    (tx INTEGER PRIMARY KEY, version BLOB NOT NULL)";
 
 /// Per remote query, the server seq its result was last settled
 /// through (see `Remote::through`). Created by the first settlement, so
@@ -3913,7 +3913,6 @@ impl Inner {
         }
         // Which version's names its ops use, should the store reopen under
         // another one before it settles.
-        self.exec(PENDING_VERSIONS_DDL, []).map_err(storage)?;
         self.exec(
             "INSERT OR REPLACE INTO _jazz_pending_versions (tx, version) VALUES (?1, ?2)",
             rusqlite::params![tx as i64, self.owner_version.as_bytes().to_vec()],
@@ -4066,18 +4065,11 @@ impl Inner {
             .map_err(storage)
     }
 
+    /// Forget settled commit `tx`: its items, rows and version go with it
+    /// (`_jazz_pending_forget`).
     fn forget_pending(&self, tx: u64) -> Result<(), Error> {
-        for table in ["_jazz_pending", "_jazz_pending_items", "_jazz_pending_rows"] {
-            self.exec(&format!("DELETE FROM {table} WHERE tx = ?1"), [tx as i64])
-                .map_err(storage)?;
-        }
-        if self.has_table("_jazz_pending_versions")? {
-            self.exec(
-                "DELETE FROM _jazz_pending_versions WHERE tx = ?1",
-                [tx as i64],
-            )
+        self.exec("DELETE FROM _jazz_pending WHERE tx = ?1", [tx as i64])
             .map_err(storage)?;
-        }
         Ok(())
     }
 
@@ -4169,9 +4161,6 @@ impl Inner {
     /// The schema version each pending commit was written under, where
     /// one was recorded (stores from before have none: the current one).
     fn pending_versions(&self) -> Result<HashMap<u64, crate::ids::SchemaVersionId>, Error> {
-        if !self.has_table("_jazz_pending_versions")? {
-            return Ok(HashMap::new());
-        }
         let mut statement = self
             .conn
             .prepare("SELECT tx, version FROM _jazz_pending_versions")

@@ -448,6 +448,13 @@ fn a_pending_commit_over_one_stored_value_survives_a_reopen() {
     assert_eq!(visible(&server), ROWS);
     drop(writer);
     assert_eq!(items(&path).0, 0, "its rows go once the commit settles");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    for table in ["_jazz_pending", "_jazz_pending_rows", "_jazz_pending_versions"] {
+        let left: i64 = conn
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0, "{table} keeps nothing of it");
+    }
 }
 
 /// A refused commit too large for one stored value is kept for the host a
