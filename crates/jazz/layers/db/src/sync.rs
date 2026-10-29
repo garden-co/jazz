@@ -1684,6 +1684,11 @@ pub(crate) struct Session {
     outbox: Vec<SyncMessage>,
     /// Images to send this tick: (table, id, branch key).
     touched: BTreeSet<(String, RowUuid, Vec<u8>)>,
+    /// Versions evicted as unreadable while the session still watches
+    /// their id (it holds another branch's version of the row): a write
+    /// that leaves one unreadable ships nothing more, so the replica learns
+    /// once that it may not read it, not each time it is edited.
+    unreadable: HashSet<(String, RowUuid, Vec<u8>)>,
     /// The versions this tick's accepted commits from the client wrote:
     /// (table, id, branch key, seq). Each ships even when a later version
     /// supersedes it, so the replica holds every state its own commits
@@ -1779,6 +1784,7 @@ impl Session {
             subs: BTreeMap::new(),
             outbox: Vec::new(),
             touched: BTreeSet::new(),
+            unreadable: HashSet::new(),
             committed: Vec::new(),
             echoes: Vec::new(),
             support: BTreeMap::new(),
@@ -7852,6 +7858,7 @@ impl Db {
             let mut echoes = std::mem::take(&mut inner.sessions[index].echoes);
             let mut watch = std::mem::take(&mut inner.sessions[index].watch);
             let mut held_rows = std::mem::take(&mut inner.sessions[index].held);
+            let mut unreadable = std::mem::take(&mut inner.sessions[index].unreadable);
             for (table, row, key) in recheck {
                 let can = inner.current_image(&table, row, &key)?.is_some()
                     && readable(&inner, &table, row, &key, policy)?;
@@ -7861,7 +7868,24 @@ impl Db {
             }
             for ((table, row, key), keys) in &written_keys {
                 if keys.iter().any(|k| watch.contains(k)) {
-                    touched.insert((table.clone(), *row, key.clone()));
+                    // A version the replica already knows it may not read
+                    // (evicted, or hidden in a view) ships again only once
+                    // it may.
+                    let known = (table.clone(), *row, key.clone());
+                    let hidden = held_rows
+                        .of(table)
+                        .and_then(|rows| rows.get(&(*row, key.clone())))
+                        .is_some_and(|(can, _)| !can);
+                    if hidden || unreadable.contains(&known) {
+                        let can = inner.current_image(table, *row, key)?.is_some()
+                            && readable(&inner, table, *row, key, policy)?;
+                        if can {
+                            unreadable.remove(&known);
+                            touched.insert(known);
+                        }
+                    } else {
+                        touched.insert(known);
+                    }
                     // A row that joins a watched correlation (a new child)
                     // is watched for whoever watches the correlation.
                     watch.share(
@@ -8153,9 +8177,13 @@ impl Db {
             // Rows that left a result, and rows a commit wrote: the current
             // image if the client may read it, else an eviction (hidden
             // while a version of it still exists).
+            // Ids the replica holds no version of any more: nobody watches
+            // them.
+            let mut gone = Vec::new();
             for (table, row, key) in touched {
                 let hidden = match inner.current_image(&table, row, &key)? {
                     Some(image) if readable(&inner, &table, row, &key, policy)? => {
+                        unreadable.remove(&(table.clone(), row, key.clone()));
                         images.push(image);
                         continue;
                     }
@@ -8168,6 +8196,14 @@ impl Db {
                         .any(|(_, mask)| mask.table == table && mask.head == key),
                     None => inner.is_withheld(&table, row, &key)?,
                 };
+                // A version that exists but is unreadable leaves the id
+                // watched: the replica may hold the row on another branch
+                // (a branch view's base, the main row under a draft).
+                if inner.current_image(&table, row, &key)?.is_some() {
+                    unreadable.insert((table.clone(), row, key.clone()));
+                } else {
+                    gone.push((table.clone(), *row.0.as_bytes()));
+                }
                 evictions.push(SyncMessage::AccessLost {
                     table,
                     id: *row.0.as_bytes(),
@@ -8219,15 +8255,11 @@ impl Db {
                     !evicted.contains(&(image.table.as_str(), image.id, image.key.as_slice()))
                 });
             }
-            for eviction in &evictions {
-                if let SyncMessage::AccessLost { table, id, .. } = eviction {
-                    watch.forget(wk((
-                        table.clone(),
-                        "id".to_owned(),
-                        watch_key(&Sql::Blob(id.to_vec())),
-                    )));
-                }
+            for (table, id) in &gone {
+                watch.forget(id_watch(table, *id));
             }
+            unreadable
+                .retain(|(table, row, _)| watch.contains(&id_watch(table, *row.0.as_bytes())));
             let mut out = Vec::new();
             // Rows travel by stored names: the versions they are stored by
             // reach the client first.
@@ -8242,6 +8274,7 @@ impl Db {
             let session = &mut inner.sessions[index];
             session.watch = watch;
             session.held = held_rows;
+            session.unreadable = unreadable;
             let mut seen = HashSet::new();
             images.retain(|image| {
                 seen.insert((image.table.clone(), image.id, image.key.clone(), image.seq))

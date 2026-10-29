@@ -3718,7 +3718,10 @@ impl Inner {
         let at = |key: Vec<u8>, cells: BTreeMap<String, Value>| -> Result<Located, Error> {
             Ok(match self.existing(&table.stored, row, &key)? {
                 Some((seq, deleted)) => Located::Row { key, seq, deleted },
-                None => Located::Absent { cells },
+                None => {
+                    self.refuse_withheld(table, row, &key)?;
+                    Located::Absent { cells }
+                }
             })
         };
         match target {
@@ -3760,15 +3763,7 @@ impl Inner {
                         deleted,
                     });
                 }
-                // The head holds a version this replica may not read: the
-                // row is hidden in the view (SPEC 8.4), and a write through
-                // it would land over a version nobody here can see.
-                if base.is_some() && self.is_withheld(&table.stored, row, &head_key)? {
-                    return Err(rejected(format!(
-                        "row {} of `{}` is hidden in this branch view: its head version is not readable here",
-                        row.0, table.name
-                    )));
-                }
+                self.refuse_withheld(table, row, &head_key)?;
                 if let Some(base) = base {
                     let base_key = table.selector_key(base)?;
                     if base_key != head_key
@@ -3786,6 +3781,19 @@ impl Inner {
                 Ok(Located::Absent { cells: head_cells })
             }
         }
+    }
+
+    /// A write to a version this replica may not read (a branch view hides
+    /// the row, SPEC 8.4) is refused: it would land over a version nobody
+    /// here can see.
+    fn refuse_withheld(&self, table: &Table, row: RowUuid, key: &[u8]) -> Result<(), Error> {
+        if self.is_withheld(&table.stored, row, key)? {
+            return Err(rejected(format!(
+                "row {} of `{}` is hidden here: its version on this branch is not readable",
+                row.0, table.name
+            )));
+        }
+        Ok(())
     }
 
     /// Evaluate a policy SQL boolean against one stored row.

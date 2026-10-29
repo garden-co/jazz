@@ -72,5 +72,8 @@ earlier layout is refused as an unsupported storage format, never misread.
 Hiding branch-view rows whose head version the reader may not read added the
 client's `_jazz_withheld` table (created on the first hidden eviction) and
 gave `drafts` an `owner` column and a read policy, which regenerated it the
-same way. Any storage change re-pins all three corpora: this one,
-`server-data-dir-v1` and the browser corpus.
+same way, and re-pinned the browser corpus (whose producer hides a note the
+same way). A storage change re-pins this corpus and the browser corpus;
+`server-data-dir-v1` is re-pinned only when an authority's bytes change (an
+authority never writes `_jazz_withheld`, and that producer is not
+byte-deterministic).

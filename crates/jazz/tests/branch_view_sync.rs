@@ -1680,3 +1680,137 @@ fn server_titles(server: &Db, draft: &BranchSelector, main: &BranchSelector) -> 
         })
         .collect()
 }
+
+/// Alice read main's x once; then a view hides the draft's x from her.
+/// Main's x stays current in her store, and Bob's later draft edits send
+/// her nothing, however she keeps main's x (a one-shot read or her own
+/// write).
+#[test]
+fn hiding_the_drafts_version_keeps_the_main_row_current_and_quiet() {
+    for via_commit in [false, true] {
+        let (server, client, shipped) = connected();
+        let b = if via_commit { 0xb1 } else { 0xb3 };
+        let (main, draft) = (branch(b), branch(b + 1));
+        put(&server, &main, 0x45, "x", 1);
+        put(&server, &main, 0x46, "y", 2);
+        set(&server, 0x45, &draft, &main, &[("owner", subject(bob()))]);
+        let on_main = ReadOpts::default().branch_view(main.clone(), None);
+        let mut remote = on_main.clone();
+        remote.tier = ReadTier::Remote;
+        read_once(&server, &client, &by_rank(), remote.clone());
+        let view = ReadOpts::default()
+            .branch_view(draft.clone(), Some(BranchViewBase::Current(main.clone())));
+        let all = client.prepare_query(&by_rank()).unwrap();
+        let _v = block_on(client.subscribe(&all, view.clone())).unwrap();
+        pump(&server, &client);
+        assert_eq!(titles(&client, &by_rank(), view.clone()), ["y"]);
+        set_rank_on(&server, 0x45, &main, 3);
+        set(
+            &server,
+            0x45,
+            &main,
+            &main,
+            &[("title", Value::String("x main v2".into()))],
+        );
+        pump(&server, &client);
+        assert_eq!(
+            titles(&client, &by_rank(), on_main.clone()),
+            ["y", "x main v2"]
+        );
+        let evictions = EVICTIONS.with(|count| *count.borrow());
+        let images = *shipped.borrow();
+        for round in 0..2 {
+            if via_commit {
+                set(
+                    &client,
+                    0x45,
+                    &main,
+                    &main,
+                    &[("title", Value::String(format!("x alice {round}")))],
+                );
+            } else {
+                read_once(&server, &client, &by_rank(), remote.clone());
+            }
+            pump(&server, &client);
+            set(
+                &server,
+                0x45,
+                &draft,
+                &main,
+                &[("title", Value::String(format!("bob {round}")))],
+            );
+            pump(&server, &client);
+        }
+        assert_eq!(EVICTIONS.with(|count| *count.borrow()), evictions);
+        assert!(*shipped.borrow() >= images);
+        assert_eq!(titles(&client, &by_rank(), view), ["y"]);
+    }
+}
+
+/// Without a view, Bob's draft edits Alice may not read still leave her
+/// main row current: one eviction of the draft's version, then nothing.
+#[test]
+fn an_unreadable_draft_version_leaves_the_main_row_watched() {
+    let (server, client, _) = connected();
+    let (main, draft) = (branch(0xb5), branch(0xb6));
+    put(&server, &main, 0x45, "x", 1);
+    set(&server, 0x45, &draft, &main, &[("owner", subject(bob()))]);
+    let on_main = ReadOpts::default().branch_view(main.clone(), None);
+    let all = client.prepare_query(&by_rank()).unwrap();
+    let _m = block_on(client.subscribe(&all, on_main.clone())).unwrap();
+    pump(&server, &client);
+    let evictions = EVICTIONS.with(|count| *count.borrow());
+    for i in 0..3 {
+        set(
+            &server,
+            0x45,
+            &draft,
+            &main,
+            &[("title", Value::String(format!("bob {i}")))],
+        );
+        pump(&server, &client);
+    }
+    assert!(EVICTIONS.with(|count| *count.borrow()) <= evictions + 1);
+    set(
+        &server,
+        0x45,
+        &main,
+        &main,
+        &[("title", Value::String("x v2".into()))],
+    );
+    pump(&server, &client);
+    assert_eq!(titles(&client, &by_rank(), on_main), ["x v2"]);
+}
+
+/// A write to the hidden head version itself (no base) is refused too.
+#[test]
+fn a_head_only_write_to_a_hidden_row_is_refused() {
+    let (server, client, _) = connected();
+    let (main, draft) = (branch(0xb7), branch(0xb8));
+    put(&server, &main, 0x45, "x", 1);
+    set(&server, 0x45, &draft, &main, &[("owner", subject(bob()))]);
+    let view =
+        ReadOpts::default().branch_view(draft.clone(), Some(BranchViewBase::Current(main.clone())));
+    let all = client.prepare_query(&by_rank()).unwrap();
+    let _v = block_on(client.subscribe(&all, view)).unwrap();
+    pump(&server, &client);
+    let upsert = block_on(client.upsert(
+        "todos",
+        RowUuid::from_bytes([0x45; 16]),
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("mine".into())),
+            ("rank".to_owned(), Value::I32(1)),
+        ]),
+        jazz::db::UpsertOptions {
+            target: jazz::db::WriteTarget::BranchView {
+                head: draft.clone(),
+                base: None,
+            },
+            ..Default::default()
+        },
+    ));
+    assert_eq!(
+        upsert.expect_err("refused").code,
+        jazz::db::ErrorCode::WriteRejected
+    );
+}

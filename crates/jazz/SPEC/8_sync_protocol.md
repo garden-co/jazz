@@ -343,7 +343,8 @@ for one query's result:
   the head alone, the current state) ignore it, and no read lists it, deleted
   rows included. The marker reveals only what the eviction does: that a
   version exists. A write through the view to a hidden row is refused
-  (`WriteRejected`): it would land over a version the replica cannot see.
+  (`WriteRejected`): it would land over a version the replica cannot see,
+  as is a write to that version through any target.
   An eviction is hidden only for the head of one of the session's branch
   views over a base; any other read's access loss keeps no marker. It lifts when an image of the row arrives (the head
   writes it readably again, or a policy input change grants access: the
@@ -445,7 +446,11 @@ change, the server sends `AccessLost { table, id, key, hidden }` and the
 replica drops its copy (`INV-SYNC-14`). `hidden` says the row still exists as
 a version the reader may not read, rather than being gone: in a branch view
 over a base it still overrides the base's row, so the replica keeps a marker
-that masks that row (§8.4). This includes a row the reader's own accepted commit
+that masks that row (§8.4). An eviction of a version that still exists keeps
+the session watching the row's id, since the replica may hold the row on
+another branch, and later writes that leave that version unreadable send
+nothing more, whichever of the session's reads watches the id; a version
+that becomes readable ships again. This includes a row the reader's own accepted commit
 wrote and cannot read (a write-only insert): the commit's fate reports its
 acceptance. Local copies are not a redaction boundary; eviction keeps the
 replica coherent, not secret.
