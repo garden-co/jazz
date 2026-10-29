@@ -1984,10 +1984,16 @@ impl Db {
                 inner.clear_derived();
                 applied
             })?;
+            // A standalone write that changed nothing made no commit: its
+            // handle names the row's current version, which may be the
+            // newest commit's own seq, so recording it would upload a
+            // second commit under that commit's transaction id.
+            let committed = notify || self.inner().tx.is_some();
             // The upload record joins the write's SQLite transaction: if it
             // fails, `with_upload` rolls both back, and nobody has been told.
-            if let Err(error) =
-                self.record_upload(vec![op], handle.seq, sync::Kind::Mergeable, None)
+            if let Err(error) = committed
+                .then(|| self.record_upload(vec![op], handle.seq, sync::Kind::Mergeable, None))
+                .transpose()
             {
                 let mut inner = self.inner();
                 inner.seq = prior;

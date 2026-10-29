@@ -257,3 +257,69 @@ fn a_store_with_the_old_message_outbox_is_refused_unchanged() {
         "the file is unchanged"
     );
 }
+
+/// An update that changes nothing makes no commit, even right after the
+/// write that made the row's current version: it must not record a second
+/// upload under that commit's transaction id, which would fail the write,
+/// or (stored over the first) upload the empty update in its place after
+/// a restart.
+#[test]
+fn an_update_that_changes_nothing_records_no_upload() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("replica.sqlite");
+    let server = block_on(Db::open_history_complete(config(0xee))).unwrap();
+    let doc = |title: &str| {
+        BTreeMap::from([
+            ("title".to_owned(), Value::String(title.to_owned())),
+            ("body".to_owned(), Value::String("short".to_owned())),
+        ])
+    };
+    let (inserted, unchanged) = {
+        let client = open_file(&path);
+        client.become_replica();
+        let inserted = block_on(client.insert(
+            "docs",
+            doc("kept"),
+            InsertOptions {
+                row_id: Some(row(1)),
+                ..Default::default()
+            },
+        ))
+        .unwrap()
+        .mergeable_tx_id();
+        let unchanged =
+            block_on(client.update("docs", row(1), BTreeMap::new(), Default::default()))
+                .unwrap()
+                .mergeable_tx_id();
+        block_on(client.insert(
+            "docs",
+            doc("next"),
+            InsertOptions {
+                row_id: Some(row(2)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        (inserted, unchanged)
+    };
+    assert_eq!(
+        unchanged, inserted,
+        "the handle names the row's current version"
+    );
+    let client = open_file(&path);
+    connect(&client, &server);
+    drive(
+        &[&client, &server, &client],
+        client.wait_for_pending_writes(DurabilityTier::Global),
+    )
+    .unwrap();
+    let titles: Vec<String> = docs(&server)
+        .into_values()
+        .map(|(title, _)| title)
+        .collect();
+    assert_eq!(
+        titles,
+        ["kept", "next"],
+        "both real commits reach the server"
+    );
+}
