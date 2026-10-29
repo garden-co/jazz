@@ -10,10 +10,10 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 
 use jazz::db::{
-    AccessProof, Acting, BuiltOn, CellDelta, Db, DbConfig, DbIdentity, InsertOptions, ReadOpts,
-    ReadSpan, ReadTier, RemoteLinkHint, SubscriptionStream, SyncCell, SyncMessage, Transport,
-    TransportError, WireBase, WireChunk, WireDelta, WireError, WireKind, WireOp, WirePull,
-    WireTarget, WireWrite, block_on, encode_frames,
+    AccessProof, Acting, BuiltOn, CellDelta, Db, DbConfig, DbIdentity, InsertOptions, Outcome,
+    ReadOpts, ReadSpan, ReadTier, RemoteLinkHint, SubscriptionStream, SyncCell, SyncMessage,
+    Transport, TransportError, WireBase, WireChunk, WireDelta, WireError, WireKind, WireOp,
+    WirePull, WireTarget, WireWrite, block_on, encode_frames,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::ReadViewSourceSpec;
@@ -952,7 +952,6 @@ fn a_delta_over_a_version_the_writer_cannot_read_is_rejected() {
             .into()
         }],
         acting: Acting::Own,
-        expect: Vec::new(),
         origin: None,
     };
     // Each version the server could have written the draft at, named as a
@@ -983,7 +982,11 @@ fn a_delta_over_a_version_the_writer_cannot_read_is_rejected() {
         .filter_map(|message| match message {
             SyncMessage::Fate {
                 tx,
-                result: Err(WireError::Rejected { message, .. }),
+                outcome:
+                    Outcome::Refused {
+                        error: WireError::Rejected { message, .. },
+                        ..
+                    },
                 ..
             } => Some((*tx, message.contains("large-value delta"))),
             SyncMessage::Fate { tx, .. } => Some((*tx, false)),
@@ -1211,7 +1214,6 @@ fn naming_a_hidden_trees_hash_reads_nothing() {
             .into(),
         ],
         acting: Acting::Own,
-        expect: Vec::new(),
         origin: None,
     };
     up.borrow_mut().push_back(insert(1, 1, &hidden));
@@ -1225,7 +1227,11 @@ fn naming_a_hidden_trees_hash_reads_nothing() {
         .filter_map(|message| match message {
             SyncMessage::Fate {
                 tx,
-                result: Err(WireError::Rejected { message, .. }),
+                outcome:
+                    Outcome::Refused {
+                        error: WireError::Rejected { message, .. },
+                        ..
+                    },
                 ..
             } => Some((*tx, message.clone())),
             SyncMessage::Fate { tx, .. } => Some((*tx, "accepted".to_owned())),
@@ -1308,7 +1314,6 @@ fn an_access_proof_the_writer_cannot_read_proves_nothing() {
             .into()
         }],
         acting: Acting::Own,
-        expect: Vec::new(),
         origin: None,
     };
     up.borrow_mut().push_back(update(1, &hidden));
@@ -1321,7 +1326,11 @@ fn an_access_proof_the_writer_cannot_read_proves_nothing() {
         .iter()
         .filter_map(|message| match message {
             SyncMessage::Fate {
-                result: Err(WireError::Rejected { message, .. }),
+                outcome:
+                    Outcome::Refused {
+                        error: WireError::Rejected { message, .. },
+                        ..
+                    },
                 ..
             } => Some(message.clone()),
             SyncMessage::Fate { .. } => Some("accepted".to_owned()),
@@ -1381,14 +1390,13 @@ fn a_push_is_never_answered() {
             .into(),
         ],
         acting: Acting::Own,
-        expect: Vec::new(),
         origin: None,
     };
     let fates = || -> Vec<bool> {
         down.borrow()
             .iter()
             .filter_map(|message| match message {
-                SyncMessage::Fate { result, .. } => Some(result.is_ok()),
+                SyncMessage::Fate { outcome, .. } => Some(outcome.result().is_ok()),
                 _ => None,
             })
             .collect()
@@ -1474,7 +1482,6 @@ fn a_delta_that_does_not_stand_in_for_a_null_cell_is_refused() {
             .into()
         }],
         acting: Acting::Own,
-        expect: Vec::new(),
         origin: None,
     };
     up.borrow_mut()
@@ -1489,7 +1496,11 @@ fn a_delta_that_does_not_stand_in_for_a_null_cell_is_refused() {
         .iter()
         .filter_map(|message| match message {
             SyncMessage::Fate {
-                result: Err(WireError::Rejected { message, .. }),
+                outcome:
+                    Outcome::Refused {
+                        error: WireError::Rejected { message, .. },
+                        ..
+                    },
                 ..
             } => Some(message.clone()),
             SyncMessage::Fate { .. } => Some("accepted".to_owned()),
@@ -1560,7 +1571,6 @@ fn a_merged_text_write_naming_a_hidden_tree_is_refused() {
             .into()
         }],
         acting: Acting::Own,
-        expect: Vec::new(),
         origin: None,
     });
     for _ in 0..4 {
@@ -1571,7 +1581,11 @@ fn a_merged_text_write_naming_a_hidden_tree_is_refused() {
         .iter()
         .filter_map(|message| match message {
             SyncMessage::Fate {
-                result: Err(WireError::Rejected { message, .. }),
+                outcome:
+                    Outcome::Refused {
+                        error: WireError::Rejected { message, .. },
+                        ..
+                    },
                 ..
             } => Some(message.clone()),
             SyncMessage::Fate { .. } => Some("accepted".to_owned()),
@@ -2187,11 +2201,13 @@ fn a_relay_forwards_no_pull_its_tab_may_not_make() {
 
 #[test]
 fn edits_cross_a_relay_as_deltas_both_ways() {
+    // A relay serves one identity's sessions (a shared worker and its
+    // tabs), so the tab writes as the relay's user.
     let core = open(0, AuthorSubject::SYSTEM);
     let relay = open(5, user(5));
-    let tab = open(6, user(6));
+    let tab = open(6, user(5));
     let (relay_up, relay_down) = connect_spied(&core, &relay, user(5));
-    let (tab_up, tab_down) = connect_spied(&relay, &tab, user(6));
+    let (tab_up, tab_down) = connect_spied(&relay, &tab, user(5));
     let _relay_stream = subscribe(&relay, Query::from("docs"));
     let _stream = subscribe(&tab, Query::from("docs"));
     let mut expected = text(4, LARGE);

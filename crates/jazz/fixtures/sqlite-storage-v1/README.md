@@ -11,9 +11,9 @@ are stored, a rejection's reason name changed how fates are recorded, and
 pending uploads moved from one encoded message to a row per op).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `781ad9111facd7b62a4dd1513763ac0e8fb41b814b77a30f430c5c9f4e63a8be`.
+  the SQLite file `fddef7947056ffd0a3cca1d74e3e5247dea8fc8a6b4f7ffffc9658be3c6d0e7a`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `bf77a0b8b5c91af66aef21d92b22fd37ebaa2ef8fbb1cfeb4ead5d12fb51951e`.
+  `959677a7477820ae54b5db9e6a0e24d145faf6ea99612e03aa0074f9fb4aebdc`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
@@ -29,8 +29,10 @@ nodes and write times:
 - a client that synced `projects` and `documents`, wrote one row that
   settled, one stamped far ahead of the server's clock that the server
   rejected (so `_jazz_transactions` keeps a rejected fate with its reason name),
-  then two writes (an insert and an update) that never reached the
-  server: its pending uploads;
+  then two writes (an insert and an update) and a serializable transaction
+  that read one project and inserted two, none of which reached the
+  server: its pending uploads, the last one stored as two op rows and a
+  read row;
 - then the server activated a second schema version that renames
   `documents.title` to `heading` (a stored-names lens) and wrote under it.
 
@@ -69,6 +71,12 @@ earlier layout is refused as an unsupported storage format, never misread.
 Merging `_jazz_applied` and `_jazz_settled` into one `_jazz_transactions`
 table keyed by an interned node code (`_jazz_nodes.n`) regenerated it the
 same way.
+
+Deleting a settled commit's pending rows in one statement (the
+`_jazz_pending_forget` trigger on `_jazz_pending`, with
+`_jazz_pending_versions` now created on open) regenerated it the same way,
+adding the serializable pending commit above so the per-op layout is
+pinned with more than one op and a read.
 
 Storing every version at a position `(_n, _seq)`, `_n` being the code of the
 node that numbered it (0 for the authority; a replica's own writes at its

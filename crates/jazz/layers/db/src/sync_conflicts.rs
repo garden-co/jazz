@@ -409,6 +409,43 @@ impl Inner {
         Ok(built)
     }
 
+    /// Where each based row of an upload this relay carries was built on,
+    /// in its own history, for the echo inference alone (see `Echoable`):
+    /// its sessions also build on its unsettled versions, named as its
+    /// commits.
+    pub(super) fn relay_landed(
+        &self,
+        sender: ([u8; 16], u64),
+        ops: &[StagedOp],
+        bases: &[(usize, WireBase)],
+    ) -> Result<HashMap<RowKey, Pos>, Error> {
+        let me = *self.identity.node.as_bytes();
+        let mut landed = HashMap::new();
+        for (op, base) in bases {
+            let (table, row) = self.based_row(ops, *op)?;
+            let at = match base.on {
+                BuiltOn::Seq(seq) => Pos::at(seq),
+                BuiltOn::Commit { node, tx } if node == me => Pos {
+                    n: self.me,
+                    seq: tx,
+                },
+                BuiltOn::Own { back } => {
+                    let tx = sender
+                        .1
+                        .checked_sub(back)
+                        .ok_or_else(|| unknown_base("a commit"))?;
+                    predecessor(self.settled(sender.0, tx)?)?
+                }
+                BuiltOn::Commit { node, tx } if node == sender.0 => {
+                    predecessor(self.settled(node, tx)?)?
+                }
+                BuiltOn::Commit { .. } => return Err(unknown_base("another node's commit")),
+            };
+            landed.insert((table.to_owned(), row, base.key.clone()), at);
+        }
+        Ok(landed)
+    }
+
     /// Keep, in each row version an accepted upload wrote at `seq`, what it
     /// was built on and the columns it authored.
     pub(super) fn record_bases(
@@ -440,6 +477,30 @@ impl Inner {
             .map_err(storage)?;
         }
         Ok(())
+    }
+
+    /// The current version of each branch of a row, as (key, seq).
+    pub(super) fn current_versions(
+        &self,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<Vec<(Vec<u8>, Pos)>, Error> {
+        let sql = format!("SELECT _b, _n, _seq FROM {} WHERE id = ?1", quote(table));
+        let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
+        let versions = statement
+            .query_map([row.0.as_bytes().to_vec()], |r| {
+                Ok((
+                    r.get::<_, Vec<u8>>(0)?,
+                    Pos {
+                        n: r.get(1)?,
+                        seq: r.get::<_, i64>(2)? as u64,
+                    },
+                ))
+            })
+            .map_err(storage)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage)?;
+        Ok(versions)
     }
 
     /// The accepted versions of a row, in seq order.
