@@ -19,41 +19,38 @@ use crate::records::{Value, ValueType};
 use crate::schema::JazzSchema;
 use crate::values::{Column, Schema, Sql, StoredNames, in_savepoint, storage, to_sql, unsupported};
 
-/// One row per (version, table, column); `col` is '' for the table itself.
-/// `n` orders versions by admission.
-pub(crate) const DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_names (version BLOB NOT NULL, \
-     tbl TEXT NOT NULL, col TEXT NOT NULL, n INTEGER NOT NULL, stored_tbl TEXT NOT NULL, \
-     stored_col TEXT NOT NULL, PRIMARY KEY (version, tbl, col)) WITHOUT ROWID;";
-
-/// Each stored table's branch columns (SPEC 4, INV-BVIEW-19), with the
-/// default a row written without one is keyed as (`has_dflt` 0: none); a
-/// table is listed with `col` '' once it has been admitted. Every version
-/// admitted to the file, in any session, must key rows the same way.
-const BRANCH_COLUMNS_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_branch_columns (tbl TEXT NOT NULL, \
-     col TEXT NOT NULL, has_dflt INTEGER NOT NULL, dflt, PRIMARY KEY (tbl, col)) WITHOUT ROWID;";
-
-/// Stored columns that lenses fill in rows inserted by versions that do not
-/// name them, one row per (stored table, stored column, lens target version):
-/// `src` names the column a copy follows, else `dflt` is a dropped
-/// column's backwards default. Created with the first such lens, so stores
-/// without one keep their file as it was.
-const LENS_CELLS_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_lens_cells (tbl TEXT NOT NULL, \
-     col TEXT NOT NULL, since BLOB NOT NULL, src TEXT, dflt, PRIMARY KEY (tbl, col, since)) \
-     WITHOUT ROWID;";
-
-/// Each stored column's value type, recorded when a version storing it is
-/// first admitted (a stored column never changes type). A column added again
-/// under a name some earlier version stored continues that stored column
-/// only if its type is the one recorded here (see [`Names::resolve`]).
-const COLUMN_TYPES_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_column_types (tbl TEXT NOT NULL, \
-     col TEXT NOT NULL, ty BLOB NOT NULL, PRIMARY KEY (tbl, col)) WITHOUT ROWID;";
-
-/// The versions whose names this replica's authority confirmed, each with
-/// the [`names_digest`] it confirmed: a version is confirmed while its names
-/// still have that digest. An authority confirms every version it admits,
-/// so it keeps none.
-const CONFIRMED_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_confirmed_names (version BLOB NOT NULL \
-     PRIMARY KEY, digest BLOB NOT NULL) WITHOUT ROWID;";
+/// The stored-name catalogue, created with the store.
+///
+/// - `_jazz_versions`: each admitted version, numbered `n` in admission
+///   order. On a replica, `confirmed` is the [`names_digest`] its authority
+///   confirmed for it: a version is confirmed while its names still have
+///   that digest (an authority confirms every version it admits, so it
+///   keeps none).
+/// - `_jazz_names`: one row per (version, table, column) with where it is
+///   stored; `col` is '' for the table itself.
+/// - `_jazz_stored_columns`: each stored column, recorded when a version
+///   storing it is first admitted: its value type (as JSON; a stored column
+///   never changes type, so a column added again under a name some earlier
+///   version stored continues that stored column only with this type, see
+///   [`Names::resolve`]), and whether it is a branch column (SPEC 4,
+///   INV-BVIEW-19) with the default a row written without one is keyed as
+///   (`has_dflt` 0: none). A table is listed with `col` '' once admitted.
+///   Every version admitted to the file, in any session, must key rows the
+///   same way.
+/// - `_jazz_lens_cells`: stored columns that lenses fill in rows inserted
+///   by versions that do not name them, one row per (stored table, stored
+///   column, lens target version): `src` names the column a copy follows,
+///   else `dflt` is a dropped column's backwards default.
+pub(crate) const DDL: &str = "\
+    CREATE TABLE IF NOT EXISTS _jazz_versions (n INTEGER PRIMARY KEY, version BLOB NOT NULL UNIQUE, \
+     confirmed BLOB);\
+    CREATE TABLE IF NOT EXISTS _jazz_names (n INTEGER NOT NULL, tbl TEXT NOT NULL, col TEXT NOT NULL, \
+     stored_tbl TEXT NOT NULL, stored_col TEXT NOT NULL, PRIMARY KEY (n, tbl, col)) WITHOUT ROWID;\
+    CREATE TABLE IF NOT EXISTS _jazz_stored_columns (tbl TEXT NOT NULL, col TEXT NOT NULL, ty TEXT, \
+     branch INTEGER NOT NULL DEFAULT 0, has_dflt INTEGER NOT NULL DEFAULT 0, dflt, \
+     PRIMARY KEY (tbl, col)) WITHOUT ROWID;\
+    CREATE TABLE IF NOT EXISTS _jazz_lens_cells (tbl TEXT NOT NULL, col TEXT NOT NULL, \
+     since BLOB NOT NULL, src TEXT, dflt, PRIMARY KEY (tbl, col, since)) WITHOUT ROWID;";
 
 /// A stored column a lens into version `since` fills in rows inserted by
 /// versions that do not name it.
@@ -220,31 +217,59 @@ fn schema_error(message: impl Into<String>) -> Error {
 impl Names {
     pub(crate) fn load(conn: &Connection) -> Result<Self, Error> {
         conn.execute_batch(DDL).map_err(storage)?;
+        conn.execute_batch(crate::catalogue::DDL).map_err(storage)?;
+        let mut names = Self::default();
+        let bad = |what: &str| Error::new(ErrorCode::Storage, format!("bad {what}"));
+        let mut by_n = HashMap::new();
         let mut statement = conn
-            .prepare("SELECT version, tbl, col, n, stored_tbl, stored_col FROM _jazz_names")
+            .prepare("SELECT n, version, confirmed FROM _jazz_versions")
             .map_err(storage)?;
         let rows = statement
             .query_map([], |r| {
                 Ok((
-                    r.get::<_, Vec<u8>>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, i64>(3)?,
-                    r.get::<_, String>(4)?,
-                    r.get::<_, String>(5)?,
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, Option<Vec<u8>>>(2)?,
                 ))
             })
             .map_err(storage)?;
-        let mut names = Self::default();
         for row in rows {
-            let (version, table, column, n, stored_table, stored_column) = row.map_err(storage)?;
-            let version = SchemaVersionId::from_bytes(version.try_into().map_err(|_| {
-                Error::new(ErrorCode::Storage, "bad schema version in _jazz_names")
-            })?);
-            let (_, names) = names
-                .versions
-                .entry(version)
-                .or_insert_with(|| (n, StoredNames::default()));
+            let (n, version, confirmed) = row.map_err(storage)?;
+            let version = SchemaVersionId::from_bytes(
+                version
+                    .try_into()
+                    .map_err(|_| bad("schema version in _jazz_versions"))?,
+            );
+            if let Some(digest) = confirmed {
+                let digest = digest
+                    .try_into()
+                    .map_err(|_| bad("digest in _jazz_versions"))?;
+                names.confirmed.insert(version, digest);
+            }
+            by_n.insert(n, version);
+            names.versions.insert(version, (n, StoredNames::default()));
+        }
+        drop(statement);
+        let mut statement = conn
+            .prepare("SELECT n, tbl, col, stored_tbl, stored_col FROM _jazz_names")
+            .map_err(storage)?;
+        let rows = statement
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            })
+            .map_err(storage)?;
+        for row in rows {
+            let (n, table, column, stored_table, stored_column) = row.map_err(storage)?;
+            let version = by_n
+                .get(&n)
+                .ok_or_else(|| bad("version number in _jazz_names"))?;
+            let (_, names) = names.versions.get_mut(version).expect("loaded above");
             let (stored, columns) = names
                 .tables
                 .entry(table)
@@ -256,113 +281,69 @@ impl Names {
             }
         }
         drop(statement);
-        let has_cells: bool = conn
-            .query_row(
-                "SELECT count(*) > 0 FROM sqlite_master WHERE name = '_jazz_lens_cells'",
-                [],
-                |r| r.get(0),
-            )
+        let mut statement = conn
+            .prepare("SELECT tbl, col, ty, branch, has_dflt, dflt FROM _jazz_stored_columns")
             .map_err(storage)?;
-        let has_branches: bool = conn
-            .query_row(
-                "SELECT count(*) > 0 FROM sqlite_master WHERE name = '_jazz_branch_columns'",
-                [],
-                |r| r.get(0),
-            )
+        let rows = statement
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, bool>(3)?,
+                    r.get::<_, bool>(4)?,
+                    r.get::<_, Sql>(5)?,
+                ))
+            })
             .map_err(storage)?;
-        if has_branches {
-            let mut statement = conn
-                .prepare("SELECT tbl, col, has_dflt, dflt FROM _jazz_branch_columns")
-                .map_err(storage)?;
-            let rows = statement
-                .query_map([], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, bool>(2)?,
-                        r.get::<_, Sql>(3)?,
-                    ))
-                })
-                .map_err(storage)?;
-            for row in rows {
-                let (table, column, has_default, default) = row.map_err(storage)?;
-                let columns = names.branches.entry(table).or_default();
-                if !column.is_empty() {
-                    columns.insert(column, has_default.then_some(default));
-                }
+        for row in rows {
+            let (table, column, ty, branch, has_default, default) = row.map_err(storage)?;
+            let columns = names.branches.entry(table.clone()).or_default();
+            if column.is_empty() {
+                continue;
             }
-        }
-        if table_exists(conn, "_jazz_column_types")? {
-            let mut statement = conn
-                .prepare("SELECT tbl, col, ty FROM _jazz_column_types")
-                .map_err(storage)?;
-            let rows = statement
-                .query_map([], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, Vec<u8>>(2)?,
-                    ))
-                })
-                .map_err(storage)?;
-            for row in rows {
-                let (table, column, ty) = row.map_err(storage)?;
-                let ty = postcard::from_bytes(&ty).map_err(|_| {
-                    Error::new(ErrorCode::Storage, "bad value type in _jazz_column_types")
-                })?;
-                names.types.insert((table, column), ty);
+            if branch {
+                columns.insert(column.clone(), has_default.then_some(default));
             }
+            let ty = ty.ok_or_else(|| bad("column without a type in _jazz_stored_columns"))?;
+            let ty =
+                serde_json::from_str(&ty).map_err(|_| bad("value type in _jazz_stored_columns"))?;
+            names.types.insert((table, column), ty);
         }
-        if table_exists(conn, "_jazz_confirmed_names")? {
-            let mut statement = conn
-                .prepare("SELECT version, digest FROM _jazz_confirmed_names")
-                .map_err(storage)?;
-            let rows = statement
-                .query_map([], |r| {
-                    Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?))
-                })
-                .map_err(storage)?;
-            for row in rows {
-                let (version, digest) = row.map_err(storage)?;
-                let bad = || Error::new(ErrorCode::Storage, "bad row in _jazz_confirmed_names");
-                let version = SchemaVersionId::from_bytes(version.try_into().map_err(|_| bad())?);
-                names
-                    .confirmed
-                    .insert(version, digest.try_into().map_err(|_| bad())?);
-            }
+        drop(statement);
+        let mut statement = conn
+            .prepare("SELECT tbl, col, since, src, dflt FROM _jazz_lens_cells")
+            .map_err(storage)?;
+        let rows = statement
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Vec<u8>>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, Sql>(4)?,
+                ))
+            })
+            .map_err(storage)?;
+        for row in rows {
+            let (table, column, since, src, default) = row.map_err(storage)?;
+            let since = SchemaVersionId::from_bytes(
+                since
+                    .try_into()
+                    .map_err(|_| bad("schema version in _jazz_lens_cells"))?,
+            );
+            let rule = match src {
+                Some(source) => LensCellRule::Copy(source),
+                None => LensCellRule::Dropped(default),
+            };
+            names.lens_cells.push(LensCell {
+                table,
+                column,
+                since,
+                rule,
+            });
         }
-        if has_cells {
-            let mut statement = conn
-                .prepare("SELECT tbl, col, since, src, dflt FROM _jazz_lens_cells")
-                .map_err(storage)?;
-            let rows = statement
-                .query_map([], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, Vec<u8>>(2)?,
-                        r.get::<_, Option<String>>(3)?,
-                        r.get::<_, Sql>(4)?,
-                    ))
-                })
-                .map_err(storage)?;
-            for row in rows {
-                let (table, column, since, src, default) = row.map_err(storage)?;
-                let since = SchemaVersionId::from_bytes(since.try_into().map_err(|_| {
-                    Error::new(ErrorCode::Storage, "bad schema version in _jazz_lens_cells")
-                })?);
-                let rule = match src {
-                    Some(source) => LensCellRule::Copy(source),
-                    None => LensCellRule::Dropped(default),
-                };
-                names.lens_cells.push(LensCell {
-                    table,
-                    column,
-                    since,
-                    rule,
-                });
-            }
-        }
+        drop(statement);
         Ok(names)
     }
 
@@ -375,7 +356,6 @@ impl Names {
         if cells.is_empty() {
             return Ok(());
         }
-        conn.execute_batch(LENS_CELLS_DDL).map_err(storage)?;
         let mut insert = conn
             .prepare_cached(
                 "INSERT OR IGNORE INTO _jazz_lens_cells (tbl, col, since, src, dflt) \
@@ -505,19 +485,8 @@ impl Names {
             }
             for (ddl_table, columns) in [
                 ("_jazz_lens_cells", ["col", "src"].as_slice()),
-                ("_jazz_branch_columns", ["col"].as_slice()),
-                ("_jazz_column_types", ["col"].as_slice()),
+                ("_jazz_stored_columns", ["col"].as_slice()),
             ] {
-                let exists: bool = conn
-                    .query_row(
-                        "SELECT count(*) > 0 FROM sqlite_master WHERE name = ?1",
-                        [ddl_table],
-                        |r| r.get(0),
-                    )
-                    .map_err(storage)?;
-                if !exists {
-                    continue;
-                }
                 match column {
                     None => {
                         conn.execute(
@@ -614,114 +583,79 @@ impl Names {
             return Ok(());
         };
         in_savepoint(conn, "jazz_names", || {
-            let id = version.as_bytes().to_vec();
-            conn.execute("DELETE FROM _jazz_names WHERE version = ?1", [&id])
+            conn.execute("DELETE FROM _jazz_names WHERE n = ?1", [n])
                 .map_err(storage)?;
-            let mut insert = conn
-                .prepare_cached(
-                    "INSERT INTO _jazz_names (version, tbl, col, n, stored_tbl, stored_col) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                )
-                .map_err(storage)?;
-            for (table, (stored, columns)) in &names.tables {
-                insert
-                    .execute(rusqlite::params![id, table, "", n, stored, ""])
-                    .map_err(storage)?;
-                for (column, stored_column) in columns {
-                    insert
-                        .execute(rusqlite::params![
-                            id,
-                            table,
-                            column,
-                            n,
-                            stored,
-                            stored_column
-                        ])
-                        .map_err(storage)?;
-                }
-            }
-            Ok(())
+            write_names(conn, n, &names)
         })?;
         self.versions.insert(version, (n, names));
         Ok(())
     }
 
-    /// Record `schema`'s names and branch columns (once per version), in
-    /// the file and then in memory. Both are written in one savepoint, so a
-    /// version is never known by name without its branch columns.
+    /// Record `schema`'s version, names, stored columns and definition
+    /// (once per version), in the file and then in memory. All are written
+    /// in one savepoint, so a version is never known by name without its
+    /// stored columns.
     pub(crate) fn admit(&mut self, conn: &Connection, schema: &Schema) -> Result<(), Error> {
         let version = schema.jazz.version_id();
-        // A version a file admitted before its column types were kept
-        // records them when it is opened again.
-        let types = self.new_types(schema)?;
         if self.versions.contains_key(&version) {
-            if !types.is_empty() {
-                in_savepoint(conn, "jazz_names", || write_types(conn, &types))?;
-                self.types
-                    .extend(types.into_iter().map(|(key, ty, _)| (key, ty)));
-            }
             return Ok(());
         }
         let n = self.versions.values().map(|(n, _)| *n).max().unwrap_or(0) + 1;
         let names = schema.names();
-        let branches = self.new_branches(schema)?;
+        let columns = self.new_stored_columns(schema)?;
         in_savepoint(conn, "jazz_names", || {
-            write_types(conn, &types)?;
-            let id = version.as_bytes().to_vec();
-            let mut insert = conn
-                .prepare_cached(
-                    "INSERT OR REPLACE INTO _jazz_names (version, tbl, col, n, stored_tbl, stored_col) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                )
-                .map_err(storage)?;
-            for (table, (stored, columns)) in &names.tables {
-                insert
-                    .execute(rusqlite::params![id, table, "", n, stored, ""])
-                    .map_err(storage)?;
-                for (column, stored_column) in columns {
-                    insert
-                        .execute(rusqlite::params![
-                            id,
-                            table,
-                            column,
-                            n,
-                            stored,
-                            stored_column
-                        ])
-                        .map_err(storage)?;
-                }
-            }
-            write_branches(conn, &branches)
+            conn.execute(
+                "INSERT INTO _jazz_versions (n, version) VALUES (?1, ?2)",
+                rusqlite::params![n, version.as_bytes().to_vec()],
+            )
+            .map_err(storage)?;
+            write_names(conn, n, &names)?;
+            write_stored_columns(conn, &columns)?;
+            crate::catalogue::record_admitted(conn, n, &schema.jazz)
         })?;
         self.versions.insert(version, (n, names));
-        self.types
-            .extend(types.into_iter().map(|(key, ty, _)| (key, ty)));
-        for (table, column, default) in branches {
-            let columns = self.branches.entry(table).or_default();
-            if let Some(default) = default {
-                columns.insert(column, default);
+        for column in columns {
+            let branches = self.branches.entry(column.table.clone()).or_default();
+            let Some(ty) = column.ty else {
+                continue;
+            };
+            if let Some(default) = column.branch {
+                branches.insert(column.column.clone(), default);
             }
+            self.types.insert((column.table, column.column), ty);
         }
         Ok(())
     }
 
-    /// `schema`'s stored columns whose type is not recorded yet, each with
-    /// its type encoded as the file keeps it.
-    fn new_types(&self, schema: &Schema) -> Result<Vec<NewType>, Error> {
+    /// `schema`'s tables and stored columns not recorded yet: each new
+    /// table (as `col` ''), and each new column with its type and, for a
+    /// branch column, its default.
+    fn new_stored_columns(&self, schema: &Schema) -> Result<Vec<NewStoredColumn>, Error> {
         let mut new = Vec::new();
         for table in schema.tables.values() {
+            if !self.branches.contains_key(&table.stored) {
+                new.push(NewStoredColumn {
+                    table: table.stored.clone(),
+                    column: String::new(),
+                    ty: None,
+                    branch: None,
+                });
+            }
+            let branch = branch_columns(table);
             for column in &table.columns {
                 let key = (table.stored.clone(), column.stored.clone());
                 if self.types.contains_key(&key) {
                     continue;
                 }
-                let bytes = postcard::to_allocvec(&column.ty).map_err(|error| {
-                    Error::new(
-                        ErrorCode::Storage,
-                        format!("encoding a column type: {error}"),
-                    )
-                })?;
-                new.push((key, column.ty.clone(), bytes));
+                new.push(NewStoredColumn {
+                    table: key.0,
+                    column: key.1,
+                    ty: Some(column.ty.clone()),
+                    branch: branch
+                        .get(column.stored.as_str())
+                        .map(|column| branch_default(column))
+                        .transpose()?,
+                });
             }
         }
         Ok(new)
@@ -777,23 +711,24 @@ impl Names {
         conn: &Connection,
         confirmed: &[([u8; 16], [u8; 16])],
     ) -> Result<bool, Error> {
+        // Only a version this store admitted is kept confirmed: the
+        // upstream sends the versions it lacks ahead of their confirmation.
         let new: Vec<_> = confirmed
             .iter()
             .map(|(version, digest)| (SchemaVersionId::from_bytes(*version), *digest))
-            .filter(|(version, digest)| self.confirmed.get(version) != Some(digest))
+            .filter(|(version, digest)| {
+                self.versions.contains_key(version) && self.confirmed.get(version) != Some(digest)
+            })
             .collect();
         if new.is_empty() {
             return Ok(false);
         }
         in_savepoint(conn, "jazz_names", || {
-            conn.execute_batch(CONFIRMED_DDL).map_err(storage)?;
-            let mut insert = conn
-                .prepare_cached(
-                    "INSERT OR REPLACE INTO _jazz_confirmed_names (version, digest) VALUES (?1, ?2)",
-                )
+            let mut update = conn
+                .prepare_cached("UPDATE _jazz_versions SET confirmed = ?2 WHERE version = ?1")
                 .map_err(storage)?;
             for (version, digest) in &new {
-                insert
+                update
                     .execute(rusqlite::params![
                         version.as_bytes().to_vec(),
                         digest.to_vec()
@@ -867,29 +802,6 @@ impl Names {
                 .values()
                 .any(|(stored, columns)| stored == table && columns.values().any(|c| c == column))
         })
-    }
-
-    /// `schema`'s tables and branch columns not recorded yet: (stored
-    /// table, stored column, default), with no column and no default for a
-    /// table itself.
-    fn new_branches(&self, schema: &Schema) -> Result<Vec<NewBranch>, Error> {
-        let mut new = Vec::new();
-        for table in schema.tables.values() {
-            let recorded = self.branches.get(&table.stored);
-            if recorded.is_none() {
-                new.push((table.stored.clone(), String::new(), None));
-            }
-            for (stored, column) in branch_columns(table) {
-                if !recorded.is_some_and(|recorded| recorded.contains_key(stored)) {
-                    new.push((
-                        table.stored.clone(),
-                        stored.to_owned(),
-                        Some(branch_default(column)?),
-                    ));
-                }
-            }
-        }
-        Ok(new)
     }
 
     /// Where `schema` stores its tables and columns.
@@ -1086,58 +998,62 @@ impl Names {
     }
 }
 
-fn table_exists(conn: &Connection, name: &str) -> Result<bool, Error> {
-    conn.query_row(
-        "SELECT count(*) > 0 FROM sqlite_master WHERE name = ?1",
-        [name],
-        |r| r.get(0),
-    )
-    .map_err(storage)
-}
-
-/// A stored column's type to record: (stored table, stored column), the
-/// type, and its encoding.
-type NewType = ((String, String), ValueType, Vec<u8>);
-
-fn write_types(conn: &Connection, types: &[NewType]) -> Result<(), Error> {
-    if types.is_empty() {
-        return Ok(());
-    }
-    conn.execute_batch(COLUMN_TYPES_DDL).map_err(storage)?;
+fn write_names(conn: &Connection, n: i64, names: &StoredNames) -> Result<(), Error> {
     let mut insert = conn
         .prepare_cached(
-            "INSERT OR IGNORE INTO _jazz_column_types (tbl, col, ty) VALUES (?1, ?2, ?3)",
+            "INSERT INTO _jazz_names (n, tbl, col, stored_tbl, stored_col) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
         )
         .map_err(storage)?;
-    for ((table, column), _, bytes) in types {
+    for (table, (stored, columns)) in &names.tables {
         insert
-            .execute(rusqlite::params![table, column, bytes])
+            .execute(rusqlite::params![n, table, "", stored, ""])
             .map_err(storage)?;
+        for (column, stored_column) in columns {
+            insert
+                .execute(rusqlite::params![n, table, column, stored, stored_column])
+                .map_err(storage)?;
+        }
     }
     Ok(())
 }
 
-/// A stored table and branch column to record, with the column's default
-/// (see [`Names::new_branches`]).
-type NewBranch = (String, String, Option<Option<Sql>>);
+/// A stored table (`column` '', no type) or column to record (see
+/// [`Names::new_stored_columns`]); `branch` is a branch column's default.
+struct NewStoredColumn {
+    table: String,
+    column: String,
+    ty: Option<ValueType>,
+    branch: Option<Option<Sql>>,
+}
 
-fn write_branches(conn: &Connection, branches: &[NewBranch]) -> Result<(), Error> {
-    if branches.is_empty() {
-        return Ok(());
-    }
-    conn.execute_batch(BRANCH_COLUMNS_DDL).map_err(storage)?;
+fn write_stored_columns(conn: &Connection, columns: &[NewStoredColumn]) -> Result<(), Error> {
     let mut insert = conn
         .prepare_cached(
-            "INSERT OR IGNORE INTO _jazz_branch_columns (tbl, col, has_dflt, dflt) \
-             VALUES (?1, ?2, ?3, ?4)",
+            "INSERT OR IGNORE INTO _jazz_stored_columns (tbl, col, ty, branch, has_dflt, dflt) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )
         .map_err(storage)?;
-    for (table, column, default) in branches {
-        let default = default.clone().flatten();
+    for column in columns {
+        let ty = column
+            .ty
+            .as_ref()
+            .map(|ty| {
+                serde_json::to_string(ty).map_err(|error| {
+                    Error::new(
+                        ErrorCode::Storage,
+                        format!("encoding a column type: {error}"),
+                    )
+                })
+            })
+            .transpose()?;
+        let default = column.branch.clone().flatten();
         insert
             .execute(rusqlite::params![
-                table,
-                column,
+                column.table,
+                column.column,
+                ty,
+                column.branch.is_some(),
                 default.is_some(),
                 default.unwrap_or(Sql::Null)
             ])

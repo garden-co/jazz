@@ -1944,10 +1944,6 @@ fn id_watch(table: &str, id: [u8; 16]) -> u64 {
     ))
 }
 
-/// The `_jazz_meta` key of the seq the current schema was activated at.
-pub(super) const ACTIVATED_META: &str = "activated";
-/// The `_jazz_meta` key of a digest of the current schema's read policies.
-pub(super) const POLICIES_META: &str = "policies";
 /// The `_jazz_meta` key of the authority namespace (see `Inner::namespace`).
 pub(super) const NAMESPACE_META: &str = "namespace";
 
@@ -4510,7 +4506,7 @@ impl Inner {
             || query.aggregate.is_some()
             || query.relation.is_some()
             || is_history_table(&query.table)
-            || self.meta(ACTIVATED_META)?.is_some_and(|at| at >= since)
+            || crate::catalogue::activated_seq(&self.conn)?.is_some_and(|at| at >= since)
         {
             return Ok(None);
         }

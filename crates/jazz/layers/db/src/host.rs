@@ -25,6 +25,7 @@ use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension, params};
 
+use crate::catalogue::{CataloguePut, CatalogueRows};
 use crate::db::{Db, FileOptions, Journal};
 use crate::options::{Error, ErrorCode};
 use crate::values::{in_savepoint, storage};
@@ -77,6 +78,10 @@ pub trait HostTables {
     ) -> Result<Option<Vec<u8>>, Error>;
     /// Remove `key`.
     fn host_delete(&self, table: HostTable, key: &[u8]) -> Result<(), Error>;
+    /// The store's catalogue (see [`crate::catalogue`]).
+    fn catalogue(&self) -> Result<CatalogueRows, Error>;
+    /// Publish `put` into the store's catalogue in one commit: all or none.
+    fn catalogue_put(&self, put: &CataloguePut) -> Result<(), Error>;
 }
 
 /// A store's file opened and admitted, before a [`Db`] is opened on it:
@@ -225,6 +230,11 @@ impl HostReader {
         self.read(|conn| prefix_scan(conn, table, prefix))
     }
 
+    /// The store's catalogue as committed (see [`crate::catalogue`]).
+    pub fn catalogue(&self) -> Result<CatalogueRows, Error> {
+        self.read(crate::catalogue::read)
+    }
+
     /// Close the connection; reads fail afterwards. Close readers before
     /// the store's own connection, which then checkpoints the WAL as the
     /// file's last connection.
@@ -270,6 +280,16 @@ impl HostTables for StoreFile {
     fn host_delete(&self, table: HostTable, key: &[u8]) -> Result<(), Error> {
         delete(&self.conn, table, key)
     }
+
+    fn catalogue(&self) -> Result<CatalogueRows, Error> {
+        crate::catalogue::read(&self.conn)
+    }
+
+    fn catalogue_put(&self, put: &CataloguePut) -> Result<(), Error> {
+        in_savepoint(&self.conn, "host_write", || {
+            crate::catalogue::put(&self.conn, put)
+        })
+    }
 }
 
 impl HostTables for Db {
@@ -296,6 +316,16 @@ impl HostTables for Db {
 
     fn host_delete(&self, table: HostTable, key: &[u8]) -> Result<(), Error> {
         self.with_host_connection(|conn| delete(conn, table, key))
+    }
+
+    fn catalogue(&self) -> Result<CatalogueRows, Error> {
+        self.with_host_connection(crate::catalogue::read)
+    }
+
+    fn catalogue_put(&self, put: &CataloguePut) -> Result<(), Error> {
+        self.with_host_connection(|conn| {
+            in_savepoint(conn, "host_write", || crate::catalogue::put(conn, put))
+        })
     }
 }
 
