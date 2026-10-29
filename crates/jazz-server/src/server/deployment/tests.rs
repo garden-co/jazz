@@ -399,6 +399,45 @@ async fn deploy_accepts_a_lens_from_an_equivalent_predecessor_hash() {
     server.shutdown().await;
 }
 
+/// The same edge from an equivalent predecessor hash must carry the same lens:
+/// one that introduces the column with another default would change how rows
+/// of that version read under the admitted target, so it is refused. Path
+/// validation sees the disagreement first; `prepare_catalogue_change` refuses
+/// it again on its own (its unit tests).
+#[tokio::test]
+async fn deploy_refuses_a_different_lens_from_an_equivalent_predecessor_hash() {
+    let server = builder(None).build().await.unwrap();
+    let router = create_router(server.state.clone());
+    let (a, b) = (schema(&[]), schema(&["a"]));
+    deploy_ok(
+        &router,
+        request(&b, &[&a, &b], vec![migration(&a, &b, &["a"])]),
+    )
+    .await;
+    let before = graph(&router).await;
+    let indexed = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("notes")
+                .column("title", ColumnType::Text)
+                .index_only(["title"]),
+        )
+        .build();
+    let mut different = migration(&indexed, &b, &["a"]);
+    different["forward"][0]["operations"][0]["value"] =
+        json!(jazz::tools::public_schema::Value::Text("other".into()));
+    let (status, error) = http(
+        &router,
+        "POST",
+        "/deploy",
+        request(&b, &[&indexed], vec![different]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+    assert_eq!(error["code"], "conflicting_paths", "{error}");
+    assert_eq!(graph(&router).await, before);
+    server.shutdown().await;
+}
+
 /// An administrator deploys compatible revisions without migration files, then
 /// adds a column with an explicit migration and uploads an older compatible snapshot.
 /// Reopening and repeating the deployment must preserve the same graph.
