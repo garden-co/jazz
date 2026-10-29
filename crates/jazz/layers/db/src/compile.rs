@@ -17,7 +17,8 @@ use crate::records::{Value, ValueType};
 use crate::tools::{CmpOp, Operation, PolicyExpr, PolicyValue};
 
 use crate::values::{
-    STATE_DELETED, STATE_NO_CONTENT, Schema, Sql, Table, query_error, quote, to_sql, unsupported,
+    STATE_AS_SENT, STATE_DELETED, STATE_NO_CONTENT, Schema, Sql, Table, query_error, quote, to_sql,
+    unsupported,
 };
 
 mod history;
@@ -426,7 +427,7 @@ impl<'a> Ctx<'a> {
              UNION ALL SELECT CAST(NULL AS INTEGER), {h_columns} FROM {name} AS c \
              CROSS JOIN {history} AS h ON c.id = h.id AND c._b = h._b WHERE {newer} \
              AND h._seq = (SELECT MAX(h2._seq) FROM {history} AS h2 \
-             WHERE h2.id = h.id AND h2._b = h._b AND {h_visible}))"
+             WHERE h2.id = h.id AND h2._b = h._b AND (h2._st & {STATE_AS_SENT}) = 0 AND {h_visible}))"
         )
     }
 
