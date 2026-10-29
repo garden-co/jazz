@@ -56,8 +56,8 @@ const CLIENT_FILE: &str = "sqlite-storage-v1/client.sqlite.gz.base64";
 /// change re-runs the producer and re-pins these; after that the corpus is
 /// immutable and a new storage format gets a new corpus beside it (see
 /// `fixtures/sqlite-storage-v1/README.md`).
-const SERVER_SHA256: &str = "428915c0eb13138871f03e00bc302cc5c222e02e810059e09f77a5f07e7db304";
-const CLIENT_SHA256: &str = "22ea051c9c3e2cc6a23f75c4a47ef493e4b9b7ed74a1cb44d62eac1a05889be8";
+const SERVER_SHA256: &str = "271487e48669ec33e3493b003462b565e2af6430648941bf2bc22e2f8b750149";
+const CLIENT_SHA256: &str = "9df7f5e5f6937247f679478b8197575a2125fc32071624ef12f7b2efae58f97f";
 
 const SERVER_NODE: [u8; 16] = [0xa0; 16];
 const CLIENT_NODE: [u8; 16] = [0xc0; 16];
@@ -812,8 +812,8 @@ fn pinned_server_corpus_keeps_a_rejected_fate_with_its_reason() {
     let conn = rusqlite::Connection::open(&server_path).unwrap();
     let mut statement = conn
         .prepare(
-            "SELECT n.node, t.result FROM _jazz_transactions AS t JOIN _jazz_nodes AS n \
-             ON n.n = t.n WHERE t.result IS NOT NULL ORDER BY n.node, t.tx",
+            "SELECT n.node, t.result FROM _jazz_transactions t JOIN _jazz_nodes n USING (n) \
+             WHERE t.result IS NOT NULL ORDER BY n.node, t.tx",
         )
         .unwrap();
     let fates: Vec<(Vec<u8>, Result<(), WireError>)> = statement

@@ -11,9 +11,9 @@ are stored, a rejection's reason name changed how fates are recorded, and
 pending uploads moved from one encoded message to a row per op).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `428915c0eb13138871f03e00bc302cc5c222e02e810059e09f77a5f07e7db304`.
+  the SQLite file `271487e48669ec33e3493b003462b565e2af6430648941bf2bc22e2f8b750149`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `22ea051c9c3e2cc6a23f75c4a47ef493e4b9b7ed74a1cb44d62eac1a05889be8`.
+  `9df7f5e5f6937247f679478b8197575a2125fc32071624ef12f7b2efae58f97f`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
@@ -60,6 +60,11 @@ resync".
 Moving a commit's bases, access proofs (formerly sources) and deltas onto its
 ops, so each pending op is stored with them and `_jazz_pending_items` keeps
 only ops and serializable reads, regenerated it the same way.
+
+Replacing a pending commit's `author` and `session` fields with one `acting`
+enum (`Own`, `Attributed`, `Session`), which changes the encoded
+`_jazz_pending` header, regenerated it the same way. A pending row in the
+earlier layout is refused as an unsupported storage format, never misread.
 
 Merging `_jazz_applied` and `_jazz_settled` into one `_jazz_transactions`
 table keyed by an interned node code (`_jazz_nodes.n`) regenerated it the
