@@ -110,7 +110,7 @@ pub struct ServerState {
     /// upgrades with `503`.
     pub(crate) max_websocket_connections: usize,
     /// The app's store: the one file (and thread) the catalogue, the account
-    /// journal and, once started, the runtime share.
+    /// registry and, once started, the runtime share.
     pub(crate) store: Option<crate::runtime::AppStore>,
     /// Serializes durable-catalogue reconciliation into the local runtime shell.
     ///

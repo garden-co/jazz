@@ -203,13 +203,15 @@ impl Inner {
             schema: None,
         };
         let compiled = self.compile(&prepared, identity, &ReadSpec::default())?;
-        let cell: Option<Sql> = self.with_preps(&compiled.preps, |_| {
-            let mut statement = self.conn.prepare_cached(&compiled.sql).map_err(storage)?;
-            statement
-                .query_row(params_from_iter(compiled.params.iter()), |r| r.get(3))
-                .optional()
-                .map_err(storage)
-        })?;
+        let cell: Option<Sql> = self
+            .conn
+            .prepare_cached(&compiled.sql)
+            .and_then(|mut statement| {
+                statement
+                    .query_row(params_from_iter(compiled.params.iter()), |r| r.get(3))
+                    .optional()
+            })
+            .map_err(storage)?;
         let cell = cell.ok_or_else(|| {
             Error::new(ErrorCode::NotObserved, "large-value cell is not observed")
         })?;

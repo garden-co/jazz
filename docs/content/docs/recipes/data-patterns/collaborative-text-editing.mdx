@@ -1,27 +1,23 @@
 ---
 title: "Collaborative text editing"
-description: Choose between text merge columns and a text CRDT, and combine Yjs with Jazz persistence and sync, including offline editing.
-reviewedAt: "e39f0156ca"
+description: Let several people edit the same text, online or offline, with a text merge column.
+reviewedAt: "a955a56742"
 ---
 
-Having text fields that can be edited by multiple users at the same time is a common need. Jazz
-offers two approaches.
+Having text fields that can be edited by multiple users at the same time is a common need. In Jazz,
+declare the column as a text merge column and keep writing it as a plain string.
 
-## Choosing an approach
+## Why a plain string column is not enough
 
 A plain string column works well for replacing a value. When two people change it at the same time,
 [one edit wins the whole field](/docs/concepts/how-sync-works#concurrent-edits). The other edit stays
 in the row's history, but it disappears from the text.
 
-**A text merge column** (`s.string().merge("text")`, or `"markdown"` / `"html"`) keeps storing a
-plain string, and the server merges concurrent edits inside it. Concurrent edits to different words
-all survive; where two people replaced the same words, the later edit wins that part. Use it when:
+## Declare a text merge column
 
-- the text is a field of a row (a description, a note, a comment, a page body), read and written
-  as a string;
-- people mostly edit different parts, or edit at different times, and an occasional overlapping
-  change resolving to one version is acceptable;
-- you want queries, filters and permissions to see the text itself, with no extra library.
+A text merge column (`s.string().merge("text")`, or `"markdown"` / `"html"`) keeps storing a plain
+string, and the server merges concurrent edits inside it. Concurrent edits to different words all
+survive; where two people replaced the same words, the later edit wins that part.
 
 ```ts title="schema.ts"
 import { schema as s } from "jazz-tools";
@@ -35,123 +31,60 @@ const schema = {
     {},
   ),
 };
+
+type AppSchema = s.Schema<typeof schema>;
+export const app: s.App<AppSchema> = s.defineApp(schema);
 ```
 
-Then write `body` as usual with `db.update(...)`. See
-[mergeable text columns](/docs/schemas/column-types#mergeable-text-columns) for what each format
-keeps whole, and [how text merges work](/docs/concepts/how-sync-works#text-merges) for the rules.
+Pick the format that matches what the column holds: `"text"` for prose, `"markdown"` for Markdown
+(what most rich text editors can import and export), `"html"` for HTML. The format decides which
+pieces a merge keeps whole, such as Markdown markers or HTML tags; see
+[mergeable text columns](/docs/schemas/column-types#mergeable-text-columns).
 
-**A text CRDT**, as in the rest of this recipe, is the better fit when:
+Text merge columns can't be optional (`.optional()` throws when the schema is built). An empty
+string stands for no text; `.default("")` lets inserts leave the column out.
 
-- several people type into the same paragraph at the same time and every keystroke must survive,
-  including concurrent edits to the same words;
-- you want live cursors and character-level merging in an editor such as CodeMirror or ProseMirror;
-- the document has structure (rich text, nested blocks) that must merge as a tree rather than as
-  text.
+## Write and read it like any string
 
-A text merge column merges on the server, one write at a time, and is not tree-aware: it keeps
-Markdown and HTML markup whole but does not check the merged result is well formed.
+There is no extra library and no special write API. Write the whole current value with
+`db.update(...)`, and read it with a normal query:
 
-## Using a text CRDT
-
-A text CRDT (short for Conflict-free Replicated Data Type) instead preserves the individual insertions and deletions needed to merge edits within the same text. You can use any CRDT library that supports collaborative text editing (e.g. [Automerge](https://automerge.org/), [Loro](https://loro.dev/) or [Yjs](https://yjs.dev/)), and let Jazz persist and sync the updates.
-
-This recipe follows the [React and CodeMirror example](https://github.com/garden-co/jazz/tree/main/examples/text-editor), which combines Jazz with Yjs and its CodeMirror integration.
-
-## Storing CRDT updates in Jazz
-
-Yjs can generate incremental updates for each change made to a `Y.Text`. Updates are just binary blobs that you
-can persist and sync using Jazz.
-
-Use a document row for metadata and a related table for update logs:
-
-<include cwd lang="ts" meta='title="schema.ts"'>
-  ../examples/text-editor/schema.ts
-</include>
-
-Each editor creates its own log row when it first makes an edit. Later edits append bytes to that same row.
-If Alice and Bob both edit offline, they append to different rows. After reconnection, Jazz delivers both logs and Yjs merges their updates. Putting both writers' updates in one byte column would lead to one user's changes overriding the other's.
-
-## Permissions
-
-The example allows everyone to read documents and create documents and logs. Only the account that created a log can update it:
-
-<include cwd lang="ts" meta='title="permissions.ts"'>
-  ../examples/text-editor/permissions.ts
-</include>
-
-Jazz populates `$createdBy` automatically. These rules restrict log updates by account. For private documents, apply your document membership rules to both documents and logs; see [group permissions](/docs/recipes/access-control/group-permissions).
-
-## Connect a Yjs document to Jazz
-
-Install Yjs and the decoder used by the log reader:
-
-```sh
-pnpm add yjs lib0
+```ts
+db.update(app.notes, noteId, { body: nextBody });
 ```
 
-The example concatenates the Yjs updates emitted by `doc.on("update")`. `lib0` supplies the decoder that `Y.readUpdate` consumes:
+Queries, filters and permissions see the text itself. Large values work too: a long note is stored
+and synced like any other large string.
 
-<include cwd lang="ts" meta='title="src/log.ts"'>
-  ../examples/text-editor/src/log.ts
-</include>
+## Editing offline
 
-[Yjs updates](https://docs.yjs.dev/api/document-updates) can be applied in any order and more than once. Once every client has received all the updates, their documents converge.
+Each edit is merged against the version its writer had seen, so a device that edits offline for a
+while merges its whole session when it reconnects, including its own chain of edits. Until the
+server's result arrives, the device shows its own text, then switches to the merged value.
 
-To persist and sync Yjs updates, append them to the session's log using Jazz's [partial updates](/docs/writing/writing-data#editing-a-page-of-a-large-value). Keep track of the current append position in the log to avoid overriding your own changes.
+## Connecting an editor
 
-To receive updates from other collaborators, subscribe to the current document's logs and remember how many bytes of each log have been processed. Apply only the new tail. Mark updates received from Jazz with a transaction origin, so they are not written back as new local updates.
+A few habits keep an editor pleasant to use with a text merge column:
 
-<Accordions type="single">
-<Accordion title="Complete provider">
+- **Debounce writes.** Write the editor's value after a short pause in typing (a few hundred
+  milliseconds) rather than on every keystroke. Each write is still merged correctly; fewer writes
+  just mean less work and less history.
+- **Apply incoming values as a change, not a reset.** When the merged value arrives, compute the
+  difference from what the editor shows and apply only that, so the cursor and selection stay where
+  they are. Replacing the editor's whole content moves the cursor to the start.
+- **Keep the serialization stable.** If your editor converts between its own document model and
+  Markdown or HTML, check that loading a value and saving it again without edits gives back the
+  same string. Otherwise every open editor rewrites the text, and those rewrites compete with real
+  edits.
 
-<include cwd lang="ts" meta='title="src/provider.ts"'>
-  ../examples/text-editor/src/provider.ts
-</include>
+## What to expect from a merge
 
-</Accordion>
-</Accordions>
+- Edits to different parts of the text all survive, and an edit both people made applies once.
+- Two insertions at the same spot both stay, the earlier one first.
+- Where both people replaced the same words, the edit the server receives later wins that part.
+  The other version stays in the row's history.
+- The merge keeps Markdown and HTML markup intact but is not tree-aware: it does not check that the
+  merged result is well formed.
 
-## Attach an editor
-
-Use a Yjs binding for your editor so that typing changes the shared text and remote updates change the view. The example uses CodeMirror 6 with `y-codemirror.next`:
-
-```sh
-pnpm add @codemirror/state @codemirror/view @codemirror/commands y-codemirror.next
-```
-
-Inside a React effect, create the Yjs document, connect it to Jazz, and attach CodeMirror on the provider's first notification. Here, `db` comes from `useDb()`, `id` identifies the Jazz document, and `parent` is a ref to the editor container:
-
-```tsx
-useEffect(() => {
-  const doc = new Y.Doc();
-  let view: EditorView | undefined;
-  const disconnect = connect(
-    db,
-    id,
-    doc,
-    () => {
-      if (view) return;
-      const text = doc.getText("text");
-      view = new EditorView({
-        parent: parent.current!,
-        state: EditorState.create({
-          doc: text.toString(),
-          extensions: [yCollab(text, null)],
-        }),
-      });
-    },
-    (error) => {
-      setError(String(error));
-      view?.destroy();
-      view = undefined;
-    },
-  );
-
-  return () => {
-    disconnect();
-    view?.destroy();
-    doc.destroy();
-  };
-}, [db, id]);
-```
+See [how text merges work](/docs/concepts/how-sync-works#text-merges) for the full rules, including
+what happens when a very large value is rewritten heavily on both sides.

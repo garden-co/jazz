@@ -758,6 +758,44 @@ refuses unresolved drafts upstream.
 Database-local `PhysicalTableId` and `PhysicalColumnId` values never cross
 API/wire boundaries; local resolution happens only at the storage boundary.
 
+### 10.7 Stored identities (SQLite engine)
+
+On the SQLite engine the catalogue is the stored names (`_jazz_names`,
+`crates/jazz/layers/db/src/names.rs`) and it syncs as `Holds` and
+`Catalogue` (ch. 8). There is no second store of identities: a table's
+identity, and each column's, is a name-based UUID (RFC 9562 version 5) of
+the **authority namespace** and the stored table (and stored column) name.
+`Db::table_identity` and `Db::column_identity` return them under a handle's
+schema version.
+
+- The authority namespace is 16 random bytes an authority with no upstream
+  mints once and keeps in `_jazz_meta`. Every `Catalogue` carries it. A
+  replica keeps the first one it mirrors and refuses an upstream that sends
+  another (another app's authority): its remote reads fail with why and its
+  local reads go on.
+- A version's identities are the authority's only once the authority has
+  confirmed that version's names. `Catalogue.confirmed` lists each version
+  the sender's authority admitted with the digest of its names, and a
+  replica keeps the list in `_jazz_confirmed_names`. A version stays
+  confirmed while its names keep that digest. Until then, and on a store
+  that has mirrored no catalogue, a lookup fails with `NotObserved`. A
+  replica never mints an identity, and neither does a store marked
+  authority that has an upstream.
+- A rename lens keeps the stored name, so it keeps the identity.
+- Each stored column's value type is kept in `_jazz_column_types` when a
+  version storing it is first admitted. A column never changes type under
+  its stored column; that is refused at admission and at open.
+- A column added again without a lens, under a name an earlier version
+  stored in its table, continues the stored column that the last such
+  version kept it in, and keeps that column's identity, only if its type is
+  the recorded one. Otherwise it gets a stored name no version uses, which
+  gives it a new identity. A column a lens adds always starts a new stored
+  column, because the lens says the source lacks it.
+
+This is how the SQLite engine meets `INV-LENS-24`: an identity is never
+reused for another column epoch, and only a compatible re-addition keeps its
+predecessor's.
+
 ### 10.9 Subsumed schema-file and schema-subset notes
 
 The former schema manager and schema file notes are folded into the catalogue

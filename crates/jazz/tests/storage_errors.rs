@@ -22,8 +22,8 @@ use std::task::{Context, Poll, Waker};
 
 use duplex_transport::duplex;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, FileOptions, InsertOptions, ReadOpts, SyncMessage, Transport,
-    block_on,
+    Db, DbConfig, DbIdentity, FileOptions, InsertOptions, ReadOpts, ReadSpan, SyncMessage,
+    Transport, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::Query;
@@ -153,63 +153,86 @@ fn synced(client: &Db, txs: &[u64]) -> Vec<String> {
     labels(&server)
 }
 
+/// The tables a pending upload is stored in (SPEC 8.3): its header, its
+/// ops and lists, and the local rows it wrote.
+const UPLOAD_TABLES: [&str; 3] = ["_jazz_pending", "_jazz_pending_items", "_jazz_pending_rows"];
+
 #[test]
 fn a_write_whose_upload_record_cannot_be_stored_is_rolled_back_whole() {
-    let path = scratch("upload-write");
-    let client = open_file(&path, 3);
-    let first = insert(&client, 1, "kept").unwrap();
+    for table in UPLOAD_TABLES {
+        let path = scratch(&format!("upload-write{table}"));
+        let client = open_file(&path, 3);
+        let first = insert(&client, 1, "kept").unwrap();
 
-    hide(&path, "_jazz_pending");
-    let failed = insert(&client, 2, "lost");
-    restore(&path, "_jazz_pending");
-    assert!(failed.is_err(), "the write reports the storage error");
-    assert_eq!(labels(&client), ["kept"], "and leaves no row behind");
+        hide(&path, table);
+        let failed = insert(&client, 2, "lost");
+        restore(&path, table);
+        assert!(
+            failed.is_err(),
+            "{table}: the write reports the storage error"
+        );
+        assert_eq!(
+            labels(&client),
+            ["kept"],
+            "{table}: and leaves no row behind"
+        );
 
-    // The replica carries on as if the failed write never happened: the
-    // same row id inserts again, and both commits reach the server once.
-    let second = insert(&client, 2, "retried").unwrap();
-    assert_eq!(labels(&client), ["kept", "retried"]);
-    assert_eq!(synced(&client, &[first, second]), ["kept", "retried"]);
+        // The replica carries on as if the failed write never happened:
+        // the same row id inserts again (under the same seq, so no part of
+        // the failed upload record may remain), and both commits reach the
+        // server once.
+        let second = insert(&client, 2, "retried").unwrap();
+        assert_eq!(labels(&client), ["kept", "retried"]);
+        assert_eq!(synced(&client, &[first, second]), ["kept", "retried"]);
+    }
 }
 
 #[test]
 fn a_transaction_whose_upload_record_cannot_be_stored_is_rolled_back_whole() {
-    let path = scratch("upload-transaction");
-    let client = open_file(&path, 3);
+    for table in UPLOAD_TABLES {
+        let path = scratch(&format!("upload-transaction{table}"));
+        let client = open_file(&path, 3);
 
-    hide(&path, "_jazz_pending");
-    let failed = block_on(client.transaction(async |tx| {
-        for (n, label) in [(1, "a"), (2, "b")] {
+        hide(&path, table);
+        let failed = block_on(client.transaction(async |tx| {
+            for (n, label) in [(1, "a"), (2, "b")] {
+                tx.insert(
+                    "items",
+                    item(label),
+                    InsertOptions {
+                        row_id: Some(row(n)),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            }
+            Ok(())
+        }));
+        restore(&path, table);
+        assert!(
+            failed.is_err(),
+            "{table}: the transaction reports the storage error"
+        );
+        assert!(
+            labels(&client).is_empty(),
+            "{table}: and none of its rows remain"
+        );
+
+        let (_, receipt) = block_on(client.transaction(async |tx| {
             tx.insert(
                 "items",
-                item(label),
+                item("c"),
                 InsertOptions {
-                    row_id: Some(row(n)),
+                    row_id: Some(row(1)),
                     ..Default::default()
                 },
             )
-            .await?;
-        }
-        Ok(())
-    }));
-    restore(&path, "_jazz_pending");
-    assert!(failed.is_err(), "the transaction reports the storage error");
-    assert!(labels(&client).is_empty(), "and none of its rows remain");
-
-    let (_, receipt) = block_on(client.transaction(async |tx| {
-        tx.insert(
-            "items",
-            item("c"),
-            InsertOptions {
-                row_id: Some(row(1)),
-                ..Default::default()
-            },
-        )
-        .await
-    }))
-    .unwrap();
-    assert_eq!(labels(&client), ["c"]);
-    assert_eq!(synced(&client, &[receipt.0]), ["c"]);
+            .await
+        }))
+        .unwrap();
+        assert_eq!(labels(&client), ["c"]);
+        assert_eq!(synced(&client, &[receipt.0]), ["c"]);
+    }
 }
 
 #[test]
@@ -313,7 +336,10 @@ fn a_reopened_replica_resumes_its_subscription_from_its_stored_watermark() {
         "no held rows are declared: {sent:?}"
     );
     let since = sent.iter().find_map(|m| match m {
-        SyncMessage::Subscribe { since, .. } => Some(*since),
+        SyncMessage::Read {
+            span: ReadSpan::Live { since },
+            ..
+        } => Some(*since),
         _ => None,
     });
     assert!(

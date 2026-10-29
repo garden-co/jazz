@@ -399,9 +399,6 @@ pub struct Table {
     pub provenance: Vec<Column>,
     /// How provenance is stored: authors as interned codes.
     pub stored_provenance: Vec<Column>,
-    /// The key columns of the large-capable columns an index names
-    /// ([`crate::large::key_column`]): stored, never read by name.
-    pub keys: Vec<Column>,
 }
 
 /// Provenance as read. Timestamps are Unix ms (u64, as in Jazz). Authors
@@ -425,8 +422,8 @@ pub(crate) const PROVENANCE: [&str; 12] = [
 
 /// The current deletion of a row, readable with `includeDeleted`: the
 /// deleting version's update stamp, NULL for live and restored rows. Never
-/// stored: a deleted row is its current version with `_del` set, and that
-/// version's update stamp is the deletion's.
+/// stored: a deleted row is its current version with [`STATE_DELETED`] set
+/// in `_st`, and that version's update stamp is the deletion's.
 pub(crate) const DELETION: [&str; 6] = [
     "$deletedAt",
     "$deletedBy",
@@ -435,6 +432,19 @@ pub(crate) const DELETION: [&str; 6] = [
     "$deletedBy.identity.issuer",
     "$deletedBy.identity.subject",
 ];
+
+/// `_st` bit: the version's commit wrote no content, only a delete, a
+/// restore or a move. Clear on an ordinary write, so a live content
+/// version stores 0. History reads list versions with it clear.
+pub(crate) const STATE_NO_CONTENT: i64 = 1;
+/// `_st` bit: the version is a tombstone. Live versions are `_st < 2`.
+pub(crate) const STATE_DELETED: i64 = 2;
+/// `_st` bit: the version is an authority text merge's write as its writer
+/// sent it, superseded by the merged version at the same seq (SPEC 4
+/// §4.3). Kept only in `__h`, at `_seq` = minus the commit's seq, as the
+/// base of its writer's next chained write; never read as a version, so
+/// every read of `__h` that is not by exact seq requires this bit clear.
+pub(crate) const STATE_AS_SENT: i64 = 4;
 
 /// Whether `column` names deletion metadata (`$deletedAt`, `$deletedBy...`).
 pub(crate) fn is_deletion(column: &str) -> bool {
@@ -503,20 +513,6 @@ pub(crate) fn elided_as(stored: &str) -> Option<&'static str> {
     }
 }
 
-/// The key column of a large-capable column.
-fn key_column_of(column: &Column) -> Column {
-    let stored = crate::large::key_column(&column.stored);
-    Column {
-        name: stored.clone(),
-        stored,
-        ty: ValueType::Nullable(Box::new(column.ty.clone())),
-        default: None,
-        json: column.json,
-        json_type: None,
-        merge: Default::default(),
-    }
-}
-
 fn stored_provenance_columns() -> Vec<Column> {
     STORED_PROVENANCE
         .iter()
@@ -571,44 +567,14 @@ impl Table {
             .find(|column| column.name == name)
     }
 
-    /// Every stored column: application columns, stored provenance, then
-    /// key columns.
+    /// Every stored column: application columns, then stored provenance.
     pub fn stored(&self) -> impl Iterator<Item = &Column> {
-        self.columns
-            .iter()
-            .chain(&self.stored_provenance)
-            .chain(&self.keys)
-    }
-
-    /// The key column of the stored column `stored`, if it has one.
-    pub(crate) fn key_of(&self, stored: &str) -> Option<&Column> {
-        let key = crate::large::key_column(stored);
-        self.keys.iter().find(|column| column.stored == key)
-    }
-
-    /// The key column stored as `key`, if this table has it.
-    pub(crate) fn key_of_key(&self, key: &str) -> Option<&Column> {
-        self.keys.iter().find(|column| column.stored == key)
+        self.columns.iter().chain(&self.stored_provenance)
     }
 
     /// The application column stored as `stored`.
     pub(crate) fn by_stored_column(&self, stored: &str) -> Option<&Column> {
         self.columns.iter().find(|column| column.stored == stored)
-    }
-
-    /// The key columns this table's indexes need.
-    fn needed_keys(&self) -> Vec<Column> {
-        self.columns
-            .iter()
-            .filter(|column| {
-                crate::large::large_capable(column)
-                    && self
-                        .indexes
-                        .iter()
-                        .any(|index| index.contains(&column.name))
-            })
-            .map(key_column_of)
-            .collect()
     }
 
     /// The stored name of a readable column (`id` and provenance are
@@ -637,7 +603,6 @@ impl Table {
         for column in &mut table.columns {
             column.name = column.stored.clone();
         }
-        table.keys = table.needed_keys();
         table.branch_by = self
             .branch_by
             .iter()
@@ -748,12 +713,8 @@ impl Schema {
                     branch_by: table.branch_by.clone(),
                     provenance: provenance_columns(),
                     stored_provenance: stored_provenance_columns(),
-                    keys: Vec::new(),
                 },
             );
-        }
-        for table in tables.values_mut() {
-            table.keys = table.needed_keys();
         }
         Self {
             tables,
@@ -788,7 +749,6 @@ impl Schema {
                     column.stored = stored.clone();
                 }
             }
-            table.keys = table.needed_keys();
         }
         schema
     }
@@ -901,23 +861,6 @@ impl Schema {
                         let index = table.stored_index(index);
                         if !physical.indexes.contains(&index) {
                             physical.indexes.push(index.clone());
-                            // A large-capable column an index names first
-                            // gains its key column, which the store fills
-                            // for the chunked cells it already holds
-                            // (`Inner::fill_keys`).
-                            for key in physical.needed_keys() {
-                                if physical.key_of(keyed(&key)).is_some() {
-                                    continue;
-                                }
-                                for target in [name.clone(), format!("{name}__h")] {
-                                    ddl.push_str(&format!(
-                                        "ALTER TABLE {} ADD COLUMN {};\n",
-                                        quote(&target),
-                                        column_def(&key)
-                                    ));
-                                }
-                                physical.keys.push(key);
-                            }
                             ddl.push_str(&physical.index_ddl(&index));
                         }
                     }
@@ -926,11 +869,6 @@ impl Schema {
         }
         Ok(ddl)
     }
-}
-
-/// The stored column a key column keys.
-fn keyed(key: &Column) -> &str {
-    crate::large::keyed_by(&key.stored).expect("a key column")
 }
 
 /// Where one schema stores its tables and columns: logical table ->
@@ -944,29 +882,12 @@ impl Table {
     /// A table known only by its stored column names, as a reopened store
     /// lists it. Enough to extend it and to copy whole rows.
     pub(crate) fn stored_only(name: String, columns: Vec<String>) -> Self {
-        let keys = columns
-            .iter()
-            .filter(|column| crate::large::keyed_by(column).is_some())
-            .map(|column| Column {
-                name: column.clone(),
-                stored: column.clone(),
-                ty: ValueType::Nullable(Box::new(ValueType::String)),
-                default: None,
-                json: false,
-                json_type: None,
-                merge: Default::default(),
-            })
-            .collect();
         Self {
             stored: name.clone(),
             name,
-            keys,
             columns: columns
                 .into_iter()
-                .filter(|column| {
-                    !STORED_PROVENANCE.contains(&column.as_str())
-                        && crate::large::keyed_by(column).is_none()
-                })
+                .filter(|column| !STORED_PROVENANCE.contains(&column.as_str()))
                 .map(|name| Column {
                     stored: name.clone(),
                     name,
@@ -1000,10 +921,6 @@ impl Table {
             .iter()
             .map(|c| match elided_as(c) {
                 Some(created) => format!("COALESCE({}, {})", quote(c), quote(created)),
-                // The key expression queries order and range by.
-                None if table.by_stored(c).is_some_and(crate::large::large_capable) => {
-                    crate::large::key_sql(&quote(c), &quote(&crate::large::key_column(c)))
-                }
                 None => quote(c),
             })
             .collect();
@@ -1028,21 +945,20 @@ impl Table {
         let history = quote(&format!("{}__h", table.stored));
         // `_b` is the canonical branch key ('' for unbranched tables).
         // Rows are unique per (id, branch); branch views select by `_b`
-        // first, so every index leads with it. `_c` is 1 when the version's
-        // commit wrote content (not only a delete or a restore): history
-        // reads list those versions. `_base` and `_cols` are what the
-        // authority keeps of the version an accepted upload wrote: what it
-        // was built on and the columns it authored (SPEC 4 §4.6); NULL
-        // everywhere else.
+        // first, so every index leads with it. `_st` is the version's state
+        // bits ([`STATE_NO_CONTENT`], [`STATE_DELETED`], and in history
+        // [`STATE_AS_SENT`]): 0 for a live version whose commit wrote
+        // content. `_base` and `_cols` are what the authority keeps of the
+        // version an accepted upload wrote: what it was built on and the
+        // columns it authored (SPEC 4 §4.6); NULL everywhere else.
         sql.push_str(&format!(
             "CREATE TABLE {name} (rid INTEGER PRIMARY KEY, id BLOB NOT NULL, \
              _b BLOB NOT NULL DEFAULT X'', _seq INTEGER NOT NULL, \
-             _del INTEGER NOT NULL DEFAULT 0, _c INTEGER NOT NULL DEFAULT 1, \
-             _base INTEGER, _cols BLOB{columns}, UNIQUE (id, _b));\n\
+             _st INTEGER NOT NULL DEFAULT 0, _base INTEGER, _cols BLOB{columns}, \
+             UNIQUE (id, _b));\n\
              CREATE INDEX {} ON {name}(_seq);\n\
              CREATE TABLE {history} (id BLOB NOT NULL, _b BLOB NOT NULL, _seq INTEGER NOT NULL, \
-             _del INTEGER NOT NULL, _c INTEGER NOT NULL DEFAULT 1, _base INTEGER, \
-             _cols BLOB{columns}, PRIMARY KEY (id, _b, _seq)) WITHOUT ROWID;\n",
+             _st INTEGER NOT NULL, _base INTEGER, _cols BLOB{columns}, PRIMARY KEY (id, _b, _seq)) WITHOUT ROWID;\n",
             quote(&format!("{}__by_seq", table.stored)),
         ));
         for index in &table.indexes {
