@@ -318,14 +318,28 @@ for one query's result:
   its filter) still masks it there. So for a branch view over a base the
   server also ships the head's rows of its root table whose base row the
   query matches, read without its window on the base alone (as of a frozen
-  base's cut): with a live read's opening (a resumed one's written after
-  `since`), with a one-shot read's answer, and again when the head or the
+  base's cut): all of them with a live read's opening (a resumed one's
+  too, since whether the reader may read one can change without it
+  changing), with a one-shot read's answer, and again when the head or the
   base writes such a row. They follow from the view's query, not from what
-  the session shipped, so they hold across reconnects. A head version the
-  replica may not read ships as its eviction like any unreadable row, so
-  the replica's view falls back to the base row it holds: what this
-  reader can see of the view. Known limits: joined tables and policy
-  tables are not masked (policy tables are read as the current state).
+  the session shipped, so they hold across reconnects.
+- A head row of these the reader may not read is **hidden**, not absent:
+  in the view its effective row is the head's version, which the reader's
+  policy denies, so the view leaves the row out, as the authority's own
+  evaluation of the view does. The server sends `AccessLost { hidden: true
+}` for it (§8.6), and the replica keeps a marker of it in
+  `_jazz_withheld` that masks the base's row of the id in every branch view
+  over a base with that head; reads of any other view (the base itself,
+  the head alone, the current state) ignore it, and no read lists it, deleted
+  rows included. The marker reveals only what the eviction does: that a
+  version exists. It lifts when an image of the row arrives (the head
+  writes it readably again, or a policy input change grants access: the
+  server rechecks masking rows as it does supporting rows, §8.6), or when
+  an `AccessLost { hidden: false }` says the row is gone. A view opened or
+  resumed later re-derives it from the server's state, and a relay passes
+  its markers on to its sessions as hidden evictions. Known limits: joined
+  tables and policy tables are not masked (policy tables are read as the
+  current state).
 - A listing judges only the rows the view holds. A cached row it leaves out
   that the head supplies is evicted; one the live base supplies may be
   another read's, so the replica asks for the head's and the base's row
@@ -414,8 +428,11 @@ image, supporting row or count (`INV-SYNC-13`), and ships accepted rows only,
 never another node's pending or refused writes (`INV-SYNC-12`).
 
 When a reader loses read access to a row it holds, through a write or a policy
-change, the server sends `AccessLost { table, id, key }` and the replica drops
-its copy (`INV-SYNC-14`). This includes a row the reader's own accepted commit
+change, the server sends `AccessLost { table, id, key, hidden }` and the
+replica drops its copy (`INV-SYNC-14`). `hidden` says the row still exists as
+a version the reader may not read, rather than being gone: in a branch view
+over a base it still overrides the base's row, so the replica keeps a marker
+that masks that row (§8.4). This includes a row the reader's own accepted commit
 wrote and cannot read (a write-only insert): the commit's fate reports its
 acceptance. Local copies are not a redaction boundary; eviction keeps the
 replica coherent, not secret.
@@ -598,8 +615,9 @@ that untrue for results the replica cannot name, so the replica forgets every
 watermark when either happens, and each read opens fresh until it settles
 again:
 
-- an `AccessLost`: a result settled earlier may have held the row, and a resume
-  from it would count the row as held after it became readable again;
+- an `AccessLost` for a row the replica held: a result settled earlier may
+  have held the row, and a resume from it would count the row as held after it
+  became readable again (one for a row it holds no image of changes no result);
 - a row asked for whole (§8.12): until its whole image arrives the replica holds
   a stale version, so it also stores no watermark meanwhile.
 

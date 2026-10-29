@@ -463,7 +463,10 @@ its view as of `since` (§8.11), the frozen base keeping its own cut. The
 upstream also ships the head rows that mask base rows the view's query
 matches (ch. 8 §8.4), so a base row arriving through another read is masked
 by a head image the view's own result would not ship, within the limits
-§8.4 lists.
+§8.4 lists. A head version the reader's policy denies hides the row from the
+view rather than exposing the base's version it overrides: the replica keeps
+a marker of it (ch. 8 §8.4), as the authority's evaluation of the view hides
+it.
 
 ### 11.6 Cross-branch-key merge helper
 

@@ -34,16 +34,56 @@ fn block_on<F: Future>(future: F) -> F::Output {
     }
 }
 
+/// Todos anyone reads unless they have an owner: then their owner, or
+/// whoever holds a grant.
 fn schema() -> JazzSchema {
+    use jazz::tools::{CmpOp, PolicyExpr, PolicyValue, TablePolicies};
+    let me = || {
+        PolicyValue::SessionRef(vec![
+            "user".to_owned(),
+            "identity".to_owned(),
+            "subject".to_owned(),
+        ])
+    };
+    let readable = PolicyExpr::Or(vec![
+        PolicyExpr::IsNull {
+            column: "owner".to_owned(),
+        },
+        PolicyExpr::Cmp {
+            column: "owner".to_owned(),
+            op: CmpOp::Eq,
+            value: me(),
+        },
+        PolicyExpr::Exists {
+            table: "grants".to_owned(),
+            condition: Box::new(PolicyExpr::Cmp {
+                column: "grantee".to_owned(),
+                op: CmpOp::Eq,
+                value: me(),
+            }),
+        },
+    ]);
     compile_schema(
         &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("grants")
+                    .column("grantee", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
             .table(
                 TableSchemaBuilder::new("todos")
                     .column("branch_id", ColumnType::Uuid)
                     .column("title", ColumnType::Text)
                     .column("rank", ColumnType::Integer)
+                    .nullable_column("owner", ColumnType::Text)
                     .branch_by("branch_id")
-                    .policies(allow_all_policies()),
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(readable)
+                            .with_insert(PolicyExpr::True)
+                            .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+                            .with_delete(PolicyExpr::True),
+                    ),
             )
             .build(),
     )
@@ -750,4 +790,337 @@ fn a_view_opened_after_a_reconnect_masks_what_the_head_changed_while_away() {
             }
         }
     }
+}
+
+fn bob() -> AuthorSubject {
+    AuthorSubject::for_test_bytes([0xb0; 16])
+}
+
+/// `who`'s subject, as an `owner` or a `grantee`.
+fn subject(who: AuthorSubject) -> Value {
+    Value::String(who.principal_parts().1)
+}
+
+/// Write `cells` to row `row` in the draft `head` over a live `base`.
+fn set(db: &Db, row: u8, head: &BranchSelector, base: &BranchSelector, cells: &[(&str, Value)]) {
+    block_on(
+        db.update(
+            "todos",
+            RowUuid::from_bytes([row; 16]),
+            cells
+                .iter()
+                .map(|(column, value)| ((*column).to_owned(), value.clone()))
+                .collect(),
+            jazz::db::UpdateOptions {
+                target: jazz::db::WriteTarget::BranchView {
+                    head: head.clone(),
+                    base: Some(BranchViewBase::Current(base.clone())),
+                },
+                ..Default::default()
+            },
+        ),
+    )
+    .unwrap();
+}
+
+/// Grant `who` every todo, as grant row 0x99.
+fn grant(db: &Db, who: AuthorSubject) {
+    block_on(db.insert(
+        "grants",
+        BTreeMap::from([("grantee".to_owned(), subject(who))]),
+        InsertOptions {
+            row_id: Some(RowUuid::from_bytes([0x99; 16])),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+}
+
+fn by_rank() -> Query {
+    Query::from("todos").order_by("rank", OrderDirection::Asc)
+}
+
+/// The draft moves x to an owner Alice may not read: in her draft view x
+/// is hidden (not main's x, which the draft overrides), while her main
+/// view keeps main's x. The draft's version reaching her again, by a
+/// write or by a grant, lifts the marker.
+#[test]
+fn a_head_version_the_reader_may_not_read_hides_the_row_in_a_live_view() {
+    let (server, client, _) = connected();
+    let (main, draft) = (branch(0x31), branch(0x32));
+    put(&server, &main, 0x45, "x", 1);
+    put(&server, &main, 0x46, "y", 2);
+    let main_view = ReadOpts::default().branch_view(main.clone(), None);
+    let view =
+        ReadOpts::default().branch_view(draft.clone(), Some(BranchViewBase::Current(main.clone())));
+    let all = client.prepare_query(&by_rank()).unwrap();
+    let _m = block_on(client.subscribe(&all, main_view.clone())).unwrap();
+    let _v = block_on(client.subscribe(&all, view.clone())).unwrap();
+    pump(&server, &client);
+    set(
+        &server,
+        0x45,
+        &draft,
+        &main,
+        &[("title", Value::String("x draft".into()))],
+    );
+    pump(&server, &client);
+    assert_eq!(titles(&client, &by_rank(), view.clone()), ["x draft", "y"]);
+
+    set(&server, 0x45, &draft, &main, &[("owner", subject(bob()))]);
+    pump(&server, &client);
+    assert_eq!(titles(&client, &by_rank(), view.clone()), ["y"]);
+    assert_eq!(titles(&client, &by_rank(), main_view.clone()), ["x", "y"]);
+    // Deleted rows of the view do not list it either.
+    let mut deleted = view.clone();
+    deleted.read_view.include_deleted = true;
+    assert_eq!(titles(&client, &by_rank(), deleted), ["y"]);
+
+    // Moved back: its image lifts the marker.
+    set(
+        &server,
+        0x45,
+        &draft,
+        &main,
+        &[("owner", Value::Nullable(None))],
+    );
+    pump(&server, &client);
+    assert_eq!(titles(&client, &by_rank(), view.clone()), ["x draft", "y"]);
+
+    // Hidden again, then a grant lets Alice read it.
+    set(&server, 0x45, &draft, &main, &[("owner", subject(bob()))]);
+    pump(&server, &client);
+    assert_eq!(titles(&client, &by_rank(), view.clone()), ["y"]);
+    grant(&server, alice());
+    pump(&server, &client);
+    assert_eq!(titles(&client, &by_rank(), view), ["x draft", "y"]);
+    assert_eq!(titles(&client, &by_rank(), main_view), ["x", "y"]);
+}
+
+/// The draft already hid x from Alice when her view opens: before it, or
+/// while she was away. Live or one-shot, over main live or frozen at her
+/// capture, her view hides x though she holds main's x.
+fn hidden_before_the_view(
+    away: bool,
+    frozen_base: bool,
+    one_shot: bool,
+    bytes: (u8, u8),
+) -> Vec<String> {
+    let server = open(0x01, AuthorSubject::SYSTEM);
+    server.set_authority();
+    let client = open(0x02, alice());
+    let (up, _) = connect(&server, &client);
+    let (main, draft) = (branch(bytes.0), branch(bytes.1));
+    put(&server, &main, 0x45, "x", 1);
+    put(&server, &main, 0x46, "y", 2);
+    let all = client.prepare_query(&by_rank()).unwrap();
+    let _m = block_on(client.subscribe(&all, ReadOpts::default().branch_view(main.clone(), None)))
+        .unwrap();
+    pump(&server, &client);
+    let frozen = block_on(client.capture_snapshot()).unwrap();
+    if away {
+        assert!(client.detach_connection(&up));
+    } else {
+        std::mem::forget(up);
+    }
+    set(&server, 0x45, &draft, &main, &[("owner", subject(bob()))]);
+    if away {
+        std::mem::forget(connect(&server, &client).0);
+    }
+    pump(&server, &client);
+    let base = if frozen_base {
+        BranchViewBase::Snapshot {
+            branch: main,
+            snapshot: frozen,
+        }
+    } else {
+        BranchViewBase::Current(main)
+    };
+    let mut view = ReadOpts::default().branch_view(draft, Some(base));
+    if one_shot {
+        view.tier = ReadTier::Remote;
+        return read_once(&server, &client, &by_rank(), view);
+    }
+    let _v = block_on(client.subscribe(&all, view.clone())).unwrap();
+    pump(&server, &client);
+    titles(&client, &by_rank(), view)
+}
+
+#[test]
+fn a_view_opened_after_the_head_hid_a_row_hides_it() {
+    let mut bytes = 0x40;
+    for away in [false, true] {
+        for frozen_base in [true, false] {
+            for one_shot in [true, false] {
+                bytes += 2;
+                assert_eq!(
+                    hidden_before_the_view(away, frozen_base, one_shot, (bytes, bytes + 1)),
+                    ["y"],
+                    "away {away}, frozen base {frozen_base}, one-shot {one_shot}"
+                );
+            }
+        }
+    }
+}
+
+/// A tab reads through its worker: the worker passes its marker on, and
+/// lifts it when the grant brings the draft's version.
+#[test]
+fn a_tab_hides_a_row_its_worker_may_not_read_on_the_head() {
+    let server = open(0x01, AuthorSubject::SYSTEM);
+    server.set_authority();
+    let worker = open(0x02, alice());
+    std::mem::forget(connect(&server, &worker).0);
+    let tab = open(0x03, alice());
+    tab.set_non_durable_client();
+    std::mem::forget(connect(&worker, &tab).0);
+    let tick = || {
+        for _ in 0..6 {
+            block_on(tab.tick()).unwrap();
+            block_on(worker.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+            block_on(worker.tick()).unwrap();
+            block_on(tab.tick()).unwrap();
+        }
+    };
+    let (main, draft) = (branch(0x61), branch(0x62));
+    put(&server, &main, 0x45, "x", 1);
+    put(&server, &main, 0x46, "y", 2);
+    set(&server, 0x45, &draft, &main, &[("owner", subject(bob()))]);
+    let main_view = ReadOpts::default().branch_view(main.clone(), None);
+    let view = ReadOpts::default().branch_view(draft, Some(BranchViewBase::Current(main)));
+    let all = tab.prepare_query(&by_rank()).unwrap();
+    let _m = block_on(tab.subscribe(&all, main_view.clone())).unwrap();
+    tick();
+    let _v = block_on(tab.subscribe(&all, view.clone())).unwrap();
+    tick();
+    assert_eq!(titles(&tab, &by_rank(), main_view.clone()), ["x", "y"]);
+    assert_eq!(titles(&tab, &by_rank(), view.clone()), ["y"]);
+    // A one-shot read through the worker hides it too.
+    let mut once = view.clone();
+    once.tier = ReadTier::Remote;
+    let bytes = postcard::to_allocvec(&by_rank()).unwrap();
+    let mut read = pin!(tab.all_serialized_query(&bytes, once, None, None, None));
+    let mut cx = Context::from_waker(Waker::noop());
+    let rows = loop {
+        if let Poll::Ready(result) = read.as_mut().poll(&mut cx) {
+            match result.unwrap() {
+                jazz::db::SerializedReadResult::Rows(rows) => break rows,
+                other => panic!("{other:?}"),
+            }
+        }
+        tick();
+    };
+    assert_eq!(rows.len(), 1);
+    grant(&server, alice());
+    tick();
+    assert_eq!(titles(&tab, &by_rank(), view), ["x", "y"]);
+}
+
+/// Whether Alice may read the draft's x changes while she is away, by a
+/// grant given or taken, not by a write to x: her resumed view follows.
+#[test]
+fn a_resumed_view_follows_access_to_a_head_row_changed_while_away() {
+    for granted_while_away in [true, false] {
+        let server = open(0x01, AuthorSubject::SYSTEM);
+        server.set_authority();
+        let client = open(0x02, alice());
+        let (up, _) = connect(&server, &client);
+        let (main, draft) = (branch(0x71), branch(0x72));
+        put(&server, &main, 0x45, "x", 1);
+        put(&server, &main, 0x46, "y", 2);
+        set(
+            &server,
+            0x45,
+            &draft,
+            &main,
+            &[
+                ("title", Value::String("x draft".into())),
+                ("owner", subject(bob())),
+            ],
+        );
+        if !granted_while_away {
+            grant(&server, alice());
+        }
+        let main_view = ReadOpts::default().branch_view(main.clone(), None);
+        let view = ReadOpts::default().branch_view(draft, Some(BranchViewBase::Current(main)));
+        let all = client.prepare_query(&by_rank()).unwrap();
+        let _m = block_on(client.subscribe(&all, main_view)).unwrap();
+        let _v = block_on(client.subscribe(&all, view.clone())).unwrap();
+        pump(&server, &client);
+        let before: &[&str] = if granted_while_away {
+            &["y"]
+        } else {
+            &["x draft", "y"]
+        };
+        assert_eq!(titles(&client, &by_rank(), view.clone()), before);
+
+        assert!(client.detach_connection(&up));
+        if granted_while_away {
+            grant(&server, alice());
+        } else {
+            block_on(server.delete(
+                "grants",
+                RowUuid::from_bytes([0x99; 16]),
+                Default::default(),
+            ))
+            .unwrap();
+        }
+        std::mem::forget(connect(&server, &client).0);
+        pump(&server, &client);
+        let after: &[&str] = if granted_while_away {
+            &["x draft", "y"]
+        } else {
+            &["y"]
+        };
+        assert_eq!(
+            titles(&client, &by_rank(), view),
+            after,
+            "granted while away {granted_while_away}"
+        );
+    }
+}
+
+/// The marker is stored: a reopened store's view hides the row offline.
+#[test]
+fn a_reopened_store_keeps_hiding_a_row_offline() {
+    let dir = std::env::temp_dir().join(format!("jazz-branch-view-sync-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("store.sqlite");
+    let open_file = || {
+        block_on(Db::open_at(
+            DbConfig::new(
+                schema(),
+                DbIdentity {
+                    node: NodeUuid::from_bytes([0x02; 16]),
+                    author: alice(),
+                },
+            ),
+            &path,
+            jazz::db::FileOptions::default(),
+        ))
+        .unwrap()
+    };
+    let (main, draft) = (branch(0x81), branch(0x82));
+    let view =
+        ReadOpts::default().branch_view(draft.clone(), Some(BranchViewBase::Current(main.clone())));
+    {
+        let server = open(0x01, AuthorSubject::SYSTEM);
+        server.set_authority();
+        let client = open_file();
+        std::mem::forget(connect(&server, &client).0);
+        put(&server, &main, 0x45, "x", 1);
+        put(&server, &main, 0x46, "y", 2);
+        set(&server, 0x45, &draft, &main, &[("owner", subject(bob()))]);
+        let all = client.prepare_query(&by_rank()).unwrap();
+        let _m =
+            block_on(client.subscribe(&all, ReadOpts::default().branch_view(main, None))).unwrap();
+        let _v = block_on(client.subscribe(&all, view.clone())).unwrap();
+        pump(&server, &client);
+        assert_eq!(titles(&client, &by_rank(), view.clone()), ["y"]);
+    }
+    let client = open_file();
+    assert_eq!(titles(&client, &by_rank(), view), ["y"]);
+    let _ = std::fs::remove_dir_all(&dir);
 }

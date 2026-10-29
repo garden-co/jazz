@@ -1000,10 +1000,15 @@ pub enum SyncMessage {
     },
     /// The row is unavailable to this reader (a write or a policy change
     /// took its read access): the replica drops its copy (INV-SYNC-14).
+    /// `hidden`: the row still exists, as a version this reader may not
+    /// read, so in a branch view over a base it still overrides the base's
+    /// row of the id; the replica keeps a marker of it that masks that row
+    /// until an image of it arrives (ch. 8 §8.4). Otherwise it is gone.
     AccessLost {
         table: String,
         id: [u8; 16],
         key: Vec<u8>,
+        hidden: bool,
     },
     /// A `Read` the server cannot serve, with why: the
     /// read ends with this error instead of waiting for an answer.
@@ -3359,20 +3364,19 @@ impl Inner {
     }
 
     /// The head rows of `mask`'s view that mask base rows its query
-    /// matches, written after `since` (a resumed read's replica holds the
-    /// older ones).
+    /// matches. A resumed read takes them all too: whether the replica may
+    /// read one can have changed since without the row changing.
     fn masking_rows(
         &self,
         policy: Option<AuthorSubject>,
         mask: &fanout::ViewMask,
-        since: Option<u64>,
     ) -> Result<Vec<(String, RowUuid, Vec<u8>)>, Error> {
         let mut out = Vec::new();
         let heads = self.images_where(&mask.table, false, "_b = ?1", &[&mask.head])?;
-        let heads: Vec<Image> = heads
-            .into_iter()
-            .filter(|image| since.is_none_or(|since| image.seq > since))
-            .collect();
+        let mut heads: Vec<[u8; 16]> = heads.into_iter().map(|image| image.id).collect();
+        // A relay's markers of head rows it may not read mask for its
+        // sessions too.
+        heads.extend(self.withheld_ids(&mask.table, &mask.head)?);
         if heads.is_empty() {
             return Ok(out);
         }
@@ -3381,13 +3385,84 @@ impl Inner {
             .iter()
             .map(|row| row.id)
             .collect();
-        for image in heads {
-            let row = RowUuid::from_bytes(image.id);
+        for id in heads {
+            let row = RowUuid::from_bytes(id);
             if shown.contains(&row) {
                 out.push((mask.table.clone(), row, mask.head.clone()));
             }
         }
         Ok(out)
+    }
+
+    /// Mark a row this replica may not read the current version of (see
+    /// [`WITHHELD_DDL`]).
+    fn withhold(&self, table: &str, row: RowUuid, key: &[u8]) -> Result<(), Error> {
+        if !self.withheld.get() {
+            self.exec(WITHHELD_DDL, []).map_err(storage)?;
+            self.withheld.set(true);
+        }
+        let id = row.0.as_bytes().to_vec();
+        self.exec(
+            "INSERT OR IGNORE INTO _jazz_withheld (tbl, id, _b) VALUES (?1, ?2, ?3)",
+            rusqlite::params![table, id, key],
+        )
+        .map_err(storage)?;
+        self.changed
+            .borrow_mut()
+            .push((table.to_owned(), row, key.to_vec()));
+        Ok(())
+    }
+
+    /// Lift a row's withheld marker, if it has one.
+    fn unwithhold(&self, table: &str, row: RowUuid, key: &[u8]) -> Result<(), Error> {
+        if !self.withheld.get() {
+            return Ok(());
+        }
+        let id = row.0.as_bytes().to_vec();
+        let lifted = self
+            .exec(
+                "DELETE FROM _jazz_withheld WHERE tbl = ?1 AND id = ?2 AND _b = ?3",
+                rusqlite::params![table, id, key],
+            )
+            .map_err(storage)?;
+        if lifted > 0 {
+            self.changed
+                .borrow_mut()
+                .push((table.to_owned(), row, key.to_vec()));
+        }
+        Ok(())
+    }
+
+    fn is_withheld(&self, table: &str, row: RowUuid, key: &[u8]) -> Result<bool, Error> {
+        if !self.withheld.get() {
+            return Ok(false);
+        }
+        let id = row.0.as_bytes().to_vec();
+        self.conn
+            .cached_row(
+                "SELECT count(*) FROM _jazz_withheld WHERE tbl = ?1 AND id = ?2 AND _b = ?3",
+                rusqlite::params![table, id, key],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|count| count > 0)
+            .map_err(storage)
+    }
+
+    /// The ids of `table` withheld on branch key `key`.
+    fn withheld_ids(&self, table: &str, key: &[u8]) -> Result<Vec<[u8; 16]>, Error> {
+        if !self.withheld.get() {
+            return Ok(Vec::new());
+        }
+        let mut statement = self
+            .conn
+            .prepare_cached("SELECT id FROM _jazz_withheld WHERE tbl = ?1 AND _b = ?2")
+            .map_err(storage)?;
+        let ids = statement
+            .query_map(rusqlite::params![table, key], |r| r.get::<_, Vec<u8>>(0))
+            .map_err(storage)?
+            .filter_map(|id| id.ok().and_then(|id| id.try_into().ok()))
+            .collect();
+        Ok(ids)
     }
 
     fn current_image(&self, table: &str, row: RowUuid, key: &[u8]) -> Result<Option<Image>, Error> {
@@ -3679,6 +3754,15 @@ impl PendingPart {
 /// byte-identical.
 const PENDING_VERSIONS_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_pending_versions \
     (tx INTEGER PRIMARY KEY, version BLOB NOT NULL)";
+
+/// Rows a replica holds no image of because it may not read their current
+/// version, by (stored table, id, branch key): in a branch view over a
+/// base, each still masks the base's row of the id (ch. 8 §8.4). Created
+/// by the first such eviction, so that opening an existing store without
+/// one leaves the file byte-identical.
+pub(crate) const WITHHELD_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_withheld \
+    (tbl TEXT NOT NULL, id BLOB NOT NULL, _b BLOB NOT NULL, PRIMARY KEY (tbl, id, _b)) \
+    WITHOUT ROWID";
 
 /// Per remote query, the server seq its result was last settled
 /// through (see `Remote::through`). Created by the first settlement, so
@@ -6208,19 +6292,40 @@ impl Db {
                                 // this one: missing answers are transient.
                                 inner.client.as_mut().expect("client").unavailable.clear();
                             }
+                            inner.unwithhold(
+                                &image.table,
+                                RowUuid::from_bytes(image.id),
+                                &image.key,
+                            )?;
                             let overlaid = inner.receive_image(image)?;
                             rebase |= overlaid;
                         }
                     }
-                    SyncMessage::AccessLost { table, id, key } => {
+                    SyncMessage::AccessLost {
+                        table,
+                        id,
+                        key,
+                        hidden,
+                    } => {
                         if !inner.physical.tables.contains_key(&table) {
                             continue;
                         }
-                        rebase |= inner.receive_eviction(&table, RowUuid::from_bytes(id), &key)?;
+                        let row = RowUuid::from_bytes(id);
+                        let held = inner.current_image(&table, row, &key)?.is_some();
+                        rebase |= inner.receive_eviction(&table, row, &key)?;
+                        // A version still exists: it masks the base's row in
+                        // branch views until an image of it arrives.
+                        if hidden {
+                            inner.withhold(&table, row, &key)?;
+                        } else {
+                            inner.unwithhold(&table, row, &key)?;
+                        }
                         // Results settled before this one may have held
                         // the row: a resume from them would count it as
                         // held, though this store no longer has it.
-                        inner.forget_watermarks()?;
+                        if held {
+                            inner.forget_watermarks()?;
+                        }
                         let client = inner.client.as_mut().expect("client");
                         client.whole.remove(&(table, id, key));
                     }
@@ -7702,7 +7807,6 @@ impl Db {
             let mut echoes = std::mem::take(&mut inner.sessions[index].echoes);
             let mut watch = std::mem::take(&mut inner.sessions[index].watch);
             let mut held_rows = std::mem::take(&mut inner.sessions[index].held);
-            touched.extend(masking);
             for (table, row, key) in recheck {
                 let can = inner.current_image(&table, row, &key)?.is_some()
                     && readable(&inner, &table, row, &key, policy)?;
@@ -7753,11 +7857,7 @@ impl Db {
                         .upgrade()
                         .and_then(|group| group.borrow().mask().cloned())
                 {
-                    let since = inner.sessions[index]
-                        .resume
-                        .get(&id)
-                        .map(|resume| resume.since);
-                    opening_masks.push((mask, since));
+                    opening_masks.push(mask);
                 }
                 // A relay's result settles once its upstream answered.
                 let answered = events
@@ -7979,22 +8079,36 @@ impl Db {
                     }
                 }
             }
-            for (mask, since) in &opening_masks {
-                touched.extend(inner.masking_rows(policy, mask, *since)?);
+            for mask in &opening_masks {
+                masking.extend(inner.masking_rows(policy, mask)?);
+            }
+            // A masking head row's readability is rechecked as policies'
+            // inputs change: access regained ships its image, which lifts
+            // the replica's marker of it.
+            for (table, row, key) in masking {
+                let can = inner.current_image(&table, row, &key)?.is_some()
+                    && readable(&inner, &table, row, &key, policy)?;
+                held_rows.keep(SESSION_OWNER, &table, row, &key, can);
+                touched.insert((table, row, key));
             }
             // Rows that left a result, and rows a commit wrote: the current
-            // image if the client may read it, else an eviction.
+            // image if the client may read it, else an eviction (hidden
+            // while a version of it still exists).
             for (table, row, key) in touched {
-                match inner.current_image(&table, row, &key)? {
+                let hidden = match inner.current_image(&table, row, &key)? {
                     Some(image) if readable(&inner, &table, row, &key, policy)? => {
-                        images.push(image)
+                        images.push(image);
+                        continue;
                     }
-                    _ => evictions.push(SyncMessage::AccessLost {
-                        table,
-                        id: *row.0.as_bytes(),
-                        key,
-                    }),
-                }
+                    Some(_) => true,
+                    None => inner.is_withheld(&table, row, &key)?,
+                };
+                evictions.push(SyncMessage::AccessLost {
+                    table,
+                    id: *row.0.as_bytes(),
+                    key,
+                    hidden,
+                });
             }
             // Rows the session's own commits wrote stay current for the
             // session, in a subscription or not: its pending writes sit on
@@ -8029,7 +8143,7 @@ impl Db {
             let evicted: HashSet<(&str, [u8; 16], &[u8])> = evictions
                 .iter()
                 .filter_map(|eviction| match eviction {
-                    SyncMessage::AccessLost { table, id, key } => {
+                    SyncMessage::AccessLost { table, id, key, .. } => {
                         Some((table.as_str(), *id, key.as_slice()))
                     }
                     _ => None,
@@ -8192,7 +8306,7 @@ impl Db {
                             inner.ship_deltas(&mut shipped, image)?;
                         }
                     }
-                    SyncMessage::AccessLost { table, id, key } => {
+                    SyncMessage::AccessLost { table, id, key, .. } => {
                         shipped.remove(&(table.clone(), *id, key.clone()));
                     }
                     _ => {}
@@ -8764,12 +8878,19 @@ impl Db {
                     .schema
                     .clone()
                     .unwrap_or_else(|| inner.owner.clone());
+                let mut hidden = Vec::new();
                 if let Some(mask) = fanout::view_mask(&schema, &prepared, &read) {
-                    for (table, row, key) in inner.masking_rows(policy, &mask, None)? {
-                        if let Some(image) = inner.current_image(&table, row, &key)?
-                            && readable(&inner, &table, row, &key, policy)?
-                        {
-                            images.push(image);
+                    for (table, row, key) in inner.masking_rows(policy, &mask)? {
+                        match inner.current_image(&table, row, &key)? {
+                            Some(image) if readable(&inner, &table, row, &key, policy)? => {
+                                images.push(image)
+                            }
+                            _ => hidden.push(SyncMessage::AccessLost {
+                                table,
+                                id: *row.0.as_bytes(),
+                                key,
+                                hidden: true,
+                            }),
                         }
                     }
                 }
@@ -8784,6 +8905,7 @@ impl Db {
                 let through = at.unwrap_or(inner.served_through());
                 let authority = inner.client.is_none();
                 let session = &mut inner.sessions[index];
+                session.outbox.extend(hidden);
                 session
                     .outbox
                     .extend(rows_messages(images, tx_ids, ROWS_MESSAGE_BYTES));

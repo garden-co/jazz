@@ -508,6 +508,9 @@ struct Inner {
     /// Images a replica dropped since the last dispatch (evictions and
     /// rebases), for keyed invalidation.
     gone: RefCell<Vec<sync::Image>>,
+    /// Whether `_jazz_withheld` exists (see `sync::WITHHELD_DDL`): branch
+    /// views over a base read it only then.
+    withheld: std::cell::Cell<bool>,
 }
 
 /// Large-value nodes one tick may reclaim.
@@ -1125,6 +1128,13 @@ impl Db {
         };
         names.admit(&conn, &schema)?;
         conn.execute_batch(sync::SYNC_DDL).map_err(storage)?;
+        let withheld: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = '_jazz_withheld'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(storage)?;
         // The commit seq resumes after the newest stored version.
         let mut seq = 0u64;
         for table in physical.tables.keys() {
@@ -1203,6 +1213,7 @@ impl Db {
                 since_tick: Vec::new(),
                 capture: Vec::new(),
                 gone: RefCell::new(Vec::new()),
+                withheld: std::cell::Cell::new(withheld > 0),
             })),
         };
         {
@@ -3269,6 +3280,7 @@ impl Inner {
         let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
         Ctx::new(schema, policy, claims, &prepared.binding)
             .with_view(read.view.clone())
+            .with_withheld(self.withheld.get())
             .with_cut(read.cut.clone(), read.settled_only)
             .with_history_origin(self.history_origin())
     }
