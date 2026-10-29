@@ -4472,6 +4472,28 @@ impl Inner {
         })?))
     }
 
+    /// [`Self::code_of`] without interning: `None` for a node this store
+    /// does not know.
+    pub(crate) fn known_code(&self, by: Option<[u8; 16]>) -> Result<Option<i64>, Error> {
+        let node = match by {
+            None => return Ok(Some(0)),
+            Some(node) if node == *self.identity.node.as_bytes() && self.me != 0 => {
+                return Ok(Some(self.me));
+            }
+            Some(node) => node,
+        };
+        let code: Option<i64> = self
+            .conn
+            .cached_row(
+                "SELECT n FROM _jazz_nodes WHERE node = ?1",
+                [node.to_vec()],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(storage)?;
+        Ok(code.map(|code| RELAY | code))
+    }
+
     fn node_code(&self, node: [u8; 16]) -> Result<i64, Error> {
         self.exec(
             "INSERT OR IGNORE INTO _jazz_nodes (node) VALUES (?1)",
@@ -4633,6 +4655,19 @@ impl Inner {
         (self.me != 0 && !self.relays_upstream()).then(|| *self.identity.node.as_bytes())
     }
 
+    /// Position `seq` as [`Self::served_through`] counts it: the authority's,
+    /// or this replica's own when it has no server (see [`Self::served_by`]).
+    pub(crate) fn served_at(&self, seq: u64) -> Pos {
+        Pos {
+            n: if self.served_by().is_some() {
+                self.me
+            } else {
+                0
+            },
+            seq,
+        }
+    }
+
     /// The position this store reads as complete through: the authority's
     /// seq it synced, or for a replica with no server its own newest.
     pub(crate) fn frontier(&self) -> Pos {
@@ -4657,12 +4692,9 @@ impl Inner {
             seq: through,
         };
         let client = self.client.as_mut().expect("client");
-        if at
-            > (Pos {
-                n: client.known_n,
-                seq: client.known,
-            })
-        {
+        // Another sequencer (the upstream gained or lost a server) restarts
+        // the count; the same one only moves forward.
+        if at.n != client.known_n || at.seq > client.known {
             client.known_n = at.n;
             client.known = at.seq;
         }
@@ -9240,17 +9272,18 @@ impl Db {
                 continue;
             }
             let row = RowUuid::from_bytes(pull.id);
-            let at = Pos {
-                n: inner.code_of(pull.by)?,
-                seq: pull.seq,
-            };
+            // A node this store never interned holds no version here; a
+            // pull never interns one.
+            let at = inner.known_code(pull.by)?.map(|n| Pos { n, seq: pull.seq });
             // Pulls name the version's table as it is stored, as rows do.
-            let image = match inner
-                .owner
-                .by_stored(&pull.table)
-                .map(|t| t.stored.as_str())
-            {
-                Some(table)
+            let image = match (
+                inner
+                    .owner
+                    .by_stored(&pull.table)
+                    .map(|t| t.stored.as_str()),
+                at,
+            ) {
+                (Some(table), Some(at))
                     if still_readable_version(&inner, table, row, &pull.key, at, identity)? =>
                 {
                     inner
@@ -9452,8 +9485,9 @@ impl Db {
                     settled.insert(tx, seq);
                 }
             }
-            let in_snapshot =
-                |at: Pos| at <= Pos::at(*snapshot) || settled.values().any(|s| *s == at);
+            // The session's snapshot counts this store's served positions.
+            let base = inner.served_at(*snapshot);
+            let in_snapshot = |at: Pos| at <= base || settled.values().any(|s| *s == at);
             for op in &ops {
                 if let Some(row) = op.row()
                     && inner

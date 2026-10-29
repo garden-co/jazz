@@ -583,3 +583,36 @@ fn a_tabs_write_is_local_once_its_worker_stored_it() {
     block_on(tab.tick()).unwrap();
     assert!(local.as_mut().poll(&mut context).is_ready());
 }
+
+/// A worker with no server validates a tab's serializable commit against
+/// the tab's snapshot in its own positions: a row it accepted before the
+/// snapshot (here another tab's insert) is in it, so a blind delete of it
+/// holds.
+#[test]
+fn a_worker_without_a_server_keeps_a_tabs_blind_delete_of_a_row_from_before_its_snapshot() {
+    let net = Net::with_worker_hint(2, RemoteLinkHint::NoServer);
+    let mut cells = holder("");
+    cells.insert("show".to_owned(), Value::String("s".to_owned()));
+    let write = block_on(net.tab(0).insert("seats", cells, Default::default())).unwrap();
+    let seat = write.row_uuid();
+    net.never_global(net.tab(0), write.mergeable_tx_id());
+    let tab = net.tab(1);
+    // A remote read: the tab learns its worker's position past the insert.
+    let audit = tab.prepare_query(&Query::from("audit")).unwrap();
+    net.drive(tab.all(&audit, ReadOpts::for_read_tier(jazz::db::ReadTier::Remote)))
+        .unwrap();
+    let open = net.begin_pinned(tab);
+    net.drive(tab.tx_ref(open).delete("seats", seat, Default::default()))
+        .unwrap();
+    let receipt = net
+        .drive(tab.commit_serializable_handle(open))
+        .expect("the tab holds no version of the seat: no local conflict");
+    net.never_global(tab, receipt.0);
+    let seats = net.worker.prepare_query(&Query::from("seats")).unwrap();
+    assert!(
+        block_on(net.worker.all(&seats, ReadOpts::default()))
+            .unwrap()
+            .is_empty(),
+        "the worker applied the delete"
+    );
+}

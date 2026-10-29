@@ -6856,7 +6856,7 @@ impl Db {
                 if let Some(row) = op.row()
                     && inner
                         .newest_seq(schema.stored_table(op.table())?, row)?
-                        .is_some_and(|at| at > Pos::at(*snapshot))
+                        .is_some_and(|at| at > inner.served_at(*snapshot))
                 {
                     return Err(conflict(
                         "row visible parent changed since transaction write was staged",
