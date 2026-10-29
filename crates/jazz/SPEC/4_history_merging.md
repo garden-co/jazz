@@ -541,8 +541,9 @@ commit (`predecessor_rejected`). It keeps, in the version the commit wrote
 the seq the named commit landed at negated; and `_cols`, the authored stored
 columns as a bitmask over their positions in the row table (stored tables
 only grow by `ADD COLUMN`, so a position never moves). An app column cannot
-take the name of a stored row column (`id`, `rid`, `_b`, `_seq`, `_del`,
-`_c`, `_base`, `_cols`). Both are NULL on every other replica and for Core's
+take the name of a stored row column (`id`, `rid`, `_b`, `_seq`, `_st`,
+`_base`, `_cols`). A delete or restore authors `_st`, the version's state
+bits (bit 0: its commit wrote no content; bit 1: deleted). Both are NULL on every other replica and for Core's
 own writes: those are made over the current image, so they are never maybe
 conflicting, and in another write's analysis they author every column. The
 flag, the walk and the merge base are derived on demand

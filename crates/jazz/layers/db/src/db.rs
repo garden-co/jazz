@@ -46,8 +46,8 @@ pub use crate::options::REMOTE_LINK_ATTEMPT_WINDOW;
 use crate::result_tree::{ResultNode, ResultRelation, ResultTree};
 pub use crate::values::CurrentRow;
 use crate::values::{
-    AuthorKey, Schema, Sql, Table, author_key, begin_savepoint, end_savepoint, from_sql,
-    in_savepoint, quote, storage, to_sql, unsupported,
+    AuthorKey, STATE_DELETED, STATE_NO_CONTENT, Schema, Sql, Table, author_key, begin_savepoint,
+    end_savepoint, from_sql, in_savepoint, quote, storage, to_sql, unsupported,
 };
 pub use sync::{
     BuiltOn, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad, FrameJoiner, Image, LOCAL_BASE,
@@ -3121,7 +3121,7 @@ impl Inner {
                 row.get(0).map_err(storage)?
             };
             let seq: i64 = row.get(1).map_err(storage)?;
-            let deleted: i64 = row.get(2).map_err(storage)?;
+            let state: i64 = row.get(2).map_err(storage)?;
             // A flat join: the root's version, then each joined row and
             // its version.
             let flat = compiled.joined > 0;
@@ -3196,7 +3196,7 @@ impl Inner {
                         .map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?,
                 ),
                 seq: seq as u64,
-                deleted: deleted != 0,
+                deleted: state & STATE_DELETED != 0,
                 cells: Arc::new(cells),
                 types: types.clone(),
                 joined,
@@ -3325,7 +3325,7 @@ impl Inner {
         key: &[u8],
     ) -> Result<Option<(u64, bool)>, Error> {
         let sql = format!(
-            "SELECT _seq, _del FROM {} WHERE id = ?1 AND _b = ?2",
+            "SELECT _seq, _st >= 2 FROM {} WHERE id = ?1 AND _b = ?2",
             quote(table)
         );
         match self.conn.cached_row(
@@ -3361,7 +3361,7 @@ impl Inner {
             return Ok(None);
         };
         let sql = format!(
-            "SELECT _del FROM {} WHERE id = ?1 AND _b = ?2 AND _seq = ?3",
+            "SELECT _st >= 2 FROM {} WHERE id = ?1 AND _b = ?2 AND _seq = ?3",
             quote(&format!("{table}__h"))
         );
         let deleted: i64 = self
@@ -3938,7 +3938,7 @@ impl Inner {
     /// Whether `row`'s current version on branch `key` is a tombstone.
     fn is_deleted_version(&self, table: &Table, row: RowUuid, key: &[u8]) -> Result<bool, Error> {
         let sql = format!(
-            "SELECT _del FROM {} WHERE id = ?1 AND _b = ?2",
+            "SELECT _st >= 2 FROM {} WHERE id = ?1 AND _b = ?2",
             quote(&table.stored)
         );
         let deleted: Option<i64> = self
@@ -4657,8 +4657,8 @@ impl Inner {
     fn snapshot(&self, table: &Table, row: RowUuid, key: &[u8], seq: u64) -> Result<(), Error> {
         let columns = self.columns_list(table);
         let sql = format!(
-            "INSERT INTO {} (id, _b, _seq, _del, _c, _base, _cols{columns}) \
-             SELECT id, _b, _seq, _del, _c, _base, _cols{columns} FROM {} WHERE id = ?1 AND _b = ?2 AND _seq <> ?3",
+            "INSERT INTO {} (id, _b, _seq, _st, _base, _cols{columns}) \
+             SELECT id, _b, _seq, _st, _base, _cols{columns} FROM {} WHERE id = ?1 AND _b = ?2 AND _seq <> ?3",
             quote(&format!("{}__h", table.stored)),
             quote(&table.stored)
         );
@@ -4707,8 +4707,10 @@ impl Inner {
                 table.name
             )));
         };
+        // The copy keeps the base's deletion and authored no content.
         let sql = format!(
-            "INSERT INTO {name} (id, _b, _seq, _del, _c{columns}) SELECT id, ?1, ?2, _del, 0{columns} \
+            "INSERT INTO {name} (id, _b, _seq, _st{columns}) \
+             SELECT id, ?1, ?2, _st | {STATE_NO_CONTENT}{columns} \
              FROM {source} WHERE id = ?3 AND _b = ?4",
             name = quote(&table.stored)
         );
@@ -4736,19 +4738,25 @@ impl Inner {
         // the previous version's.
         // What a new version was built on is the authority's to write
         // (SPEC 4 §4.6).
+        let mut values = vec![Sql::Integer(seq as i64)];
+        let deletion = match deleted {
+            Some(deleted) => {
+                values.push(Sql::Integer(if deleted { STATE_DELETED } else { 0 }));
+                format!("?{}", values.len())
+            }
+            None => format!("(_st & {STATE_DELETED})"),
+        };
+        // The no-content bit stays set only while no write of the commit
+        // authored content.
+        let no_content = if content { 0 } else { STATE_NO_CONTENT };
         let mut sets = vec![
             "_seq = ?1".to_owned(),
             "_base = NULL, _cols = NULL".to_owned(),
             format!(
-                "_c = CASE WHEN _seq = ?1 THEN max(_c, {content}) ELSE {content} END",
-                content = content as u8
+                "_st = (CASE WHEN _seq = ?1 THEN _st & {no_content} ELSE {no_content} END) \
+                 | {deletion}"
             ),
         ];
-        let mut values = vec![Sql::Integer(seq as i64)];
-        if let Some(deleted) = deleted {
-            values.push(Sql::Integer(deleted as i64));
-            sets.push(format!("_del = ?{}", values.len()));
-        }
         for (name, value) in cells {
             let cell = match table.column(name) {
                 Some(column) => self.bind_cell(column, value, source)?,
@@ -5576,7 +5584,7 @@ impl Inner {
                 continue;
             }
             let sql = format!(
-                "SELECT {} FROM {} WHERE id = ?1 AND _b = ?2 AND _del = 0",
+                "SELECT {} FROM {} WHERE id = ?1 AND _b = ?2 AND _st < 2",
                 quote(&column.stored),
                 quote(&t.stored)
             );

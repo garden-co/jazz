@@ -12,7 +12,7 @@ this one. Until then format 1 is still moving, so such a change re-runs the
 producer and re-pins the hash and account here and in the test.
 
 - `jazz.sqlite.gz.base64`: SHA-256 of the SQLite file
-  `bd218c13ea8bc53c3ed2513cb4396f8309a2a517e556677b1d42a18992ca3a79`.
+  `eeab989cd5213fecdc08783e118bed23b16f39a91bab0c8bd8e82ffbb24edf3e`.
 
 Producer: `produce_server_data_dir_corpus_v1` in
 `crates/jazz-server/src/server/data_dir_corpus.rs` (ignored;
@@ -23,7 +23,7 @@ Producer: `produce_server_data_dir_corpus_v1` in
 - deployed `notes(title, body)` with a migration introducing `body` (default
   `(none)`), then written a second note with a body;
 - asked to register `alice` (issuer `https://issuer.example`), who got account
-  `99f895c2-eb94-41d3-bd84-8c44114b619b`;
+  `1451c1d2-2d6f-4d4a-a788-9479861be1a9`;
 - shut down, which checkpoints the WAL into the file.
 
 Reader: `pinned_server_data_dir_reopens_and_accepts_current_writes`, run by

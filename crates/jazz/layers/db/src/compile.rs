@@ -357,8 +357,8 @@ impl<'a> Ctx<'a> {
                             .collect::<Vec<_>>()
                             .join(", ");
                         (
-                            format!("(_seq = {own} AND _del = 0 AND id IN ({ids}))"),
-                            format!("(c._seq = {own} AND c._del = 0 AND c.id IN ({ids}))"),
+                            format!("(_seq = {own} AND _st < 2 AND id IN ({ids}))"),
+                            format!("(c._seq = {own} AND c._st < 2 AND c.id IN ({ids}))"),
                         )
                     }
                 }
@@ -373,13 +373,13 @@ impl<'a> Ctx<'a> {
                 let row = self.bind(Sql::Blob(row.to_vec()));
                 let key = self.bind(Sql::Blob(key.clone()));
                 (
-                    format!("(_seq = {own} AND _del = 0 AND (id <> {row} OR _b <> {key}))"),
-                    format!("(c._seq = {own} AND c._del = 0 AND (c.id <> {row} OR c._b <> {key}))"),
+                    format!("(_seq = {own} AND _st < 2 AND (id <> {row} OR _b <> {key}))"),
+                    format!("(c._seq = {own} AND c._st < 2 AND (c.id <> {row} OR c._b <> {key}))"),
                 )
             }
             Some(Overlay::Except { .. }) => (
-                format!("(_seq = {own} AND _del = 0)"),
-                format!("(c._seq = {own} AND c._del = 0)"),
+                format!("(_seq = {own} AND _st < 2)"),
+                format!("(c._seq = {own} AND c._st < 2)"),
             ),
         };
         let (visible, h_visible, newer) = if extra.is_empty() {
@@ -427,7 +427,7 @@ impl<'a> Ctx<'a> {
     pub(crate) fn source(&mut self, table: &Table) -> Result<String, Error> {
         // Explicit columns: a schema view reads its own columns of the
         // physical (unioned) table.
-        let mut columns = "rid, id, _b, _seq, _del".to_owned();
+        let mut columns = "rid, id, _b, _seq, _st".to_owned();
         for column in table.stored() {
             columns.push_str(&format!(", {}", quote(&column.stored)));
         }
@@ -447,7 +447,7 @@ impl<'a> Ctx<'a> {
                 // branch columns are the head's, so predicates, policies and
                 // projections see one effective branch.
                 let head_cells = table.selector_cells(&view.head)?;
-                let mut inherited = format!("m.rid, m.id, {head}, m._seq, m._del");
+                let mut inherited = format!("m.rid, m.id, {head}, m._seq, m._st");
                 for column in table.stored() {
                     match head_cells.get(&column.name) {
                         Some(value) => {
@@ -718,7 +718,7 @@ impl<'a> Ctx<'a> {
         let source = self.source(table)?;
         let statement = |order: &str| {
             format!(
-                "SELECT {alias}.id, {alias}._seq, {alias}._del{columns} FROM {source} AS {alias} \
+                "SELECT {alias}.id, {alias}._seq, {alias}._st{columns} FROM {source} AS {alias} \
                  WHERE {} ORDER BY {order} LIMIT {limit} OFFSET {offset}",
                 and(&wheres),
             )
@@ -749,7 +749,7 @@ impl<'a> Ctx<'a> {
         let alias = "t";
         let mut wheres = Vec::new();
         if !include_deleted {
-            wheres.push(format!("{alias}._del = 0"));
+            wheres.push(format!("{alias}._st < 2"));
         }
         for filter in &query.filters {
             wheres.push(self.predicate(filter, table, alias)?);
@@ -773,7 +773,7 @@ impl<'a> Ctx<'a> {
             if include.require {
                 let i = self.alias("i");
                 wheres.push(format!(
-                    "EXISTS (SELECT 1 FROM {} AS {i} WHERE {i}.id = {alias}.{} AND {i}._del = 0)",
+                    "EXISTS (SELECT 1 FROM {} AS {i} WHERE {i}.id = {alias}.{} AND {i}._st < 2)",
                     self.source(target)?,
                     quote(table.stored_name(column))
                 ));
@@ -845,7 +845,7 @@ impl<'a> Ctx<'a> {
                 .collect();
             let source = self.source(table)?;
             let mut body = format!(
-                "SELECT {alias}.id AS id, {alias}._seq AS _seq, {alias}._del AS _del, \
+                "SELECT {alias}.id AS id, {alias}._seq AS _seq, {alias}._st AS _st, \
                  {label} AS _arm{columns}{keys_sql} FROM {source} AS {alias} WHERE {}",
                 and(&wheres)
             );
@@ -876,7 +876,7 @@ impl<'a> Ctx<'a> {
         let offset = self.bind(Sql::Integer(plan.offset as i64));
         let columns: String = (0..projection.len()).map(|i| format!(", c{i}")).collect();
         let sql = format!(
-            "SELECT id, _seq, _del, _arm{columns} FROM ({}) ORDER BY {} \
+            "SELECT id, _seq, _st, _arm{columns} FROM ({}) ORDER BY {} \
              LIMIT {limit} OFFSET {offset}",
             arms.join(" UNION ALL "),
             order.join(", ")
@@ -1051,7 +1051,7 @@ impl<'a> Ctx<'a> {
                     let Some(sql) = &source.sql else { continue };
                     let b = self.alias("b");
                     bound = Some(history::HistoryBound::Ids(format!(
-                        "SELECT {} FROM {sql} AS {b} WHERE {b}._del = 0",
+                        "SELECT {} FROM {sql} AS {b} WHERE {b}._st < 2",
                         column_sql(&source.table, &b, other.1)?
                     )));
                     break;
@@ -1081,12 +1081,12 @@ impl<'a> Ctx<'a> {
                 (&right.table, &right.alias, right_column),
             )?;
             joins.push_str(&format!(
-                " JOIN {} AS {alias} ON {alias}._del = 0 AND {on}",
+                " JOIN {} AS {alias} ON {alias}._st < 2 AND {on}",
                 sql_of(right),
                 alias = right.alias
             ));
         }
-        let mut wheres = vec!["t._del = 0".to_owned()];
+        let mut wheres = vec!["t._st < 2".to_owned()];
         for (at, predicate) in &routed {
             let source = &sources[*at];
             wheres.push(self.predicate(predicate, &source.table, &source.alias)?);
@@ -1129,7 +1129,7 @@ impl<'a> Ctx<'a> {
             }
         }
         let sql = format!(
-            "SELECT t.id, t._seq, t._del{ids}{columns} FROM {} AS t{joins} \
+            "SELECT t.id, t._seq, t._st{ids}{columns} FROM {} AS t{joins} \
              WHERE {} ORDER BY {}",
             sql_of(&sources[0]),
             and(&wheres),
@@ -1202,7 +1202,7 @@ impl<'a> Ctx<'a> {
             let child = self.table(&array.table)?;
             let c = self.alias("c");
             let outer = column_sql(table, alias, &array.outer_column)?;
-            let mut conds = vec![format!("{c}._del = 0")];
+            let mut conds = vec![format!("{c}._st < 2")];
             for filter in &array.filters {
                 conds.push(self.predicate(filter, child, &c)?);
             }
@@ -1277,7 +1277,7 @@ impl<'a> Ctx<'a> {
             ("", parent.clone())
         };
         let mut wheres = vec![
-            format!("{alias}._del = 0"),
+            format!("{alias}._st < 2"),
             correlate(child, alias, &array.inner_column, &correlated)?,
         ];
         for filter in &array.filters {
@@ -1307,7 +1307,7 @@ impl<'a> Ctx<'a> {
         };
         let statement = |order: &str| {
             format!(
-                "SELECT {alias}.id, {alias}._seq, {alias}._del{columns} FROM {source} AS {alias} \
+                "SELECT {alias}.id, {alias}._seq, {alias}._st{columns} FROM {source} AS {alias} \
                  WHERE {} ORDER BY {order} LIMIT {limit} OFFSET {offset}",
                 and(&wheres),
             )
@@ -1363,7 +1363,7 @@ impl<'a> Ctx<'a> {
     ) -> Result<String, Error> {
         let target = self.table(&join.table)?;
         let j = self.alias("j");
-        let mut conds = vec![format!("{j}._del = 0")];
+        let mut conds = vec![format!("{j}._st < 2")];
         if let Some(session) = self.policy {
             conds.push(self.read_policy(target, &j, session)?);
         }
@@ -1383,7 +1383,7 @@ impl<'a> Ctx<'a> {
                         let referenced = self.table(&lookup.table)?;
                         let l = self.alias("l");
                         let mut found = vec![
-                            format!("{l}._del = 0"),
+                            format!("{l}._st < 2"),
                             format!(
                                 "{l}.id = {}",
                                 column_sql(table, alias, &lookup.row_id_source_column)?
@@ -1456,7 +1456,7 @@ impl<'a> Ctx<'a> {
             Some(seed) => {
                 let seeds = self.table(&seed.table)?;
                 let s = self.alias("s");
-                let mut conds = vec![format!("{s}._del = 0")];
+                let mut conds = vec![format!("{s}._st < 2")];
                 if let Some(session) = self.policy {
                     conds.push(self.read_policy(seeds, &s, session)?);
                 }
@@ -1491,7 +1491,7 @@ impl<'a> Ctx<'a> {
             },
         };
         let e = self.alias("e");
-        let mut step = vec![format!("{e}._del = 0")];
+        let mut step = vec![format!("{e}._st < 2")];
         if let Some(session) = self.policy {
             step.push(self.read_policy(edges, &e, session)?);
         }
@@ -1519,7 +1519,7 @@ impl<'a> Ctx<'a> {
         };
         let a = self.alias("a");
         let mut conds = vec![
-            format!("{a}._del = 0"),
+            format!("{a}._st < 2"),
             format!(
                 "{} = {alias}.id",
                 column_sql(access, &a, &via.access_row_column)?
@@ -1900,7 +1900,7 @@ impl<'a> Ctx<'a> {
                     self.policy_expr(condition, target, &e, Some((table, alias)), session, depth)?;
                 semi_join(
                     format!("{} AS {e}", self.source(target)?),
-                    vec![format!("{e}._del = 0"), inner],
+                    vec![format!("{e}._st < 2"), inner],
                 )
             }
             // The relation's outer row is the row under check, also inside
@@ -1942,7 +1942,7 @@ impl<'a> Ctx<'a> {
                 let on = self.join_key((target, &p, "id"), (table, alias, via_column))?;
                 semi_join(
                     format!("{} AS {p}", self.source(target)?),
-                    vec![on, format!("{p}._del = 0"), inner],
+                    vec![on, format!("{p}._st < 2"), inner],
                 )
             }
             PolicyExpr::InheritsReferencing {
@@ -1968,7 +1968,7 @@ impl<'a> Ctx<'a> {
                     format!("{} AS {s}", self.source(source)?),
                     vec![
                         correlate(source, &s, via_column, &format!("{alias}.id"))?,
-                        format!("{s}._del = 0"),
+                        format!("{s}._st < 2"),
                         inner,
                     ],
                 )
@@ -1998,7 +1998,7 @@ impl<'a> Ctx<'a> {
         let seed = column_sql(table, alias, via)?;
         let parent = column_sql(table, &p, via)?;
         let steps = self.source(table)?;
-        let mut step = vec![format!("{p}._del = 0"), format!("{c}.d < {bound}")];
+        let mut step = vec![format!("{p}._st < 2"), format!("{c}.d < {bound}")];
         for guard in &chain.guards {
             step.push(self.policy_expr(guard, table, &p, None, session, 0)?);
         }
@@ -2014,7 +2014,7 @@ impl<'a> Ctx<'a> {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(format!(
             "EXISTS (WITH RECURSIVE {cte} SELECT 1 FROM {} AS {a} JOIN {c} ON {a}.id = {c}.id \
-             WHERE {a}._del = 0 AND {})",
+             WHERE {a}._st < 2 AND {})",
             self.source(table)?,
             or(&base)
         ))
@@ -2072,7 +2072,7 @@ impl<'a> Ctx<'a> {
                 let r = self.alias("r");
                 Ok(Rel {
                     ctes: Vec::new(),
-                    wheres: vec![format!("{r}._del = 0")],
+                    wheres: vec![format!("{r}._st < 2")],
                     from: vec![Src {
                         sql: self.source(table)?,
                         alias: r,
@@ -2795,7 +2795,7 @@ fn deletion_sql(table: &Table, alias: &str, column: &str) -> String {
         _ => "$updatedBy",
     };
     format!(
-        "CASE WHEN {alias}._del = 1 THEN {} END",
+        "CASE WHEN {alias}._st >= 2 THEN {} END",
         stored_sql(alias, stamp)
     )
 }
@@ -3561,11 +3561,11 @@ mod tests {
         );
         let outer = semi_join(
             r#""a" AS a"#.to_owned(),
-            vec!["a._del = 0".to_owned(), inner],
+            vec!["a._st < 2".to_owned(), inner],
         );
         assert_eq!(
             outer,
-            r#"EXISTS (SELECT 1 FROM "a" AS a, "b" AS b WHERE (a._del = 0 AND (b.x = a.id AND b.s IS 'W) WHERE (')))"#
+            r#"EXISTS (SELECT 1 FROM "a" AS a, "b" AS b WHERE (a._st < 2 AND (b.x = a.id AND b.s IS 'W) WHERE (')))"#
         );
         // A subquery source keeps its own WHERE.
         let sourced =
