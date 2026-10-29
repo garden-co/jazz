@@ -13,7 +13,10 @@ use std::collections::BTreeMap;
 
 use duplex_transport::duplex;
 
-use jazz::db::{Db, DbConfig, DbIdentity, ErrorCode, Reason, RemoteLinkHint, block_on};
+use jazz::db::{
+    Db, DbConfig, DbIdentity, ErrorCode, InsertOptions, Reason, RemoteLinkHint, WriteIdentity,
+    block_on,
+};
 use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::query::Query;
 use jazz::records::Value;
@@ -115,4 +118,26 @@ fn a_relays_own_sessions_write_as_its_identity_at_the_core() {
         "{created_by} for {:?}",
         written.row_uuid()
     );
+}
+
+#[test]
+fn a_users_store_refuses_a_write_as_another_session() {
+    // It would upload as the store's own identity, so the core would
+    // attribute the write to the store's user.
+    let relay = open(5, user(5));
+    relay.become_replica();
+    let as_session = |author| InsertOptions {
+        identity: WriteIdentity::Session(author),
+        ..Default::default()
+    };
+    let error =
+        block_on(relay.insert("notes", body("as user 6"), as_session(user(6)))).unwrap_err();
+    assert_eq!(error.reason, Some(Reason::IdentityMismatch));
+    block_on(relay.insert("notes", body("as user 5"), as_session(user(5)))).unwrap();
+    // A system store writes as whichever session it vouches for, and so
+    // does a user's store that is no replica (nothing uploads its writes).
+    let standalone = open(4, user(4));
+    block_on(standalone.insert("notes", body("as user 6"), as_session(user(6)))).unwrap();
+    let core = open(0, AuthorSubject::SYSTEM);
+    block_on(core.insert("notes", body("as user 6"), as_session(user(6)))).unwrap();
 }

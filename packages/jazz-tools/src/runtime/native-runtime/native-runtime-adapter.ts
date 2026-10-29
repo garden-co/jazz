@@ -1309,8 +1309,18 @@ export class NativeRuntimeAdapter implements Runtime {
     return await this.db.evictExpiredStagedLargeValues();
   }
 
-  async acceptPeer(claims: Record<string, unknown> = {}, localEpoch?: bigint): Promise<Transport> {
-    if (this !== this.ownerRuntime) return this.ownerRuntime.acceptPeer(claims, localEpoch);
+  /**
+   * Serve a peer (a tab) whose replica is `identity`. A store configured as
+   * a user serves only its own identity: it uploads what its peers write as
+   * itself, so a peer of another identity is refused (`identity_mismatch`).
+   */
+  async acceptPeer(
+    claims: Record<string, unknown> = {},
+    localEpoch?: bigint,
+    identity: Uint8Array = this.peerIdentity,
+  ): Promise<Transport> {
+    if (this !== this.ownerRuntime)
+      return this.ownerRuntime.acceptPeer(claims, localEpoch, identity);
     if (this.closed) throw new Error("Native runtime is closed");
     return this.runWhenCoreIdle(async () => {
       if (this.closed) throw new Error("Native runtime is closed");
@@ -1327,6 +1337,8 @@ export class NativeRuntimeAdapter implements Runtime {
         const proof = this.selfSignedClientProof;
         let subscriber: Transport;
         if (proof) {
+          // The proof is this store's own: it vouches for no other identity.
+          if (!sameBytes(identity, this.peerIdentity)) throw identityMismatchError();
           if (!this.db.acceptSubscriberWithSelfSignedProof) {
             throw new Error(
               "Native runtime does not support self-signed subscriber admission; rebuild the matching Jazz WASM artifact",
@@ -1343,7 +1355,7 @@ export class NativeRuntimeAdapter implements Runtime {
           if (!this.db.acceptSubscriber) {
             throw new Error("Native runtime does not expose subscriber links");
           }
-          subscriber = await this.db.acceptSubscriber(this.peerIdentity, claims, localEpoch);
+          subscriber = await this.db.acceptSubscriber(identity, claims, localEpoch);
         }
         if (this.closed) {
           // We still own the slot. Awaiting gated retirement here would wait
@@ -5365,6 +5377,14 @@ function errorMessage(error: unknown): string {
     }
   }
   return String(error);
+}
+
+/** The refusal the engine gives a peer of another identity, with its reason. */
+function identityMismatchError(): Error {
+  return Object.assign(
+    new Error("a store configured as one user serves only its own identity's peers"),
+    { code: "protocol", reason: "identity_mismatch" satisfies NativeCoreErrorReason },
+  );
 }
 
 function contextualError(context: string, error: unknown): Error {

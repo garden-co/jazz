@@ -55,6 +55,8 @@ type SharedWorkerGlobal = typeof globalThis & {
 type TabPeer = {
   tabId: string;
   context: RuntimeContext;
+  /** The author of the tab's own replica, as it connected; the runtime serves only its own. */
+  author: Uint8Array;
   port: MessagePort;
   pump: BrowserWorkerTransportPump | null;
   subscriber: Transport | null;
@@ -999,7 +1001,7 @@ async function connectTab(
     });
     assertAdmission();
     // No await between the final fence, peer publication and listener handoff.
-    attachTab(context, message.tabId, port);
+    attachTab(context, message.tabId, port, message.options.author);
     releaseClaim();
     finishBootstrap();
     post(port, { type: "runtime-ready" });
@@ -1403,6 +1405,7 @@ function attachTab(
   context: RuntimeContext,
   tabId: string,
   port: MessagePort,
+  author: Uint8Array,
   inspectorAttachment = false,
 ): void {
   closeTab(context, tabId);
@@ -1414,6 +1417,7 @@ function attachTab(
   peer = {
     tabId,
     context,
+    author,
     port,
     pump: null,
     subscriber: null,
@@ -1677,6 +1681,7 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
           unownedSubscriber = await activeRuntime.acceptPeer(
             message.sessionClaims,
             peerAuthority.epoch,
+            peer.author,
           );
           // Close and storage invalidation revoke publication synchronously,
           // without waiting for recovery to finish.
@@ -1947,7 +1952,7 @@ function attachInspectorControl(authSessionKey: string, port: MessagePort): void
       } satisfies BrowserInspectorControlEvent);
       return;
     }
-    attachTab(context, message.tabId, message.port, true);
+    attachTab(context, message.tabId, message.port, context.options.author, true);
     port.postMessage({ type: "result", id: message.id } satisfies BrowserInspectorControlEvent);
   };
   const dispose = () => {
