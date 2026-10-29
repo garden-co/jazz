@@ -5,7 +5,8 @@
 //! (SPEC 4 §4.6), and every replica converges to its image. Disjoint edits
 //! all survive, for inline and large values alike; overlapping
 //! replacements go to the later write; a write without anything to merge
-//! takes the fast path.
+//! takes the fast path. An optional column merges a NULL base as "",
+//! while a NULL write against a concurrent edit goes to the later write.
 
 use crate::common;
 
@@ -50,6 +51,9 @@ fn schema() -> JazzSchema {
                 merging("notes", ColumnMergeStrategy::Markdown),
                 merging("page", ColumnMergeStrategy::Html),
                 column("title"),
+                ColumnDescriptor::new("summary", ColumnType::Text)
+                    .nullable()
+                    .merge_strategy(ColumnMergeStrategy::Text),
             ]),
             indexed_columns: None,
             composite_indexes: Vec::new(),
@@ -79,6 +83,14 @@ fn cells(pairs: &[(&str, &str)]) -> BTreeMap<String, Value> {
         .iter()
         .map(|(column, value)| ((*column).to_owned(), Value::String((*value).to_owned())))
         .collect()
+}
+
+/// Column `summary`, optional: `None` writes NULL.
+fn summary(value: Option<&str>) -> BTreeMap<String, Value> {
+    BTreeMap::from([(
+        "summary".to_owned(),
+        Value::Nullable(value.map(|text| Box::new(Value::String(text.to_owned())))),
+    )])
 }
 
 struct Client {
@@ -217,6 +229,51 @@ impl Net {
         {
             Some(Value::String(text)) => text,
             other => panic!("`{column}` is {other:?}"),
+        }
+    }
+
+    /// Optional column `summary` of `row` as `db` holds it.
+    fn read_summary(db: &Db, row: RowUuid) -> Option<String> {
+        let prepared = db.prepare_query(&Query::from("docs")).unwrap();
+        match block_on(db.all(&prepared, ReadOpts::default()))
+            .unwrap()
+            .into_iter()
+            .find(|current| current.row_uuid() == row)
+            .and_then(|current| current.cell("summary"))
+        {
+            Some(Value::Nullable(None)) | None => None,
+            Some(Value::Nullable(Some(text))) => match *text {
+                Value::String(text) => Some(text),
+                other => panic!("`summary` holds {other:?}"),
+            },
+            Some(Value::String(text)) => Some(text),
+            other => panic!("`summary` is {other:?}"),
+        }
+    }
+
+    /// Client `i` writes `summary` of `row`; returns the write's tx.
+    fn write_summary(&self, i: usize, row: RowUuid, value: Option<&str>) -> u64 {
+        block_on(
+            self.db(i)
+                .update("docs", row, summary(value), Default::default()),
+        )
+        .unwrap()
+        .mergeable_tx_id()
+    }
+
+    /// Every replica holds `expected` in optional column `summary` of `row`.
+    fn assert_summary_everywhere(&self, row: RowUuid, expected: Option<&str>) {
+        assert_eq!(
+            Self::read_summary(&self.core, row).as_deref(),
+            expected,
+            "the authority"
+        );
+        for (i, client) in self.clients.iter().enumerate() {
+            assert_eq!(
+                Self::read_summary(&client.db, row).as_deref(),
+                expected,
+                "client {i}"
+            );
         }
     }
 
@@ -504,4 +561,100 @@ fn transaction_writes_merge_over_what_the_transaction_saw() {
     net.online(0);
     net.settle(0, alice);
     net.assert_everywhere(row, "body", "zero one two three four");
+}
+
+/// Two writers filling an optional column that was NULL: the NULL base
+/// merges as "", so both additions stay, the earlier one first.
+#[test]
+fn concurrent_writes_over_a_null_base_both_survive() {
+    let mut net = Net::new(2);
+    let row = net.seed(0, &[("body", "doc")]);
+    net.assert_summary_everywhere(row, None);
+    net.offline(0);
+    net.offline(1);
+    let alice = net.write_summary(0, row, Some("Alice's take."));
+    let bob = net.write_summary(1, row, Some("Bob's take."));
+    net.online(0);
+    net.settle(0, alice);
+    net.online(1);
+    net.settle(1, bob);
+    net.assert_summary_everywhere(row, Some("Alice's take.Bob's take."));
+}
+
+/// Concurrent edits to an optional column that holds text merge as on a
+/// required one; an empty string is a value, not NULL.
+#[test]
+fn an_optional_column_with_text_merges_like_a_required_one() {
+    let mut net = Net::new(2);
+    let row = net.seed(0, &[("body", "doc")]);
+    let seeded = net.write_summary(0, row, Some("The cat sat."));
+    net.settle(0, seeded);
+    net.offline(0);
+    net.offline(1);
+    let alice = net.write_summary(0, row, Some("The black cat sat."));
+    let bob = net.write_summary(1, row, Some("The cat slept."));
+    net.online(0);
+    net.settle(0, alice);
+    net.online(1);
+    net.settle(1, bob);
+    net.assert_summary_everywhere(row, Some("The black cat slept."));
+
+    let emptied = net.write_summary(0, row, Some(""));
+    net.settle(0, emptied);
+    net.assert_summary_everywhere(row, Some(""));
+}
+
+/// A clear racing an edit: whichever write lands later wins the whole
+/// value, in both orders.
+#[test]
+fn a_clear_against_a_concurrent_edit_goes_to_the_later_write() {
+    let mut net = Net::new(2);
+    let row = net.seed(0, &[("body", "doc")]);
+    let seeded = net.write_summary(0, row, Some("Draft one."));
+    net.settle(0, seeded);
+
+    // The clear lands second: NULL.
+    net.offline(0);
+    net.offline(1);
+    let edit = net.write_summary(0, row, Some("Draft one, revised."));
+    let clear = net.write_summary(1, row, None);
+    net.online(0);
+    net.settle(0, edit);
+    net.online(1);
+    net.settle(1, clear);
+    net.assert_summary_everywhere(row, None);
+
+    let seeded = net.write_summary(0, row, Some("Draft two."));
+    net.settle(0, seeded);
+
+    // The edit lands second: its value as sent, clear or not.
+    net.offline(0);
+    net.offline(1);
+    let clear = net.write_summary(1, row, None);
+    let edit = net.write_summary(0, row, Some("Draft two, revised."));
+    net.online(1);
+    net.settle(1, clear);
+    net.online(0);
+    net.settle(0, edit);
+    net.assert_summary_everywhere(row, Some("Draft two, revised."));
+}
+
+/// An offline writer's chain that clears and then writes again: the clear
+/// lands after another writer's edit and wins, and the next link, built on
+/// the clear, lands over the NULL as sent.
+#[test]
+fn a_chain_that_clears_then_writes_lands_its_last_write() {
+    let mut net = Net::new(2);
+    let row = net.seed(0, &[("body", "doc")]);
+    let seeded = net.write_summary(0, row, Some("Old."));
+    net.settle(0, seeded);
+    net.offline(0);
+    let clear = net.write_summary(0, row, None);
+    let fresh = net.write_summary(0, row, Some("Fresh."));
+    let bob = net.write_summary(1, row, Some("Old. Bob."));
+    net.settle(1, bob);
+    net.online(0);
+    net.settle(0, clear);
+    net.settle(0, fresh);
+    net.assert_summary_everywhere(row, Some("Fresh."));
 }

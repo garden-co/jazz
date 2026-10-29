@@ -146,7 +146,7 @@ named `id` are ordinary payload data.
 The default merge strategy is column last-writer-wins by HLC
 (`MergeStrategy::Lww`). A counter declaration is accepted only on a non-nullable
 integer column (`INV-DATA-9`), and a text-merging declaration (`Text`,
-`Markdown`, `Html`) only on a non-nullable string column (`INV-HIST-24`). A
+`Markdown`, `Html`) only on a string column, nullable or not (`INV-HIST-24`). A
 schema naming a merge strategy this build does not know is refused by name. Public `Integer` and `BigInt` columns lower to
 `I32` and `I64`; lower-level runtime schemas also support the unsigned fixed-width
 integer representations.

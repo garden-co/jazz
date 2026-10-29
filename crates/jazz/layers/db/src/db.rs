@@ -397,9 +397,13 @@ struct Inner {
     merge_bases: HashMap<(String, RowUuid, Vec<u8>), sync::Built>,
     /// The edits back to the values as sent the upload's text writes made
     /// (see [`crate::text_merge::encode_in`]), by row version, stored column
-    /// first; empty for a write left as sent.
+    /// first; empty for a write left as sent, `None` for a clear (a NULL
+    /// write, never merged).
     text_in: RefCell<
-        BTreeMap<(String, RowUuid, Vec<u8>), BTreeMap<String, Vec<crate::text_merge::Edit>>>,
+        BTreeMap<
+            (String, RowUuid, Vec<u8>),
+            BTreeMap<String, Option<Vec<crate::text_merge::Edit>>>,
+        >,
     >,
     /// A transaction handle's staged writes left applied between its
     /// stages (see [`Db::in_overlay`]); undone by [`Store`] before any
@@ -4387,6 +4391,9 @@ impl Inner {
                 MergeStrategy::Lww => continue,
                 MergeStrategy::Text | MergeStrategy::Markdown | MergeStrategy::Html => {
                     match self.text_merged(table, row, held, at, column, value)? {
+                        Some(merged) if column.nullable() => {
+                            Value::Nullable(Some(Box::new(Value::String(merged))))
+                        }
                         Some(merged) => Value::String(merged),
                         None => continue,
                     }
@@ -4438,12 +4445,13 @@ impl Inner {
         };
         let merged = self.text_merge(table, row, held, (key, seq), built, column, value)?;
         let sent = match &merged {
-            Some((merged, incoming)) => crate::text_merge::edits(
+            Some((merged, incoming)) => Some(crate::text_merge::edits(
                 column.merge.text_format().expect("a text strategy"),
                 merged,
                 incoming,
-            ),
-            None => Vec::new(),
+            )),
+            None if matches!(value, Value::Nullable(None)) => None,
+            None => Some(Vec::new()),
         };
         self.text_in
             .borrow_mut()
@@ -4471,10 +4479,16 @@ impl Inner {
         let Some(held) = held else {
             return Ok(None);
         };
+        // A clear (a NULL write) is never merged, and an edit that a clear
+        // overtook stands as sent: either way the later write wins.
+        if matches!(value, Value::Nullable(None)) {
+            return Ok(None);
+        }
         let current = |db: &Self| -> Result<Option<String>, Error> {
-            db.cell_at(table, row, held, &column.name)?
-                .map(|current| db.logical_text(&column.name, &current))
-                .transpose()
+            Ok(match db.cell_at(table, row, held, &column.name)? {
+                Some(current) => db.optional_text(&column.name, &current)?,
+                None => None,
+            })
         };
         let earlier = self
             .text_in
@@ -4487,7 +4501,11 @@ impl Inner {
                 let Some(current) = current(self)? else {
                     return Ok(None);
                 };
-                (crate::text_merge::apply(&current, &sent)?, current)
+                match sent {
+                    Some(sent) => (crate::text_merge::apply(&current, &sent)?, current),
+                    // Built on its own clear: a NULL base, merged as "".
+                    None => (String::new(), current),
+                }
             }
             None => {
                 let Some((base, on)) =
@@ -4495,10 +4513,13 @@ impl Inner {
                 else {
                     return Ok(None);
                 };
-                let Some(base) = from_sql(&column.ty, base.as_ref(), &self.chunks)? else {
-                    return Ok(None);
+                // A NULL base merges as "": additions to an empty optional
+                // column are all kept, as they are over an empty string.
+                let mut base = match from_sql(&column.ty, base.as_ref(), &self.chunks)? {
+                    Some(base) => self.optional_text(&column.name, &base)?.unwrap_or_default(),
+                    None if column.nullable() => String::new(),
+                    None => return Ok(None),
                 };
-                let mut base = self.logical_text(&column.name, &base)?;
                 // A base on a commit is its value as sent, not as merged.
                 if let Some(on) = on {
                     base = crate::text_merge::apply(
@@ -4583,6 +4604,7 @@ impl Inner {
         for ((table, row, key), edits) in text_in {
             let entries: Vec<_> = edits
                 .into_iter()
+                .filter_map(|(column, edits)| Some((column, edits?)))
                 .filter(|(_, edits)| !edits.is_empty())
                 .collect();
             if entries.is_empty() {
@@ -4637,9 +4659,18 @@ impl Inner {
     }
 
     /// The whole string a text column's value holds.
+    /// [`Self::logical_text`] of a cell that may be NULL (`None`).
+    fn optional_text(&self, column: &str, value: &Value) -> Result<Option<String>, Error> {
+        match value {
+            Value::Nullable(None) => Ok(None),
+            value => self.logical_text(column, value).map(Some),
+        }
+    }
+
     fn logical_text(&self, column: &str, value: &Value) -> Result<String, Error> {
         match value {
             Value::String(text) => Ok(text.clone()),
+            Value::Nullable(Some(value)) => self.logical_text(column, value),
             Value::Large(large) => String::from_utf8(self.chunks.value_bytes(large)?)
                 .map_err(|_| rejected(format!("`{column}` holds a value that is not UTF-8"))),
             _ => Err(rejected(format!("`{column}` is not a string"))),
