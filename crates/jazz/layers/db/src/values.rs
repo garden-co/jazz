@@ -641,6 +641,8 @@ impl Table {
 pub struct Schema {
     pub tables: BTreeMap<String, Table>,
     pub jazz: JazzSchema,
+    /// `jazz`'s version id.
+    pub version: crate::ids::SchemaVersionId,
     /// The schema whose policies govern this one's tables, when they are
     /// another's: a sync session on an older version is checked against
     /// the current schema's policies, compiled under its names (tables
@@ -719,6 +721,7 @@ impl Schema {
         Self {
             tables,
             jazz: jazz.clone(),
+            version: jazz.version_id(),
             policies_from: None,
         }
     }

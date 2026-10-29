@@ -259,6 +259,9 @@ impl ReadSpec {
                 None
             }
         };
+        if opts.tier == ReadTier::Remote {
+            inner.check_not_stranded()?;
+        }
         Ok(Self {
             include_deleted: opts.read_view.include_deleted,
             settled_only: inner.client.is_some() && opts.tier == ReadTier::Remote,
@@ -489,8 +492,9 @@ struct Inner {
     accepted: u64,
     /// Rows written since the last server tick (only while serving).
     since_tick: Vec<(String, RowUuid, Vec<u8>)>,
-    /// Ops of the open local transaction, for upload.
-    capture: Vec<StagedOp>,
+    /// Ops of the open local transaction, for upload, each with the
+    /// schema version whose names it uses.
+    pub(crate) capture: Vec<(crate::ids::SchemaVersionId, StagedOp)>,
     /// Images a replica dropped since the last dispatch (evictions and
     /// rebases), for keyed invalidation.
     gone: RefCell<Vec<sync::Image>>,
@@ -671,6 +675,7 @@ fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> 
     Ok(Schema {
         tables,
         jazz: jazz.clone(),
+        version: jazz.version_id(),
         policies_from: None,
     })
 }
@@ -1097,6 +1102,7 @@ impl Db {
             let mut physical = Schema {
                 tables: BTreeMap::new(),
                 jazz: config.schema.clone(),
+                version: config.schema.version_id(),
                 policies_from: None,
             };
             physical.union(&schema)?;
@@ -1362,6 +1368,16 @@ impl Db {
                 .find(|c| c.name == column)
                 .map(|c| crate::names::identity(namespace, &table.stored, Some(&c.stored))),
         })
+    }
+
+    /// The schema version this handle writes under: its view's, else the
+    /// owner's. A replica uploads each commit under the version that
+    /// wrote it.
+    pub(crate) fn write_version(&self) -> crate::ids::SchemaVersionId {
+        match &self.view {
+            Some(view) => view.version,
+            None => self.inner.borrow().owner_version,
+        }
     }
 
     /// The shared state, set up to run under this handle's schema.
@@ -2056,7 +2072,15 @@ impl Db {
             // The upload record joins the write's SQLite transaction: if it
             // fails, `with_upload` rolls both back, and nobody has been told.
             if let Err(error) = committed
-                .then(|| self.record_upload(vec![op], handle.seq, sync::Kind::Mergeable, None))
+                .then(|| {
+                    self.record_upload(
+                        vec![op],
+                        handle.seq,
+                        sync::Kind::Mergeable,
+                        None,
+                        self.write_version(),
+                    )
+                })
                 .transpose()
             {
                 let mut inner = self.inner();
@@ -2189,7 +2213,18 @@ impl Db {
         let value = result?;
         let (seq, _) = changed.expect("committed");
         // The upload record joins the transaction's SQLite savepoint.
-        if let Err(error) = self.record_upload(captured, seq, sync::Kind::Mergeable, None) {
+        let recorded = self
+            .upload_version(captured.iter().map(|(version, _)| *version))
+            .and_then(|version| {
+                self.record_upload(
+                    captured.into_iter().map(|(_, op)| op).collect(),
+                    seq,
+                    sync::Kind::Mergeable,
+                    None,
+                    version,
+                )
+            });
+        if let Err(error) = recorded {
             let mut inner = self.inner();
             inner.seq = prior;
             inner.abandon_savepoint("tx")?;
@@ -2428,6 +2463,12 @@ impl Db {
             }
             inner.write_admission(&target, cells)?;
             if make_current {
+                // Pending commits written under the version current until
+                // now keep uploading under it (INV-SYNC-52).
+                let previous = *inner.owner_version.as_bytes();
+                if let Some(client) = inner.client.as_mut() {
+                    client.keep_version(previous);
+                }
                 inner.owner_version = target.jazz.version_id();
                 inner.owner = Rc::new(target);
                 // Read policies that changed may read differently from
@@ -6011,6 +6052,29 @@ fn schema_error(message: impl Into<String>) -> Error {
     Error::new(ErrorCode::Schema, message)
 }
 
+impl Db {
+    /// The schema version a transaction's commit uploads under: the one
+    /// every write in it (each with its `versions` entry) names its tables
+    /// and columns by. A replica cannot upload one commit under several, so
+    /// a transaction written through views of different versions is
+    /// refused there; elsewhere nothing uploads.
+    fn upload_version(
+        &self,
+        versions: impl IntoIterator<Item = crate::ids::SchemaVersionId>,
+    ) -> Result<crate::ids::SchemaVersionId, Error> {
+        let mut versions = versions.into_iter();
+        let Some(first) = versions.next() else {
+            return Ok(self.write_version());
+        };
+        if self.is_client() && versions.any(|version| version != first) {
+            return Err(unsupported(
+                "a transaction writing through schema views of different versions on a replica",
+            ));
+        }
+        Ok(first)
+    }
+}
+
 /// The changes a schema view may make over the owner's schema without an
 /// explicit lens: add and drop columns, add tables. Everything else names
 /// what it changed (Jazz's `direct_schema_view_lens` rules).
@@ -6777,12 +6841,18 @@ impl Db {
         };
         // `commit_ops` holds the upload record and the commit in one SQLite
         // transaction and rolls both back on an error.
-        if let Err(error) = self.record_upload(
-            ops.iter().map(|(_, op)| op.clone()).collect(),
-            seq,
-            kind,
-            None,
-        ) {
+        let recorded = self
+            .upload_version(ops.iter().map(|(schema, _)| schema.version))
+            .and_then(|version| {
+                self.record_upload(
+                    ops.iter().map(|(_, op)| op.clone()).collect(),
+                    seq,
+                    kind,
+                    None,
+                    version,
+                )
+            });
+        if let Err(error) = recorded {
             let mut inner = self.inner();
             inner.seq = prior;
             inner.changed.borrow_mut().truncate(mark);
