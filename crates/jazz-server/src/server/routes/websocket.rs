@@ -3559,11 +3559,11 @@ mod tests {
         });
         let addr = server.block_on(start_ws_test_server(state.clone()));
         let accounts = state.accounts.as_ref().unwrap();
-        let catalogue = state
+        let probe = state
             .store
             .as_ref()
             .unwrap()
-            .kv(crate::kv::CATALOGUE)
+            .kv(jazz::host::HostTable::new("load_probe"))
             .unwrap();
         let principal = jazz::account_registry::Principal {
             issuer: "https://issuer.example".into(),
@@ -3577,7 +3577,7 @@ mod tests {
         let mut idle = (0..20)
             .map(|n: u32| {
                 let at = std::time::Instant::now();
-                catalogue
+                probe
                     .write_many(&[(b"idle-probe".to_vec(), n.to_le_bytes().to_vec())])
                     .unwrap();
                 at.elapsed()
@@ -3630,7 +3630,7 @@ mod tests {
             server.block_on(accounts.login(principal.clone())).unwrap();
             logins.push(at.elapsed());
             let at = std::time::Instant::now();
-            catalogue
+            probe
                 .write_many(&[(
                     b"probe".to_vec(),
                     at.elapsed().as_nanos().to_le_bytes().to_vec(),
