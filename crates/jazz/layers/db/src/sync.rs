@@ -862,6 +862,10 @@ pub enum SyncMessage {
         include_deleted: bool,
         tier: ReadTier,
         wait: Option<u64>,
+        /// The read view the result is of: the current state, a branch
+        /// view (head over an optional live or frozen base), or a
+        /// snapshot. Part of the read's identity (`INV-BVIEW-12`).
+        view: Box<ReadViewSourceSpec>,
         span: ReadSpan,
     },
     Unsubscribe {
@@ -1061,14 +1065,11 @@ pub enum ReadSpan {
     /// through that seq; the opening ships only what changed after it.
     Live { since: Option<u64> },
     /// Answered once, at the current state or as of server seq `at`, in
-    /// branch view `view`, whose window and versions the read observes. A
+    /// the read's view, whose window and versions the read observes. A
     /// view frozen at a snapshot reference is resolved by the receiver (a
     /// reopened tab's capture, which its worker settled), which also sends
     /// the origins of the commits it names (see [`SyncMessage::Rows`]).
-    Once {
-        at: Option<u64>,
-        view: Box<ReadViewSourceSpec>,
-    },
+    Once { at: Option<u64> },
 }
 
 /// One admitted schema version in a [`SyncMessage::Catalogue`].
@@ -1239,6 +1240,8 @@ pub(crate) struct Remote {
     query: Query,
     binding: BTreeMap<String, Value>,
     include_deleted: bool,
+    /// The view the server maintains it in (see [`upstream_view`]).
+    view: ReadViewSourceSpec,
     /// How far it reaches (see `SyncMessage::Read`).
     reach: RemoteReach,
     pub(crate) answered: Rc<StdCell<bool>>,
@@ -1413,9 +1416,34 @@ fn remote_key(
     query: &Query,
     binding: &BTreeMap<String, Value>,
     include_deleted: bool,
+    view: &ReadViewSourceSpec,
     reach: RemoteReach,
 ) -> String {
-    format!("{query:?}{binding:?}{include_deleted}{reach:?}")
+    format!("{query:?}{binding:?}{include_deleted}{view:?}{reach:?}")
+}
+
+/// The view a replica asks its upstream to keep a subscription in. A
+/// branch view's head and live base are maintained upstream. A frozen
+/// base is this replica's own capture: a durable replica asks only for
+/// the live head, while a non-durable one (a tab, whose memory store its
+/// worker fills) and a snapshot read take the current rows, as the cut is
+/// applied here.
+pub(crate) fn upstream_view(source: &ReadViewSourceSpec, non_durable: bool) -> ReadViewSourceSpec {
+    match source {
+        ReadViewSourceSpec::BranchView {
+            base: Some(BranchViewBase::Snapshot { .. }),
+            ..
+        } if non_durable => ReadViewSourceSpec::Current,
+        ReadViewSourceSpec::BranchView {
+            head,
+            base: Some(BranchViewBase::Snapshot { .. }),
+        } => ReadViewSourceSpec::BranchView {
+            head: head.clone(),
+            base: None,
+        },
+        ReadViewSourceSpec::Snapshot { .. } => ReadViewSourceSpec::Current,
+        view => view.clone(),
+    }
 }
 
 /// How far a read reaches past a relay: its tier, and how long the relay
@@ -1585,7 +1613,7 @@ impl SettledBy {
 // ---- server state ---------------------------------------------------------
 
 /// An upstream subscription's identity: query, binding, include_deleted.
-type RemoteRead = (Query, BTreeMap<String, Value>, bool);
+type RemoteRead = (Query, BTreeMap<String, Value>, bool, ReadViewSourceSpec);
 
 pub(crate) struct Session {
     transport: Box<dyn Transport>,
@@ -1680,7 +1708,9 @@ pub(crate) struct Session {
 struct FirstLoadWait {
     until: Instant,
     prepared: PreparedQuery,
-    include_deleted: bool,
+    /// The read's view and deletion flag, served without the settled-only
+    /// narrowing once the wait runs out.
+    read: ReadSpec,
 }
 
 impl Session {
@@ -3588,10 +3618,11 @@ fn watermark_key(
     query: &Query,
     binding: &BTreeMap<String, Value>,
     include_deleted: bool,
+    view: &ReadViewSourceSpec,
     author: AuthorSubject,
 ) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(&encode(&(query, binding, include_deleted)));
+    hasher.update(&encode(&(query, binding, include_deleted, view)));
     hasher.update(format!("{author:?}").as_bytes());
     *hasher.finalize().as_bytes()
 }
@@ -4509,7 +4540,7 @@ impl Inner {
         &self,
         prepared: &PreparedQuery,
         identity: Option<AuthorSubject>,
-        include_deleted: bool,
+        read: &ReadSpec,
         support: &[Support],
         since: u64,
         claims: bool,
@@ -4517,6 +4548,7 @@ impl Inner {
         let query = &prepared.query;
         if self.client.is_some()
             || claims
+            || read.cut.is_some()
             || since > self.served_through()
             || crate::db::is_windowed(query)
             || query.flat_join.is_some()
@@ -4560,11 +4592,12 @@ impl Inner {
                 break;
             }
         }
+        // A branch view's prior result reads its head (and live base) as
+        // of `since`; a frozen base keeps its own cut.
         let prior = if moved {
             let read = ReadSpec {
                 cut: Some(Cut::at(since)),
-                include_deleted,
-                ..ReadSpec::default()
+                ..read.clone()
             };
             Some(
                 self.run(prepared, identity, &read)?
@@ -4874,6 +4907,7 @@ impl Db {
                 include_deleted: r.include_deleted,
                 tier: r.reach.tier,
                 wait: r.reach.wait,
+                view: Box::new(r.view.clone()),
                 span: ReadSpan::Live { since: r.through },
             })
             .collect();
@@ -5312,6 +5346,7 @@ impl Db {
         &self,
         prepared: &PreparedQuery,
         include_deleted: bool,
+        view: &ReadViewSourceSpec,
         reach: RemoteReach,
     ) -> Option<(
         Rc<StdCell<bool>>,
@@ -5320,8 +5355,9 @@ impl Db {
     )> {
         let query = remote_query(&prepared.query);
         let mut inner = self.inner.borrow_mut();
+        let view = upstream_view(view, inner.non_durable);
         let client = inner.client.as_mut()?;
-        let key = remote_key(&query, &prepared.binding, include_deleted, reach);
+        let key = remote_key(&query, &prepared.binding, include_deleted, &view, reach);
         if let Some(remote) = client.remote.get_mut(&key) {
             remote.refs += 1;
             return Some((
@@ -5336,7 +5372,7 @@ impl Db {
         let refused = Rc::new(RefCell::new(None));
         let global = Rc::new(StdCell::new(false));
         let author = inner.identity.author;
-        let watermark = watermark_key(&query, &prepared.binding, include_deleted, author);
+        let watermark = watermark_key(&query, &prepared.binding, include_deleted, &view, author);
         // A replica that cannot read its watermark opens the query fresh.
         let through = inner.watermark(&watermark).ok().flatten();
         let client = inner.client.as_mut()?;
@@ -5347,6 +5383,7 @@ impl Db {
             include_deleted,
             tier: reach.tier,
             wait: reach.wait,
+            view: Box::new(view.clone()),
             span: ReadSpan::Live { since: through },
         });
         client.remote.insert(
@@ -5357,6 +5394,7 @@ impl Db {
                 query: query.into_owned(),
                 binding: prepared.binding.clone(),
                 include_deleted,
+                view,
                 reach,
                 answered: answered.clone(),
                 refused: refused.clone(),
@@ -5374,11 +5412,12 @@ impl Db {
         query: &Query,
         binding: &BTreeMap<String, Value>,
         include_deleted: bool,
+        view: &ReadViewSourceSpec,
         reach: RemoteReach,
     ) {
         self.inner
             .borrow_mut()
-            .release_remote(query, binding, include_deleted, reach);
+            .release_remote(query, binding, include_deleted, view, reach);
     }
 
     pub(crate) fn link_hint(&self) -> Option<Rc<StdCell<Link>>> {
@@ -5394,12 +5433,14 @@ impl Inner {
         query: &Query,
         binding: &BTreeMap<String, Value>,
         include_deleted: bool,
+        view: &ReadViewSourceSpec,
         reach: RemoteReach,
     ) {
+        let view = upstream_view(view, self.non_durable);
         let Some(client) = self.client.as_mut() else {
             return;
         };
-        let key = remote_key(&remote_query(query), binding, include_deleted, reach);
+        let key = remote_key(&remote_query(query), binding, include_deleted, &view, reach);
         let Some(remote) = client.remote.get_mut(&key) else {
             return;
         };
@@ -5467,10 +5508,8 @@ impl Db {
             include_deleted,
             tier,
             wait: reach.wait,
-            span: ReadSpan::Once {
-                at,
-                view: Box::new(view.clone()),
-            },
+            view: Box::new(view.clone()),
+            span: ReadSpan::Once { at },
         };
         // The request in flight, and the connection it went out on.
         let mut asked: Option<(u64, u64)> = None;
@@ -6011,6 +6050,7 @@ impl Db {
                                 remote.query.clone(),
                                 remote.binding.clone(),
                                 remote.include_deleted,
+                                remote.view.clone(),
                                 ids,
                                 through,
                             ));
@@ -6158,15 +6198,8 @@ impl Db {
         // replica's view of that result holds and the server's lacks lost
         // their listing (INV-SYNC-14), as rows a commit took away do. A
         // resumed opening lists its result too.
-        for (query, binding, include_deleted, listed, through) in answered_remotes {
-            self.evict_unanswered(
-                query,
-                binding,
-                include_deleted,
-                &ReadViewSourceSpec::Current,
-                &listed,
-                through,
-            )?;
+        for (query, binding, include_deleted, view, listed, through) in answered_remotes {
+            self.evict_unanswered(query, binding, include_deleted, &view, &listed, through)?;
         }
         let mut inner = self.inner.borrow_mut();
         let client = inner.client.as_mut().expect("client");
@@ -6521,7 +6554,8 @@ impl Inner {
                         query,
                         binding,
                         include_deleted,
-                        span: ReadSpan::Once { at: None, view },
+                        view,
+                        span: ReadSpan::Once { at: None },
                         ..
                     } = &fetch.ask
                     {
@@ -6855,8 +6889,14 @@ impl Db {
             .get_mut(subscriber.slot)
             .filter(|session| session.open && session.generation == subscriber.generation)
         {
-            for (query, binding, include_deleted) in session.close(&dropped) {
-                inner.release_remote(&query, &binding, include_deleted, RemoteReach::REMOTE);
+            for (query, binding, include_deleted, view) in session.close(&dropped) {
+                inner.release_remote(
+                    &query,
+                    &binding,
+                    include_deleted,
+                    &view,
+                    RemoteReach::REMOTE,
+                );
             }
             inner.forget_relayed(subscriber.slot);
         }
@@ -7086,10 +7126,9 @@ impl Db {
             SyncMessage::Advise { .. } => true,
             // A read frozen at a snapshot may name the held commits
             // themselves, which the server cannot resolve until they apply.
-            SyncMessage::Read {
-                span: ReadSpan::Once { view, .. },
-                ..
-            } if frozen_at(view).is_some() => barrier.tables.is_some() && !barrier.commits,
+            SyncMessage::Read { view, .. } if frozen_at(view).is_some() => {
+                barrier.tables.is_some() && !barrier.commits
+            }
             SyncMessage::Read { .. } => {
                 let Some(written) = &barrier.tables else {
                     return false;
@@ -7788,11 +7827,12 @@ impl Db {
                 // reconnects and resumes from its last settled seq.
                 if session.transport.send(message).is_err() {
                     let released = session.close(&dropped);
-                    for (query, binding, include_deleted) in released {
+                    for (query, binding, include_deleted, view) in released {
                         inner.release_remote(
                             &query,
                             &binding,
                             include_deleted,
+                            &view,
                             RemoteReach::REMOTE,
                         );
                     }
@@ -7845,10 +7885,7 @@ impl Db {
             let (queue, group) = inner.subscribe_member(
                 &wait.prepared,
                 policy,
-                ReadSpec {
-                    include_deleted: wait.include_deleted,
-                    ..ReadSpec::default()
-                },
+                wait.read,
                 SettledBy::Always(authority),
             )?;
             let session = &mut inner.sessions[index];
@@ -7942,11 +7979,25 @@ impl Db {
                 include_deleted,
                 tier,
                 wait,
+                view,
                 span: ReadSpan::Live { since },
             } => {
                 let local = tier == ReadTier::LocalOnly;
                 let prepared = with_claims(db.prepare_query_bound(&query, binding)?);
                 let windowed = crate::db::is_windowed(&query);
+                // The result is kept in the read's view: a branch view's
+                // head over its live or frozen base (SPEC 11.5).
+                let viewed = {
+                    let opts = ReadOpts {
+                        read_view: crate::protocol::ReadViewSpec {
+                            source: (*view).clone(),
+                            include_deleted,
+                        },
+                        ..ReadOpts::default()
+                    };
+                    ReadSpec::of(&opts, &db.inner())?
+                };
+                let resume_read = viewed.clone();
                 // A relay serves what its upstream lists, settled once the
                 // upstream answers: its own store may be cold. A Remote
                 // read waits for that answer however long it takes, its
@@ -7963,7 +8014,7 @@ impl Db {
                     .as_ref()
                     .map(|client| may_wait(client.hint.get()));
                 let attached = if upstream.is_some() && !local {
-                    db.attach_remote(&prepared, include_deleted, RemoteReach::REMOTE)
+                    db.attach_remote(&prepared, include_deleted, &view, RemoteReach::REMOTE)
                 } else {
                     None
                 };
@@ -7979,7 +8030,7 @@ impl Db {
                         FirstLoadWait {
                             until,
                             prepared: prepared.clone(),
-                            include_deleted,
+                            read: viewed.clone(),
                         },
                     );
                 }
@@ -7990,11 +8041,10 @@ impl Db {
                     &prepared,
                     policy,
                     ReadSpec {
-                        include_deleted,
                         // A Remote one leaves out this replica's pending
                         // versions: only the authority confirms them.
                         settled_only: relayed.is_some() && tier == ReadTier::Remote,
-                        ..ReadSpec::default()
+                        ..viewed
                     },
                     match relayed {
                         Some((answered, _, global)) => {
@@ -8010,6 +8060,7 @@ impl Db {
                                 prepared.query.clone(),
                                 prepared.binding.clone(),
                                 include_deleted,
+                                (*view).clone(),
                             );
                             inner.sessions[index].relayed.insert(id, read);
                         }
@@ -8017,6 +8068,7 @@ impl Db {
                             &prepared.query,
                             &prepared.binding,
                             include_deleted,
+                            &view,
                             RemoteReach::REMOTE,
                         ),
                     }
@@ -8030,7 +8082,7 @@ impl Db {
                     let resume = inner.resume_from(
                         &prepared,
                         policy,
-                        include_deleted,
+                        &resume_read,
                         &support,
                         since,
                         claims,
@@ -8070,10 +8122,16 @@ impl Db {
                 // again and its opening brings them up to date.
                 inner.sessions[index].watch.release(id);
                 inner.sessions[index].held.release(id);
-                if let Some((query, binding, include_deleted)) =
+                if let Some((query, binding, include_deleted, view)) =
                     inner.sessions[index].relayed.remove(&id)
                 {
-                    inner.release_remote(&query, &binding, include_deleted, RemoteReach::REMOTE);
+                    inner.release_remote(
+                        &query,
+                        &binding,
+                        include_deleted,
+                        &view,
+                        RemoteReach::REMOTE,
+                    );
                 }
                 if let Some((queue, group, ..)) = inner.sessions[index].subs.remove(&id) {
                     let dropped = inner.fan.dropped.clone();
@@ -8131,7 +8189,8 @@ impl Db {
                 include_deleted,
                 tier,
                 wait,
-                span: ReadSpan::Once { at, view },
+                view,
+                span: ReadSpan::Once { at },
             } => {
                 // A relay asks its upstream first for a Remote read, then
                 // serves it from its store once the answer's rows are in
@@ -8171,10 +8230,8 @@ impl Db {
                         include_deleted,
                         tier: ReadTier::Remote,
                         wait: None,
-                        span: ReadSpan::Once {
-                            at,
-                            view: view.clone(),
-                        },
+                        view: view.clone(),
+                        span: ReadSpan::Once { at },
                     });
                 }
                 if let Some(strict) = relay {
@@ -8191,10 +8248,8 @@ impl Db {
                         include_deleted,
                         tier: ReadTier::Remote,
                         wait: None,
-                        span: ReadSpan::Once {
-                            at,
-                            view: view.clone(),
-                        },
+                        view: view.clone(),
+                        span: ReadSpan::Once { at },
                     };
                     client.outbox.push(ask.clone());
                     client.relayed_fetches.push(RelayedFetch {
@@ -8210,7 +8265,8 @@ impl Db {
                             include_deleted,
                             tier,
                             wait,
-                            span: ReadSpan::Once { at, view },
+                            view,
+                            span: ReadSpan::Once { at },
                         },
                     });
                     return Ok(());

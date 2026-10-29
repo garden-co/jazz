@@ -1662,10 +1662,8 @@ fn a_snapshot_read_naming_a_held_commit_waits_for_it() {
         include_deleted: false,
         tier: ReadTier::Remote,
         wait: None,
-        span: ReadSpan::Once {
-            at: None,
-            view: Box::new(ReadViewSourceSpec::Snapshot { snapshot }),
-        },
+        view: Box::new(ReadViewSourceSpec::Snapshot { snapshot }),
+        span: ReadSpan::Once { at: None },
     });
     let reply = || {
         down.borrow().iter().find_map(|message| match message {

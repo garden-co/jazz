@@ -19,6 +19,8 @@ mod authorization_scope_reentry;
 mod binding_host;
 #[path = "../branch_column_evolution.rs"]
 mod branch_column_evolution;
+#[path = "../branch_view_sync.rs"]
+mod branch_view_sync;
 #[path = "../branch_views.rs"]
 mod branch_views;
 #[path = "../claims_change.rs"]

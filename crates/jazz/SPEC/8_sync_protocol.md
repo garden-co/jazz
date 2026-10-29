@@ -275,13 +275,21 @@ decided with the known fate.
 
 ### 8.4 Downstream: reads and rows
 
-`Read { id, query, binding, include_deleted, tier, wait, span }` asks for one
-query's result:
+`Read { id, query, binding, include_deleted, tier, wait, view, span }` asks
+for one query's result:
 
+- `view` is the read view the result is of: the current state, a branch view
+  (head over an optional live or frozen base), or a snapshot. It is part of
+  the read's identity (`INV-BVIEW-12`): the server keeps a live read in its
+  view, as ch. 11 §11.5 maintains it. A replica asks for a branch view's head
+  and live base as they are; a durable replica asks for only the head of a
+  view over a frozen base, the base being its own capture, while a
+  non-durable one, whose store its relay fills, and a snapshot read ask for
+  the current rows and apply the cut themselves.
 - `span: Live { since }` keeps it current until `Unsubscribe` (§8.5);
   `since` resumes it (§8.11).
-- `span: Once { at, view }` answers it once, at the current state or as of
-  server seq `at`, in branch view `view`.
+- `span: Once { at }` answers it once, at the current state or as of
+  server seq `at`.
 - `tier` says how far the read reaches past a relay: `LocalOnly` is served
   from the relay's store, `LocalFirst` from it too while the relay asks its
   upstream, `Remote` once its upstream answered. An authority's store is the
@@ -490,7 +498,7 @@ type are never read as another's.
 
 A replica persists, per live read, the server seq its result last settled
 through, in `_jazz_watermarks` keyed by a digest of the query, binding,
-`include_deleted` flag and reader identity (not the tier or wait, and not the
+`include_deleted` flag, the view it asked for and reader identity (not the tier or wait, and not the
 schema version: the key is over stored names). On reconnect or reopen, it
 sends `Read { span: Live { since } }` with that seq.
 

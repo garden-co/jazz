@@ -32,6 +32,7 @@ use jazz::db::{
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::model::transaction::OpenTransactionId;
+use jazz::protocol::ReadViewSourceSpec;
 use jazz::protocol::{LensOp, MigrationLens, PermissionAdviceAction, TableLens};
 use jazz::query::{Query, col, eq, lit};
 use jazz::records::Value;
@@ -649,6 +650,7 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
             include_deleted: false,
             tier: ReadTier::LocalFirst,
             wait: None,
+            view: Box::new(ReadViewSourceSpec::Current),
             span: ReadSpan::Live { since: None },
         },
     ])));

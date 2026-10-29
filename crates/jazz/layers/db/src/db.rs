@@ -289,6 +289,7 @@ pub struct SubscriptionStream {
         Query,
         BTreeMap<String, Value>,
         bool,
+        ReadViewSourceSpec,
         sync::RemoteReach,
     )>,
 }
@@ -296,8 +297,8 @@ pub struct SubscriptionStream {
 impl Drop for SubscriptionStream {
     fn drop(&mut self) {
         self.dropped.set(self.dropped.get() + 1);
-        if let Some((inner, query, binding, include_deleted, reach)) = self.remote.take() {
-            Db { inner, view: None }.detach_remote(&query, &binding, include_deleted, reach);
+        if let Some((inner, query, binding, include_deleted, view, reach)) = self.remote.take() {
+            Db { inner, view: None }.detach_remote(&query, &binding, include_deleted, &view, reach);
         }
     }
 }
@@ -1816,14 +1817,17 @@ impl Db {
         let read = ReadSpec::of(&opts, &self.inner())?;
         let client = self.is_client();
         let non_durable = self.inner().non_durable;
+        // A branch view's head (and live base) is kept current upstream,
+        // over a frozen base too: only a snapshot is wholly this store's.
         let reach = client
-            .then(|| sync::remote_reach(&opts, non_durable, read.frozen()))
+            .then(|| sync::remote_reach(&opts, non_durable, read.cut.is_some()))
             .flatten();
         if reach.is_some() {
             self.remote_shape(&prepared.query)?;
         }
-        let remote =
-            reach.and_then(|reach| self.attach_remote(prepared, read.include_deleted, reach));
+        let view = opts.read_view.source.clone();
+        let remote = reach
+            .and_then(|reach| self.attach_remote(prepared, read.include_deleted, &view, reach));
         let settled = match (&remote, client) {
             (Some((answered, _, global)), _) => {
                 sync::SettledBy::Remote(answered.clone(), global.clone())
@@ -1862,6 +1866,7 @@ impl Db {
                     prepared.query.clone(),
                     prepared.binding.clone(),
                     include_deleted,
+                    view,
                     reach,
                 )
             }),
