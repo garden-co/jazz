@@ -21,6 +21,8 @@ mod binding_host;
 mod branch_column_evolution;
 #[path = "../branch_views.rs"]
 mod branch_views;
+#[path = "../catalogue_rows.rs"]
+mod catalogue_rows;
 #[path = "../claims_change.rs"]
 mod claims_change;
 #[path = "../column_defaults.rs"]
@@ -133,6 +135,10 @@ mod snapshots;
 mod storage_corpus;
 #[path = "../storage_errors.rs"]
 mod storage_errors;
+#[path = "../stored_identities.rs"]
+mod stored_identities;
+#[path = "../streaming_upload_ownership.rs"]
+mod streaming_upload_ownership;
 #[path = "../structured_result_tree.rs"]
 mod structured_result_tree;
 #[path = "../sync_access_loss.rs"]

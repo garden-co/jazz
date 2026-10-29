@@ -19,8 +19,8 @@ The model is small:
 - **Writes travel up** as one `Commit` per transaction and come back as one
   `Fate`.
 - **Reads travel up** as one `Read` per query and come back as rows plus
-  settlement: `Rows` and `Evict` messages, then a `Settled` naming the server
-  seq the result is complete through. Results are never sent; the replica
+  settlement: `Rows` and `AccessLost` messages, then a `Settled` naming the
+  server seq the result is complete through. Results are never sent; the replica
   derives every result with its own compiled queries (`INV-SYNC-44`).
 - **Coherence is per subscription.** The server keeps a row current for a
   session only while one of its live reads covers it. A cached row no live read
@@ -97,27 +97,27 @@ Only one relay tier is supported: an authority, optionally a durable relay
 
 Messages, with their postcard variant tags:
 
-| Tag | Message           | Direction       | Purpose                                                          |
-| --- | ----------------- | --------------- | ---------------------------------------------------------------- |
-| 0   | `Read`            | client → server | A read, live or once (§8.4)                                      |
-| 1   | `Unsubscribe`     | client → server | End a live read (§8.5)                                           |
-| 2   | `Hold`            | client → server | Rows whose shipped deltas did not apply: ship them whole (§8.12) |
-| 3   | `Settled`         | server → client | A read is complete through a seq (§8.4)                          |
-| 4   | `Commit`          | client → server | One transaction's writes (§8.2)                                  |
-| 5   | `ChunkRequests`   | client → server | Pull large-value nodes (§8.12)                                   |
-| 6   | `PushChunks`      | client → server | Large-value nodes ahead of a commit (§8.12)                      |
-| 7   | `Chunks`          | server → client | Pulled nodes, and the ones the server cannot answer              |
-| 8   | `Rows`            | server → client | Row images, with the origins of history versions                 |
-| 9   | `Evict`           | server → client | Drop a row the reader may no longer read                         |
-| 10  | `Refused`         | server → client | A read the server cannot serve, with why                         |
-| 11  | `Fate`            | server → client | A commit's outcome (§8.3)                                        |
-| 12  | `Advise`          | client → server | Permission preflight                                             |
-| 13  | `Advice`          | server → client | Its answer                                                       |
-| 14  | `Schema`          | client → server | The schema version the session reads and writes by (§8.9)        |
-| 15  | `SchemaAdmission` | server → client | Whether that version is admitted                                 |
-| 16  | `Stored`          | relay → session | A relay holds the session's commit and uploads it (§8.3)         |
-| 17  | `Holds`           | client → server | The schema versions and names the replica keeps (§8.10)          |
-| 18  | `Catalogue`       | server → client | Admitted versions, stored names and lens cells (§8.10)           |
+| Tag | Message              | Direction       | Purpose                                                          |
+| --- | -------------------- | --------------- | ---------------------------------------------------------------- |
+| 0   | `Read`               | client → server | A read, live or once (§8.4)                                      |
+| 1   | `Unsubscribe`        | client → server | End a live read (§8.5)                                           |
+| 2   | `ResendWhole`        | client → server | Rows whose shipped deltas did not apply: ship them whole (§8.12) |
+| 3   | `Settled`            | server → client | A read is complete through a seq (§8.4)                          |
+| 4   | `Commit`             | client → server | One transaction's writes (§8.2)                                  |
+| 5   | `ChunkRequests`      | client → server | Pull large-value nodes (§8.12)                                   |
+| 6   | `PushChunks`         | client → server | Large-value nodes ahead of a commit (§8.12)                      |
+| 7   | `Chunks`             | server → client | Pulled nodes, and the ones the server cannot answer              |
+| 8   | `Rows`               | server → client | Row images, with the tx ids of history versions                  |
+| 9   | `AccessLost`         | server → client | Drop a row the reader may no longer read                         |
+| 10  | `Refused`            | server → client | A read the server cannot serve, with why                         |
+| 11  | `Fate`               | server → client | A commit's outcome (§8.3)                                        |
+| 12  | `CheckAllowed`       | client → server | Permission preflight                                             |
+| 13  | `CheckAllowedResult` | server → client | Its answer: `Allowed`, `Denied` or `Unknown`                     |
+| 14  | `Schema`             | client → server | The schema version the session reads and writes by (§8.9)        |
+| 15  | `SchemaAdmission`    | server → client | Whether that version is admitted                                 |
+| 16  | `Stored`             | relay → session | A relay holds the session's commit and uploads it (§8.3)         |
+| 17  | `KnownCatalogue`     | client → server | The schema versions and names the replica keeps (§8.10)          |
+| 18  | `Catalogue`          | server → client | Admitted versions, stored names and lens cells (§8.10)           |
 
 Tags before `Commit` keep their numbers: a replica stores each pending
 upload's header as an encoded `Commit` message (`_jazz_pending`, see §8.3),
@@ -178,11 +178,26 @@ messages at 2 MiB, the prelude included.
 ### 8.2 Upstream: commits
 
 A committed transaction travels as one `Commit { node, tx, kind, ops, … }`;
-open transactions never ship (ch. 3, `INV-TX-2`). `ops` are the writes
+open transactions never ship (ch. 3, `INV-TX-2`). Each op is a write
 (`Insert`, `Update`, `Upsert`, `Delete`, `Restore`, `Move`) by the session
-schema's table and column names; the authority resolves them to stored names
-under the schema version the commit was written under (§8.9). The other
-fields:
+schema's table and column names, which the authority resolves to stored names
+under the schema version the commit was written under (§8.9), with what its
+writer knew of the row it writes:
+
+- `bases`: on the commit's first op that writes a row, for each branch key it
+  writes the row under over an image the writer held, the base of that image
+  (SPEC 4 §4.6). A move writes two. Only the authority's conflict derivation
+  reads them. A base on any other op, or two naming one row and branch key,
+  refuse the commit.
+- `deltas`: the op's chunked cells travelling as edits over the writer's
+  newest settled version of the row (SPEC 19.8). Each stands in for one
+  column whose cell holds NULL in its place; a second delta for a column, or
+  one over a cell that is not that NULL, refuses the commit.
+- `access_proof`: when the op's chunked values travel as trees, a version of
+  the row the writer may read whose trees vouch for the nodes it did not push
+  (SPEC 19.4).
+
+The commit's other fields:
 
 - `kind`: `Mergeable`, or `Serializable { snapshot, reads, own }`: the
   snapshot seq, each read with the rows and server versions it returned, and
@@ -191,14 +206,9 @@ fields:
   writes only if every result and written row is unchanged since the snapshot.
   A stale or partial replica can only cause a conflict, never a
   non-serializable commit.
-- `bases`: for each row written over an image the writer held, the base of
-  that image (SPEC 4 §4.6). Only the authority's conflict derivation reads it.
 - `expect`: a digest of each written row as the writer's replica holds it
   afterwards. The authority does not echo a row whose new version matches;
   the writer installs its own as that version (§8.3).
-- `deltas`, `sources`: chunked cells travelling as edits over the writer's
-  newest settled version, and the settled versions that trees' unpushed
-  nodes sit under (SPEC 19.8).
 - `author`, `session`: provenance or a session a trusted link acts for. Only
   a trusted link may set one other than its own identity.
 - `origin`: the session commit a relay uploads this one for.
@@ -206,9 +216,11 @@ fields:
 A replica keeps every unsettled commit and uploads it in order on each
 connection. It is stored a row per op, not as one encoded message:
 
-- `_jazz_pending (tx, header)`: the `Commit` with its lists left empty.
-- `_jazz_pending_items (tx, part, n, item)`: each op, cell delta, source,
-  base and serializable read, by list (`part`) and position (`n`).
+- `_jazz_pending (tx, header)`: the `Commit` with its ops and reads left
+  out.
+- `_jazz_pending_items (tx, part, n, item)`: each op (with its bases, deltas
+  and access proof) and serializable read, by list (`part`) and position
+  (`n`).
 - `_jazz_pending_rows (tx, n, tbl, id, key)`: the local rows it wrote.
 
 `expect` is not kept: after a reopen the server ships those rows. A row's
@@ -239,8 +251,8 @@ client sends its staged commits ahead of the reads asked since its last send.
 
 When a session's large-value ingress limit holds a commit back, the server
 holds every later message of that session that could observe it: a `Read`,
-`Unsubscribe` or `Hold` whose tables (its query's and those its policies read)
-the held commits write, a read frozen at a snapshot (which may name the held
+`Unsubscribe` or `ResendWhole` whose tables (its query's and those its
+policies read) the held commits write, a read frozen at a snapshot (which may name the held
 commits), and anything whose effect is not known. Other messages are served
 ahead. Each hop guarantees its own order, so client → relay → authority gives
 read-your-writes end to end.
@@ -292,12 +304,12 @@ query's result:
 
 The server ships the result's rows and the rows that support them (joined and
 included rows, the rows its policies read where the replica needs them), then
-`Settled { id, through, listing, global }`, or `Refused { id, code, message }`
+`Settled { id, through, members, global }`, or `Refused { id, code, message }`
 when serving it fails (an unsupported shape, a storage error): the read
-ends with that error. `listing` is the result's row ids in order. It is
+ends with that error. `members` is the result's row ids in order. It is
 always present for a one-shot read, and for a live read's opening and window
 changes when the read is limited or the opening could not tell what left it.
-Cached rows a listing leaves out are no longer in that result; the replica
+Cached rows `members` leaves out are no longer in that result; the replica
 evicts them (a row a pending write touches waits for the server's word on it).
 `global` says the answer is the global authority's (directly, or through
 relays that settle by their upstream), not a relay's own store.
@@ -310,7 +322,7 @@ read stays unsettled, and a node with no upstream settles locally
 
 #### 8.4.1 Raw rows and local derivation
 
-`Rows { images, origins }` carries row images. An `Image` is self-contained
+`Rows { images, tx_ids }` carries row images. An `Image` is self-contained
 (`INV-SYNC-7`): stored table name, row id, branch key, seq, deleted flag,
 whether the version wrote content, and its stored cells by stored column name.
 Images travel raw: by the authority's stored names, untranslated, whatever
@@ -318,7 +330,7 @@ schema version the session declared (`INV-SYNC-45`). The replica mirrors the
 authority's physical layout (§8.10) and applies its lenses locally, so an old
 client reads a new server's rows through the same lenses the server would use.
 
-`origins` names the transactions behind history versions among the images, as
+`tx_ids` names the transactions behind history versions among the images, as
 (seq, writer node, writer tx): a replica lists a history version only once it
 knows its `$transactionId`. It is empty for current rows.
 
@@ -352,7 +364,7 @@ This state lives only in the serving process and is released on disconnect
 `Unsubscribe { id }` releases the read's watches. A row no watch holds stops
 being kept current: the replica keeps it as a cold copy, which local reads may
 still return, and a later read that covers it brings it up to date (its
-opening ships what changed, and its listing drops what left).
+opening ships what changed, and its `members` drops what left).
 
 ### 8.6 Policy narrowing and eviction
 
@@ -361,14 +373,15 @@ image, supporting row or count (`INV-SYNC-13`), and ships accepted rows only,
 never another node's pending or refused writes (`INV-SYNC-12`).
 
 When a reader loses read access to a row it holds, through a write or a policy
-change, the server sends `Evict { table, id, key }` and the replica drops its
-copy (`INV-SYNC-14`). This includes a row the reader's own accepted commit
+change, the server sends `AccessLost { table, id, key }` and the replica drops
+its copy (`INV-SYNC-14`). This includes a row the reader's own accepted commit
 wrote and cannot read (a write-only insert): the commit's fate reports its
 acceptance. Local copies are not a redaction boundary; eviction keeps the
 replica coherent, not secret.
 
-`Advise { id, action, author, session }` asks whether the session would be
-allowed an action now, without writing; `Advice` answers it.
+`CheckAllowed { id, action, author, session }` asks whether the session would be
+allowed an action now, without writing; `CheckAllowedResult { id, result }`
+answers it.
 
 ### 8.7 Mergeable and serializable delivery
 
@@ -450,16 +463,26 @@ keep and retry pending writes but cannot accept them or make them `Global`.
 
 ### 8.10 Catalogue
 
-After its first `Schema`, a replica sends `Holds { versions }`: the schema
-versions whose stored names it keeps, each with `names_digest` of those names.
-The server answers with `Catalogue { versions, cells }` for every admitted
-version the replica lacks or names otherwise, in admission order, ahead of any
-row; and again whenever its store admits a version.
+After its first `Schema`, a replica sends `KnownCatalogue { versions }`: the
+schema versions whose stored names it keeps, each with `names_digest` of those names.
+The server answers with `Catalogue { namespace, versions, cells, confirmed }`,
+carrying every admitted version the replica lacks or names otherwise, in
+admission order, ahead of any row; and again whenever its store admits a
+version or learns more of its authority's catalogue.
 
 - A `CatalogueVersion` is a structural schema (without permissions) plus, per
   table, its name and stored name and, per column, its name and stored name.
 - A `CatalogueCell` is a stored column a lens fills: a copy of stored column
   `source`, or a dropped column's backwards default, from version `since` on.
+- `namespace` is the authority's, once the sender knows it. Table and column
+  identities are UUIDs derived from it and the stored names, so the authority
+  mints them and replicas only mirror them. A replica that keeps another
+  namespace is another app's store and refuses the upstream.
+- `confirmed` lists the versions whose names are the authority's, each with its
+  names' digest: every version the authority admitted, or, from a relay, those
+  its upstream confirmed. Only a confirmed version's tables and columns have an
+  identity; a version only the replica admitted has none until the authority
+  admits it too.
 
 The replica admits each version under the authority's stored names, renaming
 tables and columns it had named otherwise while it did not know them (for
@@ -469,9 +492,12 @@ therefore never ships. Lens semantics are chapter 10.
 
 A relay that mirrors a new catalogue owes its own sessions the versions they
 now name otherwise, so a tab follows its worker's names. Mirroring is whole or
-not at all. A catalogue the replica cannot mirror (a table it stores under the
-name the upstream stores another table as) drops the link, and every remote
-read fails with why; local reads are served as before.
+not at all. A catalogue the replica cannot mirror drops the link, and every remote read
+fails with why; local reads are served as before. That is a table it stores
+under the name the upstream stores another table as, another app's namespace,
+or a stored column it keeps with another type than the upstream's (each added
+a column again under the same fresh stored name while apart): values of one
+type are never read as another's.
 
 ### 8.11 Resuming live reads from `since`
 
@@ -499,7 +525,7 @@ The authority opens a resumed read one of three ways:
   have since left (as they are now, or their eviction), and supporting rows
   whose access changed.
 
-Each ends with a `Settled` (and its listing where §8.4 calls for one), so a
+Each ends with a `Settled` (and its `members` where §8.4 calls for one), so a
 resumed read leaves the replica with the same rows as a fresh one
 (`INV-SYNC-25`, `INV-SYNC-11`). A replica that cannot read its watermark opens
 the read fresh.
@@ -509,8 +535,8 @@ that untrue for results the replica cannot name, so the replica forgets every
 watermark when either happens, and each read opens fresh until it settles
 again:
 
-- an `Evict`: a result settled earlier may have held the row, and a resume from
-  it would count the row as held after it became readable again;
+- an `AccessLost`: a result settled earlier may have held the row, and a resume
+  from it would count the row as held after it became readable again;
 - a row asked for whole (§8.12): until its whole image arrives the replica holds
   a stale version, so it also stores no watermark meanwhile.
 
@@ -527,9 +553,9 @@ chunks are present (`INV-SYNC-46`).
 
 Within a session the server ships later versions' chunked cells as deltas over
 the version it last shipped of that row. A replica that cannot apply a delta
-(it lacks that base version) sends `Hold { rows }` for those rows, and the
-server ships each whole or evicts it. The replica sends the `Hold` again on
-every new connection until the whole image arrives, and stores no watermark
+(it lacks that base version) sends `ResendWhole { rows }` for those rows, and
+the server ships each whole or evicts it. The replica sends the `ResendWhole`
+again on every new connection until the whole image arrives, and stores no watermark
 meanwhile (§8.11). A live read's rows are never declared this way: its opening
 brings them up to date from `since`.
 

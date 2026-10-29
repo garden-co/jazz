@@ -564,7 +564,7 @@ fn a_row_evicted_and_readable_again_returns_when_an_older_subscription_resumes()
     assert_eq!(ids(&client, None), [id(3, 0)], "client converges on m0");
 }
 
-/// A cold row a fresh opening's listing drops (no `Evict` crosses: the
+/// A cold row a fresh opening's `members` drops (no `AccessLost` crosses: the
 /// new session never shipped it), then readable again without changing,
 /// reaches the replica when an older subscription resumes.
 #[test]
@@ -597,7 +597,7 @@ fn a_row_a_listing_dropped_returns_when_an_older_subscription_resumes() {
     let q2 = client.prepare_query(&Query::from("messages")).unwrap();
     let s2 = block_on(client.subscribe(&q2, ReadOpts::default())).unwrap();
     pump(&server, &client);
-    assert!(ids(&client, None).is_empty(), "q2's listing drops m0");
+    assert!(ids(&client, None).is_empty(), "q2's members drop m0");
     drop(s2);
     pump(&server, &client);
 

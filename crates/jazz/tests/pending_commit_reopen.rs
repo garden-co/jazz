@@ -16,7 +16,7 @@ use std::task::{Context, Poll, Waker};
 use duplex_transport::duplex;
 use jazz::db::{
     Db, DbConfig, DbIdentity, ErrorCode, FileOptions, InsertOptions, LargeValueUpdate,
-    LargeValueUpdatePage, LargeValueUpdateSplice, ReadOpts, RemoteLinkHint, block_on,
+    LargeValueUpdatePage, LargeValueUpdateSplice, ReadOpts, RemoteLinkHint, WireOp, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::Query;
@@ -112,6 +112,19 @@ fn docs(db: &Db) -> BTreeMap<[u8; 16], (String, String)> {
         .collect()
 }
 
+/// The stored ops of the pending commits, in order.
+fn stored_ops(path: &Path) -> Vec<WireOp> {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    let mut statement = conn
+        .prepare("SELECT item FROM _jazz_pending_items WHERE part = 0 ORDER BY tx, n")
+        .unwrap();
+    statement
+        .query_map([], |r| r.get::<_, Vec<u8>>(0))
+        .unwrap()
+        .map(|item| postcard::from_bytes(&item.unwrap()).unwrap())
+        .collect()
+}
+
 fn stored_parts(path: &Path) -> BTreeSet<i64> {
     let conn = rusqlite::Connection::open(path).unwrap();
     let mut statement = conn
@@ -156,7 +169,7 @@ fn a_pending_serializable_commit_reloads_every_stored_part_after_a_restart() {
 
     // Offline, one serializable commit: it reads the docs, splices row 1's
     // body (a delta over its settled version) and gives row 2 a new body,
-    // which travels as a tree with its settled version as source. Both rows
+    // which travels as a tree with its settled version as its access proof. Both rows
     // were held, so each write has a base.
     let tx = {
         let client = open_file(&path);
@@ -200,11 +213,23 @@ fn a_pending_serializable_commit_reloads_every_stored_part_after_a_restart() {
         .unwrap();
         block_on(client.commit_serializable_handle(open)).unwrap().0
     };
-    // Op, delta, source, base and read (see `PendingPart`).
+    // Ops and reads (see `PendingPart`); each op keeps its base, and its
+    // delta or access proof.
     assert_eq!(
         stored_parts(&path),
-        BTreeSet::from([0, 1, 2, 3, 4]),
+        BTreeSet::from([0, 1]),
         "every list of the commit is stored"
+    );
+    let ops = stored_ops(&path);
+    assert_eq!(ops.len(), 2, "{ops:?}");
+    assert!(ops.iter().all(|op| op.bases.len() == 1), "{ops:?}");
+    assert!(
+        ops[0].deltas.len() == 1 && ops[0].access_proof.is_none(),
+        "{ops:?}"
+    );
+    assert!(
+        ops[1].deltas.is_empty() && ops[1].access_proof.is_some(),
+        "{ops:?}"
     );
 
     let client = open_file(&path);

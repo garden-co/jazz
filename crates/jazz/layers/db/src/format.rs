@@ -84,7 +84,10 @@ pub(crate) fn admit(conn: &Connection) -> Result<(), Error> {
         })
         .map_err(storage)?;
     match versions.as_slice() {
-        [rusqlite::types::Value::Integer(STORAGE_FORMAT)] => refuse_message_outbox(conn),
+        [rusqlite::types::Value::Integer(STORAGE_FORMAT)] => {
+            refuse_message_outbox(conn)?;
+            refuse_versioned_names(conn)
+        }
         [rusqlite::types::Value::Integer(version)] => Err(unsupported(format!(
             "this store was written in Jazz SQLite storage format {version}"
         ))),
@@ -111,6 +114,28 @@ fn refuse_message_outbox(conn: &Connection) -> Result<(), Error> {
     if old {
         return Err(unsupported(
             "this development store keeps pending uploads as encoded messages, \
+             a layout from before format 1 shipped",
+        ));
+    }
+    Ok(())
+}
+
+/// Refuse a development store of format 1 from before its catalogue was
+/// rows (SPEC 10.2): its `_jazz_names` is keyed by version id rather than
+/// by admission number in `_jazz_versions`, and it keeps no schemas to
+/// admit again. Format 1 had not shipped then, so no released store has
+/// that layout. Checked before any catalogue table is created.
+fn refuse_versioned_names(conn: &Connection) -> Result<(), Error> {
+    let old: bool = conn
+        .query_row(
+            "SELECT count(*) > 0 FROM pragma_table_info('_jazz_names') WHERE name = 'version'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(storage)?;
+    if old {
+        return Err(unsupported(
+            "this development store keeps its stored names by schema version, \
              a layout from before format 1 shipped",
         ));
     }

@@ -32,7 +32,7 @@ use jazz::db::{
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::model::transaction::OpenTransactionId;
-use jazz::protocol::PermissionAdviceAction;
+use jazz::protocol::{LensOp, MigrationLens, PermissionAdviceAction, TableLens};
 use jazz::query::{Query, col, eq, lit};
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
@@ -54,22 +54,22 @@ const FORMAT: &str = "jazz-sqlite-sync-wire-corpus-v1";
 const VARIANTS: [&str; 19] = [
     "Read",
     "Unsubscribe",
-    "Hold",
+    "ResendWhole",
     "Settled",
     "Commit",
     "ChunkRequests",
     "PushChunks",
     "Chunks",
     "Rows",
-    "Evict",
+    "AccessLost",
     "Refused",
     "Fate",
-    "Advise",
-    "Advice",
+    "CheckAllowed",
+    "CheckAllowedResult",
     "Schema",
     "SchemaAdmission",
     "Stored",
-    "Holds",
+    "KnownCatalogue",
     "Catalogue",
 ];
 
@@ -288,8 +288,8 @@ impl Transport for Recording {
             // built on an unsettled commit (bases, origin), else the first.
             let relayed = matches!(
                 &decoded,
-                SyncMessage::Commit { bases, origin: Some(_), .. }
-                    if bases.iter().any(|base| matches!(base.on, jazz::db::BuiltOn::Commit { .. }))
+                SyncMessage::Commit { ops, origin: Some(_), .. }
+                    if ops.iter().flat_map(|op| &op.bases).any(|base| matches!(base.on, jazz::db::BuiltOn::Commit { .. }))
             );
             let mut recorded = self.recorded.borrow_mut();
             if let SyncMessage::Fate {
@@ -311,8 +311,8 @@ impl Transport for Recording {
                 .or_insert_with(|| (self.peer.to_owned(), frame.clone()));
             let pinned_relayed = matches!(
                 postcard::from_bytes(&pinned.1),
-                Ok(SyncMessage::Commit { bases, origin: Some(_), .. })
-                    if bases.iter().any(|base: &jazz::db::WireBase| matches!(base.on, jazz::db::BuiltOn::Commit { .. }))
+                Ok(SyncMessage::Commit { ops, origin: Some(_), .. })
+                    if ops.iter().flat_map(|op: &jazz::db::WireOp| &op.bases).any(|base| matches!(base.on, jazz::db::BuiltOn::Commit { .. }))
             );
             if relayed && !pinned_relayed {
                 *pinned = (self.peer.to_owned(), frame.clone());
@@ -329,9 +329,10 @@ impl Transport for Recording {
 }
 
 /// Message shapes the one frame per variant leaves unpinned: a one-shot
-/// `Read` (its span carries a snapshot and a view) and `Rows` carrying the
-/// commits behind history versions.
-const SHAPES: [&str; 2] = ["Read/once", "Rows/origins"];
+/// `Read` (its span carries a snapshot and a view), `Rows` carrying the
+/// commits behind history versions, and a `Catalogue` carrying versions
+/// with their stored names and a lens's cells.
+const SHAPES: [&str; 3] = ["Read/once", "Rows/tx_ids", "Catalogue/versions"];
 
 fn shape(message: &SyncMessage) -> Option<&'static str> {
     match message {
@@ -339,7 +340,10 @@ fn shape(message: &SyncMessage) -> Option<&'static str> {
             span: ReadSpan::Once { .. },
             ..
         } => Some(SHAPES[0]),
-        SyncMessage::Rows { origins, .. } if !origins.is_empty() => Some(SHAPES[1]),
+        SyncMessage::Rows { tx_ids, .. } if !tx_ids.is_empty() => Some(SHAPES[1]),
+        SyncMessage::Catalogue {
+            versions, cells, ..
+        } if !versions.is_empty() && !cells.is_empty() => Some(SHAPES[2]),
         _ => None,
     }
 }
@@ -399,6 +403,21 @@ fn schema(draft: bool) -> JazzSchema {
     compile_schema(
         &SchemaBuilder::new()
             .table(notes.policies(read_and_allow_all_writes(session_eq("owner", &ME))))
+            .build(),
+    )
+}
+
+/// `schema(false)` with `first_owner`, a lens's copy of `owner`.
+fn schema_with_copy() -> JazzSchema {
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("owner", ColumnType::Text)
+                    .column("body", ColumnType::Bytea)
+                    .column("first_owner", ColumnType::Text)
+                    .policies(read_and_allow_all_writes(session_eq("owner", &ME))),
+            )
             .build(),
     )
 }
@@ -495,7 +514,7 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     .unwrap();
     pump(&[&alice, &server, &alice]);
 
-    // Read (once), Settled with a listing: a serializable
+    // Read (once), Settled with members: a serializable
     // transaction's second read is pinned to its snapshot, so after a
     // newer write it answers from history.
     let open_tx = OpenTransactionId::new();
@@ -522,7 +541,7 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     let _history = block_on(alice.subscribe(&history, ReadOpts::default())).unwrap();
     pump(&[&alice, &server, &alice]);
 
-    // Advise, Advice.
+    // CheckAllowed, CheckAllowedResult.
     let id = alice.request_permission_advice(
         PermissionAdviceAction::Read {
             table: "notes".to_owned(),
@@ -546,8 +565,8 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     drop(stream);
     pump(&[&alice, &server, &alice]);
 
-    // Hold, Evict: alice's own note is deleted while she is away; she
-    // reconnects holding it.
+    // ResendWhole, AccessLost: alice's own note is deleted while she is
+    // away; she reconnects holding it.
     block_on(server.delete("notes", mine, Default::default())).unwrap();
     connect(&alice, &server, user(1), &recorded);
     pump(&[&alice, &server, &alice]);
@@ -598,6 +617,25 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     block_on(mallory.insert("notes", note(2, vec![7]), InsertOptions::default())).unwrap();
     pump(&[&mallory, &server, &mallory]);
 
+    // Catalogue with versions and cells: the server admits a version whose
+    // lens copies a column while alice is connected.
+    let copied = schema_with_copy();
+    let lens = MigrationLens::new(
+        schema(false).version_id(),
+        copied.version_id(),
+        vec![TableLens {
+            source_table: "notes".into(),
+            target_table: "notes".into(),
+            ops: vec![LensOp::CopyColumn {
+                from: "owner".into(),
+                to: "first_owner".into(),
+            }],
+        }],
+    )
+    .unwrap();
+    block_on(server.activate_schema_with_lenses(copied, &[lens])).unwrap();
+    pump(&[&alice, &server, &alice]);
+
     // Refused: a subscription the server cannot serve. No replica sends
     // one (it prepares queries against the same schema), so a raw session
     // does, on the schema version alice announced.
@@ -625,16 +663,16 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     );
     pump(&[&server]);
 
-    // Hold: a replica asks for a row whole when a shipped delta does not
+    // ResendWhole: a replica asks for a row whole when a shipped delta does not
     // apply over the version it holds, which takes a corrupted delta to
     // provoke; its frame is pinned as a replica encodes it.
-    let hold = SyncMessage::Hold {
+    let hold = SyncMessage::ResendWhole {
         rows: vec![("notes".to_owned(), [0x11; 16], Vec::new(), 0)],
     };
     let [frame] = encode_frames(hold).unwrap().try_into().unwrap();
     recorded
         .borrow_mut()
-        .insert("Hold".to_owned(), ("server".to_owned(), frame));
+        .insert("ResendWhole".to_owned(), ("server".to_owned(), frame));
 
     recorded.borrow().clone()
 }

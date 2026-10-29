@@ -41,8 +41,11 @@ Pick the format that matches what the column holds: `"text"` for prose, `"markdo
 pieces a merge keeps whole, such as Markdown markers or HTML tags; see
 [mergeable text columns](/docs/schemas/column-types#mergeable-text-columns).
 
-Text merge columns can't be optional (`.optional()` throws when the schema is built). An empty
-string stands for no text; `.default("")` lets inserts leave the column out.
+A text merge column can be optional. Two people adding text to a `null` column at the same time
+both keep their text, while clearing it to `null` against someone else's edit goes to whichever
+write reaches the server later. If you don't need to tell "no text yet" from empty text, a required
+column with `.default("")` is simpler; see
+[mergeable text columns](/docs/schemas/column-types#mergeable-text-columns).
 
 ## Write and read it like any string
 

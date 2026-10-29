@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 
-use crate::ids::{AuthorSubject, RowUuid};
+use crate::ids::{AuthorSubject, GlobalPhysicalColumnId, GlobalPhysicalTableId, RowUuid};
 use crate::protocol::{
     BranchSelector, BranchViewBase, CurrentWriteSchema, LensOp, MigrationLens, ReadViewSourceSpec,
     SchemaVersion,
@@ -50,12 +50,12 @@ use crate::values::{
     begin_savepoint, end_savepoint, from_sql, in_savepoint, quote, storage, to_sql, unsupported,
 };
 pub use sync::{
-    BuiltOn, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad, FrameJoiner, Image, LOCAL_BASE,
-    NON_DURABLE_BASE, ReadSpan, RejectedTransaction, RelationSnapshot, RemoteLinkHint,
+    AccessProof, BuiltOn, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad, FrameJoiner, Image,
+    LOCAL_BASE, NON_DURABLE_BASE, ReadSpan, RejectedTransaction, RelationSnapshot, RemoteLinkHint,
     SerializedReadResult, SubscriberId, SyncMessage, Transport, TransportError, Upstream, WireBase,
     WireChunk, WireChunkRef, WireDelta, WireError, WireKind, WireOp, WirePull, WireTarget,
-    WireTransport, WireTransportAdapter, WriteConflict, decode_message, duplex, encode_frames,
-    validate_frame_batch_for_corpus,
+    WireTransport, WireTransportAdapter, WireWrite, WriteConflict, decode_message, duplex,
+    encode_frames, validate_frame_batch_for_corpus,
 };
 
 /// Shape identity: equal for bindings of one query against one schema.
@@ -486,6 +486,8 @@ struct Inner {
     /// Limits on local streaming uploads and on pushed nodes awaiting
     /// their commit.
     staging: LargeValueStagingPolicy,
+    /// Dropped uploads queue cleanup without recursively borrowing the owner.
+    upload_cleanup: Rc<RefCell<Vec<[u8; 32]>>>,
     /// The staging ingress window: (start ms, encoded bytes admitted).
     ingress: RefCell<(u64, u64)>,
     /// The schema the current operation runs under: the owner's, or the
@@ -1130,8 +1132,12 @@ impl Db {
         // A version this file admitted keeps its names; another one is
         // named against the most recently admitted.
         let mut names = crate::names::Names::load(&conn)?;
+        // Every version an earlier process admitted is admitted again, with
+        // the names it was stored under.
+        let mut admitted = crate::catalogue::admitted(&conn)?;
         let schema = names.resolve(&config.schema, &[], names.latest())?;
         names.check_branches(&schema)?;
+        names.check_types(&schema)?;
         let chunks = crate::large::Chunks::install(path, config.chunk_store.clone())?;
         // Statements are keyed per table and verb; the default 16 entries
         // thrash as soon as a schema has a few tables.
@@ -1208,12 +1214,18 @@ impl Db {
                 derived: Vec::new(),
                 possession: None,
                 staging: LargeValueStagingPolicy::default(),
+                upload_cleanup: Rc::default(),
                 ingress: RefCell::new((0, 0)),
                 schema: owner.clone(),
                 owner_version: owner.jazz.version_id(),
                 owner,
                 physical,
-                admitted: vec![(config.schema.version_id(), config.schema.clone())],
+                admitted: {
+                    let version = config.schema.version_id();
+                    admitted.retain(|(id, _)| *id != version);
+                    admitted.push((version, config.schema.clone()));
+                    admitted
+                },
                 names,
                 views: BTreeMap::new(),
                 batches: HashMap::new(),
@@ -1361,6 +1373,63 @@ impl Db {
     /// Whether this store is the global authority.
     pub fn is_authority(&self) -> bool {
         self.inner.borrow().authority
+    }
+
+    /// The identity of table `table` of this handle's schema: the same
+    /// UUID on the authority and every replica of it, for the table's whole
+    /// life (a rename keeps it), and never another app's. `Ok(None)` when
+    /// the schema has no such table.
+    ///
+    /// Identities are the authority's: a replica answers once it has
+    /// mirrored the authority's catalogue with this schema version in it,
+    /// and fails with code `NotObserved` until then (a version only this
+    /// replica admitted has none yet).
+    pub fn table_identity(&self, table: &str) -> Result<Option<GlobalPhysicalTableId>, Error> {
+        Ok(self
+            .stored_identity(table, None)?
+            .map(GlobalPhysicalTableId))
+    }
+
+    /// The identity of column `column` of table `table` of this handle's
+    /// schema, as [`Db::table_identity`]. A column dropped and added again
+    /// keeps its identity only with the type it had; with another one it is
+    /// a new column.
+    pub fn column_identity(
+        &self,
+        table: &str,
+        column: &str,
+    ) -> Result<Option<GlobalPhysicalColumnId>, Error> {
+        Ok(self
+            .stored_identity(table, Some(column))?
+            .map(GlobalPhysicalColumnId))
+    }
+
+    fn stored_identity(
+        &self,
+        table: &str,
+        column: Option<&str>,
+    ) -> Result<Option<uuid::Uuid>, Error> {
+        let inner = self.inner();
+        let schema = inner.schema.clone();
+        let version = schema.jazz.version_id();
+        let namespace = inner.namespace()?;
+        let (Some(namespace), true) = (namespace, inner.names_confirmed(&version)) else {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                "this store has not received its authority's catalogue for this schema version yet",
+            ));
+        };
+        let Some(table) = schema.tables.get(table) else {
+            return Ok(None);
+        };
+        Ok(match column {
+            None => Some(crate::names::identity(namespace, &table.stored, None)),
+            Some(column) => table
+                .columns
+                .iter()
+                .find(|c| c.name == column)
+                .map(|c| crate::names::identity(namespace, &table.stored, Some(&c.stored))),
+        })
     }
 
     /// The shared state, set up to run under this handle's schema.
@@ -2241,7 +2310,7 @@ impl Db {
             .find(|publication| publication.version.id == current.schema)
             .cloned()
             .ok_or_else(|| Error::new(ErrorCode::Schema, "schema version was not published"))?;
-        self.activate(publication.version.schema, &[publication.lens])
+        self.activate(publication.version.schema, &[publication.lens], None)
     }
 
     /// Make `schema` the current schema. The stored tables grow to hold it:
@@ -2250,7 +2319,7 @@ impl Db {
     /// keep their data. Changing a column's type is not supported yet, and a
     /// new required column needs a default.
     pub async fn activate_schema(&self, schema: JazzSchema) -> Result<(), Error> {
-        self.activate(schema, &[])
+        self.activate(schema, &[], None)
     }
 
     /// [`Db::activate_schema`], with the migration lenses into `schema`
@@ -2263,7 +2332,20 @@ impl Db {
         schema: JazzSchema,
         lenses: &[MigrationLens],
     ) -> Result<(), Error> {
-        self.activate(schema, lenses)
+        self.activate(schema, lenses, None)
+    }
+
+    /// [`Db::activate_schema_with_lenses`] as permissions revision
+    /// `revision` of the store's catalogue (see [`crate::catalogue`]): its
+    /// row records the schema and policies, and when they took effect. A
+    /// store without a server numbers its activations itself.
+    pub async fn activate_schema_at_revision(
+        &self,
+        revision: u64,
+        schema: JazzSchema,
+        lenses: &[MigrationLens],
+    ) -> Result<(), Error> {
+        self.activate(schema, lenses, Some(revision))
     }
 
     /// Admit `schema` without making it current: the stored tables grow to
@@ -2275,19 +2357,82 @@ impl Db {
         schema: JazzSchema,
         lenses: &[MigrationLens],
     ) -> Result<(), Error> {
-        self.admit(schema, lenses, false)
+        self.admit(schema, lenses, None)
     }
 
-    fn activate(&self, schema: JazzSchema, lenses: &[MigrationLens]) -> Result<(), Error> {
-        self.admit(schema, lenses, true)
+    fn activate(
+        &self,
+        schema: JazzSchema,
+        lenses: &[MigrationLens],
+        revision: Option<u64>,
+    ) -> Result<(), Error> {
+        self.admit(schema, lenses, Some(revision))
     }
 
+    /// Apply `change` to the store's catalogue in one transaction: publish
+    /// its rows, admit its versions in order, then make its schema current
+    /// at its revision. A change that fails anywhere leaves the file and
+    /// this database as they were.
+    pub async fn apply_catalogue(
+        &self,
+        change: crate::catalogue::CatalogueChange,
+    ) -> Result<(), Error> {
+        let saved = {
+            let inner = self.inner();
+            (
+                inner.physical.clone(),
+                inner.names.clone(),
+                inner.admitted.clone(),
+                inner.owner.clone(),
+                inner.owner_version,
+            )
+        };
+        begin_savepoint(&self.inner().conn, "jazz_catalogue")?;
+        let applied = (|| {
+            crate::catalogue::put(&self.inner().conn, &change.put)?;
+            for (schema, lenses) in change.admit {
+                self.admit(schema, &lenses, None)?;
+            }
+            if let Some((revision, schema, lenses)) = change.activate {
+                self.admit(schema, &lenses, Some(Some(revision)))?;
+            }
+            Ok(())
+        })();
+        let ended = end_savepoint(&self.inner().conn, "jazz_catalogue", applied.is_ok());
+        let result = applied.and(ended);
+        if result.is_err() {
+            let mut inner = self.inner();
+            let (physical, names, admitted, owner, owner_version) = saved;
+            inner.physical = physical;
+            inner.names = names;
+            inner.admitted = admitted;
+            inner.owner = owner;
+            inner.owner_version = owner_version;
+            inner.reset_everything();
+        }
+        result
+    }
+
+    /// The current schema, with its policies.
+    pub fn current_schema(&self) -> JazzSchema {
+        self.inner().owner.jazz.clone()
+    }
+
+    /// The store's catalogue: every schema, lens and permissions revision
+    /// it keeps (see [`crate::catalogue`]).
+    pub fn catalogue(&self) -> Result<crate::catalogue::CatalogueRows, Error> {
+        crate::catalogue::read(&self.inner().conn)
+    }
+
+    /// Admit `schema`; with `current`, also make it current, at that
+    /// permissions revision if one is given.
     fn admit(
         &self,
         schema: JazzSchema,
         lenses: &[MigrationLens],
-        make_current: bool,
+        current: Option<Option<u64>>,
     ) -> Result<(), Error> {
+        let make_current = current.is_some();
         {
             let mut inner = self.inner();
             let version = schema.version_id();
@@ -2310,6 +2455,7 @@ impl Db {
             // is the schema's own, so a replica that never saw the lens
             // keys rows the same way.
             inner.names.check_branches(&target)?;
+            inner.names.check_types(&target)?;
             if make_current {
                 for table in target.tables.values() {
                     if let Some(current) = inner.owner.by_stored(&table.stored) {
@@ -2371,11 +2517,13 @@ impl Db {
                 }
                 let digest =
                     u64::from_le_bytes(digest.finalize().as_bytes()[..8].try_into().unwrap());
-                if inner.meta(sync::POLICIES_META)? != Some(digest) {
-                    let seq = inner.seq;
-                    inner.persist_meta(sync::POLICIES_META, digest)?;
-                    inner.persist_meta(sync::ACTIVATED_META, seq)?;
-                }
+                crate::catalogue::record_activation(
+                    &inner.conn,
+                    current.flatten(),
+                    &inner.owner.jazz,
+                    digest,
+                    inner.seq,
+                )?;
             }
             if !inner
                 .admitted
@@ -2405,10 +2553,92 @@ impl Inner {
     /// stored here (a renamed column), the one this store added stays
     /// unused, and the rebase that follows replays pending writes into
     /// the upstream's. A table named otherwise is not supported yet.
+    ///
+    /// It then keeps the authority's `namespace` (refusing an upstream of
+    /// another app) and the versions the authority `confirmed`. Returns
+    /// whether any version's names changed here.
     pub(crate) fn mirror_catalogue(
+        &mut self,
+        namespace: Option<[u8; 16]>,
+        versions: Vec<sync::CatalogueVersion>,
+        cells: Vec<sync::CatalogueCell>,
+        confirmed: &[([u8; 16], [u8; 16])],
+    ) -> Result<bool, Error> {
+        let known = self.namespace()?;
+        if let (Some(known), Some(namespace)) = (known, namespace)
+            && known != namespace
+        {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                "the upstream's catalogue is another app's: this store keeps a different authority namespace",
+            ));
+        }
+        let renamed = !versions.is_empty();
+        if renamed {
+            self.mirror_versions(versions, cells)?;
+        }
+        let learned = known.is_none() && namespace.is_some();
+        if let (true, Some(namespace)) = (learned, namespace) {
+            self.persist_namespace(namespace)?;
+        }
+        let conn = &self.conn;
+        let told = self.names.confirm(conn, confirmed)? || learned;
+        // This store's own sessions (a worker's tabs) are told what it now
+        // knows of the authority's catalogue.
+        if told && !renamed {
+            for session in &mut self.sessions {
+                session.owe_catalogue();
+            }
+        }
+        Ok(renamed)
+    }
+
+    /// Take the upstream's versions, names and lens cells: whole or not at
+    /// all, in the file and in memory. A catalogue this store cannot take
+    /// (a stored column it keeps with another type) leaves it unchanged.
+    fn mirror_versions(
         &mut self,
         versions: Vec<sync::CatalogueVersion>,
         cells: Vec<sync::CatalogueCell>,
+    ) -> Result<(), Error> {
+        let (physical, names, admitted) = (
+            self.physical.clone(),
+            self.names.clone(),
+            self.admitted.clone(),
+        );
+        let mut moved = Vec::new();
+        begin_savepoint(&self.conn, "jazz_mirror")?;
+        let mirrored = self.mirror_versions_steps(versions, cells, &mut moved);
+        let ended = end_savepoint(&self.conn, "jazz_mirror", mirrored.is_ok());
+        if let Err(error) = mirrored.and(ended) {
+            self.physical = physical;
+            self.names = names;
+            self.admitted = admitted;
+            return Err(error);
+        }
+        if let Some(client) = self.client.as_mut() {
+            for (ours, theirs) in &moved {
+                client.moved_table(ours, theirs);
+            }
+        }
+        let owner = Rc::new(self.named(&self.owner.jazz));
+        self.schema = owner.clone();
+        self.owner = owner;
+        self.reset_everything();
+        // This store's own sessions (a worker's tabs) store rows by its
+        // names, which may have just changed: each is sent the versions
+        // it now names otherwise.
+        for session in &mut self.sessions {
+            session.owe_catalogue();
+        }
+        Ok(())
+    }
+
+    fn mirror_versions_steps(
+        &mut self,
+        versions: Vec<sync::CatalogueVersion>,
+        cells: Vec<sync::CatalogueCell>,
+        moved: &mut Vec<(String, String)>,
     ) -> Result<(), Error> {
         use crate::names::{LensCell, LensCellRule};
         let cells: Vec<LensCell> = cells
@@ -2450,27 +2680,9 @@ impl Inner {
             match self.names.get(version).cloned() {
                 Some(local) if local == *names => {}
                 Some(local) => {
-                    // Whole or not at all, in the file and in memory.
-                    let (physical, kept) = (self.physical.clone(), self.names.clone());
-                    let mut moved = Vec::new();
-                    begin_savepoint(&self.conn, "jazz_mirror")?;
-                    let renamed = self
-                        .rename_stored(&local, names, &mut moved)
-                        .and_then(|()| {
-                            let conn = &self.conn;
-                            self.names.rename(conn, *version, names.clone())
-                        });
-                    let ended = end_savepoint(&self.conn, "jazz_mirror", renamed.is_ok());
-                    if let Err(error) = renamed.and(ended) {
-                        self.physical = physical;
-                        self.names = kept;
-                        return Err(error);
-                    }
-                    if let Some(client) = self.client.as_mut() {
-                        for (ours, theirs) in &moved {
-                            client.moved_table(ours, theirs);
-                        }
-                    }
+                    self.rename_stored(&local, names, moved)?;
+                    let conn = &self.conn;
+                    self.names.rename(conn, *version, names.clone())?;
                 }
                 None => {
                     fresh.insert(*version);
@@ -2494,24 +2706,17 @@ impl Inner {
             } else {
                 Vec::new()
             };
+            // The authority stores a column under a name this store keeps
+            // with another type (each re-added it while apart): its values
+            // are never read as this store's.
+            self.names.check_types(&target)?;
             self.write_admission(&target, fills)?;
             if !self.admitted.iter().any(|(id, _)| *id == version) {
                 self.admitted.push((version, jazz));
             }
         }
         let conn = &self.conn;
-        self.names.record_lens_cells(conn, cells)?;
-        let owner = Rc::new(self.named(&self.owner.jazz));
-        self.schema = owner.clone();
-        self.owner = owner;
-        self.reset_everything();
-        // This store's own sessions (a worker's tabs) store rows by its
-        // names, which may have just changed: each is sent the versions
-        // it now names otherwise.
-        for session in &mut self.sessions {
-            session.owe_catalogue();
-        }
-        Ok(())
+        self.names.record_lens_cells(conn, cells)
     }
 
     /// Rename the stored columns `local` names otherwise than `upstream`
@@ -4144,6 +4349,7 @@ impl Inner {
 
     /// Delete up to `budget` large-value nodes no cell or branch references.
     fn reclaim_large_values(&mut self, budget: usize) -> Result<usize, Error> {
+        self.release_dropped_uploads()?;
         in_savepoint(&self.conn, "reclaim", || {
             crate::large::reclaim(&self.conn, &self.chunks, budget)
         })
@@ -4469,6 +4675,9 @@ impl Inner {
                 MergeStrategy::Lww => continue,
                 MergeStrategy::Text | MergeStrategy::Markdown | MergeStrategy::Html => {
                     match self.text_merged(table, row, held, at, column, value)? {
+                        Some(merged) if column.nullable() => {
+                            Value::Nullable(Some(Box::new(Value::String(merged))))
+                        }
                         Some(merged) => Value::String(merged),
                         None => continue,
                     }
@@ -4550,10 +4759,16 @@ impl Inner {
         let Some(held) = held else {
             return Ok(None);
         };
+        // A clear (a NULL write) is never merged, and an edit that a clear
+        // overtook stands as sent: either way the later write wins.
+        if matches!(value, Value::Nullable(None)) {
+            return Ok(None);
+        }
         let current = |db: &Self| -> Result<Option<String>, Error> {
-            db.cell_at(table, row, held, &column.name)?
-                .map(|current| db.logical_text(&column.name, &current))
-                .transpose()
+            Ok(match db.cell_at(table, row, held, &column.name)? {
+                Some(current) => db.optional_text(&column.name, &current)?,
+                None => None,
+            })
         };
         let earlier = self
             .as_sent
@@ -4578,10 +4793,13 @@ impl Inner {
                 else {
                     return Ok(None);
                 };
-                let Some(base) = from_sql(&column.ty, base.as_ref(), &self.chunks)? else {
-                    return Ok(None);
+                // A NULL base merges as "": additions to an empty optional
+                // column are all kept, as they are over an empty string.
+                let base = match from_sql(&column.ty, base.as_ref(), &self.chunks)? {
+                    Some(base) => self.optional_text(&column.name, &base)?.unwrap_or_default(),
+                    None if column.nullable() => String::new(),
+                    None => return Ok(None),
                 };
-                let base = self.logical_text(&column.name, &base)?;
                 let Some(current) = current(self)? else {
                     return Ok(None);
                 };
@@ -4695,10 +4913,19 @@ impl Inner {
         Ok(count)
     }
 
+    /// [`Self::logical_text`] of a cell that may be NULL (`None`).
+    fn optional_text(&self, column: &str, value: &Value) -> Result<Option<String>, Error> {
+        match value {
+            Value::Nullable(None) => Ok(None),
+            value => self.logical_text(column, value).map(Some),
+        }
+    }
+
     /// The whole string a text column's value holds.
     fn logical_text(&self, column: &str, value: &Value) -> Result<String, Error> {
         match value {
             Value::String(text) => Ok(text.clone()),
+            Value::Nullable(Some(value)) => self.logical_text(column, value),
             Value::Large(large) => String::from_utf8(self.chunks.value_bytes(large)?)
                 .map_err(|_| rejected(format!("`{column}` holds a value that is not UTF-8"))),
             _ => Err(rejected(format!("`{column}` is not a string"))),
@@ -5926,10 +6153,19 @@ impl Db {
         let logical = {
             let mut inner = self.inner.borrow_mut();
             let version = schema.version_id();
-            if let Some((_, admitted)) = inner.admitted.iter().find(|(id, _)| *id == version) {
-                if !same_tables(admitted, &schema, |l, r| {
-                    l.read_policy == r.read_policy && l.write_policies == r.write_policies
-                }) {
+            if let Some((_, admitted)) = inner.admitted.iter_mut().find(|(id, _)| *id == version) {
+                let same_policies =
+                    |l: &crate::schema::TableSchema, r: &crate::schema::TableSchema| {
+                        l.read_policy == r.read_policy && l.write_policies == r.write_policies
+                    };
+                // A version mirrored from the upstream's catalogue travels
+                // without its policies: the view brings them.
+                if !same_tables(admitted, &schema, same_policies)
+                    && same_tables(admitted, &schema.without_permissions(), same_policies)
+                {
+                    *admitted = schema.clone();
+                }
+                if !same_tables(admitted, &schema, same_policies) {
                     return Err(schema_error(
                         "schema view policy metadata conflicts with its admitted structural schema",
                     ));
@@ -5952,6 +6188,7 @@ impl Db {
             let base = inner.owner.names();
             let logical = inner.names.resolve(&schema, &[], Some(&base))?;
             inner.names.check_branches(&logical)?;
+            inner.names.check_types(&logical)?;
             inner.write_admission(&logical, Vec::new())?;
             if !inner.admitted.iter().any(|(id, _)| *id == version) {
                 inner.admitted.push((version, schema.clone()));
