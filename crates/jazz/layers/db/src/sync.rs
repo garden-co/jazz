@@ -768,6 +768,9 @@ pub enum WireError {
         message: String,
     },
     Other(String),
+    /// A final write failure caused by storage. Appended after the existing
+    /// variants so their wire and stored-fate tags stay unchanged.
+    Storage(String),
 }
 
 /// A large-value node named by its object hash.
@@ -2161,6 +2164,7 @@ fn wire_error(error: &Error) -> WireError {
             reason: error.reason.map(|reason| reason.as_str().to_owned()),
             message: error.message.clone(),
         },
+        ErrorCode::Storage => WireError::Storage(error.to_string()),
         _ => WireError::Other(error.to_string()),
     }
 }
@@ -2174,6 +2178,7 @@ fn from_wire_error(error: WireError) -> Error {
             message,
         },
         WireError::Other(m) => Error::new(ErrorCode::Protocol, m),
+        WireError::Storage(m) => Error::new(ErrorCode::Storage, m),
     }
 }
 

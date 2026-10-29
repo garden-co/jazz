@@ -49,3 +49,12 @@ way.
 Replacing the authority's `_jazz_text_in` side table with as-sent history
 versions, when `documents.body` became text-merging, regenerated it the same
 way.
+
+Storage failures now use the appended `WireError::Storage(String)` tag 3 in
+recorded verdicts (`_jazz_applied.result` and the originating retry store's
+`_jazz_rejected.error`). Existing tags 0 through 2 still decode unchanged;
+the pinned files contain no storage failure, so their bytes do not change.
+The sync wire corpus pins the new tag and the old generic tag, and the
+storage-error reopen test checks replay from disk. Earlier builds cannot
+read a verdict using tag 3. This is an in-place change to the unshipped
+format 1, requiring matching builds as described in SPEC 8.3.

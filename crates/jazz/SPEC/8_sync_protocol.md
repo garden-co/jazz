@@ -251,7 +251,10 @@ read-your-writes end to end.
 
 - `result`: `Ok`, or `Conflict`, `Rejected { reason, message }` (a `Reason`
   by stable name; an unknown name arrives as a rejection without a reason) or
-  `Other`.
+  `Other`, or `Storage`. `Storage` carries the diagnostic text and maps to
+  the public error code `storage`, including through relays and replay of a
+  recorded verdict. It is a final failed write, not a request to retry the
+  same transaction. `Other` keeps its existing `protocol` classification.
 - `through`: the server seq the session is complete through after the
   commit's rows shipped. Applying a fate never moves the replica's settled seq
   backward (`INV-SYNC-5`).
@@ -272,6 +275,15 @@ which is final.
 A fate lost to a disconnect is recovered on the next connection: the replica
 re-uploads its pending commits, and the authority answers a commit it already
 decided with the known fate.
+
+Compatibility: in the unshipped SQLite sync wire v1, `Storage(String)` is
+appended to `WireError` at postcard tag 3; `Conflict`, `Rejected`, and `Other`
+keep tags 0, 1, and 2. The corpus pins both `Fate/storage` and `Fate/other`.
+Recorded fates in storage format 1 use the same encoding (see its corpus
+README). Earlier builds cannot decode tag 3, so endpoints and stored-fate
+readers must upgrade together before alpha.60; no mixed-build support is
+claimed. A storage failure that prevents recording a verdict still closes
+the session with the existing retryable transport error.
 
 ### 8.4 Downstream: reads and rows
 
