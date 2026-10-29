@@ -89,7 +89,7 @@ fn slow_queries_report_their_plan_and_the_index_that_would_help() {
     let hint = title.hint().unwrap_or_else(|| panic!("{title:#?}"));
     assert!(hint.contains("scans all of tasks"), "{hint}");
 
-    let ordered = find("\"title\" END) ASC");
+    let ordered = find("ORDER BY t.\"title\" ASC");
     assert_eq!(ordered.rows, 40);
     assert!(
         ordered

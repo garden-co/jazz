@@ -3279,32 +3279,7 @@ impl Inner {
             Sql::Integer(image.deleted as i64),
             Sql::Integer(image.content as i64),
         ];
-        let physical = self.physical.tables.get(&image.table);
-        let mut cells = self.stored_cells(image)?;
-        // Key columns are this store's: an upstream's keys for columns
-        // indexed here are kept, others dropped, and missing ones derived.
-        if let Some(physical) = physical {
-            cells.retain(|(name, _)| {
-                crate::large::keyed_by(name).is_none() || physical.key_of_key(name).is_some()
-            });
-            for key in &physical.keys {
-                if cells.iter().any(|(name, _)| *name == key.stored) {
-                    continue;
-                }
-                let keyed = crate::large::keyed_by(&key.stored).expect("a key column");
-                let Some((_, cell)) = cells.iter().find(|(name, _)| name == keyed) else {
-                    continue;
-                };
-                let cell = match self.key_cell(cell) {
-                    Ok(cell) => cell,
-                    // A replica may not hold the value's first chunks.
-                    Err(error) if crate::large::is_missing(&error) => Sql::Null,
-                    Err(error) => return Err(error),
-                };
-                cells.push((key.stored.clone(), cell));
-            }
-        }
-        for (column, value) in cells {
+        for (column, value) in self.stored_cells(image)? {
             names.push(quote(&column));
             values.push(value);
         }
