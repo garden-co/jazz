@@ -54,6 +54,7 @@ async function createWatchdogFollower(port = new TestPort()) {
     progressPeerTransport: vi.fn(async () => undefined),
     retirePeerTransport: vi.fn(async () => undefined),
     reportRemoteServerTransportError: vi.fn(),
+    reportLocalRelayError: vi.fn(),
     flushLocalSettlements: vi.fn(async () => undefined),
   };
   const onFailure = vi.fn();
@@ -80,6 +81,17 @@ async function createWatchdogFollower(port = new TestPort()) {
 }
 
 describe("MessagePortBrowserFollowerConnection", () => {
+  it("reports a worker storage failure to local durability waiters before retiring the peer", async () => {
+    const fixture = await createWatchdogFollower();
+    const failure = new Error("browser storage: injected quota failure");
+    fixture.port.emit({ type: "error", error: serializeBrowserRelayError(failure) });
+    expect(fixture.runtime.reportLocalRelayError).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ message: failure.message }),
+    );
+    expect(fixture.onFailure).toHaveBeenCalledOnce();
+    expect(fixture.runtime.retirePeerTransport).toHaveBeenCalledOnce();
+  });
+
   it("detects silent worker death with a mutation awaiting local durability and no control RPC", async () => {
     vi.useFakeTimers();
     const fixture = await createWatchdogFollower();
@@ -172,6 +184,7 @@ describe("MessagePortBrowserFollowerConnection", () => {
         progressPeerTransport: vi.fn(async () => undefined),
         retirePeerTransport: vi.fn(async () => undefined),
         reportRemoteServerTransportError: vi.fn(),
+        reportLocalRelayError: vi.fn(),
       };
       const connection = new MessagePortBrowserFollowerConnection(
         runtime as never,
@@ -223,6 +236,7 @@ describe("MessagePortBrowserFollowerConnection", () => {
         progressPeerTransport: vi.fn(async () => undefined),
         retirePeerTransport: vi.fn(async () => undefined),
         reportRemoteServerTransportError: vi.fn(),
+        reportLocalRelayError: vi.fn(),
       };
       const onFailure = vi.fn();
       connection = new MessagePortBrowserFollowerConnection(
@@ -431,6 +445,7 @@ describe("MessagePortBrowserFollowerConnection", () => {
       retirePeerTransport: vi.fn(async () => undefined),
       clearRemoteServerTransportError: vi.fn(),
       reportRemoteServerTransportError: vi.fn(),
+      reportLocalRelayError: vi.fn(),
       reportRemoteMutationError: vi.fn(),
     };
     const connection = new MessagePortBrowserFollowerConnection(
@@ -476,6 +491,7 @@ describe("MessagePortBrowserFollowerConnection", () => {
       retirePeerTransport: vi.fn(async () => undefined),
       clearRemoteServerTransportError: vi.fn(),
       reportRemoteServerTransportError: vi.fn(),
+      reportLocalRelayError: vi.fn(),
       reportRemoteMutationError: vi.fn(),
     };
     const connection = new MessagePortBrowserFollowerConnection(
@@ -534,6 +550,7 @@ describe("MessagePortBrowserFollowerConnection", () => {
       progressPeerTransport: vi.fn(() => Promise.reject(failure)),
       retirePeerTransport: vi.fn(() => Promise.reject(retirementFailure)),
       reportRemoteServerTransportError: vi.fn(),
+      reportLocalRelayError: vi.fn(),
       reportRemoteMutationError: vi.fn(),
     };
     const onFailure = vi.fn();
@@ -582,6 +599,7 @@ describe("MessagePortBrowserFollowerConnection", () => {
       progressPeerTransport: vi.fn(async () => undefined),
       retirePeerTransport: vi.fn(async () => undefined),
       reportRemoteServerTransportError: vi.fn(),
+      reportLocalRelayError: vi.fn(),
       reportRemoteMutationError: vi.fn(),
     };
     const onFailure = vi.fn();
@@ -658,6 +676,7 @@ describe("MessagePortBrowserFollowerConnection", () => {
       retirePeerTransport: vi.fn(async () => undefined),
       clearRemoteServerTransportError: vi.fn(),
       reportRemoteServerTransportError: vi.fn(),
+      reportLocalRelayError: vi.fn(),
       reportRemoteMutationError: vi.fn(),
     };
     const connection = new MessagePortBrowserFollowerConnection(
@@ -712,6 +731,7 @@ describe("MessagePortBrowserFollowerConnection", () => {
       retirePeerTransport: vi.fn(async () => undefined),
       clearRemoteServerTransportError: vi.fn(),
       reportRemoteServerTransportError: vi.fn(),
+      reportLocalRelayError: vi.fn(),
       reportRemoteMutationError: vi.fn(),
     };
     const connection = new MessagePortBrowserFollowerConnection(

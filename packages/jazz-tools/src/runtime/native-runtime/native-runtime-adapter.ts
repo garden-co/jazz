@@ -882,6 +882,8 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverReplacementRetirement: Promise<void> | null = null;
   private serverTransportError: Error | null = null;
   private serverTransportErrorWaiters: ServerTransportErrorWaiter[] = [];
+  private localRelayError: Error | null = null;
+  private readonly localRelayErrorWaiters: ServerTransportErrorWaiter[] = [];
   private serverTransportWorkEpoch = 0;
   private serverTransportWorkWaiters: ServerTransportWorkWaiter[] = [];
   private serverEndpointUrl: string | null = null;
@@ -1121,13 +1123,15 @@ export class NativeRuntimeAdapter implements Runtime {
   }): Promise<Transport> {
     if (this !== this.ownerRuntime) return await this.ownerRuntime.connectUpstreamPeer(authority);
     this.peerUpstreamAttached = true;
-    if (authority)
-      return this.connectNegotiatedUpstream({
-        protocolVersion: WIRE_PROTOCOL_VERSION,
-        features: authority.features,
-        authority,
-      });
-    return await this.db.connectUpstream();
+    const transport = authority
+      ? await this.connectNegotiatedUpstream({
+          protocolVersion: WIRE_PROTOCOL_VERSION,
+          features: authority.features,
+          authority,
+        })
+      : await this.db.connectUpstream();
+    this.localRelayError = null;
+    return transport;
   }
 
   onPeerTransportWork(listener: (requiresDistinctPass?: boolean) => void): () => void {
@@ -3039,6 +3043,21 @@ export class NativeRuntimeAdapter implements Runtime {
     this.handleServerTransportError(error, this.serverConnectionGeneration, retrying);
   }
 
+  /** The durable worker itself failed, so a tab cannot establish Local either. */
+  reportLocalRelayError(error: Error): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.reportLocalRelayError(error);
+    this.localRelayError ??= error;
+    for (const waiter of this.localRelayErrorWaiters.splice(0)) {
+      if (waiter.active) waiter.reject(this.localRelayError);
+    }
+    // The broker replaces failed workers. Local persistence for this attempt
+    // has failed, but authority acceptance can still arrive after replacement.
+    // A pump or watchdog failure may already have stopped the upstream. Its
+    // teardown must preserve that terminal error for subsequent Global waits.
+    if (this.serverTransportError && !this.serverTransportErrorRetrying) return;
+    this.handleServerTransportError(error, this.serverConnectionGeneration, true);
+  }
+
   /** Clear a terminal remote-peer error after its replacement transport is ready. */
   clearRemoteServerTransportError(): void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.clearRemoteServerTransportError();
@@ -3109,6 +3128,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this.pendingLocalSettlements.size > 0) {
       await Promise.all(this.pendingLocalSettlements);
     }
+    this.throwServerTransportErrorForTier("local");
   }
 
   /** Observe worker durability work, including fire-and-forget mutations. */
@@ -4369,6 +4389,9 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private throwServerTransportErrorForTier(tier: string, throughOutage = false): void {
+    if (tier === "local" && this.nonDurableClient && this.localRelayError) {
+      throw this.localRelayError;
+    }
     if (tier !== "global" && tier !== "remote") return;
     const error = this.serverTransportErrorFor(throughOutage);
     if (error) throw error;
@@ -4378,8 +4401,10 @@ export class NativeRuntimeAdapter implements Runtime {
     tier: string,
     throughOutage = false,
   ): { promise: Promise<never>; cancel: () => void } | null {
-    if (tier !== "global" && tier !== "remote") return null;
-    const error = this.serverTransportErrorFor(throughOutage);
+    const local = tier === "local" && this.nonDurableClient;
+    if (!local && tier !== "global" && tier !== "remote") return null;
+    const error = local ? this.localRelayError : this.serverTransportErrorFor(throughOutage);
+    const waiters = local ? this.localRelayErrorWaiters : this.serverTransportErrorWaiters;
     if (error) {
       return {
         promise: Promise.reject(error),
@@ -4394,14 +4419,14 @@ export class NativeRuntimeAdapter implements Runtime {
     const promise = new Promise<never>((_, reject) => {
       waiter.reject = reject;
     });
-    this.serverTransportErrorWaiters.push(waiter);
+    waiters.push(waiter);
     return {
       promise,
       cancel: () => {
         if (!waiter.active) return;
         waiter.active = false;
-        const index = this.serverTransportErrorWaiters.indexOf(waiter);
-        if (index >= 0) this.serverTransportErrorWaiters.splice(index, 1);
+        const index = waiters.indexOf(waiter);
+        if (index >= 0) waiters.splice(index, 1);
       },
     };
   }
