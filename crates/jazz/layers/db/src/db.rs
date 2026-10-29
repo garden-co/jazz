@@ -50,12 +50,12 @@ use crate::values::{
     begin_savepoint, end_savepoint, from_sql, in_savepoint, quote, storage, to_sql, unsupported,
 };
 pub use sync::{
-    AccessProof, BuiltOn, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad, FrameJoiner, Image,
-    LOCAL_BASE, NON_DURABLE_BASE, ReadSpan, RejectedTransaction, RelationSnapshot, RemoteLinkHint,
-    SerializedReadResult, SubscriberId, SyncMessage, Transport, TransportError, Upstream, WireBase,
-    WireChunk, WireChunkRef, WireDelta, WireError, WireKind, WireOp, WirePull, WireTarget,
-    WireTransport, WireTransportAdapter, WireWrite, WriteConflict, decode_message, duplex,
-    encode_frames, validate_frame_batch_for_corpus,
+    AccessProof, Acting, BuiltOn, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad,
+    FrameJoiner, Image, LOCAL_BASE, NON_DURABLE_BASE, Outcome, ReadSpan, RejectedTransaction,
+    RelationSnapshot, RemoteLinkHint, SerializedReadResult, SubscriberId, SyncMessage, Transport,
+    TransportError, Upstream, WireBase, WireChunk, WireChunkRef, WireDelta, WireError, WireKind,
+    WireOp, WirePull, WireTarget, WireTransport, WireTransportAdapter, WireWrite, WriteConflict,
+    decode_message, duplex, encode_frames, validate_frame_batch_for_corpus,
 };
 
 /// Shape identity: equal for bindings of one query against one schema.
@@ -259,6 +259,9 @@ impl ReadSpec {
                 None
             }
         };
+        if opts.tier == ReadTier::Remote {
+            inner.check_not_stranded()?;
+        }
         Ok(Self {
             include_deleted: opts.read_view.include_deleted,
             settled_only: inner.client.is_some() && opts.tier == ReadTier::Remote,
@@ -377,6 +380,8 @@ pub struct SchemaPublication {
 
 struct Inner {
     conn: Connection,
+    /// One-way, owner-wide fence for new application mutations during close.
+    mutation_admission_closed: bool,
     /// Errors the next ticks fail with, for tests of a tick driver.
     #[cfg(any(test, feature = "testing"))]
     failing_ticks: VecDeque<ErrorCode>,
@@ -465,6 +470,10 @@ struct Inner {
     /// A replica whose store does not outlive it (a foreground over a
     /// durable relay): its local reads wait for the upstream's view too.
     non_durable: bool,
+    /// Rows the authority named as written for this replica's own commits
+    /// whose version was not this replica's image of them (see
+    /// `Inner::as_written_images`), asked for whole instead.
+    pub(crate) as_written_mismatches: u64,
     /// The global authority: what it settles is durable at `Global`.
     authority: bool,
     /// Uploads the authority refused, by commit seq, kept for a host that
@@ -485,8 +494,9 @@ struct Inner {
     accepted: u64,
     /// Rows written since the last server tick (only while serving).
     since_tick: Vec<(String, RowUuid, Vec<u8>)>,
-    /// Ops of the open local transaction, for upload.
-    capture: Vec<StagedOp>,
+    /// Ops of the open local transaction, for upload, each with the
+    /// schema version whose names it uses.
+    pub(crate) capture: Vec<(crate::ids::SchemaVersionId, StagedOp)>,
     /// Images a replica dropped since the last dispatch (evictions and
     /// rebases), for keyed invalidation.
     gone: RefCell<Vec<sync::Image>>,
@@ -667,6 +677,7 @@ fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> 
     Ok(Schema {
         tables,
         jazz: jazz.clone(),
+        version: jazz.version_id(),
         policies_from: None,
     })
 }
@@ -1093,6 +1104,7 @@ impl Db {
             let mut physical = Schema {
                 tables: BTreeMap::new(),
                 jazz: config.schema.clone(),
+                version: config.schema.version_id(),
                 policies_from: None,
             };
             physical.union(&schema)?;
@@ -1122,7 +1134,7 @@ impl Db {
         // An accepted upload that wrote no rows still took a seq: its
         // dedupe entry records it.
         let settled: Option<i64> = conn
-            .cached_row("SELECT MAX(seq) FROM _jazz_settled", [], |r| r.get(0))
+            .cached_row("SELECT MAX(seq) FROM _jazz_transactions", [], |r| r.get(0))
             .map_err(storage)?;
         seq = seq.max(settled.unwrap_or(0) as u64);
         let owner = Rc::new(schema.clone());
@@ -1130,6 +1142,7 @@ impl Db {
             view: None,
             inner: Rc::new(Store::new(Inner {
                 conn,
+                mutation_admission_closed: false,
                 #[cfg(any(test, feature = "testing"))]
                 failing_ticks: VecDeque::new(),
                 chunks,
@@ -1173,6 +1186,7 @@ impl Db {
                 publications: Vec::new(),
                 client: None,
                 non_durable: false,
+                as_written_mismatches: 0,
                 authority: false,
                 upstream_rejections: None,
                 sessions: Vec::new(),
@@ -1357,6 +1371,16 @@ impl Db {
                 .find(|c| c.name == column)
                 .map(|c| crate::names::identity(namespace, &table.stored, Some(&c.stored))),
         })
+    }
+
+    /// The schema version this handle writes under: its view's, else the
+    /// owner's. A replica uploads each commit under the version that
+    /// wrote it.
+    pub(crate) fn write_version(&self) -> crate::ids::SchemaVersionId {
+        match &self.view {
+            Some(view) => view.version,
+            None => self.inner.borrow().owner_version,
+        }
     }
 
     /// The shared state, set up to run under this handle's schema.
@@ -1601,6 +1625,19 @@ impl Db {
 
     pub async fn close(&self) -> Result<(), Error> {
         self.tick().await
+    }
+
+    /// Permanently stop admitting application row mutations in this runtime
+    /// and all its schema views. New transactions, further staging, stream
+    /// pushes and commits return a storage error, including a callback
+    /// transaction that was still running when this fence was set.
+    ///
+    /// Reads, transaction abandonment, stream aborts and ordinary sync/cleanup
+    /// ticks remain available so already committed writes can settle. This is
+    /// an in-memory shutdown phase, not a stored policy or storage retirement;
+    /// a new storage owner starts with mutation admission open.
+    pub fn stop_mutation_admission(&self) {
+        self.inner().mutation_admission_closed = true;
     }
 
     // ---- preparation ----------------------------------------------------
@@ -2028,6 +2065,7 @@ impl Db {
     /// One write. On a client, a local (unauthenticated) write is also an
     /// upload: it is recorded for the authority, which decides its fate.
     fn write_op(&self, mut op: StagedOp, who: Who) -> Result<WriteHandle, Error> {
+        self.inner().require_mutation_admission()?;
         self.with_upload(|| {
             let table = op.table().to_owned();
             let (prior, mark) = {
@@ -2051,7 +2089,15 @@ impl Db {
             // The upload record joins the write's SQLite transaction: if it
             // fails, `with_upload` rolls both back, and nobody has been told.
             if let Err(error) = committed
-                .then(|| self.record_upload(vec![op], handle.seq, sync::Kind::Mergeable, None))
+                .then(|| {
+                    self.record_upload(
+                        vec![op],
+                        handle.seq,
+                        sync::Kind::Mergeable,
+                        None,
+                        self.write_version(),
+                    )
+                })
                 .transpose()
             {
                 let mut inner = self.inner();
@@ -2151,6 +2197,7 @@ impl Db {
     ) -> Result<(T, TxReceipt), Error> {
         {
             let mut inner = self.inner();
+            inner.require_mutation_admission()?;
             if inner.tx.is_some() {
                 return Err(unsupported("nested transactions"));
             }
@@ -2160,7 +2207,10 @@ impl Db {
             inner.tx = Some((seq, BTreeSet::new()));
         }
         let mut tx = MergeableTx { db: self, identity };
-        let result = callback(&mut tx).await;
+        let result = callback(&mut tx).await.and_then(|value| {
+            self.inner().require_mutation_admission()?;
+            Ok(value)
+        });
         let captured;
         let prior;
         let changed = {
@@ -2184,7 +2234,18 @@ impl Db {
         let value = result?;
         let (seq, _) = changed.expect("committed");
         // The upload record joins the transaction's SQLite savepoint.
-        if let Err(error) = self.record_upload(captured, seq, sync::Kind::Mergeable, None) {
+        let recorded = self
+            .upload_version(captured.iter().map(|(version, _)| *version))
+            .and_then(|version| {
+                self.record_upload(
+                    captured.into_iter().map(|(_, op)| op).collect(),
+                    seq,
+                    sync::Kind::Mergeable,
+                    None,
+                    version,
+                )
+            });
+        if let Err(error) = recorded {
             let mut inner = self.inner();
             inner.seq = prior;
             inner.abandon_savepoint("tx")?;
@@ -2423,6 +2484,12 @@ impl Db {
             }
             inner.write_admission(&target, cells)?;
             if make_current {
+                // Pending commits written under the version current until
+                // now keep uploading under it (INV-SYNC-52).
+                let previous = *inner.owner_version.as_bytes();
+                if let Some(client) = inner.client.as_mut() {
+                    client.keep_version(previous);
+                }
                 inner.owner_version = target.jazz.version_id();
                 inner.owner = Rc::new(target);
                 // Read policies that changed may read differently from
@@ -3023,6 +3090,16 @@ impl Drop for Inner {
 }
 
 impl Inner {
+    fn require_mutation_admission(&self) -> Result<(), Error> {
+        if self.mutation_admission_closed {
+            return Err(Error::new(
+                ErrorCode::Storage,
+                "database is closing or closed",
+            ));
+        }
+        Ok(())
+    }
+
     /// Undo everything since `SAVEPOINT name`. Its changes are forgotten
     /// first, so no subscriber hears of them whatever happens next.
     fn abandon_savepoint(&self, name: &str) -> Result<(), Error> {
@@ -4758,8 +4835,8 @@ impl Inner {
             self.exec(
                 &format!(
                     "DELETE FROM {} WHERE id = ?1 AND _b = ?2 AND _seq < 0 \
-                     AND (_st & {STATE_AS_SENT}) <> 0 AND EXISTS (SELECT 1 FROM _jazz_settled AS s \
-                     WHERE s.seq = -_seq AND s.node = ?3)",
+                     AND (_st & {STATE_AS_SENT}) <> 0 AND EXISTS (SELECT 1 FROM _jazz_transactions AS s \
+                     JOIN _jazz_nodes AS n ON n.n = s.n WHERE s.seq = -_seq AND n.node = ?3)",
                     quote(&format!("{stored}__h"))
                 ),
                 rusqlite::params![row.0.as_bytes().to_vec(), key, node.to_vec()],
@@ -5726,6 +5803,7 @@ pub(crate) enum StagedOp {
 
 impl Db {
     pub async fn mergeable_tx(&self) -> Result<MergeableTxHandle<'_>, Error> {
+        self.inner().require_mutation_admission()?;
         Ok(MergeableTxHandle {
             db: self,
             identity: WriteIdentity::Database,
@@ -5739,6 +5817,7 @@ impl Db {
         &self,
         author: AuthorSubject,
     ) -> Result<MergeableTxHandle<'_>, Error> {
+        self.inner().require_mutation_admission()?;
         Ok(MergeableTxHandle {
             db: self,
             identity: WriteIdentity::Attribution(author),
@@ -5830,6 +5909,7 @@ impl MergeableTxHandle<'_> {
         cells: BTreeMap<String, Value>,
         mut opts: InsertOptions,
     ) -> Result<WriteHandle, Error> {
+        self.db.inner().require_mutation_admission()?;
         let row = match opts.row_id {
             Some(row) => row,
             None => self.db.inner().ids.next_row_id(),
@@ -5848,6 +5928,7 @@ impl MergeableTxHandle<'_> {
         cells: BTreeMap<String, Value>,
         opts: UpdateOptions,
     ) -> Result<(), Error> {
+        self.db.inner().require_mutation_admission()?;
         self.ops
             .borrow_mut()
             .push(StagedOp::Update(table.to_owned(), row, cells, opts));
@@ -5861,6 +5942,7 @@ impl MergeableTxHandle<'_> {
         cells: BTreeMap<String, Value>,
         opts: UpsertOptions,
     ) -> Result<(), Error> {
+        self.db.inner().require_mutation_admission()?;
         self.ops
             .borrow_mut()
             .push(StagedOp::Upsert(table.to_owned(), row, cells, opts));
@@ -5873,6 +5955,7 @@ impl MergeableTxHandle<'_> {
         row: RowUuid,
         opts: DeleteOptions,
     ) -> Result<(), Error> {
+        self.db.inner().require_mutation_admission()?;
         self.ops
             .borrow_mut()
             .push(StagedOp::Delete(table.to_owned(), row, opts));
@@ -5886,6 +5969,7 @@ impl MergeableTxHandle<'_> {
         content: Option<BTreeMap<String, Value>>,
         opts: RestoreOptions,
     ) -> Result<(), Error> {
+        self.db.inner().require_mutation_admission()?;
         self.ops
             .borrow_mut()
             .push(StagedOp::Restore(table.to_owned(), row, content, opts));
@@ -5901,6 +5985,7 @@ impl MergeableTxHandle<'_> {
         destination: BranchSelector,
         row: RowUuid,
     ) -> Result<(), Error> {
+        self.db.inner().require_mutation_admission()?;
         self.ops
             .borrow_mut()
             .push(StagedOp::Move(table.to_owned(), source, destination, row));
@@ -6004,6 +6089,29 @@ impl SchemaViewId {
 
 fn schema_error(message: impl Into<String>) -> Error {
     Error::new(ErrorCode::Schema, message)
+}
+
+impl Db {
+    /// The schema version a transaction's commit uploads under: the one
+    /// every write in it (each with its `versions` entry) names its tables
+    /// and columns by. A replica cannot upload one commit under several, so
+    /// a transaction written through views of different versions is
+    /// refused there; elsewhere nothing uploads.
+    fn upload_version(
+        &self,
+        versions: impl IntoIterator<Item = crate::ids::SchemaVersionId>,
+    ) -> Result<crate::ids::SchemaVersionId, Error> {
+        let mut versions = versions.into_iter();
+        let Some(first) = versions.next() else {
+            return Ok(self.write_version());
+        };
+        if self.is_client() && versions.any(|version| version != first) {
+            return Err(unsupported(
+                "a transaction writing through schema views of different versions on a replica",
+            ));
+        }
+        Ok(first)
+    }
 }
 
 /// The changes a schema view may make over the owner's schema without an
@@ -6550,6 +6658,7 @@ impl Db {
 
     fn begin(&self, id: OpenTransactionId, kind: BatchKind) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
+        inner.require_mutation_admission()?;
         if inner.batches.contains_key(&id) {
             return Err(rejected(format!("transaction {id:?} is already open")));
         }
@@ -6584,6 +6693,7 @@ impl Db {
     }
 
     fn take_batch(&self, id: OpenTransactionId) -> Result<Batch, Error> {
+        self.inner().require_mutation_admission()?;
         self.inner
             .borrow_mut()
             .batches
@@ -6747,6 +6857,7 @@ impl Db {
     }
 
     fn commit_ops_now(&self, batch: &Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
+        self.inner().require_mutation_admission()?;
         let ops = &batch.ops;
         let (seq, prior, mark) = {
             let mut inner = self.inner();
@@ -6772,12 +6883,18 @@ impl Db {
         };
         // `commit_ops` holds the upload record and the commit in one SQLite
         // transaction and rolls both back on an error.
-        if let Err(error) = self.record_upload(
-            ops.iter().map(|(_, op)| op.clone()).collect(),
-            seq,
-            kind,
-            None,
-        ) {
+        let recorded = self
+            .upload_version(ops.iter().map(|(schema, _)| schema.version))
+            .and_then(|version| {
+                self.record_upload(
+                    ops.iter().map(|(_, op)| op.clone()).collect(),
+                    seq,
+                    kind,
+                    None,
+                    version,
+                )
+            });
+        if let Err(error) = recorded {
             let mut inner = self.inner();
             inner.seq = prior;
             inner.changed.borrow_mut().truncate(mark);
@@ -7008,6 +7125,7 @@ impl Db {
     ) -> Result<(), Error> {
         let marks = {
             let mut inner = self.inner.staging();
+            inner.require_mutation_admission()?;
             inner.schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
             let chunked = inner.chunk_large_cells(&mut op)?;
             edits.pending_nodes.extend(chunked.pending_nodes);

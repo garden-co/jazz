@@ -11,9 +11,9 @@ are stored, a rejection's reason name changed how fates are recorded, and
 pending uploads moved from one encoded message to a row per op).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `d78562ef4a8eb970c467e675559c9d7587b3ed0f99811ce032a7aa54802adcb9`.
+  the SQLite file `94e06f90678579806523f100a690f81359aa8f18cd3d72c858951d91f335b86f`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `190d4428d36b2aa0a4ffe3cf370a81c561e8cd2b4f570493e188dfce8f77cb85`.
+  `a96432b9fbdb9caa268110cedab776b396804c28cba8ca1154bdc5d179eaef2e`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
@@ -28,9 +28,11 @@ nodes and write times:
   write as sent (`_st` bit 2, at `_seq` = minus the commit's seq);
 - a client that synced `projects` and `documents`, wrote one row that
   settled, one stamped far ahead of the server's clock that the server
-  rejected (so `_jazz_applied` keeps a rejected fate with its reason name),
-  then two writes (an insert and an update) that never reached the
-  server: its pending uploads;
+  rejected (so `_jazz_transactions` keeps a rejected fate with its reason name),
+  then two writes (an insert and an update) and a serializable transaction
+  that read one project and inserted two, none of which reached the
+  server: its pending uploads, the last one stored as two op rows and a
+  read row;
 - then the server activated a second schema version that renames
   `documents.title` to `heading` (a stored-names lens) and wrote under it.
 
@@ -61,8 +63,23 @@ Moving a commit's bases, access proofs (formerly sources) and deltas onto its
 ops, so each pending op is stored with them and `_jazz_pending_items` keeps
 only ops and serializable reads, regenerated it the same way.
 
+Replacing a pending commit's `author` and `session` fields with one `acting`
+enum (`Own`, `Attributed`, `Session`), which changes the encoded
+`_jazz_pending` header, regenerated it the same way. A pending row in the
+earlier layout is refused as an unsupported storage format, never misread.
+
+Merging `_jazz_applied` and `_jazz_settled` into one `_jazz_transactions`
+table keyed by an interned node code (`_jazz_nodes.n`) regenerated it the
+same way.
+
+Deleting a settled commit's pending rows in one statement (the
+`_jazz_pending_forget` trigger on `_jazz_pending`, with
+`_jazz_pending_versions` now created on open) regenerated it the same way,
+adding the serializable pending commit above so the per-op layout is
+pinned with more than one op and a read.
+
 Storage failures now use the appended `WireError::Storage(String)` tag 3 in
-recorded verdicts (`_jazz_applied.result` and the originating retry store's
+recorded verdicts (`_jazz_transactions.result` and the originating retry store's
 `_jazz_rejected.error`). Existing tags 0 through 2 still decode unchanged;
 the pinned files contain no storage failure, so their bytes do not change.
 The sync wire corpus pins the new tag and the old generic tag, and the

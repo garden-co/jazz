@@ -75,6 +75,8 @@ mod local_first_first_load_gate;
 mod local_first_server_wait;
 #[path = "../maybe_conflicting.rs"]
 mod maybe_conflicting;
+#[path = "../mutation_admission.rs"]
+mod mutation_admission;
 #[path = "../order_by_unselected_column.rs"]
 mod order_by_unselected_column;
 #[path = "../parameterized_subscription_routing.rs"]
@@ -85,6 +87,8 @@ mod pending_commit_reopen;
 mod permission_advice;
 #[path = "../policy_activation.rs"]
 mod policy_activation;
+#[path = "../pre_sync_writes.rs"]
+mod pre_sync_writes;
 #[path = "../prepared_claim_routing.rs"]
 mod prepared_claim_routing;
 #[path = "../provenance.rs"]
