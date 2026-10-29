@@ -1105,7 +1105,6 @@ impl Db {
             let mut physical = stored_schema(&conn, &config.schema)?;
             let ddl = physical.union(&schema)?;
             execute_script(&conn, &ddl)?;
-            crate::large::fill_keys(&conn, &chunks, &physical)?;
             physical
         };
         names.admit(&conn, &schema)?;
@@ -2727,13 +2726,9 @@ impl Inner {
     /// version this replica knows names).
     pub(crate) fn stored_image(&self, mut image: sync::Image) -> Option<sync::Image> {
         let table = self.physical.by_stored(&image.table)?;
-        // A large value's key column travels named after the column it keys.
-        image.cells.retain(|(name, _)| {
-            name.starts_with('$')
-                || table
-                    .by_stored(crate::large::keyed_by(name).unwrap_or(name))
-                    .is_some()
-        });
+        image
+            .cells
+            .retain(|(name, _)| name.starts_with('$') || table.by_stored(name).is_some());
         Some(image)
     }
 
@@ -2764,7 +2759,6 @@ impl Inner {
     ) -> Result<(), Error> {
         let ddl = self.physical.union(target)?;
         execute_script(&self.conn, &ddl)?;
-        crate::large::fill_keys(&self.conn, &self.chunks, &self.physical)?;
         // A new copy holds its source's values, in every row version.
         for cell in &cells {
             if let crate::names::LensCellRule::Copy(source) = &cell.rule {
@@ -3174,13 +3168,7 @@ impl Inner {
     fn execute(&self, compiled: &Compiled, table: &str) -> Result<Vec<CurrentRow>, Error> {
         let started = web_time::Instant::now();
         let mut run = crate::slow::Run::default();
-        let rows = self.with_preps(&compiled.preps, |ties| {
-            let sql = match &compiled.ranked_sql {
-                Some(ranked) if ties => ranked,
-                _ => &compiled.sql,
-            };
-            self.execute_sql(sql, compiled, table, &mut run)
-        })?;
+        let rows = self.execute_sql(&compiled.sql, compiled, table, &mut run)?;
         run.elapsed = started.elapsed();
         let mut slow = self.slow.borrow_mut();
         if slow.is_slow(run.elapsed) {
@@ -3213,30 +3201,6 @@ impl Inner {
         Ok(plan.join("\n"))
     }
 
-    /// Answer `preps` into `_jazz_lv_scratch`, run `body` (told whether a
-    /// rank prep found chunked values sharing a sort key), then clear the
-    /// answers. Statements that need no prep run directly.
-    pub(crate) fn with_preps<T>(
-        &self,
-        preps: &[crate::compile::Prep],
-        body: impl FnOnce(bool) -> Result<T, Error>,
-    ) -> Result<T, Error> {
-        if preps.is_empty() {
-            return body(false);
-        }
-        // The answers are scratch rows: undone with the savepoint either way.
-        begin_savepoint(&self.conn, "jazz_scratch")?;
-        let result = (|| {
-            let mut ties = false;
-            for prep in preps {
-                ties |= crate::large::answer(&self.conn, &self.chunks, prep)?;
-            }
-            body(ties)
-        })();
-        end_savepoint(&self.conn, "jazz_scratch", false)?;
-        result
-    }
-
     fn execute_sql(
         &self,
         sql: &str,
@@ -3265,17 +3229,9 @@ impl Inner {
         let mut arms: Vec<Arc<str>> = Vec::new();
         while let Some(row) = rows.next().map_err(storage)? {
             let id: Vec<u8> = if compiled.aggregate {
-                // A group's key: the group-by cell (which a chunked value's
-                // class stands for in SQL) by its value.
-                let key = match row.get_ref(0).map_err(storage)? {
-                    cell @ ValueRef::Integer(_) if compiled.large_group => {
-                        format!("{:?}", self.chunks.materialize(cell)?)
-                    }
-                    ValueRef::Text(cell) | ValueRef::Blob(cell) if compiled.large_group => {
-                        format!("{cell:?}")
-                    }
-                    cell => format!("{:?}", Sql::from(cell)),
-                };
+                // A group's key: the group-by cell, a chunked one by its
+                // identity (SPEC 19.11).
+                let key = format!("{:?}", Sql::from(row.get_ref(0).map_err(storage)?));
                 blake3::hash(key.as_bytes()).as_bytes()[..16].to_vec()
             } else {
                 row.get(0).map_err(storage)?
@@ -3665,18 +3621,17 @@ impl Inner {
         cut: Option<Cut>,
         policy: impl FnOnce(&mut Ctx<'_>) -> Result<String, Error>,
     ) -> Result<(bool, OverlayRead), Error> {
-        let (sql, params, preps, read) = self.policy_check(table, row, key, cut, policy)?;
-        let value: i64 = self.with_preps(&preps, |_| {
-            self.conn
-                .cached_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
-                .map_err(storage)
-        })?;
+        let (sql, params, read) = self.policy_check(table, row, key, cut, policy)?;
+        let value: i64 = self
+            .conn
+            .cached_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
+            .map_err(storage)?;
         Ok((value != 0, read))
     }
 
     /// The statement [`Inner::holds_at`] runs: the policy SQL boolean for
-    /// one stored row, its parameters, the preps it needs, and what of the
-    /// cut's overlay it reads.
+    /// one stored row, its parameters, and what of the cut's overlay it
+    /// reads.
     fn policy_check(
         &self,
         table: &Table,
@@ -3684,7 +3639,7 @@ impl Inner {
         key: &[u8],
         cut: Option<Cut>,
         policy: impl FnOnce(&mut Ctx<'_>) -> Result<String, Error>,
-    ) -> Result<(String, Vec<Sql>, Vec<crate::compile::Prep>, OverlayRead), Error> {
+    ) -> Result<(String, Vec<Sql>, OverlayRead), Error> {
         let binding = BTreeMap::new();
         let claims = Session::default();
         let mut ctx = Ctx::new(&self.schema, None, &claims, &binding).with_cut(cut, false);
@@ -3693,7 +3648,6 @@ impl Inner {
             rows: ctx.overlaid_rows,
             tables: std::mem::take(&mut ctx.overlay_tables),
         };
-        let preps = std::mem::take(&mut ctx.preps);
         let mut params = ctx.params;
         params.push(Sql::Blob(row.0.as_bytes().to_vec()));
         params.push(Sql::Blob(key.to_vec()));
@@ -3703,7 +3657,7 @@ impl Inner {
             params.len() - 1,
             params.len()
         );
-        Ok((sql, params, preps, read))
+        Ok((sql, params, read))
     }
 
     /// SQLite's plan for the INSERT check a unit ending now would run on
@@ -3725,7 +3679,7 @@ impl Inner {
             overlay: Some(overlay),
         };
         let session = self.session(author);
-        let (sql, params, _, _) = self.policy_check(table, row, &[], Some(cut), |ctx| {
+        let (sql, params, _) = self.policy_check(table, row, &[], Some(cut), |ctx| {
             ctx.operation_policy(table, Operation::Insert, "a", &session)
         })?;
         let mut statement = self
@@ -3757,7 +3711,6 @@ impl Inner {
         let mut ctx = Ctx::new(&self.schema, None, &claims, &binding).with_cut(Some(cut), false);
         let condition = policy(&mut ctx)?;
         let source = ctx.source(table)?;
-        let preps = std::mem::take(&mut ctx.preps);
         let mut params = ctx.params;
         params.push(Sql::Blob(row.0.as_bytes().to_vec()));
         params.push(Sql::Blob(key.to_vec()));
@@ -3766,12 +3719,11 @@ impl Inner {
             params.len() - 1,
             params.len()
         );
-        let value: Option<i64> = self.with_preps(&preps, |_| {
-            self.conn
-                .cached_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
-                .optional()
-                .map_err(storage)
-        })?;
+        let value: Option<i64> = self
+            .conn
+            .cached_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
+            .optional()
+            .map_err(storage)?;
         Ok(value.is_some_and(|value| value != 0))
     }
 
@@ -4409,37 +4361,6 @@ impl Inner {
         )?))
     }
 
-    /// The key cell for a cell of a large-capable column: a chunked value's
-    /// sort prefix, NULL otherwise.
-    pub(crate) fn key_cell(&self, cell: &Sql) -> Result<Sql, Error> {
-        match cell {
-            Sql::Integer(cell) => self.chunks.prefix(&self.chunks.descriptor(*cell)?),
-            _ => Ok(Sql::Null),
-        }
-    }
-
-    /// The key cells the stored columns `written` (with their cells) need
-    /// in `table`'s physical table: (key column, key cell).
-    fn key_cells<'a>(
-        &self,
-        table: &Table,
-        written: impl Iterator<Item = (&'a str, &'a Sql)>,
-    ) -> Result<Vec<(String, Sql)>, Error> {
-        let Some(physical) = self.physical.tables.get(&table.stored) else {
-            return Ok(Vec::new());
-        };
-        if physical.keys.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut keys = Vec::new();
-        for (stored, cell) in written {
-            if let Some(key) = physical.key_of(stored) {
-                keys.push((key.stored.clone(), self.key_cell(cell)?));
-            }
-        }
-        Ok(keys)
-    }
-
     /// Every stored column of `table`, including ones only other schema
     /// views know: history and copy-on-write carry whole stored rows.
     fn columns_list(&self, table: &Table) -> String {
@@ -4944,26 +4865,17 @@ impl Inner {
             values.push(Sql::Integer(deleted as i64));
             sets.push(format!("_del = ?{}", values.len()));
         }
-        let mut written = Vec::new();
         for (name, value) in cells {
             let cell = match table.column(name) {
                 Some(column) => self.bind_cell(column, value, source)?,
                 None => Self::bind_value(value)?,
             };
-            written.push((table.stored_name(name).to_owned(), cell.clone()));
             values.push(cell);
             sets.push(format!(
                 "{} = ?{}",
                 quote(table.stored_name(name)),
                 values.len()
             ));
-        }
-        for (key, cell) in self.key_cells(
-            table,
-            written.iter().map(|(name, cell)| (name.as_str(), cell)),
-        )? {
-            values.push(cell);
-            sets.push(format!("{} = ?{}", quote(&key), values.len()));
         }
         for (name, value) in self.stamp()?.updated() {
             values.push(value);
@@ -5042,7 +4954,6 @@ impl Inner {
             Sql::Blob(key.clone()),
             Sql::Integer(seq as i64),
         ];
-        let mut written: Vec<(String, Sql)> = Vec::new();
         for column in &table.columns {
             let value = match (cells.get(&column.name), &column.default) {
                 (Some(value), _) => self.bind_cell(column, value, source)?,
@@ -5053,20 +4964,11 @@ impl Inner {
                 }
             };
             for (_, copy) in copies.iter().filter(|(c, _)| *c == column.name) {
-                written.push((copy.clone(), value.clone()));
                 names.push(quote(copy));
                 values.push(value.clone());
             }
-            written.push((column.stored.clone(), value.clone()));
             names.push(quote(&column.stored));
             values.push(value);
-        }
-        for (key, cell) in self.key_cells(
-            table,
-            written.iter().map(|(name, cell)| (name.as_str(), cell)),
-        )? {
-            names.push(quote(&key));
-            values.push(cell);
         }
         for (stored, default) in dropped {
             names.push(quote(&stored));
