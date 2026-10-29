@@ -23,7 +23,8 @@ readers of a version whose tree contains them.
 Invariant digest:
 
 - `INV-CONTENT-1`: large values have one implementation, and a chunked value
-  reads, filters, orders and indexes as its logical value.
+  reads as its logical value. Queries compare it by cell, never by content
+  (19.5).
 - `INV-CONTENT-2`: a version's cell is immutable: `(epoch, n)` always names the
   same logical value, however the epoch grows.
 - `INV-CONTENT-3`: nodes and edits are disclosed only through a readable row
@@ -67,17 +68,8 @@ logical length exceeds `INLINE_VALUE_MAX_BYTES`. So an inline cell never equals
 a chunked one, and a write that brings a chunked value back under the limit
 stores it inline.
 
-A column that an index names additionally has a hidden key column
-`$k:<column>` in the table and its history (`$` names are the engine's). It
-holds the value's sort prefix (its first `SORT_PREFIX_BYTES` = 256 logical
-bytes, cut on a code point for text, in the column's storage class) for
-chunked cells and NULL otherwise. The column's indexes, orderings and ranges
-are on `COALESCE("$k:<column>", <column>)`. A key column is store-local: a
-store writes it with the cell, fills it for cells stored before an index
-named the column, and an image carries it under the column's wire name, which
-the receiving store keeps for the columns it indexes. Unindexed columns have
-no key column; their orderings take each chunked value's sort key from the
-Rust prep.
+A large-capable column has no other stored column: its indexes are on the
+cell itself, and no query reads a chunked value's bytes (19.5).
 
 ## 19.2 Trees and nodes
 
@@ -241,23 +233,45 @@ A chunked value is read by replaying its prefix over the parts of its tree the
 read needs. Partial reads (byte, UTF-8 and UTF-16 ranges, JSON pointers) map
 their range through the edits and read only the leaves it covers.
 
-| Operation                                            | How it runs                                                                                        |
-| ---------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `=` against an inline-size literal                   | SQL: an inline cell compares directly; a chunked cell never matches                                |
-| `=`, `IN`, DISTINCT, GROUP BY between chunked values | equal cells are equal values; unequal cells are compared by length, then content, in the Rust prep |
-| `=` against a literal over 64 KiB                    | the Rust prep                                                                                      |
-| length                                               | the Rust prep: tree length plus the prefix's net edits                                             |
-| ORDER BY and ranges, indexed column                  | the index on `COALESCE(c__k, c)`; the Rust prep orders values sharing a prefix                     |
-| ORDER BY and ranges, unindexed column                | the Rust prep ranks the column's chunked values                                                    |
-| `contains`, LIKE, JSON pointer                       | the Rust prep reads the content                                                                    |
+Queries compare cells, in plain SQL. An inline cell compares as its value,
+exactly as any other string or bytes value. A chunked cell (a value over
+`INLINE_VALUE_MAX_BYTES`, 64 KiB) is compared by identity, never by content:
 
-The prep answers before the statement runs and hands its answers to the
-statement as parameters, so every query, trigger and schema object uses only
-SQLite built-ins and runs on any SQLite, Durable Objects included.
+| Operation on a value over 64 KiB          | Result                                                                                                            |
+| ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `=`, `!=`, `IN` against an inline literal | never equal: an inline literal is under the threshold, a chunked value over it                                    |
+| `=`, `!=`, `IN` against a longer literal  | refused when the query compiles: "comparing `t.c` with a literal over 65536 bytes is not supported yet"           |
+| `=`, `!=` between two columns, joins      | equal only when both name the same cell                                                                           |
+| GROUP BY, DISTINCT                        | one group per cell                                                                                                |
+| `<`, `<=`, `>`, `>=`                      | never matches, against a literal or another column                                                                |
+| `contains`                                | never matches                                                                                                     |
+| ORDER BY                                  | after NULL and before every inline value ascending (reversed descending), among themselves in no meaningful order |
 
-`INV-CONTENT-1`: every read, comparison, edit and sync path goes through the
-one implementation in `jazz-db`, and its answers equal those of the
-materialized logical value.
+Equal cells always hold equal values (`INV-CONTENT-2`), so cell equality can
+under-report equality but never over-report it. Two cells of one value are
+the same cell when both are tail-free (`n = 0`): a tree is content-defined,
+so the same bytes build the same root, and interning reuses the epoch over
+it. A value written with an edit tail, or interned into a different epoch on
+another replica, is a different cell; equality between such values depends on
+how they were written. Cells are store-local: a client and the server may
+hold one value as different cells, so a policy that compares two
+large-capable columns can decide a row over 64 KiB differently on each.
+Values up to 64 KiB, the common case, have none of these limits.
+
+These are limits, not a design commitment. A column flag that consolidates
+every write to a tail-free tree (making equality on that column exact, at the
+cost of cheap edits) is the planned escape hatch; content `contains` would
+need a write-time index (SQLite FTS5 with the trigram tokenizer runs on every
+target, Durable Objects included).
+
+The only Rust-side query work on chunked values is reading them: whole
+projections, partial selections (19.12), splices and deltas. Every query,
+trigger and schema object uses only SQLite built-ins and runs on any SQLite,
+Durable Objects included, and reads never write.
+
+`INV-CONTENT-1`: every read, edit and sync path goes through the one
+implementation in `jazz-db`, and every read returns the materialized logical
+value.
 
 ## 19.6 Deltas
 
@@ -579,7 +593,7 @@ not expose epochs, cells, node hashes, tree nodes, leases or retry state.
   check, with short-lived presigned URLs so revealed names expire.
 - Store-local leaf patches (a new leaf kept as its base leaf plus edits until
   it is offloaded), as a storage optimization outside the format.
-- A lazily filled content-hash table, if exact equality between chunked values
-  in plain SQL turns out to matter.
+- Exact equality, ranges and `contains` on values over 64 KiB (19.5): a
+  consolidating column flag, and a write-time FTS5 trigram index.
 - Retention and history thinning: removal of old versions must be ordinary
   refcounted row deletions, never direct node deletion.

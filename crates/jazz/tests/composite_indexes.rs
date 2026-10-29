@@ -264,9 +264,7 @@ fn composite_index_definition_in_the_store_file_is_pinned() {
             "tasks__ix(owner,rank)".to_owned(),
             concat!(
                 "CREATE INDEX \"tasks__ix(owner,rank)\" ON \"tasks\"(",
-                // A text cell may be chunked; the key is its key column's
-                // sort prefix then, its inline text otherwise.
-                "COALESCE(\"$k:owner\", \"owner\"), \"rank\", id)"
+                "\"owner\", \"rank\", id)"
             )
             .to_owned()
         )]

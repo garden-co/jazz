@@ -11,9 +11,9 @@ are stored, a rejection's reason name changed how fates are recorded, and
 pending uploads moved from one encoded message to a row per op).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `9867047a9cfba82293d56e3c5fd61a845423078ba9593948776df147d08af112`.
+  the SQLite file `42532ba76913e0743a8857b2c21ac13721e616265cdd8ed0ba5e4bf453c44d59`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `a5b77c755525b8ae311fe559f8380e9b5db99a450a033e41d935d39a030ee1a1`.
+  `836358707284e5ec14388915a1901030a91b9f2ba69cef80b3809d1009a53dad`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
@@ -38,3 +38,7 @@ in place, without a migration or format bump. Pending writes recover their
 upstream baseline from the current row or the newest history version below
 the replica's local sequence range. Eviction removes current and historical
 versions so reopening cannot restore an evicted baseline.
+
+Dropping the large-value key columns (`$k:<column>`) and `_jazz_lv_scratch`,
+when queries stopped reading chunked values' content, regenerated it the same
+way.
