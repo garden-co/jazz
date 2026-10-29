@@ -635,3 +635,72 @@ fn a_head_tombstone_masks_a_base_row_that_arrives_after_the_view_opened() {
     pump(&server, &client);
     assert_eq!(titles(&client, &query, draft_view), ["y"]);
 }
+
+/// A one-shot read through the host path, settled by the server at `tier`.
+fn read_once(server: &Db, client: &Db, query: &Query, opts: ReadOpts) -> Vec<String> {
+    let bytes = postcard::to_allocvec(query).unwrap();
+    let mut read = pin!(client.all_serialized_query(&bytes, opts, None, None, None));
+    let mut cx = Context::from_waker(Waker::noop());
+    let rows = loop {
+        if let Poll::Ready(result) = read.as_mut().poll(&mut cx) {
+            match result.unwrap() {
+                jazz::db::SerializedReadResult::Rows(rows) => break rows,
+                other => panic!("{other:?}"),
+            }
+        }
+        block_on(client.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+    };
+    rows.iter()
+        .map(|row| match row.cell("title") {
+            Some(Value::String(title)) => title,
+            other => panic!("{other:?}"),
+        })
+        .collect()
+}
+
+#[test]
+fn a_one_shot_view_read_masks_a_held_base_row_with_its_head() {
+    let (server, client, _) = connected();
+    let (main, draft) = (branch(0xd9), branch(0xda));
+    put(&server, &main, 0x45, "x", 1);
+    put(&server, &main, 0x46, "y", 1);
+    put(&server, &main, 0x47, "z", 1);
+    set_rank(&server, 0x45, &draft, &main, 9);
+    del(&server, 0x47, &draft, Some(&main));
+    // A main subscription brings main's x and z.
+    let all = client.prepare_query(&Query::from("todos")).unwrap();
+    let _m = block_on(client.subscribe(&all, ReadOpts::default().branch_view(main.clone(), None)))
+        .unwrap();
+    pump(&server, &client);
+
+    let mut opts = ReadOpts::default().branch_view(draft, Some(BranchViewBase::Current(main)));
+    opts.tier = ReadTier::Remote;
+    assert_eq!(read_once(&server, &client, &rank_one(), opts), ["y"]);
+}
+
+#[test]
+fn views_over_one_head_share_its_head_branch_read_until_the_last_closes() {
+    let (server, client, _) = connected();
+    let (main, draft) = (branch(0xdb), branch(0xdc));
+    put(&server, &main, 0x45, "x", 1);
+    let subscriptions = || server.runtime_stats_for_test().active_subscriptions;
+    let before = subscriptions();
+    let view = ReadOpts::default().branch_view(draft, Some(BranchViewBase::Current(main.clone())));
+    let filtered = client.prepare_query(&rank_one()).unwrap();
+    let all = client.prepare_query(&Query::from("todos")).unwrap();
+
+    // Each view, and one head-branch read of `todos` they share.
+    let a = block_on(client.subscribe(&filtered, view.clone())).unwrap();
+    pump(&server, &client);
+    assert_eq!(subscriptions() - before, 2);
+    let b = block_on(client.subscribe(&all, view.clone())).unwrap();
+    pump(&server, &client);
+    assert_eq!(subscriptions() - before, 3);
+    drop(a);
+    pump(&server, &client);
+    assert_eq!(subscriptions() - before, 2);
+    drop(b);
+    pump(&server, &client);
+    assert_eq!(subscriptions(), before);
+}

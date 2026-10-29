@@ -1281,6 +1281,13 @@ pub(crate) struct Remote {
     /// resumes from it too.
     through: Option<u64>,
     watermark: [u8; 32],
+    /// Whether the server answered this read itself; `answered` also
+    /// waits for its `companions`.
+    settled: bool,
+    /// The head-branch reads it holds (see `Inner::head_branch_reads`),
+    /// by key: it is answered once they are, refused if one is, and
+    /// releases them when it goes.
+    companions: Vec<String>,
 }
 
 /// The snapshot reference a read view is frozen at, if any.
@@ -4820,6 +4827,31 @@ impl Inner {
 }
 
 impl Client {
+    /// Recompute whether the read under `key`, and every read holding it
+    /// as a head-branch companion, is answered: by the server itself and
+    /// through all its companions.
+    fn refresh_answered(&mut self, key: &str) {
+        let holders: Vec<String> = self
+            .remote
+            .iter()
+            .filter(|(_, remote)| remote.companions.iter().any(|c| c == key))
+            .map(|(holder, _)| holder.clone())
+            .chain(std::iter::once(key.to_owned()))
+            .collect();
+        for holder in holders {
+            let Some(remote) = self.remote.get(&holder) else {
+                continue;
+            };
+            let answered = remote.settled
+                && remote.companions.iter().all(|companion| {
+                    self.remote
+                        .get(companion)
+                        .is_some_and(|companion| companion.settled)
+                });
+            remote.answered.set(answered);
+        }
+    }
+
     /// Stored table `from` is stored as `to` now (a replica took its
     /// upstream's name for it).
     pub(crate) fn moved_table(&mut self, from: &str, to: &str) {
@@ -5416,15 +5448,13 @@ impl Db {
         let companions = inner.head_branch_reads(&prepared.query, view);
         let (query, include_deleted, view) =
             upstream_read(&prepared.query, include_deleted, view, inner.non_durable);
-        for (query, view) in companions {
-            inner.attach_upstream_read(query, &BTreeMap::new(), true, view, reach);
-        }
         let (_, flags) = inner.attach_upstream_read(
             query.into_owned(),
             &prepared.binding,
             include_deleted,
             view,
             reach,
+            companions,
         );
         Some(flags)
     }
@@ -5496,7 +5526,8 @@ impl Inner {
             .collect()
     }
 
-    /// Attach one upstream live read (refcounted by its key): its key, and
+    /// Attach one upstream live read (refcounted by its key), and on its
+    /// first attach the head-branch `companions` it holds: its key, and
     /// whether the server answered it, why it refused it, and whether the
     /// answer was the global authority's.
     fn attach_upstream_read(
@@ -5506,6 +5537,7 @@ impl Inner {
         include_deleted: bool,
         view: ReadViewSourceSpec,
         reach: RemoteReach,
+        companions: Vec<(Query, ReadViewSourceSpec)>,
     ) -> (
         String,
         (
@@ -5525,6 +5557,14 @@ impl Inner {
             );
             return (key, flags);
         }
+        let companions: Vec<String> = companions
+            .into_iter()
+            .map(|(query, view)| {
+                self.attach_upstream_read(query, &BTreeMap::new(), true, view, reach, Vec::new())
+                    .0
+            })
+            .collect();
+        let client = self.client.as_mut().expect("client");
         let id = client.next_id;
         client.next_id += 1;
         let answered = Rc::new(StdCell::new(false));
@@ -5560,6 +5600,8 @@ impl Inner {
                 global: global.clone(),
                 through,
                 watermark,
+                settled: false,
+                companions,
             },
         );
         client.remote_ids.insert(id, key.clone());
@@ -5578,9 +5620,12 @@ impl Inner {
         remote.refs -= 1;
         if remote.refs == 0 {
             let id = remote.id;
-            client.remote.remove(key);
+            let remote = client.remote.remove(key).expect("remote");
             client.remote_ids.remove(&id);
             client.outbox.push(SyncMessage::Unsubscribe { id });
+            for companion in &remote.companions {
+                self.release_upstream_read(companion);
+            }
         }
     }
 
@@ -5594,10 +5639,6 @@ impl Inner {
         view: &ReadViewSourceSpec,
         reach: RemoteReach,
     ) {
-        for (query, view) in self.head_branch_reads(query, view) {
-            let key = remote_key(&query, &BTreeMap::new(), true, &view, reach);
-            self.release_upstream_read(&key);
-        }
         let (query, include_deleted, view) =
             upstream_read(query, include_deleted, view, self.non_durable);
         let key = remote_key(&query, binding, include_deleted, &view, reach);
@@ -6185,8 +6226,10 @@ impl Db {
                             continue;
                         };
                         let remote = client.remote.get_mut(&key).expect("remote");
-                        remote.answered.set(true);
+                        remote.settled = true;
                         remote.global.set(global);
+                        client.refresh_answered(&key);
+                        let remote = client.remote.get_mut(&key).expect("remote");
                         // A row owed whole is stale here: this store does
                         // not hold the result as of `through`.
                         let resumable = client.whole.is_empty();
@@ -6228,10 +6271,17 @@ impl Db {
                             client.relayed_fetches.iter().any(|f| f.upstream == id);
                         if let Some(slot) = client.answers.get_mut(&id) {
                             *slot = Some(Err(error));
-                        } else if let Some(key) = client.remote_ids.get(&id)
-                            && let Some(remote) = client.remote.get(key)
-                        {
-                            *remote.refused.borrow_mut() = Some(error);
+                        } else if let Some(key) = client.remote_ids.get(&id) {
+                            // A refused head-branch read refuses the views
+                            // that hold it: they cannot be masked.
+                            for remote in client.remote.values() {
+                                if remote.companions.contains(key) {
+                                    *remote.refused.borrow_mut() = Some(error.clone());
+                                }
+                            }
+                            if let Some(remote) = client.remote.get(key) {
+                                *remote.refused.borrow_mut() = Some(error);
+                            }
                         }
                     }
                     SyncMessage::Stored { tx } => {
@@ -6606,7 +6656,8 @@ impl Inner {
         // Nothing settles at the server's tier while detached: a
         // subscription (or one opened meanwhile) is held until the next
         // upstream answers it again.
-        for remote in client.remote.values() {
+        for remote in client.remote.values_mut() {
+            remote.settled = false;
             remote.answered.set(false);
         }
     }
@@ -9500,6 +9551,23 @@ impl Db {
             self.remote_shape(&prepared.query)?;
             // A Remote read waits for the server while offline.
             let strict = opts.tier == ReadTier::Remote;
+            // The view is read here over every base row this replica
+            // holds: the head branch's rows mask them (see `attach_remote`).
+            let companions = self
+                .inner()
+                .head_branch_reads(&prepared.query, &opts.read_view.source);
+            for (query, view) in companions {
+                let companion = PreparedQuery {
+                    query,
+                    binding: BTreeMap::new(),
+                    shape: Shape([0; 16]),
+                    binding_id: Binding([0; 16]),
+                    request_claims: None,
+                    schema: None,
+                };
+                self.fetch(&companion, None, true, reach, deadline, None, strict, &view)
+                    .await?;
+            }
             self.fetch(
                 &prepared,
                 None,
