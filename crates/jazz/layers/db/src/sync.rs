@@ -4859,6 +4859,18 @@ impl Client {
 /// versions by, and were never recorded for upload, so syncing would lose
 /// them to the upstream's rows (#4443). They stay local, and so does what
 /// it writes after.
+/// The refusal of a commit written under a schema version the server has
+/// not deployed (INV-SYNC-52).
+fn schema_version_not_deployed() -> Error {
+    Error {
+        code: ErrorCode::WriteRejected,
+        reason: Some(Reason::SchemaVersionNotDeployed),
+        message: "this write was made through a schema version the server has not deployed: \
+                  deploy the schema before releasing the app that writes through it"
+            .to_owned(),
+    }
+}
+
 fn stranded() -> Error {
     Error::new(
         ErrorCode::Protocol,
@@ -6268,15 +6280,8 @@ impl Db {
         let mut commits = std::mem::take(&mut client.unsent);
         // Each commit's large-value nodes go ahead of it. A commit whose
         // nodes must be fetched first waits, and so do those after it.
-        // So does one written through a view of a version its upstream has
-        // not confirmed admitting (INV-SYNC-52): a `Schema` switch to it
-        // would hold the whole session there, reads included, until the
-        // server admits it.
         let mut pushes = Vec::with_capacity(commits.len());
         for commit in &commits {
-            if inner.awaits_admission(commit) {
-                break;
-            }
             match inner.pushes_for(commit)? {
                 Some(push) => pushes.push(push),
                 None => break,
@@ -6326,12 +6331,11 @@ impl Db {
                 client.sent.push(commit.clone());
             }
         }
-        // A commit written under an earlier version is sent under it: the
+        // A commit is sent under the version it was written under: the
         // server reads its ops by that version's names. An authority keeps
         // admitting every version it published (a server replays its
-        // catalogue on start), so the server holds the session's later
-        // messages behind such a switch only for a version never published
-        // (a draft), as it does for a session declaring one.
+        // catalogue on start); a commit under a version it never deployed
+        // is refused (INV-SYNC-52).
         let mut declared = current;
         for (commit, (hashes, batches)) in commits.into_iter().zip(pushes) {
             if let SyncMessage::Commit { tx, .. } = &commit {
@@ -6460,20 +6464,6 @@ impl Inner {
             Some(client) if client.stranded => Err(stranded()),
             _ => Ok(()),
         }
-    }
-
-    /// Whether pending `commit` was written under a version other than
-    /// the current one that this replica's upstream has not confirmed
-    /// admitting: it uploads once the upstream's catalogue confirms it.
-    fn awaits_admission(&self, commit: &SyncMessage) -> bool {
-        let SyncMessage::Commit { tx, .. } = commit else {
-            return false;
-        };
-        let Some(version) = self.client.as_ref().and_then(|c| c.versions.get(tx)) else {
-            return false;
-        };
-        let version = crate::ids::SchemaVersionId::from_bytes(*version);
-        version != self.owner_version && !self.names.confirmed(&version)
     }
 
     /// Whether any stored table holds a row or a version of one: on a
@@ -6685,9 +6675,49 @@ impl Inner {
     /// Whether session `index` declared a schema version this store has
     /// not admitted.
     fn session_unadmitted(&self, index: usize) -> bool {
-        self.sessions[index].version.is_some_and(|version| {
-            version != self.owner_version && !self.admitted.iter().any(|(id, _)| *id == version)
-        })
+        self.sessions[index]
+            .version
+            .is_some_and(|version| !self.deployed(version))
+    }
+
+    /// Whether this store admitted schema `version`.
+    fn deployed(&self, version: crate::ids::SchemaVersionId) -> bool {
+        version == self.owner_version || self.admitted.iter().any(|(id, _)| *id == version)
+    }
+
+    /// Refuse each commit in `held`, messages of session `index` in the
+    /// order it sent them, that it wrote under a version this store has
+    /// not admitted (INV-SYNC-52).
+    fn refuse_undeployed(&mut self, index: usize, held: &mut VecDeque<SyncMessage>) {
+        let mut version = self.sessions[index].version;
+        let mut refused = Vec::new();
+        held.retain(|message| match message {
+            SyncMessage::Schema { version: declared } => {
+                version = Some(crate::ids::SchemaVersionId::from_bytes(*declared));
+                true
+            }
+            SyncMessage::Commit { tx, .. } if version.is_some_and(|v| !self.deployed(v)) => {
+                refused.push(*tx);
+                false
+            }
+            _ => true,
+        });
+        for tx in refused {
+            self.refuse_undeployed_commit(index, tx);
+        }
+    }
+
+    /// Answer session `index`'s commit `tx`, written under a version this
+    /// store has not admitted, with its refusal.
+    fn refuse_undeployed_commit(&mut self, index: usize, tx: u64) {
+        let through = self.served_through();
+        self.sessions[index].outbox.push(SyncMessage::Fate {
+            tx,
+            through,
+            result: Err(wire_error(&schema_version_not_deployed())),
+            held: Vec::new(),
+            global: true,
+        });
     }
 
     /// The schema session `index` declared, governed by the current
@@ -7113,15 +7143,19 @@ impl Db {
             // A session on a schema version this server has not
             // admitted (a draft awaiting its lens) waits: serving it
             // under another version would expose rows it may not read
-            // that way.
+            // that way. Its commits do not wait: they are refused
+            // (INV-SYNC-52).
             if !matches!(
                 message,
-                SyncMessage::Schema { .. } | SyncMessage::Holds { .. }
+                SyncMessage::Schema { .. } | SyncMessage::Holds { .. } | SyncMessage::Commit { .. }
             ) {
-                let inner = self.inner.borrow_mut();
+                let mut inner = self.inner.borrow_mut();
                 if inner.session_unadmitted(index) {
                     inbound.push_front(message);
                     held.extend(inbound);
+                    // The commits it holds that way are refused now: a
+                    // refused commit changes nothing a read could observe.
+                    inner.refuse_undeployed(index, &mut held);
                     break;
                 }
             }
@@ -8496,6 +8530,13 @@ impl Db {
                         held: Vec::new(),
                         global: true,
                     });
+                    return Ok(());
+                }
+                // A commit written under a version this server has not
+                // deployed is refused at once, loudly: the app that wrote
+                // it was released ahead of its schema (INV-SYNC-52).
+                if self.inner.borrow().session_unadmitted(index) {
+                    self.inner.borrow_mut().refuse_undeployed_commit(index, tx);
                     return Ok(());
                 }
                 // The session commit a relay's carries, when the link may

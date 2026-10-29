@@ -1,7 +1,7 @@
 //! Writes made before the server can take them are never silently lost:
 //! a store that writes before it first connects, and a client writing
 //! under a schema version its server has not admitted yet, either upload
-//! those writes once they can, or are told at once.
+//! those writes once they can, or are refused with a typed error.
 
 use crate::common;
 
@@ -13,8 +13,8 @@ use std::rc::Rc;
 use std::task::{Context, Poll};
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, FileOptions, InsertOptions, ReadOpts, ReadTier, SubscriptionEvent,
-    SyncMessage, Transport, TransportError, block_on,
+    Db, DbConfig, DbIdentity, Error, FileOptions, InsertOptions, ReadOpts, ReadTier, Reason,
+    SubscriptionEvent, SyncMessage, Transport, TransportError, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::{MigrationLens, TableLens};
@@ -22,6 +22,7 @@ use jazz::query::Query;
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, OpenTransactionId, SchemaBuilder, TableSchemaBuilder};
+use jazz::tx::DurabilityTier;
 
 use common::{allow_all_policies, compile_schema};
 
@@ -132,7 +133,8 @@ fn pump(server: &Db, clients: &[&Db]) {
     }
 }
 
-fn insert(db: &Db, n: u8, cells: &[(&str, &str)]) {
+/// Insert row `n`; the transaction it committed.
+fn insert(db: &Db, n: u8, cells: &[(&str, &str)]) -> u64 {
     block_on(
         db.insert(
             "notes",
@@ -146,7 +148,8 @@ fn insert(db: &Db, n: u8, cells: &[(&str, &str)]) {
             },
         ),
     )
-    .unwrap();
+    .unwrap()
+    .mergeable_tx_id()
 }
 
 /// The row bytes of every note `db` reads, sorted.
@@ -272,44 +275,71 @@ fn an_empty_store_connects_whenever_it_becomes_a_replica() {
     assert_eq!(ids(&client), vec![1, 2]);
 }
 
-/// #4450: a client on v1 admits v2 ahead of its server and writes through
-/// a v2 view. Once the server admits v2 the write uploads, on both sides.
+/// #4450: an offline client on v1 admits v2 ahead of its server and
+/// writes through a v2 view. The write stays pending, its v2 column
+/// included; once the server has v2 when the client syncs, it uploads.
 #[test]
-fn a_write_through_a_version_the_server_admits_later_uploads() {
+fn an_offline_view_write_uploads_once_the_server_has_its_version() {
     let dir = tempfile::tempdir().unwrap();
     let server = authority_at(v1(), &dir.path().join("server.sqlite"));
     insert(&server, 1, &[("title", "on the server")]);
     let client = open_at(v1(), 1, &dir.path().join("client.sqlite"));
+    client.become_replica();
+    block_on(client.admit_schema_with_lenses(v2(), &[lens()])).unwrap();
+    let ahead = block_on(client.register_schema_view(v2())).unwrap();
+    insert(&ahead, 2, &[("title", "ahead"), ("tag", "new")]);
+    assert_eq!(tag(&ahead, 2), some("new"));
+
+    block_on(server.activate_schema_with_lenses(v2(), &[lens()])).unwrap();
     let _link = link(&client, &server);
     let q = client.prepare_query(&Query::from("notes")).unwrap();
     let _sub = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
     pump(&server, &[&client]);
 
-    block_on(client.admit_schema_with_lenses(v2(), &[lens()])).unwrap();
-    let ahead = block_on(client.register_schema_view(v2())).unwrap();
-    insert(&ahead, 2, &[("title", "ahead"), ("tag", "new")]);
-    pump(&server, &[&client]);
-    // The server holds it until it admits v2; meanwhile the client keeps
-    // it, its v2 column included, across the rows that keep arriving.
-    insert(&server, 3, &[("title", "meanwhile")]);
-    pump(&server, &[&client]);
-    assert_eq!(ids(&server), vec![1, 3]);
-    assert_eq!(ids(&ahead), vec![1, 2, 3]);
-    assert_eq!(tag(&ahead, 2), some("new"));
-
-    block_on(server.activate_schema_with_lenses(v2(), &[lens()])).unwrap();
-    pump(&server, &[&client]);
-
-    assert_eq!(ids(&server), vec![1, 2, 3]);
+    assert_eq!(ids(&server), vec![1, 2]);
     assert_eq!(tag(&server, 2), some("new"));
-    assert_eq!(ids(&client), vec![1, 2, 3]);
+    assert_eq!(ids(&client), vec![1, 2]);
     assert_eq!(tag(&ahead, 2), some("new"));
 }
 
-/// #4450: a client opened on v2 while its server knows only v1 writes;
-/// once the server admits v2 the write uploads.
+/// #4450: a write through a v2 view syncs to a server that still lacks
+/// v2. The server refuses it loudly, with a typed reason (the app was
+/// released ahead of its schema); the client drops it, and the session
+/// goes on: reads are answered and writes after it upload.
 #[test]
-fn a_write_from_a_client_opened_ahead_of_its_server_uploads() {
+fn a_view_write_the_server_lacks_at_sync_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = authority_at(v1(), &dir.path().join("server.sqlite"));
+    insert(&server, 1, &[("title", "on the server")]);
+    let client = open_at(v1(), 1, &dir.path().join("client.sqlite"));
+    client.become_replica();
+    block_on(client.admit_schema_with_lenses(v2(), &[lens()])).unwrap();
+    let ahead = block_on(client.register_schema_view(v2())).unwrap();
+    let refused = insert(&ahead, 2, &[("title", "ahead"), ("tag", "new")]);
+    let after = insert(&client, 3, &[("title", "a plain v1 write after it")]);
+
+    let _link = link(&client, &server);
+    let q = client.prepare_query(&Query::from("notes")).unwrap();
+    let _sub = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
+    let error = fate(&server, &client, refused).expect_err("refused by the server");
+    assert_eq!(
+        error.reason,
+        Some(Reason::SchemaVersionNotDeployed),
+        "{error:?}"
+    );
+    fate(&server, &client, after).expect("uploads");
+    insert(&server, 4, &[("title", "meanwhile")]);
+    pump(&server, &[&client]);
+
+    assert_eq!(ids(&server), vec![1, 3, 4]);
+    assert_eq!(ids(&client), vec![1, 3, 4]);
+    assert_eq!(remote_read(&server, &client), Some(Ok(vec![1, 3, 4])));
+}
+
+/// #4450: a client opened on v2 while its server knows only v1: a write
+/// it syncs then is refused with a typed reason, never kept in silence.
+#[test]
+fn a_write_from_a_client_opened_ahead_of_its_server_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let server = authority_at(v1(), &dir.path().join("server.sqlite"));
     insert(&server, 1, &[("title", "on the server")]);
@@ -318,13 +348,35 @@ fn a_write_from_a_client_opened_ahead_of_its_server_uploads() {
     let q = client.prepare_query(&Query::from("notes")).unwrap();
     let _sub = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
     pump(&server, &[&client]);
-    insert(&client, 2, &[("title", "ahead"), ("tag", "new")]);
-    pump(&server, &[&client]);
+    let tx = insert(&client, 2, &[("title", "ahead"), ("tag", "new")]);
+    let error = fate(&server, &client, tx).expect_err("refused by the server");
+    assert_eq!(
+        error.reason,
+        Some(Reason::SchemaVersionNotDeployed),
+        "{error:?}"
+    );
+    assert_eq!(ids(&server), vec![1]);
+    assert!(!ids(&client).contains(&2));
+}
 
+/// A client opened on v2 that writes offline uploads on its first sync
+/// once its server has v2.
+#[test]
+fn a_client_opened_ahead_uploads_once_its_server_has_the_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = authority_at(v1(), &dir.path().join("server.sqlite"));
+    insert(&server, 1, &[("title", "on the server")]);
+    let client = open_at(v2(), 1, &dir.path().join("client.sqlite"));
+    client.become_replica();
+    insert(&client, 2, &[("title", "ahead"), ("tag", "new")]);
     block_on(server.activate_schema_with_lenses(v2(), &[lens()])).unwrap();
+    let _link = link(&client, &server);
+    let q = client.prepare_query(&Query::from("notes")).unwrap();
+    let _sub = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
     pump(&server, &[&client]);
 
     assert_eq!(ids(&server), vec![1, 2]);
+    assert_eq!(tag(&server, 2), some("new"));
     assert_eq!(ids(&client), vec![1, 2]);
 }
 
@@ -423,38 +475,19 @@ fn remote_read(server: &Db, client: &Db) -> Option<Result<Vec<u8>, String>> {
     None
 }
 
-/// A write through a view of a version the server has not admitted waits
-/// on the client, and the uploads after it queue behind it in order; the
-/// session is not held, so reads keep being answered. Once the server
-/// admits the version, all of them land.
-#[test]
-fn uploads_wait_behind_a_write_the_server_cannot_take_yet_and_reads_go_on() {
-    let dir = tempfile::tempdir().unwrap();
-    let server = authority_at(v1(), &dir.path().join("server.sqlite"));
-    insert(&server, 1, &[("title", "on the server")]);
-    let client = open_at(v1(), 1, &dir.path().join("client.sqlite"));
-    let _link = link(&client, &server);
-    let q = client.prepare_query(&Query::from("notes")).unwrap();
-    let _sub = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
-    pump(&server, &[&client]);
-
-    block_on(client.admit_schema_with_lenses(v2(), &[lens()])).unwrap();
-    let ahead = block_on(client.register_schema_view(v2())).unwrap();
-    insert(&ahead, 2, &[("title", "ahead"), ("tag", "new")]);
-    pump(&server, &[&client]);
-    insert(&client, 3, &[("title", "a plain v1 write after it")]);
-    insert(&server, 4, &[("title", "meanwhile")]);
-    pump(&server, &[&client]);
-
-    assert_eq!(ids(&server), vec![1, 4]);
-    assert_eq!(ids(&client), vec![1, 2, 3, 4]);
-    assert_eq!(remote_read(&server, &client), Some(Ok(vec![1, 4])));
-
-    block_on(server.activate_schema_with_lenses(v2(), &[lens()])).unwrap();
-    pump(&server, &[&client]);
-    assert_eq!(ids(&server), vec![1, 2, 3, 4]);
-    assert_eq!(tag(&server, 2), some("new"));
-    assert_eq!(remote_read(&server, &client), Some(Ok(vec![1, 2, 3, 4])));
+/// Transaction `tx`'s fate at the server, pumping `client` and `server`
+/// until it is known.
+fn fate(server: &Db, client: &Db, tx: u64) -> Result<(), Error> {
+    let mut wait = pin!(client.wait_for_transaction(tx, DurabilityTier::Global));
+    let waker = futures::task::noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    for _ in 0..20 {
+        if let Poll::Ready(result) = wait.as_mut().poll(&mut cx) {
+            return result.map(drop);
+        }
+        pump(server, &[client]);
+    }
+    panic!("transaction {tx} has no fate yet");
 }
 
 /// A `transaction` opened on the owner whose writes go through a view
@@ -488,7 +521,6 @@ fn a_transaction_uploads_under_the_version_its_writes_name() {
         Ok(())
     }))
     .unwrap();
-    pump(&server, &[&client]);
     block_on(server.activate_schema_with_lenses(v2(), &[lens()])).unwrap();
     pump(&server, &[&client]);
     assert_eq!(ids(&client), vec![5]);
@@ -533,8 +565,8 @@ fn schema_work_before_becoming_a_replica_does_not_strand_a_store() {
     assert_eq!(remote_read(&server, &client), Some(Ok(vec![1])));
 }
 
-/// A write through a v2 view survives a reopen under v1 (without the
-/// view) before the server admits v2, and lands, `tag` included.
+/// An offline write through a v2 view survives a reopen under v1
+/// (without the view), and lands once the server has v2, `tag` included.
 #[test]
 fn a_pending_view_write_survives_a_reopen() {
     let dir = tempfile::tempdir().unwrap();
@@ -543,19 +575,16 @@ fn a_pending_view_write_survives_a_reopen() {
     let path = dir.path().join("client.sqlite");
     {
         let client = open_at(v1(), 1, &path);
-        let _link = link(&client, &server);
-        pump(&server, &[&client]);
+        client.become_replica();
         block_on(client.admit_schema_with_lenses(v2(), &[lens()])).unwrap();
         let ahead = block_on(client.register_schema_view(v2())).unwrap();
         insert(&ahead, 2, &[("title", "ahead"), ("tag", "new")]);
-        pump(&server, &[&client]);
     }
     let client = open_at(v1(), 1, &path);
+    block_on(server.activate_schema_with_lenses(v2(), &[lens()])).unwrap();
     let _link = link(&client, &server);
     let q = client.prepare_query(&Query::from("notes")).unwrap();
     let _sub = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
-    pump(&server, &[&client]);
-    block_on(server.activate_schema_with_lenses(v2(), &[lens()])).unwrap();
     pump(&server, &[&client]);
     assert_eq!(ids(&server), vec![1, 2]);
     assert_eq!(tag(&server, 2), some("new"));

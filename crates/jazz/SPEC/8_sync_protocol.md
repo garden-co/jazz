@@ -56,7 +56,7 @@ source of truth and names each invariant's tests):
 - `INV-SYNC-49`: A server MUST process a session's messages in the order sent, so a read sent after a commit is served after that commit.
 - `INV-SYNC-50`: A non-durable client's local seqs MUST NOT collide with its relay's.
 - `INV-SYNC-51`: A store that committed writes before it became a replica MUST keep them and refuse every upstream, saying why.
-- `INV-SYNC-52`: A replica MUST upload each commit under the schema version of the view that wrote it, and keep it until its upstream admits that version, without holding its reads.
+- `INV-SYNC-52`: A replica MUST upload each commit under the schema version of the view that wrote it, keeping it pending while offline; a server MUST refuse a commit under a version it has not deployed, at once, with reason `schema_version_not_deployed`.
 - `INV-TX-2`, `INV-TX-11`, `INV-TX-23`: commit, seq and relay rules (ch. 3).
 - `INV-WIRE-1`, `INV-WIRE-2`: exact postcard frames and Hello version negotiation (§8.1.1).
 
@@ -448,8 +448,9 @@ not admitted is named like the server's current schema.
 
 `SchemaAdmission { admitted }` tells the session whether its version is
 admitted, whenever that changes. Until it is, the server holds the session's
-messages (a draft awaiting its lens), so a read that needs the server fails
-with the reason rather than waiting out its budget.
+reads (a draft awaiting its lens), so a read that needs the server fails
+with the reason rather than waiting out its budget, and refuses its commits
+(below).
 
 Each pending commit records the schema version it was written under
 (`_jazz_pending_versions`): the version of the schema view that wrote it, or
@@ -457,13 +458,15 @@ the store's current version. Before uploading pending commits staged under
 another version than the session's current one, the replica sends a `Schema`
 switch for them, so an offline write made before an upgrade, or through a view
 of a version the server has not admitted yet, is resolved under the names it
-was written with (`INV-SYNC-52`). A commit under a version the upstream's
-catalogue has not confirmed (one only the replica admitted) is not sent: a
-switch to it would hold the whole session, reads included. It waits on the
-replica, and the commits after it queue behind it in order, until the
-catalogue confirms that version; reads and subscriptions go on meanwhile.
-The replica replays a waiting commit under its version while it holds it (a
-registered view), so the columns only that version has stay visible there.
+was written with (`INV-SYNC-52`). Offline, such a commit stays pending, and
+the replica replays it under its version while it holds it (a registered view),
+so the columns only that version has stay visible there. A commit that reaches
+a server which has not deployed its version is refused there, at once, with
+reason `schema_version_not_deployed` (code `write_rejected`): the app that
+wrote it was released ahead of its schema, a deploy error that waiting would
+hide. The replica rolls it back like any refused write; the session goes on,
+and the commits after it upload. A server holding a session's reads behind an
+unadmitted version refuses the commits behind them the same way.
 One commit uploads under one version, so a replica refuses a transaction
 written through views of different versions.
 
