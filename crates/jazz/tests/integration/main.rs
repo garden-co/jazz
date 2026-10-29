@@ -21,6 +21,8 @@ mod binding_host;
 mod branch_column_evolution;
 #[path = "../branch_views.rs"]
 mod branch_views;
+#[path = "../callback_transaction_cancellation.rs"]
+mod callback_transaction_cancellation;
 #[path = "../claims_change.rs"]
 mod claims_change;
 #[path = "../column_defaults.rs"]

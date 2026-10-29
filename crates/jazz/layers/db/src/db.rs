@@ -2169,6 +2169,11 @@ impl Db {
             let seq = inner.seq + 1;
             inner.tx = Some((seq, BTreeSet::new()));
         }
+        let mut guard = CallbackTransactionGuard {
+            db: self,
+            prior_seq: self.inner.borrow().seq,
+            active: true,
+        };
         let mut tx = MergeableTx { db: self, identity };
         let result = callback(&mut tx).await.and_then(|value| {
             self.inner().require_mutation_admission()?;
@@ -2190,6 +2195,7 @@ impl Db {
                 }
                 Err(_) => {
                     inner.abandon_savepoint("tx")?;
+                    guard.active = false;
                     None
                 }
             }
@@ -2201,9 +2207,11 @@ impl Db {
             let mut inner = self.inner();
             inner.seq = prior;
             inner.abandon_savepoint("tx")?;
+            guard.active = false;
             return Err(error);
         }
         end_savepoint(&self.inner.borrow().conn, "tx", true)?;
+        guard.active = false;
         self.notify();
         Ok((value, TxReceipt(seq)))
     }
@@ -2841,6 +2849,33 @@ fn delta(
         removed,
         settled: true,
         tier: DurabilityTier::Local,
+    }
+}
+
+/// A callback may suspend at any await. Cancellation or unwinding must undo
+/// both its SQLite savepoint and its runtime state before another unit starts.
+struct CallbackTransactionGuard<'a> {
+    db: &'a Db,
+    prior_seq: u64,
+    active: bool,
+}
+
+impl Drop for CallbackTransactionGuard<'_> {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let mut inner = self.db.inner.borrow_mut();
+        if inner.abandon_savepoint("tx").is_err() {
+            // Drop cannot return the storage error. Do not admit another write
+            // if SQLite could not confirm that this unit was rolled back.
+            inner.mutation_admission_closed = true;
+        }
+        inner.seq = self.prior_seq;
+        inner.tx = None;
+        inner.capture.clear();
+        inner.writer = None;
+        inner.clear_derived();
     }
 }
 
