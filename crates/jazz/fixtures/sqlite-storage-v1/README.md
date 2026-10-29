@@ -11,9 +11,9 @@ are stored, a rejection's reason name changed how fates are recorded, and
 pending uploads moved from one encoded message to a row per op).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `42532ba76913e0743a8857b2c21ac13721e616265cdd8ed0ba5e4bf453c44d59`.
+  the SQLite file `69019c09a75e20b170806aebbc381e6e8248d8524f79d661409aff285ba2671c`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `836358707284e5ec14388915a1901030a91b9f2ba69cef80b3809d1009a53dad`.
+  `e2b48687d56ecb45b5226c98f2eefe33fd84026bfe24a83fbfb4b4afba12e56a`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
@@ -42,3 +42,7 @@ versions so reopening cannot restore an evicted baseline.
 Dropping the large-value key columns (`$k:<column>`) and `_jazz_lv_scratch`,
 when queries stopped reading chunked values' content, regenerated it the same
 way.
+
+Dropping the partial indexes of chunked rows (`<table>__lv_<column>`), which
+only those queries used, regenerated it the same way: a reopened store now
+learns its large-capable columns from the refcount triggers.
