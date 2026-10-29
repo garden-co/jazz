@@ -55,8 +55,9 @@ fn without_rank() -> JazzSchema {
     )
 }
 
-/// `notes(text, rank: bigint = 5)`: `rank` added again with its type (a
-/// version of its own: its default differs).
+/// `notes(text, rank: bigint = 5, tag: text?)`: `rank` added again with
+/// its type, in a version of its own (a default is not part of a version's
+/// identity, so the new `tag` makes it one).
 fn bigint_rank() -> JazzSchema {
     compile_schema(
         &SchemaBuilder::new()
@@ -64,6 +65,7 @@ fn bigint_rank() -> JazzSchema {
                 TableSchemaBuilder::new("notes")
                     .column("text", ColumnType::Text)
                     .column_with_default("rank", ColumnType::BigInt, jazz::tools::Value::BigInt(5))
+                    .nullable_column("tag", ColumnType::Text)
                     .policies(allow_all_policies()),
             )
             .build(),
@@ -508,4 +510,231 @@ fn a_reopened_store_refuses_a_type_change() {
     .err()
     .expect("a type change is refused");
     assert!(error.to_string().contains("changing the type"), "{error}");
+}
+
+/// `notes(text, rank: boolean?)`: `rank` added again with a third type.
+fn bool_rank() -> JazzSchema {
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("text", ColumnType::Text)
+                    .nullable_column("rank", ColumnType::Boolean)
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    )
+}
+
+/// The rejection reason of a remote read of `notes` on `client`, after
+/// pumping it with `server`.
+fn remote_read_rejection(client: &Db, server: &Db) -> Option<String> {
+    let q = client.prepare_query(&Query::from("notes")).unwrap();
+    let mut stream = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
+    pump(server, &[client]);
+    let mut rejected = None;
+    while let Some(event) = stream.try_next_event() {
+        if let SubscriptionEvent::Rejected { reason } = event {
+            rejected = Some(reason);
+        }
+    }
+    rejected
+}
+
+/// A replica and its authority each add `rank` again while apart, as text
+/// and as a boolean: both store it under the same fresh name. The replica
+/// refuses the authority's catalogue rather than read text as booleans: it
+/// stays as it was, its remote reads say why, and its local reads go on.
+#[test]
+fn a_replica_refuses_a_catalogue_storing_its_column_with_another_type() {
+    let server = authority(notes("notes", "text"), 0);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("client.sqlite");
+    {
+        let client = open_at(notes("notes", "text"), 1, &path);
+        let _link = link(&client, &server);
+        block_on(server.activate_schema(without_rank())).unwrap();
+        pump(&server, &[&client]);
+    }
+    let client = open_at(without_rank(), 1, &path);
+    block_on(client.activate_schema(text_rank())).unwrap();
+    insert(
+        &client,
+        1,
+        &[
+            ("text", Value::String("a".into())),
+            (
+                "rank",
+                Value::Nullable(Some(Box::new(Value::String("high".into())))),
+            ),
+        ],
+    );
+    block_on(server.activate_schema(bool_rank())).unwrap();
+
+    let _link = link(&client, &server);
+    let reason = remote_read_rejection(&client, &server).expect("the remote read says why");
+    assert!(reason.contains("changing the type"), "{reason}");
+    assert_eq!(
+        ranks(&client),
+        [Some(Value::Nullable(Some(Box::new(Value::String(
+            "high".into()
+        )))))],
+        "local reads go on"
+    );
+    drop(client);
+    let reopened = open_at(text_rank(), 1, &path);
+    assert_eq!(
+        ranks(&reopened),
+        [Some(Value::Nullable(Some(Box::new(Value::String(
+            "high".into()
+        )))))],
+        "nothing of the authority's catalogue was stored"
+    );
+}
+
+/// `table(text)`, with `rank` of `ty` defaulting to `default` when given.
+fn ranked(table: &str, rank: Option<(ColumnType, jazz::tools::Value)>) -> JazzSchema {
+    let mut builder = TableSchemaBuilder::new(table).column("text", ColumnType::Text);
+    if let Some((ty, default)) = rank {
+        builder = builder.column_with_default("rank", ty, default);
+    }
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(builder.policies(allow_all_policies()))
+            .build(),
+    )
+}
+
+/// `rank` added again through a lens from the version that dropped it is
+/// a new column, with the lens's default: the lens says the source lacks
+/// it, so the integers stored before are not its values.
+#[test]
+fn a_column_a_lens_adds_again_is_a_new_column() {
+    let db = authority(notes("notes", "text"), 1);
+    insert(
+        &db,
+        1,
+        &[("text", Value::String("a".into())), ("rank", Value::I64(7))],
+    );
+    let rank = db.column_identity("notes", "rank").unwrap();
+    block_on(db.activate_schema(without_rank())).unwrap();
+    let lens = rename(
+        &without_rank(),
+        &bigint_rank(),
+        vec![LensOp::AddColumn {
+            column: "rank".into(),
+            default: Value::I64(5),
+        }],
+    );
+    block_on(db.activate_schema_with_lenses(bigint_rank(), &[lens])).unwrap();
+    let added = db.column_identity("notes", "rank").unwrap();
+    assert!(added.is_some());
+    assert_ne!(added, rank);
+    assert_eq!(ranks(&db), [Some(Value::I64(5))]);
+}
+
+/// Dropped, the table renamed, then added again with its type: `rank`
+/// continues the stored column it had under the table's old name.
+#[test]
+fn a_column_added_again_after_its_table_is_renamed_keeps_its_identity_and_values() {
+    let db = authority(notes("notes", "text"), 1);
+    insert(
+        &db,
+        1,
+        &[("text", Value::String("a".into())), ("rank", Value::I64(7))],
+    );
+    let rank = db.column_identity("notes", "rank").unwrap();
+    block_on(db.activate_schema(without_rank())).unwrap();
+    let tasks = ranked("tasks", None);
+    block_on(
+        db.activate_schema_with_lenses(tasks.clone(), &[rename(&without_rank(), &tasks, vec![])]),
+    )
+    .unwrap();
+    block_on(db.activate_schema(ranked(
+        "tasks",
+        Some((ColumnType::BigInt, jazz::tools::Value::BigInt(5))),
+    )))
+    .unwrap();
+    assert_eq!(db.column_identity("tasks", "rank").unwrap(), rank);
+    let prepared = db.prepare_query(&Query::from("tasks")).unwrap();
+    let rows = block_on(db.all(&prepared, ReadOpts::default())).unwrap();
+    let ranks: Vec<_> = rows
+        .iter()
+        .map(|row| {
+            row.cells()
+                .find(|(name, _)| *name == "rank")
+                .and_then(|(_, value)| value.cloned())
+        })
+        .collect();
+    assert_eq!(ranks, [Some(Value::I64(7))]);
+}
+
+/// A replica mirrors a column its authority dropped and added again: the
+/// same stored column, so the same identity and the values from before.
+#[test]
+fn a_replica_mirrors_a_column_added_again() {
+    let server = authority(notes("notes", "text"), 0);
+    insert(
+        &server,
+        1,
+        &[("text", Value::String("a".into())), ("rank", Value::I64(7))],
+    );
+    let client = block_on(Db::open(config(
+        notes("notes", "text"),
+        1,
+        AuthorSubject::SYSTEM,
+    )))
+    .unwrap();
+    let _link = link(&client, &server);
+    let all = client.prepare_query(&Query::from("notes")).unwrap();
+    let _held = block_on(client.subscribe(&all, ReadOpts::default())).unwrap();
+    pump(&server, &[&client]);
+    let rank = server.column_identity("notes", "rank").unwrap();
+    block_on(server.activate_schema(without_rank())).unwrap();
+    block_on(server.activate_schema(bigint_rank())).unwrap();
+    pump(&server, &[&client]);
+    let view = block_on(client.register_schema_view(bigint_rank())).unwrap();
+    assert_eq!(view.column_identity("notes", "rank").unwrap(), rank);
+    assert_eq!(ranks(&view), [Some(Value::I64(7))]);
+}
+
+/// A store written before column types were recorded knows none: a column
+/// added there again starts a new stored column rather than guess the
+/// type of the one it had, and the types it stores from then on are
+/// recorded.
+#[test]
+fn a_store_without_recorded_types_adds_a_column_again_as_a_new_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.sqlite");
+    let db = open_at(notes("notes", "text"), 1, &path);
+    db.set_authority();
+    insert(
+        &db,
+        1,
+        &[("text", Value::String("a".into())), ("rank", Value::I64(7))],
+    );
+    let rank = db.column_identity("notes", "rank").unwrap();
+    block_on(db.activate_schema(without_rank())).unwrap();
+    drop(db);
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch("DROP TABLE _jazz_column_types")
+        .unwrap();
+    let db = open_at(without_rank(), 1, &path);
+    db.set_authority();
+    block_on(db.activate_schema(bigint_rank())).unwrap();
+    let added = db.column_identity("notes", "rank").unwrap();
+    assert!(added.is_some());
+    assert_ne!(added, rank);
+    assert_eq!(ranks(&db), [Some(Value::I64(5))]);
+    drop(db);
+    let recorded: i64 = rusqlite::Connection::open(&path)
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM _jazz_column_types WHERE tbl = 'notes'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(recorded > 0, "its types are recorded");
 }

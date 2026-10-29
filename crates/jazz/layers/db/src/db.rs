@@ -2430,10 +2430,52 @@ impl Inner {
         Ok(renamed)
     }
 
+    /// Take the upstream's versions, names and lens cells: whole or not at
+    /// all, in the file and in memory. A catalogue this store cannot take
+    /// (a stored column it keeps with another type) leaves it unchanged.
     fn mirror_versions(
         &mut self,
         versions: Vec<sync::CatalogueVersion>,
         cells: Vec<sync::CatalogueCell>,
+    ) -> Result<(), Error> {
+        let (physical, names, admitted) = (
+            self.physical.clone(),
+            self.names.clone(),
+            self.admitted.clone(),
+        );
+        let mut moved = Vec::new();
+        begin_savepoint(&self.conn, "jazz_mirror")?;
+        let mirrored = self.mirror_versions_steps(versions, cells, &mut moved);
+        let ended = end_savepoint(&self.conn, "jazz_mirror", mirrored.is_ok());
+        if let Err(error) = mirrored.and(ended) {
+            self.physical = physical;
+            self.names = names;
+            self.admitted = admitted;
+            return Err(error);
+        }
+        if let Some(client) = self.client.as_mut() {
+            for (ours, theirs) in &moved {
+                client.moved_table(ours, theirs);
+            }
+        }
+        let owner = Rc::new(self.named(&self.owner.jazz));
+        self.schema = owner.clone();
+        self.owner = owner;
+        self.reset_everything();
+        // This store's own sessions (a worker's tabs) store rows by its
+        // names, which may have just changed: each is sent the versions
+        // it now names otherwise.
+        for session in &mut self.sessions {
+            session.owe_catalogue();
+        }
+        Ok(())
+    }
+
+    fn mirror_versions_steps(
+        &mut self,
+        versions: Vec<sync::CatalogueVersion>,
+        cells: Vec<sync::CatalogueCell>,
+        moved: &mut Vec<(String, String)>,
     ) -> Result<(), Error> {
         use crate::names::{LensCell, LensCellRule};
         let cells: Vec<LensCell> = cells
@@ -2475,27 +2517,9 @@ impl Inner {
             match self.names.get(version).cloned() {
                 Some(local) if local == *names => {}
                 Some(local) => {
-                    // Whole or not at all, in the file and in memory.
-                    let (physical, kept) = (self.physical.clone(), self.names.clone());
-                    let mut moved = Vec::new();
-                    begin_savepoint(&self.conn, "jazz_mirror")?;
-                    let renamed = self
-                        .rename_stored(&local, names, &mut moved)
-                        .and_then(|()| {
-                            let conn = &self.conn;
-                            self.names.rename(conn, *version, names.clone())
-                        });
-                    let ended = end_savepoint(&self.conn, "jazz_mirror", renamed.is_ok());
-                    if let Err(error) = renamed.and(ended) {
-                        self.physical = physical;
-                        self.names = kept;
-                        return Err(error);
-                    }
-                    if let Some(client) = self.client.as_mut() {
-                        for (ours, theirs) in &moved {
-                            client.moved_table(ours, theirs);
-                        }
-                    }
+                    self.rename_stored(&local, names, moved)?;
+                    let conn = &self.conn;
+                    self.names.rename(conn, *version, names.clone())?;
                 }
                 None => {
                     fresh.insert(*version);
@@ -2519,24 +2543,17 @@ impl Inner {
             } else {
                 Vec::new()
             };
+            // The authority stores a column under a name this store keeps
+            // with another type (each re-added it while apart): its values
+            // are never read as this store's.
+            self.names.check_types(&target)?;
             self.write_admission(&target, fills)?;
             if !self.admitted.iter().any(|(id, _)| *id == version) {
                 self.admitted.push((version, jazz));
             }
         }
         let conn = &self.conn;
-        self.names.record_lens_cells(conn, cells)?;
-        let owner = Rc::new(self.named(&self.owner.jazz));
-        self.schema = owner.clone();
-        self.owner = owner;
-        self.reset_everything();
-        // This store's own sessions (a worker's tabs) store rows by its
-        // names, which may have just changed: each is sent the versions
-        // it now names otherwise.
-        for session in &mut self.sessions {
-            session.owe_catalogue();
-        }
-        Ok(())
+        self.names.record_lens_cells(conn, cells)
     }
 
     /// Rename the stored columns `local` names otherwise than `upstream`
@@ -6062,10 +6079,19 @@ impl Db {
         let logical = {
             let mut inner = self.inner.borrow_mut();
             let version = schema.version_id();
-            if let Some((_, admitted)) = inner.admitted.iter().find(|(id, _)| *id == version) {
-                if !same_tables(admitted, &schema, |l, r| {
-                    l.read_policy == r.read_policy && l.write_policies == r.write_policies
-                }) {
+            if let Some((_, admitted)) = inner.admitted.iter_mut().find(|(id, _)| *id == version) {
+                let same_policies =
+                    |l: &crate::schema::TableSchema, r: &crate::schema::TableSchema| {
+                        l.read_policy == r.read_policy && l.write_policies == r.write_policies
+                    };
+                // A version mirrored from the upstream's catalogue travels
+                // without its policies: the view brings them.
+                if !same_tables(admitted, &schema, same_policies)
+                    && same_tables(admitted, &schema.without_permissions(), same_policies)
+                {
+                    *admitted = schema.clone();
+                }
+                if !same_tables(admitted, &schema, same_policies) {
                     return Err(schema_error(
                         "schema view policy metadata conflicts with its admitted structural schema",
                     ));

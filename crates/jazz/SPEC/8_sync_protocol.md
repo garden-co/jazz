@@ -452,14 +452,24 @@ keep and retry pending writes but cannot accept them or make them `Global`.
 
 After its first `Schema`, a replica sends `Holds { versions }`: the schema
 versions whose stored names it keeps, each with `names_digest` of those names.
-The server answers with `Catalogue { versions, cells }` for every admitted
-version the replica lacks or names otherwise, in admission order, ahead of any
-row; and again whenever its store admits a version.
+The server answers with `Catalogue { namespace, versions, cells, confirmed }`,
+carrying every admitted version the replica lacks or names otherwise, in
+admission order, ahead of any row; and again whenever its store admits a
+version or learns more of its authority's catalogue.
 
 - A `CatalogueVersion` is a structural schema (without permissions) plus, per
   table, its name and stored name and, per column, its name and stored name.
 - A `CatalogueCell` is a stored column a lens fills: a copy of stored column
   `source`, or a dropped column's backwards default, from version `since` on.
+- `namespace` is the authority's, once the sender knows it. Table and column
+  identities are UUIDs derived from it and the stored names, so the authority
+  mints them and replicas only mirror them. A replica that keeps another
+  namespace is another app's store and refuses the upstream.
+- `confirmed` lists the versions whose names are the authority's, each with its
+  names' digest: every version the authority admitted, or, from a relay, those
+  its upstream confirmed. Only a confirmed version's tables and columns have an
+  identity; a version only the replica admitted has none until the authority
+  admits it too.
 
 The replica admits each version under the authority's stored names, renaming
 tables and columns it had named otherwise while it did not know them (for
@@ -469,9 +479,12 @@ therefore never ships. Lens semantics are chapter 10.
 
 A relay that mirrors a new catalogue owes its own sessions the versions they
 now name otherwise, so a tab follows its worker's names. Mirroring is whole or
-not at all. A catalogue the replica cannot mirror (a table it stores under the
-name the upstream stores another table as) drops the link, and every remote
-read fails with why; local reads are served as before.
+not at all. A catalogue the replica cannot mirror drops the link, and every remote read
+fails with why; local reads are served as before. That is a table it stores
+under the name the upstream stores another table as, another app's namespace,
+or a stored column it keeps with another type than the upstream's (each added
+a column again under the same fresh stored name while apart): values of one
+type are never read as another's.
 
 ### 8.11 Resuming live reads from `since`
 
