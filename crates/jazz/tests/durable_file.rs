@@ -17,9 +17,7 @@ use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
 use duplex_transport::duplex;
-use jazz::db::{
-    Db, DbConfig, DbIdentity, FileOptions, InsertOptions, LOCAL_BASE, ReadOpts, block_on,
-};
+use jazz::db::{Db, DbConfig, DbIdentity, FileOptions, InsertOptions, ReadOpts, block_on};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query};
 use jazz::records::Value;
@@ -306,7 +304,7 @@ fn a_replicas_pending_uploads_survive_a_restart_and_are_resent() {
         "every recovered upload reached the server"
     );
     for tx in txs {
-        assert!(tx > LOCAL_BASE);
+        assert!(tx > 0);
         drive(
             &[&client, &server, &client],
             client.wait_for_transaction(tx, DurabilityTier::Global),

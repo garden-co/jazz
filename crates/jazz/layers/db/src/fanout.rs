@@ -764,7 +764,7 @@ impl Inner {
     ) -> Vec<Vec<(String, String)>> {
         let read = |sql: String,
                     params: &[&dyn rusqlite::ToSql]|
-         -> Vec<(i64, Vec<u8>, Vec<(String, String)>)> {
+         -> Vec<((i64, i64), Vec<u8>, Vec<(String, String)>)> {
             let Ok(mut statement) = self.conn.prepare_cached(&sql) else {
                 return Vec::new();
             };
@@ -774,12 +774,14 @@ impl Inner {
                 .map(|s| (*s).to_owned())
                 .collect();
             let rows = statement.query_map(params, |r| {
-                let mut seq = 0;
+                let mut seq = (0, 0);
                 let mut branch = Vec::new();
                 let mut out = Vec::new();
                 for (i, name) in names.iter().enumerate() {
-                    if name == "_seq" {
-                        seq = r.get(i)?;
+                    if name == "_n" {
+                        seq.0 = r.get(i)?;
+                    } else if name == "_seq" {
+                        seq.1 = r.get(i)?;
                     } else if name == "_b" {
                         branch = r.get(i)?;
                     } else if columns.contains(name) {
@@ -799,15 +801,15 @@ impl Inner {
         let seq = current
             .iter()
             .find(|(_, branch, _)| branch.as_slice() == key)
-            .map_or(i64::MAX, |(seq, _, _)| *seq);
+            .map_or((i64::MAX, i64::MAX), |(seq, _, _)| *seq);
         let old = read(
             format!(
-                "SELECT * FROM {} WHERE id = ?1 AND _b = ?2 AND _seq < ?3 AND (_st & {}) = 0 \
-                 ORDER BY _seq DESC LIMIT 1",
+                "SELECT * FROM {} WHERE id = ?1 AND _b = ?2 AND (_n, _seq) < (?3, ?4) \
+                 AND (_st & {}) = 0 ORDER BY _n DESC, _seq DESC LIMIT 1",
                 quote(&format!("{table}__h")),
                 crate::values::STATE_AS_SENT
             ),
-            &[&id, &key, &seq],
+            &[&id, &key, &seq.0, &seq.1],
         );
         current
             .into_iter()
@@ -1456,7 +1458,7 @@ pub(super) fn opening(rows: &[CurrentRow]) -> SubscriptionEvent {
 /// joined rows, and a union read's arm (the occurrence).
 type RowKey = (
     RowUuid,
-    u64,
+    crate::db::Pos,
     Arc<[crate::values::JoinedRow]>,
     Option<Arc<str>>,
 );
@@ -1465,7 +1467,7 @@ fn row_key(row: &CurrentRow) -> RowKey {
     let version = if is_history_table(&row.table) {
         row.seq
     } else {
-        0
+        crate::db::Pos::default()
     };
     (row.id, version, row.joined.clone(), row.union_arm.clone())
 }
@@ -1502,7 +1504,7 @@ fn page_splices(old: &Value, new: &Value) -> Option<Vec<crate::db::LargeValueDel
 }
 
 fn new_version(prior: &CurrentRow, row: &CurrentRow) -> bool {
-    prior.seq != row.seq && !(prior.seq >= crate::db::LOCAL_BASE && row.seq < crate::db::LOCAL_BASE)
+    prior.seq != row.seq && (prior.seq.accepted() || !row.seq.accepted())
 }
 
 fn diff(before: &[CurrentRow], after: &[CurrentRow]) -> Option<SubscriptionEvent> {

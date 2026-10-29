@@ -208,7 +208,7 @@ impl Inner {
             .prepare_cached(&compiled.sql)
             .and_then(|mut statement| {
                 statement
-                    .query_row(params_from_iter(compiled.params.iter()), |r| r.get(3))
+                    .query_row(params_from_iter(compiled.params.iter()), |r| r.get(4))
                     .optional()
             })
             .map_err(storage)?;
@@ -244,7 +244,7 @@ impl Inner {
         table: &str,
         row: RowUuid,
         column: &str,
-        (from, to): (u64, u64),
+        (from, to): (Pos, Pos),
         reader: Option<AuthorSubject>,
     ) -> Result<Vec<LargeValueDeltaSplice>, Error> {
         let t = self.schema.table(table)?;
@@ -266,16 +266,16 @@ impl Inner {
             ));
         }
         let mut cells = Vec::with_capacity(2);
-        for seq in [from, to] {
+        for at in [from, to] {
             if let Some(author) = reader
-                && !self.check_version(t, row, &[], seq, author, Operation::Select)?
+                && !self.check_version(t, row, &[], at, author, Operation::Select)?
             {
                 return Err(Error::new(
                     ErrorCode::NotObserved,
-                    format!("version {seq} of the row is not readable"),
+                    format!("version {} of the row is not readable", at.seq),
                 ));
             }
-            cells.push(self.version_cell(t, row, &col.stored, seq)?);
+            cells.push(self.version_cell(t, row, &col.stored, at)?);
         }
         fn logical<'a>(chunks: &crate::large::Chunks, cell: &'a Sql) -> Result<Logical<'a>, Error> {
             match cell {
@@ -316,12 +316,12 @@ impl Inner {
         }])
     }
 
-    /// The stored cell `stored` of `row`'s version `seq`, current or in
+    /// The stored cell `stored` of `row`'s version at `at`, current or in
     /// history.
-    fn version_cell(&self, t: &Table, row: RowUuid, stored: &str, seq: u64) -> Result<Sql, Error> {
+    fn version_cell(&self, t: &Table, row: RowUuid, stored: &str, at: Pos) -> Result<Sql, Error> {
         for table in [t.stored.clone(), format!("{}__h", t.stored)] {
             let sql = format!(
-                "SELECT {} FROM {} WHERE id = ?1 AND _b = ?2 AND _seq = ?3",
+                "SELECT {} FROM {} WHERE id = ?1 AND _b = ?2 AND _n = ?3 AND _seq = ?4",
                 quote(stored),
                 quote(&table)
             );
@@ -329,7 +329,12 @@ impl Inner {
                 .conn
                 .cached_row(
                     &sql,
-                    rusqlite::params![row.0.as_bytes().to_vec(), Vec::<u8>::new(), seq as i64],
+                    rusqlite::params![
+                        row.0.as_bytes().to_vec(),
+                        Vec::<u8>::new(),
+                        at.n,
+                        at.seq as i64
+                    ],
                     |r| r.get(0),
                 )
                 .optional()
@@ -340,7 +345,7 @@ impl Inner {
         }
         Err(Error::new(
             ErrorCode::NotObserved,
-            format!("version {seq} of the row is not held"),
+            format!("version {} of the row is not held", at.seq),
         ))
     }
 
@@ -607,8 +612,8 @@ impl Db {
         table: &str,
         row: RowUuid,
         column: &str,
-        from: u64,
-        to: u64,
+        from: Pos,
+        to: Pos,
     ) -> Result<Vec<LargeValueDeltaSplice>, Error> {
         self.fetching(|| {
             let inner = self.inner();
@@ -1480,7 +1485,10 @@ impl TxRef<'_> {
             StagedOp::Update(table.to_owned(), row, patch, opts),
             edits,
         )?;
-        Ok(WriteHandle { row, seq: 0 })
+        Ok(WriteHandle {
+            row,
+            seq: Pos::default(),
+        })
     }
 }
 

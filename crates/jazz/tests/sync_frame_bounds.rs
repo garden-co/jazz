@@ -15,6 +15,7 @@ fn image(actor: u8, bytes: usize) -> Image {
         id: [actor; 16],
         key: vec![],
         seq: 1,
+        by: None,
         deleted: false,
         content: true,
         cells: vec![("body".into(), SyncCell::Blob(vec![actor; bytes]))],

@@ -4,13 +4,15 @@
 //! client is a `Db` whose store is a partial replica of server versions
 //! plus its own optimistic writes.
 //!
-//! * Replica rows carry the server's commit seq in `_seq`, so history and
-//!   as-of cuts on the client are over server versions. Optimistic local
-//!   writes take seqs from `LOCAL_BASE` up, above any server seq, and are
-//!   therefore invisible to every cut at a server seq. A non-durable client
-//!   (a worker's tab) numbers its own from `NON_DURABLE_BASE` up: its
-//!   replica also holds its worker's unsettled versions at the worker's
-//!   local seqs, and the two numberings must never meet.
+//! * A row version is at a [`Pos`]: the sequencer that numbered it (`_n`)
+//!   and its seq there (`_seq`). The authority's versions are at `_n` = 0,
+//!   so history and as-of cuts on the client are over server versions. A
+//!   replica's optimistic writes are at its own node's code, numbered by
+//!   its own counter from 1, and order after every server version, so every
+//!   cut at a server seq leaves them out. A non-durable client (a worker's
+//!   tab) also holds its worker's unsettled versions, at the worker's code:
+//!   a node code's role bits ([`RELAY`], [`LEAF`]) order the worker's
+//!   before the tab's own.
 //! * A row touched by a pending (unsettled) local transaction keeps its
 //!   upstream baseline in history, below this replica's local sequence range.
 //!   A transient cache selects that image during a tick; a rebase restores it
@@ -79,19 +81,51 @@ fn now_ms() -> i64 {
         .map_or(0, |d| d.as_millis() as i64)
 }
 
-/// Optimistic local seqs start here; every server seq is below it. Below
-/// 2^53, so seqs stay exact where SQLite integers surface as JS numbers
-/// (Durable Objects).
-pub const LOCAL_BASE: u64 = 1 << 52;
+/// The role bits of a node code (`_n`, SPEC 4): a code is its role ORed
+/// with the node's row in `_jazz_nodes`. Code 0 is the authority, the
+/// sequencer of every accepted version. A durable replica (a relay, such
+/// as a browser's worker) numbers its own versions at a `RELAY` code; a
+/// non-durable one (a worker's tab) at a `LEAF` code, so on a tab its
+/// relay's unsettled versions order before its own.
+pub const RELAY: i64 = 1 << 48;
+pub const LEAF: i64 = 2 << 48;
 
-/// A non-durable client's optimistic local seqs start here, so they never
-/// collide with its upstream relay's (from `LOCAL_BASE` up, which a relay
-/// ships to it for versions it has not settled). A relay would need 2^51
-/// local commits to reach it. Still below 2^53.
-///
-/// One relay tier only (SPEC 9 §9.5): a durable replica behind a relay would
-/// number from `LOCAL_BASE` like the relay, so that is not supported.
-pub const NON_DURABLE_BASE: u64 = LOCAL_BASE + (1 << 51);
+/// The node row a code names, without its role bits.
+pub(crate) fn node_index(code: i64) -> i64 {
+    code & (RELAY - 1)
+}
+
+/// A row version's position: the sequencer that numbered it (`_n`, 0 for
+/// the authority) and its seq there. Positions order by sequencer first,
+/// so every accepted version precedes every unsettled one, and a relay's
+/// unsettled versions precede its tab's own.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Pos {
+    pub n: i64,
+    pub seq: u64,
+}
+
+impl Pos {
+    /// Every accepted version: the cut of a read that leaves out unsettled
+    /// ones.
+    pub const SETTLED: Self = Self {
+        n: 0,
+        seq: i64::MAX as u64,
+    };
+
+    /// An accepted version, by its authority seq.
+    pub const fn at(seq: u64) -> Self {
+        Self { n: 0, seq }
+    }
+
+    /// Before every unsettled version, after every accepted one.
+    pub const UNSETTLED: Self = Self { n: 1, seq: 0 };
+
+    /// Whether the authority numbered the version.
+    pub fn accepted(self) -> bool {
+        self.n == 0
+    }
+}
 
 /// A message transport between a client and its server.
 pub trait Transport {
@@ -470,13 +504,11 @@ impl From<&Cell> for Sql {
 }
 
 /// Whether `image` is an older unsettled version of a relay's than the
-/// `held` one: a relay numbers its unsettled versions from `LOCAL_BASE` up,
-/// in its own order, and ships older ones in as-of answers. Cuts never read
+/// `held` one: a relay ships older ones in as-of answers. Cuts never read
 /// them (a snapshot naming another replica's unsettled commit is
-/// unavailable), and their seqs may collide with this replica's own, so the
-/// replica keeps neither as history.
-fn relay_older(held: u64, image: u64) -> bool {
-    image >= LOCAL_BASE && held > image
+/// unavailable), so the replica keeps neither as history.
+fn relay_older(held: Pos, image: Pos) -> bool {
+    !image.accepted() && held > image
 }
 
 /// One stored row version: the unit of replication.
@@ -486,6 +518,10 @@ pub struct Image {
     pub id: [u8; 16],
     pub key: Vec<u8>,
     pub seq: u64,
+    /// The node whose unsettled version this is, numbered by its own
+    /// counter (a relay's, shipped to its tab); `None` for an accepted
+    /// version, numbered by the authority.
+    pub by: Option<[u8; 16]>,
     pub deleted: bool,
     /// Whether the version's commit wrote content (stored in `_st`): history
     /// reads list only content versions.
@@ -498,16 +534,17 @@ pub struct Image {
 /// reader joins split frames up to.
 const ROWS_MESSAGE_BYTES: usize = jazz_protocol::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES / 4;
 
+/// Where a commit landed and who wrote it: (seq, the node whose position
+/// it is when not the authority's (as [`Image::by`]), writer node, writer
+/// tx).
+pub type TxName = (u64, Option<[u8; 16]>, [u8; 16], u64);
+
 /// `images` (and the `tx_ids` they come with) as `Rows` messages of at
 /// most `limit` ([`ROWS_MESSAGE_BYTES`]) of images each. A reader installs each
 /// message whole, so a commit's versions (one seq) never straddle two: a
 /// result that needs more than one goes in seq order, and a single
 /// commit larger than the bound still travels as one.
-fn rows_messages(
-    mut images: Vec<Image>,
-    tx_ids: Vec<(u64, [u8; 16], u64)>,
-    limit: usize,
-) -> Vec<SyncMessage> {
+fn rows_messages(mut images: Vec<Image>, tx_ids: Vec<TxName>, limit: usize) -> Vec<SyncMessage> {
     let size = |image: &Image| {
         postcard::serialize_with_flavor(image, postcard::ser_flavors::Size::default())
             .unwrap_or(usize::MAX)
@@ -520,13 +557,15 @@ fn rows_messages(
         return vec![SyncMessage::Rows { images, tx_ids }];
     }
     let mut sized: Vec<(usize, Image)> = sizes.into_iter().zip(images.drain(..)).collect();
-    sized.sort_by_key(|(_, image)| image.seq);
+    sized.sort_by_key(|(_, image)| (image.by, image.seq));
     let mut out = Vec::new();
     let mut tx_ids = Some(tx_ids);
     let mut batch: Vec<Image> = Vec::new();
     let mut bytes = 0usize;
     for (n, image) in sized {
-        let same_commit = batch.last().is_some_and(|last| last.seq == image.seq);
+        let same_commit = batch
+            .last()
+            .is_some_and(|last| (last.by, last.seq) == (image.by, image.seq));
         if !batch.is_empty() && !same_commit && bytes.saturating_add(n) > limit {
             out.push(SyncMessage::Rows {
                 images: std::mem::take(&mut batch),
@@ -607,9 +646,7 @@ pub struct AccessProof {
 /// The version a write was built on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BuiltOn {
-    /// An accepted version, by its upstream seq. From a relay's session it
-    /// may be the relay's own unsettled version (a seq from `LOCAL_BASE`
-    /// up), which the relay renames to the commit that wrote it.
+    /// An accepted version, by its upstream seq.
     Seq(u64),
     /// The sender's own unsettled commit `back` txs before this one: the
     /// writer saw that commit as it sent it, and what that was built on.
@@ -778,7 +815,10 @@ pub struct WireRead {
     pub binding: BTreeMap<String, Value>,
     /// The read listed deleted rows too (`includeDeleted`).
     pub include_deleted: bool,
-    pub rows: Vec<([u8; 16], u64)>,
+    /// Each row the read listed, at the version it read: an authority seq
+    /// (no node), or an unsettled commit by its (node, tx): the sender's
+    /// own, or its relay's that the relay shipped it.
+    pub rows: Vec<([u8; 16], Option<[u8; 16]>, u64)>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -832,6 +872,8 @@ pub struct WirePull {
     pub id: [u8; 16],
     pub key: Vec<u8>,
     pub seq: u64,
+    /// The node whose unsettled version `seq` is (as [`Image::by`]).
+    pub by: Option<[u8; 16]>,
     pub root: [u8; 32],
     pub nodes: Vec<[u8; 32]>,
     pub span: Option<(u64, u64)>,
@@ -945,12 +987,15 @@ pub enum SyncMessage {
     /// limited or its opening could not tell what left it; the replica
     /// drops cached rows `members` leaves out. `global`: the result is the
     /// global authority's (directly, or through relays that settle by
-    /// their upstream), not a relay's own store.
+    /// their upstream), not a relay's own store. `by`: the node whose
+    /// positions `through` counts, when not the authority's (a replica's
+    /// with no server, which numbers its versions at its own node).
     Settled {
         id: u64,
         through: u64,
         members: Option<Vec<[u8; 16]>>,
         global: bool,
+        by: Option<[u8; 16]>,
     },
     /// `acting`: who the writes are (see [`Acting`]).
     Commit {
@@ -986,13 +1031,13 @@ pub enum SyncMessage {
         missing: Vec<WireChunkRef>,
     },
     /// Row images. `tx_ids` names the transactions behind the history
-    /// versions among them, as (seq, writer node, writer tx): a replica
-    /// lists a history version only once it knows its `$transactionId`,
-    /// and a one-shot read frozen at a snapshot names the commits that
-    /// snapshot holds. Empty for current rows.
+    /// versions among them, as [`TxName`]s: a replica lists a history
+    /// version only once it knows its `$transactionId`, and a one-shot
+    /// read frozen at a snapshot names the commits that snapshot holds.
+    /// Empty for current rows.
     Rows {
         images: Vec<Image>,
-        tx_ids: Vec<(u64, [u8; 16], u64)>,
+        tx_ids: Vec<TxName>,
     },
     /// The row is unavailable to this reader (a write or a policy change
     /// took its read access): the replica drops its copy (INV-SYNC-14).
@@ -1014,12 +1059,15 @@ pub enum SyncMessage {
     /// version. `global`: the fate is the global authority's (directly, or
     /// relayed from it), not the last word of a replica with no server,
     /// which orders its sessions' commits but cannot make them `Global`.
+    /// `by`: as on [`SyncMessage::Settled`], the node whose positions
+    /// `through` counts when not the authority's.
     Fate {
         tx: u64,
         through: u64,
         result: Result<(), WireError>,
         held: Vec<Held>,
         global: bool,
+        by: Option<[u8; 16]>,
     },
     // client → server
     /// A permission preflight: would the session's identity be allowed
@@ -1275,7 +1323,7 @@ struct Echo {
     table: String,
     row: RowUuid,
     key: Vec<u8>,
-    seq: u64,
+    at: Pos,
     digest: [u8; 16],
 }
 
@@ -1372,6 +1420,9 @@ pub(crate) struct Client {
     baselines: HashMap<(String, RowUuid, Vec<u8>), Option<Image>>,
     /// Highest server seq any answer was complete through.
     pub(crate) known: u64,
+    /// The node code whose positions `known` counts: 0, the authority's,
+    /// unless the upstream is a replica with no server (its own node's).
+    pub(crate) known_n: i64,
     /// The `known` cut last written to `_jazz_meta`.
     persisted_known: u64,
     answers: HashMap<u64, Option<Result<(u64, Vec<[u8; 16]>), Error>>>,
@@ -1656,10 +1707,10 @@ pub(crate) struct Session {
     /// Images to send this tick: (table, id, branch key).
     touched: BTreeSet<(String, RowUuid, Vec<u8>)>,
     /// The versions this tick's accepted commits from the client wrote:
-    /// (table, id, branch key, seq). Each ships even when a later version
-    /// supersedes it, so the replica holds every state its own commits
-    /// produced (a snapshot naming one reads it there).
-    committed: Vec<(String, RowUuid, Vec<u8>, u64)>,
+    /// (table, id, branch key, position). Each ships even when a later
+    /// version supersedes it, so the replica holds every state its own
+    /// commits produced (a snapshot naming one reads it there).
+    committed: Vec<(String, RowUuid, Vec<u8>, Pos)>,
     /// This tick's accepted commits' `expect` rows: the image of each is
     /// not shipped while it is the row's current version and matches.
     echoes: Vec<Echo>,
@@ -1675,7 +1726,7 @@ pub(crate) struct Session {
     /// chunked cells go as deltas over it (SPEC 19.8). The replica keeps a
     /// row it was shipped after the subscriptions that covered it end, so
     /// only an eviction drops it.
-    shipped: HashMap<(String, [u8; 16], Vec<u8>), u64>,
+    shipped: HashMap<(String, [u8; 16], Vec<u8>), Pos>,
     /// Resumed subscriptions whose opening is still to send.
     resume: BTreeMap<u64, Resume>,
     /// Supporting rows live subscriptions cover, per table, with whether
@@ -2421,7 +2472,7 @@ fn from_wire(op: WireOp) -> Result<StagedOp, Error> {
 /// The image filter for one row version. `+_seq` keeps the planner on
 /// the row-id index: after a bulk commit every row shares one `_seq`, and
 /// the `_seq` index would scan them all for each lookup.
-const ID_AT_SEQ: &str = "id = ?1 AND +_seq = ?2";
+const ID_AT: &str = "id = ?1 AND +_n = ?2 AND +_seq = ?3";
 
 // ---- stored images ----------------------------------------------------------
 
@@ -2658,17 +2709,17 @@ impl Inner {
     fn history_versions(
         &self,
         source: &str,
-        versions: impl IntoIterator<Item = (RowUuid, u64)>,
+        versions: impl IntoIterator<Item = (RowUuid, Pos)>,
         images: &mut Vec<Image>,
         seqs: &mut BTreeSet<u64>,
     ) -> Result<(), Error> {
         let mut current = BTreeSet::new();
-        for (row, seq) in versions {
+        for (row, at) in versions {
             let rid = row.0.as_bytes().to_vec();
-            let seq = seq as i64;
-            let mut found = self.images_where(source, false, ID_AT_SEQ, &[&rid, &seq])?;
+            let seq = at.seq as i64;
+            let mut found = self.images_where(source, false, ID_AT, &[&rid, &at.n, &seq])?;
             if found.is_empty() {
-                found = self.images_where(source, true, ID_AT_SEQ, &[&rid, &seq])?;
+                found = self.images_where(source, true, ID_AT, &[&rid, &at.n, &seq])?;
             }
             for image in &found {
                 seqs.insert(image.seq);
@@ -2701,7 +2752,7 @@ impl Inner {
             .conn
             .prepare_cached(
                 "SELECT t.seq FROM _jazz_transactions AS t JOIN _jazz_nodes AS n \
-                 ON n.n = t.n WHERE t.tx = ?1 AND n.node = ?2 AND t.seq IS NOT NULL",
+                 ON n.n = t.n WHERE t.tx = ?1 AND n.node = ?2 AND t.sn = 0 AND t.seq IS NOT NULL",
             )
             .and_then(|mut statement| {
                 statement
@@ -2718,18 +2769,18 @@ impl Inner {
             None => return Ok(Vec::new()),
         };
         let mut images = Vec::new();
-        self.history_versions(table, [(joined.row, seq)], &mut images, seqs)?;
+        self.history_versions(table, [(joined.row, Pos::at(seq))], &mut images, seqs)?;
         Ok(images)
     }
 
     /// Who committed each of `seqs`, as (seq, node, tx): `_jazz_transactions`
     /// for uploads, this authority's node for its own commits.
-    fn tx_ids(&self, seqs: &BTreeSet<u64>) -> Result<Vec<(u64, [u8; 16], u64)>, Error> {
+    fn tx_ids(&self, seqs: &BTreeSet<u64>) -> Result<Vec<TxName>, Error> {
         let mut statement = self
             .conn
             .prepare_cached(
                 "SELECT n.node, t.tx FROM _jazz_transactions AS t JOIN _jazz_nodes AS n \
-                 ON n.n = t.n WHERE t.seq = ?1",
+                 ON n.n = t.n WHERE t.sn = 0 AND t.seq = ?1",
             )
             .map_err(storage)?;
         let mut out = Vec::with_capacity(seqs.len());
@@ -2741,8 +2792,8 @@ impl Inner {
                 .optional()
                 .map_err(storage)?;
             out.push(match recorded {
-                Some((node, tx)) => (seq, node.try_into().unwrap_or([0; 16]), tx),
-                None => (seq, *self.identity.node.as_bytes(), seq),
+                Some((node, tx)) => (seq, None, node.try_into().unwrap_or([0; 16]), tx),
+                None => (seq, None, *self.identity.node.as_bytes(), seq),
             });
         }
         Ok(out)
@@ -2834,7 +2885,7 @@ impl Inner {
             table,
             row,
             &found.key,
-            floor.since,
+            Pos::at(floor.since),
             identity,
         )?)
     }
@@ -3088,15 +3139,18 @@ impl Inner {
                     id: [0; 16],
                     key: Vec::new(),
                     seq: 0,
+                    by: None,
                     deleted: false,
                     content: true,
                     cells: Vec::new(),
                 };
+                let mut code = 0;
                 for (i, name) in names.iter().enumerate() {
                     match name.as_str() {
                         "rid" => {}
                         "id" => image.id = r.get::<_, Vec<u8>>(i)?.try_into().unwrap_or([0; 16]),
                         "_b" => image.key = r.get(i)?,
+                        "_n" => code = r.get::<_, i64>(i)?,
                         "_seq" => image.seq = r.get::<_, i64>(i)? as u64,
                         "_st" => {
                             let state = r.get::<_, i64>(i)?;
@@ -3111,10 +3165,17 @@ impl Inner {
                             .push((name.clone(), Cell::from(r.get::<_, Sql>(i)?))),
                     }
                 }
-                Ok(image)
+                Ok((code, image))
             })
             .map_err(storage)?;
-        let mut images = rows.collect::<Result<Vec<_>, _>>().map_err(storage)?;
+        let images = rows.collect::<Result<Vec<_>, _>>().map_err(storage)?;
+        let mut images = images
+            .into_iter()
+            .map(|(code, mut image)| {
+                image.by = self.node_of(code)?;
+                Ok(image)
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
         for image in &mut images {
             self.resolve_authors(image)?;
             self.portable_large(image)?;
@@ -3152,18 +3213,21 @@ impl Inner {
     /// (SPEC 19.8).
     fn ship_deltas(
         &self,
-        shipped: &mut HashMap<(String, [u8; 16], Vec<u8>), u64>,
+        shipped: &mut HashMap<(String, [u8; 16], Vec<u8>), Pos>,
         image: &mut Image,
     ) -> Result<(), Error> {
         let held = shipped
             .get(&(image.table.clone(), image.id, image.key.clone()))
             .copied();
-        hold_shipped(shipped, image);
-        let Some(seq) = held.filter(|_| !image.deleted) else {
+        hold_shipped(shipped, image, self.pos(image)?);
+        // A delta names its base by an authority seq: a relay's unsettled
+        // version travels whole to its tab.
+        let Some(at) = held.filter(|held| !image.deleted && held.accepted()) else {
             return Ok(());
         };
+        let seq = at.seq;
         let row = RowUuid::from_bytes(image.id);
-        let Some(base) = self.version_image(&image.table, row, &image.key, seq)? else {
+        let Some(base) = self.version_image(&image.table, row, &image.key, at)? else {
             return Ok(());
         };
         for (name, cell) in &mut image.cells {
@@ -3186,23 +3250,23 @@ impl Inner {
         Ok(())
     }
 
-    /// The version of a row at `seq`, current or in history.
+    /// The version of a row at `at`, current or in history.
     fn version_image(
         &self,
         table: &str,
         row: RowUuid,
         key: &[u8],
-        seq: u64,
+        at: Pos,
     ) -> Result<Option<Image>, Error> {
         let id = row.0.as_bytes().to_vec();
-        let seq = seq as i64;
+        let seq = at.seq as i64;
         for history in [false, true] {
             let found = self
                 .images_where(
                     table,
                     history,
-                    "id = ?1 AND _b = ?2 AND _seq = ?3",
-                    &[&id, &key, &seq],
+                    "id = ?1 AND _b = ?2 AND _n = ?3 AND _seq = ?4",
+                    &[&id, &key, &at.n, &seq],
                 )?
                 .pop();
             if found.is_some() {
@@ -3354,12 +3418,14 @@ impl Inner {
         let mut names = vec![
             "id".to_owned(),
             "_b".to_owned(),
+            "_n".to_owned(),
             "_seq".to_owned(),
             "_st".to_owned(),
         ];
         let mut values = vec![
             Sql::Blob(image.id.to_vec()),
             Sql::Blob(image.key.clone()),
+            Sql::Integer(self.code_of(image.by)?),
             Sql::Integer(image.seq as i64),
             Sql::Integer(
                 if image.deleted { STATE_DELETED } else { 0 }
@@ -3387,10 +3453,10 @@ impl Inner {
         Ok(())
     }
 
-    /// Drop a row's current version and its history from `from_seq` up.
+    /// Drop a row's current version and its history from `from` up.
     /// The dropped image is kept for dispatch: keyed invalidation reads old
     /// images from history, which this removes.
-    fn drop_row(&self, table: &str, row: RowUuid, key: &[u8], from_seq: u64) -> Result<(), Error> {
+    fn drop_row(&self, table: &str, row: RowUuid, key: &[u8], from: Pos) -> Result<(), Error> {
         if let Some(image) = self.current_image(table, row, key)? {
             self.gone.borrow_mut().push(image);
         }
@@ -3402,10 +3468,10 @@ impl Inner {
         .map_err(storage)?;
         self.exec(
             &format!(
-                "DELETE FROM {} WHERE id = ?1 AND _b = ?2 AND _seq >= ?3",
+                "DELETE FROM {} WHERE id = ?1 AND _b = ?2 AND (_n, _seq) >= (?3, ?4)",
                 quote(&format!("{table}__h"))
             ),
-            rusqlite::params![id, key, from_seq as i64],
+            rusqlite::params![id, key, from.n, from.seq as i64],
         )
         .map_err(storage)?;
         self.changed
@@ -3418,15 +3484,20 @@ impl Inner {
     /// (which becomes history), older lands in history (an as-of answer).
     fn merge_image(&self, image: &Image) -> Result<(), Error> {
         let row = RowUuid::from_bytes(image.id);
-        match self.current_image(&image.table, row, &image.key)? {
+        let at = self.pos(image)?;
+        let current = match self.current_image(&image.table, row, &image.key)? {
+            Some(current) => Some((self.pos(&current)?, current)),
+            None => None,
+        };
+        match current {
             None => {
                 self.put_image(image, false)?;
                 self.changed
                     .borrow_mut()
                     .push((image.table.clone(), row, image.key.clone()));
             }
-            Some(current) if current.seq == image.seq => {}
-            Some(current) if relay_older(current.seq, image.seq) => {
+            Some((held, _)) if held == at => {}
+            Some((held, _)) if relay_older(held, at) => {
                 if self.non_durable {
                     self.put_image(image, true)?;
                     self.changed
@@ -3434,14 +3505,13 @@ impl Inner {
                         .push((image.table.clone(), row, image.key.clone()));
                 }
             }
-            Some(current) if current.seq < image.seq || current.seq >= LOCAL_BASE => {
+            Some((held, current)) if held < at || !held.accepted() => {
                 // A relay's newer version: its older one stays as history.
-                let relay_newer = self.non_durable && current.seq >= LOCAL_BASE;
-                let relay_newer = relay_newer && current.seq < image.seq;
-                if current.seq < LOCAL_BASE || relay_newer {
+                let relay_newer = self.non_durable && !held.accepted() && held < at;
+                if held.accepted() || relay_newer {
                     self.put_image(&current, true)?;
                 }
-                let floor = if relay_newer { image.seq } else { LOCAL_BASE };
+                let floor = if relay_newer { at } else { Pos::UNSETTLED };
                 self.drop_row(&image.table, row, &image.key, floor)?;
                 self.put_image(image, false)?;
             }
@@ -3457,7 +3527,7 @@ impl Inner {
     }
 
     fn evict(&self, table: &str, row: RowUuid, key: &[u8]) -> Result<(), Error> {
-        self.drop_row(table, row, key, 0)
+        self.drop_row(table, row, key, Pos::default())
     }
 
     /// The server evicted a row: this reader cannot read it. A row pending
@@ -3500,6 +3570,7 @@ impl Inner {
             };
             held.stamp(&mut image);
             image.seq = through;
+            image.by = None;
             self.receive_image(image)?;
         }
         Ok(())
@@ -3515,11 +3586,11 @@ impl Inner {
         for op in ops {
             let Some(row) = op.row() else { continue };
             let table = self.schema.stored_table(op.table())?;
-            let sql = format!("SELECT _b FROM {} WHERE {ID_AT_SEQ}", quote(table));
+            let sql = format!("SELECT _b FROM {} WHERE {ID_AT}", quote(table));
             let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
             let keys: Vec<Vec<u8>> = statement
                 .query_map(
-                    rusqlite::params![row.0.as_bytes().to_vec(), seq as i64],
+                    rusqlite::params![row.0.as_bytes().to_vec(), self.me, seq as i64],
                     |r| r.get(0),
                 )
                 .map_err(storage)?
@@ -3543,19 +3614,17 @@ impl Inner {
         key: &[u8],
     ) -> Result<Option<Image>, Error> {
         let id = row.0.as_bytes().to_vec();
-        let base = self.local_base();
         if let Some(image) = self.current_image(table, row, key)?
-            && image.seq < base
+            && self.pos(&image)?.n < self.me
         {
             return Ok(Some(image));
         }
-        let base = base as i64;
         Ok(self
             .images_where(
                 table,
                 true,
-                "id = ?1 AND _b = ?2 AND _seq < ?3 ORDER BY _seq DESC LIMIT 1",
-                &[&id, &key, &base],
+                "id = ?1 AND _b = ?2 AND _n < ?3 ORDER BY _n DESC, _seq DESC LIMIT 1",
+                &[&id, &key, &self.me],
             )?
             .pop())
     }
@@ -3581,9 +3650,11 @@ impl Inner {
 /// A commit is named by its writer's (node, tx). `_jazz_nodes` interns each
 /// node as a small code `n` (and records which identity owns it, see
 /// `claim_node`), and `_jazz_transactions` keeps one row per commit this
-/// store knows of under that code: `seq` where it landed (NULL once
-/// rejected), and `result` the fate this store recorded for it as a server
-/// (NULL when it only learned where the commit landed).
+/// store knows of under that code: (`sn`, `seq`) the position it landed
+/// at (`seq` NULL once rejected): an authority seq (`sn` 0), or a relay's
+/// own commit carrying it (`sn` the relay's own code); and `result` the
+/// fate this store recorded for it as a server (NULL when it only learned
+/// where the commit landed).
 pub(crate) const SYNC_DDL: &str = "\
     CREATE TABLE IF NOT EXISTS _jazz_pending (tx INTEGER PRIMARY KEY, header BLOB NOT NULL);\
     CREATE TABLE IF NOT EXISTS _jazz_pending_items (tx INTEGER NOT NULL, part INTEGER NOT NULL, n INTEGER NOT NULL, item BLOB NOT NULL, PRIMARY KEY (tx, part, n));\
@@ -3591,8 +3662,8 @@ pub(crate) const SYNC_DDL: &str = "\
     CREATE TABLE IF NOT EXISTS _jazz_meta (k TEXT PRIMARY KEY, v BLOB NOT NULL);\
     CREATE TABLE IF NOT EXISTS _jazz_authors (n INTEGER PRIMARY KEY, account BLOB NOT NULL, issuer TEXT NOT NULL, subject TEXT NOT NULL, UNIQUE (account, issuer, subject));\
     CREATE TABLE IF NOT EXISTS _jazz_nodes (n INTEGER PRIMARY KEY, node BLOB NOT NULL UNIQUE, author INTEGER);\
-    CREATE TABLE IF NOT EXISTS _jazz_transactions (n INTEGER NOT NULL, tx INTEGER NOT NULL, seq INTEGER, result BLOB, PRIMARY KEY (n, tx)) WITHOUT ROWID;\
-    CREATE INDEX IF NOT EXISTS _jazz_transactions_by_seq ON _jazz_transactions (seq);";
+    CREATE TABLE IF NOT EXISTS _jazz_transactions (n INTEGER NOT NULL, tx INTEGER NOT NULL, sn INTEGER NOT NULL DEFAULT 0, seq INTEGER, result BLOB, PRIMARY KEY (n, tx)) WITHOUT ROWID;\
+    CREATE INDEX IF NOT EXISTS _jazz_transactions_by_seq ON _jazz_transactions (sn, seq);";
 
 /// The retry store for refused commits, with each one's ops in
 /// `_jazz_rejected_ops`. It is created by the first refusal it keeps, not
@@ -3702,6 +3773,7 @@ impl Inner {
                     id: via.id,
                     key: via.key,
                     seq: via.seq,
+                    by: via.by,
                     root,
                     nodes: Vec::new(),
                     span: spans.get(&root).map(|span| (span.start, span.end)),
@@ -3842,6 +3914,7 @@ impl Inner {
             id: image.id,
             key: image.key.clone(),
             seq: image.seq,
+            by: image.by,
         };
         let roots = self.large_roots(&image.table, image)?;
         for root in &roots {
@@ -4337,6 +4410,68 @@ impl Inner {
     }
 
     /// `node`'s code in `_jazz_nodes`, interning it on first use.
+    /// This store's own node code as a replica: a relay's, or a
+    /// non-durable client's (see [`RELAY`]).
+    pub(crate) fn own_code(&self) -> Result<i64, Error> {
+        let role = if self.non_durable { LEAF } else { RELAY };
+        Ok(role | self.node_code(*self.identity.node.as_bytes())?)
+    }
+
+    /// The newest seq this replica's node numbered a version of its own at.
+    fn own_high_water(&self) -> Result<u64, Error> {
+        let mut seq = 0u64;
+        for table in self.physical.tables.keys() {
+            for name in [table.clone(), format!("{table}__h")] {
+                let max: Option<i64> = self
+                    .conn
+                    .cached_row(
+                        &format!("SELECT MAX(_seq) FROM {} WHERE _n = ?1", quote(&name)),
+                        [self.me],
+                        |r| r.get(0),
+                    )
+                    .map_err(storage)?;
+                seq = seq.max(max.unwrap_or(0) as u64);
+            }
+        }
+        Ok(seq)
+    }
+
+    /// The code an image's version is at (`_n`): 0 for an accepted
+    /// version, else the code of the node that numbered it.
+    pub(crate) fn code_of(&self, by: Option<[u8; 16]>) -> Result<i64, Error> {
+        match by {
+            None => Ok(0),
+            Some(node) if node == *self.identity.node.as_bytes() && self.me != 0 => Ok(self.me),
+            Some(node) => Ok(RELAY | self.node_code(node)?),
+        }
+    }
+
+    /// Where an image's version is.
+    pub(crate) fn pos(&self, image: &Image) -> Result<Pos, Error> {
+        Ok(Pos {
+            n: self.code_of(image.by)?,
+            seq: image.seq,
+        })
+    }
+
+    /// The node a stored version's code names (`None` for the authority).
+    pub(crate) fn node_of(&self, code: i64) -> Result<Option<[u8; 16]>, Error> {
+        if code == 0 {
+            return Ok(None);
+        }
+        let node: Vec<u8> = self
+            .conn
+            .cached_row(
+                "SELECT node FROM _jazz_nodes WHERE n = ?1",
+                [node_index(code)],
+                |r| r.get(0),
+            )
+            .map_err(storage)?;
+        Ok(Some(node.try_into().map_err(|_| {
+            Error::new(ErrorCode::Storage, "a stored node id is not 16 bytes")
+        })?))
+    }
+
     fn node_code(&self, node: [u8; 16]) -> Result<i64, Error> {
         self.exec(
             "INSERT OR IGNORE INTO _jazz_nodes (node) VALUES (?1)",
@@ -4368,16 +4503,22 @@ impl Inner {
         Ok(())
     }
 
-    /// Where a commit landed in the authority's order: `Some(seq)` once
-    /// accepted, `None` once rejected. Kept by the authority for every
-    /// upload and by a replica for its own, so snapshots that name
-    /// individual commits stay readable after they settle.
-    fn record_settled(&self, node: [u8; 16], tx: u64, seq: Option<u64>) -> Result<(), Error> {
+    /// Where a commit landed: `Some(at)` once accepted (in the authority's
+    /// order, or a relay's own commit carrying it), `None` once rejected.
+    /// Kept by the authority for every upload and by a replica for its
+    /// own, so snapshots that name individual commits stay readable after
+    /// they settle.
+    fn record_settled(&self, node: [u8; 16], tx: u64, at: Option<Pos>) -> Result<(), Error> {
         let code = self.node_code(node)?;
         self.exec(
-            "INSERT INTO _jazz_transactions (n, tx, seq) VALUES (?1, ?2, ?3) \
-             ON CONFLICT (n, tx) DO UPDATE SET seq = excluded.seq",
-            rusqlite::params![code, tx as i64, seq.map(|s| s as i64)],
+            "INSERT INTO _jazz_transactions (n, tx, sn, seq) VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT (n, tx) DO UPDATE SET sn = excluded.sn, seq = excluded.seq",
+            rusqlite::params![
+                code,
+                tx as i64,
+                at.map_or(0, |at| at.n),
+                at.map(|at| at.seq as i64)
+            ],
         )
         .map_err(storage)?;
         Ok(())
@@ -4386,16 +4527,15 @@ impl Inner {
     /// The sessions' commits this store's own commit `seq` carries, as it
     /// accepted them through a relay.
     fn relayed_origins(&self, seq: u64) -> Result<Vec<([u8; 16], u64)>, Error> {
-        let me = self.identity.node.as_bytes().to_vec();
         let mut statement = self
             .conn
             .prepare_cached(
                 "SELECT n.node, t.tx FROM _jazz_transactions AS t JOIN _jazz_nodes AS n \
-                 ON n.n = t.n WHERE t.seq = ?1 AND n.node != ?2",
+                 ON n.n = t.n WHERE t.sn = ?1 AND t.seq = ?2",
             )
             .map_err(storage)?;
         let rows = statement
-            .query_map(rusqlite::params![seq as i64, me], |r| {
+            .query_map(rusqlite::params![self.me, seq as i64], |r| {
                 Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?))
             })
             .map_err(storage)?;
@@ -4413,27 +4553,26 @@ impl Inner {
         Ok(origins)
     }
 
-    /// Where `node`'s commit `tx` landed: `Some(Some(seq))`, rejected
+    /// Where `node`'s commit `tx` landed: `Some(Some(position))`, rejected
     /// (`Some(None)`), or unknown here (`None`). A row with no `seq` reads as
     /// rejected: every `record_fate` is paired with a `record_settled` in the
     /// same transaction, so an accepted commit's row always has one.
-    fn settled(&self, node: [u8; 16], tx: u64) -> Result<Option<Option<u64>>, Error> {
+    fn settled(&self, node: [u8; 16], tx: u64) -> Result<Option<Option<Pos>>, Error> {
         match self.conn.cached_row(
-            "SELECT t.seq FROM _jazz_transactions AS t JOIN _jazz_nodes AS n ON n.n = t.n \
+            "SELECT t.sn, t.seq FROM _jazz_transactions AS t JOIN _jazz_nodes AS n ON n.n = t.n \
              WHERE n.node = ?1 AND t.tx = ?2",
             rusqlite::params![node.to_vec(), tx as i64],
-            |r| r.get::<_, Option<i64>>(0),
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?)),
         ) {
-            Ok(seq) => Ok(Some(seq.map(|s| s as u64))),
+            Ok((n, seq)) => Ok(Some(seq.map(|seq| Pos { n, seq: seq as u64 }))),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(error) => Err(storage(error)),
         }
     }
 
     /// Where each of `own` (this replica's commits unsettled at a
-    /// serializable snapshot) has since landed at a seq: a relay with no
-    /// server settles its sessions' commits at its own local seqs.
-    pub(crate) fn own_landings(&self, own: &[u64]) -> Result<HashMap<u64, u64>, Error> {
+    /// serializable snapshot) has since landed.
+    pub(crate) fn own_landings(&self, own: &[u64]) -> Result<HashMap<u64, Pos>, Error> {
         let me = *self.identity.node.as_bytes();
         let mut landed = HashMap::new();
         for &tx in own {
@@ -4449,13 +4588,19 @@ impl Inner {
     /// unsettled at begin (`own`), wherever each is now: settled at a seq,
     /// still pending at its local seq, or rejected (then it never happened).
     pub(crate) fn serializable_cut(&self, snapshot: u64, own: &[u64]) -> Result<Cut, Error> {
-        let mut cut = Cut::at(snapshot);
+        let mut cut = Cut::at(Pos {
+            n: self.frontier().n,
+            seq: snapshot,
+        });
         let me = *self.identity.node.as_bytes();
         for &tx in own {
             match self.settled(me, tx)? {
-                Some(Some(seq)) => cut.extra.push(seq),
+                Some(Some(at)) => cut.extra.push(at),
                 Some(None) => {}
-                None => cut.extra.push(tx),
+                None => cut.extra.push(Pos {
+                    n: self.me,
+                    seq: tx,
+                }),
             }
         }
         Ok(cut)
@@ -4480,6 +4625,48 @@ impl Inner {
             Some(client) if self.relays_upstream() => client.known,
             _ => self.seq,
         }
+    }
+
+    /// The node whose positions [`Self::served_through`] counts, when not
+    /// the authority's: a replica's with no server.
+    fn served_by(&self) -> Option<[u8; 16]> {
+        (self.me != 0 && !self.relays_upstream()).then(|| *self.identity.node.as_bytes())
+    }
+
+    /// The position this store reads as complete through: the authority's
+    /// seq it synced, or for a replica with no server its own newest.
+    pub(crate) fn frontier(&self) -> Pos {
+        match &self.client {
+            Some(client) if client.no_server() => Pos {
+                n: self.me,
+                seq: self.seq,
+            },
+            Some(client) => Pos {
+                n: client.known_n,
+                seq: client.known,
+            },
+            None => Pos::at(self.seq),
+        }
+    }
+
+    /// Advance what this replica knows it is complete through to
+    /// `through`, counted at `by`'s node (the authority's when `None`).
+    fn learn_known(&mut self, through: u64, by: Option<[u8; 16]>) -> Result<Pos, Error> {
+        let at = Pos {
+            n: self.code_of(by)?,
+            seq: through,
+        };
+        let client = self.client.as_mut().expect("client");
+        if at
+            > (Pos {
+                n: client.known_n,
+                seq: client.known,
+            })
+        {
+            client.known_n = at.n;
+            client.known = at.seq;
+        }
+        Ok(at)
     }
 
     /// The `Catalogue` session `index` is owed: the admitted versions it
@@ -4632,22 +4819,28 @@ impl Inner {
                 moved = true;
                 break;
             }
-            let max: Option<i64> = self
+            // Any version after the authority's `since`: a newer accepted
+            // one, or an unsettled one.
+            let newer: Option<i64> = self
                 .conn
                 .cached_row(
-                    &format!("SELECT MAX(_seq) FROM {}", quote(table)),
-                    [],
+                    &format!(
+                        "SELECT 1 FROM {} WHERE (_n, _seq) > (0, ?1) LIMIT 1",
+                        quote(table)
+                    ),
+                    [since as i64],
                     |r| r.get(0),
                 )
+                .optional()
                 .map_err(storage)?;
-            if max.is_some_and(|max| max as u64 > since) {
+            if newer.is_some() {
                 moved = true;
                 break;
             }
         }
         let prior = if moved {
             let read = ReadSpec {
-                cut: Some(Cut::at(since)),
+                cut: Some(Cut::at(Pos::at(since))),
                 include_deleted,
                 ..ReadSpec::default()
             };
@@ -4675,19 +4868,38 @@ impl Inner {
         reads: Vec<WireRead>,
         own: Vec<u64>,
     ) -> Result<Kind, Error> {
+        let me = *self.identity.node.as_bytes();
         let mut carried = BTreeMap::new();
         for tx in own {
-            if let Some(Some(seq)) = self.settled(origin, tx)? {
-                carried.insert(tx, seq);
+            if let Some(Some(at)) = self.settled(origin, tx)? {
+                carried.insert(tx, at);
             }
         }
+        // A carried commit is named as this relay's (or by the authority
+        // seq it settled at).
+        let name = |at: Pos| {
+            if at.accepted() {
+                (None, at.seq)
+            } else {
+                (Some(me), at.seq)
+            }
+        };
         let reads = reads
             .into_iter()
             .map(|read| WireRead {
                 rows: read
                     .rows
                     .into_iter()
-                    .map(|(row, seq)| (row, carried.get(&seq).copied().unwrap_or(seq)))
+                    .map(|(row, by, seq)| match by {
+                        Some(node) if node == origin => match carried.get(&seq) {
+                            Some(&at) => {
+                                let (by, seq) = name(at);
+                                (row, by, seq)
+                            }
+                            None => (row, by, seq),
+                        },
+                        _ => (row, by, seq),
+                    })
                     .collect(),
                 ..read
             })
@@ -4695,7 +4907,11 @@ impl Inner {
         Ok(Kind::Serializable {
             snapshot,
             reads,
-            own: carried.into_values().collect(),
+            own: carried
+                .into_values()
+                .filter(|at| !at.accepted())
+                .map(|at| at.seq)
+                .collect(),
         })
     }
 
@@ -4729,7 +4945,7 @@ impl Inner {
                 "it was captured past the authority state this store has synced",
             ));
         }
-        let mut cut = Cut::at(snapshot.global_base.0);
+        let mut cut = Cut::at(Pos::at(snapshot.global_base.0));
         let me = *self.identity.node.as_bytes();
         for dot in &snapshot.dots {
             let node = *dot.node.as_bytes();
@@ -4747,7 +4963,10 @@ impl Inner {
                 && let Some(client) = &self.client
             {
                 if client.pending.iter().any(|p| p.tx == tx) {
-                    cut.extra.push(tx);
+                    cut.extra.push(Pos {
+                        n: self.me,
+                        seq: tx,
+                    });
                     continue;
                 }
                 if client.fates.get(&tx).is_some_and(Result::is_err) {
@@ -4766,11 +4985,15 @@ impl Inner {
         if self.meta("client")?.is_none() {
             return Ok(());
         }
-        // A settled upload's rows now carry server seqs, so the stored
-        // versions no longer show the local seqs handed out. The fates
-        // recorded for this node do: the next commit continues after them,
-        // or it would reuse a transaction id the authority dedupes away.
+        // This replica's counter numbers its own commits: it resumes after
+        // its newest unsettled version. A settled upload's rows now carry
+        // server seqs, so the stored versions no longer show the seqs
+        // handed out. The fates recorded for this node do: the next commit
+        // continues after them, or it would reuse a transaction id the
+        // authority dedupes away.
         let me = *self.identity.node.as_bytes();
+        self.me = self.own_code()?;
+        self.seq = self.own_high_water()?;
         let settled: Option<i64> = self
             .conn
             .cached_row(
@@ -4912,6 +5135,7 @@ impl Client {
             stored: HashSet::new(),
             baselines: HashMap::new(),
             known: 0,
+            known_n: 0,
             persisted_known: 0,
             answers: HashMap::new(),
             advice: HashMap::new(),
@@ -5123,7 +5347,7 @@ impl Db {
             return Ok(());
         }
         read.settled_only = true;
-        read.cut = Some(crate::compile::Cut::at(through));
+        read.cut = Some(crate::compile::Cut::at(Pos::at(through)));
         let (table, head) = {
             let inner = self.inner.borrow();
             let schema = inner.schema.clone();
@@ -5161,7 +5385,7 @@ impl Db {
                             .contains_key(&(table.clone(), row, image.key.clone()))
                     });
                     let in_view = head.as_ref().is_none_or(|head| *head == image.key);
-                    if in_view && image.seq <= through && !overlaid {
+                    if in_view && image.by.is_none() && image.seq <= through && !overlaid {
                         evict.push((row, image.key));
                     }
                 }
@@ -5191,19 +5415,20 @@ impl Db {
         true
     }
 
-    /// Become a replica: optimistic seqs from here on sit above every
-    /// server seq, and commits are owed to an upstream (uploaded once one
-    /// connects). A store that will connect later becomes one before it
-    /// writes: what it committed before sits at seqs its upstream numbers
-    /// its own versions by and was never recorded for upload, so such a
-    /// store keeps it and refuses every upstream (see [`stranded`]).
+    /// Become a replica: its versions from here on are its own node's
+    /// (ordered after every server version), and commits are owed to an
+    /// upstream (uploaded once one connects). A store that will connect
+    /// later becomes one before it writes: what it committed before sits at
+    /// the authority's positions, which its upstream numbers its own versions
+    /// by, and was never recorded for upload, so such a store keeps it and
+    /// refuses every upstream (see [`stranded`]).
     pub fn become_replica(&self) {
         let mut inner = self.inner.borrow_mut();
         if inner.client.is_some() {
             return;
         }
         let stranded = !inner.authority && inner.holds_rows().expect("read the store's tables");
-        inner.raise_to_local_base();
+        inner.me = inner.own_code().expect("intern this replica's node");
         let node = *inner.identity.node.as_bytes();
         let mut client = Client::new(node);
         client.stranded = stranded;
@@ -5303,15 +5528,27 @@ impl Db {
                     image
                 }
             };
-            let settled = image.as_ref().map(|image| image.seq);
-            if let Some(image) = image.filter(|image| !image.deleted) {
-                settled_images.insert(row_key.clone(), image);
+            // Deltas and access proofs name their image by an authority
+            // seq: over a relay's unsettled version (on a tab) values go
+            // whole.
+            if let Some(image) = image
+                .as_ref()
+                .filter(|image| !image.deleted && image.by.is_none())
+            {
+                settled_images.insert(row_key.clone(), image.clone());
             }
             // This replica sends the commit: its predecessor goes by how
             // far back it is.
+            // A relay's unsettled version (on a tab) is the relay's commit.
             let on = match client.pending.newest(&row_key) {
                 Some(tx) => Some(BuiltOn::Own { back: seq - tx }),
-                None => settled.map(BuiltOn::Seq),
+                None => image.as_ref().map(|image| match image.by {
+                    Some(node) => BuiltOn::Commit {
+                        node,
+                        tx: image.seq,
+                    },
+                    None => BuiltOn::Seq(image.seq),
+                }),
             };
             if relayed.is_none()
                 && let Some(on) = on
@@ -6097,8 +6334,12 @@ impl Db {
                     SyncMessage::Rows { images, tx_ids } => {
                         // A history version is listed once its transaction
                         // is known.
-                        for (seq, node, tx) in tx_ids {
-                            inner.record_settled(node, tx, Some(seq))?;
+                        for (seq, by, node, tx) in tx_ids {
+                            let at = Pos {
+                                n: inner.code_of(by)?,
+                                seq,
+                            };
+                            inner.record_settled(node, tx, Some(at))?;
                         }
                         for image in images {
                             let Some(mut image) = inner.stored_image(image) else {
@@ -6157,9 +6398,10 @@ impl Db {
                         through,
                         members,
                         global,
+                        by,
                     } => {
+                        inner.learn_known(through, by)?;
                         let client = inner.client.as_mut().expect("client");
-                        client.known = client.known.max(through);
                         // A one-shot read's answer.
                         if let Some(slot) = client.answers.get_mut(&id) {
                             *slot = Some(Ok((through, members.unwrap_or_default())));
@@ -6231,13 +6473,19 @@ impl Db {
                         result,
                         held,
                         global,
+                        by,
                     } => {
                         let accepted = result.is_ok();
-                        if accepted {
+                        if accepted && global {
                             inner.install_held(tx, through, &held)?;
                         }
+                        // A relay's own last word is at its own position.
+                        let landed = if global || by.is_some() {
+                            inner.learn_known(through, by)?
+                        } else {
+                            Pos::at(through)
+                        };
                         let client = inner.client.as_mut().expect("client");
-                        client.known = client.known.max(through);
                         let serializable = client.sent.iter().any(|m| {
                             matches!(m, SyncMessage::Commit { tx: sent, kind: WireKind::Serializable { .. }, .. } if *sent == tx)
                         });
@@ -6293,7 +6541,7 @@ impl Db {
                         if let Some(hashes) = client.pushed.remove(&tx) {
                             crate::large::mark_pushed(&inner.conn, &hashes)?;
                         }
-                        inner.record_settled(node, tx, accepted.then_some(through))?;
+                        inner.record_settled(node, tx, accepted.then_some(landed))?;
                         inner.forget_pending(tx)?;
                         rebase = true;
                         // Sessions whose commits this upload carried learn
@@ -6319,6 +6567,7 @@ impl Db {
                                     result: fate.clone().map_err(|error| wire_error(&error)),
                                     held: Vec::new(),
                                     global,
+                                    by,
                                 });
                             }
                         }
@@ -6347,7 +6596,7 @@ impl Db {
         let mut inner = self.inner.borrow_mut();
         let client = inner.client.as_mut().expect("client");
         let known = client.known;
-        if known == client.persisted_known {
+        if known == client.persisted_known || client.known_n != 0 {
             return Ok(());
         }
         client.persisted_known = known;
@@ -6426,6 +6675,7 @@ impl Db {
                             }),
                             held: Vec::new(),
                             global: false,
+                            by: None,
                         });
                     }
                     _ => kept.push((commit, push)),
@@ -6537,10 +6787,11 @@ impl Db {
         for ((table, row, key), image) in &baseline {
             match image {
                 Some(image) => {
-                    inner.drop_row(table, *row, key, image.seq)?;
+                    let at = inner.pos(image)?;
+                    inner.drop_row(table, *row, key, at)?;
                     inner.put_image(image, false)?;
                 }
-                None => inner.drop_row(table, *row, key, 0)?,
+                None => inner.drop_row(table, *row, key, Pos::default())?,
             }
         }
         let active = inner.schema.clone();
@@ -6565,8 +6816,8 @@ impl Db {
 
 impl Inner {
     /// A stranded replica (see [`stranded`]) has no upstream to answer a
-    /// `Remote` read: its rows at server-range seqs are its own, never
-    /// confirmed (INV-SYNC-51). A local-first read serves its store.
+    /// `Remote` read: its rows at the authority's positions are its own,
+    /// never confirmed (INV-SYNC-51). A local-first read serves its store.
     pub(crate) fn check_not_stranded(&self) -> Result<(), Error> {
         match &self.client {
             Some(client) if client.stranded => Err(stranded()),
@@ -6590,29 +6841,6 @@ impl Inner {
             }
         }
         Ok(false)
-    }
-
-    /// Where this replica's optimistic local seqs start.
-    fn local_base(&self) -> u64 {
-        if self.non_durable {
-            NON_DURABLE_BASE
-        } else {
-            LOCAL_BASE
-        }
-    }
-
-    /// Hand out local seqs from this replica's base on. The jump hands out
-    /// no seq, so the high water stays where it was until a commit.
-    pub(crate) fn raise_to_local_base(&mut self) {
-        let base = self.local_base();
-        if self.seq < base {
-            let from = match self.base_jump {
-                Some((from, to)) if self.seq == to => from,
-                _ => self.seq,
-            };
-            self.base_jump = Some((from, base));
-            self.seq = base;
-        }
     }
 
     /// The upstream sent what this store cannot follow (a catalogue it
@@ -6838,12 +7066,14 @@ impl Inner {
     /// store has not admitted, with its refusal.
     fn refuse_undeployed_commit(&mut self, index: usize, tx: u64) {
         let through = self.served_through();
+        let by = self.served_by();
         self.sessions[index].outbox.push(SyncMessage::Fate {
             tx,
             through,
             result: Err(wire_error(&schema_version_not_deployed())),
             held: Vec::new(),
             global: true,
+            by,
         });
     }
 
@@ -6917,10 +7147,11 @@ impl Inner {
         let client = self.client.as_ref().expect("client");
         if let Some(Some(image)) = client.baselines.get(&(table.to_owned(), row, key.to_vec()))
             && image.seq == seq
+            && image.by.is_none()
         {
             return Ok(Some(image.clone()));
         }
-        self.version_image(table, row, key, seq)
+        self.version_image(table, row, key, Pos::at(seq))
     }
 
     /// A commit's chunked values that extend the same column's value in
@@ -7017,28 +7248,37 @@ impl Inner {
     /// Apply one server image; returns whether a rebase is needed (the row
     /// is overlaid by a pending write).
     fn receive_image(&mut self, image: Image) -> Result<bool, Error> {
-        // Two tiers number local seqs: relays from `LOCAL_BASE`, the
-        // non-durable foregrounds behind them from `NON_DURABLE_BASE`. An
-        // upstream version in a foreground's own range would come from a
-        // third tier (a foreground serving sessions), whose seqs could meet
-        // this replica's own.
-        if self.non_durable && image.seq >= NON_DURABLE_BASE {
+        // An upstream ships accepted versions and its own unsettled ones,
+        // never this replica's own: those it holds as it wrote them.
+        if image.by == Some(*self.identity.node.as_bytes()) {
             return Err(unsupported(
-                "a non-durable client's upstream relaying versions numbered in that \
-                 client's own local range (only a durable store relays to it)",
+                "an upstream shipping a version numbered by this replica's own node",
             ));
         }
+        let at = self.pos(&image)?;
         let row = RowUuid::from_bytes(image.id);
-        let client = self.client.as_mut().expect("client");
         let overlaid = (image.table.clone(), row, image.key.clone());
-        if let Some(baseline) = client.baselines.get_mut(&overlaid) {
-            match baseline {
-                Some(old) if old.seq >= image.seq && old.seq < LOCAL_BASE => {
+        let old = match self
+            .client
+            .as_ref()
+            .expect("client")
+            .baselines
+            .get(&overlaid)
+        {
+            None => None,
+            Some(None) => Some(None),
+            Some(Some(old)) => Some(Some(self.pos(old)?)),
+        };
+        if let Some(old) = old {
+            let client = self.client.as_mut().expect("client");
+            let baseline = client.baselines.get_mut(&overlaid).expect("baseline");
+            match old {
+                Some(held) if held >= at && held.accepted() => {
                     self.put_image(&image, true)?;
                     return Ok(false);
                 }
                 // A relay's older unsettled version (an as-of answer).
-                Some(old) if relay_older(old.seq, image.seq) => {
+                Some(held) if relay_older(held, at) => {
                     if self.non_durable {
                         self.put_image(&image, true)?;
                     }
@@ -7047,10 +7287,10 @@ impl Inner {
                 // The replaced server version stays as history. A relay's
                 // unsettled version gives way to a settled one, as the
                 // relay's store moved on from it.
-                Some(old) => {
-                    let relay_newer = old.seq >= LOCAL_BASE && old.seq < image.seq;
-                    let older = std::mem::replace(old, image);
-                    if older.seq < LOCAL_BASE || self.non_durable && relay_newer {
+                Some(held) => {
+                    let relay_newer = !held.accepted() && held < at;
+                    let older = baseline.replace(image).expect("held baseline");
+                    if held.accepted() || self.non_durable && relay_newer {
                         self.put_image(&older, true)?;
                     }
                 }
@@ -7084,8 +7324,7 @@ impl Db {
         claims: Option<BTreeMap<String, Value>>,
     ) -> SubscriberId {
         let mut inner = self.inner.borrow_mut();
-        // A third tier of local seqs would meet a foreground's own (see
-        // `NON_DURABLE_BASE`); its sessions refuse what it relays.
+        // One relay tier only (SPEC 9 §9.5).
         debug_assert!(
             !inner.non_durable,
             "a non-durable client serves no sessions"
@@ -7161,7 +7400,7 @@ impl Db {
                 ..Default::default()
             },
         ))?;
-        Ok(handle.seq)
+        Ok(handle.seq.seq)
     }
 
     /// Sessions the server ended since the last call because of what they
@@ -7491,7 +7730,8 @@ impl Db {
         self.notify();
         let mut inner = self.inner.borrow_mut();
         let through = inner.served_through();
-        let mut cache: HashMap<(String, RowUuid, u64), Vec<Image>> = HashMap::new();
+        let by = inner.served_by();
+        let mut cache: HashMap<(String, RowUuid, Pos), Vec<Image>> = HashMap::new();
         // Rows written since the last tick, with the watch keys they match.
         let written = std::mem::take(&mut inner.since_tick);
         let mut written_keys: Vec<((String, RowUuid, Vec<u8>), Vec<u64>)> = Vec::new();
@@ -7690,7 +7930,7 @@ impl Db {
                         let unchanged = resume.as_ref().is_some_and(|resume| {
                             reset
                                 && history.is_none()
-                                && row.seq <= resume.since
+                                && row.seq <= Pos::at(resume.since)
                                 && resume
                                     .prior
                                     .as_ref()
@@ -7717,13 +7957,17 @@ impl Db {
                                 )?;
                                 cache.insert(key.clone(), found);
                             } else {
-                                history_seqs.insert(row.seq);
+                                history_seqs.insert(row.seq.seq);
                             }
                         } else if !cache.contains_key(&key) {
                             let id = row.id.0.as_bytes().to_vec();
-                            let seq = row.seq as i64;
-                            let found =
-                                inner.images_where(&table, false, ID_AT_SEQ, &[&id, &seq])?;
+                            let seq = row.seq.seq as i64;
+                            let found = inner.images_where(
+                                &table,
+                                false,
+                                ID_AT,
+                                &[&id, &row.seq.n, &seq],
+                            )?;
                             cache.insert(key.clone(), found);
                         }
                         if unchanged {
@@ -7837,6 +8081,7 @@ impl Db {
                         through,
                         members: window,
                         global,
+                        by,
                     });
                     // The settled opening listed the result.
                     if let Some((.., opened)) = inner.sessions[index].subs.get_mut(&id) {
@@ -7866,10 +8111,11 @@ impl Db {
             }
             // Superseded versions of the client's own commits land in its
             // history, while the row stays readable.
-            for (table, row, key, seq) in committed {
-                let superseded = inner
-                    .current_image(&table, row, &key)?
-                    .is_some_and(|current| current.seq != seq);
+            for (table, row, key, at) in committed {
+                let superseded = match inner.current_image(&table, row, &key)? {
+                    Some(current) => inner.pos(&current)? != at,
+                    None => false,
+                };
                 if superseded {
                     echoes.retain(|e| !(e.table == table && e.row == row && e.key == key));
                 }
@@ -7878,8 +8124,8 @@ impl Db {
                     images.extend(inner.images_where(
                         &table,
                         true,
-                        "id = ?1 AND _b = ?2 AND _seq = ?3",
-                        &[&id, &key, &(seq as i64)],
+                        "id = ?1 AND _b = ?2 AND _n = ?3 AND _seq = ?4",
+                        &[&id, &key, &at.n, &(at.seq as i64)],
                     )?);
                 }
             }
@@ -7927,7 +8173,13 @@ impl Db {
             session.held = held_rows;
             let mut seen = HashSet::new();
             images.retain(|image| {
-                seen.insert((image.table.clone(), image.id, image.key.clone(), image.seq))
+                seen.insert((
+                    image.table.clone(),
+                    image.id,
+                    image.key.clone(),
+                    image.by,
+                    image.seq,
+                ))
             });
             // The writer's own rows, still at the version its commit
             // produced and exactly as it holds them, settle by its Fate.
@@ -7949,7 +8201,8 @@ impl Db {
                         e.table == image.table
                             && *e.row.0.as_bytes() == image.id
                             && e.key == image.key
-                            && e.seq == image.seq
+                            && e.at == Pos::at(image.seq)
+                            && image.by.is_none()
                     }) else {
                         return true;
                     };
@@ -7959,7 +8212,7 @@ impl Db {
                         held.entry(echo.tx)
                             .or_default()
                             .push(Held::of(echo.index, image));
-                        hold_shipped(&mut session.shipped, image);
+                        hold_shipped(&mut session.shipped, image, Pos::at(image.seq));
                     }
                     !same
                 });
@@ -7990,13 +8243,16 @@ impl Db {
                     .collect()
             });
             if !own.is_empty() {
+                // This relay's versions of those commits, at its own node.
+                let me = *inner.identity.node.as_bytes();
+                let is_own = |image: &Image| image.by == Some(me) && own.contains(&image.seq);
                 let mut shipped = HashSet::new();
                 for message in &mut out {
                     let SyncMessage::Rows { images, .. } = message else {
                         continue;
                     };
                     let mut bases = Vec::new();
-                    for image in images.iter().filter(|image| own.contains(&image.seq)) {
+                    for image in images.iter().filter(|image| is_own(image)) {
                         if !shipped.insert((image.table.clone(), image.id, image.key.clone())) {
                             continue;
                         }
@@ -8005,11 +8261,12 @@ impl Db {
                             .images_where(
                                 &image.table,
                                 true,
-                                "id = ?1 AND _b = ?2 AND _seq < ?3 ORDER BY _seq DESC",
-                                &[&id, &image.key, &(image.seq as i64)],
+                                "id = ?1 AND _b = ?2 AND (_n, _seq) < (?3, ?4) \
+                                 ORDER BY _n DESC, _seq DESC",
+                                &[&id, &image.key, &inner.me, &(image.seq as i64)],
                             )?
                             .into_iter()
-                            .find(|base| !own.contains(&base.seq));
+                            .find(|base| !is_own(base));
                         // Read access is the base version's own: the
                         // session's pending write may be what lets it read
                         // the row now.
@@ -8020,19 +8277,20 @@ impl Db {
                                 &base.table,
                                 row,
                                 &base.key,
-                                base.seq,
+                                inner.pos(&base)?,
                                 policy,
                             )? {
                                 bases.push(base);
                             }
                         }
                     }
-                    images.retain(|image| !own.contains(&image.seq));
+                    images.retain(|image| !is_own(image));
                     for base in bases {
                         if !images.iter().any(|image| {
                             image.table == base.table
                                 && image.id == base.id
                                 && image.key == base.key
+                                && image.by == base.by
                                 && image.seq == base.seq
                         }) {
                             images.push(base);
@@ -8509,8 +8767,9 @@ impl Db {
                 let mut named = Vec::new();
                 for dot in snapshot.iter().flat_map(|snapshot| &snapshot.dots) {
                     let (node, tx) = (*dot.node.as_bytes(), dot.time.0);
-                    if let Some(Some(seq)) = inner.settled(node, tx)? {
-                        named.push((seq, node, tx));
+                    // At the authority's position or this store's own.
+                    if let Some(Some(at)) = inner.settled(node, tx)? {
+                        named.push((at.seq, inner.node_of(at.n)?, node, tx));
                     }
                 }
                 let opts = ReadOpts {
@@ -8532,7 +8791,7 @@ impl Db {
                     }
                 };
                 let read = ReadSpec {
-                    cut: viewed.cut.or(at.map(Cut::at)),
+                    cut: viewed.cut.or(at.map(|at| Cut::at(Pos::at(at)))),
                     include_deleted,
                     settled_only: strict,
                     view: viewed.view,
@@ -8566,11 +8825,11 @@ impl Db {
                 } else {
                     for row in &rows {
                         let rid = row.id.0.as_bytes().to_vec();
-                        let seq = row.seq as i64;
-                        let mut found =
-                            inner.images_where(&table, false, ID_AT_SEQ, &[&rid, &seq])?;
+                        let seq = row.seq.seq as i64;
+                        let at = [&rid as &dyn rusqlite::ToSql, &row.seq.n, &seq];
+                        let mut found = inner.images_where(&table, false, ID_AT, &at)?;
                         if found.is_empty() {
-                            found = inner.images_where(&table, true, ID_AT_SEQ, &[&rid, &seq])?;
+                            found = inner.images_where(&table, true, ID_AT, &at)?;
                         }
                         images.extend(found);
                     }
@@ -8612,6 +8871,7 @@ impl Db {
                 let mut tx_ids = inner.tx_ids(&seqs)?;
                 tx_ids.extend(named);
                 let through = at.unwrap_or(inner.served_through());
+                let by = inner.served_by();
                 let authority = inner.client.is_none();
                 let session = &mut inner.sessions[index];
                 session
@@ -8624,6 +8884,7 @@ impl Db {
                     // A strict read at a relay is served once its upstream
                     // answered, from the settled rows alone.
                     global: authority || strict,
+                    by,
                 });
             }
             SyncMessage::Commit {
@@ -8639,6 +8900,7 @@ impl Db {
                 if !self.inner.borrow().claim_node(node, &identity)? {
                     let mut inner = self.inner.borrow_mut();
                     let through = inner.served_through();
+                    let by = inner.served_by();
                     inner.sessions[index].outbox.push(SyncMessage::Fate {
                         tx,
                         through,
@@ -8648,6 +8910,7 @@ impl Db {
                         }),
                         held: Vec::new(),
                         global: true,
+                        by,
                     });
                     return Ok(());
                 }
@@ -8727,15 +8990,21 @@ impl Db {
                 let mut inner = self.inner.borrow_mut();
                 // An accepted commit's fate carries the seq it landed at (a
                 // resend gets the recorded one), so the replica learns it.
-                let through = match (&result, inner.settled(node, tx)?) {
-                    (Ok(()), Some(Some(seq))) => seq,
-                    _ => inner.served_through(),
+                let (through, by) = match (&result, inner.settled(node, tx)?) {
+                    (Ok(()), Some(Some(at))) => (at.seq, inner.node_of(at.n)?),
+                    _ => (inner.served_through(), inner.served_by()),
+                };
+                // The commit landed at this store's own position: the
+                // authority's, or a replica's own node's.
+                let landed = Pos {
+                    n: inner.me,
+                    seq: through,
                 };
                 let session = &mut inner.sessions[index];
                 if result.is_ok() {
                     session.committed.extend(
                         rows.iter()
-                            .map(|(table, row, key)| (table.clone(), *row, key.clone(), through)),
+                            .map(|(table, row, key)| (table.clone(), *row, key.clone(), landed)),
                     );
                 }
                 session.touched.extend(rows.iter().cloned());
@@ -8760,9 +9029,15 @@ impl Db {
                         .outbox
                         .push(SyncMessage::Stored { tx });
                 } else {
+                    // A replica's own last word (it has no server) orders
+                    // the commit at its own position, but is not the
+                    // authority's.
+                    let global = landed.accepted();
                     // The rows the writer holds as they now are need no
                     // echo: fan-out drops their images if still current.
-                    if result.is_ok() {
+                    // Held rows install at the authority's seq: a replica's
+                    // last word ships its versions instead.
+                    if result.is_ok() && global {
                         let echoes = expect.into_iter().enumerate().filter_map(|(i, expect)| {
                             let (table, row, key) = rows.iter().find(|(_, row, key)| {
                                 *row.0.as_bytes() == expect.id && *key == expect.key
@@ -8773,21 +9048,19 @@ impl Db {
                                 table: table.clone(),
                                 row: *row,
                                 key: key.clone(),
-                                seq: through,
+                                at: landed,
                                 digest: expect.digest,
                             })
                         });
                         inner.sessions[index].echoes.extend(echoes);
                     }
-                    // A replica's own last word (it has no server) orders
-                    // the commit at a local seq, but is not the authority's.
-                    let global = inner.client.is_none() || through < LOCAL_BASE;
                     inner.sessions[index].outbox.push(SyncMessage::Fate {
                         tx,
                         through,
                         result,
                         held: Vec::new(),
                         global,
+                        by,
                     });
                 }
             }
@@ -8906,11 +9179,18 @@ impl Db {
                     _ => return Err(unresolved()),
                 };
                 let seq = delta.delta.seq;
-                if !still_readable_version(&inner, &table.stored, row, &delta.key, seq, identity)? {
+                if !still_readable_version(
+                    &inner,
+                    &table.stored,
+                    row,
+                    &delta.key,
+                    Pos::at(seq),
+                    identity,
+                )? {
                     return Err(unresolved());
                 }
                 let base = inner
-                    .version_image(&table.stored, row, &delta.key, seq)?
+                    .version_image(&table.stored, row, &delta.key, Pos::at(seq))?
                     .ok_or_else(unresolved)?;
                 let (_, old) = base
                     .cells
@@ -8960,6 +9240,10 @@ impl Db {
                 continue;
             }
             let row = RowUuid::from_bytes(pull.id);
+            let at = Pos {
+                n: inner.code_of(pull.by)?,
+                seq: pull.seq,
+            };
             // Pulls name the version's table as it is stored, as rows do.
             let image = match inner
                 .owner
@@ -8967,12 +9251,10 @@ impl Db {
                 .map(|t| t.stored.as_str())
             {
                 Some(table)
-                    if still_readable_version(
-                        &inner, table, row, &pull.key, pull.seq, identity,
-                    )? =>
+                    if still_readable_version(&inner, table, row, &pull.key, at, identity)? =>
                 {
                     inner
-                        .version_image(table, row, &pull.key, pull.seq)?
+                        .version_image(table, row, &pull.key, at)?
                         .map(|image| (table, image))
                 }
                 _ => None,
@@ -9073,10 +9355,17 @@ impl Db {
             else {
                 continue;
             };
-            if !still_readable_version(&inner, table, row, &proof.key, proof.seq, identity)? {
+            if !still_readable_version(
+                &inner,
+                table,
+                row,
+                &proof.key,
+                Pos::at(proof.seq),
+                identity,
+            )? {
                 continue;
             }
-            if let Some(image) = inner.version_image(table, row, &proof.key, proof.seq)? {
+            if let Some(image) = inner.version_image(table, row, &proof.key, Pos::at(proof.seq))? {
                 roots.extend(inner.large_roots(table, &image)?);
             }
         }
@@ -9163,7 +9452,8 @@ impl Db {
                     settled.insert(tx, seq);
                 }
             }
-            let in_snapshot = |seq: u64| seq <= *snapshot || settled.values().any(|s| *s == seq);
+            let in_snapshot =
+                |at: Pos| at <= Pos::at(*snapshot) || settled.values().any(|s| *s == at);
             for op in &ops {
                 if let Some(row) = op.row()
                     && inner
@@ -9190,18 +9480,30 @@ impl Db {
                     include_deleted: read.include_deleted,
                     ..ReadSpec::default()
                 };
-                let now: Vec<([u8; 16], u64)> = inner
+                let now: Vec<([u8; 16], Option<Pos>)> = inner
                     .read_versions(&prepared, identity, &spec)
                     .map_err(|e| (e, Vec::new()))?
                     .iter()
-                    .map(|(row, seq)| (*row.0.as_bytes(), *seq))
+                    .map(|(row, at)| (*row.0.as_bytes(), Some(*at)))
                     .collect();
-                // A row the sender read at an own commit's local seq is
-                // compared where that commit settled.
-                let then: Vec<([u8; 16], u64)> = read
+                // A row the sender read at an own commit is compared where
+                // that commit settled; one at this store's own commit (a
+                // relay's it shipped the sender) where it is.
+                let me = *inner.identity.node.as_bytes();
+                let then: Vec<([u8; 16], Option<Pos>)> = read
                     .rows
                     .iter()
-                    .map(|(row, seq)| (*row, settled.get(seq).copied().unwrap_or(*seq)))
+                    .map(|&(row, by, seq)| {
+                        let at = match by {
+                            None => Some(Pos::at(seq)),
+                            Some(node) if node == origin.0 => settled.get(&seq).copied(),
+                            Some(node) if node == me && inner.me != 0 => {
+                                Some(Pos { n: inner.me, seq })
+                            }
+                            Some(_) => None,
+                        };
+                        (row, at)
+                    })
                     .collect();
                 if now != then {
                     let rows = mentioned(&inner);
@@ -9262,7 +9564,7 @@ impl Db {
             }
             let recorded = inner
                 .record_fate(origin.0, origin.1, &Ok(()))
-                .and_then(|()| inner.record_settled(origin.0, origin.1, Some(seq)));
+                .and_then(|()| inner.record_settled(origin.0, origin.1, Some(inner.own_pos(seq))));
             if let Err(error) = recorded {
                 inner.changed.borrow_mut().truncate(mark);
                 end_savepoint(&inner.conn, "upload", false).map_err(|e| (e, Vec::new()))?;
@@ -9394,13 +9696,13 @@ fn fresh_advice_base() -> u64 {
     (high >> 13) | 1
 }
 
-/// [`readable`] for the version of the row at `seq`.
+/// [`readable`] for the version of the row at `at`.
 fn readable_version(
     inner: &Inner,
     table: &str,
     row: RowUuid,
     key: &[u8],
-    seq: u64,
+    at: Pos,
     identity: Option<AuthorSubject>,
 ) -> Result<bool, Error> {
     let Some(author) = identity else {
@@ -9408,7 +9710,7 @@ fn readable_version(
     };
     let schema = inner.owner.clone();
     let table = owned_table(&schema, table)?;
-    inner.check_version(table, row, key, seq, author, Operation::Select)
+    inner.check_version(table, row, key, at, author, Operation::Select)
 }
 
 /// Whether `identity` may read the version of `row` at `seq` and, still,
@@ -9419,10 +9721,10 @@ fn still_readable_version(
     table: &str,
     row: RowUuid,
     key: &[u8],
-    seq: u64,
+    at: Pos,
     identity: Option<AuthorSubject>,
 ) -> Result<bool, Error> {
-    Ok(readable_version(inner, table, row, key, seq, identity)?
+    Ok(readable_version(inner, table, row, key, at, identity)?
         && readable(inner, table, row, key, identity)?)
 }
 
@@ -9490,7 +9792,7 @@ fn wire_row(op: &WireOp) -> Option<RowUuid> {
 
 /// Record that the replica holds `image`, when it has chunked cells: its
 /// later versions' go as deltas over it (SPEC 19.8).
-fn hold_shipped(shipped: &mut HashMap<(String, [u8; 16], Vec<u8>), u64>, image: &Image) {
+fn hold_shipped(shipped: &mut HashMap<(String, [u8; 16], Vec<u8>), Pos>, image: &Image, at: Pos) {
     if image.deleted
         || !image
             .cells
@@ -9501,8 +9803,8 @@ fn hold_shipped(shipped: &mut HashMap<(String, [u8; 16], Vec<u8>), u64>, image: 
     }
     let seq = shipped
         .entry((image.table.clone(), image.id, image.key.clone()))
-        .or_insert(image.seq);
-    *seq = (*seq).max(image.seq);
+        .or_insert(at);
+    *seq = (*seq).max(at);
 }
 
 // ---- reads through the binding entry point -------------------------------
@@ -9622,8 +9924,8 @@ impl Db {
     /// Mark this store as a non-durable foreground over a durable relay:
     /// its own store starts empty each time, so a subscription's opening,
     /// whatever its tier, waits for the upstream's answer (the relay's
-    /// stored view, or its upstream's once that answers). Its own writes
-    /// take seqs from [`NON_DURABLE_BASE`] up.
+    /// stored view, or its upstream's once that answers). Its own versions
+    /// are at a [`LEAF`] code, after its relay's.
     pub fn set_non_durable_client(&self) {
         let mut inner = self.inner.borrow_mut();
         debug_assert!(
@@ -9632,7 +9934,7 @@ impl Db {
         );
         inner.non_durable = true;
         if inner.client.is_some() {
-            inner.raise_to_local_base();
+            inner.me = inner.own_code().expect("intern this replica's node");
         }
     }
 }
@@ -9644,14 +9946,9 @@ impl Db {
         let Some(client) = &inner.client else {
             return "not a client".to_owned();
         };
-        let base = inner.local_base();
         format!(
             "pending {:?} sent {} unsent {} baseline {:?} fates {:?} connected {}",
-            client
-                .pending
-                .iter()
-                .map(|p| p.tx - base)
-                .collect::<Vec<_>>(),
+            client.pending.iter().map(|p| p.tx).collect::<Vec<_>>(),
             client.sent.len(),
             client.unsent.len(),
             client
@@ -9662,7 +9959,7 @@ impl Db {
             client
                 .fates
                 .iter()
-                .map(|(tx, r)| (tx.saturating_sub(base), r.is_ok()))
+                .map(|(tx, r)| (*tx, r.is_ok()))
                 .collect::<BTreeMap<_, _>>(),
             client.transport.is_some(),
         )
@@ -9686,7 +9983,7 @@ mod tests {
         postcard::to_allocvec(&(
             COMMIT,
             [7u8; 16],
-            LOCAL_BASE + 1,
+            1u64,
             WireKind::Mergeable,
             Vec::<WireOp>::new(),
             author.map(str::to_owned),
@@ -9718,7 +10015,7 @@ mod tests {
     fn a_current_pending_header_round_trips() {
         let header = SyncMessage::Commit {
             node: [7; 16],
-            tx: LOCAL_BASE + 1,
+            tx: 1,
             kind: WireKind::Mergeable,
             ops: Vec::new(),
             acting: Acting::Session {
@@ -9741,6 +10038,7 @@ mod tests {
             id: [id; 16],
             key: Vec::new(),
             seq,
+            by: None,
             deleted: false,
             content: true,
             cells: vec![("body".to_owned(), Cell::Blob(vec![0; body]))],
@@ -9768,7 +10066,7 @@ mod tests {
             image(3, 3, 100),
             image(4, 2, 100),
         ];
-        let tx_ids = vec![(1, [9; 16], 1)];
+        let tx_ids = vec![(1, None, [9; 16], 1)];
         let messages = rows_messages(images, tx_ids.clone(), 300);
         // seq 1 and 2 fit together; seq 3's two versions stay together.
         assert_eq!(

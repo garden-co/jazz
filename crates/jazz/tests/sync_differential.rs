@@ -301,7 +301,7 @@ impl Net {
                     polled.is_ready(),
                     "client {} write {} has no fate after syncing",
                     client.who,
-                    tx - jazz::db::LOCAL_BASE
+                    tx
                 );
                 rejected += matches!(polled, std::task::Poll::Ready(Err(_))) as usize;
             }

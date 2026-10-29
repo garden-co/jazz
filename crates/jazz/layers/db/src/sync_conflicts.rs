@@ -164,7 +164,7 @@ fn unknown_base(what: &str) -> Error {
 /// A commit's predecessor as the receiver recorded it: accepted (at a
 /// seq), rejected, or never received, which a sender only names after its
 /// predecessor was lost, so the write is rejected as over a rejected one.
-fn predecessor(commit: Option<Option<u64>>) -> Result<u64, Error> {
+fn predecessor(commit: Option<Option<Pos>>) -> Result<Pos, Error> {
     commit.flatten().ok_or_else(predecessor_rejected)
 }
 
@@ -268,11 +268,11 @@ impl Inner {
     /// relay's (one of its own unsettled versions it shipped the session, or
     /// the commit carrying one of the session's) is named as this relay's.
     /// A base on a commit this relay rejected, or never received, rejects
-    /// the write. A version in this relay's local range that is not one of
-    /// its own commits (one from before a reset)
-    /// cannot be named upstream: the write counts as built on the newest
-    /// version of the row this relay holds accepted, so it may be flagged
-    /// over a version its writer saw, never the other way round.
+    /// the write. An unsettled version of this relay's node that is not one
+    /// of its commits (one from before a reset) cannot be named upstream:
+    /// the write counts as built on the newest version of the row this
+    /// relay holds accepted, so it may be flagged over a version its writer
+    /// saw, never the other way round.
     pub(super) fn relay_bases(
         &self,
         sender: ([u8; 16], u64),
@@ -281,37 +281,39 @@ impl Inner {
     ) -> Result<Vec<(usize, WireBase)>, Error> {
         let me = *self.identity.node.as_bytes();
         let pending = &self.client.as_ref().expect("a relay is a client").pending;
-        // Where a commit this relay carries landed: still in its own local
-        // range (named as its commit), or already accepted upstream.
-        let carried = |seq: u64| {
-            if seq >= LOCAL_BASE {
-                BuiltOn::Commit { node: me, tx: seq }
+        // Where a commit this relay carries landed: still one of its own
+        // (named as its commit), or already accepted upstream.
+        let carried = |at: Pos| {
+            if at.accepted() {
+                BuiltOn::Seq(at.seq)
             } else {
-                BuiltOn::Seq(seq)
+                BuiltOn::Commit {
+                    node: me,
+                    tx: at.seq,
+                }
             }
         };
         bases
             .into_iter()
             .map(|(op, base)| {
                 let on = match base.on {
-                    BuiltOn::Seq(seq) if seq < LOCAL_BASE => BuiltOn::Seq(seq),
-                    BuiltOn::Seq(seq) if seq < NON_DURABLE_BASE => {
+                    BuiltOn::Seq(seq) => BuiltOn::Seq(seq),
+                    BuiltOn::Commit { node, tx } if node == me => {
                         let (table, row) = self.based_row(ops, op)?;
                         let row_key = (table.to_owned(), row, base.key.clone());
                         let own_pending = pending
                             .by_row
                             .get(&row_key)
-                            .is_some_and(|txs| txs.contains(&seq));
-                        match self.settled(me, seq)? {
-                            _ if own_pending => BuiltOn::Commit { node: me, tx: seq },
-                            Some(Some(_)) => BuiltOn::Commit { node: me, tx: seq },
+                            .is_some_and(|txs| txs.contains(&tx));
+                        match self.settled(me, tx)? {
+                            _ if own_pending => BuiltOn::Commit { node: me, tx },
+                            Some(Some(_)) => BuiltOn::Commit { node: me, tx },
                             Some(None) => return Err(predecessor_rejected()),
                             None => BuiltOn::Seq(
                                 self.newest_accepted(table, row, &base.key)?.unwrap_or(0),
                             ),
                         }
                     }
-                    BuiltOn::Seq(_) => return Err(unknown_base("a version")),
                     BuiltOn::Own { back } => {
                         let tx = sender
                             .1
@@ -372,7 +374,7 @@ impl Inner {
             .iter()
             .rev()
             .map(|v| v.seq)
-            .find(|&seq| seq < LOCAL_BASE))
+            .next())
     }
 
     /// What each based row of an upload was built on, in this authority's
@@ -389,17 +391,16 @@ impl Inner {
         for (op, base) in bases {
             let (table, row) = self.based_row(ops, *op)?;
             let on = match base.on {
-                BuiltOn::Seq(seq) if seq < LOCAL_BASE => Built::Seq(seq),
-                BuiltOn::Seq(_) => return Err(unknown_base("a version")),
+                BuiltOn::Seq(seq) => Built::Seq(seq),
                 BuiltOn::Own { back } => {
                     let tx = sender
                         .1
                         .checked_sub(back)
                         .ok_or_else(|| unknown_base("a commit"))?;
-                    Built::On(predecessor(self.settled(sender.0, tx)?)?)
+                    Built::On(predecessor(self.settled(sender.0, tx)?)?.seq)
                 }
                 BuiltOn::Commit { node, tx } if node == sender.0 => {
-                    Built::On(predecessor(self.settled(node, tx)?)?)
+                    Built::On(predecessor(self.settled(node, tx)?)?.seq)
                 }
                 BuiltOn::Commit { .. } => return Err(unknown_base("another node's commit")),
             };
@@ -424,8 +425,9 @@ impl Inner {
                 .map_or(&[][..], Vec::as_slice);
             self.exec(
                 &format!(
-                    "UPDATE {} SET _base = ?1, _cols = ?2 WHERE id = ?3 AND _b = ?4 AND _seq = ?5",
-                    quote(table)
+                    "UPDATE {} SET _base = ?1, _cols = ?2 WHERE id = ?3 AND _b = ?4 AND _n = {} AND _seq = ?5",
+                    quote(table),
+                    self.me
                 ),
                 rusqlite::params![
                     built.get(row_key).map(|built| built.stored()),
@@ -448,8 +450,8 @@ impl Inner {
         key: &[u8],
     ) -> Result<Vec<Version>, Error> {
         let sql = format!(
-            "SELECT _seq, _base, _cols FROM {} WHERE id = ?1 AND _b = ?2 \
-             UNION ALL SELECT _seq, _base, _cols FROM {} WHERE id = ?1 AND _b = ?2 \
+            "SELECT _seq, _base, _cols FROM {} WHERE id = ?1 AND _b = ?2 AND _n = 0 \
+             UNION ALL SELECT _seq, _base, _cols FROM {} WHERE id = ?1 AND _b = ?2 AND _n = 0 \
              AND (_st & {STATE_AS_SENT}) = 0 ORDER BY 1",
             quote(table),
             quote(&format!("{table}__h"))
@@ -483,7 +485,7 @@ impl Inner {
         let writers: BTreeMap<u64, ([u8; 16], u64)> = self
             .tx_ids(&history.iter().map(|v| v.seq).collect())?
             .into_iter()
-            .map(|(seq, node, tx)| (seq, (node, tx)))
+            .map(|(seq, _, node, tx)| (seq, (node, tx)))
             .collect();
         let writer = |seq: u64| writers.get(&seq).copied().unwrap_or(([0; 16], seq));
         let mut conflicts = Vec::with_capacity(history.len());
@@ -581,7 +583,7 @@ impl Inner {
         let id = row.0.as_bytes().to_vec();
         if let Some(on) = sent {
             let sql = format!(
-                "SELECT {} FROM {} WHERE id = ?1 AND _b = ?2 AND _seq = ?3",
+                "SELECT {} FROM {} WHERE id = ?1 AND _b = ?2 AND _n = 0 AND _seq = ?3",
                 quote(column),
                 quote(&format!("{table}__h")),
             );
@@ -597,8 +599,8 @@ impl Inner {
             }
         }
         let sql = format!(
-            "SELECT {column} FROM {} WHERE id = ?1 AND _b = ?2 AND _seq = ?3 \
-             UNION ALL SELECT {column} FROM {} WHERE id = ?1 AND _b = ?2 AND _seq = ?3",
+            "SELECT {column} FROM {} WHERE id = ?1 AND _b = ?2 AND _n = 0 AND _seq = ?3 \
+             UNION ALL SELECT {column} FROM {} WHERE id = ?1 AND _b = ?2 AND _n = 0 AND _seq = ?3",
             quote(table),
             quote(&format!("{table}__h")),
             column = quote(column),

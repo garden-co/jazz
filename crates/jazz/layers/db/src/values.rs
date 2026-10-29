@@ -948,7 +948,9 @@ impl Table {
         let history = quote(&format!("{}__h", table.stored));
         // `_b` is the canonical branch key ('' for unbranched tables).
         // Rows are unique per (id, branch); branch views select by `_b`
-        // first, so every index leads with it. `_st` is the version's state
+        // first, so every index leads with it. A version is at (`_n`,
+        // `_seq`): the code of the sequencer that numbered it (0 for the
+        // authority, see [`crate::db::RELAY`]) and its seq there. `_st` is the version's state
         // bits ([`STATE_NO_CONTENT`], [`STATE_DELETED`], and in history
         // [`STATE_AS_SENT`]): 0 for a live version whose commit wrote
         // content. `_base` and `_cols` are what the authority keeps of the
@@ -956,12 +958,13 @@ impl Table {
         // columns it authored (SPEC 4 §4.6); NULL everywhere else.
         sql.push_str(&format!(
             "CREATE TABLE {name} (rid INTEGER PRIMARY KEY, id BLOB NOT NULL, \
-             _b BLOB NOT NULL DEFAULT X'', _seq INTEGER NOT NULL, \
+             _b BLOB NOT NULL DEFAULT X'', _n INTEGER NOT NULL DEFAULT 0, _seq INTEGER NOT NULL, \
              _st INTEGER NOT NULL DEFAULT 0, _base INTEGER, _cols BLOB{columns}, \
              UNIQUE (id, _b));\n\
-             CREATE INDEX {} ON {name}(_seq);\n\
-             CREATE TABLE {history} (id BLOB NOT NULL, _b BLOB NOT NULL, _seq INTEGER NOT NULL, \
-             _st INTEGER NOT NULL, _base INTEGER, _cols BLOB{columns}, PRIMARY KEY (id, _b, _seq)) WITHOUT ROWID;\n",
+             CREATE INDEX {} ON {name}(_n, _seq);\n\
+             CREATE TABLE {history} (id BLOB NOT NULL, _b BLOB NOT NULL, \
+             _n INTEGER NOT NULL DEFAULT 0, _seq INTEGER NOT NULL, _st INTEGER NOT NULL, \
+             _base INTEGER, _cols BLOB{columns}, PRIMARY KEY (id, _b, _n, _seq)) WITHOUT ROWID;\n",
             quote(&format!("{}__by_seq", table.stored)),
         ));
         for index in &table.indexes {
@@ -1141,7 +1144,8 @@ pub(crate) fn quote(name: &str) -> String {
 pub struct CurrentRow {
     pub(crate) table: Arc<str>,
     pub(crate) id: RowUuid,
-    pub(crate) seq: u64,
+    /// Where the row's version is.
+    pub(crate) seq: crate::db::Pos,
     pub(crate) deleted: bool,
     /// Projected cells in projection order. `None` is an unwritten cell.
     pub(crate) cells: Arc<Vec<(String, Option<Value>)>>,
@@ -1238,8 +1242,8 @@ impl CurrentRow {
         self.deleted
     }
 
-    /// The commit sequence number of this row version.
-    pub fn seq(&self) -> u64 {
+    /// Where this row version is: its sequencer's code and its seq there.
+    pub fn seq(&self) -> crate::db::Pos {
         self.seq
     }
 

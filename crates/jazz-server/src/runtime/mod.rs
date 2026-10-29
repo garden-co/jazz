@@ -1717,6 +1717,7 @@ impl Owner {
                             }),
                             held: Vec::new(),
                             global: true,
+                            by: None,
                         });
                 }
                 Ok(Some(

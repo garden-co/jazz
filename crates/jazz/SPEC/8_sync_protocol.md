@@ -11,11 +11,14 @@ The model is small:
 - The **authority** (the server, or a node with no upstream) is a database
   holding complete history. Every accepted commit gets the next server seq.
 - A **replica** is a database whose store is a partial copy of server versions
-  plus its own optimistic writes. Replica rows carry the server seq they were
-  shipped at, so cuts and history on the replica are over server versions.
-  Optimistic local writes number from `LOCAL_BASE` up (a non-durable client
-  from `NON_DURABLE_BASE` up), above every server seq, so no cut at a server
-  seq sees them.
+  plus its own optimistic writes. Every stored version sits at a position
+  `(_n, _seq)`: `_n` is the code of the node that numbered it (0 for the
+  authority) and `_seq` that node's counter. Replica rows carry the server
+  seq they were shipped at, at `_n = 0`, so cuts and history on the replica
+  are over server versions. A replica numbers its own optimistic writes
+  from 1 at its own node's code (role bits over its `_jazz_nodes` code:
+  `RELAY` for a durable replica, `LEAF` for a non-durable one), which sorts
+  after every server position, so no cut at a server seq sees them.
 - **Writes travel up** as one `Commit` per transaction and come back as one
   `Fate`.
 - **Reads travel up** as one `Read` per query and come back as rows plus
@@ -54,7 +57,7 @@ source of truth and names each invariant's tests):
 - `INV-SYNC-46`: A replica missing the chunks of a large value MUST request them and install the row only once its chunks are present; a writer pushes a value's new chunks before the commit that uses them.
 - `INV-SYNC-48`: A Remote read MUST NOT report rows the server's answer no longer lists.
 - `INV-SYNC-49`: A server MUST process a session's messages in the order sent, so a read sent after a commit is served after that commit.
-- `INV-SYNC-50`: A non-durable client's local seqs MUST NOT collide with its relay's.
+- `INV-SYNC-50`: A non-durable client's local versions MUST NOT collide with its relay's: each is stored at the position of the node that numbered it.
 - `INV-SYNC-51`: A store that committed writes before it became a replica MUST keep them and refuse every upstream, saying why.
 - `INV-SYNC-52`: A replica MUST upload each commit under the schema version of the view that wrote it, keeping it pending while offline; a server MUST refuse a commit under a version it has not deployed, at once, with reason `schema_version_not_deployed`.
 - `INV-TX-2`, `INV-TX-11`, `INV-TX-23`: commit, seq and relay rules (ch. 3).
@@ -605,11 +608,14 @@ for its sessions (tabs). It serves a session's reads from its store per the
 read's tier, asking its upstream with the same `Read` where the tier needs
 the authority's answer, and tells its sessions the authority's seq it knows
 (`served_through`), so a session's snapshot is one the authority validates as
-it is. It numbers its unsettled versions from `LOCAL_BASE` and ships them to
-its sessions; a non-durable session numbers its own writes from
-`NON_DURABLE_BASE` (`INV-SYNC-50`). A relay stores a session's commit as its
-own pending commit, answers `Stored`, and relays the authority's `Fate`
-(§8.3).
+it is. It numbers its unsettled versions at its own node and ships them to
+its sessions with `Image.by` naming that node; a non-durable session numbers
+its own writes at its own node, so the two never collide in the session's
+store (`INV-SYNC-50`). A relay stores a session's commit as its own pending
+commit, answers `Stored`, and relays the authority's `Fate` (§8.3). A relay
+whose host says it has no server is its sessions' last word: its `Fate` and
+`Settled` carry `by`, its own node, since their `through` counts its
+positions rather than the authority's.
 
 ## Open Questions
 

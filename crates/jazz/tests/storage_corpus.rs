@@ -56,8 +56,8 @@ const CLIENT_FILE: &str = "sqlite-storage-v1/client.sqlite.gz.base64";
 /// change re-runs the producer and re-pins these; after that the corpus is
 /// immutable and a new storage format gets a new corpus beside it (see
 /// `fixtures/sqlite-storage-v1/README.md`).
-const SERVER_SHA256: &str = "271487e48669ec33e3493b003462b565e2af6430648941bf2bc22e2f8b750149";
-const CLIENT_SHA256: &str = "9df7f5e5f6937247f679478b8197575a2125fc32071624ef12f7b2efae58f97f";
+const SERVER_SHA256: &str = "781ad9111facd7b62a4dd1513763ac0e8fb41b814b77a30f430c5c9f4e63a8be";
+const CLIENT_SHA256: &str = "bf77a0b8b5c91af66aef21d92b22fd37ebaa2ef8fbb1cfeb4ead5d12fb51951e";
 
 const SERVER_NODE: [u8; 16] = [0xa0; 16];
 const CLIENT_NODE: [u8; 16] = [0xc0; 16];
@@ -903,6 +903,14 @@ fn another_storage_format_is_refused_without_changing_the_file() {
             "uninterned nodes",
             "DROP TABLE _jazz_nodes; \
              CREATE TABLE _jazz_nodes (node BLOB PRIMARY KEY, author INTEGER) WITHOUT ROWID",
+        ),
+        // One from before every version was stored at a position: a
+        // replica's own versions in a reserved seq range.
+        (
+            "unpositioned versions",
+            "DROP TABLE _jazz_transactions; \
+             CREATE TABLE _jazz_transactions (n INTEGER NOT NULL, tx INTEGER NOT NULL, \
+             seq INTEGER, result BLOB, PRIMARY KEY (n, tx)) WITHOUT ROWID",
         ),
     ] {
         let path = edited_server_corpus(name, sql);

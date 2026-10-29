@@ -586,6 +586,7 @@ fn a_message_larger_than_one_wire_frame_travels_in_parts() {
         id: [n; 16],
         key: Vec::new(),
         seq: 1,
+        by: None,
         deleted: false,
         content: true,
         cells: vec![("title".into(), SyncCell::Text(vec![b'x'; 300 * 1024]))],

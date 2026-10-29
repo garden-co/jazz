@@ -11,9 +11,9 @@ are stored, a rejection's reason name changed how fates are recorded, and
 pending uploads moved from one encoded message to a row per op).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `271487e48669ec33e3493b003462b565e2af6430648941bf2bc22e2f8b750149`.
+  the SQLite file `781ad9111facd7b62a4dd1513763ac0e8fb41b814b77a30f430c5c9f4e63a8be`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `9df7f5e5f6937247f679478b8197575a2125fc32071624ef12f7b2efae58f97f`.
+  `bf77a0b8b5c91af66aef21d92b22fd37ebaa2ef8fbb1cfeb4ead5d12fb51951e`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
@@ -69,3 +69,10 @@ earlier layout is refused as an unsupported storage format, never misread.
 Merging `_jazz_applied` and `_jazz_settled` into one `_jazz_transactions`
 table keyed by an interned node code (`_jazz_nodes.n`) regenerated it the
 same way.
+
+Storing every version at a position `(_n, _seq)`, `_n` being the code of the
+node that numbered it (0 for the authority; a replica's own writes at its
+node's code instead of a reserved local seq range), regenerated it the same
+way. It adds `_n` to every row and history table (history keyed by
+`(id, _b, _n, _seq)`), `sn` to `_jazz_transactions` and `node` to
+`_jazz_lv_via`.
