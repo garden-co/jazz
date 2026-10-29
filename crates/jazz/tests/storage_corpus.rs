@@ -892,26 +892,6 @@ fn another_storage_format_is_refused_without_changing_the_file() {
             "versioned names",
             "ALTER TABLE _jazz_names ADD COLUMN version BLOB",
         ),
-        // One from before a commit's record was one `_jazz_transactions`
-        // row: fates and landings in their own tables.
-        (
-            "per-table fates",
-            "CREATE TABLE _jazz_applied (node BLOB NOT NULL, tx INTEGER NOT NULL, result BLOB, \
-             PRIMARY KEY (node, tx))",
-        ),
-        (
-            "uninterned nodes",
-            "DROP TABLE _jazz_nodes; \
-             CREATE TABLE _jazz_nodes (node BLOB PRIMARY KEY, author INTEGER) WITHOUT ROWID",
-        ),
-        // One from before every version was stored at a position: a
-        // replica's own versions in a reserved seq range.
-        (
-            "unpositioned versions",
-            "DROP TABLE _jazz_transactions; \
-             CREATE TABLE _jazz_transactions (n INTEGER NOT NULL, tx INTEGER NOT NULL, \
-             seq INTEGER, result BLOB, PRIMARY KEY (n, tx)) WITHOUT ROWID",
-        ),
     ] {
         let path = edited_server_corpus(name, sql);
         let before = digest_tree(&path);

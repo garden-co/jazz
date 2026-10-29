@@ -87,9 +87,7 @@ pub(crate) fn admit(conn: &Connection) -> Result<(), Error> {
     match versions.as_slice() {
         [rusqlite::types::Value::Integer(STORAGE_FORMAT)] => {
             refuse_message_outbox(conn)?;
-            refuse_versioned_names(conn)?;
-            refuse_per_table_fates(conn)?;
-            refuse_unpositioned_versions(conn)
+            refuse_versioned_names(conn)
         }
         [rusqlite::types::Value::Integer(version)] => Err(unsupported(format!(
             "this store was written in Jazz SQLite storage format {version}"
@@ -140,56 +138,6 @@ fn refuse_versioned_names(conn: &Connection) -> Result<(), Error> {
         return Err(unsupported(
             "this development store keeps its stored names by schema version, \
              a layout from before format 1 shipped",
-        ));
-    }
-    Ok(())
-}
-
-/// Refuse a development store of format 1 from before a commit's record
-/// was one `_jazz_transactions` row: it keeps fates in `_jazz_applied` and
-/// landings in `_jazz_settled`, by 16-byte node, and its `_jazz_nodes` has
-/// no interned code. Format 1 had not shipped then, so no released store
-/// has that layout. Checked before any sync table is created.
-fn refuse_per_table_fates(conn: &Connection) -> Result<(), Error> {
-    let old: bool = conn
-        .query_row(
-            "SELECT count(*) > 0 FROM sqlite_master WHERE type = 'table' \
-             AND name IN ('_jazz_applied', '_jazz_settled') \
-             OR (EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_jazz_nodes') \
-             AND NOT EXISTS (SELECT 1 FROM pragma_table_info('_jazz_nodes') WHERE name = 'n'))",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(storage)?;
-    if old {
-        return Err(unsupported(
-            "this development store keeps commit fates in `_jazz_applied` and \
-             `_jazz_settled` (or nodes uninterned in `_jazz_nodes`), a layout from \
-             before format 1 shipped",
-        ));
-    }
-    Ok(())
-}
-
-/// Refuse a development store of format 1 from before every version was
-/// stored at a position `(_n, _seq)`: its replica's own versions sit at
-/// seqs in a reserved local range, and `_jazz_transactions` has no `sn`.
-/// Format 1 had not shipped then, so no released store has that layout.
-fn refuse_unpositioned_versions(conn: &Connection) -> Result<(), Error> {
-    let old: bool = conn
-        .query_row(
-            "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' \
-             AND name = '_jazz_transactions') \
-             AND NOT EXISTS (SELECT 1 FROM pragma_table_info('_jazz_transactions') \
-             WHERE name = 'sn')",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(storage)?;
-    if old {
-        return Err(unsupported(
-            "this development store numbers a replica's own versions in a reserved \
-             seq range, a layout from before format 1 shipped",
         ));
     }
     Ok(())
