@@ -8,8 +8,9 @@ use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, DeleteOptions, FileOptions, InsertOptions, LOCAL_BASE, ReadOpts,
-    ReadTier, SyncMessage, Transport, TransportError, WireKind, WireOp, WireTarget, block_on,
+    Acting, Db, DbConfig, DbIdentity, DeleteOptions, FileOptions, InsertOptions, LOCAL_BASE,
+    ReadOpts, ReadTier, SyncMessage, Transport, TransportError, WireKind, WireOp, WireTarget,
+    block_on,
 };
 use jazz::ids::RowUuid;
 use jazz::ids::{AuthorSubject, NodeUuid};
@@ -204,8 +205,7 @@ fn a_commit_as_another_identitys_node_is_refused_and_claims_nothing() {
         tx: tx + 1,
         kind,
         ops: Vec::new(),
-        author: None,
-        session: None,
+        acting: Acting::Own,
         expect: Vec::new(),
         deltas: Vec::new(),
         sources: Vec::new(),
@@ -282,8 +282,7 @@ fn an_upsert_over_a_row_deleted_in_the_same_commit_is_checked_as_an_insert() {
                 at: None,
             },
         ],
-        author: None,
-        session: None,
+        acting: Acting::Own,
         expect: Vec::new(),
         deltas: Vec::new(),
         sources: Vec::new(),
@@ -315,8 +314,7 @@ fn the_authority_refuses_cells_that_are_not_of_their_columns_type() {
                 target: WireTarget::Root,
                 at: None,
             }],
-            author: None,
-            session: None,
+            acting: Acting::Own,
             expect: Vec::new(),
             deltas: Vec::new(),
             sources: Vec::new(),
@@ -359,8 +357,7 @@ fn a_reopened_authority_continues_after_the_seq_of_a_rowless_commit() {
         tx: LOCAL_BASE + 1,
         kind: WireKind::Mergeable,
         ops: Vec::new(),
-        author: None,
-        session: None,
+        acting: Acting::Own,
         expect: Vec::new(),
         deltas: Vec::new(),
         sources: Vec::new(),

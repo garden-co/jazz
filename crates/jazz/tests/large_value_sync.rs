@@ -10,9 +10,10 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 
 use jazz::db::{
-    BuiltOn, CellDelta, Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadSpan, ReadTier,
-    RemoteLinkHint, SubscriptionStream, SyncCell, SyncMessage, Transport, TransportError, WireBase,
-    WireDelta, WireError, WireKind, WireOp, WirePull, WireTarget, block_on, encode_frames,
+    Acting, BuiltOn, CellDelta, Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadSpan,
+    ReadTier, RemoteLinkHint, SubscriptionStream, SyncCell, SyncMessage, Transport, TransportError,
+    WireBase, WireDelta, WireError, WireKind, WireOp, WirePull, WireTarget, block_on,
+    encode_frames,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::ReadViewSourceSpec;
@@ -919,8 +920,7 @@ fn a_delta_over_a_version_the_writer_cannot_read_is_rejected() {
             target: WireTarget::Root,
             at: None,
         }],
-        author: None,
-        session: None,
+        acting: Acting::Own,
         expect: Vec::new(),
         deltas,
         sources: Vec::new(),
@@ -1178,8 +1178,7 @@ fn naming_a_hidden_trees_hash_reads_nothing() {
             target: WireTarget::Root,
             at: None,
         }],
-        author: None,
-        session: None,
+        acting: Acting::Own,
         expect: Vec::new(),
         deltas: Vec::new(),
         sources: Vec::new(),
@@ -1259,8 +1258,7 @@ fn a_merged_text_write_naming_a_hidden_tree_is_refused() {
             target: WireTarget::Root,
             at: None,
         }],
-        author: None,
-        session: None,
+        acting: Acting::Own,
         expect: Vec::new(),
         deltas: Vec::new(),
         sources: Vec::new(),

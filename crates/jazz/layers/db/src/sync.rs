@@ -832,6 +832,34 @@ const _: () = assert!(
         <= jazz_protocol::protocol_limits::MAX_WIRE_FRAME_BYTES
 );
 
+/// Who a commit's writes, or a preflight, act as. Authors are canonical
+/// author subjects. Only a trusted link may name an author other than its
+/// own identity; the server decides from the link how far it trusts one.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Acting {
+    /// The sender's own: checked and attributed as the link.
+    Own,
+    /// Attributed to `author` (provenance only), checked as the sender.
+    Attributed { author: String },
+    /// `author`'s as a session with these claims: over a trusted link,
+    /// checked and attributed as that session; over a session link,
+    /// checked as the link's own identity.
+    Session {
+        author: String,
+        claims: BTreeMap<String, Value>,
+    },
+}
+
+impl Acting {
+    /// The author it names, if any.
+    fn author(&self) -> Option<&str> {
+        match self {
+            Acting::Own => None,
+            Acting::Attributed { author } | Acting::Session { author, .. } => Some(author),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SyncMessage {
     // client → server
@@ -888,20 +916,13 @@ pub enum SyncMessage {
         listing: Option<Vec<[u8; 16]>>,
         global: bool,
     },
-    /// `author`: the provenance the writes carry when it is not the
-    /// sender's own (a trusted session or an attribution), as a canonical
-    /// author subject. Only a trusted link may set one that differs from
-    /// its own identity.
+    /// `acting`: who the writes are (see [`Acting`]).
     Commit {
         node: [u8; 16],
         tx: u64,
         kind: WireKind,
         ops: Vec<WireOp>,
-        author: Option<String>,
-        /// The writes are `author`'s as a session, with these claims (a
-        /// trusted link acting for it): the authority checks their
-        /// policies as that session. Otherwise `author` is provenance only.
-        session: Option<BTreeMap<String, Value>>,
+        acting: Acting,
         /// The rows as the writer's replica holds them after these writes
         /// (see [`Expect`]): the authority skips echoing a row whose new
         /// version is exactly that. Empty when the writer does not know.
@@ -977,13 +998,12 @@ pub enum SyncMessage {
     },
     // client → server
     /// A permission preflight: would the session's identity be allowed
-    /// `action` right now? Never writes. `author` and `session` name the
-    /// session a trusted link asks for, as on a [`SyncMessage::Commit`].
+    /// `action` right now? Never writes. `acting` names who asks, as on
+    /// a [`SyncMessage::Commit`].
     Advise {
         id: u64,
         action: PermissionAdviceAction,
-        author: Option<String>,
-        session: Option<BTreeMap<String, Value>>,
+        acting: Acting,
     },
     // server → client
     Advice {
@@ -3795,8 +3815,7 @@ impl Inner {
             tx: sent_as,
             kind,
             ops,
-            author,
-            session,
+            acting,
             expect: _,
             deltas,
             sources,
@@ -3828,8 +3847,7 @@ impl Inner {
             tx: *sent_as,
             kind,
             ops: Vec::new(),
-            author: author.clone(),
-            session: session.clone(),
+            acting: acting.clone(),
             expect: Vec::new(),
             deltas: Vec::new(),
             sources: Vec::new(),
@@ -4721,13 +4739,7 @@ impl Inner {
         for (tx, header) in pending {
             let commit = self.pending_commit(tx, &header)?;
             let rows = self.pending_rows(tx)?;
-            let SyncMessage::Commit {
-                ops,
-                author,
-                session,
-                ..
-            } = &commit
-            else {
+            let SyncMessage::Commit { ops, acting, .. } = &commit else {
                 continue;
             };
             let mut ops = ops
@@ -4740,10 +4752,10 @@ impl Inner {
             if let Some(version) = versions.get(&tx).filter(|v| **v != self.owner_version) {
                 client.versions.insert(tx, *version.as_bytes());
             }
-            if let Some(author) = author.as_deref().map(AuthorSubject::from_canonical) {
+            if let Some(author) = acting.author().map(AuthorSubject::from_canonical) {
                 let author = author.map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?;
-                ops.iter_mut()
-                    .for_each(|op| op.attribute(author, session.is_some()));
+                let session = matches!(acting, Acting::Session { .. });
+                ops.iter_mut().for_each(|op| op.attribute(author, session));
             }
             client.pending.push(Pending {
                 tx,
@@ -5130,9 +5142,16 @@ impl Db {
             (inner.identity.author == AuthorSubject::SYSTEM).then(|| inner.stamp_author())
         });
         // A session's writes carry its claims, for the authority's check.
-        let session_claims = author
-            .filter(|_| session)
-            .map(|author| inner.claims.get(&author).cloned().unwrap_or_default());
+        let acting = match author {
+            None => Acting::Own,
+            Some(author) if session => Acting::Session {
+                author: author.canonical().to_owned(),
+                claims: inner.claims.get(&author).cloned().unwrap_or_default(),
+            },
+            Some(author) => Acting::Attributed {
+                author: author.canonical().to_owned(),
+            },
+        };
         let rows = inner.written_rows(&ops, seq)?;
         let mut baselines = Vec::new();
         // What this replica built each row it wrote on (SPEC 4 §4.6): its
@@ -5223,8 +5242,7 @@ impl Db {
                     tx: seq,
                     kind,
                     ops: wire,
-                    author: author.map(|author| author.canonical().to_owned()),
-                    session: session_claims,
+                    acting,
                     expect,
                     deltas,
                     sources,
@@ -5722,16 +5740,16 @@ impl Db {
         client.next_advice += 1;
         if client.transport.is_some() && may_wait(client.hint.get()) {
             client.advice.insert(id, None);
-            let (author, session) = match session {
-                Some((author, claims)) => (Some(author.canonical().to_owned()), Some(claims)),
-                None => (None, None),
+            let acting = match session {
+                Some((author, claims)) => Acting::Session {
+                    author: author.canonical().to_owned(),
+                    claims,
+                },
+                None => Acting::Own,
             };
-            client.outbox.push(SyncMessage::Advise {
-                id,
-                action,
-                author,
-                session,
-            });
+            client
+                .outbox
+                .push(SyncMessage::Advise { id, action, acting });
         } else {
             client.advice.insert(id, Some(PermissionAdvice::Unknown));
         }
@@ -8101,21 +8119,16 @@ impl Db {
                     }
                 }
             }
-            SyncMessage::Advise {
-                id,
-                action,
-                author,
-                session,
-            } => {
+            SyncMessage::Advise { id, action, acting } => {
                 // As for a commit: a trusted link may ask for a session it
                 // vouches for; a session link only for its own.
-                let advice = match commit_who(policy, author.as_deref(), session.is_some()) {
+                let advice = match commit_who(policy, &acting) {
                     Ok(who) => {
                         let identity = match who {
                             Who::Session(author) => Some(author),
                             _ => policy,
                         };
-                        let vouched = vouched(policy, who, session);
+                        let vouched = vouched(policy, who, acting);
                         self.with_claims(vouched, || self.advise(identity, action))
                     }
                     Err(_) => PermissionAdvice::Denied,
@@ -8355,8 +8368,7 @@ impl Db {
                 tx,
                 kind,
                 ops,
-                author,
-                session,
+                acting,
                 expect,
                 deltas,
                 sources,
@@ -8396,7 +8408,7 @@ impl Db {
                 let known = self.inner.borrow().applied_fate(node, tx)?;
                 let (result, rows) = match known {
                     Some(result) => (result, Vec::new()),
-                    None => match commit_who(policy, author.as_deref(), session.is_some())
+                    None => match commit_who(policy, &acting)
                         .map_err(|error| (error, Vec::new()))
                         .and_then(|who| {
                             let (ops, mut roots) = db
@@ -8412,7 +8424,7 @@ impl Db {
                                 roots,
                                 settle: Default::default(),
                             };
-                            let vouched = vouched(policy, who, session);
+                            let vouched = vouched(policy, who, acting);
                             self.with_claims(vouched, || {
                                 db.authorize_commit(
                                     who,
@@ -9028,20 +9040,20 @@ impl Db {
 fn vouched(
     policy: Option<AuthorSubject>,
     who: Who,
-    session: Option<BTreeMap<String, Value>>,
+    acting: Acting,
 ) -> Option<(AuthorSubject, BTreeMap<String, Value>)> {
-    match (who, session) {
-        (Who::Session(author), Some(claims)) if policy.is_none() => Some((author, claims)),
+    match (who, acting) {
+        (Who::Session(author), Acting::Session { claims, .. }) if policy.is_none() => {
+            Some((author, claims))
+        }
         _ => None,
     }
 }
 
-fn commit_who(
-    policy: Option<AuthorSubject>,
-    author: Option<&str>,
-    session: bool,
-) -> Result<Who, Error> {
-    let author = author
+fn commit_who(policy: Option<AuthorSubject>, acting: &Acting) -> Result<Who, Error> {
+    let session = matches!(acting, Acting::Session { .. });
+    let author = acting
+        .author()
         .map(AuthorSubject::from_canonical)
         .transpose()
         .map_err(|error| Error::new(ErrorCode::WriteRejected, error.to_string()))?;

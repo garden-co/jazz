@@ -199,8 +199,12 @@ fields:
 - `deltas`, `sources`: chunked cells travelling as edits over the writer's
   newest settled version, and the settled versions that trees' unpushed
   nodes sit under (SPEC 19.8).
-- `author`, `session`: provenance or a session a trusted link acts for. Only
-  a trusted link may set one other than its own identity.
+- `acting`: who the writes are. `Own`: the sender's, checked and attributed as
+  the link. `Attributed { author }`: provenance only, checked as the sender.
+  `Session { author, claims }`: a session's writes with its claims. Over a
+  trusted link the authority checks them as that session; over a session link
+  it checks them as the link's own identity. Only a trusted link may name an
+  author other than its own identity.
 - `origin`: the session commit a relay uploads this one for.
 
 A replica keeps every unsettled commit and uploads it in order on each
@@ -367,7 +371,7 @@ wrote and cannot read (a write-only insert): the commit's fate reports its
 acceptance. Local copies are not a redaction boundary; eviction keeps the
 replica coherent, not secret.
 
-`Advise { id, action, author, session }` asks whether the session would be
+`Advise { id, action, acting }` asks whether the session would be
 allowed an action now, without writing; `Advice` answers it.
 
 ### 8.7 Mergeable and serializable delivery

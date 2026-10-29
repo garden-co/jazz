@@ -50,8 +50,8 @@ use crate::values::{
     begin_savepoint, end_savepoint, from_sql, in_savepoint, quote, storage, to_sql, unsupported,
 };
 pub use sync::{
-    BuiltOn, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad, FrameJoiner, Image, LOCAL_BASE,
-    NON_DURABLE_BASE, ReadSpan, RejectedTransaction, RelationSnapshot, RemoteLinkHint,
+    Acting, BuiltOn, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad, FrameJoiner, Image,
+    LOCAL_BASE, NON_DURABLE_BASE, ReadSpan, RejectedTransaction, RelationSnapshot, RemoteLinkHint,
     SerializedReadResult, SubscriberId, SyncMessage, Transport, TransportError, Upstream, WireBase,
     WireChunk, WireChunkRef, WireDelta, WireError, WireKind, WireOp, WirePull, WireTarget,
     WireTransport, WireTransportAdapter, WriteConflict, decode_message, duplex, encode_frames,
