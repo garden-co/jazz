@@ -116,6 +116,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         jwt_token: Some(jwt_token),
         backend_secret: None,
         admin_secret: None,
+        migrations: Default::default(),
     };
 
     let client = TodoClient::connect(context).await?;

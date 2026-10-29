@@ -81,6 +81,11 @@ pub struct AppContext {
     /// Admin secret for privileged sync over WebSocket and `/admin/*` HTTP.
     /// On `/ws`, a valid admin secret authenticates this client as the backend.
     pub admin_secret: Option<String>,
+    /// The app's schema versions and the lenses between them, as
+    /// `jazz-tools deploy` writes them to `migrations/bundle.json`: the
+    /// store reaches `schema` along them, so it stores each version as the
+    /// server does (SPEC 10.7).
+    pub migrations: crate::db::Migrations,
 }
 
 #[cfg(feature = "testing")]
@@ -97,6 +102,7 @@ impl AppContext {
             jwt_token: None,
             backend_secret: None,
             admin_secret: None,
+            migrations: Default::default(),
         }
     }
 }
