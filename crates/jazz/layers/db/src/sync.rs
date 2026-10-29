@@ -656,17 +656,11 @@ pub enum Outcome {
         accepted_at: Option<u64>,
         held: Vec<Held>,
     },
-    /// Refused as conflicting with a concurrent commit.
-    Conflict(String),
-    /// Refused: `reason` is the [`Reason`] by its stable name. A name this
-    /// build does not know arrives as a rejection without a reason, its
-    /// message intact.
-    Rejected {
-        reason: Option<String>,
-        message: String,
-    },
-    /// Refused for any other cause.
-    Other(String),
+    /// The commit was refused, for `error`, and landed nowhere. The rows
+    /// it wrote shipped back ahead of the fate as they are, and the session
+    /// is complete through server seq `through` with them: a retry's
+    /// snapshot reads at it, so it sees what the commit conflicted with.
+    Refused { through: u64, error: WireError },
 }
 
 impl Outcome {
@@ -679,19 +673,11 @@ impl Outcome {
         }
     }
 
-    fn refused(error: WireError) -> Self {
-        match error {
-            WireError::Conflict(message) => Outcome::Conflict(message),
-            WireError::Rejected { reason, message } => Outcome::Rejected { reason, message },
-            WireError::Other(message) => Outcome::Other(message),
-        }
-    }
-
     /// The seq the commit landed at, once accepted.
     pub fn seq(&self) -> Option<u64> {
         match self {
             Outcome::Accepted { seq, .. } => Some(*seq),
-            _ => None,
+            Outcome::Refused { .. } => None,
         }
     }
 
@@ -699,12 +685,7 @@ impl Outcome {
     pub fn result(&self) -> Result<(), WireError> {
         match self {
             Outcome::Accepted { .. } => Ok(()),
-            Outcome::Conflict(message) => Err(WireError::Conflict(message.clone())),
-            Outcome::Rejected { reason, message } => Err(WireError::Rejected {
-                reason: reason.clone(),
-                message: message.clone(),
-            }),
-            Outcome::Other(message) => Err(WireError::Other(message.clone())),
+            Outcome::Refused { error, .. } => Err(error.clone()),
         }
     }
 }
@@ -810,7 +791,7 @@ pub enum WireKind {
     },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WireError {
     Conflict(String),
     /// `reason`: the [`Reason`] by its stable name. A name this build does
@@ -6345,9 +6326,9 @@ impl Db {
                         };
                         let accepted = landed.is_some();
                         let client = inner.client.as_mut().expect("client");
-                        if let Some(seq) = landed {
-                            client.known = client.known.max(seq);
-                        }
+                        let (Outcome::Accepted { seq: through, .. }
+                        | Outcome::Refused { through, .. }) = &outcome;
+                        client.known = client.known.max(*through);
                         let serializable = client.sent.iter().any(|m| {
                             matches!(m, SyncMessage::Commit { tx: sent, kind: WireKind::Serializable { .. }, .. } if *sent == tx)
                         });
@@ -6412,6 +6393,7 @@ impl Db {
                         if let Some(relayed) = client.relayed_fates.remove(&tx) {
                             client.relay_ready = true;
                             let fate = client.fates.get(&tx).cloned().unwrap_or(Ok(()));
+                            let known = client.known;
                             for (index, session_tx, rows) in relayed {
                                 let Some(session) =
                                     inner.sessions.get_mut(index).filter(|s| s.open)
@@ -6430,7 +6412,10 @@ impl Db {
                                             "commit {tx} accepted at no seq"
                                         )));
                                     }
-                                    (Err(error), _) => Outcome::refused(wire_error(error)),
+                                    (Err(error), _) => Outcome::Refused {
+                                        through: known,
+                                        error: wire_error(error),
+                                    },
                                 };
                                 session.outbox.push(SyncMessage::Fate {
                                     tx: session_tx,
@@ -6533,12 +6518,15 @@ impl Db {
                     SyncMessage::Commit { tx, .. } if size > limit => {
                         client.refused.push(SyncMessage::Fate {
                             tx: *tx,
-                            outcome: Outcome::Rejected {
-                                reason: None,
-                                message: format!(
-                                    "a commit of {size} bytes is over the {limit} bytes one \
-                                     message may carry: not supported yet"
-                                ),
+                            outcome: Outcome::Refused {
+                                through: client.known,
+                                error: WireError::Rejected {
+                                    reason: None,
+                                    message: format!(
+                                        "a commit of {size} bytes is over the {limit} bytes one \
+                                         message may carry: not supported yet"
+                                    ),
+                                },
                             },
                             global: false,
                         });
@@ -8675,11 +8663,16 @@ impl Db {
                 let identity = self.inner.borrow().sessions[index].identity;
                 if !self.inner.borrow().claim_node(node, &identity)? {
                     let mut inner = self.inner.borrow_mut();
+                    let through = inner.served_through();
                     inner.sessions[index].outbox.push(SyncMessage::Fate {
                         tx,
-                        outcome: Outcome::Rejected {
-                            reason: None,
-                            message: "commit names a node another identity writes as".to_owned(),
+                        outcome: Outcome::Refused {
+                            through,
+                            error: WireError::Rejected {
+                                reason: None,
+                                message: "commit names a node another identity writes as"
+                                    .to_owned(),
+                            },
                         },
                         global: true,
                     });
@@ -8849,7 +8842,7 @@ impl Db {
                     let global = inner.client.is_none() || through < LOCAL_BASE;
                     let outcome = match result {
                         Ok(()) => Outcome::accepted(through, accepted_at),
-                        Err(error) => Outcome::refused(error),
+                        Err(error) => Outcome::Refused { through, error },
                     };
                     inner.sessions[index].outbox.push(SyncMessage::Fate {
                         tx,
