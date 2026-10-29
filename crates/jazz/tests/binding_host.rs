@@ -579,7 +579,7 @@ fn a_backend_writes_as_a_local_first_account_only_once_admitted() {
 }
 
 #[test]
-fn a_first_result_larger_than_one_wire_frame_splits_into_rows_messages() {
+fn a_message_larger_than_one_wire_frame_travels_in_parts() {
     use jazz::db::{FrameJoiner, Image, SyncCell, SyncMessage, encode_frames};
     let image = |n: u8| Image {
         table: "todos".into(),
@@ -593,39 +593,36 @@ fn a_first_result_larger_than_one_wire_frame_splits_into_rows_messages() {
     let images: Vec<Image> = (0..20).map(image).collect();
     let frames = encode_frames(SyncMessage::Rows {
         images: images.clone(),
+        tx_ids: Vec::new(),
     })
     .unwrap();
     assert!(frames.len() > 1);
     let limit = jazz::protocol_limits::MAX_WIRE_FRAME_BYTES;
-    // Every frame but the last carries leading parts; the last is the
-    // `Rows` that completes them, and only it yields the whole message.
+    // Every frame is a part of the one encoding, marked as leading or
+    // last; only the last yields the whole message.
     let last = frames.len() - 1;
     let mut joiner = FrameJoiner::default();
     for (i, frame) in frames.iter().enumerate() {
         assert!(frame.len() < limit);
-        let decoded = postcard::from_bytes::<SyncMessage>(frame).unwrap();
-        match (i == last, decoded) {
-            (false, SyncMessage::RowsPart { .. }) | (true, SyncMessage::Rows { .. }) => {}
-            (_, other) => panic!("frame {i} of {}: {other:?}", frames.len()),
-        }
+        assert_eq!(frame[0], if i == last { 0xFE } else { 0xFF });
         match joiner.push(frame).unwrap() {
             None => assert!(i < last),
-            Some(SyncMessage::Rows { images: joined }) => {
+            Some(SyncMessage::Rows { images: joined, .. }) => {
                 assert_eq!(i, last);
-                assert_eq!(
-                    joined.iter().map(|i| i.id).collect::<Vec<_>>(),
-                    images.iter().map(|i| i.id).collect::<Vec<_>>()
-                );
+                assert_eq!(joined, images);
             }
             Some(other) => panic!("expected rows, got {other:?}"),
         }
     }
-    // A message that fits stays one frame.
-    let one = encode_frames(SyncMessage::Rows {
+    // A message that fits stays one frame: its plain encoding.
+    let small = SyncMessage::Rows {
         images: vec![image(1)],
-    })
-    .unwrap();
-    assert_eq!(one.len(), 1);
+        tx_ids: Vec::new(),
+    };
+    assert_eq!(
+        encode_frames(small.clone()).unwrap(),
+        [postcard::to_allocvec(&small).unwrap()]
+    );
 }
 
 /// A browser tab over its worker: the worker is a replica whose own
@@ -639,7 +636,7 @@ fn tab_over(worker: &Binding, tab: Binding) -> (Binding, Link, Link) {
 }
 
 #[test]
-fn a_frame_is_one_message_and_a_rows_message_ends_its_parts() {
+fn a_frame_is_one_message_and_a_split_message_ends_with_its_last_part() {
     use jazz::db::{FrameJoiner, SyncMessage, decode_message, encode_frames};
     let [frame] =
         <[Vec<u8>; 1]>::try_from(encode_frames(SyncMessage::Unsubscribe { id: 7 }).unwrap())
@@ -653,11 +650,24 @@ fn a_frame_is_one_message_and_a_rows_message_ends_its_parts() {
     assert!(postcard::from_bytes::<SyncMessage>(&trailing).is_ok());
     assert!(decode_message(&trailing).is_err());
     assert!(FrameJoiner::default().push(&trailing).is_err());
-    // Parts followed by anything but their `Rows` are the peer's error.
-    let part = postcard::to_allocvec(&SyncMessage::RowsPart { images: Vec::new() }).unwrap();
+    // A message split in two joins from its parts.
+    let (head, tail) = frame.split_at(1);
     let mut joiner = FrameJoiner::default();
-    assert!(joiner.push(&part).unwrap().is_none());
+    assert!(joiner.push(&[&[0xFF], head].concat()).unwrap().is_none());
+    assert!(matches!(
+        joiner.push(&[&[0xFE], tail].concat()),
+        Ok(Some(SyncMessage::Unsubscribe { id: 7 }))
+    ));
+    // Parts followed by a whole message, or a last part with nothing
+    // before it, are the peer's error.
+    let mut joiner = FrameJoiner::default();
+    assert!(joiner.push(&[&[0xFF], head].concat()).unwrap().is_none());
     assert!(joiner.push(&frame).is_err());
+    assert!(
+        FrameJoiner::default()
+            .push(&[&[0xFE], tail].concat())
+            .is_err()
+    );
 }
 
 /// A frame no sync message decodes from.
@@ -1033,6 +1043,7 @@ fn a_refusal_for_a_closed_tabs_write_names_the_tabs_transaction() {
     let seen = std::rc::Rc::clone(&refused);
     *worker.hooks.rejected.borrow_mut() = Some(Box::new(move |tx_id, _, _, _| {
         seen.borrow_mut().push(tx_id.clone());
+        true
     }));
     worker.set_remote_link_hint("live").unwrap();
     let mut up = worker.connect_upstream();
@@ -1058,6 +1069,88 @@ fn a_refusal_for_a_closed_tabs_write_names_the_tabs_transaction() {
     pump(&[(&up, &down)]);
     assert_eq!(titles(&worker), ["kept"]);
     assert_eq!(*refused.borrow(), [update.tx_id]);
+    // Neither the relay nor the authority keeps the tab's refused payload
+    // (INV-TX-9): only the store that made a write retries it.
+    assert!(worker.db.rejected_transactions().unwrap().is_empty());
+    assert!(server.db.rejected_transactions().unwrap().is_empty());
+}
+
+/// A refusal no listener took stays in the retry store (INV-TX-9): the
+/// store's payload is let go only once the refusal reached the
+/// application, here when a listener arrives and asks for it again.
+#[test]
+fn a_refusal_nobody_heard_is_kept_until_a_listener_takes_it() {
+    // Notes may be inserted and read, never changed.
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("title", ColumnType::Text)
+                    .policies(
+                        jazz::tools::TablePolicies::new()
+                            .with_select(jazz::tools::PolicyExpr::True)
+                            .with_insert(jazz::tools::PolicyExpr::True),
+                    ),
+            )
+            .build(),
+    );
+    let server = {
+        let identity = DbIdentity {
+            node: NodeUuid::from_bytes([0xed; 16]),
+            author: AuthorSubject::SYSTEM,
+        };
+        let db = block_on(Db::open_history_complete(DbConfig::new(
+            schema.clone(),
+            identity,
+        )))
+        .unwrap();
+        Binding::new(db, identity, true)
+    };
+    let identity = identity(0xe2);
+    let client = Binding::new(
+        block_on(Db::open(DbConfig::new(schema, identity))).unwrap(),
+        identity,
+        false,
+    );
+    let listening = std::rc::Rc::new(std::cell::Cell::new(false));
+    let heard = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let (on, seen) = (std::rc::Rc::clone(&listening), std::rc::Rc::clone(&heard));
+    *client.hooks.rejected.borrow_mut() = Some(Box::new(move |tx_id, _, _, _| {
+        if on.get() {
+            seen.borrow_mut().push(tx_id.clone());
+        }
+        on.get()
+    }));
+    client.set_remote_link_hint("live").unwrap();
+    let up = client.connect_upstream();
+    let down = server.accept_subscriber(client.author(), Default::default());
+    let links = [(&up, &down)];
+    let write = client.insert("notes", &title("kept"), &none()).unwrap();
+    drive(&links, client.wait_for(write.seq, "global").unwrap()).unwrap();
+    let row = *write.row_id.0.as_bytes();
+
+    let update = client
+        .update("notes", &row, &title("changed"), &none())
+        .unwrap();
+    pump(&links);
+    assert!(heard.borrow().is_empty());
+    assert_eq!(
+        client
+            .db
+            .rejected_transactions()
+            .unwrap()
+            .iter()
+            .map(|r| r.seq)
+            .collect::<Vec<_>>(),
+        [update.seq],
+        "nobody heard it: the payload stays"
+    );
+
+    listening.set(true);
+    client.redeliver_rejections();
+    pump(&links);
+    assert_eq!(*heard.borrow(), [update.tx_id]);
+    assert!(client.db.rejected_transactions().unwrap().is_empty());
 }
 
 #[test]

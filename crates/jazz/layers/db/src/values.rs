@@ -1,6 +1,7 @@
 //! Jazz values in SQLite cells, the schema as SQLite sees it, and rows.
 
 use std::collections::BTreeMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::ids::RowUuid;
@@ -86,10 +87,8 @@ pub(crate) fn in_savepoint<T>(
     result
 }
 
-/// One SQLite value, as bound or read. Text holds raw bytes: large-capable
-/// columns store text that is not UTF-8 (tagged bytes and chunked large-value
-/// descriptors, see [`crate::large`]), which SQLite stores and compares
-/// without interpreting.
+/// One SQLite value, as bound or read. Text holds raw bytes, which SQLite
+/// stores and compares without interpreting.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Sql {
     Null,
@@ -155,9 +154,9 @@ pub(crate) fn to_sql(value: &Value) -> Result<Option<Sql>, Error> {
         Value::F64(v) => Sql::Real(*v),
         Value::Bool(v) => Sql::Integer(*v as i64),
         Value::String(v) => Sql::Text(v.as_bytes().to_vec()),
-        Value::Bytes(v) => Sql::Text(crate::large::inline_bytes(v)),
-        // A chunked cell carries its sort prefix, which needs the chunks:
-        // descriptors are stored through `Inner::large_cell`.
+        Value::Bytes(v) => Sql::Blob(v.clone()),
+        // A chunked cell names an epoch, which only a store has: descriptors
+        // are stored through `Inner::large_cell`.
         Value::Large(_) => return Err(unsupported("a large-value descriptor as a literal")),
         Value::Uuid(v) => Sql::Blob(v.as_bytes().to_vec()),
         Value::EnumTag(v) => Sql::Integer(*v as i64),
@@ -260,14 +259,12 @@ pub(crate) fn from_sql(
         }));
     }
     match (ty, cell) {
-        (ValueType::String, ValueRef::Text(cell)) => {
-            let text = match cell.first() {
-                Some(&crate::large::CHUNKED) => chunks.materialize(cell)?,
-                _ => cell.to_vec(),
-            };
-            return Ok(String::from_utf8(text).ok().map(Value::String));
+        (ValueType::String, ValueRef::Text(_) | ValueRef::Integer(_)) => {
+            return Ok(String::from_utf8(chunks.materialize(cell)?)
+                .ok()
+                .map(Value::String));
         }
-        (ValueType::Bytes, ValueRef::Text(cell)) => {
+        (ValueType::Bytes, ValueRef::Blob(_) | ValueRef::Integer(_)) => {
             return Ok(Some(Value::Bytes(chunks.materialize(cell)?)));
         }
         // An author record, read as a JSON array of its fields (see
@@ -369,6 +366,9 @@ pub struct Column {
     pub ty: ValueType,
     pub default: Option<Value>,
     pub json: bool,
+    /// How a column that holds JSON (a JSON column or an array of them)
+    /// checks the values written to it; `None` for any other column.
+    pub json_type: Option<Rc<JsonCheck>>,
     /// How concurrent writes to the column merge at the authority.
     pub merge: crate::schema::MergeStrategy,
 }
@@ -422,8 +422,8 @@ pub(crate) const PROVENANCE: [&str; 12] = [
 
 /// The current deletion of a row, readable with `includeDeleted`: the
 /// deleting version's update stamp, NULL for live and restored rows. Never
-/// stored: a deleted row is its current version with `_del` set, and that
-/// version's update stamp is the deletion's.
+/// stored: a deleted row is its current version with [`STATE_DELETED`] set
+/// in `_st`, and that version's update stamp is the deletion's.
 pub(crate) const DELETION: [&str; 6] = [
     "$deletedAt",
     "$deletedBy",
@@ -432,6 +432,19 @@ pub(crate) const DELETION: [&str; 6] = [
     "$deletedBy.identity.issuer",
     "$deletedBy.identity.subject",
 ];
+
+/// `_st` bit: the version's commit wrote no content, only a delete, a
+/// restore or a move. Clear on an ordinary write, so a live content
+/// version stores 0. History reads list versions with it clear.
+pub(crate) const STATE_NO_CONTENT: i64 = 1;
+/// `_st` bit: the version is a tombstone. Live versions are `_st < 2`.
+pub(crate) const STATE_DELETED: i64 = 2;
+/// `_st` bit: the version is an authority text merge's write as its writer
+/// sent it, superseded by the merged version at the same seq (SPEC 4
+/// §4.3). Kept only in `__h`, at `_seq` = minus the commit's seq, as the
+/// base of its writer's next chained write; never read as a version, so
+/// every read of `__h` that is not by exact seq requires this bit clear.
+pub(crate) const STATE_AS_SENT: i64 = 4;
 
 /// Whether `column` names deletion metadata (`$deletedAt`, `$deletedBy...`).
 pub(crate) fn is_deletion(column: &str) -> bool {
@@ -509,6 +522,7 @@ fn stored_provenance_columns() -> Vec<Column> {
             ty: ValueType::Nullable(Box::new(ValueType::U64)),
             default: None,
             json: false,
+            json_type: None,
             merge: Default::default(),
         })
         .collect()
@@ -538,6 +552,7 @@ fn provenance_columns() -> Vec<Column> {
             })),
             default: None,
             json: false,
+            json_type: None,
             merge: Default::default(),
         })
         .collect()
@@ -555,6 +570,11 @@ impl Table {
     /// Every stored column: application columns, then stored provenance.
     pub fn stored(&self) -> impl Iterator<Item = &Column> {
         self.columns.iter().chain(&self.stored_provenance)
+    }
+
+    /// The application column stored as `stored`.
+    pub(crate) fn by_stored_column(&self, stored: &str) -> Option<&Column> {
+        self.columns.iter().find(|column| column.stored == stored)
     }
 
     /// The stored name of a readable column (`id` and provenance are
@@ -646,6 +666,16 @@ impl Schema {
                     ty: column.column_type.clone(),
                     default: column.default.clone(),
                     json: column.large_value_kind == crate::schema::LargeValueSemanticKind::Json,
+                    json_type: public
+                        .and_then(|public| {
+                            public
+                                .columns
+                                .columns
+                                .iter()
+                                .find(|declared| declared.name_str() == column.name)
+                        })
+                        .filter(|declared| holds_json(&declared.column_type))
+                        .map(|declared| Rc::new(JsonCheck::new(declared.column_type.clone()))),
                     merge: table
                         .merge_strategies
                         .get(&column.name)
@@ -791,7 +821,14 @@ impl Schema {
                 Some(physical) => {
                     let mut large = Vec::new();
                     for column in &table.columns {
-                        if physical.column(&column.stored).is_some() {
+                        if let Some(stored) = physical
+                            .columns
+                            .iter_mut()
+                            .find(|stored| stored.stored == column.stored)
+                        {
+                            // A reopened store knows a column by name only.
+                            stored.ty = column.ty.clone();
+                            stored.json = column.json;
                             continue;
                         }
                         let default = match &column.default {
@@ -823,8 +860,8 @@ impl Schema {
                     for index in &table.indexes {
                         let index = table.stored_index(index);
                         if !physical.indexes.contains(&index) {
+                            physical.indexes.push(index.clone());
                             ddl.push_str(&physical.index_ddl(&index));
-                            physical.indexes.push(index);
                         }
                     }
                 }
@@ -857,6 +894,7 @@ impl Table {
                     ty: ValueType::Nullable(Box::new(ValueType::U64)),
                     default: None,
                     json: false,
+                    json_type: None,
                     merge: Default::default(),
                 })
                 .collect(),
@@ -883,10 +921,6 @@ impl Table {
             .iter()
             .map(|c| match elided_as(c) {
                 Some(created) => format!("COALESCE({}, {})", quote(c), quote(created)),
-                // The key expression queries order and range by.
-                None if table.by_stored(c).is_some_and(crate::large::large_capable) => {
-                    crate::large::key_sql(&quote(c))
-                }
                 None => quote(c),
             })
             .collect();
@@ -911,18 +945,20 @@ impl Table {
         let history = quote(&format!("{}__h", table.stored));
         // `_b` is the canonical branch key ('' for unbranched tables).
         // Rows are unique per (id, branch); branch views select by `_b`
-        // first, so every index leads with it. `_c` is 1 when the version's
-        // commit wrote content (not only a delete or a restore): history
-        // reads list those versions.
+        // first, so every index leads with it. `_st` is the version's state
+        // bits ([`STATE_NO_CONTENT`], [`STATE_DELETED`], and in history
+        // [`STATE_AS_SENT`]): 0 for a live version whose commit wrote
+        // content. `_base` and `_cols` are what the authority keeps of the
+        // version an accepted upload wrote: what it was built on and the
+        // columns it authored (SPEC 4 §4.6); NULL everywhere else.
         sql.push_str(&format!(
             "CREATE TABLE {name} (rid INTEGER PRIMARY KEY, id BLOB NOT NULL, \
              _b BLOB NOT NULL DEFAULT X'', _seq INTEGER NOT NULL, \
-             _del INTEGER NOT NULL DEFAULT 0, _c INTEGER NOT NULL DEFAULT 1{columns}, \
+             _st INTEGER NOT NULL DEFAULT 0, _base INTEGER, _cols BLOB{columns}, \
              UNIQUE (id, _b));\n\
              CREATE INDEX {} ON {name}(_seq);\n\
              CREATE TABLE {history} (id BLOB NOT NULL, _b BLOB NOT NULL, _seq INTEGER NOT NULL, \
-             _del INTEGER NOT NULL, _c INTEGER NOT NULL DEFAULT 1{columns}, \
-             PRIMARY KEY (id, _b, _seq)) WITHOUT ROWID;\n",
+             _st INTEGER NOT NULL, _base INTEGER, _cols BLOB{columns}, PRIMARY KEY (id, _b, _seq)) WITHOUT ROWID;\n",
             quote(&format!("{}__by_seq", table.stored)),
         ));
         for index in &table.indexes {
@@ -951,11 +987,11 @@ pub(crate) fn sql_literal(value: &Value) -> Result<String, Error> {
         Some(Sql::Null) => "NULL".to_owned(),
         Some(Sql::Integer(v)) => v.to_string(),
         Some(Sql::Real(v)) => format!("{v:e}"),
-        // A tagged bytes cell is TEXT that no SQL literal can spell (it
-        // starts with NUL), and a column default must be a literal.
+        // Text with a NUL has no SQL literal, and a column default must be
+        // a literal.
         Some(Sql::Text(v)) => match std::str::from_utf8(&v) {
             Ok(text) if !text.contains('\0') => format!("'{}'", text.replace('\'', "''")),
-            _ => return Err(unsupported("a bytes default on an added column")),
+            _ => return Err(unsupported("a text default with a NUL on an added column")),
         },
         Some(Sql::Blob(v)) => format!("X'{}'", hex(&v)),
     })
@@ -1012,7 +1048,7 @@ impl Table {
                 );
             }
         }
-        branch_key(&values)
+        self.normalized_branch_key(values)
     }
 
     /// The branch key a row with these cells lives under.
@@ -1028,7 +1064,32 @@ impl Table {
                 crate::protocol::BranchColumnValue::from(value),
             );
         }
+        self.normalized_branch_key(values)
+    }
+
+    /// The branch key of these branch-column values. A branch column at its
+    /// default is left out (INV-BVIEW-19): a branch column a later schema
+    /// version adds must have an immutable default, so the rows written
+    /// before it, and the selectors of versions that do not name it, keep
+    /// the key they had and read as that default.
+    fn normalized_branch_key(
+        &self,
+        mut values: BTreeMap<String, crate::protocol::BranchColumnValue>,
+    ) -> Vec<u8> {
+        values.retain(|name, value| {
+            self.branch_default(name)
+                .is_none_or(|default| *value != crate::protocol::BranchColumnValue::from(default))
+        });
         branch_key(&values)
+    }
+
+    /// A branch column's declared default, unwrapped from its nullability.
+    fn branch_default(&self, column: &str) -> Option<Value> {
+        let mut value = self.column(column)?.default.clone()?;
+        while let Value::Nullable(Some(inner)) = value {
+            value = *inner;
+        }
+        Some(value)
     }
 
     /// Branch-column cells named by a selector, decoded by column type.
@@ -1038,9 +1099,14 @@ impl Table {
     ) -> Result<BTreeMap<String, Value>, Error> {
         let mut cells = BTreeMap::new();
         for column in &self.branch_by {
-            let encoded = selector.values.get(column).ok_or_else(|| {
-                query_error(format!("branch selector has no `{}.{column}`", self.name))
-            })?;
+            // A selector of a version before the column names its default.
+            let Some(encoded) = selector.values.get(column) else {
+                let default = self.branch_default(column).ok_or_else(|| {
+                    query_error(format!("branch selector has no `{}.{column}`", self.name))
+                })?;
+                cells.insert(column.clone(), default);
+                continue;
+            };
             let ty = &self.column(column).expect("branch column").ty;
             let value = encoded
                 .decode_as(ty)
@@ -1380,4 +1446,91 @@ fn coerce(value: &Value, ty: &ValueType) -> Result<Value, Error> {
         }
         (value, _) => value.clone(),
     })
+}
+
+fn holds_json(ty: &crate::tools::ColumnType) -> bool {
+    match ty {
+        crate::tools::ColumnType::Json { .. } => true,
+        crate::tools::ColumnType::Array { element } => holds_json(element),
+        _ => false,
+    }
+}
+
+/// How the values written to a column that holds JSON are checked: against
+/// the column's declared public type, whose JSON Schema is compiled once, on
+/// first use. Every value a write authors is checked here, local or uploaded
+/// by a peer, so the schema holds for every value the store accepts, not
+/// only for writers whose own validator agrees.
+#[derive(Debug)]
+pub struct JsonCheck {
+    ty: crate::tools::ColumnType,
+    compiled: std::cell::OnceCell<crate::tools::CompiledSchema>,
+}
+
+impl JsonCheck {
+    pub fn new(ty: crate::tools::ColumnType) -> Self {
+        Self {
+            ty,
+            compiled: std::cell::OnceCell::new(),
+        }
+    }
+
+    /// Check a written cell: its JSON text must parse and match the schema.
+    pub(crate) fn check(&self, value: &Value, path: &str) -> Result<(), String> {
+        self.check_as(&self.ty, value, path)
+    }
+
+    fn check_as(
+        &self,
+        ty: &crate::tools::ColumnType,
+        value: &Value,
+        path: &str,
+    ) -> Result<(), String> {
+        use crate::tools::ColumnType;
+        match (ty, value) {
+            (_, Value::Nullable(None)) => Ok(()),
+            (_, Value::Nullable(Some(inner))) => self.check_as(ty, inner, path),
+            (ColumnType::Json { .. }, Value::String(text)) => self.check_text(text, path),
+            (ColumnType::Array { element }, Value::Array(items)) => {
+                items.iter().enumerate().try_for_each(|(index, item)| {
+                    self.check_as(element, item, &format!("{path}[{index}]"))
+                })
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Check one JSON document, given as its text.
+    pub(crate) fn check_text(&self, text: &str, path: &str) -> Result<(), String> {
+        let instance: serde_json::Value = serde_json::from_str(text)
+            .map_err(|error| format!("invalid JSON for column `{path}`: {error}"))?;
+        match self.compiled(path)? {
+            Some(schema) => schema
+                .validate(&instance)
+                .map_err(|error| crate::tools::json_schema_failure(error, path)),
+            None => Ok(()),
+        }
+    }
+
+    /// The declared schema, compiled; `None` if the column declares none. A
+    /// schema that fails to compile is tried again on the next check (a
+    /// browser host may install its validator later).
+    fn compiled(&self, path: &str) -> Result<Option<&crate::tools::CompiledSchema>, String> {
+        let mut ty = &self.ty;
+        while let crate::tools::ColumnType::Array { element } = ty {
+            ty = element;
+        }
+        let crate::tools::ColumnType::Json {
+            schema: Some(schema),
+        } = ty
+        else {
+            return Ok(None);
+        };
+        if let Some(compiled) = self.compiled.get() {
+            return Ok(Some(compiled));
+        }
+        let compiled = crate::tools::CompiledSchema::new(schema)
+            .map_err(|error| crate::tools::json_schema_failure(error, path))?;
+        Ok(Some(self.compiled.get_or_init(|| compiled)))
+    }
 }

@@ -10,6 +10,58 @@ Any column can be made nullable by chaining `.optional()`.
 
 <AvailableColumnTypes />
 
+## Mergeable Text Columns
+
+By default, a string column keeps one value: when two people edit it at the same time from the same
+starting point, [one edit wins the whole field](/docs/concepts/how-sync-works#concurrent-edits).
+For prose that several people edit at once, opt the column into a text merge strategy instead:
+
+```ts title="schema.ts"
+import { schema as s } from "jazz-tools";
+
+const schema = {
+  docs: s.table(
+    {
+      title: s.string(), // one value: a concurrent edit replaces it whole
+      body: s.string().merge("text"),
+      notes: s.string().merge("markdown"),
+      page: s.string().merge("html"),
+    },
+    {},
+  ),
+};
+```
+
+The column still stores and syncs a plain string, so you read and write it like any other string,
+large values included. What changes is what happens when edits meet: the server merges them, so
+Alice adding a sentence at the top while Bob fixes a typo at the bottom keeps both changes.
+
+The three formats differ in what the merge keeps whole. An edit never splits one of these pieces:
+
+| Strategy            | Kept whole                                                                                                                                                                                                               |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `merge("text")`     | Words, single spaces and punctuation marks. In scripts written without spaces (Chinese, Japanese, Thai and the like) and for emoji, each character. Accents, emoji modifiers and joined emoji stay with their character. |
+| `merge("markdown")` | Everything `text` keeps, plus runs of markup characters such as `**` or `##`, list markers like `1.`, and link targets like `](https://example.com)`.                                                                    |
+| `merge("html")`     | Everything `text` keeps, plus whole tags (`<p class="intro">`) and entities (`&amp;`).                                                                                                                                   |
+
+The merge works on these pieces, not on a document tree: it keeps markup intact but does not check
+that the merged Markdown or HTML is well formed. See
+[Collaborative text editing](/docs/recipes/data-patterns/collaborative-text-editing) for how to use
+one with an editor.
+
+A text merge column can be optional (`s.string().optional().merge("text")`). `null` means no text
+yet, and an empty string is ordinary text:
+
+- Two people adding text to a `null` column at the same time both keep their text, the earlier write
+  first, just as they would on an empty string.
+- Clearing the column to `null` while someone else edits it is not merged: whichever write reaches
+  the server later wins the whole value.
+
+<Callout type="warn">
+  `merge("text")`, `merge("markdown")` and `merge("html")` are only valid on **string columns**.
+  Calling them on any other type throws at schema construction time.
+</Callout>
+
 ## Transformed Columns
 
 > **Experimental:** Transformed columns are an early TypeScript API and may change before the stable release.

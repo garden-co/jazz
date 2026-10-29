@@ -17,8 +17,12 @@ mod array_columns;
 mod authorization_scope_reentry;
 #[path = "../binding_host.rs"]
 mod binding_host;
+#[path = "../branch_column_evolution.rs"]
+mod branch_column_evolution;
 #[path = "../branch_views.rs"]
 mod branch_views;
+#[path = "../catalogue_rows.rs"]
+mod catalogue_rows;
 #[path = "../claims_change.rs"]
 mod claims_change;
 #[path = "../column_defaults.rs"]
@@ -51,6 +55,8 @@ mod host_tables;
 mod include_live;
 #[path = "../large_value_append.rs"]
 mod large_value_append;
+#[path = "../large_value_chunk_store.rs"]
+mod large_value_chunk_store;
 #[path = "../large_value_read_scaling.rs"]
 mod large_value_read_scaling;
 #[path = "../large_value_streaming_create.rs"]
@@ -67,10 +73,14 @@ mod large_values;
 mod local_first_first_load_gate;
 #[path = "../local_first_server_wait.rs"]
 mod local_first_server_wait;
+#[path = "../maybe_conflicting.rs"]
+mod maybe_conflicting;
 #[path = "../order_by_unselected_column.rs"]
 mod order_by_unselected_column;
 #[path = "../parameterized_subscription_routing.rs"]
 mod parameterized_subscription_routing;
+#[path = "../pending_commit_reopen.rs"]
+mod pending_commit_reopen;
 #[path = "../permission_advice.rs"]
 mod permission_advice;
 #[path = "../policy_activation.rs"]
@@ -79,16 +89,28 @@ mod policy_activation;
 mod prepared_claim_routing;
 #[path = "../provenance.rs"]
 mod provenance;
+#[path = "../recheck_policies.rs"]
+mod recheck_policies;
+#[path = "../recheck_queries.rs"]
+mod recheck_queries;
+#[path = "../recheck_sync.rs"]
+mod recheck_sync;
+#[path = "../rejected_retry_store.rs"]
+mod rejected_retry_store;
 #[path = "../relation_policies.rs"]
 mod relation_policies;
 #[path = "../relation_queries.rs"]
 mod relation_queries;
 #[path = "../relation_results.rs"]
 mod relation_results;
+#[path = "../relational_delete_retraction.rs"]
+mod relational_delete_retraction;
 #[path = "../relay_local_seqs.rs"]
 mod relay_local_seqs;
 #[path = "../relay_policy_subscriptions.rs"]
 mod relay_policy_subscriptions;
+#[path = "../relay_serves_on_arrival.rs"]
+mod relay_serves_on_arrival;
 #[path = "../schema_activation.rs"]
 mod schema_activation;
 #[path = "../schema_renames.rs"]
@@ -103,20 +125,30 @@ mod serializable_sync;
 mod session_policy_values;
 #[path = "../session_write_checks.rs"]
 mod session_write_checks;
+#[path = "../slow_queries.rs"]
+mod slow_queries;
 #[path = "../snapshots.rs"]
 mod snapshots;
 #[path = "../storage_corpus.rs"]
 mod storage_corpus;
 #[path = "../storage_errors.rs"]
 mod storage_errors;
+#[path = "../stored_identities.rs"]
+mod stored_identities;
+#[path = "../streaming_upload_ownership.rs"]
+mod streaming_upload_ownership;
 #[path = "../structured_result_tree.rs"]
 mod structured_result_tree;
+#[path = "../sync_access_loss.rs"]
+mod sync_access_loss;
 #[path = "../sync_aggregates.rs"]
 mod sync_aggregates;
 #[path = "../sync_differential.rs"]
 mod sync_differential;
 #[path = "../sync_echo.rs"]
 mod sync_echo;
+#[path = "../sync_frame_bounds.rs"]
+mod sync_frame_bounds;
 #[path = "../sync_gather.rs"]
 mod sync_gather;
 #[path = "../sync_resume.rs"]
@@ -131,11 +163,22 @@ mod sync_support_access;
 mod sync_untrusted_clients;
 #[path = "../sync_wire_corpus.rs"]
 mod sync_wire_corpus;
+#[path = "../text_merge.rs"]
+mod text_merge;
+#[path = "../transaction_commit_kind.rs"]
+mod transaction_commit_kind;
 #[path = "../transaction_handles.rs"]
 mod transaction_handles;
+#[path = "../transaction_read_tiers.rs"]
+mod transaction_read_tiers;
 #[path = "../union_queries.rs"]
 mod union_queries;
 #[path = "../uuid_page_probe.rs"]
 mod uuid_page_probe;
 #[path = "../write_check_evidence.rs"]
 mod write_check_evidence;
+#[path = "../write_receipt_owner.rs"]
+mod write_receipt_owner;
+
+#[path = "../transaction_read_prefix.rs"]
+mod transaction_read_prefix;

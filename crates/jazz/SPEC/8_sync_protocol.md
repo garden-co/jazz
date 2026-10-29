@@ -2,1417 +2,582 @@
 
 ## Overview
 
-One protocol carries everything between nodes. This chapter defines that peer
-protocol: how writes travel up as commit units, how fates and query-driven view
-updates travel down, how payloads are deduplicated and rehydrated, and how
-mergeable vs serializable transactions are delivered. It ties together transactions
-(ch. 3), history (ch. 4), queries (ch. 6), and authorization (ch. 7); the
-deployment roles are chapter 9.
+One protocol carries everything between nodes: a browser tab and its worker, a
+worker or native client and the server, a relay and its upstream. This chapter
+defines it as implemented by the SQLite engine (`crates/jazz/layers/db/src/sync.rs`).
 
-Invariant digest:
+The model is small:
 
-- `INV-SYNC-5`: A receiver applying a fate update MUST NOT move `global_time` backward and MUST raise observed durability only by a supplied `Some(DurabilityTier)` claim using monotone max semantics; `None` MUST leave durability unchanged.
-- `INV-SYNC-7`: A query update MUST identify supporting physical row versions individually, never imply query membership from whole-transaction possession. Result members, query-source roles and program facts are receiver-local bookkeeping, not fields in the base peer read protocol.
-- `INV-SYNC-8`: A view server MUST use `peer_payload_inventory.complete_tx_payloads` only for tx-level complete payloads covered by the peer payload inventory; payload dedup MUST be peer-scoped, not subscription-scoped, and partial bundles MUST remain eligible for later payload emission until complete-tx payload coverage is established.
-- `INV-SYNC-9`: A receiver MUST NOT install a complete supporting set until its referenced transaction metadata and exact native bodies are available and valid for the selected authority usage.
-- `INV-SYNC-10`: Each v2 ViewUpdate MUST atomically install either an initial/recovery physical supporting Snapshot or a Delta naming the exact installed predecessor. A delta MUST NOT reset unchanged receiver inputs.
-- `INV-SYNC-11`: Complete supporting-set replacement and subscription detach MUST preserve per-peer payload dedup while peer state survives.
-- `INV-SYNC-12`: Downstream subscription view updates MUST contain accepted/settled state only and MUST NOT emit pending versions to non-origin peers.
-- `INV-SYNC-13`: Downstream view construction MUST apply the peer identity's read policy before emitting result-set entries, version bundles, or complete tx payload refs.
-- `INV-SYNC-14`: When a reader loses read access to a row (through a write or a read-policy change), the server MUST evict it: the row leaves the reader's future settled results and the replica drops its local copy. Local copies are not a redaction boundary, so the eviction is about coherence, not secrecy. This includes rows the replica's own accepted commit wrote and cannot read (a write-only insert): the commit's fate reports its acceptance.
-- `INV-SYNC-15`: Serializable transaction payloads MAY be delivered, stored, and participate partially at the transaction level; receiver-visible subscription state MUST expose them only when complete for the maintained subscription view being served, and partial fragments MUST NOT update whole-database current indexes.
-- `INV-SYNC-16`: A mergeable transaction MAY be delivered and applied partially; each visible mergeable version can contribute without waiting for `tx.n_total_writes`.
-- `INV-SYNC-17`: A supporting set and its native payloads MUST include enough authorized deletion-register evidence to reconstruct the row’s visible presence or absence.
-- `INV-SYNC-27`: Shared deletion-history storage is local representation only: sync payloads continue to identify deletion versions by logical table, branch key, row, transaction, and schema, and receivers MUST resolve the sender's record through their own stable physical mapping.
-- `INV-SYNC-20`: Applying only the local input differences between complete supporting sets MUST be observationally equivalent to evaluating the newer complete set, including enter/leave churn and exact-version replacement.
-- `INV-SYNC-21`: Wire `TxId` and row-version payloads MUST use node UUIDs and schema version IDs, not node-local integer aliases.
-- `INV-SYNC-23`: A serving peer MUST reject a capability-gapped live subscription with `SyncMessage::SubscribeRejected` addressed to the requested `SubscriptionKey`; the rejected subscription MUST NOT become active, `Unsubscribe` for it is a no-op, and the connection MUST keep serving other subscriptions.
-- `INV-SYNC-24`: Known-state payload dedup may omit only native bodies, never required physical snapshot membership or delta additions/removals. Fresh subscriptions and recovery require a full snapshot; retained transport revisions are not durable coverage receipts.
-- `INV-SYNC-25`: A view served under known-state dedup, followed when needed by the full resend after a known-state miss (`INV-SYNC-26`), MUST leave the reader with the same rows as the same view served without dedup.
-- `INV-SYNC-26`: A receiver that finds an update naming a held row whose body it no longer has MUST reopen that view without known state, and the serving peer MUST then resend every row of the view with its body under ordinary read policy. There is no per-version fetch: rows are identified by `(row, row_seq)` and resent whole. A second such update for the same view before it settles is a protocol error rather than a resend loop.
-- `INV-SYNC-27`: A fast known-state declaration MUST only be made for contiguously applied, unevicted served streams in the current process; eviction invalidates its in-memory cursor, and restart never recovers a declaration.
-- `INV-SYNC-29`: A fast known-state declaration carrying authorization progress may affect native-body dedup only when its server-stamped progress matches the serving peer’s current token for that reader and binding view. It MUST NOT replace the complete supporting set or the fresh selected-authority confirmation.
-- `INV-SYNC-30`: `settled_through` is a durable canonical-view history cursor for known-state payload dedup and repair, not a subscription or one-shot coverage receipt. Global settlement and coverage additionally require a fresh confirming `ViewUpdate` from the selected continuously active upstream connection. A new settled one-shot requires confirmation for its exact current usage-site `SubscriptionKey`; an update for a detached predecessor cannot satisfy it even when shape, binding, and options are equal. Disconnect, restart, upstream switch, or any update from a nonselected upstream invalidates all selected-authority receipts immediately unless an exact recomputation closure is proven.
-- `INV-SYNC-28`: The pre-reconstruction terminal carrier is historical scaffolding and is retired by `INV-SYNC-36`; it is not an authority-output compatibility contract.
-- `INV-SYNC-31`: A downstream subscription MUST synchronize exact canonical authored supporting versions, never application-projected rows as replicated truth.
-- `INV-SYNC-32`: A receiver MUST select branch-key-qualified authored-history winners before projection, decode each synchronized fact in its authored schema, project it through the ordered catalogue lineage into the subscription read schema, and derive terminal output with its local IVM without supplementing unrelated local history.
-- `INV-SYNC-33`: The serving authority MUST decide disclosure under the exact reader and query context and send sufficient authorized supporting versions to reproduce the view. Opaque evidence or residual-program carriers require a separately specified extension and are not part of the base protocol.
-- `INV-SYNC-34`: A subscription is settled only after its complete supporting set and exact native witnesses are validated for the selected authority usage. Reconnect, repair and recovery MUST re-establish that evidence before reporting settlement.
-- `INV-SYNC-35`: A receiver MUST finish installation of the complete supporting set and local IVM update before publication. Persisted fast-known-state evidence MUST NOT claim partial or non-durable native input installation.
-- `INV-SYNC-36`: Peer sync carries an exact authorized input closure, never authority-produced application terminal rows or ordered terminal operations. The receiver reconciles admitted authority inputs with tier-eligible local inputs and derives the only application terminal by running its local copy of the identified maintained Groove program.
-- `INV-TX-2`: Committing a serializable transaction MUST store the commit locally as `Fate::Pending` with `DurabilityTier::Local` and emit exactly one `SyncMessage::CommitUnit`.
-- `INV-TX-3`: A commit unit whose Transaction.ntotalwrites does not equal the delivered version count MUST be rejected by the fate authority as RejectionReason::MalformedCommit(...)...
-- `INV-TX-4`: Duplicate commit units with identical payloads MUST be idempotent and return the already-known fate; duplicate units with conflicting payloads MUST fail as Error::Conf...
-- `INV-TX-5`: Core MUST park a commit unit authored under a schema version it does not yet know, with no fate, seq or visible rows, parking a resent copy only once, and MUST decide it exactly once after that schema arrives. Linear history has no version parents, so a unit has no parent prerequisites.
-- `INV-TX-11`: Accepted core commits MUST receive a strictly increasing authority-minted `GlobalTime`; accepted state and the core committed frontier MUST become durable atomically before publication.
-- `INV-TX-23`: Fate authority MUST be structurally wired by the host. A node that receives a downstream commit unit as a local receiver (relay) MUST store it through the relay path as `Fate::Pending` at `DurabilityTier::Local`; it MUST NOT emit a fate, assign a seq, or make the write visible at the `Global` tier until Core's fate arrives.
+- The **authority** (the server, or a node with no upstream) is a database
+  holding complete history. Every accepted commit gets the next server seq.
+- A **replica** is a database whose store is a partial copy of server versions
+  plus its own optimistic writes. Replica rows carry the server seq they were
+  shipped at, so cuts and history on the replica are over server versions.
+  Optimistic local writes number from `LOCAL_BASE` up (a non-durable client
+  from `NON_DURABLE_BASE` up), above every server seq, so no cut at a server
+  seq sees them.
+- **Writes travel up** as one `Commit` per transaction and come back as one
+  `Fate`.
+- **Reads travel up** as one `Read` per query and come back as rows plus
+  settlement: `Rows` and `AccessLost` messages, then a `Settled` naming the
+  server seq the result is complete through. Results are never sent; the replica
+  derives every result with its own compiled queries (`INV-SYNC-44`).
+- **Coherence is per subscription.** The server keeps a row current for a
+  session only while one of its live reads covers it. A cached row no live read
+  covers is a cold copy; it becomes current again once a read covers it. A live
+  read resumes from the seq it last settled through, and its opening ships only
+  what changed after that.
 
-- `INV-SYNC-37`: `ReadTier::LocalOnly` MUST remain on the calling node. Remote subscriptions have no propagation switch; every receiving node follows normal upstream routing.
-- `INV-SYNC-38`: An extra local query input absent from a completed selected-authority scope MUST be revalidated; scope absence or Unknown MUST NOT assert deletion or access loss. Bounded batches MUST preserve eventual retry/progression for supported active queries.
-- `INV-SYNC-48`: A fresh strict (Global) read of a current/default single-table scalar query MUST NOT report settled while a row the client holds live, whose local winner is accepted at Global and which matches the query locally, is absent from the settled authority answer: exactly those rows are probed through `CurrentRowsRequest` and the receipt's carriers (deleted images included) are ingested first; a row answered unavailable (access loss) is evicted (`INV-SYNC-14`). Agreeing views settle without a probe. Reconciliation is reliable, not best-effort: settlement may stop waiting after a bounded interval and release on the authority answer alone, but the outstanding reconciliation is never dropped. The runtime keeps discovering and probing, deduplicated per row, independent of the stream that found the row and of whether the query runtime ever idles, retrying Unknown, dropped, timed-out, or disconnected probes with backoff (immediately on a new upstream link, never while none is admitted), until the authority answers each held row as deleted, readable, or unavailable, or the row's local version changes. A deletion answered after settlement is still applied locally and emits the ordinary local change.
-- `INV-SYNC-39`: Confirmed current unavailability MUST be scoped to the exact effective identity/claims and filter current application inputs before joins, counts and limits. It MUST NOT erase shared content, expose the cause, or affect SYSTEM and other contexts.
-- `INV-SYNC-40`: Readmission MUST follow complete authorized native content ingestion and fresh correlated evidence. Durable per-row denial and clear watermarks MUST survive reopen and prevent stale replies from reversing a newer decision; authoritative inclusion MUST be able to revalidate an excluded row.
-- `INV-SYNC-41`: A partial client relay MUST NOT authorize query or exact-version repair bytes using cached policy inputs. Core authorizes disclosure for the admitted reader; delegated client scopes remain client-scoped across local relay links. SYSTEM reconciliation MUST NOT create access-loss markers for an ordinary reader.
-- `INV-SYNC-42`: An authorized deletion MUST retain native content and deletion witnesses and includeDeleted semantics; deletion-only evidence MUST NOT certify a complete Readable coordinate or override confirmed access loss.
-- `INV-SYNC-43`: Validated receipt application MUST be owned through durable and runtime source updates to completion or fail closed; caller cancellation MUST NOT leave normal queries using a source state inconsistent with persisted availability evidence.
+Invariant digest (the registry, `crates/invariant-registry.jsonl`, is the
+source of truth and names each invariant's tests):
 
-- `INV-SYNC-44`: The sole v2 read format is physical supporting Snapshot/Delta, with no compiler roles or separate completeness facts on the wire. Initial/recovery snapshots establish a complete authorized set; ordinary updates carry only physical membership changes against the exact predecessor. Receivers validate changed inputs and install atomically before deriving results locally.
-- `INV-SYNC-45`: Native supporting rows MUST follow the authority catalogue that identifies them, including permission-advice hydration. Repair MUST check exact content/deletion layers and branches and use the live usage’s admitted policy binding. Authorized deletion witnesses remain repairable under includeDeleted semantics; retired usages MUST NOT initiate repair.
+- `INV-SYNC-5`: Applying a fate or a settled seq MUST NOT move a node's settled seq backward or lower a write's reached durability tier; a lost fate is recovered on resume rather than guessed.
+- `INV-SYNC-7`: Rows MUST travel as self-contained row images (table, id, branch key, seq, deleted flag, content, cells), and result membership is per row: a subscription never holds a transaction as a unit of membership.
+- `INV-SYNC-8`: A server MUST track per session which row versions the peer holds and ship each version at most once across all of that peer's subscriptions; a peer it has no record of receives every row its results need.
+- `INV-SYNC-10`: A replica MUST apply a message whole: a message larger than one wire frame travels in transport parts whose last part ends it, and nothing of it is visible before the end.
+- `INV-SYNC-11`: A reset after reconnect MUST replace the subscription's whole result (members no longer listed leave) while the server keeps skipping versions the peer is known to hold.
+- `INV-SYNC-12`: A server MUST ship other peers accepted rows only, never another node's pending or refused writes.
+- `INV-SYNC-13`: A server MUST apply the peer identity's read policy before shipping any row image, support row or count to it.
+- `INV-SYNC-14`: When a reader loses read access to a row (through a write or a read-policy change), the server MUST evict it; the replica drops its local copy. Local copies are not a redaction boundary, so eviction is about coherence, not secrecy.
+- `INV-SYNC-15`: A serializable commit MUST be decided and applied whole at the authority and reach replicas whole.
+- `INV-SYNC-16`: Mergeable writes MUST apply per column without waiting for other writes.
+- `INV-SYNC-17`: A row image MUST carry its deleted flag, so a replica can tell a deleted row from one it was never sent, including for rows it cached from an ended read.
+- `INV-SYNC-20`: A replica's synced result MUST equal the authority's read of the same query for that reader after any interleaving of writes, entering and leaving rows included.
+- `INV-SYNC-21`: Wire messages MUST name nodes by UUID, authors by identity and schemas by version id; node-local codes never leave their database.
+- `INV-SYNC-24`: A fresh subscription MUST receive its whole result; only a resumed one may be sent just the rows changed after the seq it held.
+- `INV-SYNC-25`: A resumed subscription MUST leave the replica with the same rows as a fresh subscription to the same query.
+- `INV-SYNC-27`: Per-session delivery state MUST live only in the serving process and be released on disconnect.
+- `INV-SYNC-28`: Results MUST travel as rows and be assembled into result trees by the receiver.
+- `INV-SYNC-30`: A replica MUST treat a subscription as settled only when its connected upstream has confirmed it with a settled seq; a node with no upstream settles locally.
+- `INV-SYNC-44`: The read protocol MUST be rows plus settlement.
+- `INV-SYNC-45`: Rows MUST be shipped raw, by the authority's stored table and column names, whatever schema version the subscriber declared; a replica mirrors its upstream's catalogue and applies the lenses locally.
+- `INV-SYNC-46`: A replica missing the chunks of a large value MUST request them and install the row only once its chunks are present; a writer pushes a value's new chunks before the commit that uses them.
+- `INV-SYNC-48`: A Remote read MUST NOT report rows the server's answer no longer lists.
+- `INV-SYNC-49`: A server MUST process a session's messages in the order sent, so a read sent after a commit is served after that commit.
+- `INV-SYNC-50`: A non-durable client's local seqs MUST NOT collide with its relay's.
+- `INV-TX-2`, `INV-TX-11`, `INV-TX-23`: commit, seq and relay rules (ch. 3).
+- `INV-WIRE-1`, `INV-WIRE-2`: exact postcard frames and Hello version negotiation (§8.1.1).
 
-- `INV-SYNC-46`: Missing-body repair MUST preserve dependent supporting deltas in order. A later independent snapshot may supersede earlier pending updates, but a delayed repair MUST never reinstall a superseded snapshot. Retired or nonselected authority usages cannot advance a revision.
+The Groove-era rows `INV-SYNC-9`, `INV-SYNC-23`, `INV-SYNC-26` and the target
+rows `INV-SYNC-31` to `INV-SYNC-43` describe the retired view-update protocol
+(supporting snapshots and deltas, known-state declarations, closure
+manifests). They no longer describe this protocol and are left for the
+registry cleanup.
 
 ## Encoder trust, bounded decoding, and failure containment
 
 Encoder trust is established by the local authenticated topology, never by a
-message claiming to be trusted. The required decoding contract is:
+message claiming to be trusted.
 
-| Direction                                                   | Encoder contract                                      |
-| ----------------------------------------------------------- | ----------------------------------------------------- |
-| Core → client, including its local relay                    | Trusted encoder; decode directly                      |
-| Client → Core, including bytes forwarded by its local relay | Untrusted encoder; bounded connection-scoped decoding |
+| Direction                                                     | Encoder contract                                      |
+| ------------------------------------------------------------- | ----------------------------------------------------- |
+| Server → client, including its local relay                    | Trusted encoder; decode directly                      |
+| Client → server, including bytes forwarded by its local relay | Untrusted encoder; bounded connection-scoped decoding |
 
-Trusted output MUST NOT undergo canonical-byte comparisons, round-trip
-re-encoding, or structural validation passes before or during reads. Wire and
-storage layers MUST preserve encoder bytes. A storage round trip does not erase
-trusted provenance or require the record layer to prove integrity again.
+For an untrusted encoder, prechecks are only for resource amplification:
+frame sizes, joined-message size and decode allocation must fit the
+connection's budget (§8.8). A frame that does not decode ends that link, not
+the process: the transport reports the failure once and the server closes the
+session (`Transport::take_failure`). Failure stays inside that scope.
 
-For an untrusted encoder, prechecks are only for pointer/offset range correctness
-and resource/lookup amplification: lengths, allocation, nesting, decompression,
-and induced data lookups must fit the connection's bounded budget. There is no
-requirement to eagerly prove all values canonical or even fully decodable.
-Malformed input may fail the decoder and gracefully close that connection.
-Failure MUST remain inside that scope: no process abort, shared lock poisoning,
-partial shared-state publication, or impact on unrelated connections. Merely
-catching a panic is not proof of containment; allocation failure and shared-state
-mutation must also be bounded/isolated.
-
-Authentication, write authorization, schema/application constraints, transaction
-identity and fate rules still apply. They are semantic admission, not defensive
-record decoding. Authentication of a local relay does not authorize its
-client's writes. Forwarding client bytes does not turn the client into a
-trusted encoder; Core still owns semantic admission.
-
-This section governs runtime validation policy where older codec descriptions
-or malformed-input fixtures demand universal rejection. Encoder layout/version
-specifications remain unchanged. Existing rejection tests are implementation
-receipts, not a requirement to revalidate trusted bytes. Implementation must
-establish and test connection containment before relying on decoder failure.
+Authentication, write authorization, schema constraints and fate rules still
+apply. They are semantic admission, not defensive decoding. Authentication of
+a local relay does not authorize its client's writes.
 
 ## Details
 
 ### 8.1 One protocol, roles not code
 
-Sync uses one peer protocol everywhere in the deployment. UI, local-worker, and
-Core links all exchange the same `SyncMessage` vocabulary; a tier's behavior is
-determined by its role, not by a separate wire language (ch. 1, principle 2).
-Roles include local relay links (`PeerRole::Relay`) and client links
-(`PeerRole::ClientLink { identity }`). Core alone assigns final fates and Global durability.
+Every link exchanges the same `SyncMessage` vocabulary. A node's behaviour
+comes from its role: a node with an upstream link is a replica (and, if it
+serves sessions, a relay); a node without one is the authority for its
+sessions. Only the global authority assigns `Global` fates (ch. 3, ch. 9).
+Only one relay tier is supported: an authority, optionally a durable relay
+(a worker), and its non-durable sessions (tabs) (SPEC 9 §9.5).
 
-A relay link is an authenticated transport capability with no permission
-subject. It neither implies `AuthorSubject::SYSTEM` nor independently narrows
-reads. A client link carries the terminated peer identity and narrows
-reads under that identity. A scope-isolated client relay may carry only the
-foreground binding admitted for that exact relay scope and attachment; the
-upstream authority, not the relay, evaluates policy under that binding (ch. 7,
-ch. 9).
+Messages, with their postcard variant tags:
 
-A browser's scope-isolated client relay authenticates with its foreground
-session, not an administrative credential incidentally present in application
-configuration. Administrative admission must not replace that session or
-silently change the relay's transport capability.
+| Tag | Message              | Direction       | Purpose                                                          |
+| --- | -------------------- | --------------- | ---------------------------------------------------------------- |
+| 0   | `Read`               | client → server | A read, live or once (§8.4)                                      |
+| 1   | `Unsubscribe`        | client → server | End a live read (§8.5)                                           |
+| 2   | `ResendWhole`        | client → server | Rows whose shipped deltas did not apply: ship them whole (§8.12) |
+| 3   | `Settled`            | server → client | A read is complete through a seq (§8.4)                          |
+| 4   | `Commit`             | client → server | One transaction's writes (§8.2)                                  |
+| 5   | `ChunkRequests`      | client → server | Pull large-value nodes (§8.12)                                   |
+| 6   | `PushChunks`         | client → server | Large-value nodes ahead of a commit (§8.12)                      |
+| 7   | `Chunks`             | server → client | Pulled nodes, and the ones the server cannot answer              |
+| 8   | `Rows`               | server → client | Row images, with the tx ids of history versions                  |
+| 9   | `AccessLost`         | server → client | Drop a row the reader may no longer read                         |
+| 10  | `Refused`            | server → client | A read the server cannot serve, with why                         |
+| 11  | `Fate`               | server → client | A commit's outcome (§8.3)                                        |
+| 12  | `CheckAllowed`       | client → server | Permission preflight                                             |
+| 13  | `CheckAllowedResult` | server → client | Its answer: `Allowed`, `Denied` or `Unknown`                     |
+| 14  | `Schema`             | client → server | The schema version the session reads and writes by (§8.9)        |
+| 15  | `SchemaAdmission`    | server → client | Whether that version is admitted                                 |
+| 16  | `Stored`             | relay → session | A relay holds the session's commit and uploads it (§8.3)         |
+| 17  | `KnownCatalogue`     | client → server | The schema versions and names the replica keeps (§8.10)          |
+| 18  | `Catalogue`          | server → client | Admitted versions, stored names and lens cells (§8.10)           |
 
-**Implementation status (2026-07-27).** Relay aggregation onto a shared upstream
-shape is intended, but the current implementation does not guarantee it. Its
-aggregation and covering-shape semantics remain an open design question below.
+Tags before `Commit` keep their numbers: a replica stores each pending
+upload's header as an encoded `Commit` message (`_jazz_pending`, see §8.3),
+so `Commit` stays tag 4 across stores. No server-sent message has tag 0 or 1, which lets a client tell a
+sync frame from a `WireFrame::Hello` (tag 0) or `WireFrame::Error` (tag 1) by
+its first byte.
 
-The peer wire form is binary-first. `WireFrame` wraps `Hello`,
-`Error`, `Channel`, and `ChannelCredit`. Ordered channel extents carry a
-postcard-encoded `SyncMessage` with protocol version, feature bits, and session
-metadata. Postcard
-is the canonical runtime frame/envelope format; JSON fixtures are only
-human-readable golden checks. Row/version payloads remain groove custom
-`Record` bytes inside protocol messages; postcard wraps those bytes, it does not
-replace row encoding. The same split applies at the binding ABI (ch. 13):
-commands, acks, and event metadata are postcard envelopes, while row-shaped
-payloads are descriptor/raw `Record` bytes at the hot boundary.
+#### 8.1.1 Frames, batches and wire versions
 
-#### Relation-query Postcard grammar in peer and binding envelopes
+A WebSocket binary message is one postcard `Vec<Vec<u8>>` batch of frames.
+The first frame each way is a `WireFrame::Hello`; the server may send a
+`WireFrame::Error` and close. Every other frame is a sync frame: a postcard
+`SyncMessage`, or a part of one (§8.8). Each whole message, unsplit or
+joined from its parts, is exactly one complete postcard value: a decoder
+rejects trailing bytes (`INV-WIRE-1`).
 
-Where a peer `ShapeAst` or binding `Query.relation`/`ShapeBody::Relation`
-contains a relation subtree, it uses the one typed Postcard relation-query
-grammar specified in [§19, Relation-query Postcard carrier](19_native_relays.md#relation-query-postcard-carrier).
-The direct native relation-read `WireRelationQuery` uses that same grammar; no
-WireFrame- or binding-specific relation subcodec exists. The committed
-`fixtures/relation_query_postcard.json` corpus pins its semantic-to-byte cases,
-the Rust receipt rejects noncanonical payloads, and TypeScript independently
-encodes the corpus and rejects malformed relation input. It is compatibility
-evidence, not a migration input.
+Every endpoint advertises exactly `min_protocol_version = 6,
+max_protocol_version = 6`. A receiver reads a Hello's version range before
+its version-scoped body and answers a foreign range with
+`UnsupportedProtocolVersion`/`Never` (`INV-WIRE-2`). The `WireFrame::Channel`
+and `WireFrame::ChannelCredit` variants keep their tags in the enum but no
+SQLite endpoint sends them. Clients, relays and servers upgrade together.
 
-**Linear-history boundary, 2026-10-08 — the sole wire protocol is v6.** Wire v6
-replaces the version DAG with linear per-row state (SPEC 4 §4.6) and keeps
-v5's compact durability tags, Edge-free peer roles and flagless shape
-registration, and v4's schema-predecessor vector (below), unchanged. It changes
-payload shapes in place, so every endpoint advertises exactly
-`min_protocol_version=6, max_protocol_version=6` and a v5 (or older) peer fails
-the Hello handshake with `UnsupportedProtocolVersion`/`Never` before any payload
-is decoded; a v5 envelope on a v6 link is rejected by its version field. The v6
-baseline, frozen fresh rather than appended to v5, is:
+The sync frames are pinned by `crates/jazz/fixtures/sqlite_sync_wire_v1.json`,
+which every shipped artifact (native, NAPI, WASM) validates
+(`jazz::sync_wire_corpus`). The corpus may be re-pinned until alpha.60 ships;
+after that, a layout change needs a compatibility write-up.
 
-- the `JVRR` row blob is version `3` (no `parents`; `_deletion` cell; row
-  descriptors defined once per sync message in a descriptor table; a Core
-  union image's `UnionExtraCells` in the same blob, flagged by the low bit of
-  its descriptor head; SPEC 16), and
-  `VersionRecord` ends with `authored_columns`, `base` (SPEC 4 §4.6 "Wire
-  layout") then `counter_signs` (SPEC 4 §4.3). Every row version of a
-  `CommitUnit` carries the base of the image its writer made it over (the
-  settled seq it held and its own pending predecessor to that row, each
-  optional; both absent for an insert or a blind update); Core validates the
-  base exactly or rejects the write as `MalformedCommit`, and otherwise
-  applies the write in its own seq order. Core never waits for a unit's
-  pending predecessor: a writer's units reach Core in the order they were
-  written (SPEC 14, `INV-HIST-23`), so one Core holds no fate for never
-  arrives, and the unit applies as written; a predecessor that arrives
-  after a newer accepted write of its node to the same row is rejected as a
-  protocol violation (SPEC 4 §4.6). Uploads stay pipelined: no node waits
-  for a fate before sending the next transaction, and a link never uploads
-  a writer's transaction ahead of an earlier one of the same writer that it
-  holds back. A history record that a view
-  update or relay forwards carries the base Core stored, and
-  takes its seq from the bundle's accepted `GlobalTime`. `FateUpdate` is
-  unchanged;
-- `SyncMessage` tags 14 (`FetchRowVersions`) and 15 (`RowVersionPayloads`) in
-  the compact v5 numbering are retired and reserved: rows are resent whole, never fetched per version;
-- `SyncMessage` tag 29 (`RetryLater`, the authority's answer to a unit whose
-  pending predecessor it had not decided) is retired and reserved: the
-  authority never waits for a predecessor, so the tag is never reused;
-- `KnownStateDeclaration` tag 2 (`ExactVersionSet`) is retired and reserved;
-  `Watermark` is tag 3, so an old exact declaration fails decoding instead of
-  being read as a watermark prefix;
-- `SupportingRowsUpdate::CatchUp` is tag 2. It is a mandatory v6 variant, not an
-  optional extension, so it has no feature bit.
-- `SyncMessage` tag 28 (`ViewUpdatePart`) is a non-final part of a
-  `ViewUpdate` whose semantic payload exceeds the routed payload limit; the
-  final part is an ordinary `ViewUpdate` (SPEC 13, "Oversized view updates").
-  It is a mandatory v6 variant with no feature bit.
-- `SupportingRow` appends `is_current: bool` after its version reference. Current
-  sources consume admitted current winners; history sources consume all admitted
-  content versions. An include-deleted history source that reads `$deletedAt`
-  or `$deletedBy` also receives the row's current deletion winner as a
-  deletion-layer supporting row with `is_current = true`. Its version witness
-  carries the deletion's authored time as physical milliseconds, as current
-  sources do, while history content witnesses keep packed HLC times.
-- `ReadViewSpec` appends `include_deleted: bool` after its `source`, so
-  `RegisterShapeOptions` encodes as
-  `tier | read_view.source | read_view.include_deleted | binding_source`. A
-  default current registration that used to encode its options as `02 00 00`
-  now encodes `02 00 00 00` (`fixtures/wire_message_frames_v6.json`, `register_shape_todos`). The flag
-  asks the authority to widen only the root current source to include deleted
-  rows (SPEC 6 §6.6) and is part of the read-view key (SPEC 6 §6.5). A peer
-  built before this field sends a three-field options tail; because the options
-  end `RegisterShape`, decoding fails at end of input instead of misreading the
-  fields.
+In-process links (a worker and its tab, tests) carry `SyncMessage` values
+directly (`sync::duplex`); a byte link frames them with postcard
+(`WireTransportAdapter`).
 
-Two result-identity encodings change with history reads. Neither is persisted,
-so neither needs a storage migration:
+#### 8.1.2 WebSocket admission prelude
 
-- `ResultKey` is version 2 (SPEC 6 §6.4.1): the leading version byte is `2`, and
-  after the union-arm records the key carries one `has_transaction:u8` flag per
-  source occurrence, root first and then each joined source in order. Each flag
-  set to 1 is followed by that source version's `tx_time:u64be | tx_node:16`;
-  a flag of 0 marks a current source. Version 1 keys are rejected.
-  `fixtures/result-key.json` pins a history root key (`key`) and a key whose
-  root and joined source are both history versions (`joined_key`).
-- `OutputOccurrenceId` serializes as its `ResultKey` bytes
-  (`#[serde(from/into = "ResultKey")]`) instead of the postcard two-field
-  `(root, joined)` pair. The `ResultMemberEntry::TypedRow` variant is removed.
-
-Clients, relays and Core servers must upgrade together; there is no v5 decoder
-or migration. The storage boundary moves with it (SPEC 2 §2.7.1).
-
-**Read-tiers boundary — wire protocol v5 (superseded by v6).** Wire v5
-removes the remote registration propagation flag and the retired Edge role,
-and compacts durability tags (ch. 9). It retains v4's schema-predecessor
-vector. V4 and older peers fail the Hello handshake before decoding these
-payloads. Clients and Core servers must upgrade together. Its frozen corpora
-are `crates/jazz/fixtures/wire_message_frames_v5.json` and
-`crates/jazz/fixtures/wire_hello_frames_v5.json`; v6 replays its Hello frames
-only to prove they are refused.
-
-**Schema-predecessor boundary — wire protocol v4 (superseded by v5).** Wire v4
-replaces the single incoming migration in each schema publication with an
-explicit predecessor vector. V3 and older peers fail the Hello handshake before
-decoding these snapshots. Clients and Core servers must upgrade together. It
-retains v3's deployment-aware catalogue policy semantics: policy changes must
-advance the write revision. Existing message discriminants remain fixed,
-including retired tags 12 and 30. Persisted single-predecessor records remain
-readable; storage versions are independent of this wire boundary.
-
-**Deployment boundary, 2026-09-18 — wire protocol v3 (superseded by v4).** `ViewUpdate` carries
-settled version payloads only through `version_carriers`; the transitional
-duplicate `version_bundles` field is absent. Every endpoint advertises exactly
-wire-protocol v3 and requires every peer Hello to advertise exactly
-`min_protocol_version=3, max_protocol_version=3`; v1, v2, and ranges such as `0..=3`,
-`2..=3`, and `3..=15` reject before payload decoding. There are no compatibility
-aliases, migration paths, or old wire decoders. `VersionBundle` remains the semantic unit produced when a
-carrier is expanded and remains the direct payload of `RowVersionPayloads`
-repair responses.
-
-Wire v3 introduces deployment-aware catalogue policy snapshot semantics: an old
-Core can emit a policy-only snapshot at the same write revision that v3 receivers
-reject. Therefore v2 peers fail the Hello handshake rather than reaching that
-semantic mismatch. Clients and Core servers must upgrade together. Existing
-message discriminants remain fixed, including retired tag 12; this wire boundary
-does not change storage formats or remove legacy storage upgrade paths.
-
-Transaction and row-version authors use the native record
-`{account: UUID, identity: {issuer: String, subject: String}}`. System authors
-carry the reserved nil account and issuer plus originating node UUID subject;
-forwarding preserves that origin. This data is never a permission capability.
-Accountless reader sessions remain distinct from non-null row authors. Large scalar descriptors use Groove's canonical
-internal enum/record encoding rather than the former private tagged/postcard
-payload. Wire row-version `$createdAt` and `$updatedAt` values are Unix
-milliseconds; the packed HLC is internal ordering state and is not protocol
-data. The wire-v6 golden fixture set is the only supported message layout.
-Wire-protocol v6 is independent of other formats that are also labelled v1,
-including storage, catalogue, migration-lens, and NAPI/WASM binding formats.
-`MigrationLens` payloads in that fixture set are
-their bounded canonical `jazz-migration-lens-v1` byte blob (with the lens id
-derived on decode), replacing postcard's former field-by-field representation.
-
-**Decision, 2026-08-31 — relay-delegated policy snapshots are v1 fields.**
-`Subscribe` now ends with `delegated_session` and `FetchRowVersions` ends with
-`delegated_session`; each is an optional `(identity, claims)` snapshot. `None`
-is the ordinary direct-session form. `Some` has two admitted sources:
-
-- an admitted `TrustedBackend` link may deliberately attribute work to an
-  explicit backend session; or
-- a scope-isolated client-relay link may carry the immutable foreground binding
-  issued for its exact durable authentication scope and current admission
-  epoch.
-
-The receiver validates the snapshot against the link's server-issued
-capability before shape admission or repair serving. An ordinary session/client
-link, an unscoped relay, a mismatched scope, a stale admission epoch, or a raw
-client-supplied binding MUST be rejected. A scope-isolated relay sends the
-validated immutable snapshot for each upstream coverage or repair request it
-owns, so two sessions with equal query bindings but distinct claims cannot
-share an evaluator or repair authorization. The upstream authority scopes both
-initial evaluation and row-version repair to that snapshot; the relay does not
-evaluate policy. `SYSTEM` is never a relay transport identity or delegated
-subject. This is a deliberate redefinition of the sole, unreleased v1 layout:
-there is no old-shape decoder or compatibility path.
-
-### 8.1.1 Frozen wire-protocol v6 byte contract
-
-`WireFrame` and each reassembled semantic channel message are **one complete
-postcard value**. A conformant decoder MUST reject a valid prefix followed by any
-trailing byte; concatenation belongs only to the documented WebSocket
-`Vec<Vec<u8>>` batch carrier. In particular, a binding MUST NOT hand a byte
-suffix from one frame to the semantic decoder, and a semantic decoder MUST NOT
-silently leave a suffix for its caller (`INV-WIRE-1`).
-Every postcard `u64`, including an enum discriminant or length prefix, MUST use
-its shortest base-128 spelling. A redundant continuation byte, more than ten
-bytes, or a tenth-byte payload above `1` is malformed rather than a compatible
-alternate encoding. TypeScript decoders that expose a `u64` as a JavaScript
-`number` MUST reject values above `Number.MAX_SAFE_INTEGER`; only fields kept
-as `bigint` may retain the full `u64` domain.
-Writers encode a ZigZag `i64` only from a safe JavaScript `number` or a
-`bigint` in `[-2^63, 2^63-1]`; they MUST reject an unsafe number or either
-out-of-range signed endpoint before emitting bytes.
-The TypeScript WebSocket carrier MUST consume the entire outer batch and the
-entire known `Hello`, `Message`, or `Error` frame whenever it parses or
-classifies that frame; reading only the enum tag is not frame acceptance.
-Within `WireHello.authority`, `WireAuthorityEndpoint.node` is the postcard
-sequence representation of `NodeUuid`: a canonical length prefix of `16`
-followed by exactly sixteen UUID bytes, then the postcard `u64` authority
-epoch. It is not a bare fixed-width UUID. A carrier MUST consume this complete
-optional endpoint before applying the exact-frame EOF check. Omitting the
-sequence length, accepting a valid Hello plus a suffix, or treating a genuine
-endpoint byte as a suffix is malformed framing, not version compatibility. A
-length other than exactly `16` MUST be rejected even when the declared byte
-sequence and the remaining Hello fields are otherwise well formed.
-
-Postcard enum ordinals are wire data. The wire-protocol v6 baseline freezes these permanent
-discriminants (decimal):
-
-| enum                    | frozen discriminants                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `WireFrame`             | `Hello=0`, `Error=1`, `Channel=2`, `ChannelCredit=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `WirePeerRole`          | `Client=0`, `Core=1`, `Relay=2`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `WireErrorCode`         | `UnsupportedProtocolVersion=0`, `UnsupportedFeature=1`, `MalformedFrame=2`, `AuthFailed=3`, `Backpressure=4`, `Internal=5`, `NotReady=6`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `WireRetry`             | `Never=0`, `AfterAuth=1`, `AfterResume=2`, `Later=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `SyncMessage`           | `ChunkRequestBatch=0`, `ChunkResponseBatch=1`, `SessionClaims=2`, `CommitUnit=3`, `FateUpdate=4`, `RegisterShape=5`, `Subscribe=6`, `SubscribeRejected=7`, `Unsubscribe=8`, `PublishSchema=9`, `PublishSchemaWithLens=10`, `PublishLens=11`, `CatalogueAck=12`, `ViewUpdate=13`, `reserved=14`, `reserved=15`, `CatalogueSnapshot=16`, `AuthorizationScopeIntent=17`, `AuthorizationScopeView=18`, `AuthorizationScopeAggregateReceipt=19`, `AuthorizationScopeUnavailable=20`, `AuthorizationScopeDecision=21`, `ChunkUploadStart=22`, `ChunkUploadNodes=23`, `ChunkUploadResult=24`, `CurrentRowsRequest=25`, `CurrentRowsReceipt=26`, `CurrentRowsCancel=27`, `ViewUpdatePart=28`, `reserved=29`, `ReadBarrier=30` |
-| `KnownStateDeclaration` | `Fast=0`, `FastWithAuthorizationProgress=1`, `reserved=2`, `Watermark=3`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `SupportingRowsUpdate`  | `Snapshot=0`, `Delta=1`, `CatchUp=2`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-
-`SyncMessage` tags 0 through 27 keep the compact v5 numbering; v6 retires tags
-14 (`FetchRowVersions`) and 15 (`RowVersionPayloads`) in place and appends
-`ViewUpdatePart` (28), the since retired tag 29 and `ReadBarrier` (30). Tags
-14, 15 and 29 of
-`SyncMessage` and tag 2 of `KnownStateDeclaration` are retired and MUST reject
-decoding; they have no
-constructible message. Historical fixtures retain their original bytes and are
-rejected using their original wire version.
-
-Future variants MUST append after these values; existing variants, fields, and
-their field order MUST NOT be reordered, inserted before, reused, or decoded
-through a migration path. A new optional semantic variant additionally needs a
-new negotiated feature bit. Wire-protocol v6 intentionally provides neither
-old-version decoding nor migration.
-
-#### Forward compatibility of tagged unions (#2468, `INV-WIRE-2`)
-
-Every tagged union on the wire is **closed and strictly decoded**: an unknown
-discriminant, at any depth, is `MalformedFrame`, exactly as #2435 fixed for
-`WireErrorCode` and `WireRetry`. There is no opaque or skippable "unknown
-variant". Jazz receivers must interpret every message exactly; a variant an
-older peer silently skipped could carry a fate, a revocation or a coverage
-claim whose absence changes results. Growth instead comes in three layers:
-
-1. **Cross-version bytes (permanent in every wire version).** A `Hello`
-   starts with the `WireFrame::Hello` tag (`0`) and then the
-   `min_protocol_version`, `max_protocol_version` pair. A `WireFrame::Error`
-   (tag `1` since wire v5) is `{ code, retry, message }` with the codes and retries in the
-   table above. Nothing else is shared across versions. A receiver reads a
-   Hello's version range **before** the rest of its body and answers a
-   foreign range with `UnsupportedProtocolVersion`/`Never`, never with
-   `MalformedFrame`, even when the remaining bytes do not parse with this
-   version's layout. Before negotiation completes, a peer sends only these
-   baseline error codes and retries.
-2. **Additive change within a version: capability bits.** A new variant of
-   any union (`WireFrame`, `SyncMessage`, or a union nested inside one, such
-   as `SubscribeRejectReason` or `LensOp`), a new message carrying extra
-   fields, or a new `WireErrorCode` or `WireRetry` is assigned a new feature
-   bit. A sender emits it only when that bit is in the negotiated
-   intersection and otherwise uses the baseline form; for a new error code,
-   that is a baseline code with the same retry meaning. The receiver rejects
-   it with `UnsupportedFeature` when the bit was not negotiated.
-   `SyncMessage::required_wire_features` MUST account for nested variants,
-   not only the top-level tag. Postcard has no optional trailing fields, so a
-   new field on an existing struct is never additive: it needs a new variant
-   behind a bit, or layer 3.
-3. **Everything else: a version bump.** Reordering, removing, or
-   re-meaning a variant or field, or changing the Hello body after the
-   version range, needs a new `WIRE_PROTOCOL_VERSION`. Negotiation stays
-   exact-version (no ranges), so peers on different versions refuse each
-   other cleanly through layer 1.
-
-Worked examples, with Alice on version `N` and Bob on `N` plus a new bit `B`
-for a new `SyncMessage` variant `X`:
-
-- _Newer sender, older receiver._ Alice does not advertise `B`, so the
-  intersection lacks it and Bob never sends `X` to Alice. If he did, Alice
-  rejects it as malformed (unknown tag) and closes the link.
-- _Older sender, newer receiver._ Alice sends only baseline messages, which
-  Bob decodes unchanged. Bob also rejects `X` from any peer that did not
-  negotiate `B`.
-- _New error code._ Bob adds `WireErrorCode::Y` behind bit `C`. To Alice he
-  sends the baseline code with the same retry meaning; to a peer that
-  negotiated `C` he sends `Y`.
-- _Different versions._ Bob on `N+1` changes the Hello body. Alice reads
-  `(N+1, N+1)` from the prefix and replies with the frozen
-  `UnsupportedProtocolVersion`/`Never` error frame, which Bob decodes with
-  his own layer-1 decoder. The reverse direction is symmetric.
-
-Canonical encoding and resource bounds are unchanged: capability bits add no
-alternate spellings, and the version probe reads two bounded varints before
-the existing exact decode.
-
-The optional feature bits are `PayloadLz4=1<<3`,
-`PayloadZstd=1<<4`,
-`AuthorizationScopeViews=1<<7`, `AuxiliaryChunks=1<<8`, and
-`ScopeIsolatedClientRelay=1<<9`. `Hello` negotiates only the intersection of optional features.
-A channel extent MUST NOT declare a bit outside that intersection. Feature
-masks are postcard `u64` values and MUST be decoded and compared across all 64
-bits; a binding language MUST NOT apply a narrowing 32-bit bitwise operation.
-Any unsupported low or high bit, including `1<<32`, rejects the Hello before
-its accepted mask is converted to a narrower runtime type. The feature mask
-and authority epoch remain `bigint` through wire decoding, so canonical values
-through `2^64-1` are representable without a JavaScript number conversion. Exactly
-one compression bit may be active on a channel extent; when both codecs are
-negotiated, an outbound sender selects LZ4 and emits only its bit. Compression
-is streamed per channel generation. Receivers enforce contiguous sequence
-numbers, unchanged authenticated metadata, bounded decoded chunks, and complete
-logical-message coverage before semantic admission. The resource limits and
-expiry rules are normative in `SPEC/13_transport_message_fragmentation.md`.
-
-Wire v5 removed the obsolete `Message` and `MessageFragment` frames, their
-envelope/fragment layouts, and the old digest-based reassembler, and compacted
-the remaining outer tags as above; v6 keeps that framing unchanged.
-For example, a small semantic message occupies one `Channel` frame; a larger
-message spans ordered extents and is admitted only after the final extent.
-A missing or reordered extent fails channel admission. Prior-version peers
-fail Hello negotiation; there is no old-frame decoder or storage-format change.
-Historical fixtures remain unchanged, while current v6 fixtures use channel
-batches and the compact error tag.
-
-JSON version cells use the schema-derived `StoredScalar(Json)` descriptor,
-including inline cells. This is the same existing scalar codec used by local
-physical JSON columns. The pre-freeze correction tracked with #2461 changes
-the serialized `VersionRecord` descriptor for inline JSON, but leaves its raw
-inline scalar bytes unchanged; the old `String` descriptor could not encode
-indirect JSON at all. Receivers reject old inline JSON records whose descriptor
-no longer matches the authored schema. This correction must be shared by the
-contained and typed identity candidates before freezing v1; it introduces no
-new durable storage encoding or compatibility fallback.
-`fixtures/large_json_wire_v1.json` pins the old inline descriptor and the corrected
-inline/indirect records. Rust checks exact bytes, decoded values, roundtrips,
-and rejection of the old descriptor before storage.
-
-The wire-protocol v6 frozen corpora are `crates/jazz/fixtures/wire_message_frames_v6.json` and
-`crates/jazz/fixtures/wire_hello_frames_v6.json`:
-Rust independently decodes every hard-coded frame, re-encodes the semantic
-value to the exact same payload and frame bytes, and TypeScript independently
-round-trips every channel batch through its production batch codec. Rust
-rejects suffixes on each frame and semantic payload. The Hello corpus crosses every frozen peer role with both absent and
-present authority endpoints and one- and multi-byte feature masks; supported
-Core cases additionally pass through the production TypeScript WebSocket
-negotiation path. Its
-binding companion, `binding_codec_golden.json`, covers NAPI/WASM's shared
-Rust-produced relation-snapshot and subscription-delta byte ABI, consumed by
-the production TypeScript decoder. These corpora are compatibility evidence,
-not a permissive migration input. Adding a new case requires a SPEC decision,
-an invariant citation, and a review of every language consumer.
-
-Inside Rust, `Db` and `PeerConnection` keep the semantic `Transport` surface over
-`SyncMessage`. Binding/server byte transports use `WireFrame` and are bridged at
-the edge of the core, so handshake, socket state, malformed-byte errors, and
-backpressure do not become DB semantics. Transports such as websockets or
-channels are binding-supplied drivers layered underneath these semantics after
-they are proven in simulation (appendix A). The only ordering assumption is
-**per-link FIFO**. Cross-link races and rehydration make stronger end-to-end
-delivery guarantees unaffordable, so "parked orphan" is a first-class protocol
-state with counters and tests (§8.2).
-
-WebSocket carriers batch by default: one binary WebSocket message carries a
-postcard `Vec<Vec<u8>>`, where each inner byte vector is one encoded
-`WireFrame`. The batch envelope is transport-local and must not be confused
-with row encoding or semantic sync messages; batching reduces socket/message
-overhead while preserving the core's per-link FIFO `WireFrame` stream.
-
-Fast reconnect currently uses Rust `ResumeCursor` as subscriber-connection
-shipped-state: it records what that connection has already received so a
-runtime-local reconnect can catch up from the cursor. This is separate from
-`WireSession` metadata, which the byte transport adapter enforces when an
-expected session is configured: missing, wrong-identity, stale-epoch, and
-wrong-session frames fail admission with structured wire errors before semantic
-sync messages are emitted. These are still runtime-local shipped-state and
-admission scaffolds, not durable network resume credentials. The session
-protocol still needs to specify portable session credentials, resume
-acceptance/rejection, auth expiry, and unsupported-feature diagnostics through
-`Hello`, message, and error frames.
-
-The message variants and their payloads are:
-
-| message                                                  | direction      | payload                                                                                                                    |
-| -------------------------------------------------------- | -------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `CommitUnit`                                             | up             | `{ tx: Transaction, versions: Vec<VersionRecord> }`                                                                        |
-| `FateUpdate`                                             | down           | `{ tx_id, fate, global_time: Option<GlobalTime>, durability: Option<DurabilityTier> }`                                     |
-| `ReadBarrier`                                            | up             | `{ writes_through: u64 }`: hold later requests until this link's first `writes_through` commit units are answered (§8.2.1) |
-| `RegisterShape`                                          | up             | `{ shape_id, ast: ShapeAst, opts: RegisterShapeOptions }`                                                                  |
-| `Subscribe`                                              | up             | `{ shape_id, subscription: SubscriptionKey, values: Vec<Value> }`                                                          |
-| `SubscribeRejected`                                      | down           | `{ subscription: SubscriptionKey, reason: SubscribeRejectReason }`                                                         |
-| `Unsubscribe`                                            | up             | `{ subscription: SubscriptionKey }`                                                                                        |
-| `ViewUpdate`                                             | down           | `{ subscription, settled_through, authorization_progress, version_carriers, peer_payload_inventory, supporting_rows }`     |
-| `ViewUpdatePart`                                         | down           | `ViewUpdate` payload shape; a non-final part of an update over the routed payload limit                                    |
-| `PublishSchemaWithLens` / `PublishLens` / `CatalogueAck` | catalogue lane | ch. 10                                                                                                                     |
-
-A `VersionCarrier` in `ViewUpdate.version_carriers` is either one owned
-`VersionBundle` or a packed run that expands to the same bundle sequence. A
-`VersionBundle` is `{ tx, versions, scope, fate, global_time, durability }`: a
-settled **view payload bundle** with the fate state observed when it shipped.
-`scope` explicitly distinguishes
-`CompleteTransaction` from `ViewScoped`; cardinality equality is not a scope
-witness. A complete bundle carries the authored `tx.n_total_writes` and may
-enter the peer's complete-transaction-payload inventory for later dedup. A
-view-scoped bundle carries only the row/version witnesses admitted by that
-selected view and MUST redact `tx.n_total_writes` to `versions.len()`. It never
-establishes complete-payload coverage, even when those numbers happen to equal
-the authored transaction's true cardinality.
-
-### 8.1.2 WebSocket admission prelude (SPEC08)
-
-Before the binary `WireFrame` carrier begins, a client sends exactly one
-UTF-8 JSON object as its first WebSocket message. The server accepts that
-prelude as either a WebSocket text message or a binary message containing the
-same UTF-8 bytes. It then requires one binary WebSocket message that decodes to
-exactly one `WireFrame::Hello`. The ordinary writer form is a complete
-postcard `Vec<Vec<u8>>` singleton batch; the route also accepts its documented
-complete raw-postcard `WireFrame` handshake form. The prelude and that first
-wire message each have the ordinary two-second handshake read deadline. Only
-the first message is parsed as a prelude; later text messages have no admission
-effect.
+Before the binary carrier begins, a client sends exactly one UTF-8 JSON object
+as its first WebSocket message (text, or binary with the same bytes). The
+server then requires one binary message that decodes to exactly one
+`WireFrame::Hello`. The prelude and that Hello each have the two-second
+handshake read deadline. Only the first message is a prelude.
 
 The prelude object has these server-owned fields:
 
 - `peer_identity`: required canonical `AuthorSubject` JSON string.
-- `auth`: required `AuthConfig` object. Its current fields are `jwt_token`,
-  `backend_secret`, `admin_secret`, and `backend_session`.
+- `auth`: required `AuthConfig` object (`jwt_token`, `backend_secret`,
+  `admin_secret`, `backend_session`).
 - `bootstrap_catalogue`: decode-only legacy boolean; `true` is rejected with
-  `UnsupportedFeature/Never`, including for admin-authenticated sessions.
-- `requested_link`: optional string enum; omission means `ordinary_session`.
-  The only admitted values are `ordinary_session` and
-  `scope_isolated_client_relay`. The latter produces its scoped-link admission
-  only for an authenticated session that negotiated
-  `FEATURE_SCOPE_ISOLATED_CLIENT_RELAY`; a session missing that feature
-  receives `UnsupportedFeature/Never`. Admin and backend credentials retain
-  their ordinary-link admission when they send this client-only request.
+  `UnsupportedFeature/Never`.
+- `requested_link`: optional, `ordinary_session` (the default) or
+  `scope_isolated_client_relay`, which is admitted only for an authenticated
+  session that negotiated `FEATURE_SCOPE_ISOLATED_CLIENT_RELAY`.
 
-The JSON object is an evolution envelope, not an authority grant. Unknown
-top-level fields and unknown fields nested in `auth` are ignored. An unknown
-`requested_link` is rejected, because it requests an authority-bearing link
-mode. Missing required fields, non-UTF-8 bytes, malformed JSON, a trailing JSON
-suffix, or an invalid known field are rejected before admission.
+Unknown fields are ignored; an unknown `requested_link` is rejected; missing
+required fields, malformed JSON or a trailing suffix are rejected before
+admission. `crates/jazz/fixtures/websocket_prelude_v1.json` pins the writer
+strings and the server's parse. Axum caps inbound WebSocket frames and
+messages at 2 MiB, the prelude included.
 
-The native Rust writer serializes `peer_identity`, `auth`, and the requested
-link mode when non-default. Its optional `AuthConfig` members serialize as
-explicit JSON nulls. The TypeScript native-runtime writer preserves its
-existing top-level auth and `sub` compatibility fields while also writing the
-nested `auth` object; those extra top-level fields are ignored by the server.
-Neither representation is a second protocol nor an authorization alias. The
-shared `jazz-websocket-prelude-v1` fixture pins the exact writer strings and
-server parse result.
+### 8.2 Upstream: commits
 
-Axum applies a 2 MiB ceiling to both inbound WebSocket frame and message size,
-including the initial text or binary prelude. An exactly 2 MiB valid prelude
-may proceed to the wire Hello; a valid prelude of 2 MiB plus one byte must not
-reach admission. This is the physical carrier ceiling, not a reduced logical
-sync or catalogue limit.
+A committed transaction travels as one `Commit { node, tx, kind, ops, … }`;
+open transactions never ship (ch. 3, `INV-TX-2`). Each op is a write
+(`Insert`, `Update`, `Upsert`, `Delete`, `Restore`, `Move`) by the session
+schema's table and column names, which the authority resolves to stored names
+under the schema version the commit was written under (§8.9), with what its
+writer knew of the row it writes:
 
-### 8.2 Upstream: commit units
+- `bases`: on the commit's first op that writes a row, for each branch key it
+  writes the row under over an image the writer held, the base of that image
+  (SPEC 4 §4.6). A move writes two. Only the authority's conflict derivation
+  reads them. A base on any other op, or two naming one row and branch key,
+  refuse the commit.
+- `deltas`: the op's chunked cells travelling as edits over the writer's
+  newest settled version of the row (SPEC 19.8). Each stands in for one
+  column whose cell holds NULL in its place; a second delta for a column, or
+  one over a cell that is not that NULL, refuses the commit.
+- `access_proof`: when the op's chunked values travel as trees, a version of
+  the row the writer may read whose trees vouch for the nodes it did not push
+  (SPEC 19.4).
 
-Upstream sync moves committed history, not in-progress edits. A committed
-transaction travels as one atomic commit unit
-(`SyncMessage::CommitUnit { tx, versions }`); open state never ships (ch. 3,
-`INV-TX-2`).
+The commit's other fields:
 
-Commit-unit delivery is idempotent by `tx_id`. If a known `tx_id` arrives with a
-conflicting payload, the receiver rejects it as `ConflictingCommitUnit`
-(`INV-TX-4`). The transaction's `n_total_writes` must equal the number of version
-records in the unit (`INV-TX-3`). If the unit is authored under a schema
-version the authority does not yet know, the authority parks the unit until
-that schema arrives (`INV-TX-5`).
+- `kind`: `Mergeable`, or `Serializable { snapshot, reads, own }`: the
+  snapshot seq, each read with the rows and server versions it returned, and
+  the writer's own commits that were unsettled when the transaction began. The
+  authority re-runs each read under the writer's identity and applies the
+  writes only if every result and written row is unchanged since the snapshot.
+  A stale or partial replica can only cause a conflict, never a
+  non-serializable commit.
+- `expect`: a digest of each written row as the writer's replica holds it
+  afterwards. The authority does not echo a row whose new version matches;
+  the writer installs its own as that version (§8.3).
+- `acting`: who the writes are. `Own`: the sender's, checked and attributed as
+  the link. `Attributed { author }`: provenance only, checked as the sender.
+  `Session { author, claims }`: a session's writes with its claims. Over a
+  trusted link the authority checks them as that session; over a session link
+  it checks and attributes them as the link's own identity, whatever author
+  they name. A session link's `Attributed` commit naming another author is
+  refused.
+- `origin`: the session commit a relay uploads this one for.
 
-Receiving a bare unfated commit unit is not authority. A node that the host
-wires as a local receiver (a relay) stores a downstream commit unit through the
-relay path as `Fate::Pending` at `DurabilityTier::Local`, forwards it upstream
-and waits for Core's `FateUpdate`; it must not emit a fate, assign a seq, or make
-the write visible at the `Global` tier (`INV-TX-23`). Only a structurally wired fate
-authority path may decide fate (ch. 3 §3.6, ch. 9).
+A replica keeps every unsettled commit and uploads it in order on each
+connection. It is stored a row per op, not as one encoded message:
 
-### 8.2.1 Read-your-writes barrier (#3863, `INV-SYNC-49`)
+- `_jazz_pending (tx, header)`: the `Commit` with its ops and reads left
+  out.
+- `_jazz_pending_items (tx, part, n, item)`: each op (with its bases, deltas
+  and access proof) and serializable read, by list (`part`) and position
+  (`n`).
+- `_jazz_pending_rows (tx, n, tbl, id, key)`: the local rows it wrote.
 
-A link sends commit units on the writes channel and requests (`RegisterShape`,
-`Subscribe`, `Unsubscribe`, `CurrentRowsRequest`, `CurrentRowsCancel`, and the
-authorization requests) on the requests channel. Each channel is FIFO, but the
-two are credited and scheduled independently (SPEC 14), so a read sent after a
-write can reach the receiver first. A reconnect resends both with no order
-between them.
+`expect` is not kept: after a reopen the server ships those rows. A row's
+values over the inline limit live in large-value storage, so a stored op is
+about the size of the row it writes, however large the commit. A store with
+a 2 MiB value limit (a Durable Object) therefore keeps any commit whose rows
+it can hold, even one that travels in several frames. An op is bounded by
+its row, not by a limit of its own: a row of 33 or more inline cells near
+64 KiB each is over 2 MiB, and such a store refuses it as a row too. A refused commit moves
+to the retry store, `_jazz_rejected (tx, error, serializable)` with its ops
+in `_jazz_rejected_ops (tx, n, op)`, until the host discards it. A build
+from before this layout cannot open a store written by one after it, nor the
+other way around. That is acceptable only because the SQLite store format
+has not shipped (alpha.60).
 
-The contract: **a request is served only after the receiver has answered every
-commit unit the same link sent before it.** To make that hold on any
-transport:
+Uploads are pipelined: no node waits for a fate before sending its next
+commit, and a writer's commits reach the authority in the order written
+(`INV-HIST-23`). The authority orders commits by arrival.
 
-- The sending link counts the commit units the transport accepts on that link,
-  starting at zero on every new link. In each turn it uploads its outbox
-  before any request, so a reconnect resends the outbox ahead of reissued opens.
-  A full large-value channel stops uploads for that turn but not requests; the
-  commits it holds back are not yet counted.
-- Before the first request after new writes, the sender sends
-  `ReadBarrier { writes_through }` on the requests channel, naming its count.
-  Requests with no writes since the last barrier carry none.
-- The receiving link numbers commit units in arrival order. It holds a
-  `ReadBarrier`, and every request behind it, until it has received
-  `writes_through` commit units and answered each one. A write is answered by
-  the first `FateUpdate` this link sends for it. A
-  copy of a write this link has already answered as stored, and not yet
-  settled, is answered on arrival: a recovering relay acknowledges a write it
-  restored from its own storage before the writer's resent copy reaches it.
-  A terminal fate ends that standing. Messages on
-  other channels are never held. Held requests are meant to keep their buffer
-  leases, so the sender's request credit bounds what a receiver holds; the
-  server does not enforce that bound yet (#4291). When a turn's
-  input runs out with requests held, the receiver sends the answers it has
-  ready and serves the requests they release in that same turn, so the
-  barrier costs no extra turn when the write is handled at once.
-- A receiver whose large-value ingress limit holds a commit back holds with
-  it every later message of the link that could observe it: a read that
-  depends on a table the held commits write (its query's tables and the
-  tables their read policies read), and anything whose effect on reads is
-  not known. Other reads, unsubscribes of reads not held, and permission
-  advice are served ahead; a read frozen at a snapshot never is, since the
-  snapshot may name the held commits. A read held this way waits until the
-  bytes queued ahead of it are admitted, i.e. for (bytes ahead) / (admitted
-  rate). (What a receiver holds is not yet bounded by the sender's credit:
-  #4291.)
-- "Answered" means stored or decided **at this node**. A Core answers with the
-  terminal fate. A relay or local receiver answers with its local
-  acknowledgement once the write is durable there, so its clients keep reading
-  while it is offline; its own upstream link then puts that write ahead of the
-  requests it forwards. Each hop guarantees its own order, so the chain gives
-  read-your-writes end to end.
+A relay that receives a session's commit stores it as its own pending commit
+and uploads it with `origin` set. It does not decide it (`INV-TX-23`).
 
-What this does not cover: a write still held on the client (for example behind
-its large-value upload) has not been sent, so no barrier names it. A one-shot
-remote read waits for such writes on the client before it is issued
-(#3844); a live view shows the client's own pending writes locally until the
-authority's update includes them. Reads served from local state
-(`local-first`, `local-only`) never wait for the authority.
+#### 8.2.1 Order and read-your-writes (`INV-SYNC-49`)
+
+A link is one ordered stream, and the server processes a session's messages in
+the order sent: a read sent after a commit is served after that commit. A
+client sends its staged commits ahead of the reads asked since its last send.
+
+When a session's large-value ingress limit holds a commit back, the server
+holds every later message of that session that could observe it: a `Read`,
+`Unsubscribe` or `ResendWhole` whose tables (its query's and those its
+policies read) the held commits write, a read frozen at a snapshot (which may name the held
+commits), and anything whose effect is not known. Other messages are served
+ahead. Each hop guarantees its own order, so client → relay → authority gives
+read-your-writes end to end.
 
 ### 8.3 Fates downstream
 
-Downstream fate messages tell peers how an already-submitted transaction has
-settled. A verdict travels as
-`SyncMessage::FateUpdate { tx_id, fate, global_time, durability }`.
-
-The `durability` field is an optional _claim_. A receiver raises observed
-durability monotonically only when the message carries `Some(_)`; `None` leaves
-the observed durability unchanged. A receiver also never moves `global_time`
-backward (`INV-SYNC-5`). When an authority accepts a commit, it assigns a
-monotone `GlobalTime` that advances the allocator and watermark (ch. 3,
-`INV-TX-11`) and maintains the global-current tables and change stream (ch. 4).
-
-### 8.4 Downstream: query-driven supporting rows
-
-A subscription receives physical versions needed to evaluate its query. Its
-first non-pending update is a complete supporting snapshot. Ordinary successors
-carry physical additions/removals and an exact predecessor revision; they do not
-resend the complete scope. An independent recovery snapshot can replace a lost
-chain. Opening-pending is a lifecycle notification, not an empty dataset.
-
-Each supporting row identifies its permanent physical table UUID, authored
-record table name, row UUID, transaction, concrete content or deletion layer,
-and branch coordinate. The native version carriers provide the corresponding
-authored bytes. They retain their authored schema and are interpreted through
-the admitted catalogue and lens lineage; bytes authored under one schema MUST
-NOT be relabeled as another schema's row (`INV-SYNC-31..32`).
-
-The wire carries neither result members nor query-source role labels, separate
-source-completeness facts, relation facts, residual programs, or application
-terminal operations. For example, a person/manager query receives ordinary
-physical rows. The receiver's compiler determines which rows participate in
-each scan. If the same row plays two roles, it need not be transmitted twice
-for that reason. Internal compiler source identities and local output deltas
-remain implementation details (`INV-SYNC-7`, `INV-SYNC-36`, `INV-SYNC-44`).
-
-The authority filters disclosure under the exact admitted reader and query
-context before shipping any supporting version. Pending versions remain local
-to their author until accepted. A local client relay consumes Core-authorized inputs
-for its admitted client queries; possession of other cached rows is not authority
-to serve them to that reader (`INV-SYNC-12..14`, `INV-SYNC-41`).
-
-### 8.4.1 Reconstructing results and repairing native bodies
-
-The receiver evaluates the query with its own IVM. For example, snapshot
-revision R contains A and B. Delta R→S removes A and adds C; B is untouched.
-Only the changed physical versions feed shared per-table receiver inputs in
-one atomic Groove batch; aliases remain local operators. No full predecessor clone,
-manifest reconstruction or retained-scope comparison is required on this path.
-
-Native body dedup remains separate from membership. Transaction inventory may
-suppress an already-retained added body, not the addition/removal itself. A
-partial bundle establishes only its explicit payload coverage, never whole
-transaction possession merely because cardinalities match.
-
-A receiver lacking an exact referenced body requests repair before installing
-the set. Content and deletion are independent layers: retaining content for a
-row and transaction does not establish possession of its deletion-register
-witness. Branch coordinates are likewise part of the exact lookup. A repair
-coordinate naming a physical row and transaction may require both native
-layers, but cannot authorize unrelated transaction siblings.
-
-For example, a still-readable task may have been deleted while its receiver
-was disconnected. The normal task query no longer displays it, but repair can
-still supply its authorized deletion witness. Repair authorization uses the
-ordinary authorized `includeDeleted` semantics rather than treating absence
-from a non-deleted query as revoked access. A reader whose current policy no
-longer permits the row receives no protected bytes. The repair uses the live
-usage's admitted identity and claims; it cannot borrow another usage's binding
-or begin work for a retired attachment (`INV-SYNC-42`, `INV-SYNC-45`).
-
-### 8.4.2 Atomic installation and ordering
-
-A complete supporting set is installed only after its catalogue, transaction
-metadata, and exact native witnesses have been validated and admitted. Chunking
-or a separate native-body repair round trip MUST NOT expose a partial set as
-the subscription's new answer. Receiver-local storage and query maintenance
-finish the installation before publication. A fast-known-state receipt MUST
-NOT claim a partial or non-durable installation (`INV-SYNC-34..35`).
-
-Native ingestion may batch several received updates into one local storage and
-IVM boundary while preserving per-link FIFO order. Application terminal rows
-and `Insert`/`Update`/`Remove`/`Move` operations are outputs of that local IVM;
-they are not peer-supplied replication truth. The binding ABI may carry them
-locally without making them part of the sync protocol.
-
-If an old set needs repair and a newer complete set arrives, the old set is
-superseded. A delayed repair may populate the immutable cache but MUST NOT
-reinstall the old set or move the application's answer backward. Unsent repair
-work for superseded sets can be discarded; an already-sent request retains its
-reply correlation until completion. Repairs are split into bounded wire
-requests, and a set requiring several batches remains uninstalled until all
-of its needed bodies are available (`INV-SYNC-46`). These are local scheduling
-rules and require no per-source roles, incremental-set proofs, or extra
-completeness fields on the wire.
-
-The receiver must also reconcile stale extra local inputs as specified below.
-Readable negative evidence for more complex queries requires the authority to
-collect sufficient supporting rows; simplifying the carrier alone does not
-implement that collection. The scalar pilot and its explicit limitations are
-specified under “Readable negative evidence and the pilot boundary.” Opaque
-policy evidence and shallow aggregates require a separately specified,
-feature-negotiated extension; they MUST NOT be smuggled into ordinary row
-payloads as projected results or unnamed program facts.
-
-### 8.5 Subscription Attach, Reset, And Detach
-
-`Subscribe` attaches one usage-site subscription id to a registered shape and a
-binding value vector. A peer may register the same `shape_id` under multiple
-serving option sets; the serving side selects the option set by
-`Subscribe.subscription.read_view`, the `ReadViewKey` derived from the resolved
-read identity. The serving side groups subscriptions by canonical program
-instance `(shape, resolved_read, policy, binding)` and maintains one shared view
-for that key, then fans `ViewUpdate`s out to each usage-site `SubscriptionKey`. Remote serving
-options are settled-only: `Local`/`None` are link-local facade tiers and must be
-normalized before propagation or rejected by a serving peer. A new usage-site
-subscription receives a complete supporting-row replacement once ready;
-every later non-pending update is also a complete replacement. The receiver
-compares it with the previous set and derives local input changes
-(`INV-SYNC-10`); the sender does not need to retain a matching incremental
-predecessor at the receiver.
-
-While a usage-site `SubscriptionKey` is active on a live link, its canonical
-attachment is immutable. The `Subscribe.shape_id` must equal
-`Subscribe.subscription.shape_id`; a mismatch is a malformed peer request and
-is dropped before registration lookup. After resolving the registration,
-binding values, and serving options to a canonical program instance, replaying
-the active key for that exact same instance is resource-idempotent: the serving
-peer replaces the usage site's known-state declaration, marks it pending for an
-initial refresh, and emits the resulting current-connection `ViewUpdate` and
-applicable authorization receipt. The replay retains one canonical coverage
-group, maintained view, and relayed subscription owner, and a later
-`Unsubscribe` still detaches that sole attachment. Reusing the key for a
-different canonical instance, or reusing a key already owned by the current-row
-producer, is a malformed peer request: the serving peer drops it without a wire
-response and preserves the original attachment and stream without any state or
-delivery side effect.
-Installing a current-row producer applies the same ownership rule after first
-admitting any queued peer requests. An identical current-row owner is an
-idempotent no-op; an ordinary subscription that already owns the derived key
-causes a local protocol error before current-row update construction, sending,
-or ownership registration.
-
-If a `Subscribe` request cannot be served because the registered shape/read-view
-has a permanent maintained-subscription capability gap, the serving peer replies
-with `SyncMessage::SubscribeRejected { subscription, reason }` addressed to the
-same `SubscriptionKey`. The initial reason vocabulary is
-`SubscribeRejectReason::UnsupportedShapeCapability { detail }`; `detail` is
-human-readable diagnostic text mapped at the serving boundary, not the internal
-lowering `CapabilityReport`. After `SubscribeRejected`, that subscription is not
-active, the requester must not expect `ViewUpdate`s for it, and `Unsubscribe`
-for the same key is a no-op. The connection and any other subscriptions on it
-remain live (`INV-SYNC-23`).
-
-`Unsubscribe` detaches one usage-site subscription. When the last usage-site
-subscription for a canonical program instance detaches, the serving side may drop
-the shared maintained view and its runtime subscription state. Per-peer payload dedup
-survives view reset and detach while peer state survives (`INV-SYNC-11`).
-
-### 8.6 Policy narrowing in sync
-
-Sync never emits view material before applying the receiving peer's read policy.
-During view construction, the peer identity's policy is checked before any result
-entry, bundle, or ref is emitted (`INV-SYNC-13`, ch. 7).
-Lost access evicts: the row leaves future settled results and the replica drops
-its copy (`INV-SYNC-14`).
-
-### 8.7 Partial vs atomic delivery
-
-Downstream delivery preserves view visibility, not transport completeness. A
-mergeable transaction may be delivered and applied **partially**: each visible
-mergeable version contributes independently (`INV-SYNC-16`). Serializable payloads
-may also be partial at the transaction level and may be stored immediately, but
-each maintained subscription view exposes serializable result members only when the
-payload required by that view is complete. This is a **view-complete serializable
-payload**, not necessarily a complete transaction payload. Otherwise the payload
-remains stored but invisible for that view (`INV-SYNC-15`, ch. 3, ch. 7).
-
-**Implementation status (2026-07-27).** The peer payload inventory is deliberately narrow:
-`peer_payload_inventory.complete_tx_payloads: Vec<TxId>` names only complete
-transaction payload coverage, not broad "known versions" and not partial row
-payload coverage. Partial and version-level dedup is the committed known-state
-design (§8.11), which retires this inventory rather than extending it.
-
-The postcard `WireFrame` channel format and groove row `Record` encoding
-do not change when future inventory fields are added.
-
-### 8.8 Protocol size limits
-
-Protocol size limits are enforced at the layer that can recover correctly:
-
-- An encoded `WireFrame` is capped at 2 MiB before postcard frame decode.
-  Channel extents carry at most 64 KiB of decoded bytes per codec flush.
-  Complete messages are admitted atomically after bounded channel reassembly.
-- A logical `SyncMessage` has independent decoded and encoded payload budgets:
-  `D = MAX_LOGICAL_MESSAGE_BYTES` and `E = MAX_ENCODED_MESSAGE_BYTES`.
-  Channels check the advertised decoded message length before reserving a
-  buffer, enforce the exact decoded chunk length, and accumulate encoded bytes
-  against `E`. Channel credits bound physical queues and retained decoded
-  buffers independently. See chapter 13 for channel resource and timeout rules.
-- A `RegisterShape` AST is capped at 64 KiB encoded. This is a semantic
-  admission limit for the shape-registration request; the connection may
-  continue after the rejected request. Server shells may expose this as
-  configuration later for unusually large generated query shapes.
-- A `CommitUnit` is capped at 4096 row-version records, independently of its
-  encoded byte size. This CPU/fan-out limit is transaction semantics: an
-  over-limit commit unit is rejected as
-  `Fate::Rejected(MalformedCommit(_))`, the connection remains live, and later
-  well-formed commit units may still settle.
-- Structured-output v4 adds named `MAX_STRUCTURED_RESULT_DEPTH` and
-  `MAX_STRUCTURED_RESULT_WIDTH` limits in `protocol_limits.rs`. A receiver MUST
-  enforce both before recursively decoding/allocating an untrusted structured
-  snapshot, replacement, or chunk accumulation. Byte caps alone do not bound
-  recursive decoder stack depth or the count of children/nodes allocated from a
-  compact payload. The limits apply to the rendered payload at every nesting
-  level and are protocol-admission limits: over-limit input is rejected before
-  semantic application (`INV-SYNC-28`).
-
-This is a resource-policy correction within wire-protocol v3. It introduces no
-framing, codec, version, compatibility negotiation, or fallback path. An older
-v3 receiver that still applies `D` to encoded payloads may reject a newly legal
-encoded-edge message whose size is in `(D, E]`; senders do not retry it through
-an alternate codec or framing path.
-
-Outbound websocket batching is byte-budgeted at the physical layer: senders
-split batches across binary messages rather than relying on a count-only batch
-limit. A logical `SyncMessage` is fragmented first, so each encoded
-`WireFrame` fits the wire-frame budget without truncation or semantic-layer
-chunking.
-
-**Wire encoding posture (target optimization guidance).** High-rate serial
-transactions (keystroke-grade chains: same author, same row, near-monotone
-times) make consecutive sync messages highly redundant. The wire harvests that
-redundancy generically, in two layers, rather than by introducing run-shaped
-message semantics: (1) **per-connection stream compression** — a compression
-context that persists across frames on one transport, so cross-message
-repetition (subscription keys, row ids, authors, adjacent timestamps)
-compresses without any wire-format change; and (2) **columnar `ViewUpdate`
-internals** — the `ViewUpdate` message carries payloads using this protocol's
-independent columnar wire encoding. A lone single-edit transaction with nothing before or after it pays full framing and transaction overhead by design — it is lone precisely when there is nothing to amortize against. Storage remains an independent row-only layer.
-
-Native transports advertise zstd-3 stream compression by default when the
-feature is compiled in. WASM/browser artifacts keep transport compression
-opt-in so bundle-size trade-offs stay explicit; reconnect resets the compression
-context and relies on known-state redelivery for correctness.
-
-### 8.9 Write admission
-
-Core evaluates a client's write against authoritative policy data. A local
-relay may retain pending writes and retry their upload, but cannot assign an
-accepted fate or Global durability. There are no intermediary permission-scope
-subscriptions or deferred edge-admission gates. Core's ordinary transaction
-admission, dependency repair, and rejection rules still apply.
-
-### 8.10 Catalogue lane
-
-Catalogue messages (`PublishSchemaWithLens`, `PublishLens`,
-`CatalogueAck`) share this protocol lane; their
-semantics are chapter 10.
-
-_Further invariants._ `INV-SYNC-21` — wire `TxId` and row-version payloads use
-node UUIDs and schema-version IDs, never node-local integer aliases (ch. 2).
-
-### 8.11 Known state: reconnect declarations and payload dedup
-
-Steady-state and reconnect payload dedup is built on three properties the
-protocol already has: the **client is the sole authority on what it durably
-holds**; every `ViewUpdate` is **self-auditing** because it references the row
-versions it treats as in scope, so a receiver structurally detects
-"referenced without body" at apply time; and the serving side may therefore
-model receiver knowledge **optimistically**, updating its model at emission
-time with no acknowledgement traffic. There is no durable-apply ack and the
-`Hello` handshake does not carry knowledge state; declarations ride per query.
-
-A subscriber declares its known state per usage-site query in one of two forms:
-
-- **Fast declaration** — `(shape, binding, completeness class, position p)`:
-  "I have contiguously applied the stream you served me for this query through
-  global position `p`, and none of it has been locally evicted." In the current
-  implementation `p` is the exact `settled_through` stamp previously emitted by
-  the serving node for the same canonical binding view. The client records and
-  retains this cursor in memory when applying `ViewUpdate`s and echoes it on
-  in-process resubscribe. Restart requires a fresh scope snapshot.
-  Any local eviction touching stored row-version bodies invalidates in-memory
-  fast facts before another declaration can be made (`INV-SYNC-27`).
-- **Watermark declaration** (`Watermark { position, authorization_progress,
-supporting_revision }`, tag 3): "I have Q at seq `position` with supporting
-  revision `supporting_revision` installed". A serving peer that can answer
-  from its `by_seq` index replies with `SupportingRowsUpdate::CatchUp` against
-  that revision; any other peer treats it as a fast declaration at `position`.
-- **Slow declaration** (retired in wire v6; its tag 2 is reserved) — an
-  explicit set of row-version identities
-  `(row_uuid, tx_time, tx_node_id)`: used when no valid fast fact exists
-  (fresh store, eviction, corruption). The client evaluates the query locally
-  and declares exactly the versions it holds. Oversized exact declarations
-  degrade to no declaration and a full ship; they are never truncated because a
-  partial exact declaration would silently overclaim. Version identities use the
-  wire `TxId` form (`INV-SYNC-21`); unfated versions are declarable because
-  `TxId`s exist before fate.
-
-Recovered fast cursors prove cached payload possession, not current query
-coverage. A receiver may advertise an unevicted recovered cursor before it has
-live authority confirmation. The response still supplies the complete current
-supporting set; any missing bodies must be repaired before applying it. Declaring
-the cursor must not mark the query live or satisfy a settled read. Fresh selected
-upstream confirmation remains required under `INV-SYNC-30`, and client-link
-authorization-progress checks still govern payload suppression.
-
-#### Persisted subscription watermark record v1
-
-A receiver that settled a row-local view (membership depends only on each
-row's own state and on no session claim, under a read policy with the same
-property) persists one record in the direct record store
-`jazz_subscription_watermarks_v1`, so after a reopen it can send a
-`Watermark` declaration instead of starting from nothing. The durable family
-is `jazz.subscription-watermark.v1`. Both halves are Groove typed records:
-
-- key `(shape_id: UUID, binding_id: UUID, read_view_id: UUID, policy_scope:
-U8, policy_binding_digest: Bytes)`, where `policy_scope` is `0` with an
-  empty digest for an unscoped view and `1` with the policy-binding directory
-  digest for a scoped one;
-- value `(format_v1: U8 = 1, settled_through: U64, supporting_revision:
-Bytes)`. For seq `0x0102030405060708` and revision `5a` × 16 the value bytes
-  are `01 0807060504030201 02 5a…5a`.
-
-Reopen accepts exactly format `1`, a nonzero seq and a non-nil revision of
-exactly 16 bytes; anything else is corruption, not a fallback to a full
-resend. The held set is not stored: it is rebuilt from the synced local rows
-that match the query, and Core's `CatchUp` replaces or drops every row whose
-seq moved past the watermark. Local eviction of row bodies purges the store,
-since the held set could no longer be rebuilt. Receipts:
-`subscription_watermarks::tests::subscription_watermark_v1_record_bytes_and_rejection_are_pinned`
-(bytes and rejection) and
-`db::tests::node_runtime::reopened_client_catches_up_from_its_stored_watermark`
-(reopen).
-
-#### Authorization progress
-
-A fast declaration may additionally carry an **authorization-progress token**.
-It is a server-stamped monotonic generation of the authorization state governing
-this reader's visibility for this canonical binding view (shape, binding, and
-read view). It is deliberately part of the declaration, rather than an
-out-of-band connection hint: it qualifies exactly the state the subscriber is
-claiming to have applied and persists with that state across reconnects.
-`ViewUpdate` carries the server stamp beside its
-peer-payload inventory, so the receiver persists it atomically with the
-corresponding settled fast fact before later echoing it in the declaration.
-
-The serving peer owns the token. Its granularity is **one reader plus one
-canonical binding view**, not a global policy-head counter. It advances when
-that reader/view is rebuilt because its effective authorization changed (for
-example, session claims changed or a permissions head was installed). This
-avoids forcing every reader to reset for unrelated policy churn. The cost of a
-token that is too coarse is excess resets; the cost of one that is too fine is
-unsafe suppression of a reset, so an absent token, an unknown server generation,
-or a mismatch is always treated conservatively. The peer retains the generation
-in its resumable peer state; if that state is not available after server loss,
-the old token cannot match.
-
-A matching token lets the server conclude that a pre-cursor membership
-difference is not evidence of an authorization change. It does **not** assert
-payload possession (the ordinary known-state body/repair rules still apply),
-nor does a mismatched token itself prove that membership is unreconstructible.
-
-The reset rule has two bounds. A reset is **required** when authorization
-progress differs and the resulting membership cannot be reconstructed from the
-data cursor (a removal or a newly visible member settled at or before `p`). A
-reset is **forbidden** when authorization progress matches and the data cursor
-is sufficient; when it is not sufficient, the server sends the smallest
-expressible incremental repair and resets only if that repair cannot be encoded
-as normal additions/removals. Conversely, an authorization-token mismatch with
-only post-cursor additions is reconstructible and therefore must not reset.
-
-Every `ViewUpdate` carries `settled_through`, the core-assigned global time
-through which the canonical binding view was evaluated. Its meaning is per
-binding view: this update reflects every global change at or before that
-time that can affect the served view, including authorization and revocation
-effects. It does not claim that the receiver possesses unrelated transactions,
-and neither density nor numerical adjacency is required: the authority may
-advance one binding directly across arbitrarily many irrelevant commits. It may
-be reused within one process across reconnects
-serving the same authoritative database lineage for known-state payload
-dedup and repair, but is never persisted or recovered. It is not an active-connection receipt: a subscription is
-settled, and a usage-site one-shot attachment is remotely covered, only after
-the selected continuously live upstream connection has sent a fresh confirming
-`ViewUpdate`. A fresh `Global` one-shot requires that confirmation for
-its exact current usage-site `SubscriptionKey`; a late update for a detached
-predecessor cannot satisfy the new attachment even when shape, binding, and
-options are equal. Disconnect, client restart, upstream switch, or applying any
-view update from a nonselected upstream immediately retires all
-selected-authority receipts and
-makes cached rows unsettled/local until the selected authority reconfirms. A stale cursor can
-under-claim knowledge and cause extra bodies to ship;
-it cannot over-claim because rows entering the view after `p` have membership
-settle positions after `p`, and therefore do not satisfy the skip rule below.
-After a nonselected update at cut `p`, a selected link's queued confirmation at
-an earlier cut cannot restore settlement; its confirming `settled_through` must
-reach at least `p`. The same floor applies to fallback-staged or deferred
-updates marked ineligible for an authority receipt, even if their link becomes
-selected before the update is finally applied.
-
-Only cores are history-complete. A client or its local relay therefore tracks
-`settled_through` per binding/subscription as proof that each exact result is
-materialized. A fresh subscription requires its own authoritative evaluation; a
-receipt for one binding says nothing about another binding's local result. A
-validated receipt from the selected authority nevertheless advances the node's
-`committed_global_time`: that field is the newest authority-committed coordinate
-known to the node, not a claim of local data completeness. When a result is
-assembled from multiple binding views, coverage is bounded by the required
-views' confirmed cuts. The separate `history_complete` capability determines
-whether `committed_global_time` is also a locally readable complete-history
-frontier (ch. 3 and ch. 5).
-
-For reconstruction, `settled_through` is necessary but not sufficient. The
-receiver must have admitted the complete supporting set, the catalogue needed
-to interpret it, and every exact native body for the selected authority usage.
-Its local IVM must finish before settlement is published. A fast cursor permits
-native-body dedup; it does not stand in for a fresh authority confirmation or
-allow partially available inputs. Recovery rebuilds from durable native state
-and repairs missing bodies, rather than trusting a persisted projected terminal
-cache (`INV-SYNC-34`).
-
-The serving side's skip rule is one comparison (`INV-SYNC-24`): a version body
-may be omitted iff the receiver's membership in it is believed — "row in the
-query's scope now" under a fast declaration, exact set membership under a slow
-declaration — and, for fast declarations, the version settled at or before
-`p`. Not-yet-fated versions are always shipped under a fast declaration.
-The complete supporting-row set and inventory refs are never omitted — only
-payload bodies.
-
-The optimism is bounded by one net. A receiver that encounters a referenced
-row without holding its body treats this as a **known-state miss**, not an
-error: it forgets the view's declared known state and reopens the view, and
-the serving peer resends every row with its body under ordinary read policy
-(`INV-SYNC-26`). There is no per-version fetch; rows are identified by
-`(row, row_seq)` and resent whole. Convergence is preserved: a stream served
-under known-state dedup followed by that resend MUST be observationally
-equivalent to the same stream served without dedup: the reader ends with the
-same rows (`INV-SYNC-25`, cf.
-`INV-SYNC-20`). A receiver must not fill a gap from another binding's
-authority receipt or claim settlement while a supporting body is unavailable.
-The canonical miss is visibility gained without a new row seq: a policy or
-membership change admitting rows that settled at or before `p` (ch. 7). A
-row-local view has no such case, because its membership changes only with
-the row's own seq.
-
-Holdings from point-in-time reads dedup conservatively: a version is assumed
-held only for rows **unchanged since the declared cut** (current version
-settled at or before the cut). The serving side never reconstructs historical
-winners for dedup — that is a per-row history walk (O(history) reads), and for
-current-view serving it buys nothing: a row changed since the cut must ship
-its current version regardless.
-
-This section is the committed replacement for extending
-`peer_payload_inventory.complete_tx_payloads` toward partial or version-level
-coverage (§8.4, §8.7): the complete-tx inventory remains the implemented
-mechanism for non-declared streams, and it is retired rather than extended as
-known-state coverage grows.
-
-_Further invariants._ `INV-SYNC-24` — fast and slow declarations omit only
-eligible version bodies; `INV-SYNC-25` — dedup plus miss resends converge to
-the undeduped stream; `INV-SYNC-26` — a known-state miss reopens the view for a full resend;
-`INV-SYNC-27` — process-local fast declarations require contiguous application
-and no eviction; eviction invalidates the in-memory fact. Neither fast cursors
-nor slow exact declarations are persisted; restart restores native data only.
-
-### 8.13 Subsumed sync and wire notes
-
-The former SyncManager and query/sync integration notes are folded here as the
-same protocol-level rule: subscriptions are desired-state declarations over
-validated shapes and bindings, not a separate query transport. A peer registers
-the shape, subscribes the binding, receives an initial coverage result, and then
-receives live updates driven by maintained-view state (ch. 16). Reconnect should
-replay desired subscriptions and locally-authored pending commit units before
-falling back to broader snapshots.
-
-There is one wire vocabulary across network links and worker bridges. Browser
-main-thread to worker communication may use `postMessage` as a carrier, but the
-semantic payload should remain the same wire-frame/SyncMessage envelope used by
-network sync. Transport-local batching, compression, and resume metadata must
-not leak into row/version encoding.
-
-**Implementation status (2026-07-27).** The receiver still uses the core
-staged-batch seam rather than an `OrderedKvStorage` transaction. The wire
-envelope has no portable resume credentials or trace/replay ids, and the
-canonical cross-language fixture set is incomplete. The ordinary committed-unit
-path is client-to-Core, optionally through a local persistence relay. Worker bridges have not yet converged on the
-network wire-frame batches.
-
-### Query-driven reconciliation of current inputs
-
-Query-driven sync remains the freshness mechanism. A cached row that does not
-participate in another query need not be refreshed. Applications may maintain
-low-priority propagated queries independently of visible UI when they want
-continued freshness. This contract is not an all-local-rows background scan and
-does not promise bounded wall-clock staleness while disconnected.
-
-A completed selected-authority input scope is compared with the eligible local
-inputs of the same query. Missing local inputs follow ordinary delivery. Extra
-local inputs require revalidation; absence from the query scope alone MUST NOT
-be interpreted as deletion or access loss. The initial implementation covers
-current/default scalar roots. It does not establish complete related or negative
-dependency reconciliation merely by making final result sets equal.
-
-Candidate discovery uses ordinary client-local visibility, including stale cached
-rows that need revalidation. It MUST NOT use a serving query that reevaluates
-cached permission rules: those rules can hide the very candidates needing
-revalidation, and their evaluation can wait for work owned by the same runtime
-pass. Candidate discovery does not authorize delivery; the selected authority
-checks current access before returning row versions or an unavailable outcome.
-
-For example, a cached task changes from `done=false` to `done=true` while its
-reader is offline. An empty unfinished-task scope does not update the cached
-value. Revalidating that extra task obtains its readable current native version;
-local IVM then removes it from the unfinished list while an all-tasks query can
-still show the updated task. A live-exit push is an eager optimization; a missed
-push must not be the only opportunity to repair this query after reconnect.
-
-Strict (Global) reads apply the same comparison before their first settlement
-(`INV-SYNC-48`). Query programs carry no deletion witnesses: a deletion reaches
-a receiver only as a row delta on a coverage live when it happened, or through
-that same usage's stored-watermark catch-up. A row retained from an earlier,
-closed read can therefore be live locally while a fresh settled authority
-answer simply omits it. Before a fresh strict stream (and so a `Remote`
-one-shot, which reads through one) first reports `settled`, the receiver
-compares the settled authority input rows with the rows its own local store
-holds live for the same query. The local inventory comes from an ordinary
-Local-tier maintained graph of the same query, opened only after the stream's
-own graph has installed and evaluated the settled closure. It never waits for
-the rest of the query runtime to idle (other streams' continuous fresh reads
-would starve it); while other work is pending the graph is opened without
-driving the runtime and is drained on later turns, so it never blocks behind
-large-value chunk work that the same sync turn must request. Rows whose current local winner is an accepted
-Global transaction and which the authority omitted are probed through the
-ordinary `CurrentRowsRequest` path, in `MAX_CURRENT_ROWS` batches, under the
-stream's admitted policy binding. Settlement is withheld until each receipt's
-carriers are ingested; a deleted image deletes the row locally. A
-`CurrentUnavailable` outcome is access loss: the row is evicted (`INV-SYNC-14`). Pending local writes
-are never candidates. Agreeing views settle in the same refresh without any
-round trip; the cost is one local evaluation of the query.
-
-Reconciliation is reliable, not best-effort. The stream withholds its first
-settlement for at most five seconds; past that bound it settles on the
-authority's answer alone, but the reconciliation continues. Omitted rows are
-handed to a runtime-owned set of held-row checks, deduplicated per
-`(table, row)`, that outlives the stream (a `Remote` one-shot closes as soon
-as it settles). A discovery unfinished at the bound, or when its stream
-closes, moves to the runtime as well, keeping the settled authority rows it
-compares against; a later discovery of the same query and policy binding
-supersedes its authority rows instead of running twice. An Unknown outcome,
-a receipt the router drops (stale floor, changed coordinate, unusable Core
-evidence, a relay that cannot forward the probe), a timed-out probe, and a
-disconnect all leave the row held: it is retried with exponential backoff
-(250 ms doubling to 30 s), immediately when a new upstream link is admitted,
-and not at all while no upstream is admitted, so a down connection does not
-spin. A row leaves the set only when the authority answers it `Readable`
-(a deleted image deletes it locally) or `CurrentUnavailable` (access loss, not
-applied), or when its local coordinate changes, in which case later reads
-reconcile the new version. Deletions answered after settlement are applied
-exactly as before settlement and mark local subscriptions dirty, so live
-subscriptions observe the ordinary local change. No outcome asserts access
-loss. The initial scope is the current/default
-single-table scalar query (no joins, includes, projections, aggregates,
-windows, or policy branches), filtered or not; a stream that already opens
-settled on a coverage live before it is not rechecked.
-
-For example, an editor reads an invitation, the read closes, and the owner then
-deletes the invitation while nothing on the editor covers it. The editor's next
-`Remote` read of that invitation receives an empty authority answer, probes the
-held row, ingests its deleted image, and only then settles: both the returned
-rows and later local-only reads omit the invitation. Had the owner instead
-revoked the editor's read access, the probe would answer `CurrentUnavailable`:
-the settled read omits the invitation and the local copy stays readable.
-
-This exchange also crosses local foreground-to-worker links. A default local
-query may read through a durable worker before reaching Core; the
-immediate hop being Local does not disable reconciliation. Each hop retains its
-fresh endpoint epoch and authenticated session independently of whether its
-peer is an authority. An ordinary client need not advertise an authority in
-order to receive current-row responses. A scope-isolated worker forwards only
-its admitted session binding, and the foreground correlates the reply against
-the same canonical identity and provider claims. Provider claims must not acquire
-synthetic fields merely by passing through a different JavaScript adapter.
-
-The known-row exchange in chapter 7 uses explicit global physical table and row
-identities, not a public column named `id`. Batches contain at most 64 distinct
-coordinates. The batch cap bounds work in flight, not eventual coverage. Transient
-Unknown answers preserve candidates for bounded retries without tight polling.
-The exchange is mandatory; missing optional support is not an Unknown outcome.
-Query closure, claims
-replacement and selected-authority replacement invalidate owned outstanding work.
-Pending local writes are not replaced simply because they are absent upstream.
-
-Fresh authoritative inclusion of a locally unavailable row must also trigger
-ordered revalidation: scanning only currently visible local rows would otherwise
-make exclusion permanent. Readable native payloads are ingested before clearing
-an exclusion. Core evaluation sequence is comparable only in its connection
-epoch; durable per-row cut/catalogue floors survive epoch and Core changes.
-Production wire authority endpoints allocate a nonzero random 64-bit connection
-incarnation, independent of process-local counters, so restarting a Core with the
-same node identity does not reuse an old receipt epoch. Incarnations are compared
-for equality, never numeric order; allocation has the collision probability of
-a random 64-bit nonce. The existing wire `u64` encoding is unchanged.
-
-Native row repair MUST preserve a bundle's ViewScoped transaction cardinality.
-A withheld parent coordinate in an incomplete transaction remains inconclusive;
-a proven wrong parent in a complete transaction still fails validation. This
-allows later authorized readmission without fetching forbidden intermediate
-versions or weakening parent-coordinate checks.
-
-### Readable negative evidence and the pilot boundary
-
-Consider a query for projects without tasks. A client knows project P and no
-related task, so P matches locally. Another node creates task T under P. Core
-excludes P, but P's own row version is unchanged. Revalidating only P cannot
-correct the client: T is the missing evidence preventing P from matching.
-
-The intended readable-evidence design includes T among the query's synchronized
-inputs when the reader may access it, even though T is not a final result row.
-Local IVM can then derive the exclusion. A result-derived source closure is not
-a complete inventory of such evidence: it may omit both a rejected root and the
-rows which caused its rejection. Supporting this requires query-operator input
-tracking beyond surviving result contributors; a matching final result count
-is not proof of dependency completeness.
-
-If T is unreadable, neither its bytes nor a fact revealing its existence may be
-sent without a separate disclosure contract. P MUST NOT be marked inaccessible
-merely because unreadable evidence changes membership while P itself remains
-readable. This differs from a hidden grant change which actually removes read
-access to P: Core can then issue the generic current-unavailable decision for P
-without exposing the grant.
-
-This example specifies the design boundary, not implemented negative-query
-support. The public query facade currently rejects the needed negative relation
-form, and scalar extra-row revalidation does not solve it. Supported positive
-related queries also require their relevant child inputs to be reconciled: a
-changed tag can remove a task without changing that task. Related-input coverage
-and general readable negative evidence remain tracked in #2660; opaque evidence
-is deferred.
-
-### Local propagation is not a remote capability
-
-`ReadTier::LocalOnly` evaluates on the calling node. It MUST NOT send a
-remote query and MUST NOT be implemented by telling another node to stop there.
-Remote registrations have no propagation switch. Every receiving node follows
-normal upstream routing under its admitted identity, trust, and topology.
-Local-only API execution remains available on every node.
-
-A browser foreground's strictly local query therefore reads its own cached and
-pending state. It does not fetch worker-only rows. A normal propagated query can
-still receive worker data. Calling the worker a durable owner does not exempt
-its peer protocol from this invariant.
-
-### Both trust boundaries and exact-version repair
-
-Core evaluates read permissions for ordinary queries and exact-version repair.
-A local relay may own cached rows for multiple readers, but cache possession
-never authorizes disclosure. It forwards the admitted reader and immutable
-claims and consumes that reader's Core-authorized supporting inputs.
-
-Trusted backend SYSTEM requests and ordinary reader requests remain distinct.
-A backend's own query can refresh an extra input without recording access loss
-for another reader. Knowing a row/transaction coordinate is not a grant to read
-it. A client request cannot acquire SYSTEM authority by crossing a local relay.
-
-For example, Alice could read task T through grant G. Core revokes G while
-updating T, but T still matches Alice's task filter. Repair returns
-current-unavailable to Alice without T's new content. Her local view excludes
-T; another reader's access and shared cached bytes remain independent. A later
-verified readable decision clears Alice's exclusion. Unknown responses are
-neither permission nor access loss. Connection or claims replacement cancels
-pending repair and stale responses cannot authorize delivery.
-
-### Host-admitted authority query delegation
-
-A verified Admin credential on a SYSTEM, non-bootstrap authority connection may
-receive the host-only `AuthorityQueryDelegate` capability. This permits immutable
-per-request query policy bindings for an authorized backend or Inspector.
-Bare `TrustedAuthority`, bootstrap `TrustedAdmin`, raw peer roles, and wire
-claims do not grant this capability. Admission APIs default to no capability;
-write authorization and publication trust are unchanged. This is an explicit
-host capability, not a remaining intermediary server role.
-
-Strict receivers retain the selected usage's deletion-layer CoveredInput facts
-and exact version bodies beside the content graph, since a tombstone contributes
-no app tuple. They forward those witnesses as ordinary physical row/version references;
-replacement or teardown releases them. They never select a deletion from an
-unrelated shared-cache version. This retained state is proportional to the
-selected scope's deletion witnesses and changes only with its source receipt.
-
-### Mandatory current-row availability messages
-
-`CurrentRowsRequest`, `CurrentRowsReceipt`, and `CurrentRowsCancel` are mandatory
-wire-protocol v6 semantic messages. They require no optional feature bit and use
-the existing named postcard control codec and native `VersionCarrier` encoding;
-the byte corpus pins all three variants. Ordinary version validation and
-authenticated link admission still apply. No compatibility with peers lacking
-these messages is promised. Unknown describes indeterminate current availability
-or unavailable authority, never missing protocol support. See SPEC 7's bounded
-current-row availability contract for authorization and receipt validation.
-
-### Atomic supporting-row view payload
-
-`ViewUpdatePayload.supporting_rows` is `SupportingRowsUpdate`:
-
-- `Snapshot { revision: [u8;16], rows: Vec<SupportingRow> }`.
-- `Delta { predecessor: [u8;16], revision: [u8;16], adds: Vec<SupportingRow>, removes: Vec<SupportingRow> }`.
-- `CatchUp { predecessor: [u8;16], revision: [u8;16], changed: Vec<SupportingRow>, left: Vec<SupportingRow> }`:
-  the answer to a `Watermark` declaration, carrying only rows whose seq moved
-  past the declared watermark (`changed`) or that left the set (`left`).
-
-The named semantic encoding is postcard in version-6 channel messages. Enum
-discriminants are respectively 0, 1 and 2, followed by fields in declaration order.
-Revisions are exactly 16 raw array bytes (no length prefix). Vectors use postcard
-lengths and the existing exact SupportingRow field encoding. Populated snapshots
-and deltas are pinned in wire_message_frames_v6.json; the empty forms, truncation
-and v1 negotiation rejection have explicit Rust byte-level tests. There is no
-v1 compatibility decoder. Storage/catalogue/binding encodings are unchanged.
-
-Revisions are non-nil opaque identifiers, not authority capabilities or history
-timestamps. A delta must name the exact installed predecessor under the admitted
-authority/result usage, or the immediately preceding validated update in the
-same batch. Disjoint additions/removals are physical set transitions, not weighted
-compiler facts. Duplicate entries, absent removals, duplicate additions, unknown
-tables, ambiguous layers and invalid native bodies reject before installation.
-An empty confirmation may use the same predecessor and successor; a nonempty
-self-successor is invalid. A broken chain fails closed and requires a fresh
-subscription snapshot; history cursors cannot repair a missing transport proof.
-
-All added bodies must be available before atomic input installation and result
-publication. A successor waiting behind native-body repair must retain its
-predecessor; it cannot use the old complete-snapshot supersession rule. A new
-independent snapshot may supersede the chain, while active repair correlation
-is preserved and delayed replies cannot reinstall retired sets. Already-ready
-updates for other subscriptions are applied before yielding for repair.
-
-Only physical supporting versions cross the wire. Source roles, completeness
-facts, query programs and output operations remain receiver-local. Multiple
-roles referencing one version retain independent local weights. Physical
-presence changes and changes to the current-winner declaration cross the link.
-A flag change removes the old fact and adds the replacement atomically; it does
-not require resending an already available version body. Scope removal does not delete cached
-bytes or assert global access loss. Existing exact reader/policy, catalogue,
-content/deletion layer, branch and selected-authority boundaries still govern
-disclosure and repair. Reopen never restores transport revision authority from
-persisted facts. This does not add negative-query evidence or shallow aggregates.
-
-Native row-version carriers are unchanged. The named postcard semantic codec
-and byte corpus pin this mandatory pre-release layout; old layouts are unsupported.
+`Fate { tx, through, result, held, global }` answers a commit:
+
+- `result`: `Ok`, or `Conflict`, `Rejected { reason, message }` (a `Reason`
+  by stable name; an unknown name arrives as a rejection without a reason) or
+  `Other`.
+- `through`: the server seq the session is complete through after the
+  commit's rows shipped. Applying a fate never moves the replica's settled seq
+  backward (`INV-SYNC-5`).
+- `held`: the `expect` rows the server did not ship, each with the
+  authority's `$createdAt`/`$updatedAt` stamps, so the writer can install its
+  own image as the accepted version. A keystroke-grade edit therefore costs
+  one `Fate` and one `Settled` downstream.
+- `global`: the fate is the global authority's (directly or relayed). A
+  non-global fate is the final word of a replica with no upstream, which
+  orders its sessions' commits but cannot make them `Global`.
+
+`Stored { tx }` is durability progress from a relay to a non-durable session:
+the relay holds the commit in its store and uploads it, so it is `Local` for a
+session whose own store is memory. It is never a decision: a stored commit can
+still be rejected, and a `Fate` always follows it, unlike a non-global `Fate`,
+which is final.
+
+A fate lost to a disconnect is recovered on the next connection: the replica
+re-uploads its pending commits, and the authority answers a commit it already
+decided with the known fate.
+
+### 8.4 Downstream: reads and rows
+
+`Read { id, query, binding, include_deleted, tier, wait, span }` asks for one
+query's result:
+
+- `span: Live { since }` keeps it current until `Unsubscribe` (§8.5);
+  `since` resumes it (§8.11).
+- `span: Once { at, view }` answers it once, at the current state or as of
+  server seq `at`, in branch view `view`.
+- `tier` says how far the read reaches past a relay: `LocalOnly` is served
+  from the relay's store, `LocalFirst` from it too while the relay asks its
+  upstream, `Remote` once its upstream answered. An authority's store is the
+  answer either way.
+- `wait` bounds how long a relay waits for its upstream's answer before it
+  serves its store (a LocalFirst read's first-load wait, or a one-shot read
+  that takes the relay's view when the authority cannot answer).
+
+The server ships the result's rows and the rows that support them (joined and
+included rows, the rows its policies read where the replica needs them), then
+`Settled { id, through, members, global }`, or `Refused { id, code, message }`
+when serving it fails (an unsupported shape, a storage error): the read
+ends with that error. `members` is the result's row ids in order. It is
+always present for a one-shot read, and for a live read's opening and window
+changes when the read is limited or the opening could not tell what left it.
+Cached rows `members` leaves out are no longer in that result; the replica
+evicts them (a row a pending write touches waits for the server's word on it).
+`global` says the answer is the global authority's (directly, or through
+relays that settle by their upstream), not a relay's own store.
+
+A replica treats a read as settled only once its connected upstream confirmed
+it with `Settled`; while the upstream is unanswered, offline or failing the
+read stays unsettled, and a node with no upstream settles locally
+(`INV-SYNC-30`). A `Remote` read never reports rows the answer no longer lists
+(`INV-SYNC-48`); `LocalFirst` and `LocalOnly` reads keep them.
+
+#### 8.4.1 Raw rows and local derivation
+
+`Rows { images, tx_ids }` carries row images. An `Image` is self-contained
+(`INV-SYNC-7`): stored table name, row id, branch key, seq, deleted flag,
+whether the version wrote content, and its stored cells by stored column name.
+Images travel raw: by the authority's stored names, untranslated, whatever
+schema version the session declared (`INV-SYNC-45`). The replica mirrors the
+authority's physical layout (§8.10) and applies its lenses locally, so an old
+client reads a new server's rows through the same lenses the server would use.
+
+`tx_ids` names the transactions behind history versions among the images, as
+(seq, writer node, writer tx): a replica lists a history version only once it
+knows its `$transactionId`. It is empty for current rows.
+
+The replica installs images into its own store and derives every result,
+include tree and count with its own compiled queries (`INV-SYNC-28`,
+`INV-SYNC-44`). No result sets, result keys or completeness facts travel.
+
+#### 8.4.2 Atomic installation
+
+A message is applied whole: nothing of it is visible before it is complete
+(`INV-SYNC-10`). A message larger than one frame is split by the transport,
+not by the sync layer (§8.8). A serializable commit is decided and applied
+whole and reaches replicas whole (`INV-SYNC-15`). Mergeable writes apply per
+column without waiting for other writes (`INV-SYNC-16`).
+
+### 8.5 Live reads: watches, unsubscribe and cold rows
+
+The server keeps one fan-out subscription per live read, under the session's
+identity, and ships images for rows entering or changing in it. A row leaving
+it ships again if the reader may still read it (a deleted row ships as its
+deleted version, `INV-SYNC-17`), else it is evicted.
+
+Per session, the server keeps refcounted watches: each live read holds the
+rows of its result and their supporting rows, and the session itself
+(`SESSION_OWNER`) holds the rows its one-shot reads returned and the rows its
+own commits wrote, so those stay current for the rest of the session. A row
+version ships at most once per session across all its reads (`INV-SYNC-8`).
+This state lives only in the serving process and is released on disconnect
+(`INV-SYNC-27`).
+
+`Unsubscribe { id }` releases the read's watches. A row no watch holds stops
+being kept current: the replica keeps it as a cold copy, which local reads may
+still return, and a later read that covers it brings it up to date (its
+opening ships what changed, and its `members` drops what left).
+
+### 8.6 Policy narrowing and eviction
+
+The server applies the session identity's read policy before shipping any
+image, supporting row or count (`INV-SYNC-13`), and ships accepted rows only,
+never another node's pending or refused writes (`INV-SYNC-12`).
+
+When a reader loses read access to a row it holds, through a write or a policy
+change, the server sends `AccessLost { table, id, key }` and the replica drops
+its copy (`INV-SYNC-14`). This includes a row the reader's own accepted commit
+wrote and cannot read (a write-only insert): the commit's fate reports its
+acceptance. Local copies are not a redaction boundary; eviction keeps the
+replica coherent, not secret.
+
+`CheckAllowed { id, action, acting }` asks whether the session would be
+allowed an action now, without writing; `CheckAllowedResult { id, result }`
+answers it.
+
+### 8.7 Mergeable and serializable delivery
+
+Delivery is per row. A mergeable commit's rows ship as they change, and a
+reader may see some of its rows before others reach a read it has no
+subscription covering. A serializable commit is applied whole at the
+authority, so every read that covers its rows sees all of them at the same
+seq. A subscription never holds a transaction as a unit of membership
+(`INV-SYNC-7`).
+
+### 8.8 Transport parts and size limits
+
+`encode_frames` turns a message into one frame, unless its encoding outgrows
+one frame (a large first result, one commit's fan-out, a large commit). Then
+it travels in as many parts as it takes: each part is a frame whose first byte
+is `0xFF` (more parts follow) or `0xFE` (the last part), followed by a slice of
+the message's postcard bytes. `FrameJoiner` joins them back into one message.
+Postcard variant tags are below `0x80`, so a part marker never begins a whole
+message. Any message may be split, and no message knows it was.
+
+A receiver treats these as the peer's error and ends the link: a frame that
+does not decode, a whole message between a split message's parts, a last part
+with no leading ones, and parts beyond the joined-message ceiling.
+
+A sender hands a split message's parts on in order and never restarts one: a
+part a full queue refuses waits ahead of anything sent later
+(`WireTransportAdapter`). A disconnect drops a half-received message with the
+connection.
+
+Limits:
+
+- An encoded frame is at most `MAX_WIRE_FRAME_BYTES` (2 MiB); a part carries
+  at most that less the carrier's prefix room.
+- A joined message is at most `MAX_LOGICAL_MESSAGE_BYTES` (256 MiB); a
+  sender refuses a larger one ("not supported yet") rather than send it, and
+  a server whose message is refused ends the session with a never-retry
+  error. A server joins an untrusted session's split messages only up to
+  `MAX_UNTRUSTED_MESSAGE_BYTES` (8 MiB, its connection's queue budget); an
+  untrusted replica rejects its own larger commit before sending it, as a
+  rejected fate, so the session survives.
+- A split message spans at most `MAX_WIRE_BATCH_FRAMES` parts, and each frame
+  is within the frame limit. A refused message's parts are dropped at once.
+- A server ships a session's rows as `Rows` of at most a quarter of the
+  joined-message ceiling of images each (live and one-shot answers alike), so
+  a result of any size travels. One commit's versions (one seq) stay in one
+  `Rows`.
+- A WebSocket batch carries at most `MAX_WIRE_BATCH_FRAMES` frames; senders
+  split batches by bytes across binary messages.
+- `PushChunks` and `Chunks` flush at half a frame of node bytes, so each fits
+  one frame. A range pull is answered with at most 4 MiB of node bytes, one
+  `ChunkRequests` with at most 16 MiB; a read past them pulls again.
+- A session's large-value ingress is rate-limited per window by server
+  policy; commits over it are held, with the messages that could observe them
+  (§8.2.1).
+
+There is no transport compression on the SQLite path.
+
+### 8.9 Schema versions and write admission
+
+`Schema { version }` is the first message on every connection: the schema
+version the session reads and writes by. Its queries and writes use that
+version's names, which the server resolves to stored names; images and
+evictions travel by stored names either way (§8.4.1). A version the server has
+not admitted is named like the server's current schema.
+
+`SchemaAdmission { admitted }` tells the session whether its version is
+admitted, whenever that changes. Until it is, the server holds the session's
+messages (a draft awaiting its lens), so a read that needs the server fails
+with the reason rather than waiting out its budget.
+
+Each pending commit records the schema version it was written under
+(`_jazz_pending_versions`). Before uploading pending commits staged under
+another version than the session's current one, the replica sends a `Schema`
+switch for them, so an offline write made before an upgrade is resolved under
+the names it was written with.
+
+The authority evaluates every write against its own policy data. A relay may
+keep and retry pending writes but cannot accept them or make them `Global`.
+
+### 8.10 Catalogue
+
+After its first `Schema`, a replica sends `KnownCatalogue { versions }`: the
+schema versions whose stored names it keeps, each with `names_digest` of those names.
+The server answers with `Catalogue { namespace, versions, cells, confirmed }`,
+carrying every admitted version the replica lacks or names otherwise, in
+admission order, ahead of any row; and again whenever its store admits a
+version or learns more of its authority's catalogue.
+
+- A `CatalogueVersion` is a structural schema (without permissions) plus, per
+  table, its name and stored name and, per column, its name and stored name.
+- A `CatalogueCell` is a stored column a lens fills: a copy of stored column
+  `source`, or a dropped column's backwards default, from version `since` on.
+- `namespace` is the authority's, once the sender knows it. Table and column
+  identities are UUIDs derived from it and the stored names, so the authority
+  mints them and replicas only mirror them. A replica that keeps another
+  namespace is another app's store and refuses the upstream.
+- `confirmed` lists the versions whose names are the authority's, each with its
+  names' digest: every version the authority admitted, or, from a relay, those
+  its upstream confirmed. Only a confirmed version's tables and columns have an
+  identity; a version only the replica admitted has none until the authority
+  admits it too.
+
+The replica admits each version under the authority's stored names, renaming
+tables and columns it had named otherwise while it did not know them (for
+example, a table created offline under a newer local schema). It then runs the
+lens fills itself, since a copy lens's fill does not bump row seqs and
+therefore never ships. Lens semantics are chapter 10.
+
+A relay that mirrors a new catalogue owes its own sessions the versions they
+now name otherwise, so a tab follows its worker's names. Mirroring is whole or
+not at all. A catalogue the replica cannot mirror drops the link, and every remote read
+fails with why; local reads are served as before. That is a table it stores
+under the name the upstream stores another table as, another app's namespace,
+or a stored column it keeps with another type than the upstream's (each added
+a column again under the same fresh stored name while apart): values of one
+type are never read as another's.
+
+### 8.11 Resuming live reads from `since`
+
+A replica persists, per live read, the server seq its result last settled
+through, in `_jazz_watermarks` keyed by a digest of the query, binding,
+`include_deleted` flag and reader identity (not the tier or wait, and not the
+schema version: the key is over stored names). On reconnect or reopen, it
+sends `Read { span: Live { since } }` with that seq.
+
+The authority opens a resumed read one of three ways:
+
+- **Fresh**, when it cannot resume: the store is a relay (its store may be
+  cold, and its seqs are not the ones its sessions resume from), the read is
+  windowed, a flat join, an aggregate, a relation or a history read, the
+  session has its own claims (policies read them, and they are not part of
+  what the client resumes from), `since` is past what the store serves (a
+  reset store), or `since` is at or before the current schema's activation.
+  The opening ships the whole result (`INV-SYNC-24`).
+- **Since**, when no membership input moved: no table the read, its supporting
+  rows or their policies read has a version after `since`. The opening ships
+  only rows with a seq after `since`.
+- **Diff**, when a membership input moved: rows may have entered the result
+  without changing. The authority evaluates the result as of `since` and ships
+  every row not in it, rows that changed after `since`, rows it held then that
+  have since left (as they are now, or their eviction), and supporting rows
+  whose access changed.
+
+Each ends with a `Settled` (and its `members` where §8.4 calls for one), so a
+resumed read leaves the replica with the same rows as a fresh one
+(`INV-SYNC-25`, `INV-SYNC-11`). A replica that cannot read its watermark opens
+the read fresh.
+
+A watermark claims the replica holds the result as it settled. Two events make
+that untrue for results the replica cannot name, so the replica forgets every
+watermark when either happens, and each read opens fresh until it settles
+again:
+
+- an `AccessLost`: a result settled earlier may have held the row, and a resume
+  from it would count the row as held after it became readable again;
+- a row asked for whole (§8.12): until its whole image arrives the replica holds
+  a stale version, so it also stores no watermark meanwhile.
+
+### 8.12 Large values
+
+Chunked large values (SPEC 19.8) travel by reference. A writer pushes a new
+value's nodes in `PushChunks` before the commit that uses them; the server
+holds them under a receipt until the commit arrives or the receipt expires. A
+replica that lacks nodes of a value it reads sends `ChunkRequests { pulls }`,
+each citing the row version that holds the value (by stored names), and the
+server answers only for a version the reader may read, with nodes of that
+version's tree (`Chunks { nodes, missing }`). A row is installed only once its
+chunks are present (`INV-SYNC-46`).
+
+Within a session the server ships later versions' chunked cells as deltas over
+the version it last shipped of that row. A replica that cannot apply a delta
+(it lacks that base version) sends `ResendWhole { rows }` for those rows, and
+the server ships each whole or evicts it. The replica sends the `ResendWhole`
+again on every new connection until the whole image arrives, and stores no watermark
+meanwhile (§8.11). A live read's rows are never declared this way: its opening
+brings them up to date from `since`.
+
+### 8.13 Relays
+
+A relay (a worker) is a replica of its upstream and the authority-facing store
+for its sessions (tabs). It serves a session's reads from its store per the
+read's tier, asking its upstream with the same `Read` where the tier needs
+the authority's answer, and tells its sessions the authority's seq it knows
+(`served_through`), so a session's snapshot is one the authority validates as
+it is. It numbers its unsettled versions from `LOCAL_BASE` and ships them to
+its sessions; a non-durable session numbers its own writes from
+`NON_DURABLE_BASE` (`INV-SYNC-50`). A relay stores a session's commit as its
+own pending commit, answers `Stored`, and relays the authority's `Fate`
+(§8.3).
 
 ## Open Questions
 
-- 🔶 [#2660](https://github.com/garden-co/jazz/issues/2660) — Query-driven reconciliation pilot and deferred related/negative-input completeness.
-
-- 🔶 [#2503](https://github.com/garden-co/jazz/issues/2503) — Bound restart-recovered authority publications without exposing an original write separately from its edge-generated merges.
-- 🔶 [#1784](https://github.com/garden-co/jazz/issues/1784) — Protocol parking, transport state, materialization options, coverage/subsumption, retention, and version tags.
-- 🔶 [#1779](https://github.com/garden-co/jazz/issues/1779) — Catalogue admission and synchronization.
+- 🔶 [#1784](https://github.com/garden-co/jazz/issues/1784) — Relay aggregation of equal reads from several sessions onto one upstream read, and coverage between reads.
+- 🔶 [#1779](https://github.com/garden-co/jazz/issues/1779) — Catalogue admission and synchronization beyond the mirrored catalogue (draft schemas, admission order across relays).

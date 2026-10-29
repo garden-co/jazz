@@ -102,13 +102,19 @@ interface ColumnBuilder {
 type MergeStrategyColumnType = {
   counter: "INTEGER" | "BIGINT";
   "g-set": { kind: "ARRAY" };
+  text: "TEXT";
+  markdown: "TEXT";
+  html: "TEXT";
 };
 
+type TextMergeStrategy = "text" | "markdown" | "html";
+
+// Text merges also run on optional columns; counter and g-set need a value.
 type AllowedColumnMergeStrategy<
   Sql extends SqlType,
   Optional extends boolean,
 > = Optional extends true
-  ? "lww"
+  ? "lww" | (Sql extends "TEXT" ? TextMergeStrategy : never)
   :
       | "lww"
       | {
@@ -467,6 +473,12 @@ function normalizeColumnMergeStrategy(
   if (strategy === "lww") {
     return undefined;
   }
+  if (strategy === "text" || strategy === "markdown" || strategy === "html") {
+    if (sqlType !== "TEXT") {
+      throw new Error(`${strategy} merge strategy is only supported on TEXT columns.`);
+    }
+    return strategy;
+  }
   if (strategy === "g-set") {
     if (nullable || typeof sqlType !== "object" || sqlType.kind !== "ARRAY") {
       throw new Error("g-set merge strategy is only supported on non-nullable ARRAY columns.");
@@ -490,7 +502,7 @@ abstract class BaseColumnBuilder implements ColumnBuilder {
 
   optional(): this {
     if (this._mergeStrategy !== undefined) {
-      // Counter and g-set both require non-nullable columns; re-validate as
+      // Counter and g-set columns must be non-nullable; re-validate as
       // nullable so the strategy's own error is thrown.
       normalizeColumnMergeStrategy(this._mergeStrategy, this._sqlType, true);
     }

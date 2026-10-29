@@ -1544,7 +1544,7 @@ test("TypeScript CI overlaps independent Node and browser suites after one artif
   assert.match(runner, /public export surface is incomplete/);
   assert.match(runner, /producer receipt is checked before either suite starts/);
   assert.match(runner, /correctness-artifact-producer\.mjs/);
-  assert.match(runner, /--concurrency=2/);
+  assert.match(runner, /--concurrency=3/);
   assert.match(
     runner,
     /browser_tests_command=.*pnpm --parallel --filter jazz-tools --filter inspector --filter band-chat-nextjs-betterauth --filter record-player-next-betterauth --filter auth-workos-chat test:browser/,

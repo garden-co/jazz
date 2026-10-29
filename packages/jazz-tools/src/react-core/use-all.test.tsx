@@ -36,6 +36,12 @@ function makeHarness(appId: string, options?: { throwOnSubscribe?: Error }) {
     getAuthState: () => ({ authMode: "local-first" as const, session: null }),
     onAuthChanged: () => () => {},
     updateAuthToken: () => {},
+    getSyncStatus: () => ({
+      link: { state: "local-only" as const },
+      pendingUploads: 0,
+      synced: true,
+    }),
+    onSyncStatusChange: () => () => {},
     subscribeDelta: (_query: QueryBuilder<Todo>, callbacks: DbDeltaSubscriptionCallbacks<Todo>) => {
       if (options?.throwOnSubscribe) {
         throw options.throwOnSubscribe;

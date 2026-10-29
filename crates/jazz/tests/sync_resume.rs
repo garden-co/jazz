@@ -1,8 +1,9 @@
 //! Reconnect resume: a client that held a subscription settled through
 //! seq W resubscribes "Q since W". The server ships only result rows
-//! changed after W (plus the result's row ids); the client drops cached
-//! rows that left and fetches result rows it lacks, which covers rows that
-//! became readable without changing.
+//! changed after W, and, when a table deciding membership was written
+//! after W, rows that entered the result without changing (by comparing
+//! it with the result as of W) and rows that left it. The opening lists
+//! the result's row ids, so the client drops cached rows that left.
 
 use crate::common;
 
@@ -82,7 +83,7 @@ struct Pipe {
 
 impl Transport for Pipe {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
-        if let (Some(count), SyncMessage::Rows { images }) = (&self.shipped, &message) {
+        if let (Some(count), SyncMessage::Rows { images, .. }) = (&self.shipped, &message) {
             *count.borrow_mut() += images.len();
         }
         self.out.borrow_mut().push_back(message);
@@ -201,10 +202,12 @@ fn a_resumed_subscription_ships_only_what_changed_and_converges() {
     let prepared = client.prepare_query(&Query::from("messages")).unwrap();
     let _stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
     pump(&server, &client);
+    // The readable room's messages, and alice's membership their read
+    // policy rests on.
     assert_eq!(
         *shipped.borrow(),
-        1000,
-        "the first opening ships the readable room"
+        1001,
+        "the first opening ships the readable room and its membership"
     );
     assert_eq!(ids(&client, None), ids(&server, Some(alice())));
 
@@ -234,10 +237,14 @@ fn a_resumed_subscription_ships_only_what_changed_and_converges() {
     let _upstream = block_on(client.connect_upstream(client_side));
     server.accept_subscriber(server_side, alice());
     pump(&server, &client);
+    // The edits and the insert, the deleted version (its table was
+    // written, so the result as of the resume point says it left), and
+    // the membership the shipped rows' read policy rests on (a changed row
+    // may rest on rows the client never held, so its support ships whole).
     assert_eq!(
         *shipped.borrow(),
-        4,
-        "only the 3 edits and the insert are shipped"
+        6,
+        "the 3 edits, the insert, the deletion and the membership are shipped"
     );
     assert_eq!(
         ids(&client, None),
@@ -261,7 +268,11 @@ fn a_resumed_subscription_ships_only_what_changed_and_converges() {
     pump(&server, &client);
     assert_eq!(ids(&client, None).len(), 2000);
     assert_eq!(ids(&client, None), ids(&server, Some(alice())));
-    assert_eq!(*shipped.borrow(), 1000, "the newly readable room, once");
+    assert_eq!(
+        *shipped.borrow(),
+        1001,
+        "the newly readable room and the membership that opened it, once"
+    );
 }
 
 /// Timing probe (run with `--release -- --nocapture`): a caught-up client
@@ -322,10 +333,11 @@ fn caught_up_resume_cost() {
     );
 }
 
-/// A row the replica cached from an ended read, across a reconnect: its
-/// deletion on the server still reaches the replica.
+/// A row the replica cached from an ended read is cold: nothing keeps it
+/// current. Its deletion on the server reaches the replica once a
+/// subscription covers it again, across a reconnect.
 #[test]
-fn a_deletion_reaches_a_row_cached_by_an_ended_read_after_reconnect() {
+fn a_deletion_reaches_a_cold_cached_row_once_a_subscription_covers_it_again() {
     let server = open(0, AuthorSubject::SYSTEM);
     let room = id(1, 1);
     server
@@ -367,5 +379,309 @@ fn a_deletion_reaches_a_row_cached_by_an_ended_read_after_reconnect() {
 
     block_on(server.delete("rooms", room, Default::default())).unwrap();
     pump(&server, &client);
-    assert_eq!(rooms(&client), [], "the deletion reaches the cached row");
+    assert_eq!(rooms(&client), [room], "the cold row is not kept current");
+
+    let _stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    assert_eq!(rooms(&client), [], "the deletion reaches the covered row");
+}
+
+/// Seeds rooms 0 and 1, alice's membership of room 0, and `per_room`
+/// messages in each room.
+fn seeded(per_room: u32) -> Db {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let seed = |table: &str, row: RowUuid, values: BTreeMap<String, Value>| {
+        server
+            .seed_settled_mergeable_for_bootstrap(table, row, AuthorSubject::SYSTEM, values)
+            .unwrap();
+    };
+    for r in 0..2 {
+        seed(
+            "rooms",
+            id(1, r),
+            cells(&[("name", Value::String(format!("room {r}")))]),
+        );
+    }
+    seed(
+        "memberships",
+        id(2, 0),
+        cells(&[
+            ("room", Value::Uuid(id(1, 0).0)),
+            ("member", Value::String(subject())),
+        ]),
+    );
+    for n in 0..per_room * 2 {
+        seed(
+            "messages",
+            id(3, n),
+            cells(&[
+                ("room", Value::Uuid(id(1, n % 2).0)),
+                ("body", Value::String(format!("m{n}"))),
+            ]),
+        );
+    }
+    server
+}
+
+/// Nico's review, point 1: a subscription's rows stop syncing once it
+/// ends. The replica keeps them (cold), and the server ships nothing more
+/// for them.
+#[test]
+fn an_ended_subscription_leaves_its_rows_cold() {
+    let server = seeded(3);
+    let client = open(1, alice());
+    let (client_side, server_side, shipped) = pipe();
+    let _upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice());
+    let prepared = client.prepare_query(&Query::from("messages")).unwrap();
+    let stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    assert_eq!(ids(&client, None).len(), 3);
+    drop(stream);
+    pump(&server, &client);
+
+    let before = *shipped.borrow();
+    block_on(server.update(
+        "messages",
+        id(3, 0),
+        cells(&[("body", Value::String("edited".into()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    pump(&server, &client);
+    assert_eq!(*shipped.borrow(), before, "nothing ships for a cold row");
+    assert_eq!(ids(&client, None).len(), 3, "the replica keeps its copies");
+}
+
+/// Losing access while away, without the rows changing: the resumed
+/// opening compares the result with the one as of its resume point, and
+/// the rows that left are evicted.
+#[test]
+fn a_resumed_subscription_evicts_rows_whose_access_was_lost_while_away() {
+    let server = seeded(5);
+    let client = open(1, alice());
+    let (client_side, server_side, _) = pipe();
+    let upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice());
+    let prepared = client.prepare_query(&Query::from("messages")).unwrap();
+    let _stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    assert_eq!(ids(&client, None).len(), 5);
+
+    assert!(client.detach_connection(&upstream));
+    block_on(server.delete("memberships", id(2, 0), Default::default())).unwrap();
+    let (client_side, server_side, shipped) = pipe();
+    let _upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice());
+    pump(&server, &client);
+    assert_eq!(ids(&client, None), ids(&server, Some(alice())));
+    assert!(
+        ids(&client, None).is_empty(),
+        "the room's messages are evicted"
+    );
+    assert_eq!(*shipped.borrow(), 0, "only evictions ship");
+}
+
+/// A caught-up subscription resumes without shipping a row: no table its
+/// result depends on was written since.
+#[test]
+fn a_caught_up_subscription_resumes_without_shipping_rows() {
+    let server = seeded(50);
+    let client = open(1, alice());
+    let (client_side, server_side, _) = pipe();
+    let upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice());
+    let prepared = client.prepare_query(&Query::from("messages")).unwrap();
+    let _stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    assert!(client.detach_connection(&upstream));
+    // A write to a table the read does not depend on.
+    block_on(server.update(
+        "rooms",
+        id(1, 1),
+        cells(&[("name", Value::String("renamed".into()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    let (client_side, server_side, shipped) = pipe();
+    let _upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice());
+    pump(&server, &client);
+    assert_eq!(*shipped.borrow(), 0);
+    assert_eq!(ids(&client, None), ids(&server, Some(alice())));
+}
+
+/// A cold row evicted through another subscription, then readable again
+/// without changing, reaches the replica when the first subscription
+/// resumes: the eviction made its older resume point untrue.
+#[test]
+fn a_row_evicted_and_readable_again_returns_when_an_older_subscription_resumes() {
+    use jazz::query::{col, eq, lit};
+    let server = seeded(1);
+    let client = open(1, alice());
+    let (client_side, server_side, _) = pipe();
+    let _upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice());
+    let q1 = client
+        .prepare_query(
+            &Query::from("messages").filter(eq(col("body"), lit(Value::String("m0".into())))),
+        )
+        .unwrap();
+    let s1 = block_on(client.subscribe(&q1, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    assert_eq!(ids(&client, None), [id(3, 0)], "q1 brings m0");
+    drop(s1);
+    pump(&server, &client);
+
+    let q2 = client.prepare_query(&Query::from("messages")).unwrap();
+    let s2 = block_on(client.subscribe(&q2, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    block_on(server.delete("memberships", id(2, 0), Default::default())).unwrap();
+    pump(&server, &client);
+    assert!(ids(&client, None).is_empty(), "q2 evicts m0 on access loss");
+    drop(s2);
+    pump(&server, &client);
+
+    // Access regained, m0 itself unchanged.
+    server
+        .seed_settled_mergeable_for_bootstrap(
+            "memberships",
+            id(2, 1),
+            AuthorSubject::SYSTEM,
+            cells(&[
+                ("room", Value::Uuid(id(1, 0).0)),
+                ("member", Value::String(subject())),
+            ]),
+        )
+        .unwrap();
+    let _s1 = block_on(client.subscribe(&q1, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    assert_eq!(
+        ids(&server, Some(alice())),
+        [id(3, 0)],
+        "server: m0 readable"
+    );
+    assert_eq!(ids(&client, None), [id(3, 0)], "client converges on m0");
+}
+
+/// A cold row a fresh opening's `members` drops (no `AccessLost` crosses: the
+/// new session never shipped it), then readable again without changing,
+/// reaches the replica when an older subscription resumes.
+#[test]
+fn a_row_a_listing_dropped_returns_when_an_older_subscription_resumes() {
+    use jazz::query::{col, eq, lit};
+    let server = seeded(1);
+    let client = open(1, alice());
+    let (client_side, server_side, _) = pipe();
+    let upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice());
+    let q1 = client
+        .prepare_query(
+            &Query::from("messages").filter(eq(col("body"), lit(Value::String("m0".into())))),
+        )
+        .unwrap();
+    let s1 = block_on(client.subscribe(&q1, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    assert_eq!(ids(&client, None), [id(3, 0)], "q1 brings m0");
+    drop(s1);
+    pump(&server, &client);
+
+    // Access lost while away; a new session never shipped m0.
+    assert!(client.detach_connection(&upstream));
+    block_on(server.delete("memberships", id(2, 0), Default::default())).unwrap();
+    let (client_side, server_side, _) = pipe();
+    let _upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice());
+    pump(&server, &client);
+
+    let q2 = client.prepare_query(&Query::from("messages")).unwrap();
+    let s2 = block_on(client.subscribe(&q2, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    assert!(ids(&client, None).is_empty(), "q2's members drop m0");
+    drop(s2);
+    pump(&server, &client);
+
+    server
+        .seed_settled_mergeable_for_bootstrap(
+            "memberships",
+            id(2, 1),
+            AuthorSubject::SYSTEM,
+            cells(&[
+                ("room", Value::Uuid(id(1, 0).0)),
+                ("member", Value::String(subject())),
+            ]),
+        )
+        .unwrap();
+    let _s1 = block_on(client.subscribe(&q1, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    assert_eq!(
+        ids(&server, Some(alice())),
+        [id(3, 0)],
+        "server: m0 readable"
+    );
+    assert_eq!(ids(&client, None), [id(3, 0)], "client converges on m0");
+}
+
+/// A resumed subscription takes the fast path (nothing it depends on was
+/// written since), then, in the same server tick, another client's
+/// offline commit makes an older, unchanged row readable. That row joins
+/// the result after the resume point was judged, so it ships: the client
+/// never held it.
+#[test]
+fn a_row_readable_through_a_commit_in_the_resumes_tick_ships() {
+    let server = seeded(1);
+    let bob = AuthorSubject::for_test_bytes([0x66; 16]);
+    let alice_db = open(1, alice());
+    let bob_db = open(2, bob);
+    let connect = |db: &Db, who: AuthorSubject| {
+        let (client_side, server_side, _) = pipe();
+        let upstream = block_on(db.connect_upstream(client_side));
+        server.accept_subscriber(server_side, who);
+        upstream
+    };
+    let tick_all = || {
+        for _ in 0..5 {
+            block_on(alice_db.tick()).unwrap();
+            block_on(bob_db.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+        }
+        block_on(alice_db.tick()).unwrap();
+        block_on(bob_db.tick()).unwrap();
+    };
+    let alice_up = connect(&alice_db, alice());
+    let bob_up = connect(&bob_db, bob);
+    let prepared = alice_db.prepare_query(&Query::from("messages")).unwrap();
+    let _stream = block_on(alice_db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    tick_all();
+    assert_eq!(ids(&alice_db, None), [id(3, 0)], "alice reads room 0 only");
+
+    // Both away; bob adds alice to room 1 offline. Nothing reaches the
+    // server, so alice's subscription is caught up when it resumes.
+    assert!(alice_db.detach_connection(&alice_up));
+    assert!(bob_db.detach_connection(&bob_up));
+    block_on(bob_db.insert(
+        "memberships",
+        cells(&[
+            ("room", Value::Uuid(id(1, 1).0)),
+            ("member", Value::String(subject())),
+        ]),
+        Default::default(),
+    ))
+    .unwrap();
+
+    // Alice's resume and bob's upload reach the server in one tick, the
+    // resume first.
+    let _alice_up = connect(&alice_db, alice());
+    let _bob_up = connect(&bob_db, bob);
+    tick_all();
+    assert_eq!(
+        ids(&server, Some(alice())),
+        [id(3, 0), id(3, 1)],
+        "server: m1 readable"
+    );
+    assert_eq!(
+        ids(&alice_db, None),
+        [id(3, 0), id(3, 1)],
+        "alice receives m1, unchanged since her resume point"
+    );
 }

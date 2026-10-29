@@ -64,7 +64,10 @@ describe("enum DSL invariants", () => {
             { name: "level", sqlType: "INTEGER", nullable: true },
           ],
         },
-        { name: "closed", fields: [{ name: "code", sqlType: "INTEGER", nullable: false }] },
+        {
+          name: "closed",
+          fields: [{ name: "code", sqlType: "INTEGER", nullable: false }],
+        },
       ],
     });
     expect(() => s.enum({ bad: { type: s.string() } })).toThrow("reserved");
@@ -181,7 +184,12 @@ describe("schema default DSL", () => {
         nullable: false,
         default: ["work", "personal"],
       },
-      { name: "archivedAt", sqlType: "TIMESTAMP", nullable: true, default: null },
+      {
+        name: "archivedAt",
+        sqlType: "TIMESTAMP",
+        nullable: true,
+        default: null,
+      },
     ]);
   });
 
@@ -339,6 +347,48 @@ describe("column merge strategy DSL", () => {
     expect(() => s.bigint().merge("counter").optional()).toThrow(
       "Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns.",
     );
+  });
+
+  it("stores text merge strategies on string columns, optional or not", () => {
+    resetCollectedState();
+    table("docs", {
+      body: s.string().merge("text"),
+      notes: s.string().merge("markdown"),
+      page: s.string().merge("html"),
+      summary: s.string().optional().merge("text"),
+      caption: s.string().merge("markdown").optional(),
+    });
+
+    const schema = getCollectedSchema();
+    expect(schema.tables[0]?.columns).toEqual([
+      { name: "body", sqlType: "TEXT", nullable: false, mergeStrategy: "text" },
+      {
+        name: "notes",
+        sqlType: "TEXT",
+        nullable: false,
+        mergeStrategy: "markdown",
+      },
+      { name: "page", sqlType: "TEXT", nullable: false, mergeStrategy: "html" },
+      { name: "summary", sqlType: "TEXT", nullable: true, mergeStrategy: "text" },
+      { name: "caption", sqlType: "TEXT", nullable: true, mergeStrategy: "markdown" },
+    ]);
+    expect(() => s.int().merge("text" as never)).toThrow(
+      "text merge strategy is only supported on TEXT columns.",
+    );
+    expect(() =>
+      s
+        .int()
+        .optional()
+        .merge("markdown" as never),
+    ).toThrow("markdown merge strategy is only supported on TEXT columns.");
+
+    if (false) {
+      s.string().optional().merge("html");
+      // @ts-expect-error integer columns cannot text-merge
+      s.int().merge("html");
+      // @ts-expect-error optional integer columns cannot text-merge
+      s.int().optional().merge("text");
+    }
   });
 
   it("types counter merge strategy by column and nullability", () => {

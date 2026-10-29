@@ -5,8 +5,9 @@
 //! and settles once each holds exactly the rows the policies allow.
 //!
 //! Workload revision 3: Core -> Client over the encoded wire, with a zstd
-//! roundtrip per frame. Revision 2 put a device-local persistence relay
-//! between them.
+//! roundtrip per frame. Its relay variant puts the device-local native relay
+//! between them, as on a device: a file-backed relay database and the client
+//! as its in-memory foreground. Revision 2 had a RocksDB relay there.
 
 mod policy;
 
@@ -14,6 +15,11 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 use std::time::Instant;
+
+use jazz_native_relay::{
+    NATIVE_RELAY_ABI_V1, NativeRelay, NativeRelayAbiRange, NativeRelayClient, NativeRelayWire,
+    RelayError, RelayOpenConfig, RelayScope,
+};
 
 use jazz::db::{
     Db, DbConfig, DbIdentity, FileOptions, InsertOptions, ReadOpts, SubscriptionEvent,
@@ -915,6 +921,8 @@ pub struct RunSummary {
     pub wall_ms: u128,
     pub ticks: usize,
     pub bytes_to_client: usize,
+    /// Dropped after the measured interval, with the summary.
+    _relay: Option<RelayTeardown>,
 }
 
 /// Opens an empty file-backed client, connects it to Core, subscribes to all
@@ -1025,6 +1033,247 @@ fn run_cold(
         wall_ms,
         ticks,
         bytes_to_client,
+        _relay: None,
+    }
+}
+
+/// Frames Core sends towards the device: each takes a zstd roundtrip and
+/// waits here until the relay's bounded inbound queue admits it.
+struct CoreToRelay {
+    pending: Rc<RefCell<VecDeque<Vec<u8>>>>,
+    received: VecDeque<Vec<u8>>,
+    wire: NativeRelayWire,
+    bytes: Rc<RefCell<usize>>,
+}
+
+impl WireTransport for CoreToRelay {
+    fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
+        let compressed = zstd::bulk::compress(&frame, 3).expect("compress frame");
+        *self.bytes.borrow_mut() += compressed.len();
+        let frame = zstd::bulk::decompress(&compressed, frame.len()).expect("decompress frame");
+        self.pending.borrow_mut().push_back(frame);
+        Ok(())
+    }
+
+    fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+        if self.received.is_empty() {
+            for frame in self
+                .wire
+                .take_outbound_encoded()
+                .expect("relay upstream frames")
+            {
+                let compressed = zstd::bulk::compress(&frame, 3).expect("compress frame");
+                let frame =
+                    zstd::bulk::decompress(&compressed, frame.len()).expect("decompress frame");
+                self.received.push_back(frame);
+            }
+        }
+        self.received.pop_front()
+    }
+}
+
+/// Hands the relay the frames Core queued, as many as its inbound queue
+/// admits now; the rest stay queued for the next round.
+fn deliver_to_relay(pending: &RefCell<VecDeque<Vec<u8>>>, wire: &NativeRelayWire) -> bool {
+    let mut pending = pending.borrow_mut();
+    let mut delivered = false;
+    while let Some(frame) = pending.front() {
+        if wire.push_inbound_encoded(frame).is_err() {
+            break;
+        }
+        pending.pop_front();
+        delivered = true;
+    }
+    delivered
+}
+
+thread_local! {
+    /// The client's subscriptions. Its database lives on the relay owner
+    /// thread, so its streams live there too.
+    static RELAY_CLIENT_SUBSCRIPTIONS: RefCell<Vec<OpenSubscription>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// The relay and its client, kept alive until after the measured interval.
+struct RelayTeardown {
+    _relay: NativeRelay,
+    client: Option<NativeRelayClient>,
+    _dir: TempDir,
+}
+
+impl std::fmt::Debug for RelayTeardown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RelayTeardown")
+    }
+}
+
+impl Drop for RelayTeardown {
+    fn drop(&mut self) {
+        if let Some(client) = self.client.take() {
+            let _ = client.with_db(|_| {
+                RELAY_CLIENT_SUBSCRIPTIONS.with(|subs| subs.borrow_mut().clear());
+                Ok(())
+            });
+            let _ = client.close();
+        }
+    }
+}
+
+/// Like [`run_cold`], through the device-local native relay: Core serves a
+/// fresh file-backed relay over the encoded wire, and the client is the
+/// relay's in-memory foreground, subscribed on the relay's owner thread.
+/// The relay drives itself after every call; the harness carries frames
+/// between Core and the relay and ticks Core.
+fn run_cold_via_relay(
+    schema: &JazzSchema,
+    seeded: &Seeded,
+    expected: &BTreeMap<String, usize>,
+    config: &Config,
+) -> RunSummary {
+    let start = Instant::now();
+    let author = config.client_author(seeded);
+    let dir = tempfile::tempdir().expect("create relay directory");
+    let relay = NativeRelay::spawn(RelayOpenConfig {
+        supported_abi: NativeRelayAbiRange {
+            minimum: NATIVE_RELAY_ABI_V1,
+            maximum: NATIVE_RELAY_ABI_V1,
+        },
+        scope: RelayScope {
+            app_namespace: "permissioned-resources".to_owned(),
+            storage_namespace: "benchmark".to_owned(),
+            auth_scope: Some("benchmark-reader".to_owned()),
+        },
+        sqlite_path: dir.path().join("relay.sqlite"),
+        schema: schema.clone(),
+        identity: DbIdentity {
+            node: node(2),
+            author,
+        },
+    })
+    .expect("open relay");
+    let wire = relay.wire().expect("relay upstream");
+    let pending = Rc::new(RefCell::new(VecDeque::new()));
+    let bytes = Rc::new(RefCell::new(0));
+    let subscriber = seeded.core.accept_subscriber(
+        Box::new(WireTransportAdapter::current(CoreToRelay {
+            pending: Rc::clone(&pending),
+            received: VecDeque::new(),
+            wire: wire.clone(),
+            bytes: Rc::clone(&bytes),
+        })),
+        author,
+    );
+    let client = relay
+        .attach_client(
+            DbIdentity {
+                node: node(3),
+                author,
+            },
+            BTreeMap::new(),
+        )
+        .expect("attach client");
+    let connect_ms = start.elapsed().as_millis();
+
+    let subscribe_start = Instant::now();
+    let planned = subscription_tables()
+        .into_iter()
+        .map(|table| {
+            let count = *expected
+                .get(&table)
+                .unwrap_or_else(|| panic!("missing expected count for {table}"));
+            (table, count)
+        })
+        .collect::<Vec<_>>();
+    client
+        .with_db(move |client| {
+            let mut subscriptions = Vec::new();
+            for (table, expected) in planned {
+                let prepared = client
+                    .prepare_query(&Query::from(table.as_str()))
+                    .unwrap_or_else(|error| panic!("prepare {table} failed: {error}"));
+                let stream = block_on(client.subscribe(&prepared, ReadOpts::default()))
+                    .unwrap_or_else(|error| panic!("subscribe {table} failed: {error}"));
+                subscriptions.push(OpenSubscription {
+                    name: table,
+                    expected,
+                    stream,
+                    rows: BTreeSet::new(),
+                });
+            }
+            RELAY_CLIENT_SUBSCRIPTIONS.with(|subs| *subs.borrow_mut() = subscriptions);
+            Ok(())
+        })
+        .expect("subscribe on relay client");
+    let subscribe_ms = subscribe_start.elapsed().as_millis();
+
+    let settle_start = Instant::now();
+    let mut ticks = 0;
+    loop {
+        // A raw `Db` call does not schedule the relay's foreground tick the
+        // way a binding command does, so the client ticks itself here, as
+        // the direct run's harness ticks its client.
+        let pending_subscriptions = client
+            .with_db(|client| {
+                block_on(client.tick()).map_err(|error| RelayError::Drive(error.to_string()))?;
+                Ok(RELAY_CLIENT_SUBSCRIPTIONS.with(|subs| {
+                    let mut subs = subs.borrow_mut();
+                    for sub in subs.iter_mut() {
+                        while let Some(event) = sub.stream.try_next_event() {
+                            apply_event(&mut sub.rows, event);
+                        }
+                    }
+                    if subs.iter().all(|sub| sub.rows.len() == sub.expected) {
+                        None
+                    } else {
+                        Some(pending_description(&subs))
+                    }
+                }))
+            })
+            .expect("read relay client subscriptions");
+        let Some(pending_subscriptions) = pending_subscriptions else {
+            break;
+        };
+        assert!(
+            ticks < config.max_ticks,
+            "timed out settling subscriptions; {pending_subscriptions}"
+        );
+        block_on(seeded.core.tick()).expect("core tick");
+        deliver_to_relay(&pending, &wire);
+        relay.pump().expect("relay drive");
+        ticks += 1;
+    }
+    let settle_ms = settle_start.elapsed().as_millis();
+    let wall_ms = start.elapsed().as_millis();
+
+    seeded.core.disconnect_subscriber(subscriber);
+    let actual_rows = client
+        .with_db(|_| {
+            Ok(RELAY_CLIENT_SUBSCRIPTIONS.with(|subs| {
+                std::mem::take(&mut *subs.borrow_mut())
+                    .into_iter()
+                    .map(|sub| (sub.name, sub.rows))
+                    .collect::<VisibleRows>()
+            }))
+        })
+        .expect("collect relay client rows");
+    let bytes_to_client = *bytes.borrow();
+    RunSummary {
+        rows_materialized: actual_rows.values().map(BTreeSet::len).sum(),
+        subscriptions: actual_rows.len(),
+        actual_rows,
+        expected_rows_by_table: None,
+        expected_rows: expected.values().sum(),
+        connect_ms,
+        subscribe_ms,
+        settle_ms,
+        wall_ms,
+        ticks,
+        bytes_to_client,
+        _relay: Some(RelayTeardown {
+            _relay: relay,
+            client: Some(client),
+            _dir: dir,
+        }),
     }
 }
 
@@ -1045,7 +1294,8 @@ fn env_or<T: std::str::FromStr>(name: &str, default: T) -> T {
 }
 
 /// Local profile driver: `JAZZ_CUSTOMER_IDENTITY` (member, spy, admin),
-/// `JAZZ_CUSTOMER_SCALE` and `JAZZ_CUSTOMER_REPEATS`; prints one receipt per run.
+/// `JAZZ_CUSTOMER_TOPOLOGY` (direct, relay), `JAZZ_CUSTOMER_SCALE` and
+/// `JAZZ_CUSTOMER_REPEATS`; prints one receipt per run.
 pub fn profile_main() {
     let identity = match std::env::var("JAZZ_CUSTOMER_IDENTITY")
         .unwrap_or_else(|_| "member".to_owned())
@@ -1058,9 +1308,21 @@ pub fn profile_main() {
             panic!("unsupported JAZZ_CUSTOMER_IDENTITY {other:?}; supported: member, spy, admin")
         }
     };
+    let via_relay = match std::env::var("JAZZ_CUSTOMER_TOPOLOGY")
+        .unwrap_or_else(|_| "direct".to_owned())
+        .as_str()
+    {
+        "direct" => false,
+        "relay" => true,
+        other => panic!("unsupported JAZZ_CUSTOMER_TOPOLOGY {other:?}; supported: direct, relay"),
+    };
     let mut fixture = Fixture::with_identity(env_or("JAZZ_CUSTOMER_SCALE", 1.0), identity);
     for run in 0..env_or("JAZZ_CUSTOMER_REPEATS", 3_usize) {
-        let result = fixture.first_sync();
+        let result = if via_relay {
+            fixture.first_sync_via_relay()
+        } else {
+            fixture.first_sync()
+        };
         println!(
             "run={run} rows={} wall_ms={} connect_ms={} subscribe_ms={} settle_ms={} ticks={} bytes_to_client={}",
             result.rows_materialized,
@@ -1121,6 +1383,15 @@ impl Fixture {
         result.expected_rows_by_table = Some(Rc::clone(&self.expected_rows_by_table));
         CompletedSync(result)
     }
+
+    /// The same first sync through a fresh device-local native relay.
+    #[inline(never)]
+    pub fn first_sync_via_relay(&mut self) -> CompletedSync {
+        let mut result =
+            run_cold_via_relay(&self.schema, &self.seeded, &self.expected, &self.config);
+        result.expected_rows_by_table = Some(Rc::clone(&self.expected_rows_by_table));
+        CompletedSync(result)
+    }
 }
 
 impl RunSummary {
@@ -1176,6 +1447,17 @@ mod tests {
         let mut fixture = Fixture::new(0.01);
         fixture.first_sync().verify();
         fixture.first_sync().verify();
+    }
+
+    #[test]
+    fn first_sync_through_the_native_relay_matches_direct() {
+        let mut fixture = Fixture::new(0.01);
+        let direct = fixture.first_sync();
+        direct.verify();
+        let relayed = fixture.first_sync_via_relay();
+        relayed.verify();
+        assert_eq!(relayed.actual_rows, direct.actual_rows);
+        fixture.first_sync_via_relay().verify();
     }
 
     #[test]

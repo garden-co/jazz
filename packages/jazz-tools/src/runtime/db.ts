@@ -27,7 +27,8 @@ import {
   SerializableWriteResult,
   WriteResult,
   JazzClient,
-  withTransactionAdmission,
+  beginClientTransactionAfter,
+  type TransactionAdmission,
   type MutationErrorEvent,
   WriteHandle,
   createOpenTransactionId,
@@ -47,7 +48,10 @@ import {
   type TxId,
   type PermissionAdvice,
   type StreamingValueSource,
+  validateWriteWaitTimeout,
+  WriteWaitTimeoutError,
 } from "./client.js";
+import { sameSyncStatus, type SyncStatus } from "./sync-status.js";
 import {
   type BrowserForegroundNodeLease,
   type RuntimeSource,
@@ -81,7 +85,12 @@ export type {
   ColumnTransformRegistry,
 } from "./column-transforms.js";
 import { toValue, toWriteRecord } from "./value-converter.js";
-import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
+import {
+  RowChangeKind,
+  SubscriptionManager,
+  type SubscriptionDelta,
+  type ValueSplices,
+} from "./subscription-manager.js";
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
 import { AuthRenewalBackoff } from "./auth-renewal-backoff.js";
 import {
@@ -161,6 +170,13 @@ export type DbConfig = {
   telemetryCollectorUrl?: string;
   /** Enable runtime tracing for DevTools-only diagnostics. */
   devMode?: boolean;
+  /**
+   * Slow-query log: queries whose runs take at least this many milliseconds
+   * are reported with `console.warn`, one line per query shape with its plan
+   * and the index that would likely make it fast (default 50; 0 turns the
+   * log off).
+   */
+  slowQueryThresholdMs?: number;
 } & (
   | {
       /** Local-first auth via a local seed. */
@@ -238,6 +254,11 @@ export type QueryOptions = ReadTierOptions & {
   branch?: Branch;
   /** Optional live base, or `[base, snapshotRef]` for a frozen base. */
   base?: BranchBase;
+  /**
+   * TEXT or BYTEA columns whose changes a subscription also delivers as splices
+   * (see {@link DbSubscriptionUpdate}). One-shot reads ignore it.
+   */
+  splices?: readonly string[];
 };
 
 type InternalDbQueryOptions = Omit<QueryOptions, "tier"> & {
@@ -253,9 +274,25 @@ type InternalDbQueryOptions = Omit<QueryOptions, "tier"> & {
  */
 export interface DbSubscriptionCallbacks<T extends { id: string }> {
   /** Called with the complete current result whenever the query changes. */
-  onUpdate: (rows: T[]) => void;
+  onUpdate: (rows: T[], update: DbSubscriptionUpdate) => void;
   /** Called once when the subscription terminates with an error. */
   onError?: (error: Error) => void;
+}
+
+/** What changed in one subscription update, beyond the complete result. */
+export interface DbSubscriptionUpdate {
+  /**
+   * Per updated row id, the splices of each column named in the `splices`
+   * option. They turn the value the previous update showed into the new one,
+   * and apply in order: each splice's offsets are in the value the earlier ones
+   * produced. TEXT splices count UTF-16 code units and insert a string; BYTEA
+   * splices count bytes and insert a `Uint8Array`. On a range select they are
+   * relative to the selected window. A column the update left unchanged has
+   * an empty list. A row or column without an entry has splices that could
+   * not be computed on this device (its previous version is no longer held,
+   * say): read its new value from the rows instead.
+   */
+  splices: ReadonlyMap<string, ValueSplices>;
 }
 
 /** Package-internal callbacks for incremental subscription consumers. */
@@ -286,6 +323,13 @@ function lowerPublicDbQueryOptions(options?: QueryOptions): InternalDbQueryOptio
   if (firstLoadRemoteWaitMs !== undefined) lowered.firstLoadRemoteWaitMs = firstLoadRemoteWaitMs;
   if (candidate.branch !== undefined) lowered.branch = candidate.branch as Branch;
   if (candidate.base !== undefined) lowered.base = candidate.base as BranchBase;
+  const splices = (candidate as { splices?: unknown }).splices;
+  if (splices !== undefined) {
+    if (!Array.isArray(splices) || !splices.every((column) => typeof column === "string")) {
+      throw new Error("splices must be an array of column names.");
+    }
+    if (splices.length > 0) lowered.splices = [...splices];
+  }
   if (isInspectorLocalQueryOptions(options)) lowered.tier = "local-only";
   return lowered;
 }
@@ -317,7 +361,9 @@ export interface DbSubscriptionSource {
  *
  * @internal
  */
-export type SubscriptionHandle = (() => void) & { readonly ready?: Promise<void> };
+export type SubscriptionHandle = (() => void) & {
+  readonly ready?: Promise<void>;
+};
 
 const dbSubscriptionSources = new WeakMap<Db, DbSubscriptionSource>();
 
@@ -577,6 +623,53 @@ function normalizeQueryOptions(
   return normalizeViewOptions(schema, table, options) ?? {};
 }
 
+/** Splices are only defined for plain TEXT and BYTEA columns of the result table. */
+function assertSpliceableColumns(
+  schema: WasmSchema,
+  table: string,
+  query: { readonly _columnTransforms?: ColumnTransformMap },
+  columns: readonly string[],
+): void {
+  const descriptors = resolveQueryTable(schema, table)?.columns ?? [];
+  for (const column of columns) {
+    const descriptor = descriptors.find((candidate) => candidate.name === column);
+    if (!descriptor) throw new Error(`splices: "${column}" is not a column of "${table}".`);
+    const type = descriptor.column_type.type;
+    if (type !== "Text" && type !== "Bytea") {
+      throw new Error(
+        `splices: column "${column}" is ${type}; splices are not supported yet for columns other than TEXT and BYTEA.`,
+      );
+    }
+    if (query._columnTransforms?.[column]) {
+      throw new Error(
+        `splices: column "${column}" has a column transform; splices are not supported yet for transformed columns.`,
+      );
+    }
+  }
+}
+
+/**
+ * A range-selected splice column must be read in part: a computed or
+ * transformed column that depends on it makes the engine read it whole and
+ * TypeScript cut the window, so the engine's splices would be in whole-value
+ * coordinates while the rows show the window.
+ */
+function assertSplicesReadInPart(
+  built: NormalizedBuiltQuery,
+  physical: NormalizedBuiltQuery,
+  columns: readonly string[],
+): void {
+  for (const column of columns) {
+    if (
+      Object.hasOwn(built.partialSelect, column) &&
+      !Object.hasOwn(physical.partialSelect, column)
+    )
+      throw new Error(
+        `splices: column "${column}" is selected in part, but a computed or transformed column depends on it, so it is read whole; splices are not supported yet for such columns.`,
+      );
+  }
+}
+
 function assertWritableTable(table: { readonly _table: string }): void {
   if (isHistoryTable(table._table)) {
     throw new Error(`History table "${table._table}" is read-only`);
@@ -611,7 +704,11 @@ function toWriteRecordForOperation(
   }
 }
 
-type WireSplicePage = { kind: "bytes" | "text_utf16" | "text_utf8"; from: number; to: number };
+type WireSplicePage = {
+  kind: "bytes" | "text_utf16" | "text_utf8";
+  from: number;
+  to: number;
+};
 
 type WireLargeValueUpdate =
   | {
@@ -832,9 +929,9 @@ function jsonPointerValue(value: unknown, pointer: string): unknown {
 }
 
 /**
- * Temporary binding-level materialization until #2090 carries exact terminal
- * demand into the engine. It preserves the public result/coordinate contract and
- * only touches selected columns; it must not be used as a chunk-demand model.
+ * The engine reads each partial selection of the physical query only in part
+ * (SPEC 19.12). A column a transform also depends on is read whole instead,
+ * and its visible selection is taken here from the whole value.
  */
 function applyPartialValueSelections<T>(
   row: T,
@@ -955,9 +1052,8 @@ function prepareTransformRead<T>(
       computedState: undefined,
       version: 0,
       physical: outputIncludes === built.includes ? built : { ...built, includes: outputIncludes },
-      transform: Object.keys(built.partialSelect).length
-        ? (row: WasmRow) => applyPartialValueSelections(decode(row), built.partialSelect)
-        : decode,
+      // The engine applies every partial selection of this physical query.
+      transform: decode,
     };
   }
   const relations = hasIncludes ? analyzeRelations(query._schema) : undefined;
@@ -1031,6 +1127,11 @@ function prepareTransformRead<T>(
     }
     const dependencyColumns = dependencies ? [...dependencies] : noWriteDependencies;
     const hasPartial = Object.keys(partialSelect).length > 0;
+    // Selections the engine did not apply: those whose column it read whole.
+    const wholeRead = Object.fromEntries(
+      Object.entries(partialSelect).filter(([column]) => !Object.hasOwn(partial, column)),
+    );
+    const sliceWhole = Object.keys(wholeRead).length > 0;
     const excluded = Object.keys(includes);
     return {
       select: physical,
@@ -1047,7 +1148,7 @@ function prepareTransformRead<T>(
               const appValues = computed
                 ? computedColumnValues(transforms!, computed, stored!, computedState, partial)
                 : undefined;
-              const result = hasPartial ? applyPartialValueSelections(row, partialSelect) : row;
+              const result = sliceWhole ? applyPartialValueSelections(row, wholeRead) : row;
               if (visibleTransforms)
                 applyColumnTransforms(
                   result,
@@ -1543,6 +1644,22 @@ export async function runInTransaction<TResult, TKind extends TransactionKind>(
  * Groups a set of writes as either a mergeable or serializable transaction (see {@link TransactionKind}).
  */
 export class Transaction<TKind extends TransactionKind = TransactionKind> {
+  /** @internal Install the prerequisite before binding the owner. */
+  static createWithAdmission<TKind extends TransactionKind>(
+    kind: TKind,
+    resolveClient: (schema: WasmSchema) => JazzClient,
+    context: DbAccessContext | null,
+    ownerClient: JazzClient | undefined,
+    prerequisite: TransactionAdmission | undefined,
+  ): Transaction<TKind> {
+    const transaction = new Transaction(kind, resolveClient, context);
+    transaction.openingPrerequisite = prerequisite;
+    if (ownerClient) transaction.bindOwnerClient(ownerClient);
+    return transaction;
+  }
+
+  private openingPrerequisite?: TransactionAdmission;
+
   private readonly pendingReads = new Set<Promise<unknown>>();
   private committing = false;
 
@@ -1582,7 +1699,16 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     const owner = getOwnerPreparation(ownerClient);
     const openTransactionId = owner?.pending
       ? createOpenTransactionId()
-      : ownerClient.beginTransaction(this.kind, session, attribution);
+      : this.openingPrerequisite
+        ? beginClientTransactionAfter(
+            ownerClient,
+            this.kind,
+            session,
+            attribution,
+            undefined,
+            this.openingPrerequisite,
+          )
+        : ownerClient.beginTransaction(this.kind, session, attribution);
     const binding: DbTransactionHandleBinding = {
       ownerClient,
       openTransactionId,
@@ -1596,11 +1722,16 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       preparation.run(() =>
         owner!.run(() => {
           if (preparation.cancelled) return;
-          const begin = () =>
-            ownerClient.beginTransaction(this.kind, session, attribution, openTransactionId);
-          const prerequisite = transactionAdmission.get(this);
-          if (prerequisite) withTransactionAdmission(ownerClient, prerequisite, begin);
-          else begin();
+          if (this.openingPrerequisite)
+            beginClientTransactionAfter(
+              ownerClient,
+              this.kind,
+              session,
+              attribution,
+              openTransactionId,
+              this.openingPrerequisite,
+            );
+          else ownerClient.beginTransaction(this.kind, session, attribution, openTransactionId);
           binding.begun = true;
         }),
       );
@@ -1754,7 +1885,10 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     }
     const values = toWriteRecordForOperation(operation, record, table._schema, table._table);
     try {
-      return { values, value: id === undefined ? undefined : immediateWriteRow(table, id, values) };
+      return {
+        values,
+        value: id === undefined ? undefined : immediateWriteRow(table, id, values),
+      };
     } catch (error) {
       this.requireBinding(operation).preparation.failure = error;
       throw error;
@@ -2019,19 +2153,12 @@ export type TransactionScope<TKind extends TransactionKind = TransactionKind> = 
   Transaction<TKind>
 >;
 
-const transactionAdmission = new WeakMap<Db | Transaction, () => Promise<void>>();
-
 /** @internal The compiler opts in before staging any operations. */
 export function beginDbTransactionAfter(
   db: Db,
-  prepare: () => Promise<void>,
+  prepare: TransactionAdmission,
 ): Transaction<"serializable"> {
-  transactionAdmission.set(db, prepare);
-  try {
-    return db.beginSerializableTransaction();
-  } finally {
-    transactionAdmission.delete(db);
-  }
+  return db.createTransaction("serializable", prepare);
 }
 
 /**
@@ -2072,6 +2199,7 @@ export class Db {
   private localFirstRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private shutdownPromise: Promise<void> | null = null;
   private readonly shutdownAbort = new AbortController();
+  private syncStatusSnapshot: SyncStatus | null = null;
   private readonly activeQuerySubscriptionTraces = new Map<
     string,
     StoredActiveQuerySubscriptionTrace
@@ -2144,6 +2272,9 @@ export class Db {
         return thisDb.shutdownPromise !== null;
       },
       markUnauthenticated: (reason) => this.markUnauthenticated(reason),
+      renewsCredential: (reason) =>
+        (credentialRenewers.get(this) ?? 0) > 0 ||
+        (reason === "expired" && this.localFirstRefreshOwned),
       clearAuthError: () => this.authStateStore.clearError(),
       onMutationError: (event) => this.handleMutationError(event),
       enableAuthenticatedInspectorLocalReads: (physicalDbName) =>
@@ -2304,13 +2435,21 @@ export class Db {
     if (!credentialsChanged && this.authStateStore.getState().error === undefined) return false;
 
     if (!this.authStateStore.validateJwtToken(jwtToken, trustedReservedSession)) return false;
-    this.connection.updateAuth({ mode: "bearer", jwtToken, trustedReservedSession });
+    this.connection.updateAuth({
+      mode: "bearer",
+      jwtToken,
+      trustedReservedSession,
+    });
     this.publishAuthUpdate(jwtToken, trustedReservedSession);
     return true;
   }
 
   private publishAuthUpdate(jwtToken?: string, trustedReservedSession?: Session): void {
-    const nextConfig = { ...this.config, jwtToken, cookieSession: undefined } as DbConfig;
+    const nextConfig = {
+      ...this.config,
+      jwtToken,
+      cookieSession: undefined,
+    } as DbConfig;
     setTrustedReservedSession(nextConfig, trustedReservedSession);
     const nextInternalSession = resolveClientInternalSessionSync(nextConfig);
     this.config.jwtToken = jwtToken;
@@ -2504,6 +2643,84 @@ export class Db {
     return () => {
       this.mutationErrorListeners.delete(listener);
     };
+  }
+
+  /**
+   * Whether this Db's writes have reached the server: the upstream
+   * connection, and how many committed transactions the server has not
+   * accepted or rejected yet. The same object is returned until the status
+   * changes, so it can back `useSyncExternalStore` directly.
+   */
+  getSyncStatus(): SyncStatus {
+    const next = this.connection.syncStatus();
+    if (this.syncStatusSnapshot && sameSyncStatus(next, this.syncStatusSnapshot)) {
+      return this.syncStatusSnapshot;
+    }
+    this.syncStatusSnapshot = next;
+    return next;
+  }
+
+  /**
+   * Call `listener` whenever {@link getSyncStatus} changes.
+   *
+   * @returns an unsubscribe callback
+   */
+  onSyncStatusChange(listener: (status: SyncStatus) => void): () => void {
+    const subscription = new AbortController();
+    const end = () => subscription.abort();
+    this.shutdownAbort.signal.addEventListener("abort", end, { once: true });
+    subscription.signal.addEventListener(
+      "abort",
+      () => this.shutdownAbort.signal.removeEventListener("abort", end),
+      { once: true },
+    );
+    let published = this.getSyncStatus();
+    this.connection.onSyncStatusChange(() => {
+      const status = this.getSyncStatus();
+      if (status === published) return;
+      published = status;
+      listener(status);
+    }, subscription.signal);
+    return end;
+  }
+
+  /**
+   * Resolve once every write committed on this Db before the call has been
+   * accepted by the server.
+   *
+   * Like `write.wait({ tier: "global" })`, the wait lasts through network
+   * outages, reconnects and credential renewal. It rejects with the
+   * server's error for the first of those writes it rejected, when the link
+   * stops for good, with a {@link WriteWaitTimeoutError} once `timeoutMs`
+   * passes, or with `signal.reason` when `signal` aborts. Ending the wait
+   * never cancels the writes: they stay queued. In a browser tab it covers
+   * that tab's own writes, not ones the shared worker recovered from storage.
+   */
+  async waitForSync(options: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<void> {
+    const { timeoutMs, signal } = options;
+    validateWriteWaitTimeout(timeoutMs);
+    this.assertOpen();
+    signal?.throwIfAborted();
+    const control = new AbortController();
+    const forward = () => control.abort(signal!.reason);
+    signal?.addEventListener("abort", forward, { once: true });
+    // Shutdown ends the wait instead of leaving it parked on a closed runtime.
+    const shutdown = () => control.abort(new Error("Db was shut down"));
+    this.shutdownAbort.signal.addEventListener("abort", shutdown, { once: true });
+    const timer =
+      timeoutMs === undefined
+        ? undefined
+        : setTimeout(
+            () => control.abort(new WriteWaitTimeoutError("global", timeoutMs)),
+            timeoutMs,
+          );
+    try {
+      await this.connection.waitForSync(control.signal);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      signal?.removeEventListener("abort", forward);
+      this.shutdownAbort.signal.removeEventListener("abort", shutdown);
+    }
   }
 
   getConfig(): DbConfig {
@@ -3053,7 +3270,11 @@ export class Db {
     return client.requestDeletePermissionAdvice(table._table, id, context?.writeSession);
   }
 
-  private createTransaction<TKind extends TransactionKind>(kind: TKind): Transaction<TKind> {
+  /** @internal Shared construction path; admission remains owned by the transaction. */
+  createTransaction<TKind extends TransactionKind>(
+    kind: TKind,
+    prerequisite?: TransactionAdmission,
+  ): Transaction<TKind> {
     this.assertOpen();
     notifyLocalWrite(this);
     const context = this.getAccessContext();
@@ -3063,22 +3284,12 @@ export class Db {
         "Cannot begin a serializable transaction before the JazzClient has been created. Run a query or mutation first.",
       );
     }
-    const prerequisite = transactionAdmission.get(this);
-    if (prerequisite && ownerClient) {
-      const transaction = withTransactionAdmission(
-        ownerClient,
-        prerequisite,
-        () => new Transaction(kind, (schema) => this.getClient(schema), context, ownerClient),
-      );
-      // Owner preparation can postpone opening beyond the synchronous admission scope.
-      transactionAdmission.set(transaction, prerequisite);
-      return transaction;
-    }
-    return new Transaction(
+    return Transaction.createWithAdmission(
       kind,
       (schema) => this.getClient(schema),
       context,
       ownerClient ?? undefined,
+      prerequisite,
     );
   }
 
@@ -3262,7 +3473,13 @@ export class Db {
         if (update.all === undefined) {
           throw new Error("Jazz subscription update is missing its materialized result.");
         }
-        onUpdate(update.all);
+        const splices = new Map<string, ValueSplices>();
+        for (const change of update.delta) {
+          if (change.kind === RowChangeKind.Updated && change.splices) {
+            splices.set(change.id, change.splices);
+          }
+        }
+        onUpdate(update.all, { splices });
       },
       ...(onError === undefined ? {} : { onError }),
     };
@@ -3331,6 +3548,10 @@ export class Db {
     const bufferedDeltas: SubscriptionDelta<T>[] = [];
 
     const queryOptions = normalizeQueryOptions(query._schema, builtQuery.table, options);
+    if (queryOptions.splices) {
+      assertSpliceableColumns(planningSchema, outputTable, query, queryOptions.splices);
+      assertSplicesReadInPart(builtQuery, prepared.physical, queryOptions.splices);
+    }
     const readSession = this.getAccessContext()?.readSession ?? session;
     type NativeSubscription = {
       id: number | null;
@@ -3439,6 +3660,9 @@ export class Db {
         )
           throw error;
         prepared = prepareTransformRead(query, builtQuery, outputTable, prepared.computedState);
+        // A dependency found only now may make a splice column read whole.
+        if (queryOptions.splices)
+          assertSplicesReadInPart(builtQuery, prepared.physical, queryOptions.splices);
         wasmQuery = translateQuery(builderJson, planningSchema, prepared.physical);
         retireNativeSubscription(activeSubscription);
         const replacement = createSubscriptionGeneration();
@@ -4024,4 +4248,21 @@ export function assertNoClientBackendSecret(config: object): void {
 
 function isBrowserRuntime(): boolean {
   return typeof window !== "undefined" && typeof Worker !== "undefined";
+}
+
+const credentialRenewers = new WeakMap<object, number>();
+
+/**
+ * @internal Declare that the caller renews this Db's credential whenever the
+ * server refuses it, until the returned release is called. Global write waits
+ * then outlast a renewable refusal instead of failing (#3923).
+ */
+export function holdCredentialRenewal(db: object): () => void {
+  credentialRenewers.set(db, (credentialRenewers.get(db) ?? 0) + 1);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    credentialRenewers.set(db, (credentialRenewers.get(db) ?? 1) - 1);
+  };
 }

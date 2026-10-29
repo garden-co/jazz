@@ -965,7 +965,7 @@ async fn handle_ws_connection(
                     Ok(frames) => frames,
                     Err(error) => {
                         drop(permit);
-                        queue_ws_error(&writer_tx, WireError::new(WireErrorCode::Backpressure, WireRetry::Later, error));
+                        queue_ws_error(&writer_tx, error);
                         break;
                     }
                 };
@@ -2350,6 +2350,40 @@ mod tests {
         assert_eq!(pong.as_ref(), ping.as_slice());
     }
 
+    #[tokio::test]
+    async fn malformed_sync_frame_ends_the_link_without_asking_for_a_retry() {
+        // Resending the same bytes after a reconnect fails the same way, so a
+        // retryable error would turn one bad frame into a reconnect loop.
+        let state = make_ws_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let mut ws =
+            open_negotiated_ws(addr, &state, AuthorSubject::for_test_bytes([0x7b; 16])).await;
+        // 0x7f is no sync message's tag (0xff would begin a split
+        // message's leading part, which waits for the rest).
+        ws.send(WsMessage::Binary(ws_frame_batch(&[vec![0x7f; 8]]).into()))
+            .await
+            .expect("send malformed sync frame");
+        let error = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let message = ws
+                    .next()
+                    .await
+                    .expect("websocket ended before an error frame")
+                    .expect("websocket result");
+                for frame in decode_ws_message(&message) {
+                    if let WireFrame::Error(error) = frame {
+                        return error;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("wait for the error frame");
+        assert_eq!(error.code, WireErrorCode::MalformedFrame);
+        assert_eq!(error.retry, WireRetry::Never);
+        assert!(!error.asks_reconnect_later(), "{error:?}");
+    }
+
     #[test]
     fn websocket_frame_batches_split_near_cap_frames() {
         let frame = vec![0x42; MAX_WIRE_FRAME_BYTES - 32];
@@ -3190,9 +3224,8 @@ mod tests {
         core.shutdown().await;
     }
 
-    /// A revoke whose journal append lands but whose durable flush fails
-    /// returns an error and poisons the registry; a restart replays the
-    /// revocation. The per-message gate must fail closed, exactly like a
+    /// A revoke whose write lands but whose durable flush fails returns an
+    /// error; the committed revocation is what every later lookup reads. The per-message gate must fail closed, exactly like a
     /// fresh registry lookup, rather than keep trusting Alice's last
     /// successful check. Guards the #3387 gate: the owner announces every
     /// attempted mutation, not only successful ones.
@@ -3262,7 +3295,7 @@ mod tests {
         let state = core.server_state();
         let mut changes = state.accounts.as_ref().map(|registry| registry.subscribe());
         let registry = state.accounts.as_ref().expect("account registry");
-        registry.fail_next_append_for_test();
+        registry.fail_next_write_for_test();
         let revoked = client
             .post(format!("{accounts}/revoke"))
             .bearer_auth(&alice)
@@ -3273,14 +3306,12 @@ mod tests {
             "the injected flush failure surfaces as a failed revoke"
         );
         assert!(
-            !registry.append_failure_pending_for_test(),
+            !registry.write_failure_pending_for_test(),
             "the injected flush failure was consumed by the revoke"
         );
 
-        // The failed revoke was announced; a failed lookup on the poisoned
-        // registry must be announced too.
-        let mut observer = state.accounts.as_ref().map(|registry| registry.subscribe());
-        // The poisoned registry now refuses every fresh lookup.
+        // The revoke committed before its flush failed: a fresh lookup
+        // reads it and refuses Alice.
         let lookup = super::super::accounts::resolve_assignment(
             &core.server_state(),
             jazz::account_registry::Principal {
@@ -3290,14 +3321,6 @@ mod tests {
         )
         .await;
         assert!(lookup.is_err());
-        assert!(
-            observer
-                .as_mut()
-                .expect("registry")
-                .has_changed()
-                .expect("owner alive"),
-            "a lookup on the poisoned registry is announced"
-        );
 
         // The per-message decision the reader/outgoing branches make, on a
         // receiver subscribed before the revoke (as the live socket's is).
@@ -3310,7 +3333,7 @@ mod tests {
         );
         assert!(
             per_message_new.is_err(),
-            "after a journaled revoke poisoned the registry, the per-message gate must not keep admitting Alice (fresh lookup: {per_message_old:?})"
+            "after a revoke whose flush failed was announced, the per-message gate must not keep admitting Alice (fresh lookup: {per_message_old:?})"
         );
         core.shutdown().await;
     }
@@ -3536,11 +3559,11 @@ mod tests {
         });
         let addr = server.block_on(start_ws_test_server(state.clone()));
         let accounts = state.accounts.as_ref().unwrap();
-        let catalogue = state
+        let probe = state
             .store
             .as_ref()
             .unwrap()
-            .kv(crate::kv::CATALOGUE)
+            .kv(jazz::host::HostTable::new("load_probe"))
             .unwrap();
         let principal = jazz::account_registry::Principal {
             issuer: "https://issuer.example".into(),
@@ -3554,7 +3577,7 @@ mod tests {
         let mut idle = (0..20)
             .map(|n: u32| {
                 let at = std::time::Instant::now();
-                catalogue
+                probe
                     .write_many(&[(b"idle-probe".to_vec(), n.to_le_bytes().to_vec())])
                     .unwrap();
                 at.elapsed()
@@ -3607,7 +3630,7 @@ mod tests {
             server.block_on(accounts.login(principal.clone())).unwrap();
             logins.push(at.elapsed());
             let at = std::time::Instant::now();
-            catalogue
+            probe
                 .write_many(&[(
                     b"probe".to_vec(),
                     at.elapsed().as_nanos().to_le_bytes().to_vec(),

@@ -7,12 +7,13 @@ not read bumps `STORAGE_FORMAT` and adds a new corpus beside this one, and
 never rewrites these. Until then format 1 is still moving, so such a change
 re-runs the producer and re-pins the hashes here and in the test instead
 (for example: per-write timestamps on the wire changed how pending uploads
-are stored, and a rejection's reason name changed how fates are recorded).
+are stored, a rejection's reason name changed how fates are recorded, and
+pending uploads moved from one encoded message to a row per op).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `9cce55030ad6f58f45dba9ae8bbf57b0dc619d47cfa0a6573982572ada9f8968`.
+  the SQLite file `e7dc3144433f4168c9bbf34884c8ed9b62f3f6cc94887e9261fd76728ecd916e`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `c80e4301d3e30661e89660ab71deff2790a1863b616c07292eeadeb05680ed4a`.
+  `cbf4a13efdc65c6fd356d51c4ca83a4d2d84e6d7835b2ed45e4334dda5912dab`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
@@ -22,6 +23,9 @@ nodes and write times:
   value, bytes, a defaulted column) and `drafts` (branched by `branch_id`);
 - two interned authors, updates (history versions), a soft delete and a row
   on a branch;
+- a client text edit to `documents.body` (text-merging) that the server
+  merged with its own concurrent edit, so its history keeps the client's
+  write as sent (`_st` bit 2, at `_seq` = minus the commit's seq);
 - a client that synced `projects` and `documents`, wrote one row that
   settled, one stamped far ahead of the server's clock that the server
   rejected (so `_jazz_applied` keeps a rejected fate with its reason name),
@@ -31,3 +35,33 @@ nodes and write times:
   `documents.title` to `heading` (a stored-names lens) and wrote under it.
 
 The receipts that read it back run by exact name in `dev/gates/storage-compat.sh`.
+
+The greenfield removal of `_jazz_shadow` regenerates this format-1 corpus
+in place, without a migration or format bump. Pending writes recover their
+upstream baseline from the current row or the newest history version below
+the replica's local sequence range. Eviction removes current and historical
+versions so reopening cannot restore an evicted baseline.
+
+Dropping the large-value key columns (`$k:<column>`) and `_jazz_lv_scratch`,
+when queries stopped reading chunked values' content, regenerated it the same
+way.
+
+Replacing the authority's `_jazz_text_in` side table with as-sent history
+versions, when `documents.body` became text-merging, regenerated it the same
+way.
+
+Keeping the deploy catalogue as typed rows (`_jazz_versions` numbering the
+admitted versions, `_jazz_names` keyed by that number, `_jazz_stored_columns`,
+and `_jazz_schemas`, `_jazz_lenses` and `_jazz_permissions`) regenerated it
+the same way. A development store with the earlier layout (`_jazz_names`
+keyed by version id) is refused at open with "delete the local store and
+resync".
+
+Moving a commit's bases, access proofs (formerly sources) and deltas onto its
+ops, so each pending op is stored with them and `_jazz_pending_items` keeps
+only ops and serializable reads, regenerated it the same way.
+
+Replacing a pending commit's `author` and `session` fields with one `acting`
+enum (`Own`, `Attributed`, `Session`), which changes the encoded
+`_jazz_pending` header, regenerated it the same way. A pending row in the
+earlier layout is refused as an unsupported storage format, never misread.
