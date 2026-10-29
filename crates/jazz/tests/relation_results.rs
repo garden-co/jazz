@@ -1,7 +1,7 @@
-//! Array relations on SQLite: a relation subscription keeps its own rows
+//! Array relations: a relation subscription keeps its own rows
 //! beside a plain one over the same root, siblings whose nested relations
 //! differ in shape share one record type, and a synced forward array
-//! relation ships the rows its arrays list. Not ported from Jazz.
+//! relation ships the rows its arrays list.
 
 use crate::common;
 
@@ -254,7 +254,7 @@ fn a_relation_read_in_a_transaction_sees_staged_children() {
     menu(&db);
     let tx = OpenTransactionId::new();
     block_on(db.begin_mergeable(tx)).unwrap();
-    block_on(db.serializable_tx_ref(tx).insert(
+    block_on(db.tx_ref(tx).insert(
         "images",
         BTreeMap::from([
             ("category_id".to_owned(), Value::Uuid(id(2, 1).0)),
@@ -264,7 +264,7 @@ fn a_relation_read_in_a_transaction_sees_staged_children() {
     ))
     .unwrap();
     let prepared = db.prepare_query(&categories_with_images()).unwrap();
-    let rows = block_on(db.serializable_tx_ref(tx).all_prepared(&prepared)).unwrap();
+    let rows = block_on(db.tx_ref(tx).all_prepared(&prepared)).unwrap();
     assert_eq!(
         images_of(&rows[0], 0).len(),
         1,
@@ -282,7 +282,7 @@ fn a_change_to_a_related_row_conflicts_with_a_serializable_relation_read() {
     let tx = OpenTransactionId::new();
     block_on(db.begin_serializable(tx)).unwrap();
     let prepared = db.prepare_query(&categories_with_images()).unwrap();
-    block_on(db.serializable_tx_ref(tx).all_prepared(&prepared)).unwrap();
+    block_on(db.tx_ref(tx).all_prepared(&prepared)).unwrap();
     block_on(db.update(
         "images",
         id(3, 1),
@@ -290,7 +290,7 @@ fn a_change_to_a_related_row_conflicts_with_a_serializable_relation_read() {
         Default::default(),
     ))
     .unwrap();
-    block_on(db.serializable_tx_ref(tx).update(
+    block_on(db.tx_ref(tx).update(
         "menus",
         id(1, 1),
         BTreeMap::from([("name".to_owned(), text("renamed"))]),

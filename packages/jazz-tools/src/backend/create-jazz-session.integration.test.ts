@@ -445,6 +445,18 @@ describe("Node shared backend session", () => {
       });
       const db = writer.getSnapshot().client!.db;
       await db.insert(app.posts, { text: "before outage" }).wait({ tier: "global" });
+      // A remote subscription opened before the outage keeps updating after it.
+      const deliveries: string[][] = [];
+      const subscriptionErrors: Error[] = [];
+      const unsubscribe = db.subscribe(
+        app.posts,
+        {
+          onUpdate: (rows) => deliveries.push(rows.map((row) => row.text).sort()),
+          onError: (error) => subscriptionErrors.push(error),
+        },
+        { tier: "remote" },
+      );
+      await vi.waitFor(() => expect(deliveries.at(-1)).toEqual(["before outage"]));
 
       const port = server.port;
       await server.stop();
@@ -486,6 +498,23 @@ describe("Node shared backend session", () => {
         },
         { timeout: 15_000, interval: 250 },
       );
+      await observer
+        .getSnapshot()
+        .client!.db.insert(app.posts, { text: "from observer" })
+        .wait({ tier: "global" });
+      await vi.waitFor(
+        () =>
+          expect(deliveries.at(-1)).toEqual([
+            "after outage",
+            "before outage",
+            "during outage",
+            "from observer",
+            "late in outage",
+          ]),
+        { timeout: 15_000, interval: 250 },
+      );
+      expect(subscriptionErrors).toEqual([]);
+      unsubscribe();
     } finally {
       await observer?.close();
       await writer.close();

@@ -107,6 +107,42 @@ fn ask(client: &Db, server: &Db, action: PermissionAdviceAction) -> PermissionAd
     drive(&[client, server, client], client.permission_advice(id))
 }
 
+/// A client transport that records the ids of the advice requests it
+/// sends.
+struct RecordingAdvice {
+    inner: Box<dyn jazz::db::Transport>,
+    sent: std::rc::Rc<std::cell::RefCell<Vec<u64>>>,
+}
+
+impl jazz::db::Transport for RecordingAdvice {
+    fn send(&mut self, message: jazz::db::SyncMessage) -> Result<(), jazz::wire::TransportError> {
+        if let jazz::db::SyncMessage::Advise { id, .. } = &message {
+            self.sent.borrow_mut().push(*id);
+        }
+        self.inner.send(message)
+    }
+
+    fn try_recv(&mut self) -> Option<jazz::db::SyncMessage> {
+        self.inner.try_recv()
+    }
+}
+
+/// [`connect`], returning the ids of the advice requests the client sends.
+fn connect_recording(
+    client: &Db,
+    server: &Db,
+    author: AuthorSubject,
+) -> std::rc::Rc<std::cell::RefCell<Vec<u64>>> {
+    let (client_side, server_side) = duplex();
+    let sent = std::rc::Rc::default();
+    block_on(client.connect_upstream(Box::new(RecordingAdvice {
+        inner: client_side,
+        sent: std::rc::Rc::clone(&sent),
+    })));
+    server.accept_subscriber(server_side, author);
+    sent
+}
+
 fn connect(client: &Db, server: &Db, author: AuthorSubject) {
     let (client_side, server_side) = duplex();
     block_on(client.connect_upstream(client_side));
@@ -270,4 +306,143 @@ fn a_trusted_backend_asks_for_the_sessions_it_acts_for() {
     // A session link cannot ask as another session: it is answered as
     // itself.
     assert_eq!(ask_as(&alice_db, bob), PermissionAdvice::Allowed);
+}
+
+/// Each request has a fresh id, so an answer only ever resolves the request
+/// it was asked for: a cancelled request's waiter is gone (it reads
+/// `Unknown` at once), its late answer resolves nothing, and a reopened
+/// database's ids never name another instance's requests.
+///
+/// ```text
+/// alice ──advise#a(insert as bob)──► core      (sent, then cancelled)
+/// alice ──advise#b(insert as alice)─► core ──► Allowed for #b only
+/// ```
+#[test]
+fn an_answer_resolves_only_the_request_it_was_asked_for() {
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb0; 16]);
+    let server = block_on(Db::open_history_complete(DbConfig::new(
+        schema(),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xee; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    let client = open(0xa1, alice);
+    let sent = connect_recording(&client, &server, alice);
+    let insert = |owner| PermissionAdviceAction::Insert {
+        table: "notes".to_owned(),
+        cells: note(owner, "new"),
+    };
+
+    let cancelled = client.request_permission_advice(insert(bob), None);
+    block_on(client.tick()).unwrap();
+    client.cancel_permission_advice_request(cancelled);
+    assert_eq!(
+        block_on(client.permission_advice(cancelled)),
+        PermissionAdvice::Unknown,
+        "a cancelled request's waiter is gone"
+    );
+    let asked = client.request_permission_advice(insert(alice), None);
+    assert_ne!(asked, cancelled);
+    assert_eq!(
+        drive(
+            &[&client, &server, &client],
+            client.permission_advice(asked)
+        ),
+        PermissionAdvice::Allowed
+    );
+    assert_eq!(
+        block_on(client.permission_advice(cancelled)),
+        PermissionAdvice::Unknown,
+        "the late answer resolved nothing"
+    );
+
+    // A request cancelled before it is sent is never asked: the core
+    // answers only the request after it.
+    let unsent = client.request_permission_advice(insert(bob), None);
+    client.cancel_permission_advice_request(unsent);
+    let next = client.request_permission_advice(insert(alice), None);
+    assert_eq!(
+        drive(&[&client, &server, &client], client.permission_advice(next)),
+        PermissionAdvice::Allowed
+    );
+    assert!(sent.borrow().contains(&next));
+    assert!(
+        !sent.borrow().contains(&unsent),
+        "a request cancelled before it was sent never goes out"
+    );
+
+    // A reopened database starts its ids elsewhere, so an id held over
+    // from the earlier instance names nothing in the new one.
+    let reopened = open(0xa1, alice);
+    connect(&reopened, &server, alice);
+    let fresh = reopened.request_permission_advice(insert(alice), None);
+    assert!(![cancelled, asked, unsent, next].contains(&fresh));
+    assert_eq!(
+        block_on(reopened.permission_advice(asked)),
+        PermissionAdvice::Unknown
+    );
+    assert_eq!(
+        drive(
+            &[&reopened, &server, &reopened],
+            reopened.permission_advice(fresh)
+        ),
+        PermissionAdvice::Allowed
+    );
+}
+
+/// Advice is a bare verdict: it discloses no rows, no policy reasons and
+/// no hidden facts. Asking to change a row the session cannot see is
+/// `Denied` exactly as for a row that does not exist.
+///
+/// ```text
+/// bob ──advise(update alice's hidden note)──► core ──► Denied
+/// bob ──advise(update a missing note)───────► core ──► Denied
+/// ```
+#[test]
+fn advice_about_a_hidden_row_tells_nothing_about_it() {
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb0; 16]);
+    let server = block_on(Db::open_history_complete(DbConfig::new(
+        schema(),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xee; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    let hidden = RowUuid::from_bytes([0x11; 16]);
+    let missing = RowUuid::from_bytes([0x12; 16]);
+    block_on(server.insert(
+        "notes",
+        note(alice, "mine"),
+        InsertOptions {
+            row_id: Some(hidden),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    let bob_db = open(0xb0, bob);
+    connect(&bob_db, &server, bob);
+    for row in [hidden, missing] {
+        let update = PermissionAdviceAction::Update {
+            table: "notes".to_owned(),
+            row,
+            patch: BTreeMap::from([("title".to_owned(), Value::String("x".to_owned()))]),
+        };
+        let delete = PermissionAdviceAction::Delete {
+            table: "notes".to_owned(),
+            row,
+        };
+        let read = PermissionAdviceAction::Read {
+            table: "notes".to_owned(),
+            row,
+        };
+        for action in [update, delete, read] {
+            assert_eq!(ask(&bob_db, &server, action), PermissionAdvice::Denied);
+        }
+    }
+    assert_eq!(count(&server, "notes"), 1);
 }

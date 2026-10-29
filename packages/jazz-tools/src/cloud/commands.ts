@@ -10,15 +10,15 @@ import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 
 import { CloudApiError, createCloudApi, type CloudApi } from "./api.js";
-import { credentialsPath, deleteProfile, readProfile, saveProfile } from "./credentials.js";
+import { credentialsPath, saveProfile } from "./credentials.js";
 import {
   CloudAuthError,
+  logoutStoredSession,
   fetchWorkosClientConfig,
   pollDeviceAuthorization,
   profileFromTokens,
   resolveCloudUrl,
   startDeviceAuthorization,
-  type CloudSessionOptions,
 } from "./session.js";
 
 export const CLOUD_COMMANDS = ["login", "logout", "whoami", "teams", "apps"] as const;
@@ -191,10 +191,7 @@ export async function runCloudCommand(args: string[], io: CloudCommandIo): Promi
 
       case "logout": {
         allowOnly(parsed, []);
-        const hadSession = (await readProfile(cloudUrl, io.env)) !== undefined;
-        const sessionRevoked = hadSession && (await revokeStoredSession(sessionOptions));
-        // Revoking can itself find the session already dead and forget it.
-        const removed = (await deleteProfile(cloudUrl, io.env)) || hadSession;
+        const { loggedOut: removed, sessionRevoked } = await logoutStoredSession(sessionOptions);
         out(
           { loggedOut: removed, sessionRevoked, cloudUrl },
           removed
@@ -243,25 +240,6 @@ export async function runCloudCommand(args: string[], io: CloudCommandIo): Promi
     }
   } catch (error) {
     return reportError(error, io, json);
-  }
-}
-
-/**
- * Ends the stored login's WorkOS session server-side, which also kills its
- * refresh token. Best effort: logout always forgets the local session, even
- * when the dashboard is unreachable or predates `/api/v1/logout`.
- */
-async function revokeStoredSession(options: CloudSessionOptions): Promise<boolean> {
-  const env = options.env ?? process.env;
-  // Revoke the stored login's session, not one behind JAZZ_CLOUD_TOKEN.
-  const { JAZZ_CLOUD_TOKEN: _ignored, ...storedOnly } = env;
-  try {
-    const result = await createCloudApi({ ...options, env: storedOnly }).request<{
-      revoked?: unknown;
-    }>("POST", "/logout");
-    return result?.revoked === true;
-  } catch {
-    return false;
   }
 }
 

@@ -1,8 +1,8 @@
 //! Keyed invalidation and shared execution against one-shot reads: random
 //! writes (including ones that move rows between watch keys and change
 //! policy evidence) under many identities' subscriptions; after every
-//! commit each maintained result must equal a fresh read. Not ported from
-//! Jazz: this pins the prototype's fan-out (src/fanout.rs).
+//! commit each maintained result must equal a fresh read. This pins the
+//! fan-out in `jazz-db` (`fanout.rs`).
 
 use crate::common;
 

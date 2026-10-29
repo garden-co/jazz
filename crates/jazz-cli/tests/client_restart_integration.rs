@@ -508,10 +508,6 @@ async fn memory_storage_client_does_not_persist_local_state_to_disk_impl() {
     client.shutdown().await.expect("shutdown memory client");
 
     assert!(
-        !data_dir.path().join("jazz.rocksdb").exists(),
-        "memory storage should not create a RocksDB database on disk"
-    );
-    assert!(
         !data_dir.path().join("jazz.sqlite").exists(),
         "memory storage should not create a SQLite database on disk"
     );

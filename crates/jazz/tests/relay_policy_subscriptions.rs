@@ -1,7 +1,7 @@
 //! A second device of the same account subscribes through its worker to rows
 //! its first device wrote, under a read policy on `$createdBy.account`: the
 //! authority's subscription wakes on the commits that write them, though no
-//! row image carries that column. Not ported from Jazz.
+//! row image carries that column.
 
 use crate::common;
 

@@ -140,7 +140,7 @@ fn seed(db: &Db, room_messages: usize) {
     for (room_index, room) in [ANNOUNCEMENTS_ROOM, GENERAL_ROOM].into_iter().enumerate() {
         for start in (0..room_messages).step_by(SEED_BATCH) {
             let end = (start + SEED_BATCH).min(room_messages);
-            let ((), tx_id) = block_on(db.transaction(async |tx| {
+            block_on(db.transaction(async |tx| {
                 for message in start..end {
                     tx.insert(
                         "messages",
@@ -155,8 +155,6 @@ fn seed(db: &Db, room_messages: usize) {
                 Ok(())
             }))
             .unwrap_or_else(|error| panic!("seed {room} messages {start}..{end}: {error}"));
-            db.finalize_local_mergeable_commit_for_test(tx_id)
-                .expect("settle seeded messages");
         }
     }
 }
@@ -233,7 +231,7 @@ impl AnnouncementsFixture {
         for _ in 0..count {
             let index = self.next_message;
             self.next_message += 1;
-            let write = block_on(self.db.insert(
+            block_on(self.db.insert(
                 "messages",
                 message_cells(ANNOUNCEMENTS_ROOM, index, index as u64),
                 InsertOptions {
@@ -243,11 +241,6 @@ impl AnnouncementsFixture {
                 },
             ))
             .expect("admin posts an announcement");
-            // The in-process authority plays the server's part: it runs the
-            // claim-gated insert policy and accepts the post.
-            self.db
-                .finalize_local_mergeable_commit_for_test(write.mergeable_tx_id())
-                .expect("authority accepts the admin's announcement");
             let mut shown = 0;
             while shown == 0 {
                 shown = added_rows(&next_event(&self.db, &mut self.stream));

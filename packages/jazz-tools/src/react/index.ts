@@ -23,6 +23,8 @@ export {
   type UseLocalFirstAuthOptions,
 } from "./use-local-first-auth.js";
 export { useAuthState, type AuthStateInfo } from "../react-core/use-auth-state.js";
+export { useSyncStatus } from "../react-core/use-sync-status.js";
+export type { LinkStatus, SyncStatus } from "../runtime/sync-status.js";
 export type { QueryOptions, RuntimeSourcesConfig } from "../runtime/index.js";
 
 export {

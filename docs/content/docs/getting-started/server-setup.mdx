@@ -40,7 +40,7 @@ On Linux, the server samples its heap, about once per 512 KiB allocated; set
 names, for `go tool pprof` or a continuous profiler. The profile records the binary's build ID, so
 tools can add source lines from a matching unstripped build. Send the admin secret in
 `X-Jazz-Admin-Secret`, or scrape it from the diagnostics listener with its token. The profile
-covers memory the server allocates from Rust, not memory RocksDB allocates internally.
+covers memory the server allocates from Rust, not memory SQLite allocates internally.
 With sampling off the route answers `404 Not Found`; other platforms answer `501 Not Implemented`.
 
 Local-first auth is disabled by default when `NODE_ENV` is `production` (case-insensitive) and enabled otherwise, including when `NODE_ENV` is unset. Enable it in production with `--allow-local-first-auth` or `JAZZ_ALLOW_LOCAL_FIRST_AUTH=true`. External JWT auth requires either `--jwks-url` or `--jwt-public-key`, but not both.

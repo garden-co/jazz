@@ -1,6 +1,6 @@
 # todo-server-rs
 
-Axum REST + SSE service backed by the `jazz` Rust client, RocksDB storage and the native WebSocket transport. The database path uses no NAPI or WASM. Application startup exports the TypeScript schema through the Jazz CLI, which requires the repository's JavaScript dependencies and built packages.
+Axum REST + SSE service backed by the `jazz` Rust client, SQLite storage and the native WebSocket transport. The database path uses no NAPI or WASM. Application startup exports the TypeScript schema through the Jazz CLI, which requires the repository's JavaScript dependencies and built packages.
 
 ## What it demonstrates
 

@@ -1,8 +1,7 @@
-//! Gathers on SQLite: recursive reachability seeded by root rows, read
+//! Gathers: recursive reachability seeded by root rows, read
 //! locally and synced. A synced gather ships its result plus the edges of
 //! its closure (transitively from each result row), and watches each
 //! frontier value so an edge that extends the closure reaches the replica.
-//! Not ported from Jazz.
 
 use crate::common;
 

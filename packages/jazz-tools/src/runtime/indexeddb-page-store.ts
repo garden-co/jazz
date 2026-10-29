@@ -61,8 +61,8 @@ export const INDEXEDDB_PAGE_FORMAT_MAGIC = "IDBTREE\0";
  * The closed Jazz storage profile carried by a browser durable root: the
  * worker's SQLite file (on the IndexedDB VFS) is in Jazz SQLite storage
  * format 1, which the engine also stamps inside the file
- * (`jazz::format::STORAGE_FORMAT`). A root the Groove engine wrote declares
- * Groove's codec families instead and fails manifest admission with an
+ * (`jazz::format::STORAGE_FORMAT`). A root written by an older storage format
+ * declares other codec families and fails manifest admission with an
  * `UnsupportedStorageCodecsError` before anything in it is read or changed.
  */
 export const JAZZ_EPOCH_1_STORAGE_CODEC_IDS = ["jazz.sqlite-storage.v1"] as const;

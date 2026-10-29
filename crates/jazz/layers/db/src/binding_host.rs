@@ -94,7 +94,7 @@ pub type HostResult<T> = Result<T, HostError>;
 pub fn not_supported(what: &str) -> HostError {
     HostError::Engine(Error::new(
         ErrorCode::Query,
-        format!("{what} is not supported on SQLite yet"),
+        format!("{what} is not supported yet"),
     ))
 }
 
@@ -326,7 +326,7 @@ fn restore_options_as<O: HostObject>(
     })
 }
 
-/// `{ read_view? | readView?, tier?, include_deleted?, first_load_remote_wait_ms? }`.
+/// `{ read_view? | readView?, tier?, include_deleted?, first_load_remote_wait_ms?, splices? }`.
 pub fn read_opts<O: HostObject>(options: &O) -> HostResult<ReadOpts> {
     let mut opts = ReadOpts::default();
     for name in ["read_view", "readView"] {
@@ -357,6 +357,10 @@ pub fn read_opts<O: HostObject>(options: &O) -> HostResult<ReadOpts> {
         if opts.tier == ReadTier::LocalFirst {
             opts.first_load = FirstLoad::WaitForRemote { timeout_ms };
         }
+    }
+    if let Some(splices) = options.get("splices")? {
+        opts.splices = O::decode::<Vec<String>>(splices)
+            .map_err(|_| HostError::Argument("splices must be an array of column names".into()))?;
     }
     Ok(opts)
 }
@@ -402,11 +406,11 @@ pub struct OpenConfig {
     pub identity: OpenIdentity,
     /// Seed for deterministic row ids (tests).
     pub row_id_seed: Option<u64>,
-    /// A Groove replica knob: keep full history. Every SQLite store keeps
-    /// full history, so this opens normally (not as an authority).
+    /// Whether the replica keeps full history. Every store keeps full
+    /// history, so either value opens the same store (not an authority).
     pub history_complete: bool,
-    /// A Groove persistence knob: SQLite commits each applied batch, so it
-    /// is accepted and has nothing to configure.
+    /// The public `initialSyncFlushEvery` option. Each applied batch commits
+    /// on its own, so there is nothing to tune and any value is accepted.
     pub initial_sync_flush_every: Option<u32>,
 }
 
@@ -539,14 +543,13 @@ pub fn db_config(schema: JazzSchema, config: &OpenConfig, identity: DbIdentity) 
 
 /// Open an in-memory database. `history_complete` needs nothing: every
 /// SQLite store keeps full history.
-pub async fn open_memory(db_config: DbConfig, _config: &OpenConfig) -> Result<Db, Error> {
+pub async fn open_memory(db_config: DbConfig) -> Result<Db, Error> {
     Db::open(db_config).await
 }
 
 /// Open a durable store in the SQLite file at `path` (see [`open_memory`]).
 pub async fn open_file(
     db_config: DbConfig,
-    _config: &OpenConfig,
     path: &std::path::Path,
     options: crate::db::FileOptions,
 ) -> Result<Db, Error> {
@@ -617,6 +620,11 @@ impl<F: Future> Future for Parked<F> {
 /// A boxed binding future.
 pub type HostFuture<T> = Pin<Box<dyn Future<Output = HostResult<T>>>>;
 
+/// See [`Hooks::rejected`].
+/// Told of a refused upload no wait claimed; returns whether the refusal
+/// reached the application (a listener was there to take it).
+pub type RejectedHook = Box<dyn Fn(&TransactionId, &Error, bool, Option<Rc<Cell<bool>>>) -> bool>;
+
 /// Hooks a host gives the database it binds.
 #[derive(Default)]
 pub struct Hooks {
@@ -624,9 +632,11 @@ pub struct Hooks {
     pub progress: Progress,
     /// Asks the host for a tick: there is sync work to send or apply.
     pub schedule_tick: RefCell<Option<Box<dyn Fn()>>>,
-    /// Told of an upload the authority refused that no wait claimed, and
-    /// whether it was a serializable transaction.
-    pub rejected: RefCell<Option<Box<dyn Fn(&TransactionId, &Error, bool)>>>,
+    /// Told of an upload the authority refused that no wait claimed yet,
+    /// whether it was a serializable transaction, and the write's claim
+    /// if it has one: a wait the caller makes before the host delivers the
+    /// report (the task that wrote it ends) still claims it.
+    pub rejected: RefCell<Option<RejectedHook>>,
     /// Each uploaded write's claim, by commit seq: a wait sets it, and a
     /// dropped receipt leaves no one to claim it.
     claims: RefCell<BTreeMap<u64, Weak<Cell<bool>>>>,
@@ -665,24 +675,30 @@ impl Hooks {
 
     /// Tell [`Hooks::rejected`] of each refused upload no wait claimed.
     /// A relayed session's refused commit is reported under its own id.
-    fn report(&self, node: NodeUuid, rejections: Vec<crate::db::UpstreamRejection>) {
+    /// Returns the seqs of `node`'s own refusals that reached the
+    /// application, through a wait or the hook.
+    fn report(&self, node: NodeUuid, rejections: Vec<crate::db::UpstreamRejection>) -> Vec<u64> {
+        let mut delivered = Vec::new();
         for rejection in rejections {
             let (seq, error) = (rejection.seq, &rejection.error);
             let writer = NodeUuid::from_bytes(rejection.writer);
             let claim = (writer == node)
                 .then(|| self.claims.borrow_mut().remove(&seq))
-                .flatten();
-            if claim
-                .and_then(|claim| claim.upgrade())
-                .is_some_and(|claim| claim.get())
-            {
-                continue;
-            }
-            if let Some(rejected) = self.rejected.borrow().as_ref() {
+                .flatten()
+                .and_then(|claim| claim.upgrade());
+            let reached = if claim.as_ref().is_some_and(|claim| claim.get()) {
+                true
+            } else if let Some(rejected) = self.rejected.borrow().as_ref() {
                 let tx_id = TransactionId::from_committed_tx(TxId::new(TxTime(seq), writer));
-                rejected(&tx_id, error, rejection.serializable);
+                rejected(&tx_id, error, rejection.serializable, claim)
+            } else {
+                false
+            };
+            if reached && writer == node {
+                delivered.push(seq);
             }
         }
+        delivered
     }
 }
 
@@ -719,6 +735,7 @@ struct WriteResultPayload {
 /// A committed write as a binding returns it.
 #[derive(Clone, Debug)]
 pub struct Write {
+    node: NodeUuid,
     /// postcard `{ row_id, tx_id }`.
     pub payload: Vec<u8>,
     /// The written row (zero for a transaction commit).
@@ -755,6 +772,8 @@ pub struct Binding {
     /// Local-first accounts a backend admitted (see
     /// [`Binding::admit_local_first_session`]), by canonical author.
     admitted: Rc<RefCell<BTreeMap<String, SelfSignedProof>>>,
+    /// Whether the next tick reports the retry store's refusals again.
+    requeue: Rc<Cell<bool>>,
 }
 
 /// A Jazz self-signed proof of a local-first account.
@@ -782,6 +801,7 @@ impl Binding {
             refused: Rc::default(),
             bound: Rc::default(),
             admitted: Rc::default(),
+            requeue: Rc::new(Cell::new(true)),
         }
     }
 
@@ -908,6 +928,7 @@ impl Binding {
     fn receipt(&self, row_id: RowUuid, seq: u64) -> HostResult<Write> {
         let tx_id = TxId::new(TxTime(seq), self.node);
         Ok(Write {
+            node: self.node,
             payload: postcard::to_allocvec(&WriteResultPayload { row_id, tx_id })
                 .map_err(|error| HostError::Argument(error.to_string()))?,
             row_id,
@@ -1145,7 +1166,7 @@ impl Binding {
         let mut options = insert_options_as(options, &|bytes| self.author_of(bytes))?;
         options.identity = self.staged_identity(id, options.identity)?;
         let row = *options.row_id.get_or_insert_with(|| self.db.next_row_id());
-        let staged = block_on(self.db.mergeable_tx_ref(id).insert(table, cells, options));
+        let staged = block_on(self.db.tx_ref(id).insert(table, cells, options));
         self.staged(id, staged)?;
         Ok(row)
     }
@@ -1164,11 +1185,7 @@ impl Binding {
         let patch = decode_cells(patch)?;
         let mut options = update_options_as(options, &|bytes| self.author_of(bytes))?;
         options.identity = self.staged_identity(id, options.identity)?;
-        let staged = block_on(
-            self.db
-                .mergeable_tx_ref(id)
-                .update(table, row, patch, options),
-        );
+        let staged = block_on(self.db.tx_ref(id).update(table, row, patch, options));
         self.staged(id, staged)
     }
 
@@ -1186,11 +1203,7 @@ impl Binding {
         options.identity = self.staged_identity(id, options.identity)?;
         let row = row_uuid(row)?;
         let cells = decode_cells(cells)?;
-        let staged = block_on(
-            self.db
-                .mergeable_tx_ref(id)
-                .upsert(table, row, cells, options),
-        );
+        let staged = block_on(self.db.tx_ref(id).upsert(table, row, cells, options));
         self.staged(id, staged)
     }
 
@@ -1206,7 +1219,7 @@ impl Binding {
         let row = row_uuid(row)?;
         let mut options = delete_options_as(options, &|bytes| self.author_of(bytes))?;
         options.identity = self.staged_identity(id, options.identity)?;
-        let staged = block_on(self.db.mergeable_tx_ref(id).delete(table, row, options));
+        let staged = block_on(self.db.tx_ref(id).delete(table, row, options));
         self.staged(id, staged)
     }
 
@@ -1233,7 +1246,7 @@ impl Binding {
         };
         let staged = block_on(
             self.db
-                .mergeable_tx_ref(id)
+                .tx_ref(id)
                 .update_with_large_value_mutations(table, row, patch, mutations, options),
         );
         self.staged(id, staged)
@@ -1253,11 +1266,7 @@ impl Binding {
         let cells = cells.map(decode_cells).transpose()?;
         let mut options = restore_options_as(options, &|bytes| self.author_of(bytes))?;
         options.identity = self.staged_identity(id, options.identity)?;
-        let staged = block_on(
-            self.db
-                .mergeable_tx_ref(id)
-                .restore(table, row, cells, options),
-        );
+        let staged = block_on(self.db.tx_ref(id).restore(table, row, cells, options));
         self.staged(id, staged)
     }
 
@@ -1322,16 +1331,9 @@ impl Binding {
         };
         let hooks = Rc::clone(&self.hooks);
         Ok(Box::pin(self.parked(async move {
-            let mut read = std::pin::pin!(db.all_serialized_query(
-                &query,
-                opts,
-                open_tx,
-                admission,
-                author,
-                require_coverage,
-                expired,
-                |_| {},
-            ));
+            let coverage: Option<&dyn Fn() -> bool> = require_coverage.then_some(&expired);
+            let mut read =
+                std::pin::pin!(db.all_serialized_query(&query, opts, open_tx, admission, coverage));
             // A row whose large values are missing records their chunks for
             // the next send; ask for the tick that sends it, or the read
             // waits on unrelated sync traffic.
@@ -1471,6 +1473,9 @@ impl Binding {
     /// Resolve once `write` reached `tier`; fail at once with its
     /// rejection, if it was rejected.
     pub fn wait_for_write(&self, write: &Write, tier: &str) -> HostResult<HostFuture<()>> {
+        if self.node != write.node {
+            return Err("write belongs to a different database node".into());
+        }
         if let Some(error) = &write.rejected {
             binding_args::durability_tier(tier)?;
             let error = error.clone();
@@ -1489,13 +1494,60 @@ impl Binding {
         }))
     }
 
+    /// How many local commits still wait for the server's verdict.
+    pub fn pending_upload_count(&self) -> usize {
+        self.db.pending_upload_count()
+    }
+
     /// Apply received frames and send what is due; waits wake.
     pub async fn tick(&self) -> HostResult<()> {
         let result = self.db.tick().await;
-        self.hooks
-            .report(self.node, self.db.take_upstream_rejections());
+        // Refusals kept from before (a reopened store's, or ones no
+        // listener took) go out again first.
+        let requeued = if self.requeue.replace(false) {
+            self.db.requeue_rejected_transactions()
+        } else {
+            Ok(())
+        };
+        let rejections = self.db.take_upstream_rejections();
+        let delivered = self.hooks.report(self.node, rejections);
+        // Delivered: the retry store lets go of their payloads. One no
+        // listener took stays, for the next listener or the next open.
+        let discarded = delivered
+            .into_iter()
+            .try_for_each(|seq| self.db.discard_rejected_transaction(seq));
         self.hooks.progress.wake_all();
-        Ok(result?)
+        result?;
+        requeued?;
+        Ok(discarded?)
+    }
+
+    /// Report the refusals the retry store still holds again on the next
+    /// tick: the host now has a listener for them.
+    pub fn redeliver_rejections(&self) {
+        self.requeue.set(true);
+        self.hooks.schedule_tick();
+    }
+
+    /// The slow-query report due now: one line per slow query shape,
+    /// naming `app`: the first at once, then at most every 10 seconds. The host
+    /// writes the lines where it reports problems (`console.warn`).
+    pub fn take_slow_query_report(&self, app: Option<&str>) -> Vec<String> {
+        self.db.take_slow_query_report(app)
+    }
+
+    /// Report query runs of at least `ms` milliseconds; 0 turns the log
+    /// off.
+    pub fn set_slow_query_threshold_ms(&self, ms: f64) -> HostResult<()> {
+        if !ms.is_finite() || ms < 0.0 {
+            return Err(HostError::Argument(format!(
+                "slow query threshold must be a non-negative number of milliseconds, not {ms}"
+            )));
+        }
+        self.db.set_slow_query_threshold(
+            (ms > 0.0).then(|| std::time::Duration::from_secs_f64(ms / 1000.0)),
+        );
+        Ok(())
     }
 
     /// Make this store the optimistic, non-durable foreground of a durable

@@ -553,13 +553,10 @@ async fn run_reconnect_scalar_query(count: usize) {
                 |log| tasks.iter().all(|task| has_removed(log, *task)),
             )
             .await;
+            // Nothing watches a row that left every subscription: the
+            // resumed answer's listing evicts it rather than refreshing it.
             let cached = local_rows(&alice, Query::from("tasks")).await;
-            assert!(
-                tasks
-                    .iter()
-                    .all(|task| cached.iter().any(|(id, values)| id == task
-                        && values.contains(&Value::Text("after reconnect".into()))))
-            );
+            assert!(!cached.iter().any(|(id, _)| tasks.contains(id)));
             alice.shutdown().await.unwrap();
             bob.shutdown().await.unwrap();
             authority.shutdown().await;
@@ -567,15 +564,15 @@ async fn run_reconnect_scalar_query(count: usize) {
         .await;
 }
 
-/// Alice's retained scalar row converges from Core after bob's
-/// offline update. alice caches -> disconnect/drop -> bob updates -> reconnect
+/// Alice's retained scalar row is evicted, not left stale, after bob's
+/// offline update moves it out of her query. alice caches -> disconnect/drop -> bob updates -> reconnect
 #[tokio::test]
 async fn reconnect_scalar_query_revalidates_extra_local_input_at_core() {
     run_reconnect_scalar_query(1).await;
 }
 
 /// Alice's 65 retained roots require more than one bounded 64-ID probe batch.
-/// bob changes every root while alice is offline; every cached input refreshes.
+/// bob changes every root while alice is offline; every cached input is evicted.
 /// alice caches 65 -> offline -> bob changes 65 -> reconnect -> two batches
 #[tokio::test]
 async fn reconnect_scalar_reconciliation_continues_past_first_batch() {
@@ -769,9 +766,10 @@ async fn run_reconnect_revoked_input(dependency: bool, persistent: bool) {
                     |(_, values)| values.contains(&Value::Text("forbidden successor".into()))
                 ));
             }
+            // The control left the subscription, so the listing evicts it
+            // rather than refreshing it.
             let cached = local_rows(&alice, Query::from("tasks")).await;
-            assert!(cached.iter().any(|(id, values)| *id == tasks[1]
-                && values.contains(&Value::Text("readable control".into()))));
+            assert!(!cached.iter().any(|(id, _)| *id == tasks[1]));
             wait_for_subscription_update(
                 &mut local,
                 &mut local_log,

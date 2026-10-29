@@ -483,7 +483,7 @@ test("CI lint enforces SPEC issue links and propagates an unlinked question fail
 
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-spec-links-contract-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
-  for (const relative of ["dev/gates", "crates/jazz/SPEC", "crates/groove/SPEC"])
+  for (const relative of ["dev/gates", "crates/jazz/SPEC"])
     fs.mkdirSync(path.join(directory, relative), { recursive: true });
   fs.copyFileSync(
     path.join(root, "dev/gates/spec-open-questions.mjs"),

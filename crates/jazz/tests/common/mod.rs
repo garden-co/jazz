@@ -69,5 +69,13 @@ pub fn direct_subscription(
 #[track_caller]
 pub fn assert_serialization_conflict(error: &jazz::db::Error) {
     assert_eq!(error.code, jazz::db::ErrorCode::WriteRejected, "{error}");
+    // The reason crosses the sync wire with the rejection; the message
+    // keeps the text earlier bindings matched.
+    assert_eq!(
+        error.reason,
+        Some(jazz::db::Reason::SerializationConflict),
+        "{error}"
+    );
+    assert!(error.is_serialization_conflict(), "{error}");
     assert!(error.message.contains("SerializationConflict"), "{error}");
 }

@@ -137,6 +137,9 @@ struct Conn {
     identity: AuthorSubject,
     claims: Option<BTreeMap<String, Value>>,
     schema: Option<SyncMessage>,
+    /// The schema versions the client holds (`Holds`), replayed on each
+    /// link like the schema so every shard sends its catalogue.
+    holds: Option<SyncMessage>,
     links: HashMap<usize, ShardLink>,
     /// Where each subscription, read and commit of this client went.
     subs: HashMap<u64, usize>,
@@ -383,6 +386,7 @@ fn cmp_cells(a: Option<&jazz::db::SyncCell>, b: Option<&jazz::db::SyncCell>) -> 
         Some(Int(_)) | Some(Real(_)) => 1,
         Some(Text(_)) => 2,
         Some(Blob(_)) => 3,
+        Some(Large(_)) | Some(Delta(_)) => 4,
     };
     match (a, b) {
         (Some(Int(x)), Some(Int(y))) => x.cmp(y),
@@ -416,6 +420,7 @@ impl Gateway {
             identity,
             claims: None,
             schema: None,
+            holds: None,
             links: HashMap::new(),
             subs: HashMap::new(),
             fetches: HashMap::new(),
@@ -457,6 +462,9 @@ impl Gateway {
             );
             if let Some(schema) = &conn.schema {
                 ours.send(schema.clone()).unwrap();
+            }
+            if let Some(holds) = &conn.holds {
+                ours.send(holds.clone()).unwrap();
             }
             stats.links_opened += 1;
             conn.links.insert(
@@ -541,6 +549,10 @@ fn route_up(
     match message {
         SyncMessage::Schema { .. } => {
             conn.schema = Some(message.clone());
+            conn.links.keys().map(|&s| (s, message.clone())).collect()
+        }
+        SyncMessage::Holds { .. } => {
+            conn.holds = Some(message.clone());
             conn.links.keys().map(|&s| (s, message.clone())).collect()
         }
         SyncMessage::Hold { rows } => {
@@ -635,6 +647,7 @@ fn route_up(
             include_deleted,
             tier,
             wait,
+            view,
         } => {
             let Some(shard) = pinned_shard(&query, &binding, shards) else {
                 let why = unmergeable(&query).or_else(|| {
@@ -662,6 +675,7 @@ fn route_up(
                             include_deleted,
                             tier,
                             wait,
+                            view: view.clone(),
                         };
                         (s, message)
                     })
@@ -679,6 +693,7 @@ fn route_up(
                     include_deleted,
                     tier,
                     wait,
+                    view,
                 },
             )]
         }
@@ -690,6 +705,10 @@ fn route_up(
             author,
             session,
             expect,
+            deltas,
+            sources,
+            bases,
+            origin,
         } => {
             let touched: HashSet<usize> = ops
                 .iter()
@@ -704,13 +723,21 @@ fn route_up(
                     let _ = conn.client.send(SyncMessage::Fate {
                         tx,
                         through: 0,
-                        result: Err(jazz::db::WireError::Rejected(
-                            "a serializable transaction across partitions is not supported by this gateway yet"
-                                .into(),
-                        )),
+                        result: Err(jazz::db::WireError::Rejected {
+reason: None,
+message: "a serializable transaction across partitions is not supported by this gateway yet".into(),
+}),
                         held: Vec::new(),
                         global: true,
                     });
+                    return Vec::new();
+                }
+                // Large values travel per shard; the spike's cross path
+                // carries none, and drops conflict bases (mergeable only).
+                if !deltas.is_empty() || !sources.is_empty() {
+                    stats
+                        .refused
+                        .push(format!("commit {tx}: large values across partitions"));
                     return Vec::new();
                 }
                 // A resend of a cross commit already in flight changes nothing.
@@ -796,6 +823,10 @@ fn route_up(
                     author,
                     session,
                     expect,
+                    deltas,
+                    sources,
+                    bases,
+                    origin,
                 },
             )]
         }
@@ -867,6 +898,10 @@ fn part_commit(
         author: author.clone(),
         session: session.clone(),
         expect: Vec::new(),
+        deltas: Vec::new(),
+        sources: Vec::new(),
+        bases: Vec::new(),
+        origin: None,
     }
 }
 
@@ -974,9 +1009,12 @@ fn merge_down(
                         return vec![SyncMessage::Fate {
                             tx,
                             through: 0,
-                            result: Err(jazz::db::WireError::Rejected(
-                                "a write of this cross-partition transaction is not allowed".into(),
-                            )),
+                            result: Err(jazz::db::WireError::Rejected {
+                                reason: None,
+                                message:
+                                    "a write of this cross-partition transaction is not allowed"
+                                        .into(),
+                            }),
                             held: Vec::new(),
                             global: true,
                         }];
@@ -1427,7 +1465,7 @@ fn cross_write(w: &World, alice: usize) {
     let tx = jazz::tools::OpenTransactionId::new();
     block_on(db.begin_mergeable(tx)).unwrap();
     for (tag, n) in [(ROOM_A, 1), (ROOM_B, 2)] {
-        block_on(db.mergeable_tx_ref(tx).insert(
+        block_on(db.tx_ref(tx).insert(
             "messages",
             cells(&[
                 ("room", Value::Uuid(row(tag, 0).0)),

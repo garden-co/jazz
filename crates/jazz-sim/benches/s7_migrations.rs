@@ -2,13 +2,15 @@
 //! has moved along a schema chain.
 //!
 //! v1 `todos(title)` -> v2 renames `title` to `name` -> v3 adds `priority`
-//! (default 0) -> v4 renames the table to `tasks`. Clients on v1 and v4
-//! write live; a v1 client that was offline since before the chain lands
-//! its queued write after the authority reached v4.
+//! (default 0) -> v4 renames the table to `tasks` and copies `name` into
+//! `search_name`. Clients on v1 and v4 write live; a v1 client that was
+//! offline since before the chain lands its queued write after the
+//! authority reached v4.
 //!
 //! Gates: every version reads the same rows under its own names, at the
-//! authority and on each client; the offline write is translated; a lens
-//! op SQLite does not support is refused with an explicit error.
+//! authority and on each client; the offline write is translated; the copy
+//! holds the seeded titles and the titles of rows v1 inserts, and stays a
+//! column of its own: a write of the title leaves it.
 
 use std::collections::BTreeMap;
 use std::time::Instant;
@@ -42,7 +44,7 @@ pub fn smoke() {
     run(0x5700_0001, 8, false);
 }
 
-fn todos(table: &str, title: &str, priority: bool) -> JazzSchema {
+fn todos(table: &str, title: &str, priority: bool, copy: bool) -> JazzSchema {
     let mut builder = TableSchemaBuilder::new(table).column(title, ColumnType::Text);
     if priority {
         builder = builder.column_with_default(
@@ -51,6 +53,9 @@ fn todos(table: &str, title: &str, priority: bool) -> JazzSchema {
             jazz::tools::Value::BigInt(0),
         );
     }
+    if copy {
+        builder = builder.column("search_name", ColumnType::Text);
+    }
     compile(
         &SchemaBuilder::new()
             .table(builder.policies(allow_all()))
@@ -58,13 +63,37 @@ fn todos(table: &str, title: &str, priority: bool) -> JazzSchema {
     )
 }
 
-/// The chain: (schema, table name, title column, has priority).
-fn chain() -> Vec<(JazzSchema, &'static str, &'static str, bool)> {
+/// The chain: (schema, table name, title column, has priority and copy).
+fn chain() -> Vec<(JazzSchema, &'static str, &'static str, bool, bool)> {
     vec![
-        (todos("todos", "title", false), "todos", "title", false),
-        (todos("todos", "name", false), "todos", "name", false),
-        (todos("todos", "name", true), "todos", "name", true),
-        (todos("tasks", "name", true), "tasks", "name", true),
+        (
+            todos("todos", "title", false, false),
+            "todos",
+            "title",
+            false,
+            false,
+        ),
+        (
+            todos("todos", "name", false, false),
+            "todos",
+            "name",
+            false,
+            false,
+        ),
+        (
+            todos("todos", "name", true, false),
+            "todos",
+            "name",
+            true,
+            false,
+        ),
+        (
+            todos("tasks", "name", true, true),
+            "tasks",
+            "name",
+            true,
+            true,
+        ),
     ]
 }
 
@@ -109,15 +138,25 @@ fn lenses(schemas: &[JazzSchema]) -> Vec<MigrationLens> {
                 default: Value::I64(0),
             }],
         ),
-        lens(&schemas[2], &schemas[3], "todos", "tasks", vec![]),
+        lens(
+            &schemas[2],
+            &schemas[3],
+            "todos",
+            "tasks",
+            vec![LensOp::CopyColumn {
+                from: "name".into(),
+                to: "search_name".into(),
+            }],
+        ),
     ]
 }
 
-/// What a version reads for each row: its title column, and priority
-/// where it has one.
+/// What a version reads for each row: its title column, and priority and
+/// the copy where it has them.
 fn expected(
-    version: &(JazzSchema, &'static str, &'static str, bool),
+    version: &(JazzSchema, &'static str, &'static str, bool, bool),
     titles: &BTreeMap<RowUuid, String>,
+    searches: &BTreeMap<RowUuid, String>,
 ) -> Rows {
     titles
         .iter()
@@ -125,6 +164,9 @@ fn expected(
             let mut values = cells([(version.2, text(title.clone()))]);
             if version.3 {
                 values.insert("priority".to_owned(), int(0));
+            }
+            if version.4 {
+                values.insert("search_name".to_owned(), text(searches[id].clone()));
             }
             (*id, values)
         })
@@ -144,6 +186,8 @@ fn run(seed: u64, rows: usize, emit: bool) {
     sim.add("core", core);
     let link = PeerProfile::new("s7", 2, 1, 0);
     let mut titles: BTreeMap<RowUuid, String> = BTreeMap::new();
+    // What v4's copy holds: the title a row was seeded or inserted with.
+    let mut searches: BTreeMap<RowUuid, String> = BTreeMap::new();
 
     // An offline v1 client queues a write before the authority migrates.
     sim.add("offline-v1", open(schemas[0].clone(), 5, user(5)));
@@ -157,6 +201,7 @@ fn run(seed: u64, rows: usize, emit: bool) {
         cells([("title", text("offline-v1"))]),
     );
     titles.insert(queued, "offline-v1".to_owned());
+    searches.insert(queued, "offline-v1".to_owned());
 
     // Seed rows on v1, then move the authority along the chain.
     for n in 0..rows {
@@ -167,6 +212,7 @@ fn run(seed: u64, rows: usize, emit: bool) {
             cells([("title", text(format!("seed-{n}")))]),
         );
         titles.insert(row(0x71, n as u64), format!("seed-{n}"));
+        searches.insert(row(0x71, n as u64), format!("seed-{n}"));
     }
     let migrate = Instant::now();
     for (step, lens) in lenses(&schemas).into_iter().enumerate() {
@@ -204,15 +250,21 @@ fn run(seed: u64, rows: usize, emit: bool) {
     );
     settle(&sim, sim.db("writer-v1"), &handle);
     titles.insert(v1_row, "live-v1".to_owned());
+    searches.insert(v1_row, "live-v1".to_owned());
     let v4_row = row(0x70, 4);
     let handle = insert(
         sim.db("writer-v4"),
         "tasks",
         v4_row,
-        cells([("name", text("live-v4")), ("priority", int(0))]),
+        cells([
+            ("name", text("live-v4")),
+            ("priority", int(0)),
+            ("search_name", text("live-v4")),
+        ]),
     );
     settle(&sim, sim.db("writer-v4"), &handle);
     titles.insert(v4_row, "live-v4".to_owned());
+    searches.insert(v4_row, "live-v4".to_owned());
     // Each writer edits the other's row under its own names.
     sim.settle();
     v1_live.poll();
@@ -264,7 +316,7 @@ fn run(seed: u64, rows: usize, emit: bool) {
         }
         assert_eq!(
             read,
-            expected(version, &titles),
+            expected(version, &titles, &searches),
             "the authority reads v{} correctly",
             index + 1
         );
@@ -279,37 +331,19 @@ fn run(seed: u64, rows: usize, emit: bool) {
     offline_live.poll();
     assert_eq!(
         v1_live.rows,
-        expected(&versions[0], &titles),
+        expected(&versions[0], &titles, &searches),
         "the v1 writer converged"
     );
     assert_eq!(
         offline_live.rows,
-        expected(&versions[0], &titles),
+        expected(&versions[0], &titles, &searches),
         "the late v1 client converged"
     );
     assert_eq!(
         v4_live.rows,
-        expected(&versions[3], &titles),
+        expected(&versions[3], &titles, &searches),
         "the v4 writer converged"
     );
-
-    // A lens op SQLite does not support yet is an explicit error.
-    let copy = lens(
-        &schemas[3],
-        &todos("tasks", "label", true),
-        "tasks",
-        "tasks",
-        vec![LensOp::CopyColumn {
-            from: "name".into(),
-            to: "label".into(),
-        }],
-    );
-    let error = block_on(
-        sim.db("core")
-            .activate_schema_with_lenses(todos("tasks", "label", true), &[copy]),
-    )
-    .expect_err("CopyColumn is refused");
-    assert!(error.message.contains("not supported"), "{error}");
 
     if emit {
         let mut fields = sim.json_fields();

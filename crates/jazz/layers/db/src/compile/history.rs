@@ -120,10 +120,12 @@ impl Ctx<'_> {
             projection,
             tables: self.tables,
             aggregate: false,
+            large_group: false,
             joined: 0,
             versioned: true,
             union: false,
             preps: self.preps,
+            partial: Vec::new(),
         })
     }
     /// The versions of the rows of `source` that `bound` names, as a SQL
@@ -173,11 +175,6 @@ impl Ctx<'_> {
         }
         if let Some(session) = self.policy {
             gate.push(self.read_policy(table, "a", session)?);
-        }
-        // A synced read follows the server: once it stops listing the
-        // current row, the row's versions leave the result too.
-        if self.members_only {
-            gate.push(self.listed(table, "a"));
         }
         keep.push(format!(
             "EXISTS (SELECT 1 FROM {name} AS a WHERE {})",
@@ -239,6 +236,7 @@ pub(super) fn versions_table(table: &Table) -> Table {
             ty,
             default: None,
             json: false,
+            json_type: None,
             merge: Default::default(),
         });
     }
@@ -251,6 +249,7 @@ pub(super) fn versions_table(table: &Table) -> Table {
             ty: ValueType::Nullable(Box::new(ValueType::U64)),
             default: None,
             json: false,
+            json_type: None,
             merge: Default::default(),
         });
     }
@@ -288,7 +287,7 @@ pub(super) fn bounding_id(predicate: &Predicate) -> Option<&Predicate> {
     }
 }
 
-/// Main's wording for a history shape it does not read yet.
+/// The error for a history shape that is not supported yet.
 fn history_unsupported(pattern: &str) -> Error {
     query_error(format!(
         "unsupported relation query: Reading {pattern} is not supported in history queries yet"

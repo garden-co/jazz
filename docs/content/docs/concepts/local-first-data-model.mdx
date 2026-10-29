@@ -114,7 +114,12 @@ write replaces the values its writer had seen, and when two writers changed the 
 same starting point, the [edit Core receives first wins](/docs/concepts/how-sync-works#concurrent-edits).
 
 If two peers update different fields, both changes can still be preserved in the resulting visible
-row state. Even row versions that lose out in the current visible result remain in row history, so
+row state. Fields with a [merge strategy](/docs/reference/internals#merge-strategies) go further and
+combine concurrent edits to the same field: a counter adds them up, and a
+[text merge column](/docs/schemas/column-types#mergeable-text-columns) keeps both people's edits to
+different parts of the text. Only Core merges text; where both replaced the same words, the edit
+Core receives later wins that part
+([details](/docs/concepts/how-sync-works#text-merges)). Even row versions that lose out in the current visible result remain in row history, so
 no local-first reconciliation information is discarded.
 
 <Callout type="warn" title="Beware of unexpected results">

@@ -2027,6 +2027,56 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     await expect(bobDenied).rejects.toThrow("authorization_denied");
   }, 15_000);
 
+  it("rejects a session write stamped too far ahead of the authority's clock with its own code", async () => {
+    globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
+
+    const { NapiDb } = await loadNapiModule();
+    const appId = "00000000-0000-0000-0000-00000000d00a";
+    server = await startLocalJazzServer({
+      appId,
+      inMemory: true,
+      backendSecret: "core-napi-clock-skew-backend",
+      adminSecret: "core-napi-clock-skew-admin",
+      schema: OWNED_TODOS_SCHEMA,
+      permissions: { todos: OWNED_TODOS_SCHEMA.todos.policies! },
+    });
+
+    const runtime = new NativeRuntimeAdapter(
+      { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
+      OWNED_TODOS_SCHEMA,
+      deterministicBytes("jazz-napi-native-runtime-clock-skew:node"),
+      testAuthorBytes("jazz-napi-native-runtime-clock-skew:author"),
+      13,
+      true,
+    );
+    runtimes.push(runtime);
+    runtime.connect(
+      webSocketUrl(server.url, appId),
+      JSON.stringify({ backend_secret: server.backendSecret }),
+    );
+
+    // An hour ahead: far beyond the authority's skew tolerance.
+    const future = runtime.insert(
+      "todos",
+      {
+        title: { type: "Text", value: "from the future" },
+        done: { type: "Boolean", value: false },
+        owner_id: { type: "Text", value: ALICE_ID },
+      },
+      JSON.stringify({
+        session: testExternalSession(ALICE_ID),
+        updated_at: Date.now() + 3_600_000,
+      }),
+    );
+    const refused = runtime.waitForTransaction(await committedTxId(future), "global");
+    await expect(refused).rejects.toMatchObject({
+      kind: "rejected",
+      code: "client_clock_too_far_ahead",
+      reason: "Client clock is too far ahead",
+    });
+    await expect(refused).rejects.toThrow("client_clock_too_far_ahead");
+  }, 15_000);
+
   it("keeps persistent client-local session writes optimistic until the authority rejects them", async () => {
     globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
 

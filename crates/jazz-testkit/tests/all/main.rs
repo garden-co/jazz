@@ -22,6 +22,8 @@ mod catalogue_sync_integration;
 mod claims_merge_integration;
 #[path = "../client_storage_shutdown_integration.rs"]
 mod client_storage_shutdown_integration;
+#[path = "../client_tick_driver.rs"]
+mod client_tick_driver;
 #[path = "../clients_sync.rs"]
 mod clients_sync;
 #[path = "../compatible_deployment.rs"]

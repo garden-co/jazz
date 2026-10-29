@@ -467,12 +467,17 @@ describe("typed app prototype", () => {
                 },
               },
               {
-                label: "derived:107bcfc3905e1cbe15814d71882c4e518afdcf4d1137d36dd28e58ed8d8ac8d9",
+                label: "derived:542367f64bd5953a37a1d016b833a4a4539f4fe6937567e2aafb939f42bba6d8",
                 input: {
                   table: "teams",
                   conditions: [],
                   hops: [],
                   gather: {
+                    seed: {
+                      table: "teams",
+                      conditions: [{ column: "name", op: "eq", value: "admins" }],
+                      hops: [],
+                    },
                     max_depth: 2,
                     step_table: "team_edges",
                     step_current_column: "child_team",

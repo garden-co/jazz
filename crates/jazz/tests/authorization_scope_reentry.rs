@@ -1,4 +1,3 @@
-// Ported verbatim from crates/jazz/tests; only the Db facade imports are swapped.
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::common;
@@ -12,7 +11,10 @@ use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query};
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
-use jazz::tools::{ColumnType as PublicColumnType, SchemaBuilder, TableSchemaBuilder};
+use jazz::tools::{
+    CmpOp, ColumnType as PublicColumnType, PolicyExpr, PolicyValue, SchemaBuilder,
+    TableSchemaBuilder,
+};
 
 use common::{
     allow_all_policies, compile_schema, exists, outer_eq, read_and_allow_all_writes, session_eq,
@@ -535,11 +537,16 @@ fn maintained_authorization_restores_an_ordered_page_after_scope_reentry() {
     assert_eq!(maintained, BTreeSet::from([winner, second]));
 }
 
-#[cfg(any())] // jazz-sqlite: not ported, mutates Groove's compiled read-policy Query in place
+/// The store's own client-local subscription does not evaluate read
+/// policies; a subscription served for an identity does. Alice's local
+/// subscription to `items` sees her row although the read policy admits no
+/// one, while the same query served for her identity sees nothing. A read
+/// policy the serving side could not evaluate never reaches a store: the
+/// schema that declares it does not compile.
 #[test]
-fn client_subscription_skips_policy_only_compile_validation_but_identity_subscription_guards_it() {
-    let schema = compile_schema(
-        &SchemaBuilder::new()
+fn client_subscription_skips_read_policy_evaluation_but_identity_subscription_applies_it() {
+    let items = |read: PolicyExpr| {
+        SchemaBuilder::new()
             .table(
                 TableSchemaBuilder::new("profiles")
                     .column("name", PublicColumnType::Text)
@@ -549,13 +556,26 @@ fn client_subscription_skips_policy_only_compile_validation_but_identity_subscri
                 TableSchemaBuilder::new("items")
                     .column("name", PublicColumnType::Text)
                     .fk_column("profile", "profiles")
-                    .policies(allow_all_policies()),
+                    .policies(read_and_allow_all_writes(read)),
             )
-            .build(),
+            .build()
+    };
+    // Ordering comparisons against the author record have no meaning.
+    let unevaluable = PolicyExpr::Cmp {
+        column: "$createdBy".to_owned(),
+        op: CmpOp::Lt,
+        value: PolicyValue::SessionRef(vec!["user".to_owned()]),
+    };
+    let error = JazzSchema::new(&items(unevaluable))
+        .expect_err("an unevaluable read policy is rejected when the schema compiles");
+    assert!(
+        format!("{error:?}").contains("items.policies.select"),
+        "{error:?}"
     );
+
     let db = block_on(Db::open(
         DbConfig::new(
-            schema,
+            compile_schema(&items(PolicyExpr::False)),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x82; 16]),
                 author: writer(),
@@ -563,26 +583,41 @@ fn client_subscription_skips_policy_only_compile_validation_but_identity_subscri
         )
         .with_id_source(SeededRowIdSource::new(0x8200)),
     ))
-    .expect("open client subscription validation fixture");
-    db.mutate_current_compiled_schema_for_test(|compiled| {
-        compiled
-            .tables
-            .iter_mut()
-            .find(|table| table.name == "items")
-            .expect("items table")
-            .read_policy = Some(Query::from("items").include("profile"));
-    });
+    .expect("open client subscription policy fixture");
+    let profile = row(0x82);
+    let item = row(0x83);
+    block_on(db.insert(
+        "profiles",
+        BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+        InsertOptions {
+            row_id: Some(profile),
+            ..Default::default()
+        },
+    ))
+    .expect("insert profile");
+    block_on(db.insert(
+        "items",
+        BTreeMap::from([
+            ("name".to_owned(), Value::String("notes".to_owned())),
+            ("profile".to_owned(), Value::Uuid(profile.0)),
+        ]),
+        InsertOptions {
+            row_id: Some(item),
+            ..Default::default()
+        },
+    ))
+    .expect("insert item");
     let prepared = db
         .prepare_query(&Query::from("items"))
         .expect("prepare items query");
 
-    let client = block_on(db.subscribe(&prepared, opts()));
-    if let Err(error) = client {
-        panic!("client-local subscription must skip serving-only policy compilation: {error:?}");
-    }
-    let trusted = block_on(db.subscribe_for_identity(&prepared, opts(), writer()));
+    let mut client = block_on(db.subscribe(&prepared, opts()))
+        .expect("client-local subscription opens without evaluating read policies");
+    assert_eq!(initial_rows(&mut client), BTreeSet::from([item]));
+    let mut served = block_on(db.subscribe_for_identity(&prepared, opts(), writer()))
+        .expect("identity subscription opens");
     assert!(
-        trusted.is_err(),
-        "trusted-serving subscription must continue to validate policy dependencies"
+        initial_rows(&mut served).is_empty(),
+        "the identity subscription applies the read policy"
     );
 }

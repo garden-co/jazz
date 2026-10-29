@@ -69,6 +69,7 @@ it("disconnects before any query and reconnects using only native credentials", 
           configured: true,
           explicitlyOffline: true,
           connected: false,
+          authRejected: null,
         });
         let globallyAccepted = false;
         const global = write.wait({ tier: "global" }).then(() => {

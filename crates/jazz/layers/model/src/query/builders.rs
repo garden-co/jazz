@@ -124,6 +124,7 @@ impl Query {
             limit: None,
             offset: 0,
             relation: None,
+            partial: Vec::new(),
         }
     }
 
@@ -569,6 +570,20 @@ impl Query {
     /// Add a correlated relation array subquery.
     pub fn array_subquery(mut self, subquery: ArraySubquery) -> Self {
         self.array_subqueries.push(subquery);
+        self
+    }
+
+    /// Select `column` read only in `part` (SPEC 19.12): the result holds
+    /// that part, and only the chunks it covers are read.
+    pub fn select_part(mut self, column: impl Into<String>, part: Part) -> Self {
+        let column = column.into();
+        if let Some(select) = &mut self.select
+            && !select.contains(&column)
+        {
+            select.push(column.clone());
+        }
+        self.partial.retain(|selected| selected.column != column);
+        self.partial.push(PartialSelect { column, part });
         self
     }
 

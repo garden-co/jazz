@@ -8,6 +8,8 @@ export class JazzLifecycle {
   private client: JazzClient | undefined;
   private activePrincipal: string | undefined;
   private activeSessionId: string | undefined;
+  /** The session whose enrollment completed, even if its reconciliation was superseded. */
+  private enrolledSessionId: string | undefined;
   private chain = Promise.resolve();
   private closed = false;
   /** Bumped by close() and transition(), which cancel reconciliations queued before them. */
@@ -50,8 +52,14 @@ export class JazzLifecycle {
       const current = this.accounts.getLoggedIn();
       // A Better Auth session is an authentication boundary even if its `sub`
       // repeats: loginJWT validates and selects the issuer/sub handle anew.
-      if (current?.identity.subject !== principal || this.activeSessionId !== sessionId)
+      const enrolled = this.activeSessionId === sessionId || this.enrolledSessionId === sessionId;
+      if (current?.identity.subject !== principal || !enrolled) {
         await enroll(this.accounts);
+        // A close and remount during the enrollment supersede this
+        // reconciliation, but the next one reuses its enrollment: registering
+        // the same identity twice fails.
+        this.enrolledSessionId = sessionId;
+      }
       if (epoch !== this.epoch || this.requestedSessionId !== sessionId) return;
       await this.openSelected(principal, sessionId);
     });
@@ -68,6 +76,7 @@ export class JazzLifecycle {
     this.cancelReconciliation();
     return this.enqueue(async () => {
       await this.closeCurrent(true);
+      this.enrolledSessionId = undefined;
       await action(this.accounts);
     });
   }

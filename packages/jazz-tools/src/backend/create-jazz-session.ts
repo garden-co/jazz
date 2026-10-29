@@ -134,6 +134,7 @@ class NodeUserRuntimeSource extends RuntimeSource {
           : {}),
         selfSignedClientProof: selfSignedClientProofFromConfig(config, session),
         readAuthorizationHost: "client-local",
+        slowQueryLog: { appId: this.host.appId, thresholdMs: this.host.slowQueryThresholdMs },
       },
     );
     const context: AppContext = { ...config, schema: runtimeSchema };

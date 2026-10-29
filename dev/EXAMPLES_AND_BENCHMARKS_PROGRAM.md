@@ -113,7 +113,7 @@ row may be deferred only with a named blocker and a focused substitute check.
 | Client ↔ edge ↔ global service                  | Sync, permissions, reconnect/resume, and server-side reads where applicable.       |
 | Offline edit → reconnect                        | Convergence plus authorization/rejection behavior.                                 |
 | Edge or worker restart during subscription      | Recovery without duplicate, missing, or unauthorized visible state.                |
-| Native RocksDB restart                          | Persistent data, subscriptions, and recovery behavior.                             |
+| Native client restart                           | Persistent data, subscriptions, and recovery behavior.                             |
 | Native SQLite relay/server restart              | Server persistence and reconnection behavior.                                      |
 | React Native client through native SQLite relay | Included when the runtime supports the app's required persistence/device features. |
 

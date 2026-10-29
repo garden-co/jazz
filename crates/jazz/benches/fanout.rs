@@ -1,8 +1,7 @@
 //! Server fan-out under load: many identities subscribed on one Db, then
-//! commits that touch a few, some or all of them. Built twice from one
-//! scenario (benches/fanout_scenario.rs).
-//! Reports subscribe cost, memory, and per-commit
-//! latency including invalidation and delta delivery.
+//! commits that touch a few, some or all of them (benches/fanout_scenario.rs).
+//! Reports subscribe cost, memory, and per-commit latency including
+//! invalidation and delta delivery.
 //!
 //! `USERS=1000 cargo bench --bench fanout`
 
@@ -37,10 +36,8 @@ pub fn rss_kib() -> u64 {
         * 4
 }
 
-mod engine {
-    use jazz::db;
-    include!("fanout_scenario.rs");
-}
+#[path = "fanout_scenario.rs"]
+mod scenario;
 
 fn main() {
     let env = |k: &str, d: usize| {
@@ -57,7 +54,7 @@ fn main() {
         messages_per_room: env("MESSAGES_PER_ROOM", 20),
         ops: env("OPS", 50),
     };
-    let report = engine::run(&cfg);
+    let report = scenario::run(&cfg);
     println!(
         "users={} rooms={} subs={} subscribe_total={:?} ({:?}/sub) rss_delta={} KiB ({} B/sub)",
         cfg.users,

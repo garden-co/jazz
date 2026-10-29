@@ -1,4 +1,3 @@
-// Ported verbatim from crates/jazz/tests; only the Db facade imports are swapped.
 //! One-shot Global UUID pages remain exact after authorization and deletion.
 //! The fixture uses public schema, mutation, and read APIs; expected IDs are
 //! independent of the query engine's complete-source plan.
@@ -59,7 +58,7 @@ fn insert(db: &Db, id: u8, owner: AuthorSubject) {
             other => panic!("unexpected fixture value: {other:?}"),
         })
         .collect::<BTreeMap<_, _>>();
-    let written = block_on(db.insert(
+    block_on(db.insert(
         "documents",
         cells,
         InsertOptions {
@@ -68,8 +67,6 @@ fn insert(db: &Db, id: u8, owner: AuthorSubject) {
         },
     ))
     .expect("insert document");
-    db.finalize_local_mergeable_commit_for_test(written.mergeable_tx_id())
-        .expect("settle document on authority");
 }
 
 fn page(db: &Db, identity: AuthorSubject, limit: usize) -> Vec<RowUuid> {
@@ -107,10 +104,8 @@ fn global_uuid_page_skips_hidden_and_deleted_prefix_rows() {
     assert_eq!(page(&db, reader(), 3), [row(2), row(4), row(6)]);
     assert_eq!(page(&db, other_reader(), 3), [row(1), row(3), row(5)]);
 
-    let deleted = block_on(db.delete("documents", row(2), Default::default()))
+    block_on(db.delete("documents", row(2), Default::default()))
         .expect("delete first visible document");
-    db.finalize_local_mergeable_commit_for_test(deleted.mergeable_tx_id())
-        .expect("settle deletion on authority");
     assert_eq!(page(&db, reader(), 3), [row(4), row(6), row(8)]);
     assert_eq!(page(&db, reader(), 20).len(), 9);
 }

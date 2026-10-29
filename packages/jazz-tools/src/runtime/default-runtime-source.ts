@@ -13,7 +13,10 @@ import {
   type RuntimeTelemetryContext,
   type RuntimeTokenOptions,
 } from "./runtime-source.js";
-import { NativeRuntimeAdapter } from "./native-runtime/native-runtime-adapter.js";
+import {
+  NativeRuntimeAdapter,
+  type SlowQueryLogOptions,
+} from "./native-runtime/native-runtime-adapter.js";
 import type { NativeSelfSignedClientProof } from "./native-runtime/native-codec.js";
 import {
   SharedBrowserForegroundNodeLease,
@@ -206,6 +209,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       !browserMode,
       selfSignedClientProof,
       backendMode,
+      { appId: config.appId, thresholdMs: config.slowQueryThresholdMs },
     );
     if (foregroundNodeLease) {
       mainThreadPeerRuntime.seedForegroundTxTimeHighWater(foregroundNodeLease.confirmedTxTime);
@@ -327,6 +331,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         selfSignedClientProof,
         initialSyncFlushEvery: initialSyncFlushEvery(config),
         appId: config.appId,
+        slowQueryThresholdMs: config.slowQueryThresholdMs,
         storageOwner: createBrowserStorageOwner(config),
         authSessionKey: createBrowserAuthSessionKey(config),
         serverUrl: config.serverUrl ? httpUrlToWs(config.serverUrl, config.appId) : undefined,
@@ -388,6 +393,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     historyComplete: boolean,
     selfSignedClientProof?: NativeSelfSignedClientProof,
     backendMode = false,
+    slowQueryLog?: SlowQueryLogOptions,
   ): NativeRuntimeAdapter {
     if (!this.ownerRuntime || this.ownerRuntime.isClosed()) {
       this.ownerRuntime = new NativeRuntimeAdapter(
@@ -397,7 +403,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         author,
         1,
         historyComplete,
-        { initialSyncFlushEvery: flushEvery, selfSignedClientProof, backendMode },
+        { initialSyncFlushEvery: flushEvery, selfSignedClientProof, backendMode, slowQueryLog },
       );
       return this.ownerRuntime;
     }

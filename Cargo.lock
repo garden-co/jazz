@@ -2088,6 +2088,7 @@ dependencies = [
  "codspeed-divan-compat",
  "jazz",
  "jazz-benchmark-guard",
+ "jazz-native-relay",
  "tempfile",
  "zstd",
 ]
@@ -2281,6 +2282,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
+ "flate2",
  "futures",
  "futures-util",
  "hex",

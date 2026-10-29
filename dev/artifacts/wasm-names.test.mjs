@@ -45,13 +45,13 @@ function moduleWithNames(names) {
 
 test("drops only the legacy mangling hash from function names", () => {
   const before = moduleWithNames([
-    "jazz_node::node::NodeState<S>::cache_tx_versions::h1f0c2a3b4c5d6e7f",
+    "jazz_db::db::Db::insert::h1f0c2a3b4c5d6e7f",
     "core::ptr::drop_in_place<jazz_types::ids::RowUuid>::h0123456789abcdef",
     "__wbindgen_malloc",
     "not_a_hash::h12345",
   ]);
   const after = moduleWithNames([
-    "jazz_node::node::NodeState<S>::cache_tx_versions",
+    "jazz_db::db::Db::insert",
     "core::ptr::drop_in_place<jazz_types::ids::RowUuid>",
     "__wbindgen_malloc",
     "not_a_hash::h12345",

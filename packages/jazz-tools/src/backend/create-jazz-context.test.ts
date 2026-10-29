@@ -276,6 +276,7 @@ describe("backend/create-jazz-context", () => {
         persistentPath: "/tmp/jazz.db",
         readAuthorizationHost: "trusted-serving",
         backendMode: true,
+        slowQueryLog: { appId: "server-app", thresholdMs: undefined },
       },
     );
   });
@@ -724,7 +725,11 @@ describe("backend/create-jazz-context", () => {
       expect.any(Uint8Array),
       1,
       true,
-      { readAuthorizationHost: "trusted-serving", backendMode: true },
+      {
+        readAuthorizationHost: "trusted-serving",
+        backendMode: true,
+        slowQueryLog: { appId: "server-app", thresholdMs: undefined },
+      },
     );
   });
 

@@ -178,8 +178,21 @@ fn native_transport_error(error: WebSocketClientError) -> NativeTransportError {
         }
         _ => false,
     };
+    // A refused credential stays refused until the caller brings a new one,
+    // whether the upgrade itself was refused or Core said so before hello.
+    let auth_rejected = match &error {
+        WebSocketClientError::Connect(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            response.status().as_u16() == 401
+        }
+        WebSocketClientError::ServerWireError(error) => {
+            error.code == jazz::wire::WireErrorCode::AuthFailed
+        }
+        _ => false,
+    };
     if retryable {
         NativeTransportError::Retryable(error.to_string())
+    } else if auth_rejected {
+        NativeTransportError::AuthRejected(error.to_string())
     } else {
         NativeTransportError::Terminal(error.to_string())
     }
@@ -859,6 +872,43 @@ fn decode_inbound_batch(bytes: &[u8]) -> Result<Vec<Vec<u8>>, String> {
 
 #[cfg(test)]
 mod tests {
+    /// #4248: Core refusing the bearer (an `AuthFailed` error before hello,
+    /// or a 401 on upgrade) is an auth rejection a fresh credential can
+    /// clear, distinct from other terminal failures and from a retryable
+    /// `NotReady`.
+    #[test]
+    fn a_refused_credential_is_an_auth_rejection() {
+        use jazz::wire::{WireError, WireErrorCode, WireRetry};
+        let wire = |code, retry| {
+            native_transport_error(WebSocketClientError::ServerWireError(WireError::new(
+                code,
+                retry,
+                "token expired",
+            )))
+        };
+        assert!(matches!(
+            wire(WireErrorCode::AuthFailed, WireRetry::Never),
+            NativeTransportError::AuthRejected(_)
+        ));
+        assert!(wire(WireErrorCode::NotReady, WireRetry::Later).is_retryable());
+        assert!(matches!(
+            wire(WireErrorCode::MalformedFrame, WireRetry::Never),
+            NativeTransportError::Terminal(_)
+        ));
+        let http = |status: u16| {
+            let response = tokio_tungstenite::tungstenite::http::Response::builder()
+                .status(status)
+                .body(None)
+                .unwrap();
+            native_transport_error(WebSocketClientError::Connect(
+                tokio_tungstenite::tungstenite::Error::Http(Box::new(response)),
+            ))
+        };
+        assert!(matches!(http(401), NativeTransportError::AuthRejected(_)));
+        assert!(matches!(http(403), NativeTransportError::Terminal(_)));
+        assert!(http(503).is_retryable());
+    }
+
     // A proxy can accept TCP while its upstream is down, then close before
     // completing HTTP upgrade. Observe the real socket error, not its text.
     #[tokio::test]

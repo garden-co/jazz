@@ -168,6 +168,9 @@ pub struct SubscriptionDeltaPayload<'a> {
     pub updated_indices: Vec<u64>,
     /// Authoritative pre-frame position for each removed row.
     pub removed_indices: Vec<u64>,
+    /// For each updated row, the opted-in columns' splices from its
+    /// previous result ([`SubscriptionOutputRow::splices`]).
+    pub updated_splices: Vec<Vec<(String, Vec<crate::db::LargeValueDeltaSplice>)>>,
 }
 
 /// Removed-row wire identity.
@@ -265,6 +268,7 @@ pub fn encode_subscription_delta(
             .collect(),
         updated_indices: updated.iter().map(|row| row.index as u64).collect(),
         removed_indices: removed.iter().map(|row| row.index as u64).collect(),
+        updated_splices: updated.iter().map(|row| row.splices.clone()).collect(),
     })
 }
 
@@ -640,6 +644,7 @@ mod tests {
                 row: row.clone(),
                 previous_index: None,
                 index: 0,
+                splices: Vec::new(),
             }],
             &[],
             &[RemovedRow {

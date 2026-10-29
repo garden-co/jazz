@@ -1,7 +1,7 @@
 //! A supporting row's readability can change without the row changing: a
 //! room included by a message becomes unreadable when the reader's
 //! membership is deleted. The replica must lose it (and get it back when
-//! access returns). Not ported from Jazz.
+//! access returns).
 
 use crate::common;
 
@@ -155,8 +155,8 @@ fn losing_and_regaining_access_to_an_include_target_reaches_the_replica() {
     pump(&server, &client);
     assert_eq!(
         local(&client, "rooms"),
-        [id(1, 1), id(1, 2)],
-        "the room she can no longer read stays readable locally (INV-SYNC-14)"
+        [id(1, 2)],
+        "the room she can no longer read is evicted (INV-SYNC-14)"
     );
     let rooms = client.prepare_query(&Query::from("rooms")).unwrap();
     let mut synced = block_on(client.subscribe(&rooms, ReadOpts::default())).unwrap();
@@ -285,9 +285,9 @@ fn membership_write_cost_with_many_holders() {
 /// A one-shot `Remote` read after access was lost leaves out the cached rows
 /// the server's answer no longer lists, in an ordered window or not, though
 /// no subscription held them to see them leave: here the reader wrote them.
-/// Local reads keep them (INV-SYNC-14).
+/// The replica drops them (INV-SYNC-14).
 #[test]
-fn a_remote_read_after_losing_access_leaves_out_unlisted_cached_rows() {
+fn a_remote_read_after_losing_access_evicts_the_cached_rows() {
     for window in [None, Some((1, 2))] {
         let server = open(0, AuthorSubject::SYSTEM);
         let me = Value::String(alice().principal_parts().1);
@@ -332,9 +332,6 @@ fn a_remote_read_after_losing_access_leaves_out_unlisted_cached_rows() {
                 None,
                 None,
                 None,
-                false,
-                || false,
-                |attachment| client.detach_query(attachment),
             );
             let mut read = std::pin::pin!(read);
             let mut context = std::task::Context::from_waker(std::task::Waker::noop());
@@ -359,7 +356,8 @@ fn a_remote_read_after_losing_access_leaves_out_unlisted_cached_rows() {
         assert_eq!(remote(), Vec::<RowUuid>::new(), "window {window:?}");
         assert_eq!(
             local(&client, "rooms"),
-            [id(1, 1), id(1, 2), id(1, 3), id(1, 4)]
+            Vec::<RowUuid>::new(),
+            "window {window:?}"
         );
     }
 }
@@ -416,9 +414,6 @@ fn a_remote_read_through_an_edge_after_losing_access_leaves_the_row_out() {
             None,
             None,
             None,
-            false,
-            || false,
-            |attachment| client.detach_query(attachment),
         );
         let mut read = std::pin::pin!(read);
         let mut context = std::task::Context::from_waker(std::task::Waker::noop());
@@ -530,7 +525,7 @@ fn a_replica_holds_the_parent_its_rows_inherit_read_access_from() {
     pump(&server, &client);
     assert_eq!(
         local(&client, "rooms"),
-        [id(1, 1)],
-        "the room she can no longer read stays readable locally (INV-SYNC-14)"
+        Vec::<RowUuid>::new(),
+        "the room she can no longer read is evicted (INV-SYNC-14)"
     );
 }

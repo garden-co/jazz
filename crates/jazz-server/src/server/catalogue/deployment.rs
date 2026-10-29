@@ -173,9 +173,12 @@ impl StoredCatalogue {
         &self,
         staged: StagedDeployment,
     ) -> Result<DeploymentResponse, CatalogueError> {
+        // Writers take the storage lock first and change the index only
+        // under it, so the index cannot change between this check and the
+        // swap below. Readers take only the index lock, which is not held
+        // while the write waits for the store.
         let mut storage = self.storage.lock().map_err(|_| CatalogueError::LockError)?;
-        let mut index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
-        if *index != staged.expected {
+        if *self.index.lock().map_err(|_| CatalogueError::LockError)? != staged.expected {
             return Err(CatalogueError::WriteError(
                 "catalogue changed while preparing deployment; fetch the graph and retry".into(),
             ));
@@ -186,7 +189,7 @@ impl StoredCatalogue {
         storage.upsert_catalogue_entries(&staged.entries)?;
         storage.flush()?;
         storage.flush_wal()?;
-        *index = staged.next;
+        *self.index.lock().map_err(|_| CatalogueError::LockError)? = staged.next;
         Ok(staged.response)
     }
 }

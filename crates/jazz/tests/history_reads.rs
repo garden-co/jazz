@@ -1,9 +1,9 @@
-//! History relations on SQLite: `history.<table>` reads list a row's
+//! History relations: `history.<table>` reads list a row's
 //! accepted content versions, current and superseded, with `$transactionId`
 //! and `$acceptedAt`. Access follows the current row's read policy, deleted
 //! rows hide their history unless deleted rows are included, branches
 //! select one branch's versions, and schema views read old versions through
-//! their lens. Ported from #4166's Groove history relations.
+//! their lens.
 
 use crate::common;
 
@@ -715,16 +715,9 @@ impl Synced {
     fn alice_reads(&self, query: &Query, opts: ReadOpts) -> Result<Vec<CurrentRow>, String> {
         use std::future::Future;
         let bytes = postcard::to_allocvec(query).unwrap();
-        let read = self.alice.all_serialized_query(
-            &bytes,
-            opts,
-            None,
-            None,
-            None,
-            false,
-            || false,
-            |attachment| self.alice.detach_query(attachment),
-        );
+        let read = self
+            .alice
+            .all_serialized_query(&bytes, opts, None, None, None);
         let mut read = std::pin::pin!(read);
         let mut context = std::task::Context::from_waker(std::task::Waker::noop());
         for _ in 0..50 {

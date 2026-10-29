@@ -26,6 +26,9 @@ pub struct DbConfig {
     pub identity: DbIdentity,
     /// Row id source used by inserts. `None` selects the production source.
     pub id_source: Option<Box<dyn RowIdSource>>,
+    /// Where settled large-value leaf bytes live. `None` keeps them in the
+    /// SQLite file ([`crate::chunk_store`]).
+    pub chunk_store: Option<std::sync::Arc<dyn crate::chunk_store::ChunkStore>>,
 }
 
 impl DbConfig {
@@ -35,12 +38,23 @@ impl DbConfig {
             schema,
             identity,
             id_source: None,
+            chunk_store: None,
         }
     }
 
     /// Override the row id source, typically with [`SeededRowIdSource`] in tests.
     pub fn with_id_source(mut self, id_source: impl RowIdSource + 'static) -> Self {
         self.id_source = Some(Box::new(id_source));
+        self
+    }
+
+    /// Keep settled large-value leaf bytes in `store` instead of the SQLite
+    /// file. A store that once had one must always be opened with it.
+    pub fn with_chunk_store(
+        mut self,
+        store: std::sync::Arc<dyn crate::chunk_store::ChunkStore>,
+    ) -> Self {
+        self.chunk_store = Some(store);
         self
     }
 }
@@ -128,6 +142,10 @@ pub struct ReadOpts {
     /// absent serde field is [`FirstLoad::Deliver`].
     #[serde(default)]
     pub first_load: FirstLoad,
+    /// Large-capable columns whose changes a subscription's updated rows
+    /// also carry as splices from the row's previous result (SPEC 19.12).
+    #[serde(default)]
+    pub splices: Vec<String>,
 }
 
 impl Default for ReadOpts {
@@ -136,6 +154,7 @@ impl Default for ReadOpts {
             tier: ReadTier::LocalFirst,
             read_view: ReadViewSpec::default(),
             first_load: FirstLoad::Deliver,
+            splices: Vec::new(),
         }
     }
 }
@@ -147,6 +166,12 @@ impl ReadOpts {
             tier,
             ..Self::default()
         }
+    }
+
+    /// Deliver `columns`' changes in updated rows as splices too.
+    pub fn with_splices(mut self, columns: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.splices = columns.into_iter().map(Into::into).collect();
+        self
     }
 
     /// Evaluate the query as a live head branch composed over an optional base.
@@ -207,26 +232,6 @@ impl RemoteLinkHint {
             _ => None,
         }
     }
-}
-
-/// How urgently a runtime should service pending sync work.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TickUrgency {
-    /// Run as soon as the runtime can.
-    Immediate,
-    /// Coalesce bursty local work before ticking.
-    Deferred,
-    /// Service work in a later host turn.
-    AfterCurrentTurn,
-}
-
-/// Runtime-neutral wake hook for thread-affine sync work.
-pub trait TickScheduler {
-    /// Schedule a future tick for pending sync work.
-    fn schedule_tick(&self, urgency: TickUrgency);
-
-    /// Schedule one future tick no earlier than the supplied delay.
-    fn schedule_tick_after(&self, delay_ms: u64);
 }
 
 /// Identity used to author and authorize a standalone write.
@@ -328,6 +333,10 @@ pub struct RestoreOptions {
 pub struct Error {
     /// Stable error code.
     pub code: ErrorCode,
+    /// The finer kind within `code`, when callers act on it: they classify
+    /// by this, never by matching `message`.
+    #[serde(default)]
+    pub reason: Option<Reason>,
     /// Human-readable detail.
     pub message: String,
 }
@@ -350,22 +359,34 @@ impl Error {
     pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
         Self {
             code,
+            reason: None,
+            message: message.into(),
+        }
+    }
+
+    /// An error of a kind callers tell apart by [`Error::reason`].
+    #[doc(hidden)]
+    pub fn with_reason(code: ErrorCode, reason: Reason, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            reason: Some(reason),
             message: message.into(),
         }
     }
 
     /// The authority rejected a serializable commit because a read it made
-    /// no longer holds. The message is the public contract bindings match.
+    /// no longer holds. The message is the text earlier bindings matched.
     pub(crate) fn serialization_conflict() -> Self {
-        Self::new(
+        Self::with_reason(
             ErrorCode::WriteRejected,
+            Reason::SerializationConflict,
             "SerializationConflict (reason: Serializable transaction conflicted with another write)",
         )
     }
 
     /// Whether the authority rejected this serializable commit as a conflict.
     pub fn is_serialization_conflict(&self) -> bool {
-        self.code == ErrorCode::WriteRejected && self.message.starts_with("SerializationConflict")
+        self.reason == Some(Reason::SerializationConflict)
     }
 
     /// Whether this serializable transaction conflicted, at the replica or
@@ -378,6 +399,102 @@ impl Error {
 impl From<crate::query::QueryError> for Error {
     fn from(error: crate::query::QueryError) -> Self {
         Self::new(ErrorCode::Query, error.to_string())
+    }
+}
+
+/// Why an error happened, finer than its [`ErrorCode`]: the kinds the
+/// engine, hosts and bindings act on differently.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reason {
+    /// A write policy denied the write (code `WriteRejected`).
+    AuthorizationDenied,
+    /// The write's explicit timestamp is too far ahead of the authority's
+    /// clock (code `WriteRejected`, SPEC 3, INV-TX-7).
+    ClientClockTooFarAhead,
+    /// A read the serializable commit made no longer holds at the
+    /// authority (code `WriteRejected`).
+    SerializationConflict,
+    /// A write to, or an insert reusing the id of, a deleted row (code
+    /// `WriteRejected`).
+    RowAlreadyDeleted,
+    /// An insert reusing a live row's id (code `WriteRejected`).
+    RowAlreadyExists,
+    /// A restore of a live row (code `WriteRejected`).
+    RowNotDeleted,
+    /// A new row, or restored content, without a value for a required
+    /// column (code `WriteRejected`).
+    MissingRequired,
+    /// A mergeable commit that would move a row to another branch (code
+    /// `Schema`).
+    BranchMove,
+    /// A read needs large-value chunks this replica requested from
+    /// upstream but has not received yet (code `NotObserved`).
+    MissingChunks,
+    /// The server holds commits from an untrusted session until it has a
+    /// published permissions head to check them by (code `WriteRejected`).
+    PermissionsHeadMissing,
+    /// The write was built on an unsettled write the authority rejected,
+    /// so it is rejected too (code `WriteRejected`, SPEC 4 §4.6).
+    PredecessorRejected,
+}
+
+impl Reason {
+    /// Every reason, in declaration order.
+    pub const ALL: [Reason; 11] = [
+        Reason::AuthorizationDenied,
+        Reason::ClientClockTooFarAhead,
+        Reason::SerializationConflict,
+        Reason::RowAlreadyDeleted,
+        Reason::RowAlreadyExists,
+        Reason::RowNotDeleted,
+        Reason::MissingRequired,
+        Reason::BranchMove,
+        Reason::MissingChunks,
+        Reason::PermissionsHeadMissing,
+        Reason::PredecessorRejected,
+    ];
+
+    /// The stable, snake_case name of this reason.
+    ///
+    /// Like [`ErrorCode::as_str`], a durable contract: bindings expose it to
+    /// JavaScript as `error.reason`, and the sync wire carries it by this
+    /// name, so a peer that does not know a newer reason still decodes the
+    /// error. Pinned by the `error_code_strings` integration test.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Reason::AuthorizationDenied => "authorization_denied",
+            Reason::ClientClockTooFarAhead => "client_clock_too_far_ahead",
+            Reason::SerializationConflict => "serialization_conflict",
+            Reason::RowAlreadyDeleted => "row_already_deleted",
+            Reason::RowAlreadyExists => "row_already_exists",
+            Reason::RowNotDeleted => "row_not_deleted",
+            Reason::MissingRequired => "missing_required",
+            Reason::BranchMove => "branch_move",
+            Reason::MissingChunks => "missing_chunks",
+            Reason::PermissionsHeadMissing => "permissions_head_missing",
+            Reason::PredecessorRejected => "predecessor_rejected",
+        }
+    }
+
+    /// The reason named `name` by [`Reason::as_str`], if this build knows it.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|reason| reason.as_str() == name)
+    }
+
+    /// Whether a write was refused for the stored state of its row rather
+    /// than for its arguments: its id is deleted or taken, it restores a
+    /// live row, it would create a row without a required value (an upsert
+    /// may create or patch), or it would move a row to another branch.
+    pub const fn is_apply_time(self) -> bool {
+        matches!(
+            self,
+            Reason::RowAlreadyDeleted
+                | Reason::RowAlreadyExists
+                | Reason::RowNotDeleted
+                | Reason::MissingRequired
+                | Reason::BranchMove
+        )
     }
 }
 

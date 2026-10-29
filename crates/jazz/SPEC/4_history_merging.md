@@ -17,20 +17,21 @@ Invariant digest:
 - `INV-HIST-8`: For a plain (`MergeStrategy::Lww`) column and for `_deletion`, Core MUST apply each accepted write to the row's post-image as a patch in the order it accepts the writes: every cell the write authored takes the write's value (last arrival wins), every cell it did not author keeps the row's value, and nothing a write authored is dropped. Concurrent writes to different cells of one row therefore all apply, and a write that does not author `_deletion` keeps the row's deletion state, so an edit made over an image older than an accepted delete leaves the row deleted.
 - `INV-HIST-9`: `MergeStrategy::Counter` MUST be declared only on non-nullable integer user columns.
 - `INV-HIST-10`: For `MergeStrategy::Counter`, a write MUST travel as its delta from the row image it was made over, and Core MUST add each accepted delta to the current value, so concurrent increments from the same base sum exactly. Core MUST reject a write whose delta would take the counter outside its column type's range rather than wrap, and a write that does not author a merge column MUST NOT replace that column's accepted ops with the writer's snapshot, also across schema versions.
+- `INV-HIST-24`: A text-merging column (`MergeStrategy::Text`, `Markdown` or `Html`) MUST be declared only on a non-nullable string user column and MUST store a plain string; writes to it travel as plain values. Only Core merges: when a version before the write that its writer never saw (§4.6) authored the column, Core MUST three-way merge the value its writer last saw of the column (the newest commit on its chain that authored the column, as that commit sent it, or else the accepted version the chain was built on), the value it holds and the write's value at token boundaries: changes to disjoint parts of the base all apply, a change both sides made applies once, inserts at one point apply in seq order, overlapping pure inserts and deletes union (as do one side's inserts with the other's replacements), and of two overlapping replacements the write sequenced later wins. Otherwise, or when the merge would spend more than a fixed budget of diff steps, the write's value stands as sent. For a version whose value a merge changed, Core MUST keep the edits back to the value as sent (`_jazz_text_in`) while its sender may still build on it.
 - `INV-HIST-11`: Content and deletion state MUST be separate layers; content writes MUST NOT change the deletion register, and a current `DeletionEvent::Deleted` MUST hide the content-current row until a current `DeletionEvent::Restored` reveals it.
 - `INV-HIST-12`: Accepted globally settled versions that become per-layer winners MUST be reflected in `jazz_{table}_global_current` or `jazz_{table}_register_global_current`.
 - `INV-HIST-13`: Re-ingesting the same commit unit with identical version rows in a different order MUST be idempotent and MUST NOT create a conflict.
 - `INV-HIST-14`: Rejected transactions MUST NOT appear as accepted row-history entries and MUST NOT participate in currentness/domination.
-- `INV-HIST-15`: Core's post-image MUST be a deterministic function of the accepted writes in seq order: no wall clock, writer clock or other node-local state enters a merged value. Concurrent writes to different cells give the same post-image in any seq order, merge-strategy ops commute, and when two writes change one plain cell the one Core sequences last keeps it.
+- `INV-HIST-15`: Core's post-image MUST be a deterministic function of the accepted writes in seq order: no wall clock, writer clock or other node-local state enters a merged value. Concurrent writes to different cells give the same post-image in any seq order, counter and set ops commute, and when two writes change one plain cell the one Core sequences last keeps it.
 - `INV-HIST-17`: Content and deletion history MUST remain independently immutable and independently selected; a combined current row is a derived cache over their winners and MUST be reproducible from retained histories after restart or rebuild.
-- `INV-HIST-20`: Core MUST resolve a write's base exactly or refuse the write: a base seq MUST name an accepted history record of the same row at that seq, and a pending predecessor MUST be an older transaction of the writer's own node. Otherwise Core MUST reject the write with a `MalformedCommit` reason saying the base is not supported yet; it never substitutes another base. Core MUST NOT wait for a pending predecessor it holds no fate for (unknown there, or held as a relayed or recovered Pending unit): such a predecessor never arrives, and Core MUST apply the write as written over the row's current image, as it does after rejecting the predecessor. A write chained on a predecessor parked at Core for a missing schema MUST park behind it and be decided after it, for a bounded wait: once the predecessor has been parked that long, Core MUST decide the write as written, as for a predecessor that never arrives.
-- `INV-HIST-21`: Whether a write maybe conflicts MUST be derived from the row's accepted history and never stored: a write is maybe conflicting iff it has a base and an accepted record of the row that is not of the writer's own chain (the accepted writes of its pending predecessor's node with a transaction time at most the predecessor's) lies after its seen seq and before it. The seen seq is the larger of its base seq and its chain root's settled base seq (followed through accepted predecessors, and through a rejected predecessor to that one's own predecessor), never a predecessor's later accepted seq. Inserts and blind updates are never maybe conflicting. Its conflict analysis MUST be the row's accepted writes after the seen seq and before the write, outside its own chain, whose authored columns overlap the write's.
+- `INV-HIST-20`: Core MUST resolve a write's base or refuse the write: a pending predecessor MUST be an older transaction of the sender's own node, otherwise Core MUST refuse the write; it never substitutes another predecessor. Core MUST NOT wait for a pending predecessor it holds no fate for (unknown there, or held as a relayed or recovered Pending unit): such a predecessor never arrives, and Core MUST reject the write as built on a rejected write. A write chained on a predecessor parked at Core for a missing schema MUST park behind it and be decided after it, for a bounded wait: once the predecessor has been parked that long, Core MUST decide the write as written, as for a predecessor that never arrives. A write built on a rejected write is rejected too (`predecessor_rejected`, §4.6).
+- `INV-HIST-21`: Whether a write maybe conflicts MUST be derived from the row's accepted history and never stored. A write's base is the version of the row it was built on: an accepted seq, or an unsettled commit (resolved at the authority to the seq it landed at). Its writer saw every version up to a base seq, or a base commit's version and everything that version saw, down the chain. A write is maybe conflicting iff it has a base and an accepted version of the row before it is one its writer never saw; inserts and blind updates are never maybe conflicting. Its conflict analysis MUST be those missed versions whose authored columns overlap the write's. A value-merging column MUST merge a write with its base version's value only when a missed version authored that column, and otherwise keep the write's value as sent.
 - `INV-HIST-23`: One writer node's commit units MUST reach the fate authority in the order they were written, on every link, and Core MUST decide them in arrival order. The order a writer's writes were written in is their `TxId` order: a writer MUST mint a write's `TxId` when the write takes its place in the writer's order (its owner's mutation queue, which publishes one write at a time in that order), never later, so `TxId` order, local commit order, upload order and recovery's `TxId`-sorted replay agree. A writer's link MUST NOT upload a write ahead of an earlier write of the same node that it holds back (for example while a large value waits out a rate limit); other writers' uploads are not held back. A write that reaches Core after Core accepted a newer write of the same node to the same row is a protocol violation: Core MUST reject it with a `MalformedCommit` reason and MUST NOT apply it.
 - `INV-HIST-18`: A version parent MUST identify an exact prior version of the same physical table, branch key, row, and content/deletion layer; it MUST NOT encode a cross-row transaction dependency or a dependency between the content and deletion layers.
 - `INV-REF-1`: A read MUST compose its layers by one rule: the top layer holding a row supplies it whatever its stamp, each layer masks the layers below it before any predicate or relational operator, and content and deletion registers are each stacked by that rule independently.
 - `INV-REF-2`: A read's refs MUST follow its tier: `Global` reads origin alone; `Local` and `None` read the local delta over origin.
 - `INV-REF-3`: A layer narrowed by an access path MUST mask lower layers by a relation exact under that narrowing (its own rows only when one row-id prefix bounds every layer; otherwise its presence, read without the access path: the local delta's presence over origin under an index, read whole or by origin's candidates' row ids, whichever reads fewer rows; the head's presence read by the base candidates' row ids over a branch view's base), and an indexed branch-view read MUST read each content layer only under the index prefix and each deletion-register layer only for the content candidates' row ids.
-- `INV-REF-4`: The rule that a pending predecessor is the writer's own node MUST be decided only in validation and in the conflict walk, never encoded in stored or sent bytes.
+- `INV-REF-4`: No stored or sent byte MUST encode that a write's unsettled base is its writer's own: a base names an unsettled commit by its sender's id (only the sender's own may go by how far back it is), and each relay renames bases into names its upstream knows. A replica shows its pending writes over each newer settled image it receives, but a write over a pending write is built on that write alone and never claims the settled images shown under it.
 - `INV-REF-5`: A node MUST store its local ref only as the sparse delta over origin: committing, rebasing and settling a pending write MUST NOT store a copy of the origin image it overrides, and a read MUST mask origin by the delta itself.
 - `INV-TX-6`: A write MUST carry the base of the row image it was made over (§4.6). Core orders writes by its own seq, never by writer clocks: a write overrides every value accepted before it whatever its clock, and Core does not reject a write because the writer's clock is behind.
 
@@ -136,10 +137,83 @@ Core sequences them; accepted ops still commute (`INV-HIST-15`). A redelivered
 commit unit is the same transaction
 and is not applied again, so a retried increment counts once (`INV-EDGE-16`).
 
+Text-merging columns merge concurrent edits to one string. The text
+strategies (`MergeStrategy::Text`, `Markdown`, `Html`; `text`, `markdown`
+and `html` in the DSL) are opt-in and may be declared only on non-nullable
+string columns (`INV-HIST-24`). The column stores a plain string, inline or
+as a large value (ch. 19), and a write to it travels as its plain value.
+Only Core merges; replicas apply a pending text write as sent, like any
+patched cell, until Core's image arrives.
+
+Core reads what the write was built on from its base (§4.6). When no
+version before the write that its writer never saw authored the column
+(the common case: nothing concurrent, or a concurrent write to other
+columns), the write's value stands as sent: no base is read and nothing is
+diffed. Otherwise Core merges three values: the base, i.e. the column's
+value the write's writer last saw of the column (walking its chain of
+unsettled commits back to the newest that authored the column, at that
+commit's value as it sent it, or else to the accepted version the chain
+was built on: a commit that left the column alone holds Core's value,
+which its writer never saw); the value Core holds; and the write's value:
+
+- each value is cut into tokens (words, single whitespace and other
+  characters; for `Markdown` also delimiter runs, ordered-list markers and
+  link destinations; for `Html` also tags and entities), so a merge never
+  splits one. In scripts written without spaces (CJK, Thai and the like)
+  and for emoji each character is a token; combining marks, variation
+  selectors, skin-tone modifiers and zero-width-joined characters stay
+  with the character they complete. Which characters form words is fixed
+  by Jazz's own tables, not the toolchain's Unicode version, so every Core
+  cuts a value alike. A `<`, `&` or `](` with no closer within a bounded
+  window is a token of one character;
+- each side's changes are diffed against the base, and both apply where
+  they touch disjoint tokens; a change both sides made identically applies
+  once (near-identical concurrent inserts both apply, as in diff3);
+- inserts at one point apply in seq order, the held value's first;
+- where changes overlap and each only inserts or only deletes, or one side
+  only inserts, the deletes and replacements apply and the inserts are kept;
+- of two overlapping replacements, the incoming write (sequenced later)
+  wins that span.
+
+A diff that would take more than a bounded number of edit steps to make
+minimal splits where its search got furthest and diffs the rest on its
+own: the result may be less than minimal, but stays fine-grained, so a
+heavily edited value loses no side's edits to the bound, and merging costs
+time linear in the value's size times the bound.
+
+A merge may also spend only a fixed budget of diff work, counted in search
+steps (each diagonal a diff search visits and each token it slides over;
+`MERGE_WORK_BUDGET`, 100 million: a 1 MB value with 10,000 scattered edits
+a side takes about a fifth of it). A merge that would spend more stops,
+and the write's value stands as sent, exactly as the later write wins two
+overlapping replacements. The budget counts work, not time, so every Core
+reaches the same result; the conflict analysis reports the column as
+overlapping either way.
+
+From `The cat sat.`, a concurrent `The black cat sat.` and `The cat
+slept.` merge to `The black cat slept.` in either order. When a merge
+changes a write's value, Core keeps for the merged version (in
+`_jazz_text_in`, keyed by table, row, branch key and seq, made with the first
+such merge) the token-level edits from the merged value back to the value
+as sent, per column: a later write built on that commit (an offline
+chain) is merged over what its writer saw, the value as sent. A later write
+of the same upload to the row was built on the earlier one as sent, and
+merges over it the same way. Only a commit's sender builds on it
+unsettled, and a sender's commits arrive in order, so once one of its
+writes to a row is built on an accepted version (or on none), its older
+entries for that row are dropped: a row keeps entries only for its
+writers' current unsettled chains. A write built on a rejected commit is rejected
+too (§4.6), so a base is always a value Core accepted. The merge is
+token-level, not tree-aware: it keeps markup tokens whole but does not
+check that merged markdown or HTML is well formed. Conflict analysis
+(`INV-HIST-21`) stays column-granular, so concurrent writes to one
+text-merging column are reported as overlapping even when they merged
+cleanly.
+
 _Further invariants._ `INV-HIST-15` — the post-image is a deterministic
 function of the accepted writes in seq order, with no clock or node-local
 state in merged values; concurrent writes to different cells and
-merge-strategy ops commute, and on a cell two writes both change the last one
+counter and set ops commute, and on a cell two writes both change the last one
 Core sequences keeps it.
 
 ### Durable codec profile
@@ -249,8 +323,8 @@ On the linear-history line Core applies each accepted write to the row's
 post-image as a **patch**, in the order it accepts the writes: every plain
 (`MergeStrategy::Lww`) cell the write authored, and `_deletion` when
 authored, takes the write's value, and every other cell keeps the value the
-row holds; merge-strategy columns (counters, sets) apply their ops in seq
-order (§4.3). No timestamp takes part, no earlier image is rebuilt, no cell
+row holds; merge-strategy columns (counters, sets, text) apply their ops in
+seq order (§4.3). No timestamp takes part, no earlier image is rebuilt, no cell
 is compared and nothing a write authored is dropped or set aside: on each
 plain cell the **last write Core accepts wins** (`INV-HIST-8`,
 `INV-HIST-15`).
@@ -261,41 +335,42 @@ derive whether the write was made over
 the row's latest accepted image, i.e. whether it **maybe conflicts** with
 writes it never saw (`INV-HIST-21`).
 
-**Base of a write.** Every row version a writer uploads carries a **base**:
+**Base of a write.** Every row version a writer uploads over an image of
+the row it held carries a **base**: the version of the row that image was.
+It is one of:
 
-- `seq` — the seq (`GlobalTime`) of the settled image of the row the writer's
-  node held when it made the write (its global-current image), or none;
-- `pending` — the `TxId` of the writer's own newest write to the same row
-  that has no fate on its node yet, whose patch the writer's image included,
-  or none. It is the node's own write even when the newest write in its
-  pending overlay is a foreign one the node relays: a writer's chain is its
-  own writes, and a foreign write's patch is never part of it.
+- `Seq(S)` — the accepted version at seq `S` (the settled image the writer's
+  node held, with no pending write of its own to the row over it);
+- `Own { back }` — the writer's own newest write to the row that has no fate
+  on its node yet, `back` transactions before this one: the writer saw that
+  write as it sent it, and whatever that write was built on;
+- `Commit { node, tx }` — an unsettled commit by its sender's id, as a relay
+  names one of its own (below).
 
-So a write made over a settled image is `{seq: S}`; a write made over the
-node's own pending write `P`, itself resting on the settled image at `S`, is
-`{seq: S, pending: P}`; and a write over a pending chain with no settled image
-under it (the row was inserted, or blindly updated, by that chain) is
-`{pending: P}`. The settled seq travels with the pending predecessor because
-the node rebases its pending overlay onto every newer settled image it
-receives: the image the writer saw is the image at `S` plus its own pending
-patches, not the image the chain started from.
+A replica shows its pending writes over each newer settled image it
+receives, but a write over a pending write is built on that write alone
+(`INV-REF-4`): it never claims the settled images shown under it, and only
+Core merges concurrent edits.
 
-A write with an empty base is an **insert**, or a **blind update** of a row
-the writer's node holds no image of (it never loaded the row, or evicted
-it). It applies like any other write and is never maybe conflicting.
+A write with no base is an **insert**, or a **blind update** of a row the
+writer's node holds no image of (it never loaded the row, or evicted it). It
+applies like any other write and is never maybe conflicting.
 
-The originator stores each pending write's base in its history record and
-uploads it unchanged, so a resent write carries the same base. When a pending
-predecessor receives its fate nothing is rewritten on the client.
+The originator stores each pending write's base with it and uploads it
+unchanged, so a resent write carries the same base.
 
-**Validating the base at Core.** For an incoming write `W` from node `N` with
-base `{seq: S, pending: P}` Core checks the base exactly or refuses the write
-with a `MalformedCommit` reason saying the base is not supported yet
-(`INV-HIST-20`): when `S` is `0` or names no accepted history record of the
-row (for example a seq above the row's current seq, or a seq of another
-row's write; one exact point read of the row's history at `S`), when `P`'s
-node is not `N`, and when `P` is not older than `W`. Core never substitutes
-another base.
+**A write built on a rejected write is rejected.** When Core rejects a write
+`P`, every write built on `P` (directly, or down a chain of writes each built
+on the one before) is rejected too, with reason `predecessor_rejected`: its
+image carried `P`'s values, and applying it would bring them back. How an app
+retries such a chain is its own (`INV-HIST-21`).
+
+**Validating the base at Core.** For an incoming write `W` from node `N`
+built on a pending predecessor `P`, Core refuses the write when `P`'s node
+is not `N` or `P` is not older than `W` (`INV-HIST-20`). Core never
+substitutes another predecessor. A `Seq` base is not checked against the
+row's history: it only feeds the derived analysis, where a seq the writer
+could not have seen makes the write count as built on less, never more.
 
 Core never waits for `P`. A writer's commit units reach Core in the order
 they were written (SPEC 14: the Writes channel is one FIFO and every link
@@ -304,11 +379,8 @@ reached Core already or never will:
 
 - When Core holds no fate for `P` (it does not know `P`, or holds it only as
   a relayed or recovered Pending unit), `P` never arrives for a decision.
-  Core treats it like a `P` it rejected: `W` applies as written over the
-  row's current image, which `P` never reached. The base is not guessed or
-  rewritten; it only feeds the "maybe conflicting" derivation (`INV-HIST-21`),
-  which already resolves an absent `P` to the newest accepted write of `N`
-  before it.
+  Core treats it like a `P` it rejected: `W` is rejected too
+  (`predecessor_rejected`).
 - When `P` is parked at Core because its schema is not known yet, `W` parks
   behind it (an in-memory lookup) and is decided after it once the schema
   arrives (`INV-HIST-20`). The wait is bounded: once `P` has been parked for
@@ -368,8 +440,8 @@ reached Core already or never will:
     those events, not by write volume.
 
 A `P` rejected locally before it reached Core (for example its large value
-was not staged) therefore ends like a `P` rejected at Core: `W` applies over
-the settled row. A writer's link keeps the order on its side too: while one
+was not staged) therefore ends like a `P` rejected at Core: `W` is rejected
+too. A writer's link keeps the order on its side too: while one
 of its writes waits (a large value rate-limited or still uploading), none of
 that writer's later writes goes up ahead of it; other writers' writes on the
 same link go on.
@@ -402,62 +474,80 @@ overridden values its writer never saw is derived from the row's accepted
 history, not stored: there is no flag bit and no copy of an overridden
 value (`INV-HIST-21`).
 
-- **What a writer saw.** A write's base names everything its writer had
-  seen of the row: the accepted records up to its base seq `S` (the settled
-  image its node held), plus its own pending chain. A predecessor's accepted
-  seq is not part of that: Core may accept another writer's write after the
-  chain's settled image and before the predecessor, and the writer saw none
-  of it. So a write's **seen seq** is the larger of `S` and its chain root's
-  settled base seq: following `P` to the newest accepted write of `P`'s node
-  to the row whose transaction time is at most `P`'s (`P` itself when Core
-  accepted it; when Core rejected `P`, which is not in history, `P`'s own
-  predecessor), and from it along its own base the same way, to the first
-  write whose base has no `P`; without `P` it is `S`. `S` is never older than
-  the chain root's base (a node's settled image only moves forward), and is
-  newer when the writer received Core's image at `S` before `P`'s fate: the
-  writer then saw everything up to `S`, `P` included if accepted by then.
-- The writer's **own chain** is the accepted writes of `P`'s node to the
-  row whose transaction time is at most `P`'s. They are the writer's own
-  pending writes it wrote over, so they never count against the write.
-- A write is **maybe conflicting** iff it has a base and an accepted record
-  of the row that is not of its own chain lies after its seen seq and before
-  it. Its **resolved base seq** is the newest accepted record its writer had
-  seen: the seen seq, moved forward over the own-chain records that directly
-  follow it (none when the seen seq is none and the row's first accepted
-  record is not of its own chain). A write is maybe conflicting exactly when
-  its resolved base seq differs from the seq of the row's accepted history
-  record immediately before it (none when it is the row's first accepted
-  record).
-- A write with an empty base (an insert or a blind update) is never maybe
-  conflicting. Neither is a write whose base is its own author's
-  immediately preceding accepted write of the row, nor any write of an
-  offline chain that nobody else interrupted: in each case only the
-  writer's own chain lies between what it saw and the write. Once another
-  writer's write lands after a chain's settled image, every later write of
-  that chain is maybe conflicting, not only the first: each overrode the
-  row without having seen that write.
+- **What a writer saw.** A write built on `Seq(S)` saw every accepted version
+  of the row up to `S`. A write built on an unsettled write `P` (accepted at
+  some seq) saw `P` and everything `P` saw, down the chain. It did not see a
+  version Core accepted between what `P` saw and `P`: the writer only had
+  `P` as it sent it.
+- A write is **maybe conflicting** iff it has a base and an accepted version
+  of the row before it is one its writer never saw. Its **resolved base
+  seq** is the newest accepted version such that its writer saw it and every
+  version before it.
+- A write with no base (an insert or a blind update) is never maybe
+  conflicting. Neither is a write of an offline chain that nobody else
+  interrupted: each write of the chain saw every version before it. Once
+  another writer's write lands between a chain's settled image and one of
+  its writes, that write and every later write of the chain are maybe
+  conflicting, not only the first: each overrode the row without having seen
+  that write.
 
-For example, carol, offline over the seed at `S`, writes `p1` (title) and
-then `w` (body, base `{seq: S, pending: p1}`); dave's body edit is accepted
+For example, carol, offline over the seed at `S`, writes `p1` (title, built
+on `Seq(S)`) and then `w` (body, built on `p1`); dave's body edit is accepted
 first, then `p1`, then `w`. `p1` is maybe conflicting with an empty conflict
 analysis (dave touched only the body). `w` is maybe conflicting and its
 conflict analysis names dave's write: `w`'s body overrode dave's, which
-carol never saw, although the record right before `w` is her own `p1`.
+carol never saw, although the version right before `w` is her own `p1`.
 
-One walk of the row's history computes every write's seen seq (each chained
-write reuses its predecessor's), and any node holding the row's accepted
-history records (their seq, transaction id, base and authored columns)
-derives the same answer.
+A write's **conflict analysis** is the accepted versions before it that its
+writer never saw whose authored columns overlap the write's (a full image
+authors every column; `_deletion` counts as a column). A maybe conflicting
+write whose missed versions all touched other columns has an empty conflict
+analysis.
 
-A write's **conflict analysis** is a walk of the row's history from its
-seen seq to the write: the accepted records with a seq greater than the seen
-seq (every earlier accepted record when it is none) and less than the
-write's own, not of its own chain, whose authored columns overlap the
-write's (a full image authors every column; `_deletion` counts as a column).
-A maybe conflicting write whose intervening foreign writes all touched other
-columns has an empty conflict analysis. The flag and the walk are exposed by
-the node (`NodeState::write_conflict`); no public read API or TypeScript
-surface carries them yet.
+**Merging needs the same base.** A merge-strategy column that merges values
+rather than ops (text, §4.3) merges a write with the version it was built on
+only when a version the writer missed authored that column; otherwise the
+write's value stands as sent, with no lookup. The base value is the column's
+value in the version the write was built on (for a write built on `P`, `P`'s
+value as accepted).
+
+On SQLite a commit carries, beside its operations, the base of each row it
+writes over an image its writer held (`WireBase`: the row, by the index of
+the commit's first op that writes it and its branch key, and the version it
+was built on as `BuiltOn`). A non-durable session (a worker's tab) may hold
+its relay's unsettled version of a row and send it as `Seq` of a seq at or
+above the local base. A relay renames every base into names its upstream
+knows before it forwards the commit: an upstream seq stays; its own
+unsettled version (one of its own commits, pending or settled), the
+session's `Own` predecessor and the session's own `Commit` all become
+`Commit { relay node, tx }` of the relay's own commit that carries them, or
+the upstream seq that commit already landed at, so Core never sees a
+relay's local seqs. A version in the relay's local range that is no commit of
+its own (one from before the relay's store was reset) cannot be named
+upstream: the write counts as built
+on the newest version of the row the relay holds accepted upstream, so it may
+be flagged over a version its writer saw but never the other way round. A
+base on a commit the relay rejected or never received rejects the write there
+(`predecessor_rejected`); a `Commit` of another node than the sender's is
+refused.
+
+Core resolves each base before it applies the commit: `Seq(S)` is the
+accepted version at `S` (not checked against the row's history: a seq the
+row never had only makes the analysis more conservative); `Own` and `Commit`
+(only of the sender's own node) are where the named commit of the sender
+landed (`_jazz_settled`), and one Core rejected or never received rejects the
+commit (`predecessor_rejected`). It keeps, in the version the commit wrote
+(the row table and history alike), `_base`: the resolved `Seq` as is, or
+the seq the named commit landed at negated; and `_cols`, the authored stored
+columns as a bitmask over their positions in the row table (stored tables
+only grow by `ADD COLUMN`, so a position never moves). An app column cannot
+take the name of a stored row column (`id`, `rid`, `_b`, `_seq`, `_del`,
+`_c`, `_base`, `_cols`). Both are NULL on every other replica and for Core's
+own writes: those are made over the current image, so they are never maybe
+conflicting, and in another write's analysis they author every column. The
+flag, the walk and the merge base are derived on demand
+(`Db::write_conflicts` and `Db::merge_base`, behind the `testing` feature);
+no public read API or TypeScript surface carries them yet.
 
 **Across schema versions.** Core merges every write into the row one
 physical column at a time, whatever schema version it was authored under
@@ -659,15 +749,15 @@ branch view's deletion registers cost the branches' rows outside the prefix.
 as `[local, peer, origin]`. Merging all peers into one delta keeps the stack
 short, as a relay's overlay already does. The model leaves room for it,
 because no stored or sent byte encodes "a pending predecessor is the
-writer's own node" (`INV-REF-4`): `base.pending` is a full `TxId`, and
+writer's own node" (`INV-REF-4`): a base names an unsettled commit by its
+sender's id (only the sender's own may go by how far back it is), and
 pending history is keyed by writer. Peers would need:
 
 - per-transaction signatures, so Core can accept a write forwarded by a node
   that did not author it (SPEC 7 is not an end-to-end signature protocol);
 - grant-based sharing of pending rows, since a peer cannot evaluate read
   policy authoritatively;
-- relaxing `INV-HIST-20` to accept a foreign pending predecessor, and the
-  conflict walk's "own chain" becoming "the chain the writer saw";
+- relaxing `INV-HIST-20` to accept a foreign pending predecessor;
 - push forwarding the predecessors a write contains ahead of it on the
   pusher's Core link, so link order still puts the predecessor first.
 

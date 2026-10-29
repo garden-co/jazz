@@ -11,13 +11,13 @@ cat >"$TEMP/bin/cargo" <<'EOF'
 set -euo pipefail
 printf '%s\n' "$*" >>"$MOCK_CARGO_LOG"
 if [[ " $* " == *" -- --list "* ]]; then
-  if [[ " $* " == *" --test incremental_delivery_canary "* ]]; then
-    printf '%s\n' 'maintained_relation::smoke: test'
+  if [[ " $* " == *" --test integration "* ]]; then
+    printf '%s\n' 'include_live::renaming_a_sender_updates_exactly_their_messages: test'
   else
     printf '%s\n' \
       'db::tests::round_trips: test' \
       'db::tests::other: test' \
-      'node::tests::harness::query_rows_at_lowers_filters_against_historical_current_rows: test'
+      'ids::tests::row_author_rejects_noncanonical_system_origin: test'
   fi
   exit "${MOCK_INVENTORY_STATUS:-0}"
 fi
@@ -48,19 +48,11 @@ grep -F -- '-p jazz --no-default-features --features testing,transport-compressi
 run --exact db::tests::round_trips
 grep -F -- 'db::tests::round_trips -- --exact' "$TEMP/cargo.log" >/dev/null
 
-# Rust files under the jazz-node crate's src/node/tests are wired through
-# node::tests::harness.  A human should be able to supply the distinctive
-# test-name suffix without knowing that internal module wrapper, and dev/t must
-# still invoke Cargo with the canonical name and --exact.
+# -p selects a layer crate, and a distinctive suffix still resolves to the
+# canonical name that dev/t passes to Cargo with --exact.
 : >"$TEMP/cargo.log"
-run -p jazz-node query_rows_at_lowers_filters_against_historical_current_rows
-grep -F -- '-p jazz-node --no-default-features --features testing,transport-compression-zstd --lib node::tests::harness::query_rows_at_lowers_filters_against_historical_current_rows -- --exact' "$TEMP/cargo.log" >/dev/null
-
-# Without -p, a node:: or peer:: library filter selects jazz-node, so the
-# canonical names gates and workflows pass keep working.
-: >"$TEMP/cargo.log"
-run --exact node::tests::harness::query_rows_at_lowers_filters_against_historical_current_rows
-grep -F -- '-p jazz-node --no-default-features --features testing,transport-compression-zstd --lib -- --list' "$TEMP/cargo.log" >/dev/null
+run -p jazz-types row_author_rejects_noncanonical_system_origin
+grep -F -- '-p jazz-types --no-default-features --features testing --lib ids::tests::row_author_rejects_noncanonical_system_origin -- --exact' "$TEMP/cargo.log" >/dev/null
 
 if run --exact db::tests::round; then
   echo 'expected exact non-match to fail' >&2
@@ -82,9 +74,9 @@ fi
 [[ "$(wc -l <"$TEMP/cargo.log")" -eq 1 ]]
 
 : >"$TEMP/cargo.log"
-run --test incremental_delivery_canary maintained_relation -- --nocapture
-grep -F -- '--test incremental_delivery_canary -- --list' "$TEMP/cargo.log" >/dev/null
-grep -F -- '--test incremental_delivery_canary maintained_relation::smoke -- --nocapture --exact' "$TEMP/cargo.log" >/dev/null
+run --test integration include_live::renaming_a_sender -- --nocapture
+grep -F -- '--test integration -- --list' "$TEMP/cargo.log" >/dev/null
+grep -F -- '--test integration include_live::renaming_a_sender_updates_exactly_their_messages -- --nocapture --exact' "$TEMP/cargo.log" >/dev/null
 
 if MOCK_INVENTORY_STATUS=17 run round_trips; then
   echo 'expected inventory failure to be preserved' >&2

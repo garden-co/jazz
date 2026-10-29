@@ -11,7 +11,7 @@ on:
   push:
     branches: [main]
   # The nightly suite: only the workloads' nightly extras (the `nightly` bench
-  # targets and the Groove reference-engine sweep), listed in
+  # targets), listed in
   # dev/benchmarks/codspeed-artifact.mjs, and the example apps' load times.
   # It never re-measures a merge case, so each case gets one perf-timeline
   # point per commit.

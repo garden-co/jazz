@@ -121,6 +121,12 @@ function columnMergeStrategyToWasm(
       return "Counter";
     case "g-set":
       return "GSet";
+    case "text":
+      return "Text";
+    case "markdown":
+      return "Markdown";
+    case "html":
+      return "Html";
   }
 }
 
@@ -206,6 +212,16 @@ export function schemaToWasm(schema: Schema): WasmSchema {
         (col.nullable || typeof col.sqlType !== "object" || col.sqlType.kind !== "ARRAY")
       ) {
         throw new Error("g-set merge strategy is only supported on non-nullable ARRAY columns.");
+      }
+      if (
+        (col.mergeStrategy === "text" ||
+          col.mergeStrategy === "markdown" ||
+          col.mergeStrategy === "html") &&
+        (col.nullable || col.sqlType !== "TEXT")
+      ) {
+        throw new Error(
+          `${col.mergeStrategy} merge strategy is only supported on non-nullable TEXT columns.`,
+        );
       }
       const descriptor: ColumnDescriptor = {
         name: col.name,

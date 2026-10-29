@@ -331,7 +331,7 @@ mod tests {
 
     // This focused lowerer test is intentional: relation IR is the NAPI/WASM
     // boundary, while end-to-end matching and subscription deltas are covered
-    // at the Groove runtime boundary below it.
+    // at the database boundary below it.
     #[test]
     fn relation_payload_enum_match_lowers_and_validates_against_case_fields() {
         let event_payload = RecordDescriptor::new([("level", ValueType::I32)]);

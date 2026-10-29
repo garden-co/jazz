@@ -1,7 +1,7 @@
-//! Junction traversals (`join_via`) on SQLite: a root row matches when some
+//! Junction traversals (`join_via`): a root row matches when some
 //! joined row does, at every nested level, and a joined row counts only
 //! when the reader may read it. Synced, the server ships each level's
-//! correlated rows with the result. Not ported from Jazz.
+//! correlated rows with the result.
 
 use crate::common;
 

@@ -1,14 +1,58 @@
 ---
 title: "Collaborative text editing"
-description: Combine Yjs text merging with Jazz persistence and sync, including offline editing.
+description: Choose between text merge columns and a text CRDT, and combine Yjs with Jazz persistence and sync, including offline editing.
 reviewedAt: "e39f0156ca"
 ---
 
-Having text fields that can be edited by multiple users at the same time is a common need.
+Having text fields that can be edited by multiple users at the same time is a common need. Jazz
+offers two approaches.
 
-A string column works well for replacing a value, but concurrent replacements use Jazz's last-writer-wins
-(LWW) conflict resolution. This can lead to content written by some of the users to _seem_ lost (even
-though those changes are still part of the row's history).
+## Choosing an approach
+
+A plain string column works well for replacing a value. When two people change it at the same time,
+[one edit wins the whole field](/docs/concepts/how-sync-works#concurrent-edits). The other edit stays
+in the row's history, but it disappears from the text.
+
+**A text merge column** (`s.string().merge("text")`, or `"markdown"` / `"html"`) keeps storing a
+plain string, and the server merges concurrent edits inside it. Concurrent edits to different words
+all survive; where two people replaced the same words, the later edit wins that part. Use it when:
+
+- the text is a field of a row (a description, a note, a comment, a page body), read and written
+  as a string;
+- people mostly edit different parts, or edit at different times, and an occasional overlapping
+  change resolving to one version is acceptable;
+- you want queries, filters and permissions to see the text itself, with no extra library.
+
+```ts title="schema.ts"
+import { schema as s } from "jazz-tools";
+
+const schema = {
+  notes: s.table(
+    {
+      title: s.string(),
+      body: s.string().merge("markdown").default(""),
+    },
+    {},
+  ),
+};
+```
+
+Then write `body` as usual with `db.update(...)`. See
+[mergeable text columns](/docs/schemas/column-types#mergeable-text-columns) for what each format
+keeps whole, and [how text merges work](/docs/concepts/how-sync-works#text-merges) for the rules.
+
+**A text CRDT**, as in the rest of this recipe, is the better fit when:
+
+- several people type into the same paragraph at the same time and every keystroke must survive,
+  including concurrent edits to the same words;
+- you want live cursors and character-level merging in an editor such as CodeMirror or ProseMirror;
+- the document has structure (rich text, nested blocks) that must merge as a tree rather than as
+  text.
+
+A text merge column merges on the server, one write at a time, and is not tree-aware: it keeps
+Markdown and HTML markup whole but does not check the merged result is well formed.
+
+## Using a text CRDT
 
 A text CRDT (short for Conflict-free Replicated Data Type) instead preserves the individual insertions and deletions needed to merge edits within the same text. You can use any CRDT library that supports collaborative text editing (e.g. [Automerge](https://automerge.org/), [Loro](https://loro.dev/) or [Yjs](https://yjs.dev/)), and let Jazz persist and sync the updates.
 

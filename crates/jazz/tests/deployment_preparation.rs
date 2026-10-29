@@ -1,4 +1,3 @@
-// Ported verbatim from crates/jazz/tests; only the Db facade imports are swapped.
 use std::collections::HashMap;
 
 use jazz::tools::deployment::{

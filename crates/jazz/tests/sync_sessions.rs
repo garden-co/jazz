@@ -191,7 +191,7 @@ fn disconnect_releases_the_session_and_reconnect_resumes() {
     let (client_side, server_side, _) = pipe();
     let _upstream = block_on(alice.connect_upstream(client_side));
     let again = server.accept_subscriber(server_side, user(1));
-    assert_eq!(again.0, session.0, "the released slot is reused");
+    assert_eq!(again.slot(), session.slot(), "the released slot is reused");
     pump(&server, &[&alice]);
     assert_eq!(local(&alice), 4, "the resumed subscription catches up");
 }
@@ -215,7 +215,7 @@ fn churn_does_not_grow_the_server() {
         let (client_side, server_side, _) = pipe();
         let upstream = block_on(visitor.connect_upstream(client_side));
         let session = server.accept_subscriber(server_side, user(2 + (n % 50) as u8));
-        assert_eq!(session.0, 1, "every visitor reuses the same slot");
+        assert_eq!(session.slot(), 1, "every visitor reuses the same slot");
         let _v = block_on(visitor.subscribe(
             &visitor.prepare_query(&Query::from("messages")).unwrap(),
             ReadOpts::default(),

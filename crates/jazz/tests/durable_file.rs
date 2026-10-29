@@ -3,7 +3,7 @@
 //! committed prefix (a Jazz transaction is all or nothing); a replica's
 //! pending uploads survive a restart and are resent; a server restart
 //! between applying a commit and acknowledging it does not apply it twice;
-//! memory stays bounded by the page cache. Not ported from Jazz.
+//! memory stays bounded by the page cache.
 
 mod common;
 
@@ -54,7 +54,7 @@ fn config(node: u8) -> DbConfig {
 }
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("jazz-sqlite-{}-{name}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("jazz-durable-file-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir.join("store.sqlite")
@@ -110,7 +110,7 @@ fn reopening_restores_rows_history_and_the_commit_seq() {
             Default::default(),
         ))
         .unwrap();
-        db.abandon_serializable_handle(open).unwrap();
+        db.abandon_transaction_handle(open).unwrap();
         block_on(db.insert("items", item(99), Default::default()))
             .unwrap()
             .mergeable_tx_id()
@@ -131,12 +131,12 @@ fn reopening_restores_rows_history_and_the_commit_seq() {
                 .limit(1),
         )
         .unwrap();
-    let rows = block_on(db.serializable_tx_ref(open).all_prepared(&first)).unwrap();
+    let rows = block_on(db.tx_ref(open).all_prepared(&first)).unwrap();
     assert_eq!(
         rows[0].cells().find(|(n, _)| *n == "label").unwrap().1,
         Some(&Value::String("changed".to_owned()))
     );
-    db.abandon_serializable_handle(open).unwrap();
+    db.abandon_transaction_handle(open).unwrap();
 }
 
 /// The page size in a SQLite file's header (bytes 16-17; 1 means 65536).
@@ -323,6 +323,51 @@ fn a_replicas_pending_uploads_survive_a_restart_and_are_resent() {
         client.sync_debug().starts_with("pending [] "),
         "{}",
         client.sync_debug()
+    );
+}
+
+/// A replica whose uploads all settled holds only server seqs; reopened, it
+/// must still continue after the local seqs it handed out, or its next write
+/// reuses a transaction id the authority already applied and is dropped as a
+/// resend.
+#[test]
+fn a_reopened_replica_whose_uploads_settled_continues_after_its_own_seqs() {
+    let path = scratch("settled-replica");
+    let server = block_on(Db::open_history_complete(config(0xec))).unwrap();
+    let connect = |client: &Db| {
+        let (client_side, server_side) = duplex();
+        block_on(client.connect_upstream(client_side));
+        client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+        server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+    };
+    let insert = |db: &Db, n: u64| {
+        let options = InsertOptions {
+            row_id: Some(row(n)),
+            ..Default::default()
+        };
+        let tx = block_on(db.insert("items", item(n), options))
+            .unwrap()
+            .mergeable_tx_id();
+        drive(
+            &[db, &server, db],
+            db.wait_for_transaction(tx, DurabilityTier::Global),
+        )
+        .unwrap();
+        tx
+    };
+    let last = {
+        let client = open_file(&path, 5);
+        connect(&client);
+        insert(&client, 0);
+        insert(&client, 1)
+    };
+    let client = open_file(&path, 5);
+    connect(&client);
+    assert!(insert(&client, 2) > last, "the commit seq continues");
+    assert_eq!(
+        count(&server),
+        3,
+        "the new write was applied, not deduplicated"
     );
 }
 
@@ -650,16 +695,7 @@ fn a_durable_relay_reads_a_large_value_its_client_wrote_offline_after_a_restart(
     let read = postcard::to_allocvec(&Query::from("items")).unwrap();
     let result = drive(
         &[&tab, &relay, &tab],
-        tab.all_serialized_query(
-            &read,
-            ReadOpts::default(),
-            None,
-            None,
-            None,
-            false,
-            || false,
-            |_| {},
-        ),
+        tab.all_serialized_query(&read, ReadOpts::default(), None, None, None),
     )
     .unwrap();
     let jazz::db::SerializedReadResult::Rows(rows) = result else {
@@ -673,5 +709,111 @@ fn a_durable_relay_reads_a_large_value_its_client_wrote_offline_after_a_restart(
             .and_then(|(_, v)| v.cloned()),
         Some(Value::String(label)),
         "the tab reads the large value through its relay"
+    );
+}
+
+/// #4189: a replica's games list subscribes in batches of up to 256 ids,
+/// `id IN batch ORDER BY n DESC LIMIT window`, growing the window 20 rows
+/// a step (closing and reopening each batch's subscription) to the end of
+/// 600 rows, then shrinking back to 41. After a shrink the subscriptions on
+/// both sides are back to the cold-launch count, and crawling again does
+/// not grow the process: what a deep crawl holds is released or reused.
+#[test]
+fn a_deep_crawl_then_shrink_releases_subscription_state() {
+    let client_path = scratch("crawl");
+    let server = block_on(Db::open_history_complete(config(0xc1))).unwrap();
+    let total = 600u64;
+    for n in 0..total {
+        let mut cells = item(n);
+        cells.insert("label".to_owned(), Value::String(format!("{n:>1024}")));
+        block_on(server.insert(
+            "items",
+            cells,
+            InsertOptions {
+                row_id: Some(row(n)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    }
+    let client = open_file(&client_path, 6);
+    let (client_side, server_side) = duplex();
+    let _upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+    let pump = || {
+        for _ in 0..4 {
+            block_on(client.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+        }
+        block_on(client.tick()).unwrap();
+    };
+    let ids: Vec<u64> = (0..total).collect();
+    let open_window = |limit: usize| {
+        ids.chunks(256)
+            .map(|batch| {
+                let query = Query::from("items")
+                    .filter(jazz::query::in_list(
+                        jazz::query::col("id"),
+                        batch
+                            .iter()
+                            .map(|n| jazz::query::lit(Value::Uuid(row(*n).0))),
+                    ))
+                    .order_by("n", OrderDirection::Desc)
+                    .limit(limit);
+                let prepared = client.prepare_query(&query).unwrap();
+                block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap()
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut window = open_window(40);
+    pump();
+    let cold = (
+        client.runtime_stats_for_test().active_subscriptions,
+        server.runtime_stats_for_test().active_subscriptions,
+    );
+    let crawl = |window: &mut Vec<_>| {
+        let mut limit = 40;
+        while limit < total as usize {
+            limit += 20;
+            window.clear();
+            pump();
+            *window = open_window(limit);
+            pump();
+        }
+        window.clear();
+        pump();
+        *window = open_window(41);
+        pump();
+    };
+    crawl(&mut window);
+    let after_first = rss_kib();
+    let shrunk = (
+        client.runtime_stats_for_test().active_subscriptions,
+        server.runtime_stats_for_test().active_subscriptions,
+    );
+    assert_eq!(
+        shrunk, cold,
+        "(client, server) subscriptions after the shrink"
+    );
+    for _ in 0..3 {
+        crawl(&mut window);
+    }
+    let after_more = rss_kib();
+    eprintln!(
+        "crawl: RSS after one crawl {} MiB, after four {} MiB",
+        after_first / 1024,
+        after_more / 1024
+    );
+    assert!(
+        after_more.saturating_sub(after_first) < 32 * 1024,
+        "repeated crawls grew the process by {} MiB",
+        (after_more - after_first) / 1024
+    );
+    assert_eq!(
+        (
+            client.runtime_stats_for_test().active_subscriptions,
+            server.runtime_stats_for_test().active_subscriptions,
+        ),
+        cold
     );
 }

@@ -1,5 +1,5 @@
 //! A session's claims changing re-runs only that session's results, not
-//! every live result on the node. Not ported from Jazz.
+//! every live result on the node.
 
 use crate::common;
 

@@ -1,12 +1,11 @@
-// Ported verbatim from crates/jazz/tests; only the Db facade imports are swapped.
 use std::collections::BTreeMap;
 
 use crate::common;
 
 use jazz::block_on;
-use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource};
-use jazz::ids::{AuthorSubject, NodeUuid};
-use jazz::query::{ArraySubquery, OrderDirection, Query};
+use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource, SubscriptionEvent};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
+use jazz::query::{ArraySubquery, OrderDirection, Query, col, eq, param};
 use jazz::records::Value;
 use jazz::result_tree::ResultRelation;
 use jazz::schema::JazzSchema;
@@ -72,8 +71,28 @@ fn children<'a>(
     children
 }
 
-#[cfg(any())]
-// jazz-sqlite: not ported, reads Groove's encoded terminal record (encoded_record / descriptor.bind)
+/// The ids of the children a delivered row carries in its `name` relation
+/// cell, in relation order.
+fn relation_ids(row: &jazz::db::CurrentRow, name: &str) -> Vec<RowUuid> {
+    let Some(Value::Array(children)) = row
+        .cells()
+        .find(|(cell, _)| *cell == name)
+        .and_then(|(_, value)| value.cloned())
+    else {
+        panic!("expected array relation cell {name}");
+    };
+    children
+        .into_iter()
+        .map(|child| match child {
+            Value::Record(record) => match record.to_values().expect("child record")[0] {
+                Value::Uuid(id) => RowUuid(id),
+                ref other => panic!("expected a child row id, got {other:?}"),
+            },
+            other => panic!("expected a child record, got {other:?}"),
+        })
+        .collect()
+}
+
 #[test]
 fn nested_tree_preserves_projection_order_offset_and_reset() {
     let db = open_db();
@@ -176,34 +195,17 @@ fn nested_tree_preserves_projection_order_offset_and_reset() {
     else {
         panic!("expected maintained reset");
     };
-    assert_eq!(added.len(), 1, "Groove emits one complete terminal parent");
+    assert_eq!(added.len(), 1, "the reset delivers one complete parent");
     assert_eq!(added[0].row_uuid(), parent);
-    let (descriptor, raw) = added[0].encoded_record();
-    let children_idx = descriptor
-        .field_index("children")
-        .expect("terminal relation field");
-    let Value::Array(children) = descriptor
-        .bind(raw)
-        .get_idx(children_idx)
-        .expect("decode terminal relation")
-    else {
-        panic!("expected terminal child array");
-    };
-    assert_eq!(children.len(), 2);
-    let child_ids_from_terminal = children
-        .into_iter()
-        .map(|value| match value {
-            Value::Record(child) => child.get_idx(0).expect("terminal child id"),
-            other => panic!("expected terminal child record, got {other:?}"),
-        })
-        .collect::<Vec<_>>();
     assert_eq!(
-        child_ids_from_terminal,
-        vec![Value::Uuid(child_ids[1].0), Value::Uuid(child_ids[0].0)]
+        relation_ids(&added[0], "children"),
+        vec![child_ids[1], child_ids[0]],
+        "the delivered relation keeps the include's order, offset and limit"
     );
+    assert!(relation_ids(&added[0], "empty").is_empty());
+    assert_eq!(relation_ids(&added[0], "ordered_children"), child_ids);
 }
 
-#[cfg(any())] // jazz-sqlite: not ported, asserts Groove IVM terminal_operations
 #[test]
 fn maintained_array_subscription_with_root_parameter_lowers_and_delivers() {
     let db = open_db();
@@ -257,21 +259,9 @@ fn maintained_array_subscription_with_root_parameter_lowers_and_delivers() {
     };
     assert_eq!(added.len(), 1);
     assert_eq!(added[0].row_uuid(), matching_parent);
-    let (descriptor, raw) = added[0].encoded_record();
-    let Value::Array(children) = descriptor
-        .bind(raw)
-        .get("children")
-        .expect("decode terminal children")
-    else {
-        panic!("expected terminal child array");
-    };
-    assert_eq!(children.len(), 1);
-    let Value::Record(child) = &children[0] else {
-        panic!("expected terminal child record");
-    };
-    assert_eq!(child.get_idx(0), Ok(Value::Uuid(initial_child.0)));
+    assert_eq!(relation_ids(&added[0], "children"), vec![initial_child]);
 
-    let _added_child = block_on(db.insert(
+    let added_child = block_on(db.insert(
         "children",
         BTreeMap::from([
             ("parent_id".to_owned(), Value::Uuid(matching_parent.0)),
@@ -282,31 +272,31 @@ fn maintained_array_subscription_with_root_parameter_lowers_and_delivers() {
     ))
     .expect("insert later child")
     .row_uuid();
+    block_on(db.tick()).expect("tick");
     let SubscriptionEvent::Delta {
         reset,
         added,
         updated,
         removed,
-        terminal_operations,
         ..
-    } = block_on(subscription.next_event()).expect("maintained terminal delivery")
+    } = block_on(subscription.next_event()).expect("maintained relation delivery")
     else {
         panic!("expected incremental maintained delta");
     };
     assert!(!reset);
     assert!(added.is_empty());
-    assert!(updated.is_empty());
     assert!(removed.is_empty());
-    assert!(matches!(
-        terminal_operations.as_slice(),
-        [jazz::groove::ivm::TerminalOperation {
-            path,
-            edit: jazz::groove::ivm::TerminalEdit::Insert { index: 1, .. },
-            ..
-        }] if path == &[jazz::groove::ivm::TerminalPathSegment::Collection(
-            "children".to_owned()
-        )]
-    ));
+    assert_eq!(updated.len(), 1, "the parent is updated in place");
+    assert_eq!(updated[0].row_uuid(), matching_parent);
+    assert_eq!(
+        relation_ids(&updated[0], "children"),
+        vec![initial_child, added_child],
+        "the new child is appended to the parent's relation"
+    );
+    assert!(
+        subscription.try_next_event().is_none(),
+        "the non-matching parent's subtree is not delivered"
+    );
 }
 
 #[test]
@@ -420,11 +410,9 @@ fn large_parent_is_materialized_atomically_without_a_frame_bound() {
         .expect("large reset remains one atomic logical result");
 }
 
-/// Ordering or slicing a nested collector by a column the include does not
-/// select keeps that column as a hidden carrier. Both union arms of the
-/// collector must agree on its descriptor (#2739), for one-shot reads and for
-/// maintained subscriptions.
-#[cfg(any())] // jazz-sqlite: not ported, reads Groove's encoded record descriptor
+/// Ordering or slicing an include by a column it does not select orders and
+/// slices the children by that column without exposing it, for one-shot
+/// reads and for maintained subscriptions (#2739).
 #[test]
 fn nested_order_by_unselected_column_reads_and_subscribes() {
     let db = open_db();
@@ -510,7 +498,7 @@ fn nested_order_by_unselected_column_reads_and_subscribes() {
         );
         for child in included {
             assert!(
-                child.row.encoded_record().0.field_index("rank").is_none(),
+                child.row.cells().all(|(name, _)| name != "rank"),
                 "the unselected sort column is not exposed"
             );
             assert!(matches!(child.row.cell_at(0), Some(Value::String(_))));

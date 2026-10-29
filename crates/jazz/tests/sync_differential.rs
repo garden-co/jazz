@@ -4,8 +4,8 @@
 //! out of other users' reach) while holding window, unbounded and
 //! policy-filtered subscriptions. Whenever every client has synced, each
 //! maintained result must equal what the server returns for that user, and
-//! every client's pending writes must have a fate. Not ported from Jazz:
-//! this pins the prototype's sync layer (src/sync.rs).
+//! every client's pending writes must have a fate. This pins the sync layer
+//! in `jazz-db` (`sync.rs`).
 
 use crate::common;
 
@@ -310,24 +310,40 @@ impl Net {
     }
 }
 
+/// Knobs for the nightly soak (`dev/gates/run-continuous-simulation-soak.sh`):
+/// - `JAZZ_SEED`: run this one seed instead of seeds `1..=SEEDS` (default 8);
+/// - `JAZZ_COMMIT_COUNT`: random writes per seed (default 600).
 #[test]
 fn clients_converge_on_the_servers_truth_under_concurrent_writes() {
+    let env = |name: &str| {
+        std::env::var(name).ok().map(|value| {
+            value
+                .parse::<u64>()
+                .unwrap_or_else(|_| panic!("{name} must be a number: {value}"))
+        })
+    };
+    let single_seed = env("JAZZ_SEED");
+    let commits = env("JAZZ_COMMIT_COUNT");
+    let seeds: Vec<u64> = match single_seed {
+        Some(seed) => vec![seed],
+        None => (1..=env("SEEDS").unwrap_or(8)).collect(),
+    };
     let mut rejected = 0;
-    let seeds: u64 = std::env::var("SEEDS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(8);
-    for seed in 1..=seeds {
-        rejected += run(seed);
+    for seed in seeds {
+        rejected += run(seed, commits.map_or(600, |commits| commits as usize));
     }
-    assert!(
-        rejected > 20,
-        "the run exercised server rejections: {rejected}"
-    );
+    // The default run must exercise rejections; a soak seed is checked
+    // against the oracle only.
+    if single_seed.is_none() && commits.is_none() {
+        assert!(
+            rejected > 20,
+            "the run exercised server rejections: {rejected}"
+        );
+    }
 }
 
-/// One randomized run; returns how many writes the server rejected.
-fn run(seed: u64) -> usize {
+/// One randomized run of `steps` writes; returns how many the server rejected.
+fn run(seed: u64, steps: usize) -> usize {
     let server = block_on(Db::open_history_complete(DbConfig::new(
         schema(),
         DbIdentity {
@@ -392,7 +408,7 @@ fn run(seed: u64) -> usize {
     let mut rng = Rng(seed);
     let mut rejected = 0;
     let (mut messages, mut memberships, mut notes) = (0usize, 0usize, 0usize);
-    for step in 0..600 {
+    for step in 0..steps {
         let k = rng.next(CLIENTS);
         let pick = rng.next(10);
         let db = &net.clients[k].db;

@@ -182,10 +182,12 @@ describe("JazzClient onAuthFailure wiring", () => {
     expect(onAuthFailure).toHaveBeenCalledWith("expired");
   });
 
-  it("does nothing when runtimeOptions.onAuthFailure is omitted", () => {
+  it("still observes refusals when runtimeOptions.onAuthFailure is omitted", () => {
+    // A refusal nothing renews ends the client's Global waits (#3923).
     const runtime = makeFakeRuntime();
     JazzClient.connectWithRuntime(runtime as any, makeContext(), {});
-    expect(runtime.onAuthFailure).not.toHaveBeenCalled();
+    expect(runtime.onAuthFailure).toHaveBeenCalledTimes(1);
+    expect(() => runtime.onAuthFailure.mock.calls[0][0]("token expired")).not.toThrow();
   });
 });
 
@@ -962,7 +964,10 @@ describe("JazzClient runtime transaction waits", () => {
       const handle = mapped ? original.mapValue((value) => value.toUpperCase()) : original;
       const completed = vi.fn();
       const waiting = handle.wait({ tier: "global" }).then(completed);
-      expect(runtime.waitForTransaction).toHaveBeenCalledWith(handle.txId, "global", { ready });
+      expect(runtime.waitForTransaction).toHaveBeenCalledWith(handle.txId, "global", {
+        ready,
+        signal: expect.any(AbortSignal),
+      });
       await Promise.resolve();
       await Promise.resolve();
       expect(completed).not.toHaveBeenCalled();
@@ -999,7 +1004,9 @@ describe("JazzClient runtime transaction waits", () => {
       client.waitForTransaction("transaction-runtime" as TxId, "global"),
     ).resolves.toBeUndefined();
 
-    expect(runtime.waitForTransaction).toHaveBeenCalledWith("transaction-runtime", "global");
+    expect(runtime.waitForTransaction).toHaveBeenCalledWith("transaction-runtime", "global", {
+      signal: expect.any(AbortSignal),
+    });
   });
 
   it("waits for connected serializable transactions at the global tier", async () => {
@@ -1009,7 +1016,9 @@ describe("JazzClient runtime transaction waits", () => {
 
     await expect(handle.wait()).resolves.toBeUndefined();
 
-    expect(runtime.waitForTransaction).toHaveBeenCalledWith("transaction-serializable", "global");
+    expect(runtime.waitForTransaction).toHaveBeenCalledWith("transaction-serializable", "global", {
+      signal: expect.any(AbortSignal),
+    });
   });
 
   it("waits for local-only serializable transactions at the local tier", async () => {
@@ -1022,7 +1031,9 @@ describe("JazzClient runtime transaction waits", () => {
 
     await expect(handle.wait()).resolves.toBeUndefined();
 
-    expect(runtime.waitForTransaction).toHaveBeenCalledWith("transaction-serializable", "local");
+    expect(runtime.waitForTransaction).toHaveBeenCalledWith("transaction-serializable", "local", {
+      signal: expect.any(AbortSignal),
+    });
   });
 
   it("surfaces runtime wait rejection as PersistedWriteRejectedError", async () => {

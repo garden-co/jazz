@@ -1445,21 +1445,18 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   "remote",
                 ),
               ]);
-              // The invitation was actually deleted, not merely withdrawn
-              // from this reader's scope. Its admitted deletion suppresses
-              // local reads too. The undeleted playlist and child instead
-              // remain cached despite losing their remote authorization.
+              // Losing read access evicts the rows: the deleted invitation,
+              // and the undeleted playlist and child, are gone from local
+              // reads too (INV-SYNC-14).
               await expect(
                 editor.all(app.invitations.where({ id: editorInvite.id })),
               ).resolves.toEqual([]);
-              expect(
-                (await editor.all(app.playlists.where({ id: playlist.id }))).map((row) => row.id),
-              ).toEqual([playlist.id]);
-              expect(
-                (await editor.all(app.playlist_entries.where({ id: belowWindowEntryId }))).map(
-                  (row) => row.id,
-                ),
-              ).toEqual([belowWindowEntryId]);
+              await expect(editor.all(app.playlists.where({ id: playlist.id }))).resolves.toEqual(
+                [],
+              );
+              await expect(
+                editor.all(app.playlist_entries.where({ id: belowWindowEntryId })),
+              ).resolves.toEqual([]);
               await expect(
                 editor
                   .insert(app.playlist_entries, {

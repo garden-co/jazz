@@ -33,44 +33,8 @@ pub const CONTAMINATING_INSTRUMENTATION: &[ContaminatingInstrumentation] = &[
         reason: "it configures CPU profiler acknowledgement during cold-load attribution",
     },
     ContaminatingInstrumentation {
-        name: "JAZZ_REHYDRATE_TRACE",
-        reason: "it resets storage-read metrics and adds timing plus formatted stderr output inside rehydration",
-    },
-    ContaminatingInstrumentation {
-        name: "GROOVE_PROFILE_HYDRATION_OPERATORS",
-        reason: "it times every hydration join, inflating wall-clock measurements",
-    },
-    ContaminatingInstrumentation {
-        name: "GROOVE_TRACE_INDEX_BY",
-        reason: "it times and formats IndexBy and Persist work inside the measured runtime path",
-    },
-    ContaminatingInstrumentation {
-        name: "JAZZ_CLOSURE_TRACE",
-        reason: "it formats and writes recursive-runtime trace records during measured work",
-    },
-    ContaminatingInstrumentation {
-        name: "JAZZ_CAPABILITY_TRACE",
-        reason: "it enables capability trace formatting during query compilation",
-    },
-    ContaminatingInstrumentation {
-        name: "JAZZ_CAPABILITY_TRACE_FILE",
-        reason: "it writes capability traces and captures backtraces during query compilation",
-    },
-    ContaminatingInstrumentation {
         name: "JAZZ_PROFILE_OUT",
         reason: "it enables CPU profiling around benchmark phases",
-    },
-    ContaminatingInstrumentation {
-        name: "JAZZ_CUSTOMER_TRACE_TICKS",
-        reason: "it formats and writes per-tick customer cold-start trace output during settling",
-    },
-    ContaminatingInstrumentation {
-        name: "JAZZ_ALLOC_SITE_SAMPLE_RATE",
-        reason: "it configures allocation stack sampling during the customer cold-start receipt",
-    },
-    ContaminatingInstrumentation {
-        name: "JAZZ_ALLOC_SITE_MAX_SAMPLES",
-        reason: "it configures allocation stack sampling during the customer cold-start receipt",
     },
 ];
 
@@ -118,10 +82,10 @@ mod tests {
         let clean = run_probe(PROBE_ENV, None);
         assert!(clean.status.success(), "clean probe failed: {clean:?}");
 
-        let contaminated = run_probe(PROBE_ENV, Some(("JAZZ_REHYDRATE_TRACE", "1")));
+        let contaminated = run_probe(PROBE_ENV, Some(("JAZZ_PROFILE_OUT", "1")));
         assert_eq!(contaminated.status.code(), Some(2));
         assert!(
-            String::from_utf8_lossy(&contaminated.stderr).contains("JAZZ_REHYDRATE_TRACE"),
+            String::from_utf8_lossy(&contaminated.stderr).contains("JAZZ_PROFILE_OUT"),
             "refusal should name the contaminating variable"
         );
     }
@@ -144,10 +108,10 @@ mod tests {
 
     #[test]
     fn finds_the_first_configured_contaminating_variable() {
-        let refusal = first_contaminating_instrumentation(|name| name == "JAZZ_REHYDRATE_TRACE")
-            .expect("JAZZ_REHYDRATE_TRACE should be refused");
+        let refusal = first_contaminating_instrumentation(|name| name == "JAZZ_PROFILE_OUT")
+            .expect("JAZZ_PROFILE_OUT should be refused");
 
-        assert_eq!(refusal.name, "JAZZ_REHYDRATE_TRACE");
+        assert_eq!(refusal.name, "JAZZ_PROFILE_OUT");
         assert!(first_contaminating_instrumentation(|_| false).is_none());
     }
 }

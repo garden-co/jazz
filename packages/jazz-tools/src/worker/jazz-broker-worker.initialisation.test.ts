@@ -133,6 +133,8 @@ const mocks = vi.hoisted(() => {
           onServerTransportError: vi.fn(),
           onRemoteLinkStateChange: vi.fn(),
           remoteLinkState: vi.fn(() => "connected"),
+          onUpstreamLinkStatusChange: vi.fn(),
+          upstreamLinkStatus: vi.fn(() => ({ state: "connected" })),
           setRemoteLinkHint: vi.fn(),
           onPeerTransportWork: vi.fn(() => () => {}),
           progressPeerTransport: vi.fn(async () => undefined),
@@ -2982,11 +2984,11 @@ describe("broker worker context initialization", () => {
     const late = await connect(initOptions, "late-tab");
     const runtime = mocks.runtimes[0]!;
     const callback = runtime.onServerTransportError.mock.calls[0]?.[0] as
-      | ((error: Error) => void)
+      | ((error: Error, state: { retrying: boolean }) => void)
       | undefined;
     expect(callback).toBeTypeOf("function");
     const terminalError = new Error("Protocol: terminal maintained view failure");
-    callback?.(terminalError);
+    callback?.(terminalError, { retrying: false });
 
     for (const port of [owner.port, successor.port]) {
       await expect(
@@ -2998,6 +3000,7 @@ describe("broker worker context initialization", () => {
           message: terminalError.message,
           stack: terminalError.stack,
         },
+        retrying: false,
       });
     }
     expect(late.port.hasEvent((event) => event.type === "transport-error")).toBe(false);
