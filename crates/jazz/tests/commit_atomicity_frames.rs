@@ -386,8 +386,8 @@ fn an_untrusted_commit_over_the_session_budget_is_rejected_without_sending() {
 }
 
 /// A pending commit too large for one stored value (a Durable Object keeps
-/// at most 2 MiB in one) is kept in parts: it survives a reopen whole and
-/// uploads as one commit, and its parts go once it settles.
+/// at most 2 MiB in one) is kept a row per op: it survives a reopen whole
+/// and uploads as one commit, and its rows go once it settles.
 #[test]
 fn a_pending_commit_over_one_stored_value_survives_a_reopen() {
     let dir = tempfile::tempdir().unwrap();
@@ -420,13 +420,23 @@ fn a_pending_commit_over_one_stored_value_survives_a_reopen() {
         commit_notes(&writer, ROWS);
         block_on(writer.tick()).unwrap();
     }
-    let parts = |path: &std::path::Path| -> i64 {
+    let items = |path: &std::path::Path| -> (i64, i64) {
         rusqlite::Connection::open(path)
             .unwrap()
-            .query_row("SELECT count(*) FROM _jazz_commit_parts", [], |r| r.get(0))
+            .query_row(
+                "SELECT count(*), coalesce(max(length(item)), 0) FROM _jazz_pending_items \
+                 WHERE part = 0",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .unwrap()
     };
-    assert!(parts(&path) > 1, "kept in parts");
+    let (ops, largest) = items(&path);
+    assert_eq!(ops, ROWS as i64, "kept a row per op");
+    assert!(
+        largest < 64 * 1024,
+        "no stored op near the value limit: {largest}"
+    );
     let writer = open_writer();
     let server = open(0xc5, AuthorSubject::SYSTEM);
     let room = Rc::new(RefCell::new(usize::MAX));
@@ -437,11 +447,11 @@ fn a_pending_commit_over_one_stored_value_survives_a_reopen() {
     }
     assert_eq!(visible(&server), ROWS);
     drop(writer);
-    assert_eq!(parts(&path), 0, "parts go once the commit settles");
+    assert_eq!(items(&path).0, 0, "its rows go once the commit settles");
 }
 
-/// A refused commit too large for one stored value is kept for the host in
-/// its parts: listed whole, and its parts go when the host discards it.
+/// A refused commit too large for one stored value is kept for the host a
+/// row per op: listed whole, and its rows go when the host discards it.
 #[test]
 fn a_refused_commit_over_one_stored_value_is_listed_whole_and_discarded() {
     let dir = tempfile::tempdir().unwrap();
@@ -469,19 +479,20 @@ fn a_refused_commit_over_one_stored_value_is_listed_whole_and_discarded() {
         block_on(writer.tick()).unwrap();
         block_on(server.tick()).unwrap();
     }
-    let parts = || -> i64 {
+    let count = |table: &str| -> i64 {
         rusqlite::Connection::open(&path)
             .unwrap()
-            .query_row("SELECT count(*) FROM _jazz_commit_parts", [], |r| r.get(0))
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
             .unwrap()
     };
     let rejected = writer.rejected_transactions().unwrap();
     assert_eq!(rejected.len(), 1);
     assert_eq!(rejected[0].ops.len(), 300, "listed whole");
-    assert!(parts() > 1, "kept in parts");
+    assert_eq!(count("_jazz_rejected_ops"), 300, "kept a row per op");
+    assert_eq!(count("_jazz_pending_items"), 0, "and no longer pending");
     writer
         .discard_rejected_transaction(rejected[0].seq)
         .unwrap();
     assert!(writer.rejected_transactions().unwrap().is_empty());
-    assert_eq!(parts(), 0, "parts go with the discarded commit");
+    assert_eq!(count("_jazz_rejected_ops"), 0, "its ops go with it");
 }

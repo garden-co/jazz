@@ -119,9 +119,9 @@ Messages, with their postcard variant tags:
 | 17  | `Holds`           | client → server | The schema versions and names the replica keeps (§8.10)          |
 | 18  | `Catalogue`       | server → client | Admitted versions, stored names and lens cells (§8.10)           |
 
-Tags before `Commit` keep their numbers: a replica stores its pending uploads
-as encoded `Commit` messages (`_jazz_pending`, see §8.3), so `Commit` stays
-tag 4 across stores. No server-sent message has tag 0 or 1, which lets a client tell a
+Tags before `Commit` keep their numbers: a replica stores each pending
+upload's header as an encoded `Commit` message (`_jazz_pending`, see §8.3),
+so `Commit` stays tag 4 across stores. No server-sent message has tag 0 or 1, which lets a client tell a
 sync frame from a `WireFrame::Hello` (tag 0) or `WireFrame::Error` (tag 1) by
 its first byte.
 
@@ -203,19 +203,27 @@ fields:
   a trusted link may set one other than its own identity.
 - `origin`: the session commit a relay uploads this one for.
 
-A replica keeps every unsettled commit in `_jazz_pending` and uploads it in
-order on each connection. The commit is kept as its encoded message in
-`commit_msg`. When the encoding is over 1 MiB, it is kept instead in 1 MiB
-parts in `_jazz_commit_parts (tx, n, part)` and `commit_msg` is empty. No
-stored value is then larger than 1 MiB, so a store with a 2 MiB value limit
-(a Durable Object) keeps commits that travel in several frames. The retry
-store for refused commits (`_jazz_rejected`) reads the same parts. They are
-dropped once neither table keeps the commit. A build from before this format
-reads the empty `commit_msg` as a malformed commit and fails with a storage
-error. That is acceptable only because the SQLite store format has not
-shipped (alpha.60). Uploads are pipelined: no node waits for a fate
-before sending its next commit, and a writer's commits reach the authority in
-the order written (`INV-HIST-23`). The authority orders commits by arrival.
+A replica keeps every unsettled commit and uploads it in order on each
+connection. It is stored a row per op, not as one encoded message:
+
+- `_jazz_pending (tx, header)`: the `Commit` with its lists left empty.
+- `_jazz_pending_items (tx, part, n, item)`: each op, cell delta, source,
+  base and serializable read, by list (`part`) and position (`n`).
+- `_jazz_pending_rows (tx, n, tbl, id, key)`: the local rows it wrote.
+
+`expect` is not kept: after a reopen the server ships those rows. A row's
+values over the inline limit live in large-value storage, so no stored value
+grows with the commit, and a store with a 2 MiB value limit (a Durable
+Object) keeps commits that travel in several frames. A refused commit moves
+to the retry store, `_jazz_rejected (tx, error, serializable)` with its ops
+in `_jazz_rejected_ops (tx, n, op)`, until the host discards it. A build
+from before this layout cannot open a store written by one after it, nor the
+other way around. That is acceptable only because the SQLite store format
+has not shipped (alpha.60).
+
+Uploads are pipelined: no node waits for a fate before sending its next
+commit, and a writer's commits reach the authority in the order written
+(`INV-HIST-23`). The authority orders commits by arrival.
 
 A relay that receives a session's commit stores it as its own pending commit
 and uploads it with `origin` set. It does not decide it (`INV-TX-23`).
