@@ -175,6 +175,23 @@ pub(crate) fn identity(namespace: [u8; 16], table: &str, column: Option<&str>) -
     uuid::Uuid::new_v5(&uuid::Uuid::from_bytes(namespace), &name)
 }
 
+/// The stored column a column named `name` starts in when `version`
+/// introduces it: `name~` and six hex digits of a hash of both. Every store
+/// derives it alike, whatever else it admitted and in whatever order, so a
+/// replica stores a version's new columns where its authority does without
+/// asking (SPEC 10.7). A column keeps its stored column across renames and
+/// later versions; only a new lineage (a column added or retyped) starts one.
+pub(crate) fn stored_column(version: &SchemaVersionId, name: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    for part in [b"column".as_slice(), version.as_bytes(), name.as_bytes()] {
+        hasher.update(&(part.len() as u64).to_le_bytes());
+        hasher.update(part);
+    }
+    let hash = hasher.finalize();
+    let [a, b, c, ..] = *hash.as_bytes();
+    format!("{name}~{a:02x}{b:02x}{c:02x}")
+}
+
 /// A digest of where a version stores its tables and columns: equal on
 /// two stores that name it alike.
 pub(crate) fn names_digest(names: &StoredNames) -> [u8; 16] {
@@ -939,9 +956,21 @@ impl Names {
                     });
                 let stored_column = match previous {
                     Some(previous) => previous.to_owned(),
-                    None => self.fresh(&column.name, &taken, |candidate, _| {
-                        self.claims_column(&stored, candidate, "", true)
-                    }),
+                    None => {
+                        let candidate = stored_column(&version, &column.name);
+                        // Only a hash collision (one in 2^24 per pair of
+                        // same-named lineages of a table) lands here: every
+                        // store refuses the version alike.
+                        if taken.contains(&candidate)
+                            || self.claims_column(&stored, &candidate, "", true)
+                        {
+                            return Err(unsupported(format!(
+                                "column {name}.{} hashing to stored column `{candidate}`, which another lineage of the table uses,",
+                                column.name
+                            )));
+                        }
+                        candidate
+                    }
                 };
                 taken.insert(stored_column.clone());
                 columns.insert(column.name.clone(), stored_column);

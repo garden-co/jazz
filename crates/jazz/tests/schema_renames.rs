@@ -208,6 +208,7 @@ fn stored(path: &Path) -> BTreeMap<String, Vec<String>> {
                 .filter(|column| {
                     !column.starts_with(['_', '$']) && column != "id" && column != "rid"
                 })
+                .map(|column| common::unhashed(&column))
                 .collect();
             (table, columns)
         })
@@ -445,7 +446,11 @@ fn a_name_freed_by_a_rename_gets_its_own_stored_column() {
     assert_eq!(read(&old, "todos", "title"), texts(&["old"]));
     let columns = &stored(&path)["todos"];
     assert_eq!(columns.len(), 3, "{columns:?}");
-    assert!(columns.contains(&"title~2".to_owned()), "{columns:?}");
+    assert_eq!(
+        columns.iter().filter(|c| *c == "title").count(),
+        2,
+        "the new `title` starts a stored column of its own: {columns:?}"
+    );
 }
 
 #[test]
@@ -783,7 +788,10 @@ fn copy_title() -> MigrationLens {
 fn history(path: &Path, table: &str, column: &str) -> Vec<String> {
     let conn = rusqlite::Connection::open(path).unwrap();
     let mut values: Vec<String> = conn
-        .prepare(&format!("SELECT \"{column}\" FROM \"{table}__h\""))
+        .prepare(&format!(
+            "SELECT {} FROM \"{table}__h\"",
+            common::physical_column(&conn, table, column)
+        ))
         .unwrap()
         .query_map([], |row| row.get(0))
         .unwrap()

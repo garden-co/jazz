@@ -79,3 +79,46 @@ pub fn assert_serialization_conflict(error: &jazz::db::Error) {
     assert!(error.is_serialization_conflict(), "{error}");
     assert!(error.message.contains("SerializationConflict"), "{error}");
 }
+
+/// `text` with each stored column's hash suffix (`~` and six hex digits,
+/// SPEC 10.7) removed: physical names, SQL and plans as the logical names
+/// spell them.
+pub fn unhashed(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < text.len() {
+        if bytes[i] == b'~'
+            && bytes.len() >= i + 7
+            && bytes[i + 1..i + 7]
+                .iter()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
+            && bytes.get(i + 7).is_none_or(|b| !b.is_ascii_alphanumeric())
+        {
+            i += 7;
+            continue;
+        }
+        let c = text[i..].chars().next().unwrap();
+        out.push(c);
+        i += c.len_utf8();
+    }
+    out
+}
+
+/// The physical column logical `column` of stored table `table` is kept
+/// in (`column~` and its hash, SPEC 10.7), quoted for SQL.
+pub fn physical_column(conn: &rusqlite::Connection, table: &str, column: &str) -> String {
+    let mut statement = conn
+        .prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))
+        .unwrap();
+    let names: Vec<String> = statement
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let name = names
+        .into_iter()
+        .find(|name| unhashed(name) == column)
+        .unwrap_or_else(|| panic!("{table} stores no column {column}"));
+    format!("\"{name}\"")
+}

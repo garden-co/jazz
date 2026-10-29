@@ -17,7 +17,7 @@ use jazz::tools::{ColumnType, Schema, SchemaBuilder, SchemaHash, TableSchemaBuil
 
 use crate::common;
 
-use common::allow_all_policies;
+use common::{allow_all_policies, physical_column, unhashed};
 
 fn block_on<F: Future>(future: F) -> F::Output {
     let waker = Waker::noop();
@@ -261,10 +261,10 @@ fn composite_index_definition_in_the_store_file_is_pinned() {
     assert_eq!(
         composite,
         [(
-            "tasks__ix(owner,rank)".to_owned(),
+            "tasks__ix(owner~fcef33,rank~dde7e7)".to_owned(),
             concat!(
-                "CREATE INDEX \"tasks__ix(owner,rank)\" ON \"tasks\"(",
-                "\"owner\", \"rank\", id)"
+                "CREATE INDEX \"tasks__ix(owner~fcef33,rank~dde7e7)\" ON \"tasks\"(",
+                "\"owner~fcef33\", \"rank~dde7e7\", id)"
             )
             .to_owned()
         )]
@@ -287,11 +287,20 @@ fn composite_index_definition_in_the_store_file_is_pinned() {
 /// test row uuids are `[n; 16]`.
 fn composite_index_row_order(directory: &std::path::Path) -> Vec<u8> {
     let conn = rusqlite::Connection::open(store_path(directory)).unwrap();
+    let (owner, rank) = (
+        physical_column(&conn, "tasks", "owner"),
+        physical_column(&conn, "tasks", "rank"),
+    );
+    let index = format!(
+        "tasks__ix({},{})",
+        owner.trim_matches('"'),
+        rank.trim_matches('"')
+    );
     let mut statement = conn
-        .prepare(
-            "SELECT id FROM tasks INDEXED BY \"tasks__ix(owner,rank)\" \
-             WHERE owner IS NOT NULL ORDER BY owner, rank, id",
-        )
+        .prepare(&format!(
+            "SELECT id FROM tasks INDEXED BY \"{index}\" \
+             WHERE {owner} IS NOT NULL ORDER BY {owner}, {rank}, id"
+        ))
         .unwrap();
     statement
         .query_map([], |row| row.get::<_, Vec<u8>>(0))
@@ -312,7 +321,7 @@ fn assert_page_uses_composite_index(db: &Db, owner: &str) {
         )
         .unwrap();
     let (_, plan) = db.explain_query_plan(&page, None).unwrap();
-    assert!(plan.contains("tasks__ix(owner,rank)"), "{plan}");
+    assert!(unhashed(&plan).contains("tasks__ix(owner,rank)"), "{plan}");
     assert!(!plan.contains("TEMP B-TREE FOR ORDER BY"), "{plan}");
 }
 
@@ -664,7 +673,7 @@ fn composite_indexes_subsume_their_prefixes_and_id_reads_seek_by_id() {
     let (_, plan) = db
         .explain_query_plan(&db.prepare_query(&ada()).unwrap(), None)
         .unwrap();
-    assert!(plan.contains("tasks__ix(owner,rank)"), "{plan}");
+    assert!(unhashed(&plan).contains("tasks__ix(owner,rank)"), "{plan}");
 
     let point = db
         .prepare_query(&ada().filter(eq(col("id"), lit(Value::Uuid(row(5).0)))))
@@ -705,7 +714,7 @@ fn adding_an_index_only_column_to_an_existing_store_backfills_its_index() {
     let index_on = |column: &str| {
         stored_task_indexes(directory.path())
             .into_iter()
-            .find(|(name, _)| *name == format!("tasks__ix({column})"))
+            .find(|(name, _)| unhashed(name) == format!("tasks__ix({column})"))
     };
     assert!(index_on("owner").is_some());
     assert_eq!(

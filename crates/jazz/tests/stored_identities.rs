@@ -543,11 +543,12 @@ fn remote_read_rejection(client: &Db, server: &Db) -> Option<String> {
 }
 
 /// A replica and its authority each add `rank` again while apart, as text
-/// and as a boolean: both store it under the same fresh name. The replica
-/// refuses the authority's catalogue rather than read text as booleans: it
-/// stays as it was, its remote reads say why, and its local reads go on.
+/// and as a boolean. Each version's new column is stored under a name
+/// derived from that version (SPEC 10.7), so the two never share a stored
+/// column: the replica mirrors the authority's catalogue beside its own,
+/// its remote reads go on, and text is never read as booleans.
 #[test]
-fn a_replica_refuses_a_catalogue_storing_its_column_with_another_type() {
+fn a_column_re_added_with_another_type_while_apart_gets_its_own_stored_column() {
     let server = authority(notes("notes", "text"), 0);
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("client.sqlite");
@@ -573,8 +574,7 @@ fn a_replica_refuses_a_catalogue_storing_its_column_with_another_type() {
     block_on(server.activate_schema(bool_rank())).unwrap();
 
     let _link = link(&client, &server);
-    let reason = remote_read_rejection(&client, &server).expect("the remote read says why");
-    assert!(reason.contains("changing the type"), "{reason}");
+    assert_eq!(remote_read_rejection(&client, &server), None);
     assert_eq!(
         ranks(&client),
         [Some(Value::Nullable(Some(Box::new(Value::String(
@@ -589,7 +589,7 @@ fn a_replica_refuses_a_catalogue_storing_its_column_with_another_type() {
         [Some(Value::Nullable(Some(Box::new(Value::String(
             "high".into()
         )))))],
-        "nothing of the authority's catalogue was stored"
+        "the text column is still the replica's"
     );
 }
 
@@ -849,7 +849,7 @@ fn task_rows(db: &Db) -> Vec<(String, Option<Value>)> {
 }
 
 /// A replica writes before its first sync under a version whose column the
-/// authority stores elsewhere (its type changed there, so `status~2`):
+/// authority stores elsewhere (its type changed there, a new stored column):
 /// mirroring the catalogue renames the replica's column, and its pending
 /// write still uploads, settles and reads back on both sides.
 #[test]
@@ -899,5 +899,122 @@ fn a_pending_write_survives_the_catalogue_renaming_its_column() {
     assert_eq!(
         client.column_identity("tasks", "status").unwrap(),
         server.column_identity("tasks", "status").unwrap()
+    );
+}
+
+/// `notes(text, rank: bigint = 0, <extra>: text?)`: a v2 that adds `rank`
+/// beside another new column, so two of them are different versions.
+fn rank_beside(extra: &str) -> JazzSchema {
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("text", ColumnType::Text)
+                    .column_with_default("rank", ColumnType::BigInt, jazz::tools::Value::BigInt(0))
+                    .nullable_column(extra, ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    )
+}
+
+/// The columns `path`'s `notes` keeps, physically.
+fn notes_columns(path: &Path) -> Vec<String> {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    let mut statement = conn
+        .prepare("SELECT name FROM pragma_table_info('notes') ORDER BY name")
+        .unwrap();
+    statement
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// An offline replica ships v2 and writes `rank` under it while its
+/// authority admits another v2 (a draft adding `rank` too) first. Stored
+/// columns are derived from the version that introduces them, not minted in
+/// admission order, so the replica stored `rank` where the authority does
+/// before it ever heard of either: mirroring the catalogue renames nothing
+/// and the pending write lands in the authority's v2 column, not the
+/// draft's.
+#[test]
+fn an_offline_replica_stores_its_v2_columns_where_the_authority_does() {
+    let v1 = without_rank();
+    let draft = rank_beside("tag");
+    let v2 = rank_beside("label");
+    let adds = |target: &JazzSchema, extra: &str| {
+        rename(
+            &v1,
+            target,
+            vec![
+                LensOp::AddColumn {
+                    column: "rank".into(),
+                    default: Value::I64(0),
+                },
+                LensOp::AddColumn {
+                    column: extra.into(),
+                    default: Value::Nullable(None),
+                },
+            ],
+        )
+    };
+    let server = authority(v1.clone(), 0);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("client.sqlite");
+    {
+        let client = open_at(v1.clone(), 1, &path);
+        let _link = link(&client, &server);
+        pump(&server, &[&client]);
+    }
+    block_on(server.admit_schema_with_lenses(draft.clone(), &[adds(&draft, "tag")])).unwrap();
+    block_on(server.admit_schema_with_lenses(v2.clone(), &[adds(&v2, "label")])).unwrap();
+
+    let client = open_at(v2.clone(), 1, &path);
+    insert(
+        &client,
+        1,
+        &[("text", Value::String("a".into())), ("rank", Value::I64(7))],
+    );
+    let offline = notes_columns(&path);
+    assert_eq!(
+        offline
+            .iter()
+            .filter(|c| common::unhashed(c) == "rank")
+            .count(),
+        1,
+        "{offline:?}"
+    );
+
+    let _link = link(&client, &server);
+    pump(&server, &[&client]);
+    let mirrored = notes_columns(&path);
+    let ours = |columns: &[String]| -> Vec<String> {
+        columns
+            .iter()
+            .filter(|c| common::unhashed(c) == "rank")
+            .cloned()
+            .collect()
+    };
+    let [column] = ours(&offline).try_into().unwrap();
+    assert!(mirrored.contains(&column), "{offline:?} -> {mirrored:?}");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let kept: i64 = conn
+        .query_row(&format!("SELECT \"{column}\" FROM notes"), [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        kept, 7,
+        "mirroring moved nothing: {offline:?} -> {mirrored:?}"
+    );
+    assert_eq!(ranks(&client), [Some(Value::I64(7))]);
+    let view = block_on(server.register_schema_view(v2)).unwrap();
+    assert_eq!(ranks(&view), [Some(Value::I64(7))]);
+    let draft = block_on(server.register_schema_view(draft)).unwrap();
+    assert_eq!(
+        ranks(&draft),
+        [Some(Value::I64(0))],
+        "the draft's `rank` is a column of its own"
     );
 }

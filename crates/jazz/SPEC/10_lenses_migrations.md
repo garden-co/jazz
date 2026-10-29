@@ -650,9 +650,22 @@ schema version.
 - A column added again without a lens, under a name an earlier version
   stored in its table, continues the stored column that the last such
   version kept it in, and keeps that column's identity, only if its type is
-  the recorded one. Otherwise it gets a stored name no version uses, which
-  gives it a new identity. A column a lens adds always starts a new stored
-  column, because the lens says the source lacks it.
+  the recorded one. Otherwise it starts a new stored column, which gives it
+  a new identity. A column a lens adds always starts a new stored column,
+  because the lens says the source lacks it.
+- A new stored column's name is derived, never minted: a column `name`
+  that version `v` introduces (a column of a new table, one a lens adds or
+  copies, one whose type changed, one added without a lens that continues
+  no stored column) is stored as `name~` and the first six hex digits of
+  BLAKE3 over the length-prefixed parts `"column"`, the 16 bytes of `v`'s
+  id, and `name`. Every store derives the same name for the same version,
+  whatever else it admitted and in whatever order, so a replica stores a
+  version's new columns where its authority does without asking, and the
+  authority's `Catalogue.confirmed` digest only checks it. A column a
+  version keeps from its source (untouched or renamed) keeps the source's
+  stored column. Two lineages of one table that share a name collide only
+  if their hashes do (one in 2^24 per pair): a store refuses such a version
+  with "is not supported yet", and every store refuses it alike.
 
 This is how the SQLite engine meets `INV-LENS-24`: an identity is never
 reused for another column epoch, and only a compatible re-addition keeps its
