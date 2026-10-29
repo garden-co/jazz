@@ -484,9 +484,11 @@ struct Inner {
     /// Each stored table's column positions, the codes authored-column
     /// bitmasks use (SPEC 4 §4.6), read on first use.
     column_codes: RefCell<HashMap<String, HashMap<String, u32>>>,
-    /// Sessions the server ended for what they sent, with why, until the
-    /// host takes them ([`Db::take_closed_subscribers`]).
-    closed: Vec<(sync::SubscriberId, Error)>,
+    /// Sessions the server ended, with why, until the host takes them
+    /// ([`Db::take_closed_subscribers`]). Kept only for a host that does
+    /// ([`Db::track_closed_subscribers`]), so that one which never takes
+    /// them does not accumulate them.
+    closed: Option<Vec<(sync::SubscriberId, Error)>>,
     /// Query statements that ran slow, until the host takes them
     /// ([`Db::take_slow_queries`]).
     slow: RefCell<crate::slow::SlowLog>,
@@ -1191,7 +1193,7 @@ impl Db {
                 upstream_rejections: None,
                 sessions: Vec::new(),
                 column_codes: RefCell::default(),
-                closed: Vec::new(),
+                closed: None,
                 slow: RefCell::default(),
                 accepted: 0,
                 since_tick: Vec::new(),
