@@ -261,6 +261,29 @@ export type NativeForegroundResponse =
   | { type: "slowQueryThresholdSet" }
   | { type: "pendingUploadCount"; count: number };
 
+type NativeForegroundSubscriptionFailureCode =
+  | "TableNotFound"
+  | "SchemaResolution"
+  | "QueryValidation"
+  | "QueryLowering"
+  | "PolicyEvaluation"
+  | "Internal"
+  | "QueryResultProtocol";
+
+function isNativeForegroundSubscriptionFailureCode(
+  value: string,
+): value is NativeForegroundSubscriptionFailureCode {
+  return (
+    value === "TableNotFound" ||
+    value === "SchemaResolution" ||
+    value === "QueryValidation" ||
+    value === "QueryLowering" ||
+    value === "PolicyEvaluation" ||
+    value === "Internal" ||
+    value === "QueryResultProtocol"
+  );
+}
+
 export type NativeForegroundSubscriptionEvent =
   | {
       type: "delta";
@@ -270,7 +293,10 @@ export type NativeForegroundSubscriptionEvent =
       delta: Uint8Array;
       terminalOperations?: unknown[];
     }
-  | { type: "rejected"; reason: string }
+  | {
+      type: "rejected";
+      code: NativeForegroundSubscriptionFailureCode;
+    }
   | { type: "closed" };
 
 function foregroundRuntimeInstallationError(): Error {
@@ -997,9 +1023,12 @@ function decodeForegroundSubscriptionEvents(
       });
     } else if (tag === 1) {
       const length = readVarint();
-      const reason = decodeForegroundUtf8(bytes, offset, length, "rejection");
+      const rawCode = decodeForegroundUtf8(bytes, offset, length, "rejection");
       offset += length;
-      events.push({ type: "rejected", reason });
+      // Earlier ABI 3 native builds send diagnostic text in this same string
+      // slot. Keep OTA bundles compatible without exposing those diagnostics.
+      const code = isNativeForegroundSubscriptionFailureCode(rawCode) ? rawCode : "Internal";
+      events.push({ type: "rejected", code });
     } else if (tag === 2) events.push({ type: "closed" });
     else throw new Error("Jazz native foreground returned unknown subscription event");
   }

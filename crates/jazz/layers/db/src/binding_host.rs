@@ -35,9 +35,9 @@ use crate::db::{
     Db, DbConfig, DbIdentity, DeleteOptions, Error, ErrorCode, ExactWriteTarget, FirstLoad,
     InsertOptions, LargeValueStagingPolicy, LargeValueUpdate, ReadOpts, ReadTier, RemoteLinkHint,
     RestoreOptions, SeededRowIdSource, SerializedReadResult, StreamingMutationKind,
-    StreamingValueUpload, SubscriberId, SubscriptionEvent, SubscriptionStream, TransportError,
-    UpdateOptions, UpsertOptions, Upstream, WireTransport, WireTransportAdapter, WriteHandle,
-    WriteIdentity, block_on,
+    StreamingValueUpload, SubscriberId, SubscriptionEvent, SubscriptionServerFailureCode,
+    SubscriptionStream, TransportError, UpdateOptions, UpsertOptions, Upstream, WireTransport,
+    WireTransportAdapter, WriteHandle, WriteIdentity, block_on,
 };
 
 /// Named cells, as the binding codec decodes them.
@@ -1781,10 +1781,10 @@ pub enum EventChunk {
     },
     /// `{ type: "closed" }`.
     Closed,
-    /// `{ type: "rejected", reason: { type: "ServerFailure", detail } }`.
+    /// `{ type: "rejected", reason: { type: "ServerFailure", code } }`.
     Rejected {
-        /// Why.
-        detail: String,
+        /// Stable, client-safe failure class.
+        code: SubscriptionServerFailureCode,
     },
 }
 
@@ -1806,7 +1806,7 @@ pub fn event_chunk(event: SubscriptionEvent) -> HostResult<EventChunk> {
             tier: format!("{tier:?}"),
         },
         SubscriptionEvent::Closed => EventChunk::Closed,
-        SubscriptionEvent::Rejected { reason } => EventChunk::Rejected { detail: reason },
+        SubscriptionEvent::Rejected { code } => EventChunk::Rejected { code },
     })
 }
 

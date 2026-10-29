@@ -17,7 +17,8 @@ use std::rc::Rc;
 
 use jazz::db::{
     Db, DbConfig, DbIdentity, ErrorCode, FileOptions, InsertOptions, ReadOpts, RemoteLinkHint,
-    SubscriptionEvent, SyncMessage, Transport, TransportError, block_on,
+    SubscriptionEvent, SubscriptionServerFailureCode, SyncMessage, Transport, TransportError,
+    block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::{LensOp, MigrationLens, TableLens};
@@ -390,12 +391,12 @@ fn an_upstream_of_another_app_is_refused() {
     pump(&bob, &[&client]);
     let mut rejected = None;
     while let Some(event) = stream.try_next_event() {
-        if let SubscriptionEvent::Rejected { reason } = event {
-            rejected = Some(reason);
+        if let SubscriptionEvent::Rejected { code } = event {
+            rejected = Some(code);
         }
     }
-    let reason = rejected.expect("the remote read says why");
-    assert!(reason.contains("another app"), "{reason}");
+    let code = rejected.expect("the remote read says why");
+    assert_eq!(code, SubscriptionServerFailureCode::SchemaResolution);
     assert_eq!(
         client.table_identity("notes").unwrap(),
         alice.table_identity("notes").unwrap()
@@ -527,16 +528,16 @@ fn bool_rank() -> JazzSchema {
     )
 }
 
-/// The rejection reason of a remote read of `notes` on `client`, after
+/// The rejection code of a remote read of `notes` on `client`, after
 /// pumping it with `server`.
-fn remote_read_rejection(client: &Db, server: &Db) -> Option<String> {
+fn remote_read_rejection(client: &Db, server: &Db) -> Option<SubscriptionServerFailureCode> {
     let q = client.prepare_query(&Query::from("notes")).unwrap();
     let mut stream = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
     pump(server, &[client]);
     let mut rejected = None;
     while let Some(event) = stream.try_next_event() {
-        if let SubscriptionEvent::Rejected { reason } = event {
-            rejected = Some(reason);
+        if let SubscriptionEvent::Rejected { code } = event {
+            rejected = Some(code);
         }
     }
     rejected
@@ -573,8 +574,8 @@ fn a_replica_refuses_a_catalogue_storing_its_column_with_another_type() {
     block_on(server.activate_schema(bool_rank())).unwrap();
 
     let _link = link(&client, &server);
-    let reason = remote_read_rejection(&client, &server).expect("the remote read says why");
-    assert!(reason.contains("changing the type"), "{reason}");
+    let code = remote_read_rejection(&client, &server).expect("the remote read says why");
+    assert_eq!(code, SubscriptionServerFailureCode::QueryValidation);
     assert_eq!(
         ranks(&client),
         [Some(Value::Nullable(Some(Box::new(Value::String(

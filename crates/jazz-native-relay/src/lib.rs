@@ -731,7 +731,9 @@ pub enum ForegroundSubscriptionEvent {
         delta: Vec<u8>,
     },
     Rejected {
-        reason: String,
+        /// Stable failure code. Earlier ABI 3 builds used diagnostic text in
+        /// this same Postcard string slot; JS maps unknown text to Internal.
+        code: String,
     },
     Closed,
     /// Existing terminal-operation JSON codec, alongside ordinary row deltas.
@@ -3038,6 +3040,34 @@ mod tests {
     mod host;
     mod snapshot_capture_codec;
     mod socket_worker;
+
+    /// Alice's OTA bundle can read both legacy and typed native rejections.
+    /// This codec-level test pins the ABI 3 bytes because a host round trip
+    /// alone would not detect matching encoder/decoder layout drift.
+    #[test]
+    fn subscription_rejection_keeps_abi_3_string_encoding() {
+        for (code, bytes) in [
+            (
+                "QueryResultProtocol",
+                b"\x04\x01\x01\x13QueryResultProtocol".as_slice(),
+            ),
+            (
+                "Protocol: malformed membership payload",
+                b"\x04\x01\x01\x26Protocol: malformed membership payload".as_slice(),
+            ),
+        ] {
+            let response = ForegroundDbCommandResponse::SubscriptionEvents {
+                events: vec![ForegroundSubscriptionEvent::Rejected {
+                    code: code.to_owned(),
+                }],
+            };
+            assert_eq!(postcard::to_allocvec(&response).unwrap(), bytes);
+            assert_eq!(
+                postcard::from_bytes::<ForegroundDbCommandResponse>(bytes).unwrap(),
+                response,
+            );
+        }
+    }
 
     /// The C header's ABI define, which the C and C++ probes compare the
     /// artifact against, is the ABI this crate speaks.

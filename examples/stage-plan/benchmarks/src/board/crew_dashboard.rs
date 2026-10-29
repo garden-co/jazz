@@ -237,8 +237,8 @@ impl FanoutFixture {
                         }
                         self.settled[index] = settled;
                     }
-                    SubscriptionEvent::Rejected { reason } => {
-                        panic!("dashboard rejected: {reason:?}")
+                    SubscriptionEvent::Rejected { code } => {
+                        panic!("dashboard rejected: {code:?}")
                     }
                     SubscriptionEvent::Closed => panic!("dashboard closed"),
                 }

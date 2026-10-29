@@ -752,9 +752,9 @@ impl Foreground {
                         tier,
                         delta,
                     },
-                    EventChunk::Rejected { detail } => {
-                        ForegroundSubscriptionEvent::Rejected { reason: detail }
-                    }
+                    EventChunk::Rejected { code } => ForegroundSubscriptionEvent::Rejected {
+                        code: code.as_str().to_owned(),
+                    },
                     EventChunk::Closed => {
                         subscription.closed = true;
                         ForegroundSubscriptionEvent::Closed

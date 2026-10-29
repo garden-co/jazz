@@ -393,8 +393,15 @@ export interface SubscriptionRejectedEvent {
 /** Why the server refused a subscription. */
 export interface SubscriptionServerFailureReason {
   type: 'ServerFailure'
-  /** The server's reason. */
-  code: string
+  /** Stable, client-safe failure class. */
+  code:
+    | 'TableNotFound'
+    | 'SchemaResolution'
+    | 'QueryValidation'
+    | 'QueryLowering'
+    | 'PolicyEvaluation'
+    | 'Internal'
+    | 'QueryResultProtocol'
 }
 
 export interface UpdateOptions {
