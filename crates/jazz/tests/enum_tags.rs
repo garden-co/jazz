@@ -1738,31 +1738,6 @@ fn a_range_with_an_unknown_variant_is_refused() {
     assert_eq!(read(cmp(Predicate::Gt, "todo")).unwrap(), 1);
 }
 
-/// A store an earlier build wrote with an enum column names its versions
-/// by ids that did not count variants: it is refused as unsupported, with
-/// what to do, not as a corrupt catalogue.
-#[test]
-fn a_store_an_earlier_build_wrote_with_enums_is_refused() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("authority.sqlite");
-    drop(authority_at(v1(), &path));
-    // The earlier build's id for the same schema.
-    rusqlite::Connection::open(&path)
-        .unwrap()
-        .execute("UPDATE _jazz_versions SET version = ?1", [vec![7u8; 16]])
-        .unwrap();
-    let refused = block_on(Db::open_at(config(v1(), 0), &path, FileOptions::default()))
-        .err()
-        .expect("refused");
-    assert!(
-        refused.to_string().contains("not supported yet")
-            && refused
-                .to_string()
-                .contains("delete the local store and resync"),
-        "{refused}"
-    );
-}
-
 /// A peer declaring the same variants in another order is another schema
 /// version (an alpha.59 peer's ids never count variants at all): until its
 /// server deploys that version, its writes are refused with a typed reason.

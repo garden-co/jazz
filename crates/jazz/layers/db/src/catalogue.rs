@@ -475,23 +475,6 @@ pub(crate) fn admitted(conn: &Connection) -> Result<Vec<(SchemaVersionId, JazzSc
             )
         })?;
         if schema.version_id() != version {
-            // Version ids count enum variants since #4432; a store an
-            // earlier build wrote, with an enum column, names its versions
-            // by the earlier ids (and stores enum cells as text).
-            let enums = schema.runtime().tables.iter().any(|table| {
-                table
-                    .columns
-                    .iter()
-                    .any(|column| column.enum_variants.is_some())
-            });
-            if enums {
-                return Err(Error::new(
-                    ErrorCode::UnsupportedStorageCodecs,
-                    "a store with enum columns written by an earlier build (before enum \
-                     columns were stored as tags) is not supported yet: delete the local \
-                     store and resync",
-                ));
-            }
             return Err(Error::new(
                 ErrorCode::Storage,
                 format!("schema of version {version:?} compiles to another version"),

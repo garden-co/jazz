@@ -39,14 +39,6 @@ nodes and write times:
 
 The receipts that read it back run by exact name in `dev/gates/storage-compat.sh`.
 
-A format-1 file written by a build before #4432 with an enum column (enum
-cells stored as text, schema version ids that did not count variants) is
-not read by later builds: opening it is refused with an unsupported
-storage format error ("a store with enum columns written by an earlier
-build ... is not supported yet: delete the local store and resync"), and
-the file is left unchanged. Format 1 had not shipped; such a store is
-recreated, not migrated.
-
 The greenfield removal of `_jazz_shadow` regenerates this format-1 corpus
 in place, without a migration or format bump. Pending writes recover their
 upstream baseline from the current row or the newest history version below
