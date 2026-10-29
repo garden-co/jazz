@@ -1,9 +1,9 @@
 //! The server catalogue's durable home: the store's own catalogue tables
 //! (see [`jazz::catalogue`]), beside the admissions they describe.
 
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
 
-use jazz::catalogue::{CataloguePut, CatalogueRows};
+use jazz::catalogue::CatalogueRows;
 use jazz::host::HostReader;
 
 pub(crate) type CatalogueStorageResult<T> = Result<T, CatalogueStorageError>;
@@ -24,6 +24,7 @@ impl std::error::Error for CatalogueStorageError {}
 /// rows use too, and wait for it.
 pub(crate) struct CatalogueStorage {
     reader: Arc<HostReader>,
+    #[cfg_attr(not(any(test, feature = "embedded-server")), allow(dead_code))]
     store: crate::runtime::HostSender,
 }
 
@@ -38,9 +39,11 @@ impl CatalogueStorage {
             .map_err(|error| CatalogueStorageError(format!("read catalogue: {error}")))
     }
 
-    /// Write `put` in one commit: all or none.
-    pub(crate) fn put(&self, put: CataloguePut) -> CatalogueStorageResult<()> {
-        let (reply, answer) = mpsc::sync_channel(1);
+    /// Write `put` in one commit: all or none. A deploy instead writes its
+    /// rows in the transaction that admits them (`Db::apply_catalogue`).
+    #[cfg(any(test, feature = "embedded-server"))]
+    pub(crate) fn put(&self, put: jazz::catalogue::CataloguePut) -> CatalogueStorageResult<()> {
+        let (reply, answer) = std::sync::mpsc::sync_channel(1);
         self.store
             .send(Box::new(move |tables| {
                 let _ = reply.send(

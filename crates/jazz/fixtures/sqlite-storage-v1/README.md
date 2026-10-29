@@ -11,9 +11,9 @@ are stored, a rejection's reason name changed how fates are recorded, and
 pending uploads moved from one encoded message to a row per op).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `5891ed003c63e50f505a56f1a57666c2ca8096b1b45f7b561fe42f8e6dad9474`.
+  the SQLite file `9a76235e1d36f74b0e20d3de967d470a4084311d8a3b31d8fc8979cbd5b4da5d`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `30751bce7b61834c7e7eaf8ecec4dc9e22f04c934eb3dbf73dab18b48b5d3017`.
+  `a5ed439e92685a02d790b98b26010257ac5e362617666625fa7a37df818014a1`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
@@ -23,6 +23,9 @@ nodes and write times:
   value, bytes, a defaulted column) and `drafts` (branched by `branch_id`);
 - two interned authors, updates (history versions), a soft delete and a row
   on a branch;
+- a client text edit to `documents.body` (text-merging) that the server
+  merged with its own concurrent edit, so its history keeps the client's
+  write as sent (`_st` bit 2, at `_seq` = minus the commit's seq);
 - a client that synced `projects` and `documents`, wrote one row that
   settled, one stamped far ahead of the server's clock that the server
   rejected (so `_jazz_applied` keeps a rejected fate with its reason name),
@@ -41,4 +44,8 @@ versions so reopening cannot restore an evicted baseline.
 
 Dropping the large-value key columns (`$k:<column>`) and `_jazz_lv_scratch`,
 when queries stopped reading chunked values' content, regenerated it the same
+way.
+
+Replacing the authority's `_jazz_text_in` side table with as-sent history
+versions, when `documents.body` became text-merging, regenerated it the same
 way.

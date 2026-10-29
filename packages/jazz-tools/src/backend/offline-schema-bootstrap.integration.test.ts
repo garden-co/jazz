@@ -107,9 +107,25 @@ describe("offline persistent schema bootstrap", () => {
           expect(await reopened.db.all(newApp.entries, { tier: "local-first" })).toHaveLength(1);
           await close(reopened.session);
           // An incompatible, unpublished target cannot borrow B's admission.
+          // Its `text` changes type in place, so it is a new required column
+          // with no value in the retained row: the store refuses it, when it
+          // opens on it or when a read first uses it.
           const incompatible = s.defineApp({ entries: s.table({ text: s.boolean() }, {}) });
-          const rejected = await open(incompatible, "reader");
-          await expect(rejected.db.all(incompatible.entries, { tier: "remote" })).rejects.toThrow(
+          const refused = async () => {
+            const attempt = await open(incompatible, "reader");
+            try {
+              await attempt.db.all(incompatible.entries, { tier: "remote" });
+            } finally {
+              await close(attempt.session);
+            }
+          };
+          await expect(refused()).rejects.toThrow(
+            /changing the type of required column entries\.text without a default/,
+          );
+          // Optional, it opens, and waits for an admission that never comes.
+          const optional = s.defineApp({ entries: s.table({ text: s.boolean().optional() }, {}) });
+          const rejected = await open(optional, "reader");
+          await expect(rejected.db.all(optional.entries, { tier: "remote" })).rejects.toThrow(
             /awaiting published catalogue admission/,
           );
           await close(rejected.session);

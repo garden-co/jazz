@@ -422,8 +422,8 @@ pub(crate) const PROVENANCE: [&str; 12] = [
 
 /// The current deletion of a row, readable with `includeDeleted`: the
 /// deleting version's update stamp, NULL for live and restored rows. Never
-/// stored: a deleted row is its current version with `_del` set, and that
-/// version's update stamp is the deletion's.
+/// stored: a deleted row is its current version with [`STATE_DELETED`] set
+/// in `_st`, and that version's update stamp is the deletion's.
 pub(crate) const DELETION: [&str; 6] = [
     "$deletedAt",
     "$deletedBy",
@@ -432,6 +432,19 @@ pub(crate) const DELETION: [&str; 6] = [
     "$deletedBy.identity.issuer",
     "$deletedBy.identity.subject",
 ];
+
+/// `_st` bit: the version's commit wrote no content, only a delete, a
+/// restore or a move. Clear on an ordinary write, so a live content
+/// version stores 0. History reads list versions with it clear.
+pub(crate) const STATE_NO_CONTENT: i64 = 1;
+/// `_st` bit: the version is a tombstone. Live versions are `_st < 2`.
+pub(crate) const STATE_DELETED: i64 = 2;
+/// `_st` bit: the version is an authority text merge's write as its writer
+/// sent it, superseded by the merged version at the same seq (SPEC 4
+/// §4.3). Kept only in `__h`, at `_seq` = minus the commit's seq, as the
+/// base of its writer's next chained write; never read as a version, so
+/// every read of `__h` that is not by exact seq requires this bit clear.
+pub(crate) const STATE_AS_SENT: i64 = 4;
 
 /// Whether `column` names deletion metadata (`$deletedAt`, `$deletedBy...`).
 pub(crate) fn is_deletion(column: &str) -> bool {
@@ -932,21 +945,20 @@ impl Table {
         let history = quote(&format!("{}__h", table.stored));
         // `_b` is the canonical branch key ('' for unbranched tables).
         // Rows are unique per (id, branch); branch views select by `_b`
-        // first, so every index leads with it. `_c` is 1 when the version's
-        // commit wrote content (not only a delete or a restore): history
-        // reads list those versions. `_base` and `_cols` are what the
-        // authority keeps of the version an accepted upload wrote: what it
-        // was built on and the columns it authored (SPEC 4 §4.6); NULL
-        // everywhere else.
+        // first, so every index leads with it. `_st` is the version's state
+        // bits ([`STATE_NO_CONTENT`], [`STATE_DELETED`], and in history
+        // [`STATE_AS_SENT`]): 0 for a live version whose commit wrote
+        // content. `_base` and `_cols` are what the authority keeps of the
+        // version an accepted upload wrote: what it was built on and the
+        // columns it authored (SPEC 4 §4.6); NULL everywhere else.
         sql.push_str(&format!(
             "CREATE TABLE {name} (rid INTEGER PRIMARY KEY, id BLOB NOT NULL, \
              _b BLOB NOT NULL DEFAULT X'', _seq INTEGER NOT NULL, \
-             _del INTEGER NOT NULL DEFAULT 0, _c INTEGER NOT NULL DEFAULT 1, \
-             _base INTEGER, _cols BLOB{columns}, UNIQUE (id, _b));\n\
+             _st INTEGER NOT NULL DEFAULT 0, _base INTEGER, _cols BLOB{columns}, \
+             UNIQUE (id, _b));\n\
              CREATE INDEX {} ON {name}(_seq);\n\
              CREATE TABLE {history} (id BLOB NOT NULL, _b BLOB NOT NULL, _seq INTEGER NOT NULL, \
-             _del INTEGER NOT NULL, _c INTEGER NOT NULL DEFAULT 1, _base INTEGER, \
-             _cols BLOB{columns}, PRIMARY KEY (id, _b, _seq)) WITHOUT ROWID;\n",
+             _st INTEGER NOT NULL, _base INTEGER, _cols BLOB{columns}, PRIMARY KEY (id, _b, _seq)) WITHOUT ROWID;\n",
             quote(&format!("{}__by_seq", table.stored)),
         ));
         for index in &table.indexes {
