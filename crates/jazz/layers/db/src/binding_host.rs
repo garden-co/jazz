@@ -412,6 +412,10 @@ pub struct OpenConfig {
     /// The public `initialSyncFlushEvery` option. Each applied batch commits
     /// on its own, so there is nothing to tune and any value is accepted.
     pub initial_sync_flush_every: Option<u32>,
+    /// The app's schema versions and migrations as JSON (a deployment's
+    /// `schemas` and `migrations`), which the binding lowers into
+    /// [`DbConfig::with_migrations`] (SPEC 10.7).
+    pub migrations: Option<Vec<u8>>,
 }
 
 /// The identity in an [`OpenConfig`].

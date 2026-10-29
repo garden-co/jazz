@@ -1096,10 +1096,12 @@ impl WasmDb {
         let (schema, mut config) = binding_host::decode_open(schema, config).map_err(host_error)?;
         let (identity, trusted) =
             binding_host::open_identity(&mut config, how).map_err(host_error)?;
-        let db = block_on(binding_host::open_memory(binding_host::db_config(
-            schema, &config, identity,
-        )))
-        .map_err(to_js_error)?;
+        let db_config = jazz::tools::deployment::published::with_client_migrations(
+            binding_host::db_config(schema, &config, identity),
+            config.migrations.as_deref(),
+        )
+        .map_err(|error| host_error(binding_host::HostError::Argument(error)))?;
+        let db = block_on(binding_host::open_memory(db_config)).map_err(to_js_error)?;
         Ok(Self::runtime_owner(Binding::new(db, identity, trusted)))
     }
 
@@ -1188,8 +1190,12 @@ impl WasmDb {
         // Every SQLite store keeps full history, so `history_complete`
         // needs nothing extra.
         let spec = browser::StoreSpec::from_js(&storage, &database)?;
-        let (db, store) =
-            browser::open(&spec, binding_host::db_config(schema, &config, identity)).await?;
+        let db_config = jazz::tools::deployment::published::with_client_migrations(
+            binding_host::db_config(schema, &config, identity),
+            config.migrations.as_deref(),
+        )
+        .map_err(|error| host_error(binding_host::HostError::Argument(error)))?;
+        let (db, store) = browser::open(&spec, db_config).await?;
         let owner = Self::runtime_owner(Binding::new(db, identity, trusted));
         *owner.open_inner()?.host.store.borrow_mut() = Some(store);
         Ok(owner)

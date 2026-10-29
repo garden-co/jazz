@@ -1129,7 +1129,11 @@ impl NapiDb {
         let (schema, mut config) = binding_host::decode_open(schema, config).map_err(host_error)?;
         let (identity, trusted) =
             binding_host::open_identity(&mut config, how).map_err(host_error)?;
-        let db_config = binding_host::db_config(schema, &config, identity);
+        let db_config = jazz::tools::deployment::published::with_client_migrations(
+            binding_host::db_config(schema, &config, identity),
+            config.migrations.as_deref(),
+        )
+        .map_err(|error| host_error(binding_host::HostError::Argument(error)))?;
         let db = match data_path {
             None => block_on(binding_host::open_memory(db_config)),
             Some(data_path) => block_on(binding_host::open_file(
