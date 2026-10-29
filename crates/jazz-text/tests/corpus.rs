@@ -9,13 +9,16 @@
 //! Run with `cargo test -p jazz-text --test corpus -- --nocapture` for the
 //! per-case report.
 
-use jazz_text::{Anchor, Side, TextFormat, merge3};
+use jazz_text::{Anchor, Range, Side, TextFormat, merge3};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 /// Marks a position in a case's text.
 const MARKER: char = '‸';
+/// Mark a range's start and end in a case's text.
+const RANGE_START: char = '‹';
+const RANGE_END: char = '›';
 /// An anchor found where expected must be at least this sure, unless the
 /// case says otherwise.
 const FOUND_AT_LEAST: f64 = 0.7;
@@ -27,7 +30,15 @@ const ORPHANED_BELOW: f64 = 0.6;
 struct AnchorCase {
     name: String,
     side: CaseSide,
-    old: String,
+    /// The value the anchor was captured in, with the marker at it; or
+    /// none, for an anchor `authored` from the new value alone.
+    #[serde(default)]
+    old: Option<String>,
+    #[serde(default)]
+    authored: Option<AuthoredAnchor>,
+    /// The match must (or must not) be flagged ambiguous.
+    #[serde(default)]
+    ambiguous: Option<bool>,
     /// The later value, with the marker where the anchor belongs; without
     /// one, the anchor's text is gone and it must come back orphaned.
     new: String,
@@ -35,6 +46,48 @@ struct AnchorCase {
     min_confidence: Option<f64>,
     #[serde(default)]
     baseline: Option<Baseline>,
+}
+
+/// An anchor written by looking only at the current value, as a tool or an
+/// LLM would: no version, no position.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuthoredAnchor {
+    #[serde(default)]
+    before: String,
+    #[serde(default)]
+    after: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RangeCase {
+    name: String,
+    /// The value the range was captured in, marked `‹…›`; or none, for a
+    /// range `authored` from the new value alone.
+    #[serde(default)]
+    old: Option<String>,
+    #[serde(default)]
+    authored: Option<AuthoredRange>,
+    /// The later value, marked where the range belongs; unmarked, the range
+    /// must come back orphaned.
+    new: String,
+    #[serde(default)]
+    min_confidence: Option<f64>,
+    #[serde(default)]
+    ambiguous: Option<bool>,
+    #[serde(default)]
+    baseline: Option<Baseline>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuthoredRange {
+    #[serde(default)]
+    before: String,
+    matched: String,
+    #[serde(default)]
+    after: String,
 }
 
 #[derive(Deserialize, Clone, Copy)]
@@ -262,39 +315,141 @@ fn marker_position(text: &str) -> Option<(String, usize)> {
 }
 
 fn check_anchor(case: &AnchorCase) -> Result<Vec<String>, String> {
-    let (old, position) =
-        marker_position(&case.old).ok_or_else(|| format!("{}: no marker in old", case.name))?;
     let side = match case.side {
         CaseSide::Before => Side::Before,
         CaseSide::After => Side::After,
     };
-    let anchor = Anchor::capture(&old, 1, position, side);
+    let anchor = match (&case.old, &case.authored) {
+        (Some(old), None) => {
+            let (old, position) =
+                marker_position(old).ok_or_else(|| format!("{}: no marker in old", case.name))?;
+            Anchor::capture(&old, 1, position, side)
+        }
+        (None, Some(authored)) => Anchor {
+            version: None,
+            position: None,
+            side,
+            before: authored.before.clone(),
+            after: authored.after.clone(),
+        },
+        _ => {
+            return Err(format!(
+                "{}: give exactly one of old and authored",
+                case.name
+            ));
+        }
+    };
     let mut problems = Vec::new();
-    match marker_position(&case.new) {
-        Some((new, expected)) => {
-            let found = anchor.resolve(&new, 2);
-            if found.position != expected {
+    let (new, expected) = match marker_position(&case.new) {
+        Some((new, at)) => (new, Some(at)),
+        None => (case.new.clone(), None),
+    };
+    let found = anchor.resolve(&new, 2);
+    expect_found(
+        &mut problems,
+        expected.map(|at| (at, at)),
+        (found.position, found.position),
+        found.confidence,
+        case.min_confidence,
+    );
+    if let Some(ambiguous) = case.ambiguous
+        && found.ambiguous != ambiguous
+    {
+        problems.push(format!(
+            "ambiguous: {}, expected {ambiguous}",
+            found.ambiguous
+        ));
+    }
+    Ok(problems)
+}
+
+fn range_markers(text: &str) -> Option<(String, usize, usize)> {
+    let start = text.find(RANGE_START)?;
+    let end = text.find(RANGE_END)?;
+    let clean: String = text
+        .chars()
+        .filter(|&c| c != RANGE_START && c != RANGE_END)
+        .collect();
+    let start_units = text[..start].encode_utf16().count();
+    let end_units = text[..end].encode_utf16().count() - 1;
+    Some((clean, start_units, end_units))
+}
+
+fn check_range(case: &RangeCase) -> Result<Vec<String>, String> {
+    let range = match (&case.old, &case.authored) {
+        (Some(old), None) => {
+            let (old, start, end) =
+                range_markers(old).ok_or_else(|| format!("{}: no ‹…› in old", case.name))?;
+            Range::capture(&old, 1, start, end)
+        }
+        (None, Some(authored)) => Range {
+            version: None,
+            start: None,
+            end: None,
+            before: authored.before.clone(),
+            matched: authored.matched.clone(),
+            after: authored.after.clone(),
+        },
+        _ => {
+            return Err(format!(
+                "{}: give exactly one of old and authored",
+                case.name
+            ));
+        }
+    };
+    let (new, expected) = match range_markers(&case.new) {
+        Some((new, start, end)) => (new, Some((start, end))),
+        None => (case.new.clone(), None),
+    };
+    let found = range.resolve(&new, 2);
+    let mut problems = Vec::new();
+    expect_found(
+        &mut problems,
+        expected,
+        (found.start, found.end),
+        found.confidence,
+        case.min_confidence,
+    );
+    if let Some(ambiguous) = case.ambiguous
+        && found.ambiguous != ambiguous
+    {
+        problems.push(format!(
+            "ambiguous: {}, expected {ambiguous}",
+            found.ambiguous
+        ));
+    }
+    Ok(problems)
+}
+
+/// Checks a resolve against the marked place, or that it came back
+/// orphaned when nothing is marked.
+fn expect_found(
+    problems: &mut Vec<String>,
+    expected: Option<(usize, usize)>,
+    found: (usize, usize),
+    confidence: f64,
+    min_confidence: Option<f64>,
+) {
+    match expected {
+        Some(expected) => {
+            if found != expected {
                 problems.push(format!(
-                    "landed at {} (confidence {:.2}), expected {expected}",
-                    found.position, found.confidence
+                    "landed at {found:?} (confidence {confidence:.2}), expected {expected:?}"
                 ));
             }
-            let least = case.min_confidence.unwrap_or(FOUND_AT_LEAST);
-            if found.confidence < least {
-                problems.push(format!("confidence {:.2} < {least}", found.confidence));
+            let least = min_confidence.unwrap_or(FOUND_AT_LEAST);
+            if confidence < least {
+                problems.push(format!("confidence {confidence:.2} < {least}"));
             }
         }
         None => {
-            let found = anchor.resolve(&case.new, 2);
-            if found.confidence >= ORPHANED_BELOW {
+            if confidence >= ORPHANED_BELOW {
                 problems.push(format!(
-                    "not orphaned: confidence {:.2} at {}",
-                    found.confidence, found.position
+                    "not orphaned: confidence {confidence:.2} at {found:?}"
                 ));
             }
         }
     }
-    Ok(problems)
 }
 
 fn load<T: for<'de> Deserialize<'de>>(file: &str) -> Vec<T> {
@@ -365,5 +520,20 @@ fn anchor_corpus() {
         mismatches.extend(verdict(&case.name, case.baseline, &problems));
     }
     println!("anchor corpus: {passed}/{} pass", cases.len());
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
+#[test]
+fn range_corpus() {
+    let cases: Vec<RangeCase> = load("ranges.json");
+    let mut mismatches = Vec::new();
+    let mut passed = 0;
+    println!("range corpus ({} cases):", cases.len());
+    for case in &cases {
+        let problems = check_range(case).unwrap_or_else(|error| vec![error]);
+        passed += usize::from(problems.is_empty());
+        mismatches.extend(verdict(&case.name, case.baseline, &problems));
+    }
+    println!("range corpus: {passed}/{} pass", cases.len());
     assert!(mismatches.is_empty(), "{mismatches:#?}");
 }

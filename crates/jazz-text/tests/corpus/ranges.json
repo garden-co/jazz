@@ -1,0 +1,126 @@
+[
+  {
+    "name": "comment range unchanged, text edited before it",
+    "old": "Load-in at 2pm. ‹Soundcheck at 5pm› and doors at 8.",
+    "new": "Load-in at 1pm sharp, please be early. ‹Soundcheck at 5pm› and doors at 8."
+  },
+  {
+    "name": "comment range unchanged, text edited after it",
+    "old": "Load-in at 2pm. ‹Soundcheck at 5pm› and doors at 8.",
+    "new": "Load-in at 2pm. ‹Soundcheck at 5pm› and doors at 7:30, show at 9."
+  },
+  {
+    "name": "a word inside the range changed",
+    "old": "Notes: ‹bring the red van keys› before Friday.",
+    "new": "Notes: ‹bring the blue van keys› before Friday."
+  },
+  {
+    "name": "words appended inside the end of the range",
+    "old": "Rider: ‹two crates of water› and towels.",
+    "new": "Rider: ‹two crates of sparkling water, chilled› and towels."
+  },
+  {
+    "name": "start of the range rewritten heavily",
+    "old": "Rider: ‹two crates of still water for the band› and towels.",
+    "new": "Rider: ‹a dozen bottles of water for the band› and towels."
+  },
+  {
+    "name": "both ends of the range rewritten, middle and context kept",
+    "old": "Plan: ‹We meet at the venue at six and load the van together› then dinner.",
+    "new": "Plan: ‹Everyone meets at the venue at six and load the van as a team› then dinner."
+  },
+  {
+    "name": "the whole covered text rewritten, context still roots it",
+    "old": "Day two. Highlight: ‹the encore went on for twenty minutes›. Next stop Leeds.",
+    "new": "Day two. Highlight: ‹an unplanned acoustic set in the bar afterwards›. Next stop Leeds.",
+    "min_confidence": 0.5
+  },
+  {
+    "name": "range over a paragraph that moved below another",
+    "old": "## Monday\nRehearsal at the studio.\n\n## Tuesday\n‹Interview with the local radio station at noon.›\n",
+    "new": "## Tuesday\n‹Interview with the local radio station at noon.›\n\n## Monday\nRehearsal at the studio.\n"
+  },
+  {
+    "name": "markdown bold added inside the range",
+    "old": "Remember ‹the setlist printouts for everyone›, please.",
+    "new": "Remember ‹the **setlist** printouts for everyone›, please."
+  },
+  {
+    "name": "html wrapper added around the range",
+    "old": "<p>Doors at 8. ‹Bring ID.› Have fun.</p>",
+    "new": "<p>Doors at 8. <strong>‹Bring ID.›</strong> Have fun.</p>"
+  },
+  {
+    "name": "range text deleted entirely: orphaned",
+    "old": "Intro stays. ‹This sentence about the cancelled Glasgow date goes away.› Outro stays too.",
+    "new": "Intro stays. Outro stays too."
+  },
+  {
+    "name": "whole document replaced: orphaned",
+    "old": "Packing list: amps, ‹cables, pedals›, spare strings.",
+    "new": "Completely different content about catering and rider requests for the venue."
+  },
+  {
+    "name": "repeated phrase: the captured copy wins",
+    "old": "Chorus: la la la.\nVerse.\nChorus: ‹la la la›.\nOutro.",
+    "new": "Chorus: la la la.\nVerse two, longer now.\nChorus: ‹la la la›.\nOutro."
+  },
+  {
+    "name": "long range with edits only in its middle",
+    "old": "Intro.\n\n‹Paragraph about the budget. It is tight this year because the van broke down twice on the motorway and the repair bill came to more than the fee for the Leeds show. We should ask the label for an advance or skip the Glasgow date.›\n\nOutro.",
+    "new": "Intro.\n\n‹Paragraph about the budget. It is tight this year because the van broke down three times near Sheffield and the garage charged us more than the Leeds fee. We should ask the label for an advance or skip the Glasgow date.›\n\nOutro."
+  },
+  {
+    "name": "emoji inside the range counts as two units",
+    "old": "Gear: ‹🎸 Fender, 🥁 Ludwig› and amps.",
+    "new": "New gear list: ‹🎸 Fender, 🥁 Ludwig› and amps."
+  },
+  {
+    "name": "an empty range does not grow when text is typed at it",
+    "old": "Setlist: Intro, ‹›Night Drive, Encore.",
+    "new": "Setlist: Intro, ‹›New Song, Night Drive, Encore."
+  },
+  {
+    "name": "authored: quote with context picks the right copy",
+    "authored": { "before": "Rehearsal at ", "matched": "the studio", "after": "." },
+    "new": "Monday: Rehearsal at ‹the studio›. Tuesday: the studio is closed.",
+    "ambiguous": false
+  },
+  {
+    "name": "authored: quote alone, unique in the value",
+    "authored": { "matched": "hotel booking for Friday" },
+    "new": "Could someone confirm if the ‹hotel booking for Friday› includes breakfast?",
+    "ambiguous": false
+  },
+  {
+    "name": "authored: quote alone, repeated in the value, is ambiguous",
+    "authored": { "matched": "bring cables" },
+    "new": "- [ ] ‹bring cables›\n- [ ] tune guitars\n- [ ] bring cables\n",
+    "ambiguous": true
+  },
+  {
+    "name": "authored: quote with slightly wrong wording still lands",
+    "authored": {
+      "before": "Highlight: ",
+      "matched": "the encore went on for 20 minutes",
+      "after": ". Next"
+    },
+    "new": "Day two. Highlight: ‹the encore went on for twenty minutes›. Next stop Leeds.",
+    "min_confidence": 0.6
+  },
+  {
+    "name": "authored: quote of text no longer there is orphaned",
+    "authored": { "before": "Meet at the ", "matched": "stage door", "after": " at six" },
+    "new": "Rendezvous by the loading bay around eighteen hundred hours."
+  },
+  {
+    "name": "authored: long paragraph quoted by an LLM",
+    "authored": {
+      "before": "",
+      "matched": "We should ask the label for an advance or skip the Glasgow date.",
+      "after": ""
+    },
+    "new": "Budget is tight because the van broke. ‹We should ask the label for an advance or skip the Glasgow date.›\n\nOutro.",
+    "ambiguous": false
+  }
+]

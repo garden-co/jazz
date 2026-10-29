@@ -38,20 +38,25 @@ pub enum Side {
     After,
 }
 
-/// A position in one version of a text value, found again in later versions
-/// by the text around it.
+/// A position in a text value, found again in later versions by the text
+/// around it.
+///
+/// [`Anchor::capture`] records one from a value a client holds. Anyone who
+/// only sees the current value (a tool, an LLM) can author one too, with no
+/// `version` or `position`: just enough text before and after to say where.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Anchor {
-    /// The `$version` of the value `position` counts in.
-    pub version: u64,
-    /// UTF-16 code units from the start of that value.
-    pub position: usize,
+    /// The `$version` of the value `position` counts in, if known.
+    pub version: Option<u64>,
+    /// UTF-16 code units from the start of that value, if known: a hint
+    /// where to look first.
+    pub position: Option<usize>,
     pub side: Side,
-    /// Up to [`CONTEXT_UNITS`] of text right before `position`; shorter only
-    /// at the value's start.
+    /// Text right before the position (W3C `prefix`). A captured anchor
+    /// keeps up to [`CONTEXT_UNITS`], shorter only at the value's start.
     pub before: String,
-    /// Up to [`CONTEXT_UNITS`] of text right after `position`; shorter only
-    /// at the value's end.
+    /// Text right after the position (W3C `suffix`). A captured anchor keeps
+    /// up to [`CONTEXT_UNITS`], shorter only at the value's end.
     pub after: String,
 }
 
@@ -62,7 +67,16 @@ pub struct Anchor {
 pub struct Resolved {
     pub position: usize,
     pub confidence: f64,
+    /// Another place matched about as well: the anchor needs more context
+    /// to say which one it means. Its confidence is lowered to match.
+    pub ambiguous: bool,
 }
+
+/// Two candidates scoring within this of each other are equally good.
+const AMBIGUOUS_WITHIN: f64 = 0.01;
+
+/// The confidence an ambiguous match keeps, as a share of its score.
+const AMBIGUOUS_SHARE: f64 = 0.8;
 
 impl Anchor {
     /// The anchor at `position` (UTF-16 code units, clamped to the value) in
@@ -70,31 +84,26 @@ impl Anchor {
     pub fn capture(text: &str, version: u64, position: usize, side: Side) -> Self {
         let units: Vec<u16> = text.encode_utf16().collect();
         let position = position.min(units.len());
-        let mut start = position.saturating_sub(CONTEXT_UNITS);
-        if start > 0 && is_low_surrogate(units[start]) {
-            start += 1;
-        }
-        let mut end = (position + CONTEXT_UNITS).min(units.len());
-        if end < units.len() && is_low_surrogate(units[end]) {
-            end -= 1;
-        }
         Self {
-            version,
-            position,
+            version: Some(version),
+            position: Some(position),
             side,
-            before: String::from_utf16_lossy(&units[start..position]),
-            after: String::from_utf16_lossy(&units[position..end]),
+            before: String::from_utf16_lossy(&units[context_start(&units, position)..position]),
+            after: String::from_utf16_lossy(&units[position..context_end(&units, position)]),
         }
     }
 
     /// Where this anchor lands in `text`, the value at `version`.
     pub fn resolve(&self, text: &str, version: u64) -> Resolved {
         let text: Vec<u16> = text.encode_utf16().collect();
-        let hint = self.position.min(text.len());
-        if version == self.version {
+        let hint = self.position.map(|position| position.min(text.len()));
+        if let (Some(hint), Some(at)) = (hint, self.version)
+            && at == version
+        {
             return Resolved {
                 position: hint,
                 confidence: 1.0,
+                ambiguous: false,
             };
         }
         let before: Vec<u16> = self.before.encode_utf16().collect();
@@ -106,21 +115,86 @@ impl Anchor {
             side: self.side,
             hint,
         };
-        let window = (
-            hint.saturating_sub(WINDOW_UNITS),
-            (hint + WINDOW_UNITS).min(text.len()),
-        );
-        let found = search.best(window);
-        if found.confidence >= SEARCH_WHOLE_BELOW || window == (0, text.len()) {
-            return found;
-        }
-        let whole = search.best((0, text.len()));
-        if whole.confidence > found.confidence {
-            whole
-        } else {
-            found
-        }
+        within_then_whole(
+            text.len(),
+            hint,
+            |span| search.best(span),
+            |found| found.confidence,
+        )
     }
+}
+
+/// The best result of `best` within [`WINDOW_UNITS`] of `hint`, or across
+/// the whole value of `len` units when that is not sure enough (or there is
+/// no hint).
+pub(crate) fn within_then_whole<T: Copy>(
+    len: usize,
+    hint: Option<usize>,
+    best: impl Fn((usize, usize)) -> T,
+    confidence: impl Fn(&T) -> f64,
+) -> T {
+    let Some(hint) = hint else {
+        return best((0, len));
+    };
+    let window = (
+        hint.saturating_sub(WINDOW_UNITS),
+        (hint + WINDOW_UNITS).min(len),
+    );
+    let found = best(window);
+    if confidence(&found) >= SEARCH_WHOLE_BELOW || window == (0, len) {
+        return found;
+    }
+    let whole = best((0, len));
+    if confidence(&whole) > confidence(&found) {
+        whole
+    } else {
+        found
+    }
+}
+
+/// Where a captured context before `position` starts: up to
+/// [`CONTEXT_UNITS`] back, not splitting a surrogate pair.
+pub(crate) fn context_start(units: &[u16], position: usize) -> usize {
+    let mut start = position.saturating_sub(CONTEXT_UNITS);
+    if start > 0 && is_low_surrogate(units[start]) {
+        start += 1;
+    }
+    start
+}
+
+/// Where a captured context after `position` ends.
+pub(crate) fn context_end(units: &[u16], position: usize) -> usize {
+    let mut end = (position + CONTEXT_UNITS).min(units.len());
+    if end < units.len() && is_low_surrogate(units[end]) {
+        end -= 1;
+    }
+    end
+}
+
+/// The best of scored candidates, flagged ambiguous when another one
+/// elsewhere scores about as well.
+pub(crate) fn pick<T: Copy>(
+    scored: impl IntoIterator<Item = (T, f64)>,
+    distance: impl Fn(&T, &T) -> usize,
+) -> Option<(T, f64, bool)> {
+    let scored: Vec<(T, f64)> = scored.into_iter().collect();
+    let (best, score) = scored
+        .iter()
+        .copied()
+        .fold(None::<(T, f64)>, |best, next| match best {
+            Some(best) if best.1 >= next.1 => Some(best),
+            _ => Some(next),
+        })?;
+    // A rival within a unit is the same place, found twice.
+    let ambiguous = scored.iter().any(|(other, other_score)| {
+        distance(other, &best) > 1 && *other_score >= score - AMBIGUOUS_WITHIN
+    });
+    let confidence = if ambiguous {
+        score * AMBIGUOUS_SHARE
+    } else {
+        score
+    };
+    Some((best, confidence, ambiguous))
 }
 
 struct Search<'a> {
@@ -128,13 +202,19 @@ struct Search<'a> {
     before: &'a [u16],
     after: &'a [u16],
     side: Side,
-    hint: usize,
+    hint: Option<usize>,
 }
 
 impl Search<'_> {
+    /// Whether the contexts were captured (so a short one was cut by the
+    /// value's edge) rather than authored.
+    fn captured(&self) -> bool {
+        self.hint.is_some()
+    }
+
     /// The best-scoring position among candidates in `start..end`.
     fn best(&self, (start, end): (usize, usize)) -> Resolved {
-        let mut candidates = vec![self.hint];
+        let mut candidates: Vec<usize> = self.hint.into_iter().collect();
         let joined: Vec<u16> = [self.before, self.after].concat();
         if !self.before.is_empty() && !self.after.is_empty() {
             candidates.extend(
@@ -155,42 +235,42 @@ impl Search<'_> {
             let to = at.saturating_sub(self.after.len().saturating_sub(distance));
             candidates.extend(from..=to);
         }
-        if self.before.len() < CONTEXT_UNITS {
+        if self.captured() && self.before.len() < CONTEXT_UNITS {
             candidates.push(0);
         }
-        if self.after.len() < CONTEXT_UNITS {
+        if self.captured() && self.after.len() < CONTEXT_UNITS {
             candidates.push(self.text.len());
         }
-        candidates.retain(|&at| at <= self.text.len());
-        candidates.sort_unstable_by_key(|&at| (at.abs_diff(self.hint), at));
-        candidates.dedup();
-        candidates.truncate(MAX_CANDIDATES);
-        candidates
-            .into_iter()
-            .map(|at| Resolved {
-                position: at,
-                confidence: self.score(at),
-            })
-            .fold(None::<Resolved>, |best, next| match best {
-                Some(best) if best.confidence >= next.confidence => Some(best),
-                _ => Some(next),
-            })
-            .expect("the hint is always a candidate")
+        if candidates.is_empty() {
+            candidates.push(start);
+        }
+        let candidates = shortlist(candidates, self.text.len(), self.hint);
+        let (position, confidence, ambiguous) = pick(
+            candidates.into_iter().map(|at| (at, self.score(at))),
+            |a, b| a.abs_diff(*b),
+        )
+        .expect("there is always a candidate");
+        Resolved {
+            position,
+            confidence,
+            ambiguous,
+        }
     }
 
     /// How well the text around `at` matches the anchor's, weighted towards
     /// the side it sticks to, less a small penalty for moving far.
     fn score(&self, at: usize) -> f64 {
+        let edges = self.captured();
         // The side it sticks to must touch the position; text typed at the
         // anchor may sit between the position and the other side.
         let (before, after) = match self.side {
             Side::Before => (
-                side_similarity(self.before, &self.text[..at], true),
-                gap_similarity(self.after, &self.text[at..], false),
+                side_similarity(self.before, &self.text[..at], true, edges),
+                gap_similarity(self.after, &self.text[at..], false, edges),
             ),
             Side::After => (
-                gap_similarity(self.before, &self.text[..at], true),
-                side_similarity(self.after, &self.text[at..], false),
+                gap_similarity(self.before, &self.text[..at], true, edges),
+                side_similarity(self.after, &self.text[at..], false, edges),
             ),
         };
         let (stuck, other) = match self.side {
@@ -200,13 +280,36 @@ impl Search<'_> {
         // Held in place by the side it sticks to; or, when that side was
         // rewritten, by the other side touching the position.
         let touching_other = match self.side {
-            Side::Before => side_similarity(self.after, &self.text[at..], false),
-            Side::After => side_similarity(self.before, &self.text[..at], true),
+            Side::Before => side_similarity(self.after, &self.text[at..], false, edges),
+            Side::After => side_similarity(self.before, &self.text[..at], true, edges),
         };
         let held = (0.65 * stuck + 0.35 * other).max(0.6 * touching_other + 0.3 * stuck);
-        let moved = at.abs_diff(self.hint) as f64 / self.text.len().max(1) as f64;
-        (held - 0.02 * moved.min(1.0)).clamp(0.0, 1.0)
+        (held - moved_penalty(at, self.hint, self.text.len())).clamp(0.0, 1.0)
     }
+}
+
+/// A small penalty for landing far from where the anchor was.
+pub(crate) fn moved_penalty(at: usize, hint: Option<usize>, len: usize) -> f64 {
+    hint.map_or(0.0, |hint| {
+        0.02 * (at.abs_diff(hint) as f64 / len.max(1) as f64).min(1.0)
+    })
+}
+
+/// Candidates deduplicated, inside the value, nearest the hint first (in
+/// the order found without one), at most [`MAX_CANDIDATES`] of them.
+pub(crate) fn shortlist(candidates: Vec<usize>, len: usize, hint: Option<usize>) -> Vec<usize> {
+    let mut seen = std::collections::HashSet::new();
+    let mut kept: Vec<usize> = candidates
+        .into_iter()
+        .filter(|&at| at <= len && seen.insert(at))
+        .collect();
+    if let Some(hint) = hint {
+        kept.sort_by_key(|&at| (at.abs_diff(hint), at));
+        kept.truncate(MAX_CANDIDATES);
+    } else {
+        kept.truncate(MAX_CANDIDATES * 4);
+    }
+    kept
 }
 
 /// How much of `context` the text on one side of a position still shows: 1
@@ -214,9 +317,16 @@ impl Search<'_> {
 /// compares with the end of `text` (text before the position), otherwise
 /// with its start. A context shorter than [`CONTEXT_UNITS`] was cut by the
 /// value's edge, so it must still reach that edge.
-fn side_similarity(context: &[u16], text: &[u16], towards_start: bool) -> f64 {
+/// Authored contexts (`edges` false) carry no edge: an empty one says
+/// nothing and a short one is just short.
+pub(crate) fn side_similarity(
+    context: &[u16],
+    text: &[u16],
+    towards_start: bool,
+    edges: bool,
+) -> f64 {
     if context.is_empty() {
-        return if text.is_empty() { 1.0 } else { 0.0 };
+        return if !edges || text.is_empty() { 1.0 } else { 0.0 };
     }
     let reach = (context.len() * 2).min(text.len());
     let near: Vec<u16> = if towards_start {
@@ -230,13 +340,14 @@ fn side_similarity(context: &[u16], text: &[u16], towards_start: bool) -> f64 {
         context.to_vec()
     };
     let distance = prefix_distance(&pattern, &near);
-    1.0 - (distance as f64 / context.len() as f64).min(1.0) - edge_penalty(context, text.len())
+    1.0 - (distance as f64 / context.len() as f64).min(1.0)
+        - edge_penalty(context, text.len(), edges)
 }
 
 /// A context shorter than [`CONTEXT_UNITS`] was cut by the value's edge; a
 /// little less sure when that side now runs well past it.
-fn edge_penalty(context: &[u16], side_len: usize) -> f64 {
-    if context.len() < CONTEXT_UNITS && side_len > context.len() + CONTEXT_UNITS / 4 {
+fn edge_penalty(context: &[u16], side_len: usize, edges: bool) -> f64 {
+    if edges && context.len() < CONTEXT_UNITS && side_len > context.len() + CONTEXT_UNITS / 4 {
         1.0 / context.len().max(CONTEXT_UNITS / 2) as f64
     } else {
         0.0
@@ -250,9 +361,13 @@ const GAP_UNITS: usize = 256;
 /// Like [`side_similarity`], but `context` may sit up to [`GAP_UNITS`] away
 /// from the position, for a small penalty: text typed at the anchor lands
 /// between them.
-fn gap_similarity(context: &[u16], text: &[u16], towards_start: bool) -> f64 {
+fn gap_similarity(context: &[u16], text: &[u16], towards_start: bool, edges: bool) -> f64 {
     if context.is_empty() {
-        return if text.len() <= GAP_UNITS { 1.0 } else { 0.5 };
+        return if !edges || text.len() <= GAP_UNITS {
+            1.0
+        } else {
+            0.5
+        };
     }
     let reach = (GAP_UNITS + context.len() * 2).min(text.len());
     let near: Vec<u16> = if towards_start {
@@ -267,7 +382,7 @@ fn gap_similarity(context: &[u16], text: &[u16], towards_start: bool) -> f64 {
     };
     let similarity = |distance: usize| 1.0 - (distance as f64 / context.len() as f64).min(1.0);
     // The whole side, when it is about as short as the context.
-    let whole = if text.len() <= context.len() + CONTEXT_UNITS / 4 {
+    let whole = if edges && text.len() <= context.len() + CONTEXT_UNITS / 4 {
         similarity(edit_distance(&pattern, &near))
     } else {
         0.0
@@ -279,12 +394,13 @@ fn gap_similarity(context: &[u16], text: &[u16], towards_start: bool) -> f64 {
         return whole.max(0.0);
     };
     let gap = end.saturating_sub(context.len()) as f64 / GAP_UNITS as f64;
-    let found = similarity(distance) - 0.15 * gap.min(1.0) - edge_penalty(context, text.len());
+    let found =
+        similarity(distance) - 0.15 * gap.min(1.0) - edge_penalty(context, text.len(), edges);
     found.max(whole).max(0.0)
 }
 
 /// The edit distance from `pattern` to the closest prefix of `text`.
-fn prefix_distance(pattern: &[u16], text: &[u16]) -> usize {
+pub(crate) fn prefix_distance(pattern: &[u16], text: &[u16]) -> usize {
     let mut row: Vec<usize> = (0..=text.len()).collect();
     for (i, &unit) in pattern.iter().enumerate() {
         let mut diagonal = row[0];
@@ -301,7 +417,7 @@ fn prefix_distance(pattern: &[u16], text: &[u16]) -> usize {
 }
 
 /// The edit distance between `a` and `b`.
-fn edit_distance(a: &[u16], b: &[u16]) -> usize {
+pub(crate) fn edit_distance(a: &[u16], b: &[u16]) -> usize {
     let mut row: Vec<usize> = (0..=b.len()).collect();
     for (i, &unit) in a.iter().enumerate() {
         let mut diagonal = row[0];
@@ -318,7 +434,7 @@ fn edit_distance(a: &[u16], b: &[u16]) -> usize {
 }
 
 /// Where `pattern` starts in `text[start..end]`, exactly.
-fn occurrences<'a>(
+pub(crate) fn occurrences<'a>(
     text: &'a [u16],
     start: usize,
     end: usize,
@@ -340,7 +456,7 @@ fn occurrences<'a>(
 
 /// Where the closest approximate matches of `pattern` end in
 /// `text[start..end]`, if they keep at least half of it.
-fn fuzzy_ends(text: &[u16], start: usize, end: usize, pattern: &[u16]) -> Vec<usize> {
+pub(crate) fn fuzzy_ends(text: &[u16], start: usize, end: usize, pattern: &[u16]) -> Vec<usize> {
     fuzzy_ends_with_distance(text, start, end, pattern)
         .into_iter()
         .map(|(at, _)| at)
@@ -348,7 +464,7 @@ fn fuzzy_ends(text: &[u16], start: usize, end: usize, pattern: &[u16]) -> Vec<us
 }
 
 /// [`fuzzy_ends`] with the edit distance of each match (Sellers' algorithm).
-fn fuzzy_ends_with_distance(
+pub(crate) fn fuzzy_ends_with_distance(
     text: &[u16],
     start: usize,
     end: usize,
@@ -403,7 +519,8 @@ mod tests {
             anchor.resolve("Hello world", 3),
             Resolved {
                 position: 6,
-                confidence: 1.0
+                confidence: 1.0,
+                ambiguous: false,
             }
         );
     }
