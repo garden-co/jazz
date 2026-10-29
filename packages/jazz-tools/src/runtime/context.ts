@@ -2,7 +2,6 @@
  * Application context for Jazz client connections.
  */
 
-import type { ClientMigrations } from "./client-migrations.js";
 import type { StorageDriver, WasmSchema } from "../drivers/types.js";
 
 /**

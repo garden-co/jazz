@@ -10,7 +10,7 @@ import { appMigrations } from "../testing/client-migrations.js";
 import { createDb } from "./default-create-db.js";
 import { waitForRows } from "./testing/support.js";
 
-import { computeSchemaHash, serializeForwardLenses } from "../dev/catalogue.js";
+import { computeSchemaHash } from "../dev/catalogue.js";
 import { loadDefinedMigration } from "../dev/catalogue-project.js";
 import { fetchMigrationGraph } from "../dev/migration-graph.js";
 import { renderMigrationStub } from "../dev/migrations.js";
