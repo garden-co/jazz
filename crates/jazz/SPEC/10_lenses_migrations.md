@@ -674,7 +674,9 @@ and no other store ever sees one.
   column's next tag, one past its highest. A removed variant keeps a tag,
   and every name a version ever declared for the stored column still reads
   back. A name a row carries that no admitted version declares (a removed
-  variant, say) is tagged when it is stored.
+  variant, say) is tagged when it is stored. A store's memory of its tags
+  follows its file: a savepoint that rolls back puts back the tags it
+  interned or renumbered.
 - **The current schema's order is tag order.** When a store makes a version
   current (activation, or opening under a version newer than any it
   admitted), it renumbers each of that version's enum columns so its
@@ -698,7 +700,10 @@ and no other store ever sees one.
   the current version that is tag order, which an index on the column
   serves. Another version (an older client during a rollout) reads each
   cell as its rank in its own declaration order, a `CASE` no index serves,
-  with names it does not declare after its own.
+  with names it does not declare after its own. A range compared with a
+  name the column never held is refused as a query error. A `GROUP BY` on
+  an enum column identifies each group by its variant name, so a
+  renumbering keeps group identity.
 - **Comparisons.** A variant name compared with an enum column for
   equality (`=`, `IN`, array containment, a policy literal or session
   value) is bound as its tag. Anything else, such as text containment or a comparison with another

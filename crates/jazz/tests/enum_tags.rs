@@ -120,6 +120,11 @@ impl Transport for Pipe {
 
 /// `client` connected to `server`, which serves it as SYSTEM.
 fn link(client: &Db, server: &Db) -> jazz::db::Upstream {
+    link_as(client, server, AuthorSubject::SYSTEM)
+}
+
+/// `client` connected to `server`, which serves it as `author`.
+fn link_as(client: &Db, server: &Db, author: AuthorSubject) -> jazz::db::Upstream {
     let up = Rc::new(RefCell::new(VecDeque::new()));
     let down = Rc::new(RefCell::new(VecDeque::new()));
     let link = block_on(client.connect_upstream(Box::new(Pipe {
@@ -131,7 +136,7 @@ fn link(client: &Db, server: &Db) -> jazz::db::Upstream {
             out: down,
             inbound: up,
         }),
-        AuthorSubject::SYSTEM,
+        author,
     );
     link
 }
@@ -894,11 +899,14 @@ fn a_replica_moving_its_column_to_the_authoritys_name_keeps_the_tags() {
     );
     pump(&server, &[&client]);
     // Its own write holds its tag.
+    let (stored, status) = stored_column(&client_path, "tasks", "status");
     let conn = rusqlite::Connection::open(&client_path).unwrap();
     let todo: Option<i64> = conn
         .query_row(
-            "SELECT \"status~2\" FROM tasks WHERE typeof(\"status~2\") = 'integer' AND title = 't' \
-             AND \"status~2\" = 0",
+            &format!(
+                "SELECT \"{status}\" FROM \"{stored}\" WHERE typeof(\"{status}\") = 'integer' \
+                 AND title = 't' AND \"{status}\" = 0"
+            ),
             [],
             |row| row.get(0),
         )
@@ -1041,6 +1049,23 @@ fn raw_cells_of(path: &Path, table: &str) -> Vec<(String, String)> {
         .unwrap()
 }
 
+/// Where enum column `table.column` is stored, as the most recently
+/// admitted version storing it as an enum names it: (stored table, stored
+/// column).
+fn stored_column(path: &Path, table: &str, column: &str) -> (String, String) {
+    rusqlite::Connection::open(path)
+        .unwrap()
+        .query_row(
+            "SELECT stored_tbl, stored_col FROM _jazz_names n WHERE tbl = ?1 AND col = ?2 \
+             AND EXISTS (SELECT 1 FROM _jazz_enum_tags t \
+             WHERE t.tbl = n.stored_tbl AND t.col = n.stored_col) \
+             ORDER BY n DESC LIMIT 1",
+            [table, column],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap()
+}
+
 /// `tasks(title, status?, rank?)`.
 fn small_schema(status: ColumnType, rank: Option<ColumnType>) -> JazzSchema {
     let mut t = TableSchemaBuilder::new("tasks")
@@ -1140,7 +1165,8 @@ fn each_store_keeps_its_own_tags() {
     ));
     let server = authority_at(with_rank("y"), &sp2);
     let before = raw_tags_named(&cp);
-    assert!(before.contains(&("rank".to_owned(), 0, "x".to_owned())));
+    let rank = stored_column(&cp, "tasks", "rank").1;
+    assert!(before.contains(&(rank, 0, "x".to_owned())));
     // The client's `rank` moves to the second authority's stored column,
     // where the authority tags `y` 0 and the client keeps `x` 0.
     let client = open_at(with_rank("y"), 1, &cp);
@@ -1161,17 +1187,19 @@ fn each_store_keeps_its_own_tags() {
     pump(&server, &[&client]);
     // Opened under a version declaring `y`, the client numbers it first;
     // `x`, which only it ever stored, follows.
+    let rank = stored_column(&sp2, "tasks", "rank").1;
+    assert_eq!(stored_column(&cp, "tasks", "rank").1, rank);
     let client_tags = raw_tags_named(&cp);
     assert!(
-        client_tags.contains(&("rank~2".to_owned(), 0, "y".to_owned())),
+        client_tags.contains(&(rank.clone(), 0, "y".to_owned())),
         "{client_tags:?}"
     );
     assert!(
-        client_tags.contains(&("rank~2".to_owned(), 1, "x".to_owned())),
+        client_tags.contains(&(rank.clone(), 1, "x".to_owned())),
         "{client_tags:?}"
     );
     let server_tags = raw_tags_named(&sp2);
-    assert!(server_tags.contains(&("rank~2".to_owned(), 0, "y".to_owned())));
+    assert!(server_tags.contains(&(rank, 0, "y".to_owned())));
     assert!(!server_tags.iter().any(|(_, _, name)| name == "x"));
     let read = |db: &Db| {
         column(
@@ -1322,7 +1350,8 @@ fn a_reorder_keeps_the_default_of_a_column_added_later() {
             .collect::<Result<_, _>>()
             .unwrap()
     };
-    assert_eq!(defaults, [("priority".to_owned(), "low".to_owned())]);
+    let priority = stored_column(&path, "tasks", "priority").1;
+    assert_eq!(defaults, [(priority, "low".to_owned())]);
     let old = block_on(db.register_schema_view(v1())).unwrap();
     insert(&old, 2, "done");
     let priorities = |db: &Db| column(db, Query::from("tasks"), "priority");
@@ -1587,4 +1616,320 @@ fn adding_or_reordering_variants_makes_a_new_schema_version() {
         id(v1()).0.to_string(),
         "463e4b11-caaa-5f66-8bc7-8372381bc982"
     );
+}
+
+/// `state` (row bytes in order) with a subscription `event` applied.
+fn apply(state: &mut Vec<u8>, event: SubscriptionEvent) {
+    if let SubscriptionEvent::Delta {
+        reset,
+        added,
+        updated,
+        removed,
+        ..
+    } = event
+    {
+        if reset {
+            state.clear();
+        }
+        let mut gone: Vec<u8> = removed.iter().map(|r| r.row_uuid.as_bytes()[0]).collect();
+        gone.extend(updated.iter().map(|r| r.row.row_uuid().as_bytes()[0]));
+        state.retain(|id| !gone.contains(id));
+        let mut placed: Vec<(usize, u8)> = added
+            .iter()
+            .chain(updated.iter())
+            .map(|r| (r.index, r.row.row_uuid().as_bytes()[0]))
+            .collect();
+        placed.sort();
+        for (index, id) in placed {
+            let at = index.min(state.len());
+            state.insert(at, id);
+        }
+    }
+}
+
+/// The row bytes `query` returns, in its order.
+fn in_order(db: &Db, query: &Query) -> Vec<u8> {
+    column(db, query.clone(), "title")
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect()
+}
+
+/// A live subscription under a version whose declaration order is not tag
+/// order (an older client during a rollout) keeps its rows, and its
+/// window, in that version's order as writes arrive.
+#[test]
+fn a_subscription_under_an_older_version_keeps_its_order() {
+    for limit in [None, Some(2usize)] {
+        let dir = tempfile::tempdir().unwrap();
+        let db = authority_at(v1(), &dir.path().join("authority.sqlite"));
+        insert(&db, 1, "done");
+        insert(&db, 3, "doing");
+        insert(&db, 6, "doing");
+        let reversed = tasks(&["done", "doing", "todo"]);
+        block_on(
+            db.activate_schema_with_lenses(reversed.clone(), &[lens(&v1(), &reversed, vec![])]),
+        )
+        .unwrap();
+        let old = block_on(db.register_schema_view(v1())).unwrap();
+        let mut query = by_status();
+        if let Some(limit) = limit {
+            query = query.limit(limit);
+        }
+        let prepared = old.prepare_query(&query).unwrap();
+        let mut stream = block_on(old.subscribe(&prepared, ReadOpts::default())).unwrap();
+        block_on(old.tick()).unwrap();
+        let mut state = Vec::new();
+        while let Some(event) = stream.try_next_event() {
+            apply(&mut state, event);
+        }
+        assert_eq!(state, in_order(&old, &query), "{limit:?}: initial");
+        // Through the current version, then through the old view.
+        insert(&db, 2, "todo");
+        insert(&old, 4, "todo");
+        insert(&old, 5, "done");
+        block_on(db.tick()).unwrap();
+        block_on(old.tick()).unwrap();
+        while let Some(event) = stream.try_next_event() {
+            apply(&mut state, event);
+        }
+        let expected = match limit {
+            None => vec![2, 4, 3, 6, 1, 5],
+            Some(_) => vec![2, 4],
+        };
+        assert_eq!(in_order(&old, &query), expected, "{limit:?}: fresh");
+        assert_eq!(state, expected, "{limit:?}: subscription");
+    }
+}
+
+/// A range compared with a name the column never held has no place in the
+/// order: it is refused, not answered with every row or none. Equality
+/// with one matches nothing.
+#[test]
+fn a_range_with_an_unknown_variant_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = authority_at(v1(), &dir.path().join("authority.sqlite"));
+    insert(&db, 1, "todo");
+    insert(&db, 2, "done");
+    let read = |predicate: Predicate| {
+        let query = Query::from("tasks").filter(predicate);
+        db.prepare_query(&query)
+            .and_then(|prepared| block_on(db.all(&prepared, ReadOpts::default())))
+            .map(|rows| rows.len())
+    };
+    let cmp = |op: fn(Operand, Operand) -> Predicate, value: &str| {
+        op(
+            Operand::Column("status".into()),
+            Operand::Literal(name(value)),
+        )
+    };
+    for predicate in [
+        cmp(Predicate::Lt, "nope"),
+        cmp(Predicate::Gt, "aaa"),
+        cmp(Predicate::Gte, "aaa"),
+    ] {
+        let refused = read(predicate).unwrap_err();
+        assert!(
+            refused.to_string().contains("not one of its variants"),
+            "{refused}"
+        );
+    }
+    assert_eq!(read(status_is("nope")).unwrap(), 0);
+    assert_eq!(read(cmp(Predicate::Gt, "todo")).unwrap(), 1);
+}
+
+/// A store an earlier build wrote with an enum column names its versions
+/// by ids that did not count variants: it is refused as unsupported, with
+/// what to do, not as a corrupt catalogue.
+#[test]
+fn a_store_an_earlier_build_wrote_with_enums_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("authority.sqlite");
+    drop(authority_at(v1(), &path));
+    // The earlier build's id for the same schema.
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute("UPDATE _jazz_versions SET version = ?1", [vec![7u8; 16]])
+        .unwrap();
+    let refused = block_on(Db::open_at(config(v1(), 0), &path, FileOptions::default()))
+        .err()
+        .expect("refused");
+    assert!(
+        refused.to_string().contains("not supported yet")
+            && refused
+                .to_string()
+                .contains("delete the local store and resync"),
+        "{refused}"
+    );
+}
+
+/// A peer declaring the same variants in another order is another schema
+/// version (an alpha.59 peer's ids never count variants at all): until its
+/// server deploys that version, its writes are refused with a typed reason.
+#[test]
+fn a_peer_on_another_variant_order_is_refused_until_deployed() {
+    use std::pin::pin;
+    use std::task::{Context, Poll};
+    let dir = tempfile::tempdir().unwrap();
+    let server = authority_at(v1(), &dir.path().join("server.sqlite"));
+    let client = open_at(
+        tasks(&["done", "doing", "todo"]),
+        1,
+        &dir.path().join("client.sqlite"),
+    );
+    client.become_replica();
+    let _link = link(&client, &server);
+    let q = client.prepare_query(&Query::from("tasks")).unwrap();
+    let _sub = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
+    pump(&server, &[&client]);
+    let tx = block_on(client.insert(
+        "tasks",
+        BTreeMap::from([
+            ("title".to_owned(), name("t")),
+            ("status".to_owned(), name("done")),
+        ]),
+        InsertOptions {
+            row_id: Some(RowUuid::from_bytes([2; 16])),
+            ..Default::default()
+        },
+    ))
+    .unwrap()
+    .mergeable_tx_id();
+    let mut wait = pin!(client.wait_for_transaction(tx, jazz::tx::DurabilityTier::Global));
+    let waker = futures::task::noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    let mut fate = None;
+    for _ in 0..20 {
+        if let Poll::Ready(result) = wait.as_mut().poll(&mut cx) {
+            fate = Some(result);
+            break;
+        }
+        pump(&server, &[&client]);
+    }
+    let error = fate.expect("a fate").expect_err("refused by the server");
+    assert_eq!(
+        error.reason,
+        Some(jazz::db::Reason::SchemaVersionNotDeployed),
+        "{error:?}"
+    );
+    assert!(ids(&server, Query::from("tasks")).is_empty());
+}
+
+/// `tasks` under `variants`, readable only where `status` is `done`.
+fn done_only(variants: &[&str]) -> JazzSchema {
+    use jazz::tools::{CmpOp, PolicyExpr, PolicyValue, TablePolicies};
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("tasks")
+                    .column("title", ColumnType::Text)
+                    .column("status", enumeration(variants))
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::Cmp {
+                                column: "status".into(),
+                                op: CmpOp::Eq,
+                                value: PolicyValue::Literal(jazz::tools::Value::Text(
+                                    "done".into(),
+                                )),
+                            })
+                            .with_insert(PolicyExpr::True)
+                            .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+                            .with_delete(PolicyExpr::True),
+                    ),
+            )
+            .build(),
+    )
+}
+
+/// A read policy naming a variant binds its tag as the store numbers it
+/// now: after a reorder renumbers the authority's tags, a user session
+/// still sees exactly the policy's rows, on the older version and on the
+/// reordered one.
+#[test]
+fn a_policy_on_a_variant_keeps_its_rows_across_a_reorder() {
+    let dir = tempfile::tempdir().unwrap();
+    let v1 = done_only(&["todo", "doing", "done"]);
+    let server = authority_at(v1.clone(), &dir.path().join("server.sqlite"));
+    insert(&server, 1, "todo");
+    insert(&server, 2, "doing");
+    insert(&server, 3, "done");
+    let user = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let client_path = dir.path().join("client.sqlite");
+    let sees = |schema: JazzSchema| {
+        let client = block_on(Db::open_at(
+            DbConfig::new(
+                schema,
+                DbIdentity {
+                    node: NodeUuid::from_bytes([1; 16]),
+                    author: user,
+                },
+            ),
+            &client_path,
+            FileOptions::default(),
+        ))
+        .unwrap();
+        let _link = link_as(&client, &server, user);
+        let q = client.prepare_query(&Query::from("tasks")).unwrap();
+        let _sub = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
+        pump(&server, &[&client]);
+        ids(&client, Query::from("tasks"))
+    };
+    assert_eq!(sees(v1.clone()), [3]);
+    let reversed = done_only(&["done", "doing", "todo"]);
+    block_on(server.activate_schema_with_lenses(reversed.clone(), &[lens(&v1, &reversed, vec![])]))
+        .unwrap();
+    insert(&server, 4, "done");
+    insert(&server, 5, "todo");
+    assert_eq!(sees(v1), [3, 4]);
+    assert_eq!(sees(reversed), [3, 4]);
+}
+
+/// Groups of an enum column carry variant names and order by the query
+/// schema's declaration order, under the current version and an older one.
+#[test]
+fn grouping_by_an_enum_follows_the_declaration_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = authority_at(v1(), &dir.path().join("authority.sqlite"));
+    insert(&db, 1, "done");
+    insert(&db, 2, "todo");
+    insert(&db, 3, "done");
+    insert(&db, 4, "doing");
+    let groups = |db: &Db| -> Vec<(String, Value, RowUuid)> {
+        let query = Query::from("tasks")
+            .aggregate([Aggregate::count().alias("n")])
+            .group_by("status")
+            .order_by("status", OrderDirection::Asc);
+        let prepared = db.prepare_query(&query).unwrap();
+        block_on(db.all(&prepared, ReadOpts::default()))
+            .unwrap()
+            .iter()
+            .map(|row| {
+                let cell = |name: &str| {
+                    row.cells()
+                        .find(|(n, _)| *n == name)
+                        .and_then(|(_, value)| value.cloned())
+                        .unwrap()
+                };
+                match cell("status") {
+                    Value::String(status) => (status, cell("n"), row.row_uuid()),
+                    other => panic!("status {other:?}"),
+                }
+            })
+            .collect()
+    };
+    let in_v1_order = groups(&db);
+    let names: Vec<&str> = in_v1_order.iter().map(|(s, ..)| s.as_str()).collect();
+    assert_eq!(names, ["todo", "doing", "done"]);
+    let reversed = tasks(&["done", "doing", "todo"]);
+    block_on(db.activate_schema_with_lenses(reversed.clone(), &[lens(&v1(), &reversed, vec![])]))
+        .unwrap();
+    let mut reversed_order = groups(&db);
+    let names: Vec<&str> = reversed_order.iter().map(|(s, ..)| s.as_str()).collect();
+    assert_eq!(names, ["done", "doing", "todo"]);
+    // The same groups, each keeping its identity across the renumbering.
+    reversed_order.reverse();
+    assert_eq!(reversed_order, in_v1_order);
+    let old = block_on(db.register_schema_view(v1())).unwrap();
+    assert_eq!(groups(&old), in_v1_order);
 }

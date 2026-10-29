@@ -43,15 +43,6 @@ use crate::values::{
 ///   by versions that do not name them, one row per (stored table, stored
 ///   column, lens target version): `src` names the column a copy follows,
 ///   else `dflt` is a dropped column's backwards default.
-/// - `_jazz_enum_tags`: each stored enum column's tags (see
-///   [`crate::values::EnumTags`]), one row per variant this store interned,
-///   with the name versions declare it by. They are this store's own: no
-///   other store sees them. A raw SQL read joins enum cells here for their
-///   names.
-/// - `_jazz_enum_defaults`: an enum column whose `ADD COLUMN ... DEFAULT`
-///   tag a renumbering ([`Names::align`]) gave another variant, with the
-///   default's name. A row inserted by a version not naming the column
-///   stores this name's tag, not the stale one SQLite would fill in.
 pub(crate) const DDL: &str = "\
     CREATE TABLE IF NOT EXISTS _jazz_versions (n INTEGER PRIMARY KEY, version BLOB NOT NULL UNIQUE, \
      confirmed BLOB);\
@@ -61,7 +52,22 @@ pub(crate) const DDL: &str = "\
      branch INTEGER NOT NULL DEFAULT 0, has_dflt INTEGER NOT NULL DEFAULT 0, dflt, \
      PRIMARY KEY (tbl, col)) WITHOUT ROWID;\
     CREATE TABLE IF NOT EXISTS _jazz_lens_cells (tbl TEXT NOT NULL, col TEXT NOT NULL, \
-     since BLOB NOT NULL, src TEXT, dflt, PRIMARY KEY (tbl, col, since)) WITHOUT ROWID;\
+     since BLOB NOT NULL, src TEXT, dflt, PRIMARY KEY (tbl, col, since)) WITHOUT ROWID;";
+
+/// The enum catalogue, created with the first enum column a store tags, so
+/// a store without one keeps its file as it was (a read-only open of it
+/// writes nothing).
+///
+/// - `_jazz_enum_tags`: each stored enum column's tags (see
+///   [`crate::values::EnumTags`]), one row per variant this store interned,
+///   with the name versions declare it by. They are this store's own: no
+///   other store sees them. A raw SQL read joins enum cells here for their
+///   names.
+/// - `_jazz_enum_defaults`: an enum column whose `ADD COLUMN ... DEFAULT`
+///   tag a renumbering ([`Names::align`]) gave another variant, with the
+///   default's name. A row inserted by a version not naming the column
+///   stores this name's tag, not the stale one SQLite would fill in.
+const ENUM_DDL: &str = "\
     CREATE TABLE IF NOT EXISTS _jazz_enum_tags (tbl TEXT NOT NULL, col TEXT NOT NULL, \
      tag INTEGER NOT NULL, name TEXT NOT NULL, PRIMARY KEY (tbl, col, tag)) WITHOUT ROWID;\
     CREATE TABLE IF NOT EXISTS _jazz_enum_defaults (tbl TEXT NOT NULL, col TEXT NOT NULL, \
@@ -331,7 +337,7 @@ impl Names {
             names.types.insert((table, column), ty);
         }
         drop(statement);
-        {
+        if table_exists(conn, "_jazz_enum_tags")? {
             let mut statement = conn
                 .prepare("SELECT tbl, col, tag, name FROM _jazz_enum_tags")
                 .map_err(storage)?;
@@ -354,7 +360,7 @@ impl Names {
                     .insert(name, tag);
             }
         }
-        {
+        if table_exists(conn, "_jazz_enum_defaults")? {
             let mut statement = conn
                 .prepare("SELECT tbl, col, name FROM _jazz_enum_defaults")
                 .map_err(storage)?;
@@ -558,6 +564,10 @@ impl Names {
                 ("_jazz_enum_tags", ["col"].as_slice()),
                 ("_jazz_enum_defaults", ["col"].as_slice()),
             ] {
+                // The enum catalogue exists only once a column is tagged.
+                if ddl_table.starts_with("_jazz_enum") && !table_exists(conn, ddl_table)? {
+                    continue;
+                }
                 match column {
                     None => {
                         conn.execute(
@@ -821,6 +831,7 @@ impl Names {
             return Ok(());
         }
         in_savepoint(conn, "jazz_tags", || {
+            conn.execute_batch(ENUM_DDL).map_err(storage)?;
             let mut insert = conn
                 .prepare_cached(
                     "INSERT INTO _jazz_enum_tags (tbl, col, tag, name) VALUES (?1, ?2, ?3, ?4)",
@@ -833,6 +844,7 @@ impl Names {
             }
             Ok(())
         })?;
+        crate::values::tags_changing(conn, &tags);
         let mut tags = tags.borrow_mut();
         for (tag, name) in new {
             tags.insert(name.to_owned(), tag);
@@ -882,6 +894,7 @@ impl Names {
                 .and_then(|tag| tags.borrow().name(tag).map(str::to_owned)),
         };
         in_savepoint(conn, "jazz_tags", || {
+            conn.execute_batch(ENUM_DDL).map_err(storage)?;
             if let Some(name) = &stale_default {
                 conn.execute(
                     "INSERT INTO _jazz_enum_defaults (tbl, col, name) VALUES (?1, ?2, ?3)",
@@ -906,6 +919,7 @@ impl Names {
             }
             Ok(())
         })?;
+        crate::values::tags_changing(conn, &tags);
         *tags.borrow_mut() = renumbered;
         if let Some(name) = stale_default {
             self.enum_defaults.borrow_mut().insert(key, name);
@@ -1272,6 +1286,15 @@ impl Names {
 
 /// The tag stored column `column` of stored table `table` was added with
 /// (`ADD COLUMN ... DEFAULT`), if any.
+fn table_exists(conn: &Connection, name: &str) -> Result<bool, Error> {
+    conn.query_row(
+        "SELECT count(*) > 0 FROM sqlite_master WHERE name = ?1",
+        [name],
+        |r| r.get(0),
+    )
+    .map_err(storage)
+}
+
 fn ddl_default(conn: &Connection, table: &str, column: &str) -> Result<Option<i64>, Error> {
     let mut statement = conn
         .prepare(&format!(
@@ -1441,5 +1464,43 @@ mod tests {
             rejected.to_string().contains("not supported yet"),
             "{rejected}"
         );
+    }
+
+    /// A tag interned inside a savepoint that rolls back leaves memory as
+    /// it leaves the file, so the next name takes that tag; one interned
+    /// inside a kept savepoint stays in both.
+    #[test]
+    fn a_rolled_back_savepoint_takes_its_interned_tags_with_it() {
+        use crate::values::{begin_savepoint, end_savepoint};
+        let conn = Connection::open_in_memory().unwrap();
+        let names = Names::load(&conn).unwrap();
+        let file = || -> Vec<(i64, String)> {
+            if !table_exists(&conn, "_jazz_enum_tags").unwrap() {
+                return Vec::new();
+            }
+            let mut statement = conn
+                .prepare("SELECT tag, name FROM _jazz_enum_tags ORDER BY tag")
+                .unwrap();
+            statement
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        let tag = |name: &str| names.tags().column("t", "c").borrow().tag(name);
+        begin_savepoint(&conn, "outer").unwrap();
+        begin_savepoint(&conn, "inner").unwrap();
+        names.intern(&conn, "t", "c", &["lost"]).unwrap();
+        end_savepoint(&conn, "inner", true).unwrap();
+        assert_eq!(tag("lost"), Some(0));
+        end_savepoint(&conn, "outer", false).unwrap();
+        assert_eq!(tag("lost"), None);
+        assert_eq!(file(), []);
+
+        begin_savepoint(&conn, "outer").unwrap();
+        names.intern(&conn, "t", "c", &["kept"]).unwrap();
+        end_savepoint(&conn, "outer", true).unwrap();
+        assert_eq!(tag("kept"), Some(0));
+        assert_eq!(file(), [(0, "kept".to_owned())]);
     }
 }

@@ -53,7 +53,81 @@ pub(crate) fn storage(error: rusqlite::Error) -> Error {
 /// Open `SAVEPOINT name`; [`end_savepoint`] closes it.
 pub(crate) fn begin_savepoint(conn: &rusqlite::Connection, name: &str) -> Result<(), Error> {
     conn.execute_batch(&format!("SAVEPOINT {name}"))
-        .map_err(storage)
+        .map_err(storage)?;
+    TAG_UNDO.with(|undo| {
+        undo.borrow_mut()
+            .entry(undo_key(conn))
+            .or_default()
+            .push(Vec::new())
+    });
+    Ok(())
+}
+
+thread_local! {
+    /// By connection: each open savepoint's undo log, innermost last: the
+    /// enum columns whose tags changed inside it, as they were before.
+    static TAG_UNDO: RefCell<std::collections::HashMap<usize, Vec<Vec<(ColumnTags, EnumTags)>>>> =
+        RefCell::default();
+}
+
+/// A connection's key in [`TAG_UNDO`]: its SQLite handle, which moving the
+/// `Connection` keeps.
+fn undo_key(conn: &rusqlite::Connection) -> usize {
+    // SAFETY: the handle is only compared, never dereferenced.
+    unsafe { conn.handle() as usize }
+}
+
+/// Stored enum column `tags` is about to change on `conn`: the innermost
+/// open savepoint logs how it was, once, to put back if it rolls back.
+pub(crate) fn tags_changing(conn: &rusqlite::Connection, tags: &ColumnTags) {
+    TAG_UNDO.with(|undo| {
+        if let Some(frame) = undo
+            .borrow_mut()
+            .get_mut(&undo_key(conn))
+            .and_then(|frames| frames.last_mut())
+            && !frame.iter().any(|(logged, _)| Rc::ptr_eq(logged, tags))
+        {
+            frame.push((tags.clone(), tags.borrow().clone()));
+        }
+    });
+}
+
+/// Close `conn`'s innermost savepoint's undo log: kept, its entries join
+/// the enclosing savepoint's (the outermost's are committed); rolled back,
+/// its columns' tags are put back. `all` closes every open log (SQLite
+/// rolled the whole transaction back).
+fn close_tag_undo(conn: &rusqlite::Connection, kept: bool, all: bool) {
+    TAG_UNDO.with(|undo| {
+        let mut undo = undo.borrow_mut();
+        let key = undo_key(conn);
+        let Some(frames) = undo.get_mut(&key) else {
+            return;
+        };
+        let count = if all { frames.len() } else { 1 };
+        for _ in 0..count {
+            let Some(frame) = frames.pop() else {
+                break;
+            };
+            match (kept, frames.last_mut()) {
+                (true, Some(parent)) => {
+                    for (tags, before) in frame {
+                        if !parent.iter().any(|(logged, _)| Rc::ptr_eq(logged, &tags)) {
+                            parent.push((tags, before));
+                        }
+                    }
+                }
+                (true, None) => {}
+                (false, _) => {
+                    for (tags, before) in frame.into_iter().rev() {
+                        *tags.borrow_mut() = before;
+                    }
+                }
+            }
+        }
+        if frames.is_empty() {
+            undo.remove(&key);
+        }
+    });
 }
 
 /// Release `SAVEPOINT name` (`keep`), or roll back everything since it. SQLite
@@ -70,9 +144,19 @@ pub(crate) fn end_savepoint(
         format!("ROLLBACK TO {name}; RELEASE {name}")
     };
     match conn.execute_batch(&sql) {
-        Ok(()) => Ok(()),
-        Err(_) if !keep && conn.is_autocommit() => Ok(()),
-        Err(error) => Err(storage(error)),
+        Ok(()) => {
+            close_tag_undo(conn, keep, false);
+            Ok(())
+        }
+        Err(error) => {
+            // In autocommit mode SQLite already rolled everything back.
+            close_tag_undo(conn, false, conn.is_autocommit());
+            if !keep && conn.is_autocommit() {
+                Ok(())
+            } else {
+                Err(storage(error))
+            }
+        }
     }
 }
 
@@ -457,6 +541,26 @@ impl Column {
         }
     }
 
+    /// `value` as this column's cell sorts in this schema's order: an enum
+    /// variant as its rank where [`Self::rank_sql`] ranks, else the cell.
+    pub(crate) fn order_cell(&self, value: &Value) -> Result<Option<Sql>, Error> {
+        let (Some(variants), Some(tags)) = (&self.variants, &self.tags) else {
+            return self.cell_sql(value);
+        };
+        let tags = tags.borrow();
+        if is_array_type(&self.ty) || tags.in_order(variants) {
+            return enum_cell(&tags, value);
+        }
+        let mut inner = value;
+        while let Value::Nullable(Some(value)) = inner {
+            inner = value;
+        }
+        match inner {
+            Value::String(name) => Ok(tags.rank(variants, name).map(Sql::Integer)),
+            _ => enum_cell(&tags, value),
+        }
+    }
+
     /// Variant `name`'s rank in this schema's declaration order.
     pub(crate) fn rank(&self, name: &str) -> Option<i64> {
         let (variants, tags) = (self.variants.as_ref()?, self.tags.as_ref()?);
@@ -613,14 +717,21 @@ pub type ColumnTags = Rc<RefCell<EnumTags>>;
 /// Every stored enum column's tags on a store, by (stored table, stored
 /// column). Schemas built for the store take their columns' entries from
 /// it, so a tag the store interns reaches every schema at once.
+///
+/// A tag is in memory as soon as it is interned, and in the file once the
+/// transaction interning it commits: every savepoint keeps an undo log of
+/// the columns whose tags changed inside it ([`tags_changing`]), so rolling
+/// it back puts their memory back too.
 #[derive(Clone, Debug, Default)]
-pub struct TagRegistry(Rc<RefCell<BTreeMap<(String, String), ColumnTags>>>);
+pub struct TagRegistry {
+    map: Rc<RefCell<BTreeMap<(String, String), ColumnTags>>>,
+}
 
 impl TagRegistry {
     /// Stored column `column` of stored table `table`'s tags (none yet: an
     /// empty entry).
     pub(crate) fn column(&self, table: &str, column: &str) -> ColumnTags {
-        self.0
+        self.map
             .borrow_mut()
             .entry((table.to_owned(), column.to_owned()))
             .or_default()
@@ -631,7 +742,7 @@ impl TagRegistry {
     /// back with [`Self::restore`].
     pub(crate) fn snapshot(&self) -> TagSnapshot {
         TagSnapshot(
-            self.0
+            self.map
                 .borrow()
                 .iter()
                 .map(|(key, tags)| (key.clone(), tags.clone(), tags.borrow().clone()))
@@ -643,7 +754,7 @@ impl TagRegistry {
     /// An entry made or moved since keeps no tags: a schema still holding
     /// it reads none it did not have.
     pub(crate) fn restore(&self, snapshot: TagSnapshot) {
-        let mut map = self.0.borrow_mut();
+        let mut map = self.map.borrow_mut();
         for tags in map.values() {
             if !snapshot.0.iter().any(|(_, kept, _)| Rc::ptr_eq(kept, tags)) {
                 *tags.borrow_mut() = EnumTags::default();
@@ -662,7 +773,7 @@ impl TagRegistry {
     /// Stored table `from` (with `column`, its stored column `column.0`) is
     /// stored as `to` (`column.1`) now: its tags follow it.
     pub(crate) fn moved(&self, from: &str, to: &str, column: Option<(&str, &str)>) {
-        let mut map = self.0.borrow_mut();
+        let mut map = self.map.borrow_mut();
         let keys: Vec<(String, String)> = map
             .keys()
             .filter(|(table, col)| table == from && column.is_none_or(|(old, _)| col == old))

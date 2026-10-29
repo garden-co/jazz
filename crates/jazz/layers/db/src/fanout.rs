@@ -1033,7 +1033,9 @@ impl Inner {
         let id_key = |row: &CurrentRow| (Sql::Blob(row.id.0.as_bytes().to_vec()), tie_desc);
         let schema = group.prepared.schema.as_ref().unwrap_or(&self.owner);
         if projected {
-            // Cells sort as stored: an enum variant by its tag.
+            // Cells sort as the compiled ORDER BY sorts them: an enum
+            // variant by its tag, or its rank in a schema whose declaration
+            // order is not tag order.
             let root = schema.tables.get(&group.prepared.query.table)?;
             let mut keys = Vec::with_capacity(rows.len());
             for row in rows {
@@ -1054,7 +1056,7 @@ impl Inner {
                             // chunked cell, which the row does not carry.
                             Some(value) => match root
                                 .column(&by.column)
-                                .map_or_else(|| to_sql(value), |column| column.cell_sql(value))
+                                .map_or_else(|| to_sql(value), |column| column.order_cell(value))
                                 .ok()??
                             {
                                 Sql::Text(bytes) | Sql::Blob(bytes)
@@ -1088,7 +1090,13 @@ impl Inner {
         let mut columns = String::new();
         for by in order {
             match crate::compile::column_sql(table, "t", &by.column) {
-                Ok(sql) => columns.push_str(&format!(", {sql}")),
+                Ok(sql) => {
+                    let sql = table
+                        .column(&by.column)
+                        .and_then(|column| column.rank_sql(&sql))
+                        .unwrap_or(sql);
+                    columns.push_str(&format!(", {sql}"));
+                }
                 Err(error) => return Some(Err(error)),
             }
         }

@@ -569,6 +569,9 @@ impl<'a> Ctx<'a> {
         // Each output an `ORDER BY` names, as it orders (an enum's rank in
         // the query schema's declaration order).
         let mut ordered: BTreeMap<String, String> = BTreeMap::new();
+        // A group's identity is its key's value: an enum variant by name,
+        // so a renumbering keeps it.
+        let mut group_key = None;
         let group = match &aggregate.group_by {
             Some(column) => {
                 let sql = column_sql(table, alias, column)?;
@@ -578,6 +581,10 @@ impl<'a> Ctx<'a> {
                 if let Some(rank) = column.rank_sql(&sql) {
                     ordered.insert(column.name.clone(), rank);
                 }
+                group_key = column
+                    .tags
+                    .as_ref()
+                    .map(|tags| tags.borrow().name_sql(&sql));
                 Some(sql)
             }
             None => None,
@@ -686,7 +693,10 @@ impl<'a> Ctx<'a> {
         let (key, group_by) = match &group {
             Some(sql) => {
                 keys.push(format!("{sql} ASC"));
-                (sql.clone(), format!(" GROUP BY {sql}"))
+                (
+                    group_key.unwrap_or_else(|| sql.clone()),
+                    format!(" GROUP BY {sql}"),
+                )
             }
             None => ("NULL".to_owned(), String::new()),
         };
@@ -3296,6 +3306,21 @@ impl Ctx<'_> {
     }
 
     fn cmp(&mut self, op: CmpOp, left: Term, right: Term) -> Result<String, Error> {
+        // A range needs the literal's place in the order: a name the
+        // column never held has none.
+        if is_range(&op) {
+            for (column, other) in [(&left, &right), (&right, &left)] {
+                if let (Term::Enum(column), Term::Bound(_, Sql::Text(name))) = (column, other) {
+                    let name = String::from_utf8_lossy(name);
+                    if column.tags.borrow().tag(&name).is_none() {
+                        return Err(query_error(format!(
+                            "comparing `{}` with `{name}`, which is not one of its variants",
+                            column.column.name
+                        )));
+                    }
+                }
+            }
+        }
         Ok(match (left, right) {
             (Term::Missing | Term::NaN, _) | (_, Term::Missing | Term::NaN) => "0".to_owned(),
             // A range in a schema whose order is not tag order compares
