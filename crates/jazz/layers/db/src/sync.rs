@@ -1359,6 +1359,9 @@ pub(crate) struct Client {
     relay_ready: bool,
     /// The server said it has not admitted this client's schema version.
     unadmitted: bool,
+    /// This store committed writes before it became a replica (see
+    /// [`stranded`]): it refuses every upstream.
+    stranded: bool,
     /// Rows asked for whole (their shipped deltas did not apply), until a
     /// whole image of each arrives. This store holds a stale version of
     /// each, so no result it settles is the server's: no watermark is
@@ -3789,7 +3792,13 @@ impl Inner {
         Ok(roots)
     }
 
-    fn persist_pending(&self, tx: u64, commit: &SyncMessage, rows: &[RowKey]) -> Result<(), Error> {
+    fn persist_pending(
+        &self,
+        tx: u64,
+        commit: &SyncMessage,
+        rows: &[RowKey],
+        version: crate::ids::SchemaVersionId,
+    ) -> Result<(), Error> {
         let SyncMessage::Commit {
             node,
             tx: sent_as,
@@ -3871,12 +3880,12 @@ impl Inner {
             )
             .map_err(storage)?;
         }
-        // Which version's names its ops use, should the store reopen under
-        // another one before it settles.
+        // Which version's names its ops use (the schema view that wrote
+        // it), should the store reopen under another one before it settles.
         self.exec(PENDING_VERSIONS_DDL, []).map_err(storage)?;
         self.exec(
             "INSERT OR REPLACE INTO _jazz_pending_versions (tx, version) VALUES (?1, ?2)",
-            rusqlite::params![tx as i64, self.owner_version.as_bytes().to_vec()],
+            rusqlite::params![tx as i64, version.as_bytes().to_vec()],
         )
         .map_err(storage)?;
         Ok(())
@@ -4703,6 +4712,7 @@ impl Inner {
             .map_err(storage)?;
         self.seq = self.seq.max(pending.unwrap_or(0) as u64);
         let mut client = Client::new(me);
+        client.stranded = self.meta("stranded")?.is_some();
         client.known = self.meta("known")?.unwrap_or(0);
         client.persisted_known = client.known;
         let mut statement = self
@@ -4835,6 +4845,7 @@ impl Client {
             relayed_fetches: Vec::new(),
             relay_ready: false,
             unadmitted: false,
+            stranded: false,
             whole: HashSet::new(),
             forgotten: false,
         }
@@ -4842,6 +4853,20 @@ impl Client {
 }
 
 // ---- client ---------------------------------------------------------------
+
+/// Why a store that committed writes before it became a replica refuses
+/// every upstream: those commits sit at seqs its upstream numbers its own
+/// versions by, and were never recorded for upload, so syncing would lose
+/// them to the upstream's rows (#4443). They stay local, and so does what
+/// it writes after.
+fn stranded() -> Error {
+    Error::new(
+        ErrorCode::Protocol,
+        "this store committed writes before it became a replica, and uploading them is \
+         not supported yet: a store that will connect upstream becomes a replica \
+         (`become_replica`, or a remote link hint) before it writes",
+    )
+}
 
 impl Db {
     /// Connect this database to its server. Writes from now on upload, and
@@ -4942,7 +4967,11 @@ impl Db {
         client.wanted.extend(asked);
         client.unadmitted = false;
         client.connection += 1;
-        Upstream(client.connection)
+        let connection = client.connection;
+        if client.stranded {
+            inner.refuse_upstream(stranded());
+        }
+        Upstream(connection)
     }
 
     /// Evict the cached rows of a remote query's settled view that its
@@ -5067,15 +5096,25 @@ impl Db {
     /// Become a replica: optimistic seqs from here on sit above every
     /// server seq, and commits are owed to an upstream (uploaded once one
     /// connects). A store that will connect later becomes one before it
-    /// writes, or its earlier commits stay local.
+    /// writes: what it committed before sits at seqs its upstream numbers
+    /// its own versions by and was never recorded for upload, so such a
+    /// store keeps it and refuses every upstream (see [`stranded`]).
     pub fn become_replica(&self) {
         let mut inner = self.inner.borrow_mut();
         if inner.client.is_some() {
             return;
         }
+        let stranded = !inner.authority && inner.holds_rows().expect("read the store's tables");
         inner.raise_to_local_base();
         let node = *inner.identity.node.as_bytes();
-        inner.client = Some(Client::new(node));
+        let mut client = Client::new(node);
+        client.stranded = stranded;
+        inner.client = Some(client);
+        if stranded {
+            inner
+                .persist_meta("stranded", 1)
+                .expect("persist stranded flag");
+        }
         inner
             .persist_meta("client", 1)
             .expect("persist replica flag");
@@ -5102,12 +5141,15 @@ impl Db {
     /// transaction the ops join it. It reads and writes the store, so
     /// it runs inside the commit's SQLite transaction: an error leaves the
     /// replica's sync state as it was, and the caller rolls the commit back.
+    /// `version`: the schema version whose names `ops` use (the schema
+    /// view that wrote them), which the commit uploads under.
     pub(crate) fn record_upload(
         &self,
         ops: Vec<StagedOp>,
         seq: u64,
         kind: Kind,
         relayed: Option<Relayed>,
+        version: crate::ids::SchemaVersionId,
     ) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
         if inner.client.is_none() {
@@ -5201,6 +5243,7 @@ impl Db {
             });
             expected.push(image);
         }
+        let other = version != inner.owner_version;
         let client = inner.client.as_mut().expect("client");
         let added: Vec<RowKey> = baselines.iter().map(|(key, _)| key.clone()).collect();
         client.baselines.extend(baselines);
@@ -5238,11 +5281,19 @@ impl Db {
                     rows: rows.clone(),
                     expected,
                 });
-                let persisted = inner.persist_pending(seq, &commit, &rows);
+                // Written through a view of another version: it uploads
+                // under that one, whose names its ops use.
+                if other {
+                    client.versions.insert(seq, *version.as_bytes());
+                }
+                let persisted = inner.persist_pending(seq, &commit, &rows, version);
                 if let Err(error) = persisted {
                     let client = inner.client.as_mut().expect("client");
                     client.unsent.pop();
                     client.pending.pop();
+                    if other {
+                        client.versions.remove(&seq);
+                    }
                     for key in &added {
                         client.baselines.remove(key);
                     }
@@ -5333,7 +5384,7 @@ impl Db {
         let id = client.next_id;
         client.next_id += 1;
         let answered = Rc::new(StdCell::new(false));
-        let refused = Rc::new(RefCell::new(None));
+        let refused = Rc::new(RefCell::new(client.stranded.then(stranded)));
         let global = Rc::new(StdCell::new(false));
         let author = inner.identity.author;
         let watermark = watermark_key(&query, &prepared.binding, include_deleted, author);
@@ -6336,17 +6387,23 @@ impl Db {
             .iter()
             .flat_map(|p| p.rows.iter().cloned())
             .collect();
-        // A commit written under an earlier version replays by the names
-        // the current one gives what it wrote, as they stand now (an
-        // upstream's catalogue may have renamed them since).
-        let pending: Vec<(u64, Vec<StagedOp>)> = pending
+        // A commit written under another version replays under it, as its
+        // names stand now (an upstream's catalogue may have renamed them
+        // since), while this store holds that version (a schema view): what
+        // it wrote that the current version lacks stays visible through
+        // the view. One written before an upgrade replays by the names the
+        // current version gives what it wrote.
+        let pending: Vec<(u64, Option<Rc<Schema>>, Vec<StagedOp>)> = pending
             .into_iter()
             .map(|(tx, ops)| match versions.get(&tx) {
                 Some(version) => {
                     let version = crate::ids::SchemaVersionId::from_bytes(*version);
-                    (tx, inner.by_current_names(version, ops))
+                    match inner.governed(version) {
+                        Some(schema) => (tx, Some(schema), ops),
+                        None => (tx, None, inner.by_current_names(version, ops)),
+                    }
                 }
-                None => (tx, ops),
+                None => (tx, None, ops),
             })
             .collect();
         for ((table, row, key), image) in &baseline {
@@ -6358,13 +6415,16 @@ impl Db {
                 None => inner.drop_row(table, *row, key, 0)?,
             }
         }
-        for (tx, ops) in pending {
+        let active = inner.schema.clone();
+        for (tx, schema, ops) in pending {
             begin_savepoint(&inner.conn, "replay")?;
+            inner.schema = schema.unwrap_or_else(|| inner.owner.clone());
             inner.merging = true;
             let replayed = ops.iter().try_for_each(|op| inner.apply(op, tx).map(drop));
             inner.merging = false;
             end_savepoint(&inner.conn, "replay", replayed.is_ok())?;
         }
+        inner.schema = active;
         let client = inner.client.as_mut().expect("client");
         client.baselines = baseline
             .into_iter()
@@ -6375,6 +6435,24 @@ impl Db {
 }
 
 impl Inner {
+    /// Whether any stored table holds a row or a version of one: on a
+    /// store that is not a replica, only its own commits put them there.
+    fn holds_rows(&self) -> Result<bool, Error> {
+        for stored in self.physical.tables.keys() {
+            for table in [stored.clone(), format!("{stored}__h")] {
+                let sql = format!("SELECT EXISTS (SELECT 1 FROM {})", quote(&table));
+                let any: bool = self
+                    .conn
+                    .query_row(&sql, [], |r| r.get(0))
+                    .map_err(storage)?;
+                if any {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
     /// Where this replica's optimistic local seqs start.
     fn local_base(&self) -> u64 {
         if self.non_durable {
@@ -8965,6 +9043,7 @@ impl Db {
                     origin: writer,
                     bases,
                 }),
+                self.write_version(),
             )
         } else {
             Ok(())

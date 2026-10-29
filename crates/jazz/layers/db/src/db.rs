@@ -665,6 +665,7 @@ fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> 
     Ok(Schema {
         tables,
         jazz: jazz.clone(),
+        version: jazz.version_id(),
         policies_from: None,
     })
 }
@@ -1088,6 +1089,7 @@ impl Db {
             let mut physical = Schema {
                 tables: BTreeMap::new(),
                 jazz: config.schema.clone(),
+                version: config.schema.version_id(),
                 policies_from: None,
             };
             physical.union(&schema)?;
@@ -1346,6 +1348,16 @@ impl Db {
                 .find(|c| c.name == column)
                 .map(|c| crate::names::identity(namespace, &table.stored, Some(&c.stored))),
         })
+    }
+
+    /// The schema version this handle writes under: its view's, else the
+    /// owner's. A replica uploads each commit under the version that
+    /// wrote it.
+    pub(crate) fn write_version(&self) -> crate::ids::SchemaVersionId {
+        match &self.view {
+            Some(view) => view.version,
+            None => self.inner.borrow().owner_version,
+        }
     }
 
     /// The shared state, set up to run under this handle's schema.
@@ -2040,7 +2052,15 @@ impl Db {
             // The upload record joins the write's SQLite transaction: if it
             // fails, `with_upload` rolls both back, and nobody has been told.
             if let Err(error) = committed
-                .then(|| self.record_upload(vec![op], handle.seq, sync::Kind::Mergeable, None))
+                .then(|| {
+                    self.record_upload(
+                        vec![op],
+                        handle.seq,
+                        sync::Kind::Mergeable,
+                        None,
+                        self.write_version(),
+                    )
+                })
                 .transpose()
             {
                 let mut inner = self.inner();
@@ -2173,7 +2193,13 @@ impl Db {
         let value = result?;
         let (seq, _) = changed.expect("committed");
         // The upload record joins the transaction's SQLite savepoint.
-        if let Err(error) = self.record_upload(captured, seq, sync::Kind::Mergeable, None) {
+        if let Err(error) = self.record_upload(
+            captured,
+            seq,
+            sync::Kind::Mergeable,
+            None,
+            self.write_version(),
+        ) {
             let mut inner = self.inner();
             inner.seq = prior;
             inner.abandon_savepoint("tx")?;
@@ -5916,6 +5942,28 @@ fn schema_error(message: impl Into<String>) -> Error {
     Error::new(ErrorCode::Schema, message)
 }
 
+impl Db {
+    /// The schema version a batch's commit uploads under: the one every
+    /// staged write names its tables and columns by. A replica cannot
+    /// upload one commit under several, so a batch staged through views of
+    /// different versions is refused there; elsewhere nothing uploads.
+    fn batch_version(
+        &self,
+        ops: &[(Rc<Schema>, StagedOp)],
+    ) -> Result<crate::ids::SchemaVersionId, Error> {
+        let mut versions = ops.iter().map(|(schema, _)| schema.version);
+        let Some(first) = versions.next() else {
+            return Ok(self.write_version());
+        };
+        if self.is_client() && versions.any(|version| version != first) {
+            return Err(unsupported(
+                "a transaction writing through schema views of different versions on a replica",
+            ));
+        }
+        Ok(first)
+    }
+}
+
 /// The changes a schema view may make over the owner's schema without an
 /// explicit lens: add and drop columns, add tables. Everything else names
 /// what it changed (Jazz's `direct_schema_view_lens` rules).
@@ -6682,12 +6730,16 @@ impl Db {
         };
         // `commit_ops` holds the upload record and the commit in one SQLite
         // transaction and rolls both back on an error.
-        if let Err(error) = self.record_upload(
-            ops.iter().map(|(_, op)| op.clone()).collect(),
-            seq,
-            kind,
-            None,
-        ) {
+        let recorded = self.batch_version(ops).and_then(|version| {
+            self.record_upload(
+                ops.iter().map(|(_, op)| op.clone()).collect(),
+                seq,
+                kind,
+                None,
+                version,
+            )
+        });
+        if let Err(error) = recorded {
             let mut inner = self.inner();
             inner.seq = prior;
             inner.changed.borrow_mut().truncate(mark);
