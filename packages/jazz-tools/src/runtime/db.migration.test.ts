@@ -6,7 +6,7 @@ import { schema as s, migration as m } from "../index.js";
 import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "../testing/index.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
 import { type Db } from "./db.js";
-import { bundleFor } from "./testing/client-migrations.js";
+import { appMigrations } from "../testing/client-migrations.js";
 import { createDb } from "./default-create-db.js";
 import { waitForRows } from "./testing/support.js";
 
@@ -41,8 +41,23 @@ const newSchema = {
 type OldAppSchema = s.Schema<typeof oldSchema>;
 type NewAppSchema = s.Schema<typeof newSchema>;
 
-const oldApp: s.App<OldAppSchema> = s.defineApp(oldSchema);
-const newApp: s.App<NewAppSchema> = s.defineApp(newSchema);
+const migration = m.defineMigration({
+  from: oldSchema,
+  to: newSchema,
+  migrate: {
+    todos: {
+      tags: m.add.array({ of: s.string(), default: [] }),
+    },
+  },
+});
+
+// Each app ships its migrations, as its generated module would hold them.
+const oldApp: s.App<OldAppSchema> = s.defineApp(oldSchema, {
+  migrations: await appMigrations(oldSchema),
+});
+const newApp: s.App<NewAppSchema> = s.defineApp(newSchema, {
+  migrations: await appMigrations(oldSchema, { to: newSchema, migration }),
+});
 
 const oldPermissions = s.definePermissions(oldApp, ({ policy }) => [
   policy.todos.allowRead.always(),
@@ -57,16 +72,6 @@ const newPermissions = s.definePermissions(newApp, ({ policy }) => [
   policy.todos.allowUpdate.always(),
   policy.todos.allowDelete.always(),
 ]);
-
-const migration = m.defineMigration({
-  from: oldSchema,
-  to: newSchema,
-  migrate: {
-    todos: {
-      tags: m.add.array({ of: s.string(), default: [] }),
-    },
-  },
-});
 
 describe("schema migrations", () => {
   let server: LocalJazzServerHandle;
@@ -97,15 +102,8 @@ describe("schema migrations", () => {
       migration,
     });
 
-    const migrations = await bundleFor(oldApp, newApp, migration);
-    oldDb = await createDb({
-      ...(await localAccountConfig(appId, serverUrl)),
-      migrations,
-    });
-    newDb = await createDb({
-      ...(await localAccountConfig(appId, serverUrl)),
-      migrations,
-    });
+    oldDb = await createDb({ ...(await localAccountConfig(appId, serverUrl)) });
+    newDb = await createDb({ ...(await localAccountConfig(appId, serverUrl)) });
   });
 
   afterEach(async () => {
@@ -176,8 +174,11 @@ it("publishes UUID reference identity lenses and relates rows written before pub
       reviewer: s.rel("users", "reviewerId"),
     }),
   };
-  const beforeApp = s.defineApp(before),
-    afterApp = s.defineApp(after);
+  const migration = m.defineMigration({ from: before, to: after });
+  const beforeApp = s.defineApp(before, { migrations: await appMigrations(before) }),
+    afterApp = s.defineApp(after, {
+      migrations: await appMigrations(before, { to: after, migration }),
+    });
   const permissionsBefore = s.definePermissions(beforeApp, ({ policy }) => [
     policy.users.allowRead.always(),
     policy.users.allowInsert.always(),
@@ -212,7 +213,6 @@ it("publishes UUID reference identity lenses and relates rows written before pub
         reviewerId: null,
       })
       .wait({ tier: "global" });
-    const migration = m.defineMigration({ from: before, to: after });
     expect(migration.forward).toEqual([{ table: "records", operations: [] }]);
     await deploy({
       appId,
@@ -222,10 +222,7 @@ it("publishes UUID reference identity lenses and relates rows written before pub
       permissions: permissionsAfter,
       migration,
     });
-    newDb = await createDb({
-      ...(await localAccountConfig(appId, serverUrl)),
-      migrations: await bundleFor(beforeApp, afterApp, migration),
-    });
+    newDb = await createDb({ ...(await localAccountConfig(appId, serverUrl)) });
     const rows = await waitForRows(
       newDb,
       afterApp.records
@@ -279,8 +276,8 @@ it("publishes generated default-bearing relation migrations and preserves them a
     users,
     records: s.table(columns, { owner: s.rel("users", "ownerId") }),
   };
-  const beforeApp = s.defineApp(before),
-    afterApp = s.defineApp(after);
+  const beforeApp = s.defineApp(before, { migrations: "none" }),
+    afterApp = s.defineApp(after, { migrations: "none" });
   const permissionsBefore = s.definePermissions(beforeApp, ({ policy }) => [
     policy.users.allowRead.always(),
     policy.users.allowInsert.always(),
@@ -383,13 +380,18 @@ it("publishes generated default-bearing relation migrations and preserves them a
       expect(wasmSchemasEqual(stored.schema, expected)).toBe(true);
       expect(await computeSchemaHash(stored.schema)).toBe(schemaHash);
     }
-    newDb = await createDb({
-      ...(await localAccountConfig(appId, server.url)),
-      migrations: await bundleFor(beforeApp, afterApp, await loadDefinedMigration(migrationFile)),
+    // The app as it ships after `migrations create`: its migrations module
+    // now holds the generated migration.
+    const shippedApp = s.defineApp(after, {
+      migrations: await appMigrations(before, {
+        to: after,
+        migration: await loadDefinedMigration(migrationFile),
+      }),
     });
+    newDb = await createDb(await localAccountConfig(appId, server.url));
     const rows = await waitForRows(
       newDb,
-      afterApp.records.where({ id: existing.id }).include({ owner: true }),
+      shippedApp.records.where({ id: existing.id }).include({ owner: true }),
       (rows) => rows.length === 1 && rows[0]?.owner?.name === "Existing owner",
     );
     expect(rows).toEqual([
@@ -403,13 +405,13 @@ it("publishes generated default-bearing relation migrations and preserves them a
         owner: { id: owner.id, name: "Existing owner" },
       },
     ]);
-    const defaultOwner = await newDb.insert(afterApp.users, {}).wait({ tier: "global" });
+    const defaultOwner = await newDb.insert(shippedApp.users, {}).wait({ tier: "global" });
     const created = await newDb
-      .insert(afterApp.records, { ownerId: defaultOwner.id })
+      .insert(shippedApp.records, { ownerId: defaultOwner.id })
       .wait({ tier: "global" });
     const defaultRows = await waitForRows(
       newDb,
-      afterApp.records.where({ id: created.id }).include({ owner: true }),
+      shippedApp.records.where({ id: created.id }).include({ owner: true }),
       (rows) => rows.length === 1 && rows[0]?.owner?.name === "Unnamed",
     );
     expect(defaultRows).toEqual([
@@ -434,8 +436,15 @@ it("publishes generated default-bearing relation migrations and preserves them a
 it("a client shipping the app's migrations writes a renamed column where the server keeps it", async () => {
   const before = { notes: s.table({ title: s.string() }, {}) };
   const after = { notes: s.table({ body: s.string() }, {}) };
-  const beforeApp = s.defineApp(before),
-    afterApp = s.defineApp(after);
+  const rename = m.defineMigration({
+    from: before,
+    to: after,
+    migrate: { notes: { body: m.renameFrom("title") } },
+  });
+  const beforeApp = s.defineApp(before, { migrations: await appMigrations(before) }),
+    afterApp = s.defineApp(after, {
+      migrations: await appMigrations(before, { to: after, migration: rename }),
+    });
   const allowBefore = s.definePermissions(beforeApp, ({ policy }) => [
     policy.notes.allowRead.always(),
     policy.notes.allowInsert.always(),
@@ -444,11 +453,6 @@ it("a client shipping the app's migrations writes a renamed column where the ser
     policy.notes.allowRead.always(),
     policy.notes.allowInsert.always(),
   ]);
-  const rename = m.defineMigration({
-    from: before,
-    to: after,
-    migrate: { notes: { body: m.renameFrom("title") } },
-  });
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   let oldDb: Db | undefined, newDb: Db | undefined;
   try {
@@ -468,8 +472,7 @@ it("a client shipping the app's migrations writes a renamed column where the ser
       permissions: allowAfter,
       migration: rename,
     });
-    const migrations = await bundleFor(beforeApp, afterApp, rename);
-    newDb = await createDb({ ...(await localAccountConfig(appId, serverUrl)), migrations });
+    newDb = await createDb({ ...(await localAccountConfig(appId, serverUrl)) });
     oldDb = await createDb({ ...(await localAccountConfig(appId, serverUrl)) });
     const created = await newDb
       .insert(afterApp.notes, { body: "written by v2" })

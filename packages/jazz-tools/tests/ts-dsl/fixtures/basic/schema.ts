@@ -78,7 +78,7 @@ export const schema = {
 };
 
 export type AppSchema = s.Schema<typeof schema>;
-export const baseApp: s.App<AppSchema> = s.defineApp(schema);
+export const baseApp: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
 
 export const permissions = s.definePermissions(baseApp, ({ policy }) => {
   policy.users.allowRead.where({});

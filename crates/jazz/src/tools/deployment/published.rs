@@ -228,6 +228,20 @@ pub fn client_migrations(json: &[u8]) -> Result<(Vec<JazzSchema>, Vec<MigrationL
     Ok((schemas, lenses))
 }
 
+/// The bundle in `migrations` (JSON, see [`client_migrations`]) lowered for
+/// a store; none ships nothing.
+pub fn lowered_client_migrations(
+    migrations: Option<&[u8]>,
+) -> Result<crate::db::Migrations, String> {
+    match migrations {
+        None => Ok(crate::db::Migrations::default()),
+        Some(json) => {
+            let (schemas, lenses) = client_migrations(json)?;
+            Ok(crate::db::Migrations { schemas, lenses })
+        }
+    }
+}
+
 /// `config` shipping the bundle in `migrations` (JSON, see
 /// [`client_migrations`]), as a binding's open configuration carries it.
 pub fn with_client_migrations(

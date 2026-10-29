@@ -5,13 +5,17 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { defineMigration, exportLocalFirstSecret, schema as s } from "../index.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
-import { bundleFor } from "../runtime/testing/client-migrations.js";
+import { appMigrations } from "../testing/client-migrations.js";
 import { createJazzSession } from "./index.js";
 
 const before = { entries: s.table({ text: s.string() }, {}) };
 const after = { ...before, controls: s.table({ value: s.string() }, {}) };
-const oldApp = s.defineApp(before);
-const newApp = s.defineApp(after);
+const migration = defineMigration({ from: before, to: after, createTables: { controls: true } });
+// Each app ships its migrations, as its generated module would hold them.
+const oldApp = s.defineApp(before, { migrations: await appMigrations(before) });
+const newApp = s.defineApp(after, {
+  migrations: await appMigrations(before, { to: after, migration }),
+});
 const oldPermissions = s.definePermissions(oldApp, ({ policy }) => {
   policy.entries.allowRead.always();
 });
@@ -19,7 +23,6 @@ const newPermissions = s.definePermissions(newApp, ({ policy }) => {
   policy.entries.allowRead.always();
   policy.controls.allowRead.always();
 });
-const migration = defineMigration({ from: before, to: after, createTables: { controls: true } });
 
 describe("offline persistent schema bootstrap", () => {
   for (const reader of [false, true]) {
@@ -41,9 +44,6 @@ describe("offline persistent schema bootstrap", () => {
         type Session = Awaited<ReturnType<typeof createJazzSession>>;
         const sessions = new Set<Session>();
         let readerSecret: string | undefined;
-        // The app ships its versions and lenses, as `jazz-tools deploy`
-        // writes them (SPEC 10.7).
-        const migrations = await bundleFor(oldApp, newApp, migration);
         async function open(
           clientApp: Parameters<typeof createJazzSession>[0]["app"],
           name: string,
@@ -54,7 +54,6 @@ describe("offline persistent schema bootstrap", () => {
             serverUrl: server.url,
             app: clientApp,
             permissions: clientApp === newApp ? newPermissions : oldPermissions,
-            migrations,
             driver: { type: "persistent", dataPath: join(directory, name) },
             initial: asReader ? "local-first" : { backendSecret: settings.backendSecret },
           });
@@ -112,7 +111,10 @@ describe("offline persistent schema bootstrap", () => {
           // Its `text` changes type in place, so it is a new required column
           // with no value in the retained row: the store refuses it, when it
           // opens on it or when a read first uses it.
-          const incompatible = s.defineApp({ entries: s.table({ text: s.boolean() }, {}) });
+          const incompatible = s.defineApp(
+            { entries: s.table({ text: s.boolean() }, {}) },
+            { migrations: "none" },
+          );
           const refused = async () => {
             const attempt = await open(incompatible, "reader");
             try {
@@ -125,7 +127,10 @@ describe("offline persistent schema bootstrap", () => {
             /changing the type of required column entries\.text without a default/,
           );
           // Optional, it opens, and waits for an admission that never comes.
-          const optional = s.defineApp({ entries: s.table({ text: s.boolean().optional() }, {}) });
+          const optional = s.defineApp(
+            { entries: s.table({ text: s.boolean().optional() }, {}) },
+            { migrations: "none" },
+          );
           const rejected = await open(optional, "reader");
           await expect(rejected.db.all(optional.entries, { tier: "remote" })).rejects.toThrow(
             /awaiting published catalogue admission/,

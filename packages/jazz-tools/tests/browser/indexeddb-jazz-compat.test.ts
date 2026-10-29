@@ -49,25 +49,28 @@ import {
   withTimeout,
 } from "./support.js";
 
-const app = s.defineApp({
-  projects: s.table(
-    {
-      name: s.string(),
-    },
-    { documentsViaProject: s.reverse("documents", "project") },
-  ),
-  documents: s
-    .table(
+const app = s.defineApp(
+  {
+    projects: s.table(
       {
-        branch: s.string(),
-        title: s.string(),
-        projectId: s.uuid(),
-        body: s.string(),
+        name: s.string(),
       },
-      { project: s.rel("projects", "projectId") },
-    )
-    .branchBy("branch"),
-});
+      { documentsViaProject: s.reverse("documents", "project") },
+    ),
+    documents: s
+      .table(
+        {
+          branch: s.string(),
+          title: s.string(),
+          projectId: s.uuid(),
+          body: s.string(),
+        },
+        { project: s.rel("projects", "projectId") },
+      )
+      .branchBy("branch"),
+  },
+  { migrations: "none" },
+);
 
 const permissions = s.definePermissions(app, ({ policy }) => [
   policy.projects.allowRead.always(),
@@ -83,15 +86,18 @@ const permissions = s.definePermissions(app, ({ policy }) => [
 // Keep the corrupt-open receipt deliberately small. The broader corpus above
 // exercises branches and large values; this isolates storage admission from
 // any schema-level query work that cannot run after an invalid epoch anyway.
-const corruptionApp = s.defineApp({
-  todos: s.table(
-    {
-      title: s.string(),
-      done: s.boolean(),
-    },
-    {},
-  ),
-});
+const corruptionApp = s.defineApp(
+  {
+    todos: s.table(
+      {
+        title: s.string(),
+        done: s.boolean(),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 
 /** The producer's account; every pinned corpus was written under it. */
 const CORPUS_SECRET = "jazz-auth-v1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";

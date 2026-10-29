@@ -10,9 +10,12 @@ import {
   type TypingComposerMetrics,
 } from "./typing-composer.ts";
 
-const app = s.defineApp({
-  todos: s.table({ title: s.string() }, {}),
-});
+const app = s.defineApp(
+  {
+    todos: s.table({ title: s.string() }, {}),
+  },
+  { migrations: "none" },
+);
 
 /** Public foregrounds borrow the fixture lease using the genuine account. */
 function clientConfig(admitted: {

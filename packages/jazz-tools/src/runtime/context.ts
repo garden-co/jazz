@@ -157,10 +157,4 @@ export interface AppContext {
    * log off).
    */
   slowQueryThresholdMs?: number;
-
-  /**
-   * The app's schema versions and migrations, as `jazz-tools` writes them to
-   * `migrations/bundle.json` (see {@link ClientMigrations}).
-   */
-  migrations?: ClientMigrations;
 }

@@ -15,7 +15,7 @@ const table = s.table(base.columns, {
     return score >= 8 ? "high" : "low";
   }),
 });
-const app = s.defineApp({ items: table });
+const app = s.defineApp({ items: table }, { migrations: "none" });
 declare const db: Db;
 db.insert(app.items, { score: 9 });
 db.update(app.items, "id", { score: 3 });
@@ -46,15 +46,18 @@ const chained = s.table(table.columns, {
     return `${id}: ${priority} ${label ?? ""}`;
   }),
 });
-s.defineApp({ items: chained });
+s.defineApp({ items: chained }, { migrations: "none" });
 
-const values = s.defineApp({
-  items: s.table(base.columns, {
-    ...base.relations,
-    object: s.computed((row) => ({ score: row.score })),
-    list: s.computed((row) => [row.score]),
-  }),
-});
+const values = s.defineApp(
+  {
+    items: s.table(base.columns, {
+      ...base.relations,
+      object: s.computed((row) => ({ score: row.score })),
+      list: s.computed((row) => [row.score]),
+    }),
+  },
+  { migrations: "none" },
+);
 declare const result: s.RowOf<typeof values.items>;
 // @ts-expect-error the computed property is read-only
 result.object = { score: 1 };

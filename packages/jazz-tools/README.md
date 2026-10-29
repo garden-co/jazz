@@ -15,17 +15,24 @@ For example, define tables rather than CoValues:
 
 ```ts
 import { schema as s } from "jazz-tools";
+import { migrations } from "./migrations";
 
-export const app = s.defineApp({
-  todos: s.table(
-    {
-      title: s.string(),
-      done: s.boolean(),
-    },
-    {},
-  ),
-});
+export const app = s.defineApp(
+  {
+    todos: s.table(
+      {
+        title: s.string(),
+        done: s.boolean(),
+      },
+      {},
+    ),
+  },
+  { migrations },
+);
 ```
+
+`./migrations` is generated: `jazz-tools validate`, `deploy` and the dev
+plugins write it beside schema.ts, even while an app has a single version.
 
 Use `db.insert`, `db.all` and `db.subscribeAll` for writes and queries.
 React, Vue and Solid expose reactive reads through `useAll` / `useOne` in their
@@ -153,8 +160,9 @@ export const schema = s.defineSchema({
 // app.ts
 import { schema as s } from "jazz-tools";
 import { schema } from "./schema.js";
+import { migrations } from "./migrations/index.js";
 
-export const app: s.App<typeof schema> = s.defineApp(schema);
+export const app: s.App<typeof schema> = s.defineApp(schema, { migrations });
 export const recordsWithPeople = app.records.include({ people: true, address: true });
 export type RecordWithPeople = s.RowOf<typeof recordsWithPeople>;
 // people: Array<{ id: string; name: string }>
@@ -176,7 +184,7 @@ export default s.definePermissions(app, ({ policy }) => [policy.people.allowRead
 The normal `jazz-tools validate --schema-dir .` command loads `schema.ts` and
 `permissions.ts`; permissions can import the independently authored app.
 A raw definition also works: declare `type AppSchema = s.Schema<typeof definition>`
-and `const app: s.App<AppSchema> = s.defineApp(definition)`.
+and `const app: s.App<AppSchema> = s.defineApp(definition, { migrations })`.
 
 `RowOf` preserves scalar/array cardinality. `.requireIncludes()` refines a
 non-nullable scalar reference's included row from `Row | null` to `Row` and
@@ -186,7 +194,7 @@ remain arrays. These APIs take their relation names directly from the explicit
 `s.rel` / `s.reverse` declarations in the authored schema, so there is no separate catalogue to generate, pass, or check for staleness.
 
 For a smaller typed surface, use
-`s.defineSliceableApp(schema).slice("records", "people")`. Only selected tables
+`s.defineSliceableApp(schema, { migrations }).slice("records", "people")`. Only selected tables
 and relations between them are exposed in TypeScript; references outside a slice
 remain scalar IDs or ID arrays. Slices retain the full structural schema for
 query planning and schema identity. A slice is a typing convenience, not an

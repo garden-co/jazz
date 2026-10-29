@@ -1648,11 +1648,22 @@ impl NapiDb {
         Ok(Self::open_as(&schema, &config, Some(&data_path), how)?)
     }
 
-    /// Register and return a typed view backed by this same runtime owner.
+    /// Register and return a typed view backed by this same runtime owner,
+    /// of an app shipping `migrations` (its bundle as JSON).
     #[napi(js_name = "registerSchema")]
-    pub fn register_schema(&self, schema: Uint8Array) -> js::Result<Self> {
+    pub fn register_schema(
+        &self,
+        schema: Uint8Array,
+        migrations: Option<Uint8Array>,
+    ) -> js::Result<Self> {
         let inner = self.open_inner()?;
-        let binding = inner.binding.register_schema(&schema).map_err(host_error)?;
+        let migrations =
+            jazz::tools::deployment::published::lowered_client_migrations(migrations.as_deref())
+                .map_err(|error| host_error(binding_host::HostError::Argument(error)))?;
+        let binding = inner
+            .binding
+            .register_schema_shipping(&schema, migrations)
+            .map_err(host_error)?;
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(Inner { binding, ..inner }))),
             owns_runtime: false,

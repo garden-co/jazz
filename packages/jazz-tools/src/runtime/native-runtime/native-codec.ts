@@ -124,9 +124,7 @@ export function openConfig(
   if (migrations == null) {
     writer.none();
   } else {
-    writer.some((value) =>
-      value.bytes(utf8(JSON.stringify(migrations, runtimeSchemaJsonReplacer))),
-    );
+    writer.some((value) => value.bytes(clientMigrationsBytes(migrations)));
   }
   return writer.finish();
 }
@@ -806,6 +804,11 @@ export function assertBytes(value: unknown, label: string): Uint8Array {
     return Uint8Array.from(value);
   }
   throw new Error(`expected ${label} to be bytes`);
+}
+
+/** An app's migrations as the bindings take them (JSON). */
+export function clientMigrationsBytes(migrations: ClientMigrations): Uint8Array {
+  return utf8(JSON.stringify(migrations, runtimeSchemaJsonReplacer));
 }
 
 export function utf8(value: string): Uint8Array {

@@ -1069,6 +1069,13 @@ impl Db {
             })
         };
         let Some((first, _)) = steps.first() else {
+            if let Some(error) = outside_migrations(&config.migrations, &config.schema, |version| {
+                crate::names::Names::load(&conn)
+                    .map(|names| names.get(version).is_some())
+                    .unwrap_or(false)
+            }) {
+                return Err(error);
+            }
             return Self::open_named(config, conn, path);
         };
         let target = std::mem::replace(&mut config.schema, first.clone());
@@ -1103,6 +1110,14 @@ impl Db {
             })
         };
         let along = !steps.is_empty();
+        if !along {
+            let inner = self.inner();
+            if let Some(error) = outside_migrations(&inner.migrations, schema, |version| {
+                inner.names.get(version).is_some()
+            }) {
+                return Err(error);
+            }
+        }
         for (schema, lenses) in steps {
             if self.inner().names.get(&schema.version_id()).is_none() {
                 self.admit(schema, &lenses, None)?;
@@ -6070,6 +6085,34 @@ impl Db {
     /// Register a typed schema view. The handle shares this owner's store,
     /// batches, clock and subscriptions; it reads and writes its own columns
     /// of the physical tables, which hold the union of every admitted view.
+    /// Ship more of the app's versions and lenses (see
+    /// [`DbConfig::with_migrations`]): a client learns an app's migrations
+    /// when it first sees the app, not only when it opens.
+    pub fn add_migrations(&self, migrations: Migrations) {
+        let mut inner = self.inner();
+        for schema in migrations.schemas {
+            let version = schema.version_id();
+            if !inner
+                .migrations
+                .schemas
+                .iter()
+                .any(|s| s.version_id() == version)
+            {
+                inner.migrations.schemas.push(schema);
+            }
+        }
+        for lens in migrations.lenses {
+            if !inner
+                .migrations
+                .lenses
+                .iter()
+                .any(|l| l.source == lens.source && l.target == lens.target)
+            {
+                inner.migrations.lenses.push(lens);
+            }
+        }
+    }
+
     pub async fn register_schema_view(&self, schema: JazzSchema) -> Result<Db, Error> {
         // A version the app's lenses lead to is admitted as the authority
         // admits it, not named against the current one.
@@ -7387,6 +7430,32 @@ impl Db {
 /// reach `target` along `migrations`: starting at a version it `admitted`
 /// (else at a version no lens leads to), ending at `target`. Empty when the
 /// store admitted `target` or no such path exists.
+/// Why a store shipping the app's `migrations` may not take `schema`: it
+/// has not admitted it, and they do not lead to it, so it would name it
+/// otherwise than the server does (SPEC 10.7). None for a store shipping
+/// none (an authority, a tool reading any version) and for the empty schema.
+fn outside_migrations(
+    migrations: &Migrations,
+    schema: &JazzSchema,
+    admitted: impl Fn(&crate::ids::SchemaVersionId) -> bool,
+) -> Option<Error> {
+    let version = schema.version_id();
+    let shipped = migrations.schemas.iter().any(|s| s.version_id() == version)
+        || migrations.lenses.iter().any(|lens| lens.target == version);
+    if migrations.schemas.is_empty()
+        || shipped
+        || schema.runtime().tables.is_empty()
+        || admitted(&version)
+    {
+        return None;
+    }
+    Some(schema_error(format!(
+        "schema version {} is not among the app's migrations: regenerate them \
+         (`jazz-tools validate`) and pass them to the client",
+        uuid::Uuid::from_bytes(*version.as_bytes())
+    )))
+}
+
 fn migration_path(
     migrations: &Migrations,
     target: &JazzSchema,

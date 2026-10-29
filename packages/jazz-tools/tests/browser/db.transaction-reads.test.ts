@@ -4,15 +4,18 @@ import { createBrowserTestDb as createDb, uniqueDbName } from "./support.js";
 import { deploy } from "../../src/dev/catalogue.js";
 import { getJazzServerInfo } from "./testing-server.js";
 
-const app = schema.defineApp({
-  todos: schema.table(
-    {
-      title: schema.string(),
-      done: schema.boolean(),
-    },
-    {},
-  ),
-});
+const app = schema.defineApp(
+  {
+    todos: schema.table(
+      {
+        title: schema.string(),
+        done: schema.boolean(),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 
 type Todo = RowOf<typeof app.todos>;
 

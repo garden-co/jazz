@@ -1138,3 +1138,31 @@ fn a_schema_view_is_admitted_along_the_bundled_lenses() {
         "{columns:?}"
     );
 }
+
+/// A client shipping the app's migrations refuses a schema they lack, on
+/// open and as a view, rather than naming it otherwise than its server.
+#[test]
+fn a_schema_outside_the_shipped_migrations_is_refused() {
+    let v1 = without_rank();
+    let stray = text_rank();
+    let shipped = |schema: JazzSchema| {
+        config(schema, 1, AuthorSubject::SYSTEM).with_migrations(vec![without_rank()], vec![])
+    };
+    let error = block_on(Db::open(shipped(stray.clone())))
+        .err()
+        .expect("refused on open");
+    assert_eq!(error.code, jazz::db::ErrorCode::Schema, "{error:?}");
+    assert!(
+        error.message.contains("not among the app's migrations"),
+        "{error:?}"
+    );
+
+    let client = block_on(Db::open(shipped(v1))).unwrap();
+    let error = block_on(client.register_schema_view(stray))
+        .err()
+        .expect("refused as a view");
+    assert!(
+        error.message.contains("not among the app's migrations"),
+        "{error:?}"
+    );
+}

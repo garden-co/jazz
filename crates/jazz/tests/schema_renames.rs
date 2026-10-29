@@ -98,12 +98,15 @@ fn rename_todos() -> MigrationLens {
 }
 
 /// `schema`'s config, shipping the app's versions and lenses as an app
-/// does (SPEC 10.7), so a store reaches any of them along its lenses.
+/// does (SPEC 10.7), so a store reaches any of them along its lenses. A
+/// test's own `schema` outside them ships as one more version.
 fn config(schema: JazzSchema, node: u8, author: AuthorSubject) -> DbConfig {
-    bare_config(schema, node, author).with_migrations(
-        vec![v1(), v2(), v3(), with_copy()],
-        vec![rename_title(), rename_todos(), copy_title()],
-    )
+    let mut schemas = vec![v1(), v2(), v3(), with_copy()];
+    if !schemas.contains(&schema) {
+        schemas.push(schema.clone());
+    }
+    bare_config(schema, node, author)
+        .with_migrations(schemas, vec![rename_title(), rename_todos(), copy_title()])
 }
 
 /// `schema`'s config without the app's lenses.

@@ -5,10 +5,13 @@ import { accountRegistryUrl } from "../../src/accounts/context.js";
 import { createAccountManager } from "../../src/accounts/create-account-manager.js";
 import type { Db } from "../../src/runtime/db.js";
 
-export const recoveryApp = s.defineApp({
-  headers: s.table({ version: s.int() }, {}),
-  items: s.table({ version: s.int() }, {}),
-});
+export const recoveryApp = s.defineApp(
+  {
+    headers: s.table({ version: s.int() }, {}),
+    items: s.table({ version: s.int() }, {}),
+  },
+  { migrations: "none" },
+);
 export const recoveryPermissions = s.definePermissions(recoveryApp, ({ policy }) => [
   policy.headers.allowRead.always(),
   policy.headers.allowInsert.always(),

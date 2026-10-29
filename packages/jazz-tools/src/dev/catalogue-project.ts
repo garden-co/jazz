@@ -31,7 +31,15 @@ import { pathToFileURL } from "node:url";
 import { build } from "esbuild";
 import type { WasmSchema } from "../drivers/types.js";
 import type { DefinedMigration } from "../migrations.js";
-import { hasRootSchema, loadCompiledSchema, type LoadedSchemaProject } from "../schema-loader.js";
+import {
+  CLIENT_MIGRATIONS_MODULE,
+  clientMigrationsPath,
+  hasRootSchema,
+  loadCompiledSchema,
+  importsClientMigrations,
+  writeClientMigrationsModule,
+  type LoadedSchemaProject,
+} from "../schema-loader.js";
 import {
   collectMissingExplicitPolicyDiagnostics,
   mergePermissionsIntoWasmSchema,
@@ -101,6 +109,7 @@ export interface DeployOptions extends CatalogueProjectOptions {
 
 export interface ValidateProjectOptions {
   schemaDir: string;
+  migrationsDir?: string;
 }
 
 export interface ValidateProjectResult {
@@ -179,6 +188,10 @@ export async function validateProject(
 ): Promise<ValidateProjectResult> {
   const compiled = ensurePermissionsProject(await loadCompiledSchema(options.schemaDir));
   await validateSchemaAndPermissions(compiled.wasmSchema, compiled.permissions);
+  await writeLocalClientMigrations(
+    options.schemaDir,
+    resolvedMigrationsDir(options.schemaDir, options.migrationsDir),
+  );
   return {
     schemaFile: compiled.schemaFile,
     permissionsFile: compiled.permissionsFile,
@@ -1157,7 +1170,7 @@ export async function createMigration(
 ): Promise<CreateMigrationResult> {
   const storage = new MigrationStorage(options.migrationsDir);
   await storage.initialize();
-  return withMigrationDirectoryLock(storage, () => createMigrationUnlocked(options, storage));
+  return withMigrationDirectoryLock(storage, async () => createMigrationUnlocked(options, storage));
 }
 
 function isDefinedMigration(value: unknown): value is DefinedMigration {
@@ -1331,9 +1344,7 @@ async function loadLocalMigrationGraph(
   const migrations: LocalMigrationGraph["migrations"] = [];
   if (await pathExists(migrationsDir)) {
     await assertNoSymlinkComponents(migrationsDir);
-    for (const fileName of (await readdir(migrationsDir))
-      .filter((name) => name.endsWith(".ts"))
-      .sort()) {
+    for (const fileName of (await readdir(migrationsDir)).filter(isMigrationFile).sort()) {
       const migration = await loadDefinedMigration(join(migrationsDir, fileName));
       if (!migration.fromHash || !migration.toHash) {
         throw new Error(
@@ -1379,7 +1390,7 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
   const graph = await fetchMigrationGraph(options);
   if (await pathExists(migrationsDir)) await assertNoSymlinkComponents(migrationsDir);
   const files = ((await pathExists(migrationsDir)) ? await readdir(migrationsDir) : [])
-    .filter((fileName) => fileName.endsWith(".ts"))
+    .filter(isMigrationFile)
     .sort();
   const snapshots = await new MigrationStorage(migrationsDir).listSnapshots();
   const knownHashes = [
@@ -1520,34 +1531,93 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
   // Clients ship what the server now holds, so they store each column where
   // it does, even before their first sync (see ClientMigrations).
   const bundled = new Map<string, WasmSchema>();
-  for (const hash of [...schemas.keys(), ...edges.flatMap((edge) => [edge.fromHash, edge.toHash])]) {
-    if (!bundled.has(hash)) {
-      bundled.set(hash, mergePermissionsIntoWasmSchema(await loadCanonicalSchema(hash), {}));
-    }
+  for (const hash of [
+    ...schemas.keys(),
+    ...edges.flatMap((edge) => [edge.fromHash, edge.toHash]),
+  ]) {
+    if (!bundled.has(hash)) bundled.set(hash, await loadCanonicalSchema(hash));
   }
-  await writeClientMigrations(migrationsDir, {
+  await writeClientMigrations(compiled.schemaFile, bundled, edges);
+  return { ...result, schema: { ...result.schema, schemaFile: compiled.schemaFile } };
+}
+
+/**
+ * The module an app imports its `migrations` from, in the `migrations`
+ * directory beside schema.ts. `jazz-tools` writes it on every validate,
+ * deploy and migration, so it exists even while an app has a single schema
+ * version.
+ */
+export const CLIENT_MIGRATIONS_FILE = CLIENT_MIGRATIONS_MODULE;
+
+/** A migration file in a migrations directory (not the generated module). */
+function isMigrationFile(fileName: string): boolean {
+  return fileName.endsWith(".ts") && fileName !== CLIENT_MIGRATIONS_FILE;
+}
+
+/** Write the app's schema versions and the migrations between them. */
+async function writeClientMigrations(
+  schemaFile: string,
+  schemas: ReadonlyMap<string, WasmSchema>,
+  edges: ReadonlyArray<{ fromHash: string; toHash: string; migration: DefinedMigration }>,
+): Promise<void> {
+  if (!(await importsClientMigrations(schemaFile))) return;
+  const bundle = {
     // As a deployment sends them (`{ tables }`), which the bindings decode.
-    schemas: [...bundled].map(([hash, schema]) => ({ hash, schema: { tables: schema } })),
+    schemas: [...schemas]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([hash, schema]) => ({
+        hash,
+        schema: { tables: mergePermissionsIntoWasmSchema(schema, {}) },
+      })),
     migrations: edges.map((edge) => ({
       fromHash: edge.fromHash,
       toHash: edge.toHash,
       forward: serializeForwardLenses(edge.migration.forward),
     })),
-  });
-  return { ...result, schema: { ...result.schema, schemaFile: compiled.schemaFile } };
+  };
+  const path = clientMigrationsPath(schemaFile);
+  await assertNoSymlinkComponents(dirname(path), true);
+  await writeClientMigrationsModule(path, JSON.stringify(bundle, runtimeSchemaJsonReplacer, 2));
 }
 
-/** The file an app imports and passes as its client's `migrations`. */
-export const CLIENT_MIGRATIONS_FILE = "bundle.json";
-
-async function writeClientMigrations(
-  migrationsDir: string,
-  bundle: { schemas: unknown[]; migrations: unknown[] },
-): Promise<void> {
-  await mkdir(migrationsDir, { recursive: true });
-  await assertNoSymlinkComponents(migrationsDir);
-  await writeFile(
-    join(migrationsDir, CLIENT_MIGRATIONS_FILE),
-    `${JSON.stringify(bundle, runtimeSchemaJsonReplacer, 2)}\n`,
+/**
+ * Write the app's migrations module from what this project holds locally:
+ * schema.ts, its snapshots and its migration files.
+ */
+async function writeLocalClientMigrations(schemaDir: string, migrationsDir: string): Promise<void> {
+  const compiled = await loadCompiledSchema(schemaDir);
+  if (!(await importsClientMigrations(compiled.schemaFile))) return;
+  const current = {
+    hash: await computeSchemaHash(compiled.wasmSchema),
+    schema: compiled.wasmSchema,
+  };
+  const schemas = new Map<string, WasmSchema>(
+    (await new MigrationStorage(migrationsDir).listSnapshots()).map(({ hash, schema }) => [
+      hash,
+      schema,
+    ]),
   );
+  schemas.set(current.hash, current.schema);
+  const edges = [];
+  if (await pathExists(migrationsDir)) {
+    await assertNoSymlinkComponents(migrationsDir);
+    for (const fileName of (await readdir(migrationsDir)).filter(isMigrationFile).sort()) {
+      const migration = await loadDefinedMigration(join(migrationsDir, fileName));
+      const known = (hash: string | undefined) =>
+        hash === undefined
+          ? undefined
+          : resolveKnownSchemaHash(hash, fileName, [...schemas.keys()]);
+      let fromHash, toHash;
+      try {
+        fromHash = known(migration.fromHash);
+        toHash = known(migration.toHash);
+      } catch {
+        // A migration from a version only the server holds: deploy fetches
+        // it and writes the module whole.
+        continue;
+      }
+      if (fromHash && toHash) edges.push({ fromHash, toHash, migration });
+    }
+  }
+  await writeClientMigrations(compiled.schemaFile, schemas, edges);
 }

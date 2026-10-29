@@ -1,11 +1,21 @@
-import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, rename, symlink } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  writeFile,
+  readFile,
+  readdir,
+  rm,
+  rename,
+  symlink,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, expect, it, vi } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { computeSchemaHash } from "./catalogue.js";
-import { deploy } from "./catalogue-project.js";
+import { deploy, validateProject } from "./catalogue-project.js";
 
 const roots: string[] = [];
 const indexPath = fileURLToPath(new URL("../index.ts", import.meta.url));
@@ -17,8 +27,8 @@ afterEach(async () => {
 async function fixture(commonjs = false) {
   const root = await mkdtemp(join(tmpdir(), "jazz-deploy-project-"));
   roots.push(root);
-  const before = s.defineApp({ notes: s.table({ title: s.string() }, {}) });
-  const after = s.defineApp({ notes: s.table({ body: s.string() }, {}) });
+  const before = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations: "none" });
+  const after = s.defineApp({ notes: s.table({ body: s.string() }, {}) }, { migrations: "none" });
   const fromHash = await computeSchemaHash(before.wasmSchema);
   const toHash = await computeSchemaHash(after.wasmSchema);
   const migrationsDir = join(root, "migrations");
@@ -26,7 +36,7 @@ async function fixture(commonjs = false) {
   await writeFile(join(root, "package.json"), JSON.stringify({ type: "module" }));
   await writeFile(
     join(root, "schema.ts"),
-    `import { schema as s } from ${JSON.stringify(indexPath)}; export const app = s.defineApp({notes:s.table({body:s.string()}, {})});`,
+    `import { schema as s } from ${JSON.stringify(indexPath)}; import { migrations } from "./migrations"; export const app = s.defineApp({notes:s.table({body:s.string()}, {})}, { migrations });`,
   );
   await writeFile(join(root, "permissions.ts"), `export default {};`);
   await writeFile(
@@ -120,12 +130,17 @@ it("keeps concurrent migration bundles isolated across module realms", async () 
     vi.resetModules();
   }
 });
+/** The `migrations` an app imports from its generated module. */
+async function importMigrations(migrationsDir: string) {
+  const module = await import(pathToFileURL(join(migrationsDir, "index.ts")).href);
+  return module.migrations;
+}
 it("writes the deployed schemas and migrations for the app's clients", async () => {
   const { root, migrationsDir } = await fixture();
   await deploy({ ...options, schemaDir: root });
-  const bundle = JSON.parse(await readFile(join(migrationsDir, "bundle.json"), "utf8"));
-  const before = s.defineApp({ notes: s.table({ title: s.string() }, {}) });
-  const after = s.defineApp({ notes: s.table({ body: s.string() }, {}) });
+  const bundle = await importMigrations(migrationsDir);
+  const before = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations: "none" });
+  const after = s.defineApp({ notes: s.table({ body: s.string() }, {}) }, { migrations: "none" });
   const [fromHash, toHash] = await Promise.all([
     computeSchemaHash(before.wasmSchema),
     computeSchemaHash(after.wasmSchema),
@@ -145,4 +160,41 @@ it("writes the deployed schemas and migrations for the app's clients", async () 
       ],
     },
   ]);
+});
+
+it("writes the migrations module for an app with a single schema version", async () => {
+  const root = await mkdtemp(join(tmpdir(), "jazz-validate-project-"));
+  roots.push(root);
+  await writeFile(join(root, "package.json"), JSON.stringify({ type: "module" }));
+  await writeFile(
+    join(root, "schema.ts"),
+    `import { schema as s } from ${JSON.stringify(indexPath)}; import { migrations } from "./migrations"; export const app = s.defineApp({notes:s.table({title:s.string()}, {})}, { migrations });`,
+  );
+  await writeFile(join(root, "permissions.ts"), `export default {};`);
+  await validateProject({ schemaDir: root });
+  const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations: "none" });
+  expect(await importMigrations(join(root, "migrations"))).toEqual({
+    schemas: [
+      { hash: await computeSchemaHash(app.wasmSchema), schema: { tables: app.wasmSchema } },
+    ],
+    migrations: [],
+  });
+  // Unchanged, validating again leaves the module as it was.
+  const path = join(root, "migrations", "index.ts");
+  const written = await readFile(path, "utf8");
+  await validateProject({ schemaDir: root });
+  expect(await readFile(path, "utf8")).toBe(written);
+});
+
+it("leaves an app that does not import its migrations module without one", async () => {
+  const root = await mkdtemp(join(tmpdir(), "jazz-validate-project-"));
+  roots.push(root);
+  await writeFile(join(root, "package.json"), JSON.stringify({ type: "module" }));
+  await writeFile(
+    join(root, "schema.ts"),
+    `import { schema as s } from ${JSON.stringify(indexPath)}; export const app = s.defineApp({notes:s.table({title:s.string()}, {})}, { migrations: "none" });`,
+  );
+  await writeFile(join(root, "permissions.ts"), `export default {};`);
+  await validateProject({ schemaDir: root });
+  expect(existsSync(join(root, "migrations", "index.ts"))).toBe(false);
 });

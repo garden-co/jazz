@@ -181,6 +181,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
   override createClient({
     config,
     schema,
+    migrations,
     onAuthFailure,
     foregroundNodeLease,
   }: RuntimeClientContext<DbConfig>): JazzClient {
@@ -211,7 +212,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       selfSignedClientProof,
       backendMode,
       { appId: config.appId, thresholdMs: config.slowQueryThresholdMs },
-      config.migrations,
+      migrations,
     );
     if (foregroundNodeLease) {
       mainThreadPeerRuntime.seedForegroundTxTimeHighWater(foregroundNodeLease.confirmedTxTime);
@@ -332,7 +333,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         author,
         selfSignedClientProof,
         initialSyncFlushEvery: initialSyncFlushEvery(config),
-        migrations: config.migrations,
+        migrations: runtime.migrations,
         appId: config.appId,
         slowQueryThresholdMs: config.slowQueryThresholdMs,
         storageOwner: createBrowserStorageOwner(config),
@@ -419,7 +420,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     }
     return Object.keys(schema).length === 0
       ? this.ownerRuntime
-      : this.ownerRuntime.registerSchemaView(schema);
+      : this.ownerRuntime.registerSchemaView(schema, migrations);
   }
 
   override installTelemetry({

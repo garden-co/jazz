@@ -8,10 +8,13 @@ const c = JSON.parse(readFileSync(configPath, "utf8"));
 const require = createRequire(join(c.project, "package.json"));
 const { schema: s } = await import(pathToFileURL(require.resolve("jazz-tools")));
 const { createJazzSession } = await import(pathToFileURL(require.resolve("jazz-tools/backend")));
-const app = s.defineApp({
-  docs: s.table({ label: s.string(), body: s.string(), metadata: s.json() }, {}),
-  denied: s.table({ value: s.string() }, {}),
-});
+const app = s.defineApp(
+  {
+    docs: s.table({ label: s.string(), body: s.string(), metadata: s.json() }, {}),
+    denied: s.table({ value: s.string() }, {}),
+  },
+  { migrations: "none" },
+);
 const permissions = s.definePermissions(app, ({ policy }) => {
   for (const op of ["allowRead", "allowInsert", "allowUpdate", "allowDelete"])
     policy.docs[op].always();

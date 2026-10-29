@@ -203,13 +203,16 @@ const schema = {
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema);
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
 `,
     );
     await writeFile(join(root, "permissions.ts"), rootAllExplicitPermissionsSchema());
 
     const version = (owner: string) =>
-      s.defineApp({ todos: s.table({ title: s.string(), [owner]: s.string() }, {}) }).wasmSchema;
+      s.defineApp(
+        { todos: s.table({ title: s.string(), [owner]: s.string() }, {}) },
+        { migrations: "none" },
+      ).wasmSchema;
     const headSchema = version("owner_id");
     const middleSchema = version("ownerId");
     const releaseSchema = version("owner");

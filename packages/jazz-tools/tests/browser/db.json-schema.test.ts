@@ -9,42 +9,51 @@ import { createBrowserTestDb, TestCleanup } from "./support.js";
 // are only checked by the TS pre-check in `value-converter.ts` (#3917), so
 // the invalid value here is a default.
 
-const jobs = s.defineApp({
-  jobs: s.table(
-    {
-      meta: s.json({
-        type: "object",
-        properties: {
-          // `\-` is valid in the native regex syntax and not in a JS `u` regex.
-          code: { type: "string", pattern: "^[a-z]+\\-[0-9]+$" },
-          count: { type: "integer", minimum: 0 },
-        },
-        required: ["code"],
-      }),
-    },
-    {},
-  ),
-});
+const jobs = s.defineApp(
+  {
+    jobs: s.table(
+      {
+        meta: s.json({
+          type: "object",
+          properties: {
+            // `\-` is valid in the native regex syntax and not in a JS `u` regex.
+            code: { type: "string", pattern: "^[a-z]+\\-[0-9]+$" },
+            count: { type: "integer", minimum: 0 },
+          },
+          required: ["code"],
+        }),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 
-const invalidDefaultJobs = s.defineApp({
-  jobs: s.table(
-    {
-      meta: s.json({ type: "object", properties: { count: { multipleOf: 2 } } }).default({
-        count: 3,
-      }),
-    },
-    {},
-  ),
-});
+const invalidDefaultJobs = s.defineApp(
+  {
+    jobs: s.table(
+      {
+        meta: s.json({ type: "object", properties: { count: { multipleOf: 2 } } }).default({
+          count: 3,
+        }),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 
-const invalidJobs = s.defineApp({
-  jobs: s.table(
-    {
-      meta: s.json({ type: "string", pattern: "[z-a]" }),
-    },
-    {},
-  ),
-});
+const invalidJobs = s.defineApp(
+  {
+    jobs: s.table(
+      {
+        meta: s.json({ type: "string", pattern: "[z-a]" }),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 
 function appId(label: string): string {
   return `browser-json-schema-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;

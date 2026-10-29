@@ -87,6 +87,7 @@ import {
   type QueryPredicate,
   type QueryPredicateOp,
   type ValueType,
+  clientMigrationsBytes,
 } from "./native-codec.js";
 import { exactSignedI64 } from "./exact-integer.js";
 import { encodeSchema } from "./schema-codec.js";
@@ -264,7 +265,7 @@ type NativeDb = {
     /** The upstream refused the scope's credential, with its reason. */
     authRejected?: string | null;
   };
-  registerSchema(schema: Uint8Array): NativeDb;
+  registerSchema(schema: Uint8Array, migrations?: Uint8Array): NativeDb;
   beginTransaction(
     openTransactionId: string,
     kind: TransactionKind,
@@ -984,9 +985,16 @@ export class NativeRuntimeAdapter implements Runtime {
     });
   }
 
-  registerSchemaView(schema: WasmSchema): NativeRuntimeAdapter {
+  /** The migrations this runtime's app ships (see {@link ClientMigrations}). */
+  readonly migrations: ClientMigrations | undefined;
+
+  /** A view of `schema`, whose app ships `migrations` (see {@link ClientMigrations}). */
+  registerSchemaView(schema: WasmSchema, migrations?: ClientMigrations): NativeRuntimeAdapter {
     return new NativeRuntimeAdapter(null, schema, this.node, this.peerIdentity, 1, true, {
-      db: this.db.registerSchema(encodeSchema(schema)),
+      db: this.db.registerSchema(
+        encodeSchema(schema),
+        migrations ? clientMigrationsBytes(migrations) : undefined,
+      ),
       // Registered schema views are façades over this same native open. The
       // capability is private to the owner and must survive view creation so
       // backend reads keep selecting the backend ABI rather than identity ABI.
@@ -1043,6 +1051,7 @@ export class NativeRuntimeAdapter implements Runtime {
       opts?.migrations,
     );
     this.peerIdentity = author;
+    this.migrations = opts?.owner?.migrations ?? opts?.migrations;
     this.schemaHash = serializeRuntimeSchema(schema);
     if (opts?.db) {
       this.db = opts.db;

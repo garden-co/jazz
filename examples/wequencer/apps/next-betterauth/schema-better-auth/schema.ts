@@ -66,7 +66,7 @@ export const schema = {
 };
 
 type BetterAuthSchema = s.Schema<typeof schema>;
-export const app: s.App<BetterAuthSchema> = s.defineApp(schema);
+export const app: s.App<BetterAuthSchema> = s.defineApp(schema, { migrations: "none" });
 
 export const permissions = s.definePermissions(app, ({ policy }) => {
   for (const table of [

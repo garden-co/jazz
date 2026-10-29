@@ -34,12 +34,18 @@ it("validates all branches before writing, deploys the converged history, and se
   const columns = [[], ["a"], ["b"], ["a", "b"]];
   const versions = await Promise.all(
     columns.map(async (added) => {
-      const app = s.defineApp({
-        notes: s.table(
-          { title: s.string(), ...Object.fromEntries(added.map((column) => [column, s.string()])) },
-          {},
-        ),
-      });
+      const app = s.defineApp(
+        {
+          notes: s.table(
+            {
+              title: s.string(),
+              ...Object.fromEntries(added.map((column) => [column, s.string()])),
+            },
+            {},
+          ),
+        },
+        { migrations: "none" },
+      );
       return { schema: app.wasmSchema, hash: await computeSchemaHash(app.wasmSchema) };
     }),
   );
@@ -48,7 +54,7 @@ it("validates all branches before writing, deploys the converged history, and se
   const writeCurrent = (index: number) =>
     writeFile(
       join(root, "schema.ts"),
-      `import { schema as s } from "jazz-tools"; export const app = s.defineApp({ notes: s.table({ ${fields(index)} }, {}) });`,
+      `import { schema as s } from "jazz-tools"; export const app = s.defineApp({ notes: s.table({ ${fields(index)} }, {}) }, { migrations: "none" });`,
     );
   await writeCurrent(0);
   await writeFile(join(root, "permissions.ts"), "export default {};");
