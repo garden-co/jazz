@@ -87,7 +87,9 @@ const schema = {
       title: s.string(),
       status: s.enum(...TASK_STATUSES),
       assigneeId: s.uuid().optional(),
-      notes: s.string().optional(),
+      // Concurrent edits to a task's notes merge instead of the last one
+      // winning.
+      notes: s.string().optional().merge("text"),
       /** Sort key inside a column. Lower values come first. */
       rank: s.float(),
     },

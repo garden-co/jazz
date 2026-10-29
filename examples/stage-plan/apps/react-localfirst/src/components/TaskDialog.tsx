@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useAll, useDb } from "jazz-tools/react";
 import { Avatar } from "@astryxdesign/core/Avatar";
 import { Button } from "@astryxdesign/core/Button";
@@ -26,6 +26,7 @@ import {
   type CrewMember,
 } from "../model/actions.js";
 import { useMe } from "../model/me.js";
+import { rebaseText } from "../model/text-rebase.js";
 import { ActivityFeed } from "./ActivityFeed.js";
 
 type TaskWithTime = Task & { $updatedAt: Date };
@@ -80,6 +81,8 @@ function TaskDetail({
   const me = useMe();
   const [title, setTitle] = useState(task.title);
   const [notes, setNotes] = useState(task.notes ?? "");
+  // The notes when you started typing, to tell your edits from a crewmate's.
+  const notesBase = useRef(task.notes ?? "");
   const [comment, setComment] = useState("");
   const [canDelete, setCanDelete] = useState(false);
   const { data: comments = [] } = useAll(
@@ -118,7 +121,9 @@ function TaskDetail({
   };
   const commitNotes = () => {
     setFocused(null);
-    if (notes !== (task.notes ?? "")) updateTaskNotes(db, task, notes);
+    const next = rebaseText(notesBase.current, notes, task.notes ?? "");
+    setNotes(next);
+    if (next !== (task.notes ?? "")) updateTaskNotes(db, task, next);
   };
 
   const crewOptions = [
@@ -180,7 +185,10 @@ function TaskDetail({
               isOptional
               value={notes}
               onChange={setNotes}
-              onFocus={() => setFocused("notes")}
+              onFocus={() => {
+                notesBase.current = task.notes ?? "";
+                setFocused("notes");
+              }}
               onBlur={commitNotes}
               rows={3}
             />
