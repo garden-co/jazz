@@ -227,6 +227,21 @@ const deletedTasks = await db.all(
 For [history rows](/docs/reading/history#deleted-rows), every version shares
 the logical row's current deletion timestamp and author.
 
+### Row version column
+
+`$version` identifies the version of the row this device holds. It is a `bigint` that only means
+something to Jazz: compare it for equality at most, and pass the row back as `basedOn` when a form
+or editor writes the value it was opened with. Text columns that merge then keep edits that arrived
+while the form was open; see
+[forms that stay open](/docs/recipes/data-patterns/collaborative-text-editing#forms-that-stay-open).
+`$version` can be selected, not filtered or sorted on.
+
+```ts
+const [opened] = await db.all(app.notes.where({ id: noteId }).select("*", "$version"));
+// ... later, when the form is saved:
+db.update(app.notes, noteId, { body: draft }, { basedOn: opened });
+```
+
 ## Framework hooks
 
 Each framework has a reactive binding that re-renders when query results change. See [Framework Patterns](/docs/reference/framework-patterns#query-subscriptions) for side-by-side examples.

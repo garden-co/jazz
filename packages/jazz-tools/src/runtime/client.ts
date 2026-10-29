@@ -599,6 +599,27 @@ export interface InsertOptions extends TimestampOverrideOptions {
 
 export interface UpdateOptions extends TimestampOverrideOptions {
   branch?: BranchView;
+  /**
+   * The row the patch was made from, read with `$version` selected. Text
+   * columns that merge then keep edits that arrived after that read instead
+   * of replacing them. Without it the write builds on the newest version held.
+   */
+  basedOn?: WriteBase;
+}
+
+/** A row read with `$version` selected, or that version itself. */
+export type WriteBase = { readonly $version: bigint | number } | bigint | number;
+
+function rowVersionOf(base: WriteBase): number {
+  const version = typeof base === "object" && base !== null ? base.$version : base;
+  if (version === undefined) {
+    throw new Error('basedOn needs a row read with "$version" selected.');
+  }
+  const number = Number(version);
+  if (!Number.isSafeInteger(number) || number < 0) {
+    throw new Error("basedOn must be a row's $version.");
+  }
+  return number;
 }
 
 export interface DeleteOptions extends TimestampOverrideOptions {
@@ -634,6 +655,7 @@ interface WriteContextPayload {
   session?: Session;
   attribution?: string;
   updated_at?: number;
+  based_on?: number;
   transaction_id?: string;
   target_branch_name?: string;
   branch_view?: { head: WireBranchSelector; base?: WireBranchViewBase };
@@ -1298,9 +1320,14 @@ export class JazzClient {
             attribution,
             _transaction,
             branch,
+            basedOn,
           ) => {
             assertActive();
-            const writeContext = this.writeContext(session, attribution, id, { updatedAt, branch });
+            const writeContext = this.writeContext(session, attribution, id, {
+              updatedAt,
+              branch,
+              basedOn,
+            });
             return this.runtime.update(table, objectId, updates, writeContext);
           },
           upsertInternal: (table, objectId, values, options, session, attribution) => {
@@ -1495,7 +1522,8 @@ export class JazzClient {
     {
       updatedAt,
       branch: selected,
-    }: { updatedAt?: number; branch?: BranchView | BranchSelector } = {},
+      basedOn,
+    }: { updatedAt?: number; branch?: BranchView | BranchSelector; basedOn?: WriteBase } = {},
   ): string | undefined {
     // An explicit attribution without a session writes as no session, not the client's.
     const session =
@@ -1507,6 +1535,7 @@ export class JazzClient {
       attribution === undefined &&
       !openTransactionId &&
       updatedAt === undefined &&
+      basedOn === undefined &&
       !branch
     ) {
       return undefined;
@@ -1516,6 +1545,7 @@ export class JazzClient {
       session &&
       !openTransactionId &&
       updatedAt === undefined &&
+      basedOn === undefined &&
       !branch
     ) {
       return JSON.stringify(serializeRuntimeSession(session));
@@ -1530,6 +1560,9 @@ export class JazzClient {
     }
     if (updatedAt !== undefined) {
       payload.updated_at = normalizeUpdatedAt(updatedAt);
+    }
+    if (basedOn !== undefined) {
+      payload.based_on = rowVersionOf(basedOn);
     }
     if (openTransactionId) {
       payload.transaction_id = openTransactionId;
@@ -1818,6 +1851,7 @@ export class JazzClient {
       attribution,
       undefined,
       options?.branch,
+      options?.basedOn,
     );
     return new WriteHandle(committedTxId(result), this);
   }
@@ -1880,10 +1914,12 @@ export class JazzClient {
     attribution?: string,
     openTransactionId?: OpenTransactionId,
     branch?: BranchView,
+    basedOn?: WriteBase,
   ): MutationResult {
     const writeContext = this.writeContext(session, attribution, openTransactionId, {
       updatedAt,
       branch,
+      basedOn,
     });
     return this.stageMutation(openTransactionId, updates, (prepared) =>
       this.runtime.update(table, objectId, prepared, writeContext),

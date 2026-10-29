@@ -293,6 +293,12 @@ pub struct UpdateOptions {
     pub target: WriteTarget,
     /// Explicit provenance timestamp, or the database clock when omitted.
     pub updated_at_ms: Option<u64>,
+    /// The `$version` of the row the patch was made from, when that is older
+    /// than the version this replica holds: a form or editor that kept a
+    /// draft while newer versions arrived. The authority treats every version
+    /// after it as one the writer missed (SPEC 4 §4.6), so text columns merge
+    /// against it. `None` builds the write on the newest version held.
+    pub based_on: Option<u64>,
 }
 
 /// Options for upserts.

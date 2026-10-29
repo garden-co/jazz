@@ -21,7 +21,7 @@ use std::task::{Context, Poll, Waker};
 use duplex_transport::duplex;
 use jazz::db::{
     Db, DbConfig, DbIdentity, LargeValueUpdateSplice, ReadOpts, RemoteLinkHint, SubscriptionStream,
-    Upstream, block_on,
+    UpdateOptions, Upstream, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::Query;
@@ -283,6 +283,38 @@ impl Net {
         )
         .unwrap()
         .mergeable_tx_id()
+    }
+
+    /// Client `i` edits `row` as made from its `$version` `based_on`, as a
+    /// form that kept a draft does; returns the edit's tx.
+    fn edit_based_on(&self, i: usize, row: RowUuid, based_on: u64, pairs: &[(&str, &str)]) -> u64 {
+        block_on(self.db(i).update(
+            "docs",
+            row,
+            cells(pairs),
+            UpdateOptions {
+                based_on: Some(based_on),
+                ..Default::default()
+            },
+        ))
+        .unwrap()
+        .mergeable_tx_id()
+    }
+
+    /// `row`'s `$version` as `db` holds it.
+    fn version(db: &Db, row: RowUuid) -> u64 {
+        let prepared = db
+            .prepare_query(&Query::from("docs").select(["body", "$version"]))
+            .unwrap();
+        match block_on(db.all(&prepared, ReadOpts::default()))
+            .unwrap()
+            .into_iter()
+            .find(|current| current.row_uuid() == row)
+            .and_then(|current| current.cell("$version"))
+        {
+            Some(Value::U64(version)) => version,
+            other => panic!("`$version` is {other:?}"),
+        }
     }
 
     /// The seq of `row`'s current version at the authority.
@@ -857,4 +889,79 @@ fn a_chain_that_clears_then_writes_lands_its_last_write() {
     net.settle(0, clear);
     net.settle(0, fresh);
     net.assert_summary_everywhere(row, Some("Fresh."));
+}
+
+/// A form opened on one version and saved after a bandmate's edit arrived:
+/// the client already holds that edit, so a plain write would replace it.
+/// Named as made from the version the form opened, the write merges.
+#[test]
+fn a_write_based_on_the_version_a_form_opened_merges_edits_that_arrived_since() {
+    let net = Net::new(2);
+    let row = net.seed(0, &[("body", "Load-in 2pm. Soundcheck 5pm. Doors 8pm.")]);
+    let opened = Net::version(net.db(0), row);
+    assert_eq!(
+        opened,
+        net.seq_of(row),
+        "an accepted version reads as its seq"
+    );
+    let bob = net.edit(
+        1,
+        row,
+        &[("body", "Load-in 2pm. Soundcheck 6pm. Doors 8pm.")],
+    );
+    net.settle(1, bob);
+    // Ada's replica holds Bob's edit; her form still shows the version it opened.
+    assert_ne!(Net::version(net.db(0), row), opened);
+    let ada = net.edit_based_on(
+        0,
+        row,
+        opened,
+        &[("body", "Load-in 1pm. Soundcheck 5pm. Doors 9pm.")],
+    );
+    net.settle(0, ada);
+    net.assert_everywhere(row, "body", "Load-in 1pm. Soundcheck 6pm. Doors 9pm.");
+}
+
+/// Without a named base the same save is built on the version the client
+/// holds, so it replaces the edit the form never showed.
+#[test]
+fn a_write_without_a_named_base_replaces_edits_its_form_never_showed() {
+    let net = Net::new(2);
+    let row = net.seed(0, &[("body", "Load-in 2pm. Soundcheck 5pm. Doors 8pm.")]);
+    let bob = net.edit(
+        1,
+        row,
+        &[("body", "Load-in 2pm. Soundcheck 6pm. Doors 8pm.")],
+    );
+    net.settle(1, bob);
+    let ada = net.edit(
+        0,
+        row,
+        &[("body", "Load-in 1pm. Soundcheck 5pm. Doors 9pm.")],
+    );
+    net.settle(0, ada);
+    net.assert_everywhere(row, "body", "Load-in 1pm. Soundcheck 5pm. Doors 9pm.");
+}
+
+/// A form opened on the client's own unsettled write names that write:
+/// the authority resolves it to where it landed.
+#[test]
+fn a_write_based_on_an_own_pending_write_merges_over_it() {
+    let mut net = Net::new(2);
+    let row = net.seed(0, &[("body", "one two three")]);
+    net.offline(0);
+    let first = net.edit(0, row, &[("body", "one two three four")]);
+    let opened = Net::version(net.db(0), row);
+    assert!(
+        opened >= jazz::db::LOCAL_BASE,
+        "an own pending write reads as its tx"
+    );
+    let bob = net.edit(1, row, &[("body", "zero one two three")]);
+    net.settle(1, bob);
+    net.online(0);
+    net.settle(0, first);
+    // Ada's replica now holds the merge of her first write and Bob's.
+    let ada = net.edit_based_on(0, row, opened, &[("body", "one 2 three four")]);
+    net.settle(0, ada);
+    net.assert_everywhere(row, "body", "zero one 2 three four");
 }

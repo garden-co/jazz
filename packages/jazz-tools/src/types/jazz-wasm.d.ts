@@ -86,6 +86,7 @@ declare module "jazz-wasm" {
   export type UpdateOptions = WriteOptions & {
     head?: unknown;
     base?: unknown;
+    basedOn?: number;
   };
 
   export type UpsertOptions = UpdateOptions;

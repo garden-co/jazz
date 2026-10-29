@@ -535,7 +535,21 @@ fn unwrap_nullable_type(ty: &ValueType) -> &ValueType {
     }
 }
 
+/// A row's version as read (`_seq`): what a write names as the version it
+/// was made from (`UpdateOptions::based_on`). Readable by name, never
+/// written by the app and not part of the default projection.
+pub(crate) const VERSION: &str = "$version";
+
 fn provenance_columns() -> Vec<Column> {
+    let version = Column {
+        name: VERSION.to_owned(),
+        stored: "_seq".to_owned(),
+        ty: ValueType::U64,
+        default: None,
+        json: false,
+        json_type: None,
+        merge: Default::default(),
+    };
     PROVENANCE
         .iter()
         .chain(&DELETION)
@@ -555,6 +569,7 @@ fn provenance_columns() -> Vec<Column> {
             json_type: None,
             merge: Default::default(),
         })
+        .chain([version])
         .collect()
 }
 

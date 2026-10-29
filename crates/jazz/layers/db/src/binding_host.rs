@@ -254,7 +254,7 @@ fn insert_options_as<O: HostObject>(
     })
 }
 
-/// `{ author?, attribution?, head?, base?, updatedAtMs? }`.
+/// `{ author?, attribution?, head?, base?, updatedAtMs?, basedOn? }`.
 pub fn update_options<O: HostObject>(options: &O) -> HostResult<UpdateOptions> {
     update_options_as(options, &author)
 }
@@ -267,6 +267,13 @@ fn update_options_as<O: HostObject>(
         identity: write_identity(options, author)?,
         target: branch_view_target(options)?,
         updated_at_ms: write_timestamp(options)?,
+        based_on: options
+            .get("basedOn")?
+            .map(|value| {
+                let value = O::number(&value).ok_or("basedOn must be a row's $version")?;
+                checked_u64(value, "basedOn")
+            })
+            .transpose()?,
     })
 }
 

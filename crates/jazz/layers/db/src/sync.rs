@@ -5267,10 +5267,20 @@ impl Db {
                 settled_images.insert(row_key.clone(), image);
             }
             // This replica sends the commit: its predecessor goes by how
-            // far back it is.
-            let on = match client.pending.newest(&row_key) {
-                Some(tx) => Some(BuiltOn::Own { back: seq - tx }),
-                None => settled.map(BuiltOn::Seq),
+            // far back it is, unless the write names the version it was
+            // made from.
+            let based_on = by_row
+                .get(&(table.clone(), *row))
+                .into_iter()
+                .flatten()
+                .find_map(|&op| match &ops[op] {
+                    StagedOp::Update(_, _, _, options) => options.based_on,
+                    _ => None,
+                });
+            let on = match (based_on, client.pending.newest(&row_key)) {
+                (Some(version), _) => Some(inner.named_base(&row_key, version)?),
+                (None, Some(tx)) => Some(BuiltOn::Own { back: seq - tx }),
+                (None, None) => settled.map(BuiltOn::Seq),
             };
             if relayed.is_none()
                 && let Some(on) = on

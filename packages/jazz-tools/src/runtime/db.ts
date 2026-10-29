@@ -48,6 +48,7 @@ import {
   type TxId,
   type PermissionAdvice,
   type StreamingValueSource,
+  type WriteBase,
   validateWriteWaitTimeout,
   WriteWaitTimeoutError,
 } from "./client.js";
@@ -391,6 +392,12 @@ export interface RestoreOptions extends TimestampOverrideOptions {
 export interface UpdateOptions extends TimestampOverrideOptions {
   branch?: Branch;
   base?: BranchBase;
+  /**
+   * The row the patch was made from, read with `$version` selected. Text
+   * columns that merge then keep edits that arrived after that read instead
+   * of replacing them. Without it the write builds on the newest version held.
+   */
+  basedOn?: WriteBase;
 }
 
 type TypedUpdateOptionsWithDiffs<TReplacements extends object, TDiffs> = UpdateOptions & {
@@ -1531,7 +1538,7 @@ function deriveStreamingInsertBranch(
   return branch;
 }
 
-export type { TransactionKind } from "./client.js";
+export type { TransactionKind, WriteBase } from "./client.js";
 
 type TransactionCommitHandle<TKind extends TransactionKind> = TKind extends "serializable"
   ? SerializableWriteHandle
@@ -1967,6 +1974,9 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     assertWritableTable(table);
     this.bindTable(table);
     const descriptors = lowerApplyDiffs(table, data, options?.applyDiffs);
+    if (descriptors.length > 0 && options?.basedOn !== undefined) {
+      throw new Error("basedOn is not supported yet together with applyDiffs.");
+    }
     rejectIncompleteDependencies(table, data, Object.keys(options?.applyDiffs ?? {}));
     const client = this.resolveClient(table._schema);
     const { openTransactionId, session, attribution } = this.requireBinding("update");
@@ -2001,6 +2011,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
           attribution,
           openTransactionId,
           normalizedOptions?.branch,
+          normalizedOptions?.basedOn,
         );
       },
     );
@@ -3089,6 +3100,7 @@ export class Db {
               context?.attribution,
               transaction,
               normalized?.branch,
+              normalized?.basedOn,
             );
           return client.commitTransaction(transaction);
         }
@@ -3190,6 +3202,9 @@ export class Db {
     assertWritableTable(table);
     const client = this.getClient(table._schema);
     const descriptors = lowerApplyDiffs(table, data, options?.applyDiffs);
+    if (descriptors.length > 0 && options?.basedOn !== undefined) {
+      throw new Error("basedOn is not supported yet together with applyDiffs.");
+    }
     rejectIncompleteDependencies(table, data, Object.keys(options?.applyDiffs ?? {}));
     const context = this.getAccessContext();
     if (descriptors.length > 0) {

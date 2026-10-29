@@ -30,6 +30,7 @@ import type { ColumnType, WasmSchema } from "./drivers/types.js";
 import {
   magicColumnType,
   type ProvenanceMagicColumn,
+  type RowVersionColumn,
   type RowAuthor,
   type NoExplicitIdColumn,
   assertUserTableColumnNameAllowed,
@@ -811,6 +812,7 @@ type ProvenanceMagicColumns = {
 export type TableSelectableColumn<TSchema extends SchemaLike, TTable extends TableName<TSchema>> =
   | BaseColumnName<TSchema, TTable>
   | ProvenanceMagicColumn
+  | RowVersionColumn
   | "*";
 
 export type TableOrderableColumn<TSchema extends SchemaLike, TTable extends TableName<TSchema>> =
@@ -841,8 +843,8 @@ type DeletedWhere<TDeleted extends boolean> = TDeleted extends true
 type SelectedRow<TRow, TSelection> = Simplify<
   ("*" extends TSelection ? TRow : Pick<TRow, Extract<TSelection | "id", keyof TRow>>) &
     Pick<
-      ProvenanceMagicColumns & DeletionMagicColumns,
-      Extract<TSelection, ProvenanceMagicColumn | keyof DeletionMagicColumns>
+      ProvenanceMagicColumns & DeletionMagicColumns & { [K in RowVersionColumn]: bigint },
+      Extract<TSelection, ProvenanceMagicColumn | keyof DeletionMagicColumns | RowVersionColumn>
     >
 >;
 
@@ -1015,6 +1017,7 @@ type BaseColumnNameFromMeta<TMeta extends AnyTableMeta> = Extract<
 type TableSelectableFromMeta<TMeta extends AnyTableMeta> =
   | BaseColumnNameFromMeta<TMeta>
   | ProvenanceMagicColumn
+  | RowVersionColumn
   | "*";
 
 /** A half-open byte range `[from, to)` for a bytes column. */

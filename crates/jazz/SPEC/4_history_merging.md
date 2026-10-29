@@ -361,6 +361,18 @@ applies like any other write and is never maybe conflicting.
 The originator stores each pending write's base with it and uploads it
 unchanged, so a resent write carries the same base.
 
+**A named base.** An update MAY name the image it was made over itself,
+as the `$version` of a row the app read earlier (`basedOn`). A row's
+`$version` is the seq of the accepted version the reader held, or, while
+the reader's own write to the row is pending, that write's commit. The
+originator then records that image as the base instead of the one it holds
+at commit time: `Seq(S)` for an accepted version, `Commit { node, tx }` for
+its own commit, pending or settled, and a version it never held is refused
+at the write. This is how a form that kept its own draft while newer
+versions arrived underneath it has its text merged against the text it
+showed (`INV-HIST-24`) rather than replacing those versions. A named base
+older than the image held only makes the write count as built on less.
+
 **A write built on a rejected write is rejected.** When Core rejects a write
 `P`, every write built on `P` (directly, or down a chain of writes each built
 on the one before) is rejected too, with reason `predecessor_rejected`: its

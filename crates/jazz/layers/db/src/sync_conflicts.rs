@@ -365,6 +365,36 @@ impl Inner {
         }
     }
 
+    /// What a write names as the version it was made from, by that
+    /// version's `$version` (its `_seq` here): an accepted version by its
+    /// seq, one of this replica's own commits by its tx, settled or not
+    /// (the authority resolves it to where it landed, and rejects the write
+    /// if it was rejected), and a relay's unsettled version as this replica
+    /// holds it, for the relay to rename (see [`Inner::relay_bases`]).
+    pub(super) fn named_base(&self, row: &RowKey, version: u64) -> Result<BuiltOn, Error> {
+        if version < LOCAL_BASE {
+            return Ok(BuiltOn::Seq(version));
+        }
+        let me = *self.identity.node.as_bytes();
+        let own_pending = self
+            .client
+            .as_ref()
+            .and_then(|client| client.pending.by_row.get(row))
+            .is_some_and(|txs| txs.contains(&version));
+        if own_pending || self.settled(me, version)?.is_some() {
+            return Ok(BuiltOn::Commit {
+                node: me,
+                tx: version,
+            });
+        }
+        // A worker's tab holds its relay's unsettled versions under their
+        // relay seqs, below its own range.
+        if self.non_durable && version < NON_DURABLE_BASE {
+            return Ok(BuiltOn::Seq(version));
+        }
+        Err(unknown_base("a version"))
+    }
+
     /// The newest version of a row this store holds accepted upstream.
     fn newest_accepted(&self, table: &str, row: RowUuid, key: &[u8]) -> Result<Option<u64>, Error> {
         Ok(self

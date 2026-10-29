@@ -225,6 +225,7 @@ type NativeInsertOptions = NativeWriteOptions & {
 type NativeUpdateOptions = NativeWriteOptions & {
   head?: unknown;
   base?: unknown;
+  basedOn?: number;
 };
 
 type NativeUpsertOptions = NativeUpdateOptions;
@@ -1893,6 +1894,7 @@ export class NativeRuntimeAdapter implements Runtime {
     rejectAttributedBranchWrite(attribution, branchView);
     const tx = this.currentTx(writeContext, "Update");
     if (tx) this.assertTransactionAttribution(tx, attribution);
+    const basedOn = basedOnFromWriteContext(writeContext);
     const patch = encodeCellsForPatch(this.table(table), values);
     if (tx) {
       this.assertTransactionWriteIdentity(tx, attribution ? undefined : writeIdentity);
@@ -1902,6 +1904,7 @@ export class NativeRuntimeAdapter implements Runtime {
         head: branchView?.head,
         base: branchView?.base,
         updatedAtMs: updatedAtMs ?? undefined,
+        basedOn,
       });
       tx.hasStagedMutations = true;
       return {
@@ -1917,6 +1920,7 @@ export class NativeRuntimeAdapter implements Runtime {
           head: branchView?.head,
           base: branchView?.base,
           updatedAtMs: updatedAtMs ?? undefined,
+          basedOn,
         }),
       ),
     );
@@ -4659,6 +4663,16 @@ function assertPublicSessionIssuer(
     )
   ) {
     throw new Error("Native runtime public session uses reserved issuer");
+  }
+}
+
+function basedOnFromWriteContext(writeContext?: string | null): number | undefined {
+  if (!writeContext) return undefined;
+  try {
+    const parsed = JSON.parse(writeContext) as { based_on?: unknown };
+    return typeof parsed.based_on === "number" ? parsed.based_on : undefined;
+  } catch {
+    return undefined;
   }
 }
 

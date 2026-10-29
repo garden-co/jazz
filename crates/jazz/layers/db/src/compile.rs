@@ -2760,6 +2760,9 @@ pub(crate) fn column_sql(table: &Table, alias: &str, column: &str) -> Result<Str
     if column == "$deletedAt" {
         return Ok(deletion_sql(table, alias, column));
     }
+    if column == crate::values::VERSION {
+        return Ok(format!("{alias}._seq"));
+    }
     if crate::values::elided_as(column).is_some() {
         return Ok(stored_sql(alias, column));
     }

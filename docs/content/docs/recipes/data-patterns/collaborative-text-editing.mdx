@@ -59,6 +59,28 @@ db.update(app.notes, noteId, { body: nextBody });
 Queries, filters and permissions see the text itself. Large values work too: a long note is stored
 and synced like any other large string.
 
+## Forms that stay open
+
+A write is merged against the version this device held when it wrote. That is right for an editor
+that applies incoming values as they arrive. A form that keeps its own draft is different: while it
+is open, a bandmate's edit can sync in underneath it, and saving the draft then replaces that edit,
+because the device already held it.
+
+Read the row with `$version` when the form opens, and pass that row as `basedOn` when it saves:
+
+```ts
+const [opened] = await db.all(app.notes.where({ id: noteId }).select("*", "$version"));
+// ... the person edits a draft of opened.body ...
+db.update(app.notes, noteId, { body: draft }, { basedOn: opened });
+```
+
+The server then merges the draft against the text the form showed, so edits that arrived while it
+was open stay. An editor that applies incoming values while it is open passes the row it last
+applied, so the base always matches what the person saw.
+
+`basedOn` names the base for every text merge column in the patch. Other columns still take the
+written value whole.
+
 ## Editing offline
 
 Each edit is merged against the version its writer had seen, so a device that edits offline for a

@@ -48,6 +48,12 @@ export const PROVENANCE_MAGIC_COLUMNS = [
   "$updatedBy.identity.issuer",
   "$updatedBy.identity.subject",
 ] as const;
+/**
+ * The version of a row this replica holds. A write passes it back as
+ * `basedOn`, so text columns merge edits the writer never saw.
+ */
+export const ROW_VERSION_COLUMN = "$version";
+export type RowVersionColumn = typeof ROW_VERSION_COLUMN;
 export const PROVENANCE_MAGIC_TIMESTAMP_COLUMNS = ["$createdAt", "$updatedAt"] as const;
 
 type RejectedPermissionIntrospectionColumn =
@@ -96,6 +102,7 @@ export function assertUserColumnNameAllowed(column: string): void {
 }
 
 export function magicColumnType(column: string): ColumnType | undefined {
+  if (column === ROW_VERSION_COLUMN) return { type: "BigInt" };
   if (column === "$createdBy" || column === "$updatedBy" || column === "$deletedBy") {
     return authorColumnType();
   }

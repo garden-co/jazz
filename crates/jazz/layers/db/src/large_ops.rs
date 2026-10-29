@@ -1112,6 +1112,7 @@ impl Db {
                         identity,
                         target,
                         updated_at_ms: now_ms,
+                        based_on: None,
                     },
                 )
                 .await
