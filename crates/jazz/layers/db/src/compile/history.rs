@@ -5,8 +5,9 @@
 //! Versions come from the table and its `__h` table. A version is listed
 //! when its commit wrote content (`_st` without
 //! [`crate::values::STATE_NO_CONTENT`]; deletes and restores without
-//! content are not versions) and the authority accepted it (`_seq` below
-//! [`crate::db::LOCAL_BASE`]: a replica's pending writes are not). Access
+//! content are not versions), it is no merged text write's value as sent
+//! ([`crate::values::STATE_AS_SENT`]) and the authority accepted it (`_seq`
+//! below [`crate::db::LOCAL_BASE`]: a replica's pending writes are not). Access
 //! follows the current row: its read policy, in its branch, gates every
 //! version of it, and a deleted current row hides its history unless the
 //! read includes deleted rows.
@@ -158,7 +159,7 @@ impl Ctx<'_> {
         let history = quote(&format!("{}__h", table.stored));
         let mut gate = vec!["a.id = v.id".to_owned(), "a._b = v._b".to_owned()];
         let mut keep = vec![
-            "(v._st & 1) = 0".to_owned(),
+            format!("(v._st & {}) = 0", STATE_NO_CONTENT | STATE_AS_SENT),
             format!("v._seq < {}", crate::db::LOCAL_BASE),
         ];
         if let Some(view) = &self.view

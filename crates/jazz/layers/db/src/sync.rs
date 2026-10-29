@@ -41,7 +41,7 @@
 use crate::schema::history::{history_source_table, is_history_table};
 use crate::values::CachedRow;
 use crate::values::query_error;
-use crate::values::{STATE_DELETED, STATE_NO_CONTENT};
+use crate::values::{STATE_AS_SENT, STATE_DELETED, STATE_NO_CONTENT};
 use rusqlite::OptionalExtension;
 use std::cell::Cell as StdCell;
 use std::cell::RefCell;
@@ -2992,7 +2992,15 @@ impl Inner {
         } else {
             table.to_owned()
         };
-        let sql = format!("SELECT * FROM {} WHERE {filter}", quote(&name));
+        // An as-sent version is no image: it never syncs.
+        let sql = if history {
+            format!(
+                "SELECT * FROM (SELECT * FROM {} WHERE _st < {STATE_AS_SENT}) WHERE {filter}",
+                quote(&name)
+            )
+        } else {
+            format!("SELECT * FROM {} WHERE {filter}", quote(&name))
+        };
         let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
         let names: Vec<String> = statement
             .column_names()
@@ -8821,7 +8829,7 @@ impl Db {
             inner.merging = true;
             inner.possession = Some(possession);
             inner.merge_bases = std::mem::take(&mut built);
-            inner.text_in.borrow_mut().clear();
+            inner.as_sent.borrow_mut().clear();
             let applied = ops
                 .iter()
                 .try_for_each(|op| inner.apply_as(op, who, seq).map(drop))
@@ -8871,7 +8879,7 @@ impl Db {
             if !relay {
                 let inner = self.inner.borrow();
                 inner.record_bases(&ops, &by_row, &built, seq, &rows)?;
-                inner.record_text_in(seq, origin.0, &built, &rows)?;
+                inner.record_as_sent(seq)?;
             }
             Ok(rows)
         });

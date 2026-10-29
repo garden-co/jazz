@@ -802,8 +802,10 @@ impl Inner {
             .map_or(i64::MAX, |(seq, _, _)| *seq);
         let old = read(
             format!(
-                "SELECT * FROM {} WHERE id = ?1 AND _b = ?2 AND _seq < ?3 ORDER BY _seq DESC LIMIT 1",
-                quote(&format!("{table}__h"))
+                "SELECT * FROM {} WHERE id = ?1 AND _b = ?2 AND _seq < ?3 AND _st < {} \
+                 ORDER BY _seq DESC LIMIT 1",
+                quote(&format!("{table}__h")),
+                crate::values::STATE_AS_SENT
             ),
             &[&id, &key, &seq],
         );

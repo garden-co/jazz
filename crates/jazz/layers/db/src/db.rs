@@ -46,8 +46,8 @@ pub use crate::options::REMOTE_LINK_ATTEMPT_WINDOW;
 use crate::result_tree::{ResultNode, ResultRelation, ResultTree};
 pub use crate::values::CurrentRow;
 use crate::values::{
-    AuthorKey, STATE_DELETED, STATE_NO_CONTENT, Schema, Sql, Table, author_key, begin_savepoint,
-    end_savepoint, from_sql, in_savepoint, quote, storage, to_sql, unsupported,
+    AuthorKey, STATE_AS_SENT, STATE_DELETED, STATE_NO_CONTENT, Schema, Sql, Table, author_key,
+    begin_savepoint, end_savepoint, from_sql, in_savepoint, quote, storage, to_sql, unsupported,
 };
 pub use sync::{
     BuiltOn, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad, FrameJoiner, Image, LOCAL_BASE,
@@ -395,12 +395,10 @@ struct Inner {
     /// built on (SPEC 4 §4.6), by (stored table, row, branch key): a text
     /// merge reads its base from it. Empty otherwise.
     merge_bases: HashMap<(String, RowUuid, Vec<u8>), sync::Built>,
-    /// The edits back to the values as sent the upload's text writes made
-    /// (see [`crate::text_merge::encode_in`]), by row version, stored column
-    /// first; empty for a write left as sent.
-    text_in: RefCell<
-        BTreeMap<(String, RowUuid, Vec<u8>), BTreeMap<String, Vec<crate::text_merge::Edit>>>,
-    >,
+    /// The values as sent of the upload's text writes, by row version and
+    /// stored column: `Some` for a write its merge changed (kept by
+    /// [`Inner::record_as_sent`]), `None` for one left as sent.
+    as_sent: RefCell<BTreeMap<(String, RowUuid, Vec<u8>), BTreeMap<String, Option<Value>>>>,
     /// A transaction handle's staged writes left applied between its
     /// stages (see [`Db::in_overlay`]); undone by [`Store`] before any
     /// other use of the store.
@@ -698,12 +696,6 @@ pub(crate) fn execute_script(conn: &Connection, script: &str) -> Result<(), Erro
     }
     Ok(())
 }
-
-/// Where the authority keeps, for a row version whose text merge changed
-/// its write's values, the edits back to the values as sent (SPEC 4 §4.3).
-const TEXT_IN_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_text_in (t TEXT NOT NULL, \
-     id BLOB NOT NULL, k BLOB NOT NULL, seq INTEGER NOT NULL, node BLOB NOT NULL, \
-     edits BLOB NOT NULL, PRIMARY KEY (t, id, k, seq)) WITHOUT ROWID;";
 
 pub(crate) fn rejected(message: impl Into<String>) -> Error {
     Error::new(ErrorCode::WriteRejected, message)
@@ -1139,7 +1131,7 @@ impl Db {
                 pending_nodes: Vec::new(),
                 merging: false,
                 merge_bases: HashMap::new(),
-                text_in: RefCell::new(BTreeMap::new()),
+                as_sent: RefCell::new(BTreeMap::new()),
                 overlay: None,
                 derived: Vec::new(),
                 possession: None,
@@ -3390,7 +3382,8 @@ impl Inner {
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!(
-            "SELECT MAX(_seq) FROM {} WHERE id = ?1 AND _b = ?2 AND (_seq <= ?3 OR _seq IN ({extra}))",
+            "SELECT MAX(_seq) FROM {} WHERE id = ?1 AND _b = ?2 AND _st < {STATE_AS_SENT} \
+             AND (_seq <= ?3 OR _seq IN ({extra}))",
             quote(&format!("{table}__h"))
         );
         let version: Option<i64> = self
@@ -4422,10 +4415,9 @@ impl Inner {
     /// A text write merged on the authority (SPEC 4 §4.3): when a version
     /// its writer never saw authored the column, the merge of the value it
     /// was built on, the value held and its own; `None` keeps its value as
-    /// sent. Every text write of an upload notes the edits back from what is
-    /// stored to its value as sent (none when unmerged): a later write
-    /// built on it, in the same upload or a later one, was built on that
-    /// value.
+    /// sent. Every text write of an upload notes its value as sent (none
+    /// when unmerged): a later write built on it, in the same upload or a
+    /// later one, was built on that value.
     fn text_merged(
         &self,
         table: &Table,
@@ -4443,26 +4435,21 @@ impl Inner {
             return Ok(None);
         };
         let merged = self.text_merge(table, row, held, (key, seq), built, column, value)?;
-        let sent = match &merged {
-            Some((merged, incoming)) => crate::text_merge::edits(
-                column.merge.text_format().expect("a text strategy"),
-                merged,
-                incoming,
-            ),
-            None => Vec::new(),
-        };
-        self.text_in
+        self.as_sent
             .borrow_mut()
             .entry(version)
             .or_default()
-            .insert(column.stored.clone(), sent);
-        Ok(merged.map(|(merged, _)| merged))
+            .insert(
+                column.stored.clone(),
+                merged.is_some().then(|| value.clone()),
+            );
+        Ok(merged)
     }
 
-    /// [`Self::text_merged`]'s merge, with the write's value: `None` when
-    /// there is nothing to merge or the merge leaves the value as sent. The
-    /// fast path reads no value: whether to merge is decided first, from
-    /// the row's `_base` and `_cols` alone.
+    /// [`Self::text_merged`]'s merge: `None` when there is nothing to merge
+    /// or the merge leaves the value as sent. The fast path reads no value:
+    /// whether to merge is decided first, from the row's `_base` and
+    /// `_cols` alone.
     #[allow(clippy::too_many_arguments)]
     fn text_merge(
         &self,
@@ -4473,7 +4460,7 @@ impl Inner {
         built: sync::Built,
         column: &crate::values::Column,
         value: &Value,
-    ) -> Result<Option<(String, String)>, Error> {
+    ) -> Result<Option<String>, Error> {
         let Some(held) = held else {
             return Ok(None);
         };
@@ -4483,20 +4470,24 @@ impl Inner {
                 .transpose()
         };
         let earlier = self
-            .text_in
+            .as_sent
             .borrow()
             .get(&(table.stored.clone(), row, key.to_vec()))
             .and_then(|columns| columns.get(&column.stored).cloned());
         let (base, current) = match earlier {
-            // Built on an earlier write of the same upload, as sent.
+            // Built on an earlier write of the same upload, as sent: what
+            // is held when that write was left as sent.
             Some(sent) => {
                 let Some(current) = current(self)? else {
                     return Ok(None);
                 };
-                (crate::text_merge::apply(&current, &sent)?, current)
+                match sent {
+                    Some(sent) => (self.logical_text(&column.name, &sent)?, current),
+                    None => (current.clone(), current),
+                }
             }
             None => {
-                let Some((base, on)) =
+                let Some(base) =
                     self.merge_base((&table.stored, row, key), built, seq, &column.stored)?
                 else {
                     return Ok(None);
@@ -4504,14 +4495,7 @@ impl Inner {
                 let Some(base) = from_sql(&column.ty, base.as_ref(), &self.chunks)? else {
                     return Ok(None);
                 };
-                let mut base = self.logical_text(&column.name, &base)?;
-                // A base on a commit is its value as sent, not as merged.
-                if let Some(on) = on {
-                    base = crate::text_merge::apply(
-                        &base,
-                        &self.sent_edits((&table.stored, row, key), on, &column.stored)?,
-                    )?;
-                }
+                let base = self.logical_text(&column.name, &base)?;
                 let Some(current) = current(self)? else {
                     return Ok(None);
                 };
@@ -4521,125 +4505,77 @@ impl Inner {
         let incoming = self.logical_text(&column.name, value)?;
         let format = column.merge.text_format().expect("a text strategy");
         let merged = crate::text_merge::merge3(format, &base, &current, &incoming);
-        Ok((merged != incoming).then_some((merged, incoming)))
+        Ok((merged != incoming).then_some(merged))
     }
 
-    /// The edits back from stored column `column`'s value at version `seq`
-    /// of a row to the value its write sent; none when it was not merged.
-    fn sent_edits(
-        &self,
-        (table, row, key): (&str, RowUuid, &[u8]),
-        seq: u64,
-        column: &str,
-    ) -> Result<Vec<crate::text_merge::Edit>, Error> {
-        if !self.text_in_exists()? {
-            return Ok(Vec::new());
-        }
-        let sent: Option<Vec<u8>> = self
-            .conn
-            .cached_row(
-                "SELECT edits FROM _jazz_text_in WHERE t = ?1 AND id = ?2 AND k = ?3 AND seq = ?4",
-                rusqlite::params![table, row.0.as_bytes().to_vec(), key, seq as i64],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(storage)?;
-        let Some(sent) = sent else {
-            return Ok(Vec::new());
-        };
-        Ok(crate::text_merge::decode_in(&sent)?
-            .into_iter()
-            .find(|(name, _)| name == column)
-            .map(|(_, edits)| edits)
-            .unwrap_or_default())
-    }
-
-    /// Keep, for each row version the upload at `seq` wrote, the edits its
-    /// text merges made back to the values as sent (`_jazz_text_in`, made
-    /// on the first merge that changes a value), and drop the entries its
-    /// sender `node` can no longer build on.
-    ///
-    /// Only a commit's own sender builds on it unsettled, and its commits
-    /// arrive in order. Once one of them writes a row over an accepted
-    /// version (or over none), every later one it sends is built on that
-    /// write or a newer one, and a chain walk stops at the first accepted
-    /// version: its older entries for the row are dead. So a row keeps
-    /// entries only for its writers' current unsettled chains.
-    pub(crate) fn record_text_in(
-        &self,
-        seq: u64,
-        node: [u8; 16],
-        built: &HashMap<(String, RowUuid, Vec<u8>), sync::Built>,
-        rows: &[(String, RowUuid, Vec<u8>)],
-    ) -> Result<(), Error> {
-        let text_in = std::mem::take(&mut *self.text_in.borrow_mut());
-        let mut exists = self.text_in_exists()?;
-        if exists {
-            for row_key @ (table, row, key) in rows {
-                if matches!(built.get(row_key), Some(sync::Built::On(_))) {
+    /// Keep, for each row version the upload at `seq` wrote whose text
+    /// merge changed a value, that version as its writer sent it (SPEC 4
+    /// §4.3): in `__h` at `_seq` = `-seq` with [`STATE_AS_SENT`] set, its
+    /// merged columns holding their values as sent and every other cell
+    /// the version's. A later write chained on it merges over these values
+    /// ([`Inner::merge_base`]); no read takes it for a version.
+    pub(crate) fn record_as_sent(&self, seq: u64) -> Result<(), Error> {
+        let as_sent = std::mem::take(&mut *self.as_sent.borrow_mut());
+        for ((stored, row, key), columns) in as_sent {
+            let Some(table) = self.physical.tables.get(&stored) else {
+                continue;
+            };
+            let mut values = vec![
+                Sql::Blob(row.0.as_bytes().to_vec()),
+                Sql::Blob(key),
+                Sql::Integer(seq as i64),
+            ];
+            let mut sent = BTreeMap::new();
+            for (name, value) in columns {
+                let (Some(value), Some(column)) = (value, table.by_stored_column(&name)) else {
                     continue;
-                }
-                self.exec(
-                    "DELETE FROM _jazz_text_in WHERE t = ?1 AND id = ?2 AND k = ?3 AND node = ?4",
-                    rusqlite::params![table, row.0.as_bytes().to_vec(), key, node.to_vec()],
-                )
-                .map_err(storage)?;
+                };
+                values.push(self.bind_cell(column, &value, Cells::Authored)?);
+                sent.insert(name, values.len());
             }
-        }
-        for ((table, row, key), edits) in text_in {
-            let entries: Vec<_> = edits
-                .into_iter()
-                .filter(|(_, edits)| !edits.is_empty())
-                .collect();
-            if entries.is_empty() {
+            if sent.is_empty() {
                 continue;
             }
-            if !exists {
-                self.conn.execute_batch(TEXT_IN_DDL).map_err(storage)?;
-                exists = true;
-            }
-            self.exec(
-                "INSERT OR REPLACE INTO _jazz_text_in (t, id, k, node, seq, edits) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                rusqlite::params![
-                    table,
-                    row.0.as_bytes().to_vec(),
-                    key,
-                    node.to_vec(),
-                    seq as i64,
-                    crate::text_merge::encode_in(&entries)
-                ],
-            )
-            .map_err(storage)?;
+            let columns = self.columns_list(table);
+            let cells: String = table
+                .stored()
+                .map(|c| match sent.get(&c.stored) {
+                    Some(at) => format!(", ?{at}"),
+                    None => format!(", {}", quote(&c.stored)),
+                })
+                .collect();
+            let sql = format!(
+                "INSERT INTO {} (id, _b, _seq, _st, _base, _cols{columns}) \
+                 SELECT id, _b, -_seq, _st | {STATE_AS_SENT}, NULL, NULL{cells} FROM {} \
+                 WHERE id = ?1 AND _b = ?2 AND _seq = ?3",
+                quote(&format!("{stored}__h")),
+                quote(&stored)
+            );
+            self.exec(&sql, params_from_iter(values.iter()))
+                .map_err(storage)?;
         }
         Ok(())
     }
 
-    /// Whether `_jazz_text_in` exists yet (it is made on the first merge
-    /// that changes a value).
-    fn text_in_exists(&self) -> Result<bool, Error> {
-        self.conn
-            .cached_row(
-                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = '_jazz_text_in'",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
-            .map(|n| n > 0)
-            .map_err(storage)
-    }
-
-    /// How many `_jazz_text_in` entries the store keeps.
+    /// How many as-sent versions ([`STATE_AS_SENT`]) the store keeps.
     #[cfg(feature = "testing")]
-    pub(crate) fn text_in_entries(&self) -> Result<u64, Error> {
-        if !self.text_in_exists()? {
-            return Ok(0);
+    pub(crate) fn as_sent_versions(&self) -> Result<u64, Error> {
+        let mut count = 0;
+        for stored in self.physical.tables.keys() {
+            let n: i64 = self
+                .conn
+                .cached_row(
+                    &format!(
+                        "SELECT count(*) FROM {} WHERE _st >= {STATE_AS_SENT}",
+                        quote(&format!("{stored}__h"))
+                    ),
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(storage)?;
+            count += n as u64;
         }
-        self.conn
-            .cached_row("SELECT count(*) FROM _jazz_text_in", [], |r| {
-                r.get::<_, i64>(0)
-            })
-            .map(|n| n as u64)
-            .map_err(storage)
+        Ok(count)
     }
 
     /// The whole string a text column's value holds.

@@ -41,7 +41,7 @@ use jazz::protocol::{BranchSelector, LensOp, MigrationLens, TableLens};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
-use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+use jazz::tools::{ColumnMergeStrategy, ColumnType, SchemaBuilder, TableName, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 use sha2::{Digest, Sha256};
 
@@ -54,8 +54,8 @@ const SERVER_FILE: &str = "sqlite-storage-v1/server.sqlite.gz.base64";
 const CLIENT_FILE: &str = "sqlite-storage-v1/client.sqlite.gz.base64";
 /// SHA-256 of the decoded SQLite files. The corpus is immutable: a new
 /// storage format gets a new corpus beside this one.
-const SERVER_SHA256: &str = "a1df60e5b40d5b0344ca26180c1c7aab829499e04a6e89a849deaf37f45f1d9e";
-const CLIENT_SHA256: &str = "f1975cea9e6a907403bed145cd7ec518fd877c6e8008c91b1b39b74f0f5ce16e";
+const SERVER_SHA256: &str = "80581b37d31f6c34fe48ff3c51851406b3e7583dac5a935947c4b9fee02589c6";
+const CLIENT_SHA256: &str = "a2b424484b1aabb84a073d675b14473eae27ac276b60af7e1b7fd1f363f2cb08";
 
 const SERVER_NODE: [u8; 16] = [0xa0; 16];
 const CLIENT_NODE: [u8; 16] = [0xc0; 16];
@@ -110,35 +110,41 @@ fn blob(n: u8) -> Vec<u8> {
 }
 
 /// `projects(name)`, `documents(project -> projects, title, body, blob,
-/// rank)` with an index on `title`, and `drafts(branch_id, title)`
-/// branched by `branch_id`. `title_column` names `documents.title`.
+/// rank)` with an index on `title` and a text-merging `body`, and
+/// `drafts(branch_id, title)` branched by `branch_id`. `title_column` names
+/// `documents.title`.
 fn schema(title_column: &str) -> JazzSchema {
-    compile_schema(
-        &SchemaBuilder::new()
-            .table(
-                TableSchemaBuilder::new("projects")
-                    .column("name", ColumnType::Text)
-                    .policies(allow_all_policies()),
-            )
-            .table(
-                TableSchemaBuilder::new("documents")
-                    .fk_column("project", "projects")
-                    .column(title_column, ColumnType::Text)
-                    .column("body", ColumnType::Text)
-                    .column("blob", ColumnType::Bytea)
-                    .column_with_default("rank", ColumnType::BigInt, jazz::tools::Value::BigInt(0))
-                    .index_only([title_column])
-                    .policies(allow_all_policies()),
-            )
-            .table(
-                TableSchemaBuilder::new("drafts")
-                    .column("branch_id", ColumnType::Uuid)
-                    .column("title", ColumnType::Text)
-                    .branch_by("branch_id")
-                    .policies(allow_all_policies()),
-            )
-            .build(),
-    )
+    let mut schema = SchemaBuilder::new()
+        .table(
+            TableSchemaBuilder::new("projects")
+                .column("name", ColumnType::Text)
+                .policies(allow_all_policies()),
+        )
+        .table(
+            TableSchemaBuilder::new("documents")
+                .fk_column("project", "projects")
+                .column(title_column, ColumnType::Text)
+                .column("body", ColumnType::Text)
+                .column("blob", ColumnType::Bytea)
+                .column_with_default("rank", ColumnType::BigInt, jazz::tools::Value::BigInt(0))
+                .index_only([title_column])
+                .policies(allow_all_policies()),
+        )
+        .table(
+            TableSchemaBuilder::new("drafts")
+                .column("branch_id", ColumnType::Uuid)
+                .column("title", ColumnType::Text)
+                .branch_by("branch_id")
+                .policies(allow_all_policies()),
+        )
+        .build();
+    let documents = schema.get_mut(&TableName::new("documents")).unwrap();
+    for column in &mut documents.columns.columns {
+        if column.name == "body" {
+            *column = column.clone().merge_strategy(ColumnMergeStrategy::Text);
+        }
+    }
+    compile_schema(&schema)
 }
 
 /// The schema the client and the first server version use.
@@ -441,6 +447,29 @@ fn produce_sqlite_storage_corpus_v1() {
             })
             .collect();
         pump(&[&client, &server]);
+        // A text edit the server merges with one it made meanwhile: it keeps
+        // the client's write as sent beside the merged version.
+        update_as(
+            &client,
+            "documents",
+            document(2),
+            user(3),
+            13,
+            &[("body", string("short, edited!"))],
+        );
+        update_as(
+            &server,
+            "documents",
+            document(2),
+            user(1),
+            14,
+            &[("body", string("Short, edited"))],
+        );
+        drive(
+            &[&client, &server],
+            client.wait_for_pending_writes(DurabilityTier::Global),
+        )
+        .unwrap();
         insert_as(
             &client,
             "projects",
@@ -592,7 +621,7 @@ fn expected_documents(title: &str, offline_edit: bool) -> Rows {
             &[
                 ("project", uuid(project(2))),
                 (title, string(notes)),
-                ("body", string("short, edited")),
+                ("body", string("Short, edited!")),
                 ("blob", Value::Bytes(blob(2))),
                 ("rank", Value::I64(5)),
             ],
@@ -639,6 +668,27 @@ fn assert_server_corpus(server: &Db, with_client_writes: bool) {
         .map(|(_, cells)| cells[0].1.clone())
         .collect();
     assert_eq!(names, [Some(string("Alpha")), Some(string("Alpha 2"))]);
+    // The merged text edit: its value as sent is kept, but never listed.
+    assert_eq!(server.as_sent_versions_for_test().unwrap(), 1);
+    let bodies: Vec<_> = rows(
+        server,
+        Query::from("history.documents")
+            .filter(eq(col("id"), lit(uuid(document(2)))))
+            .select(["body"]),
+        ReadOpts::default(),
+    )
+    .unwrap()
+    .into_iter()
+    .map(|(_, cells)| cells[0].1.clone().unwrap())
+    .collect();
+    let mut expected = ["short", "short, edited", "Short, edited", "Short, edited!"]
+        .map(string)
+        .to_vec();
+    if with_client_writes {
+        // The client's offline title edit, a version of its own.
+        expected.push(string("Short, edited!"));
+    }
+    assert_eq!(bodies, expected);
     // The branch row, through its branch.
     assert_eq!(
         rows(

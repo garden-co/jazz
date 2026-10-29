@@ -92,13 +92,44 @@ struct Client {
 struct Net {
     core: Db,
     clients: Vec<Client>,
+    /// Where the authority's file lives, when it has one.
+    dir: Option<tempfile::TempDir>,
+}
+
+fn open_core(dir: &tempfile::TempDir) -> Db {
+    block_on(Db::open_at(
+        DbConfig::new(
+            schema(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([CORE; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        ),
+        &dir.path().join("core.sqlite"),
+        jazz::db::FileOptions::default(),
+    ))
+    .unwrap()
 }
 
 impl Net {
     fn new(clients: usize) -> Self {
+        Self::with_core(clients, None)
+    }
+
+    /// [`Net::new`] with the authority on a file, so it can restart.
+    fn on_file(clients: usize) -> Self {
+        Self::with_core(clients, Some(tempfile::tempdir().unwrap()))
+    }
+
+    fn with_core(clients: usize, dir: Option<tempfile::TempDir>) -> Self {
+        let core = match &dir {
+            Some(dir) => open_core(dir),
+            None => open(CORE, AuthorSubject::SYSTEM),
+        };
         let mut net = Net {
-            core: open(CORE, AuthorSubject::SYSTEM),
+            core,
             clients: Vec::new(),
+            dir,
         };
         for i in 0..clients {
             let node = 0x50 + i as u8;
@@ -147,6 +178,45 @@ impl Net {
 
     fn db(&self, i: usize) -> &Db {
         &self.clients[i].db
+    }
+
+    /// Close the authority and open it again from its file; the clients
+    /// that were online reconnect.
+    fn restart_core(&mut self) {
+        let online: Vec<usize> = (0..self.clients.len())
+            .filter(|&i| self.clients[i].up.is_some())
+            .collect();
+        for &i in &online {
+            let client = &mut self.clients[i];
+            let up = client.up.take().expect("online");
+            assert!(client.db.detach_connection(&up));
+        }
+        drop(std::mem::replace(
+            &mut self.core,
+            open(CORE, AuthorSubject::SYSTEM),
+        ));
+        self.core = open_core(self.dir.as_ref().expect("an authority on a file"));
+        for i in online {
+            self.connect(i);
+        }
+    }
+
+    /// The bodies `db`'s history read lists for `row`, oldest first.
+    fn history(db: &Db, row: RowUuid) -> Vec<String> {
+        let query = Query::from("history.docs")
+            .filter(jazz::query::eq(
+                jazz::query::col("id"),
+                jazz::query::lit(Value::Uuid(row.0)),
+            ))
+            .order_by("$acceptedAt", jazz::query::OrderDirection::Asc);
+        block_on(db.all(&db.prepare_query(&query).unwrap(), ReadOpts::default()))
+            .unwrap()
+            .into_iter()
+            .map(|version| match version.cell("body") {
+                Some(Value::String(text)) => text,
+                other => panic!("`body` is {other:?}"),
+            })
+            .collect()
     }
 
     fn pump(&self) {
@@ -299,13 +369,58 @@ fn an_offline_chain_merges_each_write_over_what_its_writer_saw() {
     // Carol's "!" and alice's " world" both landed after "Hello": the
     // held value's insert goes first.
     net.assert_everywhere(row, "body", "Hi! Hello! big world");
-    // The merges kept what alice's chain sent, for the links after them.
-    assert!(net.core.text_in_entries_for_test().unwrap() > 0);
-    // Her next write is built on a settled version: nothing can build on
-    // her old chain any more, and its entries go.
+    // Both merges kept what alice's chain sent, as versions of their own.
+    assert_eq!(net.core.as_sent_versions_for_test().unwrap(), 2);
+    // No read lists them: history holds the accepted versions only.
+    let accepted = [
+        "Hello",
+        "Hello!",
+        "Hi! Hello!",
+        "Hi! Hello! world",
+        "Hi! Hello! big world",
+    ];
+    assert_eq!(Net::history(&net.core, row), accepted);
+    // A client lists the versions it holds, never one as sent.
+    for i in 0..2 {
+        let held = Net::history(net.db(i), row);
+        assert!(
+            held.iter().all(|body| accepted.contains(&body.as_str())),
+            "client {i}: {held:?}"
+        );
+    }
     let next = net.edit(0, row, &[("body", "Hi! Hello! big world.")]);
     net.settle(0, next);
-    assert_eq!(net.core.text_in_entries_for_test().unwrap(), 0);
+    net.assert_everywhere(row, "body", "Hi! Hello! big world.");
+}
+
+/// The as-sent version a chained write merges over is stored, not held in
+/// memory: the authority restarts between the merged link and the next.
+#[test]
+fn a_chain_merges_over_its_value_as_sent_after_the_authority_restarts() {
+    let mut net = Net::on_file(2);
+    let row = net.seed(0, &[("body", "Hello")]);
+    net.offline(0);
+    let first = net.edit(0, row, &[("body", "Hello world")]);
+    let bob = net.edit(1, row, &[("body", "Hello!")]);
+    net.settle(1, bob);
+    // Alice's first edit reaches the authority, which merges it, but she
+    // writes again before she hears back: her second is built on her first
+    // as she sent it.
+    net.connect(0);
+    net.db(0).set_remote_link_hint(RemoteLinkHint::Live);
+    block_on(net.db(0).tick()).unwrap();
+    block_on(net.core.tick()).unwrap();
+    assert_eq!(Net::read(&net.core, row, "body"), "Hello! world");
+    let second = net.edit(0, row, &[("body", "Hello big world")]);
+    net.restart_core();
+    net.settle(0, first);
+    net.settle(0, second);
+    // Over the merged value instead, bob's "!" would be lost.
+    net.assert_everywhere(row, "body", "Hello! big world");
+    assert_eq!(
+        Net::history(&net.core, row),
+        ["Hello", "Hello!", "Hello! world", "Hello! big world"]
+    );
 }
 
 /// A chain link that left the column alone stores the value the authority
