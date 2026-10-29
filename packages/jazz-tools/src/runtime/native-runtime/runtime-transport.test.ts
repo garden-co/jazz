@@ -79,6 +79,51 @@ describe("NativeRuntimeAdapter server transport", () => {
     }
   });
 
+  it.each([false, true])(
+    "preserves a terminal failure when worker teardown also fails (same error=%s)",
+    async (sameError) => {
+      const persisted = deferred<void>();
+      const runtime = NativeRuntimeAdapter.fromDb(
+        fakeDb({
+          setNonDurableClient: () => undefined,
+          nativeConnectionStatus: () => ({
+            configured: true,
+            connected: false,
+            explicitlyOffline: false,
+            authRejected: false,
+          }),
+          insert: () => ({ ...fakeWrite(), wait: () => persisted.promise }),
+          tick: () => undefined,
+        }) as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        false,
+      );
+      runtime.setNonDurableClient();
+      try {
+        const receipt = runtime.insert("todos", { title: { type: "Text", value: "pending" } });
+        const txId = await committedTxId(receipt);
+        const terminal = new Error("terminal worker transport failure");
+        const relay = sameError ? terminal : new Error("worker teardown failed");
+        const local = expect(runtime.waitForTransaction(txId, "local")).rejects.toBe(relay);
+        const global = expect(runtime.waitForTransaction(txId, "global")).rejects.toBe(terminal);
+        // The follower pump and watchdog report the terminal failure before
+        // fail() also reports that the durable worker is unavailable.
+        runtime.reportRemoteServerTransportError(terminal);
+        runtime.reportLocalRelayError(relay);
+        await Promise.all([local, global]);
+        await expect(runtime.waitForTransaction(txId, "global")).rejects.toBe(terminal);
+        await expect(runtime.waitForTransaction(txId, "local")).rejects.toBe(relay);
+        expect(runtime.upstreamLinkStatus()).toMatchObject({ reason: "stopped" });
+      } finally {
+        persisted.resolve();
+        await runtime.close();
+      }
+    },
+  );
+
   it("allows new Local waits after a failed worker is replaced", async () => {
     const persisted = deferred<void>();
     const runtime = NativeRuntimeAdapter.fromDb(
