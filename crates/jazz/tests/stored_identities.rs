@@ -1018,3 +1018,80 @@ fn an_offline_replica_stores_its_v2_columns_where_the_authority_does() {
         "the draft's `rank` is a column of its own"
     );
 }
+
+/// A replica that never synced opens straight into v2, whose lens renames
+/// `text` to `body`, with the app's bundled v1 and lens. It stores `body`
+/// in v1's `text` column, as the authority does, before it ever connects:
+/// its offline write lands there, and the authority reads it under both
+/// versions without anything being renamed or moved.
+#[test]
+fn a_replica_with_bundled_lenses_stores_a_renamed_column_where_the_authority_does() {
+    let v1 = without_rank();
+    let v2 = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("body", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    );
+    let lens = rename(
+        &v1,
+        &v2,
+        vec![LensOp::RenameColumn {
+            from: "text".into(),
+            to: "body".into(),
+        }],
+    );
+    let server = authority(v1.clone(), 0);
+    block_on(server.activate_schema_with_lenses(v2.clone(), &[lens.clone()])).unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("client.sqlite");
+    let open = || {
+        block_on(Db::open_at(
+            config(v2.clone(), 1, AuthorSubject::SYSTEM)
+                .with_migrations(vec![v1.clone()], vec![lens.clone()]),
+            &path,
+            FileOptions::default(),
+        ))
+        .unwrap()
+    };
+    let unsynced = {
+        let client = open();
+        let unsynced = notes_columns(&path);
+        assert!(
+            unsynced.iter().all(|c| common::unhashed(c) != "body"),
+            "`body` is stored in v1's `text`: {unsynced:?}"
+        );
+        // A store becomes a replica before it writes (INV-SYNC-51).
+        let _link = link(&client, &server);
+        pump(&server, &[&client]);
+        unsynced
+    };
+    assert_eq!(notes_columns(&path), unsynced, "mirroring changed nothing");
+
+    let client = open();
+    insert(&client, 1, &[("body", Value::String("offline".into()))]);
+    let _link = link(&client, &server);
+    pump(&server, &[&client]);
+    assert_eq!(notes_columns(&path), unsynced);
+    let read = |db: &Db, column: &str| -> Vec<Option<Value>> {
+        let prepared = db.prepare_query(&Query::from("notes")).unwrap();
+        block_on(db.all(&prepared, ReadOpts::default()))
+            .unwrap()
+            .iter()
+            .map(|row| {
+                row.cells()
+                    .find(|(name, _)| *name == column)
+                    .and_then(|(_, value)| value.cloned())
+            })
+            .collect()
+    };
+    let offline = Some(Value::String("offline".into()));
+    assert_eq!(read(&client, "body"), [offline.clone()]);
+    assert_eq!(read(&server, "body"), [offline.clone()]);
+    let old = block_on(server.register_schema_view(v1)).unwrap();
+    assert_eq!(read(&old, "text"), [offline]);
+}

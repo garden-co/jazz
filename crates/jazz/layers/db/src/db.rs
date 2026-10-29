@@ -22,7 +22,7 @@ use rusqlite::{Connection, OptionalExtension, params_from_iter};
 
 pub use crate::options::{
     DbConfig, DbIdentity, DeleteOptions, Error, ErrorCode, ExactWriteTarget, InsertOptions,
-    ReadOpts, ReadTier, Reason, RestoreOptions, RowIdSource, SeededRowIdSource, UpdateOptions,
+    Migrations, ReadOpts, ReadTier, Reason, RestoreOptions, RowIdSource, SeededRowIdSource, UpdateOptions,
     UpsertOptions, WriteIdentity, WriteTarget, block_on,
 };
 
@@ -1047,6 +1047,39 @@ impl Db {
     }
 
     fn open_on(
+        mut config: DbConfig,
+        conn: Connection,
+        path: Option<(&std::path::Path, Option<&'static str>)>,
+    ) -> Result<Self, Error> {
+        // A schema this store has not admitted is reached along the lenses
+        // the app ships: from a version it admitted, else from the first
+        // version, each admitted as the authority admits it.
+        let steps = {
+            let names = crate::names::Names::load(&conn)?;
+            migration_path(&config.migrations, &config.schema, |version| {
+                names.get(version).is_some()
+            })
+        };
+        let Some(((first, _), rest)) = steps.split_first() else {
+            return Self::open_named(config, conn, path);
+        };
+        let target = std::mem::replace(&mut config.schema, first.clone());
+        let db = Self::open_named(config, conn, path)?;
+        for (schema, lenses) in rest {
+            db.admit(schema.clone(), lenses, None)?;
+        }
+        {
+            let mut inner = db.inner();
+            let owner = Rc::new(inner.named(&target));
+            inner.owner_version = target.version_id();
+            inner.schema = owner.clone();
+            inner.owner = owner;
+            inner.reset_everything();
+        }
+        Ok(db)
+    }
+
+    fn open_named(
         config: DbConfig,
         conn: Connection,
         path: Option<(&std::path::Path, Option<&'static str>)>,
@@ -7366,5 +7399,67 @@ impl Db {
             tx: self.tx_ref(id),
             committed: false,
         })
+    }
+}
+
+/// The versions, each with the lenses into it, a store passes through to
+/// reach `target` along `migrations`: starting at a version it `admitted`
+/// (else at a version no lens leads to), ending at `target`. Empty when the
+/// store admitted `target` or no such path exists.
+fn migration_path(
+    migrations: &Migrations,
+    target: &JazzSchema,
+    admitted: impl Fn(&crate::ids::SchemaVersionId) -> bool,
+) -> Vec<(JazzSchema, Vec<MigrationLens>)> {
+    fn walk(
+        migrations: &Migrations,
+        schema: &JazzSchema,
+        admitted: &dyn Fn(&crate::ids::SchemaVersionId) -> bool,
+        seen: &mut BTreeSet<crate::ids::SchemaVersionId>,
+    ) -> Option<Vec<(JazzSchema, Vec<MigrationLens>)>> {
+        let version = schema.version_id();
+        if admitted(&version) {
+            return Some(vec![(schema.clone(), Vec::new())]);
+        }
+        if !seen.insert(version) {
+            return None;
+        }
+        let into: Vec<&MigrationLens> = migrations
+            .lenses
+            .iter()
+            .filter(|lens| lens.target == version)
+            .collect();
+        if into.is_empty() {
+            return Some(vec![(schema.clone(), Vec::new())]);
+        }
+        // A path from an admitted version beats one from the first.
+        let mut found: Option<Vec<(JazzSchema, Vec<MigrationLens>)>> = None;
+        for lens in into {
+            let Some(source) = migrations
+                .schemas
+                .iter()
+                .find(|s| s.version_id() == lens.source)
+            else {
+                continue;
+            };
+            let Some(mut path) = walk(migrations, source, admitted, seen) else {
+                continue;
+            };
+            path.push((schema.clone(), vec![lens.clone()]));
+            let from_admitted = admitted(&path[0].0.version_id());
+            if from_admitted {
+                return Some(path);
+            }
+            found.get_or_insert(path);
+        }
+        found
+    }
+    if admitted(&target.version_id()) || migrations.lenses.is_empty() {
+        return Vec::new();
+    }
+    let mut seen = BTreeSet::new();
+    match walk(migrations, target, &admitted, &mut seen) {
+        Some(path) if path.len() > 1 => path,
+        _ => Vec::new(),
     }
 }
