@@ -26,20 +26,21 @@ use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
 use jazz::db::{
-    CorpusReader, Db, DbConfig, DbIdentity, InsertOptions, ReadOpts, ReadTier, Reason, SyncMessage,
-    Transport, UpdateOptions, WireError as SyncWireError, block_on, encode_frames,
-    validate_frame_batch_for_corpus,
+    Acting, CorpusReader, Db, DbConfig, DbIdentity, FrameJoiner, InsertOptions, Outcome, ReadOpts,
+    ReadSpan, ReadTier, Reason, SyncMessage, Transport, UpdateOptions, WireError as SyncWireError,
+    WriteIdentity, block_on, encode_frames, validate_frame_batch_for_corpus,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::model::transaction::OpenTransactionId;
-use jazz::protocol::PermissionAdviceAction;
+use jazz::protocol::{LensOp, MigrationLens, PermissionAdviceAction, TableLens};
 use jazz::query::{Query, col, eq, lit};
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::wire::{
     TransportError, WireError, WireErrorCode, WireFrame, WireHello, WirePeerRole, WireRetry,
-    current_wire_features, encode_frame, encode_websocket_frame_batch,
+    current_wire_features, decode_websocket_frame_batch, encode_frame,
+    encode_websocket_frame_batch,
 };
 use serde::{Deserialize, Serialize};
 
@@ -48,31 +49,28 @@ use common::{compile_schema, read_and_allow_all_writes, session_eq};
 const CORPUS: &str = "sqlite_sync_wire_v1.json";
 const FORMAT: &str = "jazz-sqlite-sync-wire-corpus-v1";
 
-/// Every `SyncMessage` variant, in declaration order, but `RowsPart`: a
-/// framing of a `Rows` too large for one frame, whose real frames are
-/// megabytes (binding_host's frame-split test covers it).
-const VARIANTS: [&str; 22] = [
-    "Subscribe",
+/// Every `SyncMessage` variant, in declaration order. A message too
+/// large for one frame travels in parts below the message layer
+/// (binding_host's frame-split test covers it).
+const VARIANTS: [&str; 19] = [
+    "Read",
     "Unsubscribe",
-    "Hold",
-    "Fetch",
+    "ResendWhole",
+    "Settled",
     "Commit",
     "ChunkRequests",
     "PushChunks",
     "Chunks",
     "Rows",
-    "Evict",
-    "Settled",
-    "Answer",
+    "AccessLost",
     "Refused",
     "Fate",
-    "Advise",
-    "Advice",
+    "CheckAllowed",
+    "CheckAllowedResult",
     "Schema",
-    "Origins",
     "SchemaAdmission",
     "Stored",
-    "Holds",
+    "KnownCatalogue",
     "Catalogue",
 ];
 
@@ -171,6 +169,32 @@ fn every_pinned_sync_frame_decodes_to_its_variant_and_reencodes_exactly() {
     }
 }
 
+/// A commit too large for one frame travels in parts: the pinned split
+/// commit joins back into exactly the pinned `Commit`.
+#[test]
+fn the_pinned_split_commit_joins_into_the_pinned_commit() {
+    let corpus = corpus();
+    let commit = corpus
+        .messages
+        .iter()
+        .find(|m| m.variant == "Commit")
+        .unwrap();
+    let split = corpus
+        .frames
+        .iter()
+        .find(|f| f.name == "a split commit in one batch")
+        .expect("a split commit is pinned");
+    let frames = decode_websocket_frame_batch(&unhex(&split.batch_hex)).unwrap();
+    assert_eq!(frames.len(), 2, "in two parts");
+    let mut joiner = FrameJoiner::default();
+    assert!(joiner.push(&frames[0]).unwrap().is_none(), "a leading part");
+    let joined = joiner.push(&frames[1]).unwrap().expect("the last part");
+    assert_eq!(
+        postcard::to_allocvec(&joined).unwrap(),
+        unhex(&commit.frame_hex)
+    );
+}
+
 /// The rejected-fate layout (a reason name beside the message) is pinned by
 /// real frames: each still decodes to a rejection with its reason name and
 /// re-encodes to the same bytes.
@@ -192,7 +216,11 @@ fn every_pinned_rejected_fate_decodes_with_its_reason_and_reencodes_exactly() {
             )
         });
         let SyncMessage::Fate {
-            result: Err(SyncWireError::Rejected { reason, message }),
+            outcome:
+                Outcome::Refused {
+                    error: SyncWireError::Rejected { reason, message },
+                    ..
+                },
             ..
         } = &decoded
         else {
@@ -205,6 +233,33 @@ fn every_pinned_rejected_fate_decodes_with_its_reason_and_reencodes_exactly() {
             bytes,
             "{}: re-encoding changed the bytes; the fate layout changed",
             fate.name
+        );
+    }
+}
+
+/// The shapes one frame per variant misses are pinned too: each still
+/// decodes to its shape and re-encodes to the same bytes.
+#[test]
+fn every_pinned_message_shape_decodes_and_reencodes_exactly() {
+    let corpus = corpus();
+    for name in SHAPES {
+        let entry = corpus
+            .frames
+            .iter()
+            .find(|frame| frame.name == name)
+            .unwrap_or_else(|| panic!("{name} is not pinned"));
+        let frames = jazz::wire::decode_websocket_frame_batch(&unhex(&entry.batch_hex)).unwrap();
+        let [bytes] = frames.as_slice() else {
+            panic!("{name}: one frame");
+        };
+        let decoded: SyncMessage = postcard::from_bytes(bytes).unwrap_or_else(|error| {
+            panic!("{name}: the pinned frame no longer decodes ({error}); the layout changed")
+        });
+        assert_eq!(shape(&decoded), Some(name));
+        assert_eq!(
+            &postcard::to_allocvec(&decoded).unwrap(),
+            bytes,
+            "{name}: re-encoding changed the bytes; the layout changed"
         );
     }
 }
@@ -264,12 +319,16 @@ impl Transport for Recording {
             // built on an unsettled commit (bases, origin), else the first.
             let relayed = matches!(
                 &decoded,
-                SyncMessage::Commit { bases, origin: Some(_), .. }
-                    if bases.iter().any(|base| matches!(base.on, jazz::db::BuiltOn::Commit { .. }))
+                SyncMessage::Commit { ops, origin: Some(_), .. }
+                    if ops.iter().flat_map(|op| &op.bases).any(|base| matches!(base.on, jazz::db::BuiltOn::Commit { .. }))
             );
             let mut recorded = self.recorded.borrow_mut();
             if let SyncMessage::Fate {
-                result: Err(SyncWireError::Rejected { reason, .. }),
+                outcome:
+                    Outcome::Refused {
+                        error: SyncWireError::Rejected { reason, .. },
+                        ..
+                    },
                 ..
             } = &decoded
             {
@@ -277,13 +336,18 @@ impl Transport for Recording {
                     .entry(rejected_fate_key(reason.as_deref()))
                     .or_insert_with(|| (self.peer.to_owned(), frame.clone()));
             }
+            if let Some(shape) = shape(&decoded) {
+                recorded
+                    .entry(shape.to_owned())
+                    .or_insert_with(|| (self.peer.to_owned(), frame.clone()));
+            }
             let pinned = recorded
                 .entry(variant(&decoded))
                 .or_insert_with(|| (self.peer.to_owned(), frame.clone()));
             let pinned_relayed = matches!(
                 postcard::from_bytes(&pinned.1),
-                Ok(SyncMessage::Commit { bases, origin: Some(_), .. })
-                    if bases.iter().any(|base: &jazz::db::WireBase| matches!(base.on, jazz::db::BuiltOn::Commit { .. }))
+                Ok(SyncMessage::Commit { ops, origin: Some(_), .. })
+                    if ops.iter().flat_map(|op: &jazz::db::WireOp| &op.bases).any(|base| matches!(base.on, jazz::db::BuiltOn::Commit { .. }))
             );
             if relayed && !pinned_relayed {
                 *pinned = (self.peer.to_owned(), frame.clone());
@@ -297,6 +361,49 @@ impl Transport for Recording {
     fn try_recv(&mut self) -> Option<SyncMessage> {
         self.inbound.borrow_mut().pop_front()
     }
+}
+
+/// Message shapes the one frame per variant leaves unpinned: a one-shot
+/// `Read` (its span carries a snapshot and a view), `Rows` carrying the
+/// commits behind history versions, a `Catalogue` carrying versions
+/// with their stored names and a lens's cells, and a trusted link's
+/// `Commit`s acting as an attributed author and as a session.
+const SHAPES: [&str; 5] = [
+    "Read/once",
+    "Rows/tx_ids",
+    "Catalogue/versions",
+    "Commit/attributed",
+    "Commit/session",
+];
+
+fn shape(message: &SyncMessage) -> Option<&'static str> {
+    match message {
+        SyncMessage::Read {
+            span: ReadSpan::Once { .. },
+            ..
+        } => Some(SHAPES[0]),
+        SyncMessage::Rows { tx_ids, .. } if !tx_ids.is_empty() => Some(SHAPES[1]),
+        SyncMessage::Catalogue {
+            versions, cells, ..
+        } if !versions.is_empty() && !cells.is_empty() => Some(SHAPES[2]),
+        SyncMessage::Commit {
+            acting: Acting::Attributed { author },
+            ..
+        } if *author == user(1).canonical() => Some(SHAPES[3]),
+        SyncMessage::Commit {
+            acting: Acting::Session { claims, .. },
+            ..
+        } if !claims.is_empty() => Some(SHAPES[4]),
+        _ => None,
+    }
+}
+
+/// The two-frame split of `frame` a reader joins: the transport's part
+/// markers (0xFF a leading part, 0xFE the last) ahead of each half. A real
+/// split happens past 2 MiB; the joiner reads a small one the same way.
+fn split(frame: &[u8]) -> [Vec<u8>; 2] {
+    let (head, tail) = frame.split_at(frame.len() / 2);
+    [[&[0xFF], head].concat(), [&[0xFE], tail].concat()]
 }
 
 /// The recording key of the first rejected fate with `reason`.
@@ -346,6 +453,21 @@ fn schema(draft: bool) -> JazzSchema {
     compile_schema(
         &SchemaBuilder::new()
             .table(notes.policies(read_and_allow_all_writes(session_eq("owner", &ME))))
+            .build(),
+    )
+}
+
+/// `schema(false)` with `first_owner`, a lens's copy of `owner`.
+fn schema_with_copy() -> JazzSchema {
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("owner", ColumnType::Text)
+                    .column("body", ColumnType::Bytea)
+                    .column("first_owner", ColumnType::Text)
+                    .policies(read_and_allow_all_writes(session_eq("owner", &ME))),
+            )
             .build(),
     )
 }
@@ -419,7 +541,7 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     .unwrap();
     block_on(server.update("notes", shared, note(1, large(2)), UpdateOptions::default())).unwrap();
 
-    // Schema, SchemaAdmission, Subscribe, Rows, Settled, ChunkRequests,
+    // Schema, SchemaAdmission, Read (live), Rows, Settled, ChunkRequests,
     // Chunks: a client subscribes and pulls the large value it reads.
     let alice = open(0x51, user(1), false);
     connect(&alice, &server, user(1), &recorded);
@@ -442,9 +564,36 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     .unwrap();
     pump(&[&alice, &server, &alice]);
 
-    // Fetch, Answer, Origins: a serializable transaction's second read is
-    // pinned to its snapshot, so after a newer write it answers from
-    // history.
+    // Commit acting as an attributed author, then as a session with its
+    // claims: a backend over a trusted link writes for alice.
+    let backend = open(0x55, AuthorSubject::SYSTEM, false);
+    connect(&backend, &server, AuthorSubject::SYSTEM, &recorded);
+    backend.set_identity_claims(
+        user(1),
+        BTreeMap::from([(
+            jazz::query::provider_claim_key("sub"),
+            Value::String("alice".to_owned()),
+        )]),
+    );
+    for identity in [
+        WriteIdentity::Attribution(user(1)),
+        WriteIdentity::Session(user(1)),
+    ] {
+        block_on(backend.insert(
+            "notes",
+            note(1, vec![8]),
+            InsertOptions {
+                identity,
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        pump(&[&backend, &server, &backend]);
+    }
+
+    // Read (once), Settled with members: a serializable
+    // transaction's second read is pinned to its snapshot, so after a
+    // newer write it answers from history.
     let open_tx = OpenTransactionId::new();
     block_on(alice.begin_serializable(open_tx)).unwrap();
     let _ = drive(
@@ -459,8 +608,8 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     );
     alice.abandon_transaction_handle(open_tx).unwrap();
 
-    // Origins: a history subscription ships superseded versions, and the
-    // commits behind them first.
+    // A history subscription ships superseded versions, with the commits
+    // behind them.
     let history = alice
         .prepare_query(
             &Query::from("history.notes").filter(eq(col("id"), lit(Value::Uuid(shared.0)))),
@@ -469,7 +618,7 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     let _history = block_on(alice.subscribe(&history, ReadOpts::default())).unwrap();
     pump(&[&alice, &server, &alice]);
 
-    // Advise, Advice.
+    // CheckAllowed, CheckAllowedResult.
     let id = alice.request_permission_advice(
         PermissionAdviceAction::Read {
             table: "notes".to_owned(),
@@ -493,8 +642,8 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     drop(stream);
     pump(&[&alice, &server, &alice]);
 
-    // Hold, Evict: alice's own note is deleted while she is away; she
-    // reconnects holding it.
+    // ResendWhole, AccessLost: alice's own note is deleted while she is
+    // away; she reconnects holding it.
     block_on(server.delete("notes", mine, Default::default())).unwrap();
     connect(&alice, &server, user(1), &recorded);
     pump(&[&alice, &server, &alice]);
@@ -545,20 +694,39 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     block_on(mallory.insert("notes", note(2, vec![7]), InsertOptions::default())).unwrap();
     pump(&[&mallory, &server, &mallory]);
 
+    // Catalogue with versions and cells: the server admits a version whose
+    // lens copies a column while alice is connected.
+    let copied = schema_with_copy();
+    let lens = MigrationLens::new(
+        schema(false).version_id(),
+        copied.version_id(),
+        vec![TableLens {
+            source_table: "notes".into(),
+            target_table: "notes".into(),
+            ops: vec![LensOp::CopyColumn {
+                from: "owner".into(),
+                to: "first_owner".into(),
+            }],
+        }],
+    )
+    .unwrap();
+    block_on(server.activate_schema_with_lenses(copied, &[lens])).unwrap();
+    pump(&[&alice, &server, &alice]);
+
     // Refused: a subscription the server cannot serve. No replica sends
     // one (it prepares queries against the same schema), so a raw session
     // does, on the schema version alice announced.
     let schema = postcard::from_bytes::<SyncMessage>(&recorded.borrow()["Schema"].1).unwrap();
     let inbound = Rc::new(RefCell::new(VecDeque::from([
         schema,
-        SyncMessage::Subscribe {
+        SyncMessage::Read {
             id: 1,
-            query: Query::from("missing"),
+            query: Box::new(Query::from("missing")),
             binding: BTreeMap::new(),
-            since: None,
             include_deleted: false,
             tier: ReadTier::LocalFirst,
             wait: None,
+            span: ReadSpan::Live { since: None },
         },
     ])));
     server.accept_subscriber(
@@ -572,16 +740,16 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     );
     pump(&[&server]);
 
-    // Hold: a replica asks for a row whole when a shipped delta does not
+    // ResendWhole: a replica asks for a row whole when a shipped delta does not
     // apply over the version it holds, which takes a corrupted delta to
     // provoke; its frame is pinned as a replica encodes it.
-    let hold = SyncMessage::Hold {
+    let hold = SyncMessage::ResendWhole {
         rows: vec![("notes".to_owned(), [0x11; 16], Vec::new(), 0)],
     };
     let [frame] = encode_frames(hold).unwrap().try_into().unwrap();
     recorded
         .borrow_mut()
-        .insert("Hold".to_owned(), ("server".to_owned(), frame));
+        .insert("ResendWhole".to_owned(), ("server".to_owned(), frame));
 
     recorded.borrow().clone()
 }
@@ -645,7 +813,18 @@ fn produce_sqlite_sync_wire_corpus_v1() {
         "malformed frame",
     )))
     .unwrap();
-    let mut commit = unhex(&messages[4].frame_hex);
+    let shapes: Vec<(&str, String, Vec<u8>)> = SHAPES
+        .iter()
+        .map(|name| {
+            let (reader, frame) = recorded
+                .remove(*name)
+                .unwrap_or_else(|| panic!("the scenario never sent a {name}"));
+            (*name, reader, frame)
+        })
+        .collect();
+    let rows = shapes[1].2.clone();
+    let whole_commit = unhex(&messages[4].frame_hex);
+    let mut commit = whole_commit.clone();
     commit.truncate(commit.len() / 2);
     let subscribe = unhex(&messages[0].frame_hex);
     let unsubscribe = unhex(&messages[1].frame_hex);
@@ -694,7 +873,24 @@ fn produce_sqlite_sync_wire_corpus_v1() {
                 batch(&[subscribe.clone(), unsubscribe]),
             ),
             entry("structured error", "client", batch(&[error])),
-        ],
+            entry(
+                "a split message in one batch",
+                "client",
+                batch(&split(&rows)),
+            ),
+            entry(
+                "a split commit in one batch",
+                "server",
+                batch(&split(&whole_commit)),
+            ),
+        ]
+        .into_iter()
+        .chain(
+            shapes
+                .iter()
+                .map(|(name, reader, frame)| entry(name, reader, batch(&[frame.clone()]))),
+        )
+        .collect(),
         rejections: vec![
             entry(
                 "unknown sync message discriminant",
@@ -738,6 +934,19 @@ fn produce_sqlite_sync_wire_corpus_v1() {
                 batch(&[vec![1, 0xff]]),
             ),
             entry("not a websocket frame batch", "server", hex(&[0xff, 0xff])),
+            entry(
+                "a split message's last part with no part before it",
+                "client",
+                batch(&[split(&rows)[1].clone()]),
+            ),
+            entry(
+                "a whole message between a split message's parts",
+                "client",
+                batch(&{
+                    let [head, tail] = split(&rows);
+                    [head, rows.clone(), tail]
+                }),
+            ),
         ],
     };
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

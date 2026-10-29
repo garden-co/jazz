@@ -3,15 +3,17 @@
 //! identity and acceptance time.
 //!
 //! Versions come from the table and its `__h` table. A version is listed
-//! when its commit wrote content (`_c`; deletes and restores without
-//! content are not versions) and the authority accepted it (`_seq` below
-//! [`crate::db::LOCAL_BASE`]: a replica's pending writes are not). Access
+//! when its commit wrote content (`_st` without
+//! [`crate::values::STATE_NO_CONTENT`]; deletes and restores without
+//! content are not versions), it is no merged text write's value as sent
+//! ([`crate::values::STATE_AS_SENT`]) and the authority accepted it (`_seq`
+//! below [`crate::db::LOCAL_BASE`]: a replica's pending writes are not). Access
 //! follows the current row: its read policy, in its branch, gates every
 //! version of it, and a deleted current row hides its history unless the
 //! read includes deleted rows.
 //!
 //! `$transactionId` is the `(tx, node)` the writer committed under, as
-//! `_jazz_settled` records it for an upload. The authority's own commits
+//! `_jazz_transactions` records it for an upload. The authority's own commits
 //! are not recorded there: they are `(seq, authority node)`. A replica
 //! lists only versions whose transaction it knows. `$acceptedAt` is the
 //! authority's stamp for the commit (ms, distinct per commit) as an HLC
@@ -90,14 +92,13 @@ impl Ctx<'_> {
             // Every listed version contributes, current or superseded.
             return self.compile_aggregate(query, aggregate, versions, &source, alias, &wheres);
         }
-        let (order, ranked_order) = self.order_sql(versions, alias, &query.order_by)?;
+        let order = self.order_sql(versions, alias, &query.order_by)?;
         // Versions of one row share its id: their seq orders them.
         let tie = match query.order_by.last().map(|key| key.direction) {
             Some(OrderDirection::Desc) => "DESC",
             _ => "ASC",
         };
         let order = format!("{order}, {alias}._seq {tie}");
-        let ranked_order = ranked_order.map(|ranked| format!("{ranked}, {alias}._seq {tie}"));
         let columns = projection
             .iter()
             .map(|(name, _)| Ok(format!(", {}", column_sql(versions, alias, name)?)))
@@ -106,7 +107,7 @@ impl Ctx<'_> {
         let offset = self.bind(Sql::Integer(query.offset as i64));
         let statement = |order: &str| {
             format!(
-                "SELECT {alias}.id, {alias}._seq, {alias}._del, {alias}.{} \
+                "SELECT {alias}.id, {alias}._seq, {alias}._st, {alias}.{} \
                  {columns} FROM {source} AS {alias} WHERE {} ORDER BY {order} LIMIT {limit} \
                  OFFSET {offset}",
                 quote(TRANSACTION_ID_COLUMN),
@@ -115,16 +116,13 @@ impl Ctx<'_> {
         };
         Ok(Compiled {
             sql: statement(&order),
-            ranked_sql: ranked_order.as_deref().map(statement),
             params: self.params,
             projection,
             tables: self.tables,
             aggregate: false,
-            large_group: false,
             joined: 0,
             versioned: true,
             union: false,
-            preps: self.preps,
             partial: Vec::new(),
         })
     }
@@ -161,7 +159,7 @@ impl Ctx<'_> {
         let history = quote(&format!("{}__h", table.stored));
         let mut gate = vec!["a.id = v.id".to_owned(), "a._b = v._b".to_owned()];
         let mut keep = vec![
-            "v._c = 1".to_owned(),
+            format!("(v._st & {}) = 0", STATE_NO_CONTENT | STATE_AS_SENT),
             format!("v._seq < {}", crate::db::LOCAL_BASE),
         ];
         if let Some(view) = &self.view
@@ -171,7 +169,7 @@ impl Ctx<'_> {
             keep.push(format!("v._b = {head}"));
         }
         if !include_deleted {
-            gate.push("a._del = 0".to_owned());
+            gate.push(format!("(a._st & {STATE_DELETED}) = 0"));
         }
         if let Some(session) = self.policy {
             gate.push(self.read_policy(table, "a", session)?);
@@ -180,8 +178,9 @@ impl Ctx<'_> {
             "EXISTS (SELECT 1 FROM {name} AS a WHERE {})",
             and(&gate)
         ));
-        let recorded = "(SELECT unhex(printf('%016x', s.tx) || hex(s.node)) \
-                        FROM _jazz_settled AS s WHERE s.seq = v._seq)";
+        let recorded = "(SELECT unhex(printf('%016x', s.tx) || hex(n.node)) \
+                        FROM _jazz_transactions AS s JOIN _jazz_nodes AS n ON n.n = s.n \
+                        WHERE s.seq = v._seq)";
         let transaction = match self.history_origin {
             Some(node) => format!(
                 "COALESCE({recorded}, unhex(printf('%016x', v._seq) || '{}'))",
@@ -203,9 +202,9 @@ impl Ctx<'_> {
             ));
         }
         let source = format!(
-            "(SELECT v.id, v._b, v._seq, 0 AS _del{v_stored}, {transaction} AS {}, \
-             {accepted} AS {}{deletion} FROM (SELECT id, _b, _seq, _c{stored} FROM {name} AS c \
-             WHERE {current_bound} UNION ALL SELECT id, _b, _seq, _c{stored} FROM {history} AS h \
+            "(SELECT v.id, v._b, v._seq, 0 AS _st{v_stored}, {transaction} AS {}, \
+             {accepted} AS {}{deletion} FROM (SELECT id, _b, _seq, _st{stored} FROM {name} AS c \
+             WHERE {current_bound} UNION ALL SELECT id, _b, _seq, _st{stored} FROM {history} AS h \
              WHERE {history_bound}) AS v WHERE {})",
             quote(TRANSACTION_ID_COLUMN),
             quote(ACCEPTED_AT_COLUMN),
@@ -218,12 +217,9 @@ impl Ctx<'_> {
 }
 
 /// The table a history source of `table` reads as: its columns plus the
-/// history metadata, under the source's name (large-value preps answer
-/// from the table and its history alike), each version carrying its
+/// history metadata, under the source's name, each version carrying its
 /// current row's deletion.
 pub(super) fn versions_table(table: &Table) -> Table {
-    // The source's columns plus the metadata, under the source's name:
-    // large-value preps answer from the table and its history alike.
     let mut versions = table.clone();
     for metadata in HistoryMetadataColumn::ALL {
         let ty = match metadata {

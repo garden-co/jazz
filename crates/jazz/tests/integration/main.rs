@@ -21,6 +21,8 @@ mod binding_host;
 mod branch_column_evolution;
 #[path = "../branch_views.rs"]
 mod branch_views;
+#[path = "../catalogue_rows.rs"]
+mod catalogue_rows;
 #[path = "../claims_change.rs"]
 mod claims_change;
 #[path = "../column_defaults.rs"]
@@ -73,14 +75,20 @@ mod local_first_first_load_gate;
 mod local_first_server_wait;
 #[path = "../maybe_conflicting.rs"]
 mod maybe_conflicting;
+#[path = "../mutation_admission.rs"]
+mod mutation_admission;
 #[path = "../order_by_unselected_column.rs"]
 mod order_by_unselected_column;
 #[path = "../parameterized_subscription_routing.rs"]
 mod parameterized_subscription_routing;
+#[path = "../pending_commit_reopen.rs"]
+mod pending_commit_reopen;
 #[path = "../permission_advice.rs"]
 mod permission_advice;
 #[path = "../policy_activation.rs"]
 mod policy_activation;
+#[path = "../pre_sync_writes.rs"]
+mod pre_sync_writes;
 #[path = "../prepared_claim_routing.rs"]
 mod prepared_claim_routing;
 #[path = "../provenance.rs"]
@@ -129,6 +137,10 @@ mod snapshots;
 mod storage_corpus;
 #[path = "../storage_errors.rs"]
 mod storage_errors;
+#[path = "../stored_identities.rs"]
+mod stored_identities;
+#[path = "../streaming_upload_ownership.rs"]
+mod streaming_upload_ownership;
 #[path = "../structured_result_tree.rs"]
 mod structured_result_tree;
 #[path = "../sync_access_loss.rs"]
@@ -161,6 +173,8 @@ mod text_merge;
 mod transaction_commit_kind;
 #[path = "../transaction_handles.rs"]
 mod transaction_handles;
+#[path = "../transaction_read_tiers.rs"]
+mod transaction_read_tiers;
 #[path = "../union_queries.rs"]
 mod union_queries;
 #[path = "../uuid_page_probe.rs"]
@@ -172,3 +186,6 @@ mod write_check_evidence;
 mod storage_owner_retirement;
 #[path = "../write_receipt_owner.rs"]
 mod write_receipt_owner;
+
+#[path = "../transaction_read_prefix.rs"]
+mod transaction_read_prefix;

@@ -347,6 +347,7 @@ fn a_tab_refuses_an_upstream_version_numbered_in_its_own_range() {
                 content: true,
                 cells: Vec::new(),
             }],
+            tx_ids: Vec::new(),
         })
         .unwrap();
     let error = block_on(tab.tick()).expect_err("the tab refuses the version");
@@ -496,7 +497,7 @@ fn a_session_gets_no_unreadable_version_under_its_own_pending_write() {
 
     let secret = SyncCell::Text(b"secret".to_vec());
     for message in net.to_tabs[0].borrow().iter() {
-        if let SyncMessage::Rows { images } = message {
+        if let SyncMessage::Rows { images, .. } = message {
             for image in images {
                 assert!(
                     !image.cells.iter().any(|(_, cell)| *cell == secret),

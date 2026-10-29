@@ -5413,6 +5413,7 @@ const REJECTION_CODES_BY_REASON: Readonly<Record<NativeCoreErrorReason, string>>
   missing_chunks: "write_rejected",
   permissions_head_missing: "write_rejected",
   predecessor_rejected: "write_rejected",
+  schema_version_not_deployed: "write_rejected",
 };
 
 /** A rejected wait's code, from the core reason every binding carries on it. */

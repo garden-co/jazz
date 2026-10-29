@@ -433,8 +433,10 @@ fn update_cells(db: &Db, table: &str, id: RowUuid, cells: BTreeMap<String, Value
 
 /// Large notes that sort by `prefix`: the prefix leads, and the filler keeps
 /// every value indirect.
+/// Long notes that stay inline: a chunked value sorts by its cell, not its
+/// content (SPEC 19.5), so ordering tests use values under the threshold.
 fn sorting_notes(prefix: &str) -> String {
-    format!("{prefix}{}", "n".repeat(LEAF_MAX_BYTES * 2))
+    format!("{prefix}{}", "n".repeat(8 * 1024))
 }
 
 /// The public event parts these tests fold.
@@ -739,4 +741,75 @@ fn a_listing_filtered_and_ordered_by_a_large_column_keeps_its_order() {
         assert_eq!(listed.cell("contents"), None);
         assert_eq!(listed.cell("notes"), None);
     }
+}
+
+/// A subscription ordered by a large-capable column places chunked values
+/// as a one-shot read does: before every inline value ascending (SPEC 19.5),
+/// and moves a row when its value crosses the threshold either way.
+///
+/// alice ──subscribe order by notes──► [chunked a, b, d]
+/// alice ──set b's notes over 64 KB──► [chunked a and b, d]
+/// alice ──set a's notes to "c…"─────► [chunked b, c, d]
+#[test]
+fn a_subscription_ordered_by_a_large_column_places_chunked_values_first() {
+    let db = open_db(files_schema(), 0xd1);
+    for (seed, notes) in [
+        (0xd2, large_notes("a")),
+        (0xd3, sorting_notes("b")),
+        (0xd4, sorting_notes("d")),
+    ] {
+        let write = block_on(db.insert(
+            FILES,
+            BTreeMap::from([
+                ("name".to_owned(), Value::String(format!("{seed}.bin"))),
+                ("notes".to_owned(), Value::String(notes)),
+                ("contents".to_owned(), Value::Bytes(Vec::new())),
+            ]),
+            InsertOptions {
+                row_id: Some(row(seed)),
+                ..Default::default()
+            },
+        ))
+        .expect("insert file");
+        block_on(write.wait(DurabilityTier::Local)).expect("local durability");
+    }
+    let query = Query::from(FILES)
+        .select(["name"])
+        .order_by("notes", OrderDirection::Asc);
+    let read = |db: &Db| {
+        let prepared = db.prepare_query(&query).expect("prepare read");
+        block_on(db.all(&prepared, opts()))
+            .expect("read")
+            .iter()
+            .map(CurrentRow::row_uuid)
+            .collect::<Vec<_>>()
+    };
+    let mut listing = subscribe(&db, query.clone());
+    let mut rows = OrderedRows::default();
+    rows.apply(next_event(&mut listing));
+    assert_eq!(rows.ids(), vec![row(0xd2), row(0xd3), row(0xd4)]);
+    assert_eq!(rows.ids(), read(&db));
+
+    update_cells(
+        &db,
+        FILES,
+        row(0xd3),
+        BTreeMap::from([("notes".to_owned(), Value::String(large_notes("b")))]),
+    );
+    rows.apply(next_event(&mut listing));
+    let mut chunked = rows.ids()[..2].to_vec();
+    chunked.sort();
+    assert_eq!(chunked, vec![row(0xd2), row(0xd3)]);
+    assert_eq!(rows.ids()[2], row(0xd4));
+    assert_eq!(rows.ids(), read(&db));
+
+    update_cells(
+        &db,
+        FILES,
+        row(0xd2),
+        BTreeMap::from([("notes".to_owned(), Value::String(sorting_notes("c")))]),
+    );
+    rows.apply(next_event(&mut listing));
+    assert_eq!(rows.ids(), vec![row(0xd3), row(0xd2), row(0xd4)]);
+    assert_eq!(rows.ids(), read(&db));
 }

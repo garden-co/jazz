@@ -82,7 +82,7 @@ struct Version {
     seq: u64,
     built: Option<Built>,
     /// Bitmask over the table's column codes; `None` authors every
-    /// column, `_del` included.
+    /// column, `_st` included.
     cols: Option<Vec<u8>>,
 }
 
@@ -124,10 +124,10 @@ impl Knowledge {
 }
 
 /// The authored-column name a deletion or restore writes.
-const DELETION: &str = "_del";
+const DELETION: &str = "_st";
 
 /// Whether two writes' authored-column bitmasks overlap; `None` authors
-/// every column, `_del` included.
+/// every column, `_st` included.
 fn authored_overlap(left: Option<&[u8]>, right: Option<&[u8]>) -> bool {
     match (left, right) {
         (Some(left), Some(right)) => left.iter().zip(right).any(|(l, r)| l & r != 0),
@@ -277,8 +277,8 @@ impl Inner {
         &self,
         sender: ([u8; 16], u64),
         ops: &[StagedOp],
-        bases: Vec<WireBase>,
-    ) -> Result<Vec<WireBase>, Error> {
+        bases: Vec<(usize, WireBase)>,
+    ) -> Result<Vec<(usize, WireBase)>, Error> {
         let me = *self.identity.node.as_bytes();
         let pending = &self.client.as_ref().expect("a relay is a client").pending;
         // Where a commit this relay carries landed: still in its own local
@@ -292,11 +292,11 @@ impl Inner {
         };
         bases
             .into_iter()
-            .map(|base| {
+            .map(|(op, base)| {
                 let on = match base.on {
                     BuiltOn::Seq(seq) if seq < LOCAL_BASE => BuiltOn::Seq(seq),
                     BuiltOn::Seq(seq) if seq < NON_DURABLE_BASE => {
-                        let (table, row) = self.based_row(ops, &base)?;
+                        let (table, row) = self.based_row(ops, op)?;
                         let row_key = (table.to_owned(), row, base.key.clone());
                         let own_pending = pending
                             .by_row
@@ -324,16 +324,41 @@ impl Inner {
                     }
                     BuiltOn::Commit { .. } => return Err(unknown_base("another node's commit")),
                 };
-                Ok(WireBase { on, ..base })
+                Ok((op, WireBase { on, ..base }))
             })
             .collect()
     }
 
-    /// The stored table and row a base names, by its op.
-    fn based_row(&self, ops: &[StagedOp], base: &WireBase) -> Result<(&str, RowUuid), Error> {
-        let op = ops
-            .get(base.op as usize)
-            .ok_or_else(|| unknown_base("an op"))?;
+    /// Refuse bases SPEC 8.2 does not allow: each travels on the commit's
+    /// first op that writes its row, and names a row and branch key no
+    /// other base names.
+    pub(super) fn check_bases(
+        &self,
+        ops: &[StagedOp],
+        by_row: &RowOps,
+        bases: &[(usize, WireBase)],
+    ) -> Result<(), Error> {
+        let misplaced =
+            |what: &str| Error::new(ErrorCode::Protocol, format!("a write's base {what}"));
+        let mut named = HashSet::new();
+        for (op, base) in bases {
+            let (table, row) = self.based_row(ops, *op)?;
+            let first = by_row
+                .get(&(table.to_owned(), row))
+                .and_then(|ops| ops.first());
+            if first != Some(op) {
+                return Err(misplaced("is not on the first op that writes its row"));
+            }
+            if !named.insert((table, row, base.key.as_slice())) {
+                return Err(misplaced("names a row another base of its commit names"));
+            }
+        }
+        Ok(())
+    }
+
+    /// The stored table and row a base names, by the op it travels on.
+    fn based_row(&self, ops: &[StagedOp], op: usize) -> Result<(&str, RowUuid), Error> {
+        let op = ops.get(op).ok_or_else(|| unknown_base("an op"))?;
         match (op.row(), self.schema.stored_table(op.table())) {
             (Some(row), Ok(table)) => Ok((table, row)),
             _ => Err(unknown_base("an op")),
@@ -353,18 +378,20 @@ impl Inner {
     /// What each based row of an upload was built on, in this authority's
     /// history, keyed by the row: an accepted seq, or where the commit it
     /// names landed. A base on a commit rejected or never received rejects
-    /// the upload.
+    /// the upload. `local`: this store is a relay, whose sessions build on
+    /// its unsettled versions too (by their local seqs).
     pub(super) fn resolve_bases(
         &self,
         sender: ([u8; 16], u64),
         ops: &[StagedOp],
-        bases: &[WireBase],
+        bases: &[(usize, WireBase)],
+        local: bool,
     ) -> Result<HashMap<RowKey, Built>, Error> {
         let mut built = HashMap::new();
-        for base in bases {
-            let (table, row) = self.based_row(ops, base)?;
+        for (op, base) in bases {
+            let (table, row) = self.based_row(ops, *op)?;
             let on = match base.on {
-                BuiltOn::Seq(seq) if seq < LOCAL_BASE => Built::Seq(seq),
+                BuiltOn::Seq(seq) if local || seq < LOCAL_BASE => Built::Seq(seq),
                 BuiltOn::Seq(_) => return Err(unknown_base("a version")),
                 BuiltOn::Own { back } => {
                     let tx = sender
@@ -415,6 +442,24 @@ impl Inner {
         Ok(())
     }
 
+    /// The current version of each branch of a row, as (key, seq).
+    pub(super) fn current_versions(
+        &self,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<Vec<(Vec<u8>, u64)>, Error> {
+        let sql = format!("SELECT _b, _seq FROM {} WHERE id = ?1", quote(table));
+        let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
+        let versions = statement
+            .query_map([row.0.as_bytes().to_vec()], |r| {
+                Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)? as u64))
+            })
+            .map_err(storage)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage)?;
+        Ok(versions)
+    }
+
     /// The accepted versions of a row, in seq order.
     fn accepted_versions(
         &self,
@@ -425,7 +470,7 @@ impl Inner {
         let sql = format!(
             "SELECT _seq, _base, _cols FROM {} WHERE id = ?1 AND _b = ?2 \
              UNION ALL SELECT _seq, _base, _cols FROM {} WHERE id = ?1 AND _b = ?2 \
-             ORDER BY 1",
+             AND (_st & {STATE_AS_SENT}) = 0 ORDER BY 1",
             quote(table),
             quote(&format!("{table}__h"))
         );
@@ -456,7 +501,7 @@ impl Inner {
     ) -> Result<Vec<WriteConflict>, Error> {
         let history = self.accepted_versions(table, row, key)?;
         let writers: BTreeMap<u64, ([u8; 16], u64)> = self
-            .origins(&history.iter().map(|v| v.seq).collect())?
+            .tx_ids(&history.iter().map(|v| v.seq).collect())?
             .into_iter()
             .map(|(seq, node, tx)| (seq, (node, tx)))
             .collect();
@@ -504,18 +549,18 @@ impl Inner {
     /// are read to decide; the value is read only when a merge is needed.
     ///
     /// The value is the newest one the writer's chain gave the column: an
-    /// unsettled link that authored it (its version as accepted, with the
-    /// link's seq, so the caller can take it back to the value as sent),
-    /// or else the version the chain's floor names. A link that left the
-    /// column alone holds whatever the authority held, which its writer
-    /// never saw, so the walk passes it by.
+    /// unsettled link that authored it, as the link sent it (its as-sent
+    /// version when a text merge changed it, [`STATE_AS_SENT`], else its
+    /// version as accepted), or else the version the chain's floor names.
+    /// A link that left the column alone holds whatever the authority held,
+    /// which its writer never saw, so the walk passes it by.
     pub(crate) fn merge_base(
         &self,
         (table, row, key): (&str, RowUuid, &[u8]),
         built: Built,
         before: u64,
         column: &str,
-    ) -> Result<Option<(Sql, Option<u64>)>, Error> {
+    ) -> Result<Option<Sql>, Error> {
         let history = self.accepted_versions(table, row, key)?;
         let knew = Knowledge::of(built, &history);
         let code = self.column_code(table, column)?;
@@ -553,6 +598,24 @@ impl Inner {
         let Some(at) = at else {
             return Ok(None);
         };
+        let id = row.0.as_bytes().to_vec();
+        if let Some(on) = sent {
+            let sql = format!(
+                "SELECT {} FROM {} WHERE id = ?1 AND _b = ?2 AND _seq = ?3",
+                quote(column),
+                quote(&format!("{table}__h")),
+            );
+            let cell = self
+                .conn
+                .cached_row(&sql, rusqlite::params![id, key, -(on as i64)], |r| {
+                    r.get::<_, Sql>(0)
+                })
+                .optional()
+                .map_err(storage)?;
+            if cell.is_some() {
+                return Ok(cell);
+            }
+        }
         let sql = format!(
             "SELECT {column} FROM {} WHERE id = ?1 AND _b = ?2 AND _seq = ?3 \
              UNION ALL SELECT {column} FROM {} WHERE id = ?1 AND _b = ?2 AND _seq = ?3",
@@ -562,14 +625,12 @@ impl Inner {
         );
         let cell = self
             .conn
-            .cached_row(
-                &sql,
-                rusqlite::params![row.0.as_bytes().to_vec(), key, at as i64],
-                |r| r.get::<_, Sql>(0),
-            )
+            .cached_row(&sql, rusqlite::params![id, key, at as i64], |r| {
+                r.get::<_, Sql>(0)
+            })
             .optional()
             .map_err(storage)?;
-        Ok(cell.map(|cell| (cell, sent)))
+        Ok(cell)
     }
 }
 
@@ -615,8 +676,7 @@ impl Db {
         let Some(built) = built else {
             return Ok(None);
         };
-        let Some((cell, _)) = inner.merge_base((&stored, row, &[]), built, seq, &stored_column)?
-        else {
+        let Some(cell) = inner.merge_base((&stored, row, &[]), built, seq, &stored_column)? else {
             return Ok(None);
         };
         let ty = &schema_table
@@ -626,10 +686,11 @@ impl Db {
         crate::values::from_sql(ty, cell.as_ref(), &inner.chunks)
     }
 
-    /// How many `_jazz_text_in` entries this store keeps.
+    /// How many as-sent versions of merged text writes this store keeps
+    /// (SPEC 4 §4.3).
     #[cfg(feature = "testing")]
-    pub fn text_in_entries_for_test(&self) -> Result<u64, Error> {
-        self.inner().text_in_entries()
+    pub fn as_sent_versions_for_test(&self) -> Result<u64, Error> {
+        self.inner().as_sent_versions()
     }
 
     /// How many bytes column `column` of `table`'s unbranched row `row`
