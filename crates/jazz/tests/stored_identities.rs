@@ -739,3 +739,117 @@ fn a_store_without_recorded_types_adds_a_column_again_as_a_new_one() {
         .unwrap();
     assert!(recorded > 0, "its types are recorded");
 }
+
+/// `notes(text, rank: text)`, `rank` required, defaulting to `default` when
+/// given: `rank`'s type changed in place, without a lens.
+fn required_text_rank(default: Option<&str>) -> JazzSchema {
+    let table = TableSchemaBuilder::new("notes").column("text", ColumnType::Text);
+    let table = match default {
+        Some(default) => table.column_with_default(
+            "rank",
+            ColumnType::Text,
+            jazz::tools::Value::Text(default.into()),
+        ),
+        None => table.column("rank", ColumnType::Text),
+    };
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(table.policies(allow_all_policies()))
+            .build(),
+    )
+}
+
+fn text(value: &str) -> Value {
+    Value::String(value.into())
+}
+
+/// A required column whose type changes in place has no value in the rows
+/// already stored: without a default it is refused, on the authority and on
+/// a store opened ahead of it, naming the column.
+#[test]
+fn a_required_column_changed_in_place_without_a_default_is_refused() {
+    let server = authority(notes("notes", "text"), 0);
+    insert(&server, 1, &[("text", text("a")), ("rank", Value::I64(7))]);
+    let error = block_on(server.activate_schema(required_text_rank(None))).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("changing the type of required column notes.rank without a default"),
+        "{error}"
+    );
+    assert_eq!(ranks(&server), [Some(Value::I64(7))]);
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("client.sqlite");
+    {
+        let client = open_at(notes("notes", "text"), 1, &path);
+        let _link = link(&client, &server);
+        let all = client.prepare_query(&Query::from("notes")).unwrap();
+        let _held = block_on(client.subscribe(&all, ReadOpts::default())).unwrap();
+        pump(&server, &[&client]);
+        assert_eq!(ranks(&client), [Some(Value::I64(7))]);
+    }
+    let Err(error) = block_on(Db::open_at(
+        config(required_text_rank(None), 1, AuthorSubject::SYSTEM),
+        &path,
+        FileOptions::default(),
+    )) else {
+        panic!("a store opened ahead takes the change");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("changing the type of required column notes.rank without a default"),
+        "{error}"
+    );
+    let client = open_at(notes("notes", "text"), 1, &path);
+    assert_eq!(
+        ranks(&client),
+        [Some(Value::I64(7))],
+        "the store is unchanged"
+    );
+}
+
+/// With a default, a required column whose type changes in place reads it
+/// in the rows already stored, takes writes like any column, and leaves the
+/// old version reading the values before; a replica mirrors all of it.
+#[test]
+fn a_required_column_changed_in_place_reads_its_default_in_existing_rows() {
+    let server = authority(notes("notes", "text"), 0);
+    for n in [1, 2] {
+        insert(&server, n, &[("text", text("a")), ("rank", Value::I64(7))]);
+    }
+    let client = block_on(Db::open(config(
+        notes("notes", "text"),
+        1,
+        AuthorSubject::SYSTEM,
+    )))
+    .unwrap();
+    let _link = link(&client, &server);
+    let all = client.prepare_query(&Query::from("notes")).unwrap();
+    let _held = block_on(client.subscribe(&all, ReadOpts::default())).unwrap();
+    pump(&server, &[&client]);
+
+    block_on(server.activate_schema(required_text_rank(Some("none")))).unwrap();
+    assert_eq!(ranks(&server), [Some(text("none")), Some(text("none"))]);
+    block_on(server.update(
+        "notes",
+        RowUuid::from_bytes([1; 16]),
+        BTreeMap::from([("rank".to_owned(), text("high"))]),
+        Default::default(),
+    ))
+    .unwrap();
+    insert(&server, 3, &[("text", text("c")), ("rank", text("low"))]);
+    let expected = [Some(text("high")), Some(text("none")), Some(text("low"))];
+    assert_eq!(ranks(&server), expected);
+    let old = block_on(server.register_schema_view(notes("notes", "text"))).unwrap();
+    assert_eq!(ranks(&old)[..2], [Some(Value::I64(7)), Some(Value::I64(7))]);
+
+    pump(&server, &[&client]);
+    let view = block_on(client.register_schema_view(required_text_rank(Some("none")))).unwrap();
+    assert_eq!(ranks(&view), expected);
+    assert_eq!(
+        ranks(&client)[..2],
+        [Some(Value::I64(7)), Some(Value::I64(7))]
+    );
+}
