@@ -273,7 +273,7 @@ enum Retirement {
     RejectAfterUpdate,
 }
 
-fn retained_rows_are_revoked(retirement: Retirement, revoke_before_drain: bool) {
+fn retirement_preserves_permission_boundaries(retirement: Retirement, revoke_before_drain: bool) {
     let reject = matches!(
         retirement,
         Retirement::RejectAfterInsert | Retirement::RejectAfterUpdate
@@ -406,52 +406,66 @@ fn retained_rows_are_revoked(retirement: Retirement, revoke_before_drain: bool) 
         assert_eq!(local(), [id(1)], "Alice retains the still-readable post");
         block_on(core.delete("grants", id(3), Default::default())).unwrap();
         pump();
+        assert_eq!(
+            local(),
+            [id(1)],
+            "An uncovered cached row stays cold after its grant is revoked",
+        );
+        let mut reopened = block_on(alice.subscribe(&query, ReadOpts::default())).unwrap();
+        pump();
+        drain_opening(&mut reopened);
+        assert_eq!(
+            local(),
+            [],
+            "Resubscribing rechecks permission and removes Alice's inaccessible post",
+        );
+    } else {
+        assert_eq!(
+            local(),
+            [],
+            "Retirement preserves revocations queued before the failure was drained",
+        );
     }
-    assert_eq!(
-        local(),
-        [],
-        "Alice loses the cached post when its permission grant is deleted",
-    );
 }
 
-/// Alice's cached post remains subject to Core's policy after normal unsubscribe.
+/// Alice unsubscribes, so her cached post stays cold after Core revokes its
+/// grant. Resubscribing checks permission again and removes the cached post.
 #[test]
-fn unsubscribe_retains_policy_tracking() {
-    retained_rows_are_revoked(Retirement::Unsubscribe, false);
+fn unsubscribe_rechecks_cold_rows_on_resubscription() {
+    retirement_preserves_permission_boundaries(Retirement::Unsubscribe, false);
 }
 
-/// Alice's cached post remains subject to Core's policy after a failed query:
-/// Core rejects --> Alice ends subscription --> Core revokes grant --> post leaves.
+/// Core rejects Alice's query, then revokes the grant on her cold cached post:
+/// reject --> revoke grant --> cached post stays --> resubscribe --> post leaves.
 #[test]
-fn rejection_retains_policy_tracking() {
-    retained_rows_are_revoked(Retirement::RejectAfterInsert, false);
+fn rejection_rechecks_cold_rows_on_resubscription() {
+    retirement_preserves_permission_boundaries(Retirement::RejectAfterInsert, false);
 }
 
 /// Alice loses her cached post even when Core revokes access before sending
 /// the query failure: reject --> revoke grant --> drain --> Alice loses post.
 #[test]
 fn rejection_preserves_queued_permission_revocations() {
-    retained_rows_are_revoked(Retirement::RejectAfterInsert, true);
+    retirement_preserves_permission_boundaries(Retirement::RejectAfterInsert, true);
 }
 
-/// Alice's updated post stays subject to Core's policy after a healthy query
-/// ends: update --> unsubscribe --> revoke grant --> cached post leaves.
+/// Alice's updated post becomes cold after unsubscribe. A later revocation
+/// removes it when Alice resubscribes, without continued tracking in between.
 #[test]
-fn unsubscribe_retains_updated_row_policy_tracking() {
-    retained_rows_are_revoked(Retirement::UnsubscribeAfterUpdate, false);
+fn unsubscribe_rechecks_updated_cold_rows_on_resubscription() {
+    retirement_preserves_permission_boundaries(Retirement::UnsubscribeAfterUpdate, false);
 }
 
-/// Alice loses an updated post after the update triggers a query failure:
-/// update --> reject --> revoke grant --> cached post leaves. The old result
-/// sequence must not prevent tracking the current version's permissions.
+/// An update fails Alice's query and makes her cached post cold. When she
+/// resubscribes, Core's later revocation prevents that post from remaining cached.
 #[test]
-fn rejection_retains_updated_row_policy_tracking() {
-    retained_rows_are_revoked(Retirement::RejectAfterUpdate, false);
+fn rejection_rechecks_updated_cold_rows_on_resubscription() {
+    retirement_preserves_permission_boundaries(Retirement::RejectAfterUpdate, false);
 }
 
 /// Alice loses the updated post when its grant is revoked before the failure
 /// is delivered: update --> reject --> revoke grant --> drain --> post leaves.
 #[test]
 fn rejection_preserves_updated_row_queued_permission_revocations() {
-    retained_rows_are_revoked(Retirement::RejectAfterUpdate, true);
+    retirement_preserves_permission_boundaries(Retirement::RejectAfterUpdate, true);
 }

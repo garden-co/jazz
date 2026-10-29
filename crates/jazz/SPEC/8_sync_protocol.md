@@ -629,17 +629,28 @@ transport:
   settled, is answered on arrival: a recovering relay acknowledges a write it
   restored from its own storage before the writer's resent copy reaches it.
   A terminal fate ends that standing. Messages on
-  other channels are never held. Held requests keep their buffer leases, so
-  the sender's request credit bounds what a receiver holds. When a turn's
+  other channels are never held. Held requests are meant to keep their buffer
+  leases, so the sender's request credit bounds what a receiver holds; the
+  server does not enforce that bound yet (#4291). When a turn's
   input runs out with requests held, the receiver sends the answers it has
   ready and serves the requests they release in that same turn, so the
   barrier costs no extra turn when the write is handled at once.
+- A receiver whose large-value ingress limit holds a commit back holds with
+  it every later message of the link that could observe it: a read that
+  depends on a table the held commits write (its query's tables and the
+  tables their read policies read), and anything whose effect on reads is
+  not known. Other reads, unsubscribes of reads not held, and permission
+  advice are served ahead; a read frozen at a snapshot never is, since the
+  snapshot may name the held commits. A read held this way waits until the
+  bytes queued ahead of it are admitted, i.e. for (bytes ahead) / (admitted
+  rate). (What a receiver holds is not yet bounded by the sender's credit:
+  #4291.)
 - "Answered" means stored or decided **at this node**. A Core answers with the
   terminal fate. A relay or local receiver answers with its local
   acknowledgement once the write is durable there, so its clients keep reading
   while it is offline; its own upstream link then puts that write ahead of the
-  requests it forwards. Each hop guarantees its own order, so the chain gives
-  read-your-writes end to end.
+  requests it forwards. Each hop (client to relay, relay to Core) guarantees
+  its own order, so the two give read-your-writes end to end.
 
 What this does not cover: a write still held on the client (for example behind
 its large-value upload) has not been sent, so no barrier names it. A one-shot
@@ -1405,3 +1416,19 @@ and byte corpus pin this mandatory pre-release layout; old layouts are unsupport
 - 🔶 [#2503](https://github.com/garden-co/jazz/issues/2503) — Bound restart-recovered authority publications without exposing an original write separately from its edge-generated merges.
 - 🔶 [#1784](https://github.com/garden-co/jazz/issues/1784) — Protocol parking, transport state, materialization options, coverage/subsumption, retention, and version tags.
 - 🔶 [#1779](https://github.com/garden-co/jazz/issues/1779) — Catalogue admission and synchronization.
+
+### SQLite served-subscription refusal (unshipped alpha.60)
+
+The SQLite sync wire v1 `Refused` frame appends
+`subscription_code: Option<SubscriptionServerFailureCode>` after its message.
+`None` is encoded as `00`; `Some` is `01` followed by category ordinal 0–6:
+TableNotFound, SchemaResolution, QueryValidation, QueryLowering,
+PolicyEvaluation, QueryResultProtocol, Internal. Relays preserve this typed
+category; message text has no classification role.
+
+This updates the unshipped alpha.60 SQLite layout, not storage bytes. Peers
+must use matching alpha.60 builds; no compatibility with earlier development
+layouts is claimed. The pinned `sqlite_sync_wire_v1.json` refusal and the
+`served_refusal_has_a_typed_wire_category` byte assertion define both shapes.
+After alpha.60 ships, changing this layout requires a new wire version and
+corpus, as specified by the corpus producer.

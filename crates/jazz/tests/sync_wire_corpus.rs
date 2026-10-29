@@ -51,7 +51,7 @@ const FORMAT: &str = "jazz-sqlite-sync-wire-corpus-v1";
 /// Every `SyncMessage` variant, in declaration order, but `RowsPart`: a
 /// framing of a `Rows` too large for one frame, whose real frames are
 /// megabytes (binding_host's frame-split test covers it).
-const VARIANTS: [&str; 20] = [
+const VARIANTS: [&str; 22] = [
     "Subscribe",
     "Unsubscribe",
     "Hold",
@@ -72,6 +72,8 @@ const VARIANTS: [&str; 20] = [
     "Origins",
     "SchemaAdmission",
     "Stored",
+    "Holds",
+    "Catalogue",
 ];
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -258,6 +260,13 @@ impl Transport for Recording {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
         for frame in encode_frames(message).unwrap() {
             let decoded: SyncMessage = postcard::from_bytes(&frame).unwrap();
+            // The pinned Commit is the first that relays a session's write
+            // built on an unsettled commit (bases, origin), else the first.
+            let relayed = matches!(
+                &decoded,
+                SyncMessage::Commit { bases, origin: Some(_), .. }
+                    if bases.iter().any(|base| matches!(base.on, jazz::db::BuiltOn::Commit { .. }))
+            );
             let mut recorded = self.recorded.borrow_mut();
             if let SyncMessage::Fate {
                 result: Err(SyncWireError::Rejected { reason, .. }),
@@ -268,9 +277,18 @@ impl Transport for Recording {
                     .entry(rejected_fate_key(reason.as_deref()))
                     .or_insert_with(|| (self.peer.to_owned(), frame.clone()));
             }
-            recorded
+            let pinned = recorded
                 .entry(variant(&decoded))
                 .or_insert_with(|| (self.peer.to_owned(), frame.clone()));
+            let pinned_relayed = matches!(
+                postcard::from_bytes(&pinned.1),
+                Ok(SyncMessage::Commit { bases, origin: Some(_), .. })
+                    if bases.iter().any(|base: &jazz::db::WireBase| matches!(base.on, jazz::db::BuiltOn::Commit { .. }))
+            );
+            if relayed && !pinned_relayed {
+                *pinned = (self.peer.to_owned(), frame.clone());
+            }
+            drop(recorded);
             self.outbound.borrow_mut().push_back(decoded);
         }
         Ok(())
@@ -493,7 +511,15 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     let tab = open(0x54, user(1), false);
     tab.set_non_durable_client();
     connect(&tab, &worker, user(1), &recorded);
-    block_on(tab.insert("notes", note(1, vec![5]), InsertOptions::default())).unwrap();
+    let tabs = block_on(tab.insert("notes", note(1, vec![5]), InsertOptions::default()))
+        .unwrap()
+        .row_uuid();
+    pump(&[&tab, &worker, &server, &worker, &tab]);
+    // Commit with bases and an origin: the tab edits its note twice before
+    // the first edit settles, and the worker relays both.
+    for body in [6, 7] {
+        block_on(tab.update("notes", tabs, note(1, vec![body]), UpdateOptions::default())).unwrap();
+    }
     pump(&[&tab, &worker, &server, &worker, &tab]);
 
     // Fate rejected with a reason: alice stamps a write further ahead of
@@ -545,6 +571,17 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
         user(3),
     );
     pump(&[&server]);
+
+    // Hold: a replica asks for a row whole when a shipped delta does not
+    // apply over the version it holds, which takes a corrupted delta to
+    // provoke; its frame is pinned as a replica encodes it.
+    let hold = SyncMessage::Hold {
+        rows: vec![("notes".to_owned(), [0x11; 16], Vec::new(), 0)],
+    };
+    let [frame] = encode_frames(hold).unwrap().try_into().unwrap();
+    recorded
+        .borrow_mut()
+        .insert("Hold".to_owned(), ("server".to_owned(), frame));
 
     recorded.borrow().clone()
 }
@@ -707,4 +744,20 @@ fn produce_sqlite_sync_wire_corpus_v1() {
         .join("fixtures")
         .join(CORPUS);
     std::fs::write(path, serde_json::to_string_pretty(&corpus).unwrap() + "\n").unwrap();
+}
+
+/// Alice's served failure carries its typed category independently of message
+/// text. These are the unshipped alpha.60 Refused bytes in SQLite sync wire v1.
+#[test]
+fn served_refusal_has_a_typed_wire_category() {
+    let message = SyncMessage::Refused {
+        id: 1,
+        code: jazz::db::ErrorCode::Protocol,
+        message: String::new(),
+        subscription_code: Some(jazz::db::SubscriptionServerFailureCode::PolicyEvaluation),
+    };
+    assert_eq!(
+        postcard::to_allocvec(&message).unwrap(),
+        [12, 1, 5, 0, 1, 4]
+    );
 }

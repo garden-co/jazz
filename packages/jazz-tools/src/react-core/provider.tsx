@@ -7,6 +7,7 @@ import React, {
   type ReactNode,
 } from "react";
 import type { AuthState } from "../runtime/auth-state.js";
+import type { SyncStatus } from "../runtime/sync-status.js";
 import { createClientConfigKey } from "../runtime/client-config-key.js";
 import {
   acquireClient as registryAcquireClient,
@@ -19,6 +20,8 @@ import { trackPromise } from "../subscriptions-orchestrator.js";
 type CoreJazzDb = {
   getAuthState(): AuthState;
   onAuthChanged(listener: (state: AuthState) => void): () => void;
+  getSyncStatus(): SyncStatus;
+  onSyncStatusChange(listener: (status: SyncStatus) => void): () => void;
 };
 
 export type CoreJazzClient = {
