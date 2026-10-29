@@ -334,14 +334,16 @@ impl Transport for Recording {
 /// history versions, a `Catalogue` carrying versions with their stored
 /// names and a lens's cells, a trusted link's `Commit`s acting as an
 /// attributed author and as a session, and a live `Read` in a branch view
-/// over a live base.
-const SHAPES: [&str; 6] = [
+/// over a live base, over a frozen base, and of a head alone.
+const SHAPES: [&str; 8] = [
     "Read/once",
     "Rows/tx_ids",
     "Catalogue/versions",
     "Commit/attributed",
     "Commit/session",
     "Read/live-branch-view",
+    "Read/live-branch-view-frozen",
+    "Read/live-branch-head",
 ];
 
 fn shape(message: &SyncMessage) -> Option<&'static str> {
@@ -376,6 +378,18 @@ fn shape(message: &SyncMessage) -> Option<&'static str> {
         {
             Some(SHAPES[5])
         }
+        SyncMessage::Read {
+            view,
+            span: ReadSpan::Live { .. },
+            ..
+        } => match **view {
+            ReadViewSourceSpec::BranchView {
+                base: Some(BranchViewBase::Snapshot { .. }),
+                ..
+            } => Some(SHAPES[6]),
+            ReadViewSourceSpec::BranchView { base: None, .. } => Some(SHAPES[7]),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -541,6 +555,22 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
         Some(BranchViewBase::Current(selector(0xd2))),
     );
     let drafted = block_on(alice.subscribe(&notes, in_draft)).unwrap();
+    pump(&[&alice, &server, &alice]);
+    drop(drafted);
+    // Read (live, in a branch view over a frozen base, and of a head alone).
+    let frozen = block_on(alice.capture_snapshot()).unwrap();
+    let over_frozen = ReadOpts::default().branch_view(
+        selector(0xd1),
+        Some(BranchViewBase::Snapshot {
+            branch: selector(0xd2),
+            snapshot: frozen,
+        }),
+    );
+    let drafted = block_on(alice.subscribe(&notes, over_frozen)).unwrap();
+    pump(&[&alice, &server, &alice]);
+    drop(drafted);
+    let head = ReadOpts::default().branch_view(selector(0xd1), None);
+    let drafted = block_on(alice.subscribe(&notes, head)).unwrap();
     pump(&[&alice, &server, &alice]);
     drop(drafted);
 

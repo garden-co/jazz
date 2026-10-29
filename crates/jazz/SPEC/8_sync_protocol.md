@@ -316,13 +316,19 @@ for one query's result:
 - A base row can reach a replica through any of its reads, and a head
   image the view's query would not match (a tombstone, a version outside
   its filter) still masks it there. So for a branch view over a base the
-  server also ships the head's rows of its root table whose base row the
-  query matches, read without its window on the base alone (as of a frozen
-  base's cut): all of them with a live read's opening (a resumed one's
-  too, since whether the reader may read one can change without it
-  changing), with a one-shot read's answer, and again when the head or the
-  base writes such a row. They follow from the view's query, not from what
-  the session shipped, so they hold across reconnects.
+  server also ships, for each branched table the read reads, the head's
+  rows whose base row the reader may see through the view: of the root
+  table, base rows the query matches, read without its window on the base
+  alone (as of a frozen base's cut) and narrowed to the head's ids; of a
+  table it reads besides (a relation, a join, a policy's table), base rows
+  the reader may read. It ships all of them with a live read's opening (a
+  resumed one's too, since whether the reader may read one can change
+  without it changing) and with a one-shot read's answer, and one again
+  when the head or the base writes it. A row whose base row the reader may
+  not see is never shipped or evicted for this, so a view tells the reader
+  nothing of rows it could not see anyway. These rows follow from the
+  view's query and the server's state, not from what the session shipped,
+  so they hold across reconnects.
 - A head row of these the reader may not read is **hidden**, not absent:
   in the view its effective row is the head's version, which the reader's
   policy denies, so the view leaves the row out, as the authority's own
@@ -337,9 +343,9 @@ for one query's result:
   server rechecks masking rows as it does supporting rows, §8.6), or when
   an `AccessLost { hidden: false }` says the row is gone. A view opened or
   resumed later re-derives it from the server's state, and a relay passes
-  its markers on to its sessions as hidden evictions. Known limits: joined
-  tables and policy tables are not masked (policy tables are read as the
-  current state).
+  its markers on to its sessions as hidden evictions. Known limit: the
+  replica evaluates a view's read policies over policy tables as their
+  current state, not in the view.
 - A listing judges only the rows the view holds. A cached row it leaves out
   that the head supplies is evicted; one the live base supplies may be
   another read's, so the replica asks for the head's and the base's row

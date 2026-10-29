@@ -108,17 +108,25 @@ fn branch(byte: u8) -> BranchSelector {
     BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([byte; 16])))])
 }
 
-/// A duplex that counts the row images the server ships.
+/// A duplex that counts the row images the server ships, and its
+/// evictions.
 struct Pipe {
     out: Rc<RefCell<VecDeque<SyncMessage>>>,
     inbound: Rc<RefCell<VecDeque<SyncMessage>>>,
     shipped: Option<Rc<RefCell<usize>>>,
 }
 
+thread_local! {
+    static EVICTIONS: RefCell<usize> = const { RefCell::new(0) };
+}
+
 impl Transport for Pipe {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
         if let (Some(count), SyncMessage::Rows { images, .. }) = (&self.shipped, &message) {
             *count.borrow_mut() += images.len();
+        }
+        if let (Some(_), SyncMessage::AccessLost { .. }) = (&self.shipped, &message) {
+            EVICTIONS.with(|count| *count.borrow_mut() += 1);
         }
         self.out.borrow_mut().push_back(message);
         Ok(())
@@ -1123,4 +1131,280 @@ fn a_reopened_store_keeps_hiding_a_row_offline() {
     let client = open_file();
     assert_eq!(titles(&client, &by_rank(), view), ["y"]);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn open_with(schema: JazzSchema, node: u8, author: AuthorSubject) -> Db {
+    block_on(Db::open(DbConfig::new(
+        schema,
+        DbIdentity {
+            node: NodeUuid::from_bytes([node; 16]),
+            author,
+        },
+    )))
+    .unwrap()
+}
+
+/// Bob's x on main and on the draft: Alice may read neither. With her view
+/// of the draft over main open, Bob's writes to x send her nothing, as
+/// without it: she learns of no row she may not see through the view.
+#[test]
+fn writes_to_a_row_the_reader_sees_on_neither_branch_send_her_nothing() {
+    let (server, client, shipped) = connected();
+    let (main, draft) = (branch(0x91), branch(0x92));
+    put(&server, &main, 0x10, "bob main", 1);
+    set(&server, 0x10, &draft, &main, &[("owner", subject(bob()))]);
+    block_on(server.update(
+        "todos",
+        RowUuid::from_bytes([0x10; 16]),
+        BTreeMap::from([("owner".to_owned(), subject(bob()))]),
+        jazz::db::UpdateOptions {
+            target: jazz::db::WriteTarget::BranchView {
+                head: main.clone(),
+                base: None,
+            },
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    let view =
+        ReadOpts::default().branch_view(draft.clone(), Some(BranchViewBase::Current(main.clone())));
+    let all = client.prepare_query(&by_rank()).unwrap();
+    let _v = block_on(client.subscribe(&all, view.clone())).unwrap();
+    pump(&server, &client);
+    let (images, evictions) = (*shipped.borrow(), EVICTIONS.with(|count| *count.borrow()));
+    set(
+        &server,
+        0x10,
+        &draft,
+        &main,
+        &[("title", Value::String("bob draft".into()))],
+    );
+    pump(&server, &client);
+    set_rank_on(&server, 0x10, &main, 7);
+    pump(&server, &client);
+    assert_eq!(*shipped.borrow(), images);
+    assert_eq!(EVICTIONS.with(|count| *count.borrow()), evictions);
+    assert!(titles(&client, &by_rank(), view).is_empty());
+}
+
+/// Head rows whose base row the view's query leaves out are not shipped,
+/// whoever writes them.
+#[test]
+fn rows_outside_the_views_query_on_the_base_ship_no_head_rows() {
+    let (server, client, shipped) = connected();
+    let (main, draft) = (branch(0x93), branch(0x94));
+    for i in 0..20u8 {
+        put(&server, &main, 0x80 + i, &format!("m{i}"), 50);
+    }
+    put(&server, &main, 0x46, "y", 1);
+    let view =
+        ReadOpts::default().branch_view(draft.clone(), Some(BranchViewBase::Current(main.clone())));
+    let prepared = client.prepare_query(&rank_one()).unwrap();
+    let _s = block_on(client.subscribe(&prepared, view.clone())).unwrap();
+    pump(&server, &client);
+    let before = *shipped.borrow();
+    for i in 0..20u8 {
+        set_rank(&server, 0x80 + i, &draft, &main, 60);
+    }
+    pump(&server, &client);
+    for i in 0..20u8 {
+        set_rank_on(&server, 0x80 + i, &main, 70);
+    }
+    pump(&server, &client);
+    assert_eq!(*shipped.borrow(), before);
+    assert_eq!(titles(&client, &by_rank(), view), ["y"]);
+}
+
+fn set_rank_on(db: &Db, row: u8, on: &BranchSelector, rank: i32) {
+    block_on(db.update(
+        "todos",
+        RowUuid::from_bytes([row; 16]),
+        BTreeMap::from([("rank".to_owned(), Value::I32(rank))]),
+        jazz::db::UpdateOptions {
+            target: jazz::db::WriteTarget::BranchView {
+                head: on.clone(),
+                base: None,
+            },
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+}
+
+/// Resumed live view: the head's x (tombstone or outside the filter) is
+/// older than `since`; while the replica is away main's x ENTERS the
+/// filter, and the main subscription brings it back. The resumed opening
+/// ships only head rows written after `since`.
+fn resume_base_enters_filter(tombstone: bool, bytes: (u8, u8)) -> Vec<String> {
+    let server = open(0x01, AuthorSubject::SYSTEM);
+    server.set_authority();
+    let client = open(0x02, alice());
+    let (up, _) = connect(&server, &client);
+    let (main, draft) = (branch(bytes.0), branch(bytes.1));
+    put(&server, &main, 0x45, "x", 5);
+    put(&server, &main, 0x46, "y", 1);
+    if tombstone {
+        del(&server, 0x45, &draft, Some(&main));
+    } else {
+        set_rank(&server, 0x45, &draft, &main, 9);
+    }
+    let all = client.prepare_query(&Query::from("todos")).unwrap();
+    let _m = block_on(client.subscribe(&all, ReadOpts::default().branch_view(main.clone(), None)))
+        .unwrap();
+    let view =
+        ReadOpts::default().branch_view(draft.clone(), Some(BranchViewBase::Current(main.clone())));
+    let prepared = client.prepare_query(&rank_one()).unwrap();
+    let _s = block_on(client.subscribe(&prepared, view.clone())).unwrap();
+    pump(&server, &client);
+    assert_eq!(titles(&client, &rank_one(), view.clone()), ["y"]);
+    assert!(client.detach_connection(&up));
+    set_rank_on(&server, 0x45, &main, 1);
+    std::mem::forget(connect(&server, &client).0);
+    pump(&server, &client);
+    pump(&server, &client);
+    titles(&client, &rank_one(), view)
+}
+
+#[test]
+fn a_resumed_view_masks_a_base_row_that_entered_its_filter_while_away() {
+    assert_eq!(resume_base_enters_filter(true, (0x51, 0x52)), ["y"]);
+    assert_eq!(resume_base_enters_filter(false, (0x53, 0x54)), ["y"]);
+}
+
+fn inc_schema() -> JazzSchema {
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("lists")
+                    .column("branch_id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text)
+                    .branch_by("branch_id")
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("branch_id", ColumnType::Uuid)
+                    .column("title", ColumnType::Text)
+                    .fk_column("list", "lists")
+                    .branch_by("branch_id")
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    )
+}
+
+/// A relation of a branched table: the draft deletes or renames the list;
+/// the replica's view shows what the server's does, whether it holds
+/// main's list through a main lists read or not.
+fn relation_names(tombstone: bool, bytes: (u8, u8), main_sub: bool) -> (String, String) {
+    let server = open_with(inc_schema(), 0x01, AuthorSubject::SYSTEM);
+    server.set_authority();
+    let client = open_with(inc_schema(), 0x02, alice());
+    std::mem::forget(connect(&server, &client).0);
+    let (main, draft) = (branch(bytes.0), branch(bytes.1));
+    let l = RowUuid::from_bytes([0x30; 16]);
+    block_on(server.insert(
+        "lists",
+        BTreeMap::from([("name".to_owned(), Value::String("main list".into()))]),
+        InsertOptions {
+            row_id: Some(l),
+            target: ExactWriteTarget::Branch(main.clone()),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    block_on(server.insert(
+        "todos",
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("t".into())),
+            (
+                "list".to_owned(),
+                Value::Uuid(uuid::Uuid::from_bytes([0x30; 16])),
+            ),
+        ]),
+        InsertOptions {
+            row_id: Some(RowUuid::from_bytes([0x31; 16])),
+            target: ExactWriteTarget::Branch(main.clone()),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    let target = jazz::db::WriteTarget::BranchView {
+        head: draft.clone(),
+        base: Some(BranchViewBase::Current(main.clone())),
+    };
+    if tombstone {
+        block_on(server.delete(
+            "lists",
+            l,
+            jazz::db::DeleteOptions {
+                target,
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    } else {
+        block_on(server.update(
+            "lists",
+            l,
+            BTreeMap::from([("name".to_owned(), Value::String("draft list".into()))]),
+            jazz::db::UpdateOptions {
+                target,
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    }
+    let lists = client.prepare_query(&Query::from("lists")).unwrap();
+    let _m = main_sub.then(|| {
+        block_on(client.subscribe(&lists, ReadOpts::default().branch_view(main.clone(), None)))
+            .unwrap()
+    });
+    pump(&server, &client);
+    let q = Query::from("todos").array_subquery(jazz::query::ArraySubquery::new(
+        "lst", "lists", "id", "list",
+    ));
+    let view =
+        ReadOpts::default().branch_view(draft.clone(), Some(BranchViewBase::Current(main.clone())));
+    let p = client.prepare_query(&q).unwrap();
+    let _s = block_on(client.subscribe(&p, view.clone())).unwrap();
+    pump(&server, &client);
+    let mut local = view.clone();
+    local.tier = ReadTier::LocalOnly;
+    let names = |t: jazz::result_tree::ResultTree| -> Vec<String> {
+        t.roots
+            .iter()
+            .map(|n| {
+                format!(
+                    "{:?}",
+                    n.relations.get("lst").map(|r| match r {
+                        jazz::result_tree::ResultRelation::Array(ch) => ch
+                            .iter()
+                            .map(|c| format!("{:?}", c.row.cell("name")))
+                            .collect::<Vec<_>>(),
+                        o => vec![format!("{o:?}")],
+                    })
+                )
+            })
+            .collect()
+    };
+    let c = names(block_on(client.all_result_tree(&p, local.clone())).unwrap());
+    let sp = server.prepare_query(&q).unwrap();
+    let s = names(block_on(server.all_result_tree(&sp, local)).unwrap());
+    (c.join(","), s.join(","))
+}
+
+#[test]
+fn a_views_relations_read_the_heads_rows_over_held_base_rows() {
+    let mut bytes = 0xa0;
+    for tombstone in [true, false] {
+        for main_sub in [true, false] {
+            bytes += 2;
+            let (client, server) = relation_names(tombstone, (bytes, bytes + 1), main_sub);
+            assert_eq!(
+                client, server,
+                "tombstone {tombstone}, main read {main_sub}"
+            );
+        }
+    }
 }

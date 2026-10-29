@@ -3363,35 +3363,70 @@ impl Inner {
         Ok(cells)
     }
 
-    /// The head rows of `mask`'s view that mask base rows its query
-    /// matches. A resumed read takes them all too: whether the replica may
-    /// read one can have changed since without the row changing.
+    /// Of the ids `ids`, those whose base row the reader may see through
+    /// `mask`'s view: of the root table, rows the query matches on the
+    /// base; of another table, rows the reader may read there.
+    fn masked(
+        &self,
+        policy: Option<AuthorSubject>,
+        mask: &fanout::ViewMask,
+        ids: &[RowUuid],
+    ) -> Result<Vec<RowUuid>, Error> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        match &mask.base_query {
+            Some(query) => {
+                let mut out = Vec::new();
+                for chunk in ids.chunks(500) {
+                    out.extend(
+                        self.run(&query.narrowed(chunk), policy, &mask.base_read)?
+                            .iter()
+                            .map(|row| row.id),
+                    );
+                }
+                Ok(out)
+            }
+            None => {
+                let mut out = Vec::new();
+                for &row in ids {
+                    let shown = self
+                        .current_image(&mask.table, row, &mask.base)?
+                        .is_some_and(|image| !image.deleted || mask.base_read.include_deleted);
+                    if shown && readable(self, &mask.table, row, &mask.base, policy)? {
+                        out.push(row);
+                    }
+                }
+                Ok(out)
+            }
+        }
+    }
+
+    /// The head rows of `mask`'s view that mask base rows the reader may
+    /// see through it. A resumed read takes them all too: whether the
+    /// reader may read one can have changed since without it changing.
     fn masking_rows(
         &self,
         policy: Option<AuthorSubject>,
         mask: &fanout::ViewMask,
     ) -> Result<Vec<(String, RowUuid, Vec<u8>)>, Error> {
-        let mut out = Vec::new();
-        let heads = self.images_where(&mask.table, false, "_b = ?1", &[&mask.head])?;
-        let mut heads: Vec<[u8; 16]> = heads.into_iter().map(|image| image.id).collect();
+        let mut heads: Vec<RowUuid> = self
+            .images_where(&mask.table, false, "_b = ?1", &[&mask.head])?
+            .into_iter()
+            .map(|image| RowUuid::from_bytes(image.id))
+            .collect();
         // A relay's markers of head rows it may not read mask for its
         // sessions too.
-        heads.extend(self.withheld_ids(&mask.table, &mask.head)?);
-        if heads.is_empty() {
-            return Ok(out);
-        }
-        let shown: HashSet<RowUuid> = self
-            .run(&mask.base_query, policy, &mask.base_read)?
-            .iter()
-            .map(|row| row.id)
-            .collect();
-        for id in heads {
-            let row = RowUuid::from_bytes(id);
-            if shown.contains(&row) {
-                out.push((mask.table.clone(), row, mask.head.clone()));
-            }
-        }
-        Ok(out)
+        heads.extend(
+            self.withheld_ids(&mask.table, &mask.head)?
+                .into_iter()
+                .map(RowUuid::from_bytes),
+        );
+        Ok(self
+            .masked(policy, mask, &heads)?
+            .into_iter()
+            .map(|row| (mask.table.clone(), row, mask.head.clone()))
+            .collect())
     }
 
     /// Mark a row this replica may not read the current version of (see
@@ -7765,25 +7800,31 @@ impl Db {
                 }
             }
             // The session's branch views over a base: a head row written
-            // over a base row, or a base row written under a head row, may
-            // mask (or unmask) a base row the replica holds.
+            // over a base row, or a base row written under a head row, masks
+            // (or stops masking) that base row, if the reader may see it
+            // through the view; no other reader learns of it.
             let masks: Vec<fanout::ViewMask> = inner.sessions[index]
                 .subs
                 .values()
                 .filter_map(|(_, group, ..)| group.upgrade())
-                .filter_map(|group| group.borrow().mask().cloned())
+                .flat_map(|group| group.borrow().masks().to_vec())
                 .collect();
             let mut masking: Vec<(String, RowUuid, Vec<u8>)> = Vec::new();
             for ((table, row, key), _) in &written_keys {
                 for mask in masks.iter().filter(|mask| mask.table == *table) {
-                    let other = if *key == mask.head {
-                        &mask.base
+                    let has_head = if *key == mask.head {
+                        true
                     } else if *key == mask.base {
-                        &mask.head
+                        inner.current_image(table, *row, &mask.head)?.is_some()
+                            || inner.is_withheld(table, *row, &mask.head)?
                     } else {
                         continue;
                     };
-                    if inner.current_image(table, *row, other)?.is_some() {
+                    if has_head
+                        && !inner
+                            .masked(inner.session_policy(index), mask, &[*row])?
+                            .is_empty()
+                    {
                         masking.push((table.clone(), *row, mask.head.clone()));
                     }
                 }
@@ -7853,11 +7894,9 @@ impl Db {
                 if events
                     .iter()
                     .any(|event| matches!(event, SubscriptionEvent::Delta { reset: true, .. }))
-                    && let Some(mask) = group
-                        .upgrade()
-                        .and_then(|group| group.borrow().mask().cloned())
+                    && let Some(group) = group.upgrade()
                 {
-                    opening_masks.push(mask);
+                    opening_masks.extend(group.borrow().masks().iter().cloned());
                 }
                 // A relay's result settles once its upstream answered.
                 let answered = events
@@ -8879,8 +8918,14 @@ impl Db {
                     .clone()
                     .unwrap_or_else(|| inner.owner.clone());
                 let mut hidden = Vec::new();
-                if let Some(mask) = fanout::view_mask(&schema, &prepared, &read) {
-                    for (table, row, key) in inner.masking_rows(policy, &mask)? {
+                let masks = if read.view.as_ref().is_some_and(|view| view.base.is_some()) {
+                    let tables = inner.read_dependencies_in(&prepared, policy, &read)?;
+                    fanout::view_masks(&schema, &prepared, &read, &tables)
+                } else {
+                    Vec::new()
+                };
+                for mask in &masks {
+                    for (table, row, key) in inner.masking_rows(policy, mask)? {
                         match inner.current_image(&table, row, &key)? {
                             Some(image) if readable(&inner, &table, row, &key, policy)? => {
                                 images.push(image)

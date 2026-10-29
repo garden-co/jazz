@@ -106,6 +106,24 @@ impl PreparedQuery {
         }
     }
 
+    /// The same query narrowed to rows `ids`.
+    pub(crate) fn narrowed(&self, ids: &[RowUuid]) -> PreparedQuery {
+        use crate::query::{Operand, Predicate};
+        let mut query = self.query.clone();
+        query.filters.push(Predicate::In(
+            Operand::Column("id".to_owned()),
+            ids.iter()
+                .map(|id| Operand::Literal(Value::Uuid(id.0)))
+                .collect(),
+        ));
+        let shape = blake3::hash(format!("{query:?}").as_bytes());
+        PreparedQuery {
+            query,
+            shape: Shape(short(shape)),
+            ..self.clone()
+        }
+    }
+
     pub fn shape(&self) -> &Shape {
         &self.shape
     }
