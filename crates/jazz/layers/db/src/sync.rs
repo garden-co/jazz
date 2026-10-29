@@ -8610,9 +8610,15 @@ impl Db {
                 // A version that exists but is unreadable leaves the id
                 // watched: the replica may hold the row on another branch
                 // (a branch view's base, the main row under a draft). A
-                // relay's marker stands for such a version too.
-                if inner.current_image(&table, row, &key)?.is_some()
-                    || inner.is_withheld(&table, row, &key)?
+                // relay's marker stands for such a version too. A relay may
+                // not hold the version it evicts at all, while its session
+                // holds the row on another branch: any version of the id
+                // here keeps it watched (#4484).
+                let id = row.0.as_bytes().to_vec();
+                if inner.is_withheld(&table, row, &key)?
+                    || !inner
+                        .images_where(&table, false, "id = ?1", &[&id])?
+                        .is_empty()
                 {
                     unreadable.insert((table.clone(), row, key.clone()));
                 } else {
