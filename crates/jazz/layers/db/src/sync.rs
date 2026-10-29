@@ -498,14 +498,14 @@ pub struct Image {
 /// reader joins split frames up to.
 const ROWS_MESSAGE_BYTES: usize = jazz_protocol::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES / 4;
 
-/// `images` (and the `origins` they come with) as `Rows` messages of at
+/// `images` (and the `tx_ids` they come with) as `Rows` messages of at
 /// most `limit` ([`ROWS_MESSAGE_BYTES`]) of images each. A reader installs each
 /// message whole, so a commit's versions (one seq) never straddle two: a
 /// result that needs more than one goes in seq order, and a single
 /// commit larger than the bound still travels as one.
 fn rows_messages(
     mut images: Vec<Image>,
-    origins: Vec<(u64, [u8; 16], u64)>,
+    tx_ids: Vec<(u64, [u8; 16], u64)>,
     limit: usize,
 ) -> Vec<SyncMessage> {
     let size = |image: &Image| {
@@ -514,15 +514,15 @@ fn rows_messages(
     };
     let sizes: Vec<usize> = images.iter().map(size).collect();
     if sizes.iter().fold(0usize, |sum, n| sum.saturating_add(*n)) <= limit {
-        if images.is_empty() && origins.is_empty() {
+        if images.is_empty() && tx_ids.is_empty() {
             return Vec::new();
         }
-        return vec![SyncMessage::Rows { images, origins }];
+        return vec![SyncMessage::Rows { images, tx_ids }];
     }
     let mut sized: Vec<(usize, Image)> = sizes.into_iter().zip(images.drain(..)).collect();
     sized.sort_by_key(|(_, image)| image.seq);
     let mut out = Vec::new();
-    let mut origins = Some(origins);
+    let mut tx_ids = Some(tx_ids);
     let mut batch: Vec<Image> = Vec::new();
     let mut bytes = 0usize;
     for (n, image) in sized {
@@ -530,7 +530,7 @@ fn rows_messages(
         if !batch.is_empty() && !same_commit && bytes.saturating_add(n) > limit {
             out.push(SyncMessage::Rows {
                 images: std::mem::take(&mut batch),
-                origins: origins.take().unwrap_or_default(),
+                tx_ids: tx_ids.take().unwrap_or_default(),
             });
             bytes = 0;
         }
@@ -539,7 +539,7 @@ fn rows_messages(
     }
     out.push(SyncMessage::Rows {
         images: batch,
-        origins: origins.take().unwrap_or_default(),
+        tx_ids: tx_ids.take().unwrap_or_default(),
     });
     out
 }
@@ -583,23 +583,22 @@ fn echo_digest(image: &Image) -> [u8; 16] {
 /// What the writer of a row version built it on (SPEC 4 §4.6, "Base of a
 /// write"): the version of the row its image was, in names the receiver
 /// knows. A write over no held image (an insert, a blind write) sends none.
+/// It travels on the commit's first op that writes the row.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireBase {
-    /// The commit's first op that writes the row.
-    pub op: u32,
     /// The row's branch key (empty unbranched).
     pub key: Vec<u8>,
     pub on: BuiltOn,
 }
 
-/// The settled version of a row a commit writes that its writer holds, so
-/// that the writer did not push the nodes of its chunked values' trees
-/// (SPEC 19.4): the authority counts that version's trees as the writer's
-/// when it may read the version.
+/// A version of the row an op writes that its writer may read, whose
+/// chunked values' trees vouch for the nodes the writer did not push
+/// (SPEC 19.4): the authority counts that version's trees as possessed by
+/// the writer, for every op of the commit, only while the writer may still
+/// read the version, so naming a root never gets the writer a tree it could
+/// not read anyway.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WireSource {
-    /// The op that writes the row.
-    pub op: u32,
+pub struct AccessProof {
     /// The row's branch key (empty unbranched).
     pub key: Vec<u8>,
     pub seq: u64,
@@ -674,10 +673,47 @@ pub enum WireTarget {
     },
 }
 
+/// A replicated write with what its writer knew of the row it writes:
+/// what it was built on, the settled version its chunked values' trees sit
+/// under, and the chunked cells that travel as edits.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WireOp {
+    pub write: WireWrite,
+    /// The base of each row this op is the commit's first to write, where
+    /// its writer held an image (SPEC 4 §4.6): one per branch key it
+    /// writes the row under (a move writes two). Only the authority's
+    /// conflict derivation reads it (INV-HIST-21).
+    pub bases: Vec<WireBase>,
+    /// Set when the op's chunked values travel as trees: the settled
+    /// version of its row their unpushed nodes sit under.
+    pub access_proof: Option<AccessProof>,
+    /// The op's chunked cells that travel as edits extending the writer's
+    /// newest settled version of its row (SPEC 19.8).
+    pub deltas: Vec<CellDelta>,
+}
+
+impl From<WireWrite> for WireOp {
+    fn from(write: WireWrite) -> Self {
+        WireOp {
+            write,
+            bases: Vec::new(),
+            access_proof: None,
+            deltas: Vec::new(),
+        }
+    }
+}
+
+impl WireOp {
+    /// The table the op writes, as the sender's schema names it.
+    pub fn table(&self) -> &str {
+        self.write.table()
+    }
+}
+
 /// A replicated write. `at`: its explicit provenance timestamp (Unix ms),
 /// if the writer gave one; each write in a commit carries its own.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum WireOp {
+pub enum WireWrite {
     Insert {
         table: String,
         row: [u8; 16],
@@ -720,16 +756,16 @@ pub enum WireOp {
     },
 }
 
-impl WireOp {
-    /// The table the op writes, as the sender's schema names it.
+impl WireWrite {
+    /// The table the write names, as the sender's schema names it.
     pub fn table(&self) -> &str {
         match self {
-            WireOp::Insert { table, .. }
-            | WireOp::Update { table, .. }
-            | WireOp::Upsert { table, .. }
-            | WireOp::Delete { table, .. }
-            | WireOp::Restore { table, .. }
-            | WireOp::Move { table, .. } => table,
+            WireWrite::Insert { table, .. }
+            | WireWrite::Update { table, .. }
+            | WireWrite::Upsert { table, .. }
+            | WireWrite::Delete { table, .. }
+            | WireWrite::Restore { table, .. }
+            | WireWrite::Move { table, .. } => table,
         }
     }
 }
@@ -832,6 +868,34 @@ const _: () = assert!(
         <= jazz_protocol::protocol_limits::MAX_WIRE_FRAME_BYTES
 );
 
+/// Who a commit's writes, or a preflight, act as. Authors are canonical
+/// author subjects. Only a trusted link may name an author other than its
+/// own identity; the server decides from the link how far it trusts one.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Acting {
+    /// The sender's own: checked and attributed as the link.
+    Own,
+    /// Attributed to `author` (provenance only), checked as the sender.
+    Attributed { author: String },
+    /// `author`'s as a session with these claims: over a trusted link,
+    /// checked and attributed as that session; over a session link,
+    /// checked as the link's own identity.
+    Session {
+        author: String,
+        claims: BTreeMap<String, Value>,
+    },
+}
+
+impl Acting {
+    /// The author it names, if any.
+    fn author(&self) -> Option<&str> {
+        match self {
+            Acting::Own => None,
+            Acting::Attributed { author } | Acting::Session { author, .. } => Some(author),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SyncMessage {
     // client → server
@@ -872,51 +936,33 @@ pub enum SyncMessage {
     /// over (SPEC 19.8). The server ships each whole, or evicts it. Sent
     /// when a delta fails, and again on each connection until the row
     /// arrives whole. The seq is not read.
-    Hold {
+    ResendWhole {
         rows: Vec<(String, [u8; 16], Vec<u8>, u64)>,
     },
     /// A read's result is complete through server seq `through`.
-    /// `listing`: the result's rows, in order: always for a one-shot
+    /// `members`: the result's rows, in order: always for a one-shot
     /// read, and for a live one's opening and window changes when it is
     /// limited or its opening could not tell what left it; the replica
-    /// drops cached rows a listing leaves out. `global`: the result is the
+    /// drops cached rows `members` leaves out. `global`: the result is the
     /// global authority's (directly, or through relays that settle by
     /// their upstream), not a relay's own store.
     Settled {
         id: u64,
         through: u64,
-        listing: Option<Vec<[u8; 16]>>,
+        members: Option<Vec<[u8; 16]>>,
         global: bool,
     },
-    /// `author`: the provenance the writes carry when it is not the
-    /// sender's own (a trusted session or an attribution), as a canonical
-    /// author subject. Only a trusted link may set one that differs from
-    /// its own identity.
+    /// `acting`: who the writes are (see [`Acting`]).
     Commit {
         node: [u8; 16],
         tx: u64,
         kind: WireKind,
         ops: Vec<WireOp>,
-        author: Option<String>,
-        /// The writes are `author`'s as a session, with these claims (a
-        /// trusted link acting for it): the authority checks their
-        /// policies as that session. Otherwise `author` is provenance only.
-        session: Option<BTreeMap<String, Value>>,
+        acting: Acting,
         /// The rows as the writer's replica holds them after these writes
         /// (see [`Expect`]): the authority skips echoing a row whose new
         /// version is exactly that. Empty when the writer does not know.
         expect: Vec<Expect>,
-        /// The ops' chunked cells that travel as edits extending the
-        /// writer's newest settled version of their row (SPEC 19.8).
-        deltas: Vec<CellDelta>,
-        /// For each op whose chunked values travel as trees, the settled
-        /// version of its row their unpushed nodes sit under.
-        sources: Vec<WireSource>,
-        /// The base of each row the commit writes over an image its
-        /// writer held (SPEC 4 §4.6); a row it inserted, or wrote without
-        /// holding, has none. Only the authority's conflict derivation
-        /// reads it (INV-HIST-21).
-        bases: Vec<WireBase>,
         /// The session commit a relay uploads this one for, as (node, tx),
         /// when it is not the sender's own: the writer its bases' unnamed
         /// `pending` nodes stand for.
@@ -939,18 +985,18 @@ pub enum SyncMessage {
         nodes: Vec<WireChunk>,
         missing: Vec<WireChunkRef>,
     },
-    /// Row images. `origins` names the transactions behind the history
+    /// Row images. `tx_ids` names the transactions behind the history
     /// versions among them, as (seq, writer node, writer tx): a replica
     /// lists a history version only once it knows its `$transactionId`,
     /// and a one-shot read frozen at a snapshot names the commits that
     /// snapshot holds. Empty for current rows.
     Rows {
         images: Vec<Image>,
-        origins: Vec<(u64, [u8; 16], u64)>,
+        tx_ids: Vec<(u64, [u8; 16], u64)>,
     },
     /// The row is unavailable to this reader (a write or a policy change
     /// took its read access): the replica drops its copy (INV-SYNC-14).
-    Evict {
+    AccessLost {
         table: String,
         id: [u8; 16],
         key: Vec<u8>,
@@ -977,18 +1023,19 @@ pub enum SyncMessage {
     },
     // client → server
     /// A permission preflight: would the session's identity be allowed
-    /// `action` right now? Never writes. `author` and `session` name the
-    /// session a trusted link asks for, as on a [`SyncMessage::Commit`].
-    Advise {
+    /// `action` right now? Never writes. `acting` names who asks, as on
+    /// a [`SyncMessage::Commit`].
+    CheckAllowed {
         id: u64,
         action: PermissionAdviceAction,
-        author: Option<String>,
-        session: Option<BTreeMap<String, Value>>,
+        acting: Acting,
     },
     // server → client
-    Advice {
+    /// The answer to a [`SyncMessage::CheckAllowed`]: `Allowed`, `Denied`
+    /// or `Unknown`.
+    CheckAllowedResult {
         id: u64,
-        advice: PermissionAdvice,
+        result: PermissionAdvice,
     },
     // client → server
     /// The schema version the client reads and writes by, sent first on
@@ -1026,7 +1073,7 @@ pub enum SyncMessage {
     /// whose stored names this replica keeps, each with
     /// [`names_digest`] of them. The server answers with the
     /// [`SyncMessage::Catalogue`] entries it lacks or keeps otherwise.
-    Holds {
+    KnownCatalogue {
         versions: Vec<([u8; 16], [u8; 16])>,
     },
     /// Server → client: schema versions this store admitted, in admission
@@ -1034,9 +1081,9 @@ pub enum SyncMessage {
     /// cells its lenses made. A replica stores rows as its upstream does
     /// (rows travel by stored names, untranslated), so it admits each
     /// version under these names, renaming what it named otherwise while
-    /// it did not know them. Sent ahead of any row after a `Holds`, and
-    /// again when the store admits a version or learns more of its
-    /// authority's catalogue.
+    /// it did not know them. Sent ahead of any row after a
+    /// `KnownCatalogue`, and again when the store admits a version or learns
+    /// more of its authority's catalogue.
     ///
     /// `namespace`: the authority's (see `Inner::namespace`), once the
     /// sender knows it; a replica that holds another one is another app's
@@ -1064,7 +1111,7 @@ pub enum ReadSpan {
     /// branch view `view`, whose window and versions the read observes. A
     /// view frozen at a snapshot reference is resolved by the receiver (a
     /// reopened tab's capture, which its worker settled), which also sends
-    /// the origins of the commits it names (see [`SyncMessage::Rows`]).
+    /// the tx ids of the commits it names (see [`SyncMessage::Rows`]).
     Once {
         at: Option<u64>,
         view: Box<ReadViewSourceSpec>,
@@ -1097,22 +1144,22 @@ impl SyncMessage {
         match self {
             Self::Read { .. } => "Read",
             Self::Unsubscribe { .. } => "Unsubscribe",
-            Self::Hold { .. } => "Hold",
+            Self::ResendWhole { .. } => "ResendWhole",
             Self::Commit { .. } => "Commit",
             Self::ChunkRequests { .. } => "ChunkRequests",
             Self::PushChunks { .. } => "PushChunks",
             Self::Chunks { .. } => "Chunks",
             Self::Rows { .. } => "Rows",
-            Self::Evict { .. } => "Evict",
+            Self::AccessLost { .. } => "AccessLost",
             Self::Settled { .. } => "Settled",
             Self::Refused { .. } => "Refused",
             Self::Fate { .. } => "Fate",
-            Self::Advise { .. } => "Advise",
-            Self::Advice { .. } => "Advice",
+            Self::CheckAllowed { .. } => "CheckAllowed",
+            Self::CheckAllowedResult { .. } => "CheckAllowedResult",
             Self::Schema { .. } => "Schema",
             Self::SchemaAdmission { .. } => "SchemaAdmission",
             Self::Stored { .. } => "Stored",
-            Self::Holds { .. } => "Holds",
+            Self::KnownCatalogue { .. } => "KnownCatalogue",
             Self::Catalogue { .. } => "Catalogue",
         }
     }
@@ -1377,10 +1424,11 @@ pub(crate) struct Client {
 }
 
 /// A session's commit a relay uploads as its own, for its upload: the
-/// session commit's (node, tx) and its bases in this store's terms.
+/// session commit's (node, tx) and its bases in this store's terms, by
+/// the op each travels on.
 pub(crate) struct Relayed {
     origin: ([u8; 16], u64),
-    bases: Vec<WireBase>,
+    bases: Vec<(usize, WireBase)>,
 }
 
 /// A session's commit a relay uploads as its own: (session, the session's
@@ -1664,8 +1712,9 @@ pub(crate) struct Session {
     /// The client was told its declared version is not admitted.
     told_unadmitted: bool,
     /// The versions the client keeps names for, with their digests
-    /// (`None` until its `Holds`), and whether it is owed a `Catalogue`.
-    holds: Option<HashMap<[u8; 16], [u8; 16]>>,
+    /// (`None` until its `KnownCatalogue`), and whether it is owed a
+    /// `Catalogue`.
+    known_catalogue: Option<HashMap<[u8; 16], [u8; 16]>>,
     catalogue_owed: bool,
     /// The namespace and confirmations the client was last sent.
     told: Option<(Option<[u8; 16]>, Vec<([u8; 16], [u8; 16])>)>,
@@ -1716,7 +1765,7 @@ impl Session {
             parked_pulls: Vec::new(),
             deferred_pulls: Vec::new(),
             told_unadmitted: false,
-            holds: None,
+            known_catalogue: None,
             catalogue_owed: false,
             told: None,
             schema: None,
@@ -1744,7 +1793,7 @@ impl Session {
     /// A version was admitted: a client that declared its holdings is
     /// told of it.
     pub(super) fn owe_catalogue(&mut self) {
-        if self.holds.is_some() {
+        if self.known_catalogue.is_some() {
             self.catalogue_owed = true;
         }
     }
@@ -1952,10 +2001,6 @@ fn id_watch(table: &str, id: [u8; 16]) -> u64 {
     ))
 }
 
-/// The `_jazz_meta` key of the seq the current schema was activated at.
-pub(super) const ACTIVATED_META: &str = "activated";
-/// The `_jazz_meta` key of a digest of the current schema's read policies.
-pub(super) const POLICIES_META: &str = "policies";
 /// The `_jazz_meta` key of the authority namespace (see `Inner::namespace`).
 pub(super) const NAMESPACE_META: &str = "namespace";
 
@@ -2213,48 +2258,49 @@ fn exact_target(target: &ExactWriteTarget) -> WireTarget {
 
 fn to_wire(op: &StagedOp) -> Result<WireOp, Error> {
     let bytes = |row: &RowUuid| *row.0.as_bytes();
-    Ok(match op {
-        StagedOp::Insert(table, cells, opts) => WireOp::Insert {
+    let write = match op {
+        StagedOp::Insert(table, cells, opts) => WireWrite::Insert {
             table: table.clone(),
             row: bytes(&opts.row_id.expect("inserts carry their row id")),
             cells: cells.clone(),
             target: exact_target(&opts.target),
             at: opts.updated_at_ms,
         },
-        StagedOp::Update(table, row, cells, opts) => WireOp::Update {
+        StagedOp::Update(table, row, cells, opts) => WireWrite::Update {
             table: table.clone(),
             row: bytes(row),
             cells: cells.clone(),
             target: wire_target(&opts.target)?,
             at: opts.updated_at_ms,
         },
-        StagedOp::Upsert(table, row, cells, opts) => WireOp::Upsert {
+        StagedOp::Upsert(table, row, cells, opts) => WireWrite::Upsert {
             table: table.clone(),
             row: bytes(row),
             cells: cells.clone(),
             target: wire_target(&opts.target)?,
             at: opts.updated_at_ms,
         },
-        StagedOp::Delete(table, row, opts) => WireOp::Delete {
+        StagedOp::Delete(table, row, opts) => WireWrite::Delete {
             table: table.clone(),
             row: bytes(row),
             target: wire_target(&opts.target)?,
             at: opts.updated_at_ms,
         },
-        StagedOp::Restore(table, row, cells, opts) => WireOp::Restore {
+        StagedOp::Restore(table, row, cells, opts) => WireWrite::Restore {
             table: table.clone(),
             row: bytes(row),
             cells: cells.clone(),
             target: exact_target(&opts.target),
             at: opts.updated_at_ms,
         },
-        StagedOp::Move(table, from, to, row) => WireOp::Move {
+        StagedOp::Move(table, from, to, row) => WireWrite::Move {
             table: table.clone(),
             row: bytes(row),
             from: from.clone(),
             to: to.clone(),
         },
-    })
+    };
+    Ok(write.into())
 }
 
 fn view_target(target: WireTarget) -> WriteTarget {
@@ -2287,8 +2333,8 @@ fn exact(target: WireTarget) -> ExactWriteTarget {
 
 fn from_wire(op: WireOp) -> Result<StagedOp, Error> {
     let id = |row: [u8; 16]| RowUuid::from_bytes(row);
-    Ok(match op {
-        WireOp::Insert {
+    Ok(match op.write {
+        WireWrite::Insert {
             table,
             row,
             cells,
@@ -2304,7 +2350,7 @@ fn from_wire(op: WireOp) -> Result<StagedOp, Error> {
                 ..Default::default()
             },
         ),
-        WireOp::Update {
+        WireWrite::Update {
             table,
             row,
             cells,
@@ -2320,7 +2366,7 @@ fn from_wire(op: WireOp) -> Result<StagedOp, Error> {
                 ..Default::default()
             },
         ),
-        WireOp::Upsert {
+        WireWrite::Upsert {
             table,
             row,
             cells,
@@ -2336,7 +2382,7 @@ fn from_wire(op: WireOp) -> Result<StagedOp, Error> {
                 ..Default::default()
             },
         ),
-        WireOp::Delete {
+        WireWrite::Delete {
             table,
             row,
             target,
@@ -2350,7 +2396,7 @@ fn from_wire(op: WireOp) -> Result<StagedOp, Error> {
                 ..Default::default()
             },
         ),
-        WireOp::Restore {
+        WireWrite::Restore {
             table,
             row,
             cells,
@@ -2368,7 +2414,7 @@ fn from_wire(op: WireOp) -> Result<StagedOp, Error> {
         ),
         // A move checks no policy locally; the authority would need the
         // source DELETE and destination INSERT policies under the session.
-        WireOp::Move { .. } => return Err(unsupported("branch moves over sync")),
+        WireWrite::Move { .. } => return Err(unsupported("branch moves over sync")),
     })
 }
 
@@ -2608,7 +2654,7 @@ impl Inner {
     /// The images a history read ships for its result `versions` (row and
     /// seq, of `source`): each version, then the current image of its row
     /// in its branch, so a replica never takes an old version for its
-    /// current one. The versions' seqs go to `seqs`, for their origins.
+    /// current one. The versions' seqs go to `seqs`, for their tx ids.
     fn history_versions(
         &self,
         source: &str,
@@ -2675,7 +2721,7 @@ impl Inner {
 
     /// Who committed each of `seqs`, as (seq, node, tx): `_jazz_settled`
     /// for uploads, this authority's node for its own commits.
-    fn origins(&self, seqs: &BTreeSet<u64>) -> Result<Vec<(u64, [u8; 16], u64)>, Error> {
+    fn tx_ids(&self, seqs: &BTreeSet<u64>) -> Result<Vec<(u64, [u8; 16], u64)>, Error> {
         let mut statement = self
             .conn
             .prepare_cached("SELECT node, tx FROM _jazz_settled WHERE seq = ?1")
@@ -3516,9 +3562,10 @@ impl Inner {
 /// write from its upload record, or a server commit from its dedupe entry.
 ///
 /// A pending commit is stored a row per op, not as one encoded message:
-/// `_jazz_pending` keeps its `Commit` with the per-row lists left empty,
-/// `_jazz_pending_items` each op, delta, source, base and serializable read
-/// (by [`PendingPart`]), and `_jazz_pending_rows` the local rows it wrote.
+/// `_jazz_pending` keeps its `Commit` with its ops and reads left out,
+/// `_jazz_pending_items` each op (with its bases, access proof and deltas) and
+/// serializable read (by [`PendingPart`]), and `_jazz_pending_rows` the
+/// local rows it wrote.
 /// A row's values over the inline limit live in large-value storage, so a
 /// stored op is about the size of the row it writes, however large the
 /// commit: a store with a small value limit (a Durable Object's 2 MiB)
@@ -3550,20 +3597,14 @@ const REJECTED_DDL: [&str; 2] = [
 #[derive(Clone, Copy)]
 enum PendingPart {
     Op = 0,
-    Delta = 1,
-    Source = 2,
-    Base = 3,
-    Read = 4,
+    Read = 1,
 }
 
 impl PendingPart {
     fn from_stored(part: i64) -> Result<Self, Error> {
         Ok(match part {
             0 => Self::Op,
-            1 => Self::Delta,
-            2 => Self::Source,
-            3 => Self::Base,
-            4 => Self::Read,
+            1 => Self::Read,
             _ => {
                 return Err(Error::new(
                     ErrorCode::Storage,
@@ -3609,8 +3650,20 @@ fn encode<T: Serialize>(value: &T) -> Vec<u8> {
     postcard::to_allocvec(value).expect("encode sync state")
 }
 
+/// A stored sync record. One written in another layout is refused as an
+/// unsupported storage format rather than misread: it must decode exactly,
+/// with no bytes left over.
 fn decode_stored<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, Error> {
-    postcard::from_bytes(bytes).map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))
+    match postcard::take_from_bytes(bytes) {
+        Ok((value, [])) => Ok(value),
+        Ok((_, rest)) => Err(crate::format::unsupported(format_args!(
+            "a stored sync record has {} trailing bytes",
+            rest.len()
+        ))),
+        Err(error) => Err(crate::format::unsupported(format_args!(
+            "a stored sync record does not decode ({error})"
+        ))),
+    }
 }
 
 impl Inner {
@@ -3683,7 +3736,7 @@ impl Inner {
 
     /// The nodes a commit's large values need pushed first: (their
     /// hashes, the batches carrying them). Every node goes but those under
-    /// the trees of the settled version each op names as its source
+    /// the trees of the settled version each op names as its access proof
     /// (SPEC 19.4). `None` when this replica must first fetch nodes it
     /// lacks (a value copied from a row it holds only partly): they are
     /// asked for, and the commit waits.
@@ -3691,7 +3744,7 @@ impl Inner {
         &mut self,
         commit: &SyncMessage,
     ) -> Result<Option<(Vec<jazz_types::large_values::ContentHash>, Vec<SyncMessage>)>, Error> {
-        let SyncMessage::Commit { ops, sources, .. } = commit else {
+        let SyncMessage::Commit { ops, .. } = commit else {
             return Ok(Some((Vec::new(), Vec::new())));
         };
         fn large(value: &Value, out: &mut Vec<jazz_types::large_values::LargeValueRef>) {
@@ -3706,12 +3759,12 @@ impl Inner {
         let mut batch = Vec::new();
         let mut size = 0;
         let mut absent = Vec::new();
-        for (index, op) in ops.iter().enumerate() {
-            let (row, cells) = match op {
-                WireOp::Insert { row, cells, .. }
-                | WireOp::Update { row, cells, .. }
-                | WireOp::Upsert { row, cells, .. }
-                | WireOp::Restore {
+        for op in ops {
+            let (row, cells) = match &op.write {
+                WireWrite::Insert { row, cells, .. }
+                | WireWrite::Update { row, cells, .. }
+                | WireWrite::Upsert { row, cells, .. }
+                | WireWrite::Restore {
                     row,
                     cells: Some(cells),
                     ..
@@ -3726,9 +3779,9 @@ impl Inner {
                 continue;
             }
             let mut named = BTreeSet::new();
-            if let Some(source) = sources.iter().find(|source| source.op as usize == index)
+            if let Some(proof) = &op.access_proof
                 && let Ok(table) = self.schema.stored_table(op.table())
-                && let Some(image) = self.held_version(table, row, &source.key, source.seq)?
+                && let Some(image) = self.held_version(table, row, &proof.key, proof.seq)?
             {
                 named = self.large_roots(table, &image)?;
             }
@@ -3808,12 +3861,8 @@ impl Inner {
             tx: sent_as,
             kind,
             ops,
-            author,
-            session,
+            acting,
             expect: _,
-            deltas,
-            sources,
-            bases,
             origin,
         } = commit
         else {
@@ -3841,12 +3890,8 @@ impl Inner {
             tx: *sent_as,
             kind,
             ops: Vec::new(),
-            author: author.clone(),
-            session: session.clone(),
+            acting: acting.clone(),
             expect: Vec::new(),
-            deltas: Vec::new(),
-            sources: Vec::new(),
-            bases: Vec::new(),
             origin: *origin,
         };
         self.exec(
@@ -3855,13 +3900,6 @@ impl Inner {
         )
         .map_err(storage)?;
         let items = (ops.iter().map(encode).map(|item| (PendingPart::Op, item)))
-            .chain(deltas.iter().map(|item| (PendingPart::Delta, encode(item))))
-            .chain(
-                sources
-                    .iter()
-                    .map(|item| (PendingPart::Source, encode(item))),
-            )
-            .chain(bases.iter().map(|item| (PendingPart::Base, encode(item))))
             .chain(reads.iter().map(|item| (PendingPart::Read, encode(item))));
         let mut n = 0i64;
         let mut last = None;
@@ -4069,15 +4107,7 @@ impl Inner {
     /// with its lists filled from `_jazz_pending_items`.
     fn pending_commit(&self, tx: u64, header: &[u8]) -> Result<SyncMessage, Error> {
         let mut commit: SyncMessage = decode_stored(header)?;
-        let SyncMessage::Commit {
-            kind,
-            ops,
-            deltas,
-            sources,
-            bases,
-            ..
-        } = &mut commit
-        else {
+        let SyncMessage::Commit { kind, ops, .. } = &mut commit else {
             return Err(Error::new(
                 ErrorCode::Storage,
                 "a pending upload is not a Commit",
@@ -4098,9 +4128,6 @@ impl Inner {
             let (part, item) = item.map_err(storage)?;
             match PendingPart::from_stored(part)? {
                 PendingPart::Op => ops.push(decode_stored(&item)?),
-                PendingPart::Delta => deltas.push(decode_stored(&item)?),
-                PendingPart::Source => sources.push(decode_stored(&item)?),
-                PendingPart::Base => bases.push(decode_stored(&item)?),
                 PendingPart::Read => match kind {
                     WireKind::Serializable { reads, .. } => reads.push(decode_stored(&item)?),
                     WireKind::Mergeable => {
@@ -4421,7 +4448,7 @@ impl Inner {
         if !std::mem::take(&mut self.sessions[index].catalogue_owed) {
             return Ok(None);
         }
-        if self.sessions[index].holds.is_none() {
+        if self.sessions[index].known_catalogue.is_none() {
             return Ok(None);
         }
         let namespace = self.namespace()?;
@@ -4439,8 +4466,11 @@ impl Inner {
         for (version, names) in self.names.in_order() {
             let digest = crate::names::names_digest(names);
             let bytes = *version.as_bytes();
-            let holds = self.sessions[index].holds.as_ref().expect("holds");
-            if holds.get(&bytes) == Some(&digest) {
+            let known_catalogue = self.sessions[index]
+                .known_catalogue
+                .as_ref()
+                .expect("known catalogue");
+            if known_catalogue.get(&bytes) == Some(&digest) {
                 continue;
             }
             let jazz = if version == self.owner_version {
@@ -4496,8 +4526,10 @@ impl Inner {
                 }
             })
             .collect();
-        let holds = self.sessions[index].holds.get_or_insert_with(HashMap::new);
-        holds.extend(sent);
+        let known_catalogue = self.sessions[index]
+            .known_catalogue
+            .get_or_insert_with(HashMap::new);
+        known_catalogue.extend(sent);
         let (namespace, confirmed) = told.clone();
         self.sessions[index].told = Some(told);
         Ok(Some(SyncMessage::Catalogue {
@@ -4536,7 +4568,7 @@ impl Inner {
             || query.aggregate.is_some()
             || query.relation.is_some()
             || is_history_table(&query.table)
-            || self.meta(ACTIVATED_META)?.is_some_and(|at| at >= since)
+            || crate::catalogue::activated_seq(&self.conn)?.is_some_and(|at| at >= since)
         {
             return Ok(None);
         }
@@ -4735,13 +4767,7 @@ impl Inner {
         for (tx, header) in pending {
             let commit = self.pending_commit(tx, &header)?;
             let rows = self.pending_rows(tx)?;
-            let SyncMessage::Commit {
-                ops,
-                author,
-                session,
-                ..
-            } = &commit
-            else {
+            let SyncMessage::Commit { ops, acting, .. } = &commit else {
                 continue;
             };
             let mut ops = ops
@@ -4754,10 +4780,10 @@ impl Inner {
             if let Some(version) = versions.get(&tx).filter(|v| **v != self.owner_version) {
                 client.versions.insert(tx, *version.as_bytes());
             }
-            if let Some(author) = author.as_deref().map(AuthorSubject::from_canonical) {
+            if let Some(author) = acting.author().map(AuthorSubject::from_canonical) {
                 let author = author.map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?;
-                ops.iter_mut()
-                    .for_each(|op| op.attribute(author, session.is_some()));
+                let session = matches!(acting, Acting::Session { .. });
+                ops.iter_mut().for_each(|op| op.attribute(author, session));
             }
             client.pending.push(Pending {
                 tx,
@@ -4936,8 +4962,8 @@ impl Db {
                     span: ReadSpan::Live { .. },
                     ..
                 } | SyncMessage::Schema { .. }
-                    | SyncMessage::Holds { .. }
-                    | SyncMessage::Hold { .. }
+                    | SyncMessage::KnownCatalogue { .. }
+                    | SyncMessage::ResendWhole { .. }
                     | SyncMessage::Commit { .. }
                     | SyncMessage::PushChunks { .. }
                     | SyncMessage::ChunkRequests { .. }
@@ -4957,7 +4983,9 @@ impl Db {
             .collect();
         let client = inner.client.as_mut().expect("client");
         client.outbox.insert(0, SyncMessage::Schema { version });
-        client.outbox.insert(1, SyncMessage::Holds { versions });
+        client
+            .outbox
+            .insert(1, SyncMessage::KnownCatalogue { versions });
         // What the old session could not answer, the new one may.
         client.unavailable.clear();
         client.outbox.extend(resubscribe);
@@ -4968,7 +4996,7 @@ impl Db {
                 .iter()
                 .map(|(table, id, key)| (table.clone(), *id, key.clone(), 0))
                 .collect();
-            client.outbox.push(SyncMessage::Hold { rows });
+            client.outbox.push(SyncMessage::ResendWhole { rows });
         }
         // Relayed reads still waiting are asked again: the old session's
         // answers are lost with it.
@@ -5203,9 +5231,16 @@ impl Db {
             (inner.identity.author == AuthorSubject::SYSTEM).then(|| inner.stamp_author())
         });
         // A session's writes carry its claims, for the authority's check.
-        let session_claims = author
-            .filter(|_| session)
-            .map(|author| inner.claims.get(&author).cloned().unwrap_or_default());
+        let acting = match author {
+            None => Acting::Own,
+            Some(author) if session => Acting::Session {
+                author: author.canonical().to_owned(),
+                claims: inner.claims.get(&author).cloned().unwrap_or_default(),
+            },
+            Some(author) => Acting::Attributed {
+                author: author.canonical().to_owned(),
+            },
+        };
         let rows = inner.written_rows(&ops, seq)?;
         let mut baselines = Vec::new();
         // What this replica built each row it wrote on (SPEC 4 §4.6): its
@@ -5243,11 +5278,13 @@ impl Db {
                     .get(&(table.clone(), *row))
                     .and_then(|ops| ops.first())
             {
-                bases.push(WireBase {
-                    op: op as u32,
-                    key: key.clone(),
-                    on,
-                });
+                bases.push((
+                    op,
+                    WireBase {
+                        key: key.clone(),
+                        on,
+                    },
+                ));
             }
         }
         let (bases, origin) = match relayed {
@@ -5255,9 +5292,19 @@ impl Db {
             None => (bases, None),
         };
         let mut wire: Result<Vec<WireOp>, Error> = ops.iter().map(to_wire).collect();
-        let (mut deltas, mut sources) = (Vec::new(), Vec::new());
         if let Ok(wire) = &mut wire {
-            (deltas, sources) = inner.commit_deltas(wire, &rows, &settled_images)?;
+            for (op, base) in bases {
+                // A relay's bases come from `relay_bases`, which refused any
+                // naming no op of the commit.
+                let op = wire.get_mut(op).ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::Protocol,
+                        "a relayed base names no op of its commit",
+                    )
+                })?;
+                op.bases.push(base);
+            }
+            inner.commit_deltas(wire, &rows, &settled_images)?;
         }
         // Each written row as this replica now holds it, so the authority
         // can skip echoing a version that is exactly this.
@@ -5297,12 +5344,8 @@ impl Db {
                     tx: seq,
                     kind,
                     ops: wire,
-                    author: author.map(|author| author.canonical().to_owned()),
-                    session: session_claims,
+                    acting,
                     expect,
-                    deltas,
-                    sources,
-                    bases,
                     origin,
                 };
                 client.unsent.push(commit.clone());
@@ -5811,16 +5854,16 @@ impl Db {
         client.next_advice += 1;
         if client.transport.is_some() && may_wait(client.hint.get()) {
             client.advice.insert(id, None);
-            let (author, session) = match session {
-                Some((author, claims)) => (Some(author.canonical().to_owned()), Some(claims)),
-                None => (None, None),
+            let acting = match session {
+                Some((author, claims)) => Acting::Session {
+                    author: author.canonical().to_owned(),
+                    claims,
+                },
+                None => Acting::Own,
             };
-            client.outbox.push(SyncMessage::Advise {
-                id,
-                action,
-                author,
-                session,
-            });
+            client
+                .outbox
+                .push(SyncMessage::CheckAllowed { id, action, acting });
         } else {
             client.advice.insert(id, Some(PermissionAdvice::Unknown));
         }
@@ -5860,9 +5903,9 @@ impl Db {
             return;
         };
         if client.advice.remove(&id).is_some() {
-            client
-                .outbox
-                .retain(|m| !matches!(m, SyncMessage::Advise { id: asked, .. } if *asked == id));
+            client.outbox.retain(
+                |m| !matches!(m, SyncMessage::CheckAllowed { id: asked, .. } if *asked == id),
+            );
         }
     }
 
@@ -5997,7 +6040,7 @@ impl Db {
                 matches!(
                     message,
                     SyncMessage::Rows { .. }
-                        | SyncMessage::Evict { .. }
+                        | SyncMessage::AccessLost { .. }
                         | SyncMessage::Settled { .. }
                 )
             }) && !inner.sessions.is_empty()
@@ -6010,10 +6053,10 @@ impl Db {
                 match message {
                     // Rows and evictions name stored tables and columns, as
                     // this store mirrors its upstream's.
-                    SyncMessage::Rows { images, origins } => {
+                    SyncMessage::Rows { images, tx_ids } => {
                         // A history version is listed once its transaction
                         // is known.
-                        for (seq, node, tx) in origins {
+                        for (seq, node, tx) in tx_ids {
                             inner.record_settled(node, tx, Some(seq))?;
                         }
                         for image in images {
@@ -6035,7 +6078,7 @@ impl Db {
                             rebase |= overlaid;
                         }
                     }
-                    SyncMessage::Evict { table, id, key } => {
+                    SyncMessage::AccessLost { table, id, key } => {
                         if !inner.physical.tables.contains_key(&table) {
                             continue;
                         }
@@ -6071,14 +6114,14 @@ impl Db {
                     SyncMessage::Settled {
                         id,
                         through,
-                        listing,
+                        members,
                         global,
                     } => {
                         let client = inner.client.as_mut().expect("client");
                         client.known = client.known.max(through);
                         // A one-shot read's answer.
                         if let Some(slot) = client.answers.get_mut(&id) {
-                            *slot = Some(Ok((through, listing.unwrap_or_default())));
+                            *slot = Some(Ok((through, members.unwrap_or_default())));
                             client.relay_ready |=
                                 client.relayed_fetches.iter().any(|f| f.upstream == id);
                             continue;
@@ -6098,7 +6141,7 @@ impl Db {
                         }
                         let watermark = remote.watermark;
                         // Cached rows the server's result lacks are stale.
-                        if let Some(ids) = listing {
+                        if let Some(ids) = members {
                             answered_remotes.push((
                                 remote.query.clone(),
                                 remote.binding.clone(),
@@ -6112,11 +6155,11 @@ impl Db {
                             inner.store_watermark(&watermark, through)?;
                         }
                     }
-                    SyncMessage::Advice { id, advice } => {
+                    SyncMessage::CheckAllowedResult { id, result } => {
                         let client = inner.client.as_mut().expect("client");
                         // Late answers to cancelled requests are dropped.
                         if let Some(slot @ None) = client.advice.get_mut(&id) {
-                            *slot = Some(advice);
+                            *slot = Some(result);
                         }
                     }
                     SyncMessage::SchemaAdmission { admitted } => {
@@ -6843,24 +6886,22 @@ impl Inner {
     /// their row's settled image, as deltas over it: each op's cell holds
     /// NULL in its place (SPEC 19.8). The upstream holds every settled
     /// version, as it shipped them. The rest travel as trees, named with
-    /// that settled image as their source (SPEC 19.4).
+    /// that settled image as their access proof (SPEC 19.4).
     fn commit_deltas(
         &self,
         ops: &mut [WireOp],
         rows: &[RowKey],
         settled: &HashMap<RowKey, Image>,
-    ) -> Result<(Vec<CellDelta>, Vec<WireSource>), Error> {
-        let mut deltas = Vec::new();
-        let mut sources = Vec::new();
-        for (index, op) in ops.iter_mut().enumerate() {
+    ) -> Result<(), Error> {
+        for op in ops.iter_mut() {
             let Ok(table) = self.schema.table(op.table()) else {
                 continue;
             };
-            let (row, cells) = match op {
-                WireOp::Insert { row, cells, .. }
-                | WireOp::Update { row, cells, .. }
-                | WireOp::Upsert { row, cells, .. }
-                | WireOp::Restore {
+            let (row, cells) = match &mut op.write {
+                WireWrite::Insert { row, cells, .. }
+                | WireWrite::Update { row, cells, .. }
+                | WireWrite::Upsert { row, cells, .. }
+                | WireWrite::Restore {
                     row,
                     cells: Some(cells),
                     ..
@@ -6891,8 +6932,7 @@ impl Inner {
                 let delta = old.and_then(|old| large_delta::extend(base.seq, &old, large));
                 if let Some(delta) = delta {
                     *value = Value::Nullable(None);
-                    deltas.push(CellDelta {
-                        op: index as u32,
+                    op.deltas.push(CellDelta {
                         column: column.clone(),
                         depth,
                         key: row_key.2.clone(),
@@ -6903,18 +6943,17 @@ impl Inner {
                 }
             }
             if trees {
-                sources.push(WireSource {
-                    op: index as u32,
+                op.access_proof = Some(AccessProof {
                     key: row_key.2.clone(),
                     seq: base.seq,
                 });
             }
         }
-        Ok((deltas, sources))
+        Ok(())
     }
 
-    /// Ask the upstream for a row whole: a `Hold` of it, which it answers
-    /// with the row whole or its eviction (SPEC 19.8). Until it arrives
+    /// Ask the upstream for a row whole: a `ResendWhole` of it, which it
+    /// answers with the row whole or its eviction (SPEC 19.8). Until it arrives
     /// this store holds a stale version, so every watermark is forgotten
     /// and none is stored (see `Client::whole`).
     fn ask_whole(&mut self, (table, id, key): (String, [u8; 16], Vec<u8>)) -> Result<(), Error> {
@@ -6922,12 +6961,12 @@ impl Inner {
         let client = self.client.as_mut().expect("client");
         client.whole.insert((table.clone(), id, key.clone()));
         let asked = client.outbox.iter().any(|message| {
-            matches!(message, SyncMessage::Hold { rows } if rows.iter().any(|held| {
+            matches!(message, SyncMessage::ResendWhole { rows } if rows.iter().any(|held| {
                 held.0 == table && held.1 == id && held.2 == key && held.3 == 0
             }))
         });
         if !asked {
-            client.outbox.push(SyncMessage::Hold {
+            client.outbox.push(SyncMessage::ResendWhole {
                 rows: vec![(table, id, key, 0)],
             });
         }
@@ -7194,7 +7233,7 @@ impl Db {
             if !refuses
                 && !matches!(
                     message,
-                    SyncMessage::Schema { .. } | SyncMessage::Holds { .. }
+                    SyncMessage::Schema { .. } | SyncMessage::KnownCatalogue { .. }
                 )
             {
                 let mut inner = self.inner.borrow_mut();
@@ -7284,7 +7323,7 @@ impl Db {
     fn overtakes(&self, index: usize, barrier: &HeldWrites, message: &SyncMessage) -> bool {
         match message {
             SyncMessage::Unsubscribe { id } => !barrier.reads.contains(id),
-            SyncMessage::Advise { .. } => true,
+            SyncMessage::CheckAllowed { .. } => true,
             // A read frozen at a snapshot may name the held commits
             // themselves, which the server cannot resolve until they apply.
             SyncMessage::Read {
@@ -7309,7 +7348,7 @@ impl Db {
             SyncMessage::Read { id, .. } => {
                 barrier.reads.insert(*id);
             }
-            SyncMessage::Unsubscribe { .. } | SyncMessage::Advise { .. } => {}
+            SyncMessage::Unsubscribe { .. } | SyncMessage::CheckAllowed { .. } => {}
             SyncMessage::Commit { ops, .. } => {
                 barrier.commits = true;
                 let schema = {
@@ -7537,7 +7576,7 @@ impl Db {
                 })
                 .collect();
             let mut images = Vec::new();
-            // Seqs of shipped history versions: their origins go first.
+            // Seqs of shipped history versions: their tx ids go first.
             let mut history_seqs = BTreeSet::new();
             for (id, queue, group, list) in subs {
                 let events: Vec<SubscriptionEvent> = queue.borrow_mut().drain(..).collect();
@@ -7755,7 +7794,7 @@ impl Db {
                     settled.push(SyncMessage::Settled {
                         id,
                         through,
-                        listing: window,
+                        members: window,
                         global,
                     });
                     // The settled opening listed the result.
@@ -7771,7 +7810,7 @@ impl Db {
                     Some(image) if readable(&inner, &table, row, &key, policy)? => {
                         images.push(image)
                     }
-                    _ => evictions.push(SyncMessage::Evict {
+                    _ => evictions.push(SyncMessage::AccessLost {
                         table,
                         id: *row.0.as_bytes(),
                         key,
@@ -7811,7 +7850,7 @@ impl Db {
             let evicted: HashSet<(&str, [u8; 16], &[u8])> = evictions
                 .iter()
                 .filter_map(|eviction| match eviction {
-                    SyncMessage::Evict { table, id, key } => {
+                    SyncMessage::AccessLost { table, id, key } => {
                         Some((table.as_str(), *id, key.as_slice()))
                     }
                     _ => None,
@@ -7823,7 +7862,7 @@ impl Db {
                 });
             }
             for eviction in &evictions {
-                if let SyncMessage::Evict { table, id, .. } = eviction {
+                if let SyncMessage::AccessLost { table, id, .. } = eviction {
                     watch.forget(wk((
                         table.clone(),
                         "id".to_owned(),
@@ -7837,10 +7876,10 @@ impl Db {
             if let Some(catalogue) = inner.catalogue_for(index)? {
                 out.push(catalogue);
             }
-            let origins = if history_seqs.is_empty() {
+            let tx_ids = if history_seqs.is_empty() {
                 Vec::new()
             } else {
-                inner.origins(&history_seqs)?
+                inner.tx_ids(&history_seqs)?
             };
             let session = &mut inner.sessions[index];
             session.watch = watch;
@@ -7892,7 +7931,7 @@ impl Db {
                     }
                 }
             }
-            out.extend(rows_messages(images, origins, ROWS_MESSAGE_BYTES));
+            out.extend(rows_messages(images, tx_ids, ROWS_MESSAGE_BYTES));
             out.extend(evictions);
             out.extend(std::mem::take(&mut session.outbox));
             out.extend(settled);
@@ -7960,8 +7999,8 @@ impl Db {
                     }
                 }
                 out.retain(|message| {
-                    !matches!(message, SyncMessage::Rows { images, origins }
-                            if images.is_empty() && origins.is_empty())
+                    !matches!(message, SyncMessage::Rows { images, tx_ids }
+                            if images.is_empty() && tx_ids.is_empty())
                 });
             }
             // Chunked cells go as deltas over the version of their row the
@@ -7974,7 +8013,7 @@ impl Db {
                             inner.ship_deltas(&mut shipped, image)?;
                         }
                     }
-                    SyncMessage::Evict { table, id, key } => {
+                    SyncMessage::AccessLost { table, id, key } => {
                         shipped.remove(&(table.clone(), *id, key.clone()));
                     }
                     _ => {}
@@ -8245,7 +8284,7 @@ impl Db {
             // Rows the replica could not apply a delta to: each ships
             // whole (or as an eviction), as the replica lacks the version
             // the delta was made over.
-            SyncMessage::Hold { rows } => {
+            SyncMessage::ResendWhole { rows } => {
                 let mut inner = self.inner.borrow_mut();
                 let session = &mut inner.sessions[index];
                 for (table, id, key, _) in rows {
@@ -8255,10 +8294,10 @@ impl Db {
                         .insert((table, RowUuid::from_bytes(id), key));
                 }
             }
-            SyncMessage::Holds { versions } => {
+            SyncMessage::KnownCatalogue { versions } => {
                 let mut inner = self.inner.borrow_mut();
                 let session = &mut inner.sessions[index];
-                session.holds = Some(versions.into_iter().collect());
+                session.known_catalogue = Some(versions.into_iter().collect());
                 session.catalogue_owed = true;
             }
             SyncMessage::Unsubscribe { id } => {
@@ -8302,28 +8341,23 @@ impl Db {
                     }
                 }
             }
-            SyncMessage::Advise {
-                id,
-                action,
-                author,
-                session,
-            } => {
+            SyncMessage::CheckAllowed { id, action, acting } => {
                 // As for a commit: a trusted link may ask for a session it
                 // vouches for; a session link only for its own.
-                let advice = match commit_who(policy, author.as_deref(), session.is_some()) {
+                let result = match commit_who(policy, &acting) {
                     Ok(who) => {
                         let identity = match who {
                             Who::Session(author) => Some(author),
                             _ => policy,
                         };
-                        let vouched = vouched(policy, who, session);
+                        let vouched = vouched(policy, who, acting);
                         self.with_claims(vouched, || self.advise(identity, action))
                     }
                     Err(_) => PermissionAdvice::Denied,
                 };
                 self.inner.borrow_mut().sessions[index]
                     .outbox
-                    .push(SyncMessage::Advice { id, advice });
+                    .push(SyncMessage::CheckAllowedResult { id, result });
             }
             SyncMessage::Read {
                 id,
@@ -8465,7 +8499,7 @@ impl Db {
                 };
                 let rows = inner.run(&prepared, policy, &read)?;
                 let mut images = Vec::new();
-                // Seqs of shipped history versions, for their origins.
+                // Seqs of shipped history versions, for their tx ids.
                 let mut seqs = BTreeSet::new();
                 // A flat join ships each occurrence's joined rows.
                 let joined_tables = query
@@ -8534,18 +8568,18 @@ impl Db {
                 let session = &mut inner.sessions[index];
                 session.watch = watch;
                 session.held = held;
-                let mut origins = inner.origins(&seqs)?;
-                origins.extend(named);
+                let mut tx_ids = inner.tx_ids(&seqs)?;
+                tx_ids.extend(named);
                 let through = at.unwrap_or(inner.served_through());
                 let authority = inner.client.is_none();
                 let session = &mut inner.sessions[index];
                 session
                     .outbox
-                    .extend(rows_messages(images, origins, ROWS_MESSAGE_BYTES));
+                    .extend(rows_messages(images, tx_ids, ROWS_MESSAGE_BYTES));
                 session.outbox.push(SyncMessage::Settled {
                     id,
                     through,
-                    listing: Some(rows.iter().map(|r| *r.id.0.as_bytes()).collect()),
+                    members: Some(rows.iter().map(|r| *r.id.0.as_bytes()).collect()),
                     // A strict read at a relay is served once its upstream
                     // answered, from the settled rows alone.
                     global: authority || strict,
@@ -8556,12 +8590,8 @@ impl Db {
                 tx,
                 kind,
                 ops,
-                author,
-                session,
+                acting,
                 expect,
-                deltas,
-                sources,
-                bases,
                 origin,
             } => {
                 let identity = self.inner.borrow().sessions[index].identity;
@@ -8580,9 +8610,6 @@ impl Db {
                     });
                     return Ok(());
                 }
-                // A commit written under a version this server has not
-                // deployed is refused at once, loudly: the app that wrote
-                // it was released ahead of its schema (INV-SYNC-52).
                 // The session commit a relay's carries, when the link may
                 // write as its node (a trusted link, or one whose identity
                 // writes as that node too); otherwise the sender's own. The
@@ -8607,14 +8634,14 @@ impl Db {
                 }
                 let (result, rows) = match known {
                     Some(result) => (result, Vec::new()),
-                    None => match commit_who(policy, author.as_deref(), session.is_some())
+                    None => match commit_who(policy, &acting)
                         .map_err(|error| (error, Vec::new()))
                         .and_then(|who| {
                             let (ops, mut roots) = db
-                                .resolve_deltas(policy, ops, deltas)
+                                .resolve_deltas(policy, ops)
                                 .map_err(|error| (error, Vec::new()))?;
                             roots.extend(
-                                db.source_roots(policy, &ops, &sources)
+                                db.proof_roots(policy, &ops)
                                     .map_err(|error| (error, Vec::new()))?,
                             );
                             let possession = crate::large::Possession {
@@ -8623,7 +8650,7 @@ impl Db {
                                 roots,
                                 settle: Default::default(),
                             };
-                            let vouched = vouched(policy, who, session);
+                            let vouched = vouched(policy, who, acting);
                             self.with_claims(vouched, || {
                                 db.authorize_commit(
                                     who,
@@ -8631,7 +8658,7 @@ impl Db {
                                     kind,
                                     ops,
                                     (node, tx),
-                                    (bases, writer),
+                                    writer,
                                     possession,
                                 )
                             })
@@ -8779,7 +8806,6 @@ impl Db {
         &self,
         identity: Option<AuthorSubject>,
         mut ops: Vec<WireOp>,
-        deltas: Vec<CellDelta>,
     ) -> Result<(Vec<WireOp>, BTreeSet<[u8; 32]>), Error> {
         let mut roots = BTreeSet::new();
         let unresolved = || {
@@ -8788,41 +8814,76 @@ impl Db {
                 "a large-value delta names no version of its row the writer may read",
             )
         };
-        let inner = self.inner();
-        for delta in deltas {
-            let op = ops.get_mut(delta.op as usize).ok_or_else(unresolved)?;
-            let table = inner.schema.table(op.table())?;
-            let stored = table.stored_name(&delta.column).to_owned();
-            let (row, cells) = match op {
-                WireOp::Insert { row, cells, .. }
-                | WireOp::Update { row, cells, .. }
-                | WireOp::Upsert { row, cells, .. }
-                | WireOp::Restore {
-                    row,
-                    cells: Some(cells),
-                    ..
-                } => (RowUuid::from_bytes(*row), cells),
-                _ => return Err(unresolved()),
-            };
-            let seq = delta.delta.seq;
-            if !still_readable_version(&inner, &table.stored, row, &delta.key, seq, identity)? {
-                return Err(unresolved());
+        // A delta stands in for its op's cell, which holds the NULL it
+        // replaces, once per column. Checked on the commit alone, before
+        // anything stored is read.
+        let malformed = |what: &str| {
+            Error::new(
+                ErrorCode::WriteRejected,
+                format!("a large-value delta {what}"),
+            )
+        };
+        for op in &mut ops {
+            let mut columns = BTreeSet::new();
+            for delta in &op.deltas {
+                if !columns.insert(delta.column.as_str()) {
+                    return Err(malformed("names a column another delta of its op names"));
+                }
+                let cell = match &mut op.write {
+                    WireWrite::Insert { cells, .. }
+                    | WireWrite::Update { cells, .. }
+                    | WireWrite::Upsert { cells, .. }
+                    | WireWrite::Restore {
+                        cells: Some(cells), ..
+                    } => cells.get_mut(&delta.column),
+                    _ => None,
+                };
+                let placeholder = cell.is_some_and(|cell| {
+                    let (inner, depth) = large_delta::unwrap(cell);
+                    matches!(inner, Value::Nullable(None)) && depth == delta.depth
+                });
+                if !placeholder {
+                    return Err(malformed("stands in for no NULL cell of its op"));
+                }
             }
-            let base = inner
-                .version_image(&table.stored, row, &delta.key, seq)?
-                .ok_or_else(unresolved)?;
-            let (_, old) = base
-                .cells
-                .iter()
-                .find(|(name, _)| *name == stored)
-                .ok_or_else(unresolved)?;
-            let old = inner
-                .large_of(&table.stored, &stored, old)?
-                .ok_or_else(unresolved)?;
-            let value = large_delta::apply(&old, &delta.delta).ok_or_else(unresolved)?;
-            roots.insert(value.root.object_hash.0);
-            let cell = cells.get_mut(&delta.column).ok_or_else(unresolved)?;
-            *cell = large_delta::wrap(Value::Large(Box::new(value)), delta.depth);
+        }
+        let inner = self.inner();
+        for op in &mut ops {
+            let deltas = std::mem::take(&mut op.deltas);
+            for delta in deltas {
+                let table = inner.schema.table(op.table())?;
+                let stored = table.stored_name(&delta.column).to_owned();
+                let (row, cells) = match &mut op.write {
+                    WireWrite::Insert { row, cells, .. }
+                    | WireWrite::Update { row, cells, .. }
+                    | WireWrite::Upsert { row, cells, .. }
+                    | WireWrite::Restore {
+                        row,
+                        cells: Some(cells),
+                        ..
+                    } => (RowUuid::from_bytes(*row), cells),
+                    _ => return Err(unresolved()),
+                };
+                let seq = delta.delta.seq;
+                if !still_readable_version(&inner, &table.stored, row, &delta.key, seq, identity)? {
+                    return Err(unresolved());
+                }
+                let base = inner
+                    .version_image(&table.stored, row, &delta.key, seq)?
+                    .ok_or_else(unresolved)?;
+                let (_, old) = base
+                    .cells
+                    .iter()
+                    .find(|(name, _)| *name == stored)
+                    .ok_or_else(unresolved)?;
+                let old = inner
+                    .large_of(&table.stored, &stored, old)?
+                    .ok_or_else(unresolved)?;
+                let value = large_delta::apply(&old, &delta.delta).ok_or_else(unresolved)?;
+                roots.insert(value.root.object_hash.0);
+                let cell = cells.get_mut(&delta.column).ok_or_else(unresolved)?;
+                *cell = large_delta::wrap(Value::Large(Box::new(value)), delta.depth);
+            }
         }
         Ok((ops, roots))
     }
@@ -8952,30 +9013,29 @@ impl Db {
         Ok((replies, parked, deferred))
     }
 
-    /// The roots of the chunked values of the settled versions a commit
-    /// names as its sources, each where `identity` may read it: the trees
-    /// the writer holds without pushing them (SPEC 19.4). A source it may
-    /// not read, or this store lacks, counts for nothing.
-    fn source_roots(
+    /// The roots of the chunked values of the versions a commit's ops name
+    /// as their access proofs, each where `identity` may read it: the trees
+    /// the writer holds without pushing them (SPEC 19.4). A proof naming a
+    /// version it may not read, or this store lacks, counts for nothing.
+    fn proof_roots(
         &self,
         identity: Option<AuthorSubject>,
         ops: &[WireOp],
-        sources: &[WireSource],
     ) -> Result<BTreeSet<[u8; 32]>, Error> {
         let inner = self.inner();
         let mut roots = BTreeSet::new();
-        for source in sources {
-            let Some(op) = ops.get(source.op as usize) else {
+        for op in ops {
+            let Some(proof) = &op.access_proof else {
                 continue;
             };
             let (Ok(table), Some(row)) = (inner.schema.stored_table(op.table()), wire_row(op))
             else {
                 continue;
             };
-            if !still_readable_version(&inner, table, row, &source.key, source.seq, identity)? {
+            if !still_readable_version(&inner, table, row, &proof.key, proof.seq, identity)? {
                 continue;
             }
-            if let Some(image) = inner.version_image(table, row, &source.key, source.seq)? {
+            if let Some(image) = inner.version_image(table, row, &proof.key, proof.seq)? {
                 roots.extend(inner.large_roots(table, &image)?);
             }
         }
@@ -8990,9 +9050,15 @@ impl Db {
         mut kind: WireKind,
         ops: Vec<WireOp>,
         origin: ([u8; 16], u64),
-        (bases, writer): (Vec<WireBase>, ([u8; 16], u64)),
+        writer: ([u8; 16], u64),
         possession: crate::large::Possession,
     ) -> Result<Vec<(String, RowUuid, Vec<u8>)>, (Error, Vec<(String, RowUuid, Vec<u8>)>)> {
+        // Each base by the op it travels on; the ops apply without them.
+        let bases: Vec<(usize, WireBase)> = ops
+            .iter()
+            .enumerate()
+            .flat_map(|(index, op)| op.bases.iter().map(move |base| (index, base.clone())))
+            .collect();
         let ops: Vec<StagedOp> = match ops.into_iter().map(from_wire).collect::<Result<_, _>>() {
             Ok(ops) => ops,
             Err(error) => return Err((error, Vec::new())),
@@ -9108,7 +9174,9 @@ impl Db {
         let by_row = self.inner().row_ops(&ops);
         let (bases, mut built) = {
             let inner = self.inner();
-            let resolved = if relay {
+            let resolved = if let Err(error) = inner.check_bases(&ops, &by_row, &bases) {
+                Err(error)
+            } else if relay {
                 inner
                     .relay_bases(origin, &ops, bases)
                     .map(|bases| (bases, HashMap::new()))
@@ -9240,20 +9308,20 @@ impl Db {
 fn vouched(
     policy: Option<AuthorSubject>,
     who: Who,
-    session: Option<BTreeMap<String, Value>>,
+    acting: Acting,
 ) -> Option<(AuthorSubject, BTreeMap<String, Value>)> {
-    match (who, session) {
-        (Who::Session(author), Some(claims)) if policy.is_none() => Some((author, claims)),
+    match (who, acting) {
+        (Who::Session(author), Acting::Session { claims, .. }) if policy.is_none() => {
+            Some((author, claims))
+        }
         _ => None,
     }
 }
 
-fn commit_who(
-    policy: Option<AuthorSubject>,
-    author: Option<&str>,
-    session: bool,
-) -> Result<Who, Error> {
-    let author = author
+fn commit_who(policy: Option<AuthorSubject>, acting: &Acting) -> Result<Who, Error> {
+    let session = matches!(acting, Acting::Session { .. });
+    let author = acting
+        .author()
         .map(AuthorSubject::from_canonical)
         .transpose()
         .map_err(|error| Error::new(ErrorCode::WriteRejected, error.to_string()))?;
@@ -9369,13 +9437,13 @@ fn receipt_author(identity: &AuthorSubject) -> Vec<u8> {
 
 /// The row a write names.
 fn wire_row(op: &WireOp) -> Option<RowUuid> {
-    match op {
-        WireOp::Insert { row, .. }
-        | WireOp::Update { row, .. }
-        | WireOp::Upsert { row, .. }
-        | WireOp::Delete { row, .. }
-        | WireOp::Restore { row, .. }
-        | WireOp::Move { row, .. } => Some(RowUuid::from_bytes(*row)),
+    match &op.write {
+        WireWrite::Insert { row, .. }
+        | WireWrite::Update { row, .. }
+        | WireWrite::Upsert { row, .. }
+        | WireWrite::Delete { row, .. }
+        | WireWrite::Restore { row, .. }
+        | WireWrite::Move { row, .. } => Some(RowUuid::from_bytes(*row)),
     }
 }
 
@@ -9563,6 +9631,68 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ids::NodeUuid;
+
+    /// A pending `Commit` header in the layout before `acting` (separate
+    /// `author` and `session`), with its lists empty as `persist_pending`
+    /// stores them.
+    fn pre_acting_header(
+        author: Option<&str>,
+        session: Option<BTreeMap<String, Value>>,
+        origin: Option<([u8; 16], u64)>,
+    ) -> Vec<u8> {
+        const COMMIT: u32 = 4;
+        postcard::to_allocvec(&(
+            COMMIT,
+            [7u8; 16],
+            LOCAL_BASE + 1,
+            WireKind::Mergeable,
+            Vec::<WireOp>::new(),
+            author.map(str::to_owned),
+            session,
+            Vec::<Expect>::new(),
+            origin,
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_pending_header_from_before_acting_is_refused_not_misread() {
+        let author = AuthorSubject::system_at(NodeUuid::from_bytes([9; 16]));
+        let headers = [
+            pre_acting_header(None, None, None),
+            pre_acting_header(None, None, Some(([8; 16], 3))),
+            pre_acting_header(Some(author.canonical()), None, Some(([8; 16], 3))),
+            pre_acting_header(Some(author.canonical()), Some(BTreeMap::new()), None),
+        ];
+        for header in headers {
+            let error = decode_stored::<SyncMessage>(&header)
+                .expect_err("an old pending header must not decode");
+            assert_eq!(error.code, ErrorCode::UnsupportedStorageCodecs, "{error:?}");
+            assert!(error.message.contains("resync"), "{error:?}");
+        }
+    }
+
+    #[test]
+    fn a_current_pending_header_round_trips() {
+        let header = SyncMessage::Commit {
+            node: [7; 16],
+            tx: LOCAL_BASE + 1,
+            kind: WireKind::Mergeable,
+            ops: Vec::new(),
+            acting: Acting::Session {
+                author: AuthorSubject::system_at(NodeUuid::from_bytes([9; 16]))
+                    .canonical()
+                    .to_owned(),
+                claims: BTreeMap::from([("role".to_owned(), Value::String("admin".to_owned()))]),
+            },
+            expect: Vec::new(),
+            origin: Some(([8; 16], 3)),
+        };
+        let bytes = encode(&header);
+        let decoded: SyncMessage = decode_stored(&bytes).unwrap();
+        assert_eq!(encode(&decoded), bytes);
+    }
 
     fn image(id: u8, seq: u64, body: usize) -> Image {
         Image {
@@ -9597,17 +9727,17 @@ mod tests {
             image(3, 3, 100),
             image(4, 2, 100),
         ];
-        let origins = vec![(1, [9; 16], 1)];
-        let messages = rows_messages(images, origins.clone(), 300);
+        let tx_ids = vec![(1, [9; 16], 1)];
+        let messages = rows_messages(images, tx_ids.clone(), 300);
         // seq 1 and 2 fit together; seq 3's two versions stay together.
         assert_eq!(
             shipped(&messages),
             [vec![(2, 1), (4, 2)], vec![(1, 3), (3, 3)]]
         );
-        let SyncMessage::Rows { origins: first, .. } = &messages[0] else {
+        let SyncMessage::Rows { tx_ids: first, .. } = &messages[0] else {
             unreachable!()
         };
-        assert_eq!(first, &origins, "the origins go with the first part");
+        assert_eq!(first, &tx_ids, "the tx ids go with the first part");
     }
 
     #[test]

@@ -1,7 +1,8 @@
 //! The server's own administrative state in the app's store file (see
-//! [`jazz::host`]): a small ordered key-value store for the schema
-//! catalogue, and plain SQL for host tables with columns of their own (the
-//! account registry).
+//! [`jazz::host`]): plain SQL for host tables with columns of their own
+//! (the account registry), and a small ordered key-value store over one
+//! host table. The schema catalogue has typed tables of its own (see
+//! [`jazz::catalogue`]).
 //!
 //! Writes run on the store's thread, on the one connection the runtime's
 //! rows use too, and wait for it (at most the one runtime job or tick slice
@@ -12,21 +13,22 @@
 
 use std::sync::{Arc, mpsc};
 
-use jazz::host::{HostPair, HostReader, HostTable, HostTables};
+use jazz::host::HostReader;
+#[cfg(test)]
+use jazz::host::{HostPair, HostTable, HostTables};
 use rusqlite::Connection;
 
 /// Errors are reported as text: callers wrap them in their own error types.
 pub(crate) type KvResult<T> = Result<T, String>;
 
-/// The server catalogue's host table.
-pub(crate) const CATALOGUE: HostTable = HostTable::new("catalogue");
-
+#[cfg(test)]
 pub(crate) struct HostKv {
     table: HostTable,
     reader: Arc<HostReader>,
     store: crate::runtime::HostSender,
 }
 
+#[cfg(test)]
 impl HostKv {
     pub(crate) fn new(
         table: HostTable,
@@ -55,7 +57,6 @@ impl HostKv {
             .map_err(|_| "server store closed before answering".to_owned())?
     }
 
-    #[cfg(test)]
     pub(crate) fn get(&self, key: &[u8]) -> KvResult<Option<Vec<u8>>> {
         self.reader
             .get(self.table, key)
@@ -66,12 +67,6 @@ impl HostKv {
     pub(crate) fn write_many(&self, pairs: &[HostPair]) -> KvResult<()> {
         let pairs = pairs.to_vec();
         self.call(move |tables, table| tables.host_put_many(table, &pairs))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn delete(&self, key: &[u8]) -> KvResult<()> {
-        let key = key.to_vec();
-        self.call(move |tables, table| tables.host_delete(table, &key))
     }
 
     /// Every pair whose key starts with `prefix`, in key order.
