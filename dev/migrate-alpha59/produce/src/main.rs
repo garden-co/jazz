@@ -53,6 +53,12 @@ fn projects() -> TableSchemaBuilder {
     TableSchemaBuilder::new("projects")
         .column("name", ColumnType::Text)
         .column("archived", ColumnType::Boolean)
+        .column(
+            "status",
+            ColumnType::Enum {
+                variants: vec!["active".into(), "paused".into(), "done".into()],
+            },
+        )
 }
 
 fn documents(title: &str, pinned: bool) -> TableSchemaBuilder {
@@ -338,7 +344,11 @@ fn v1_rows(db: &Db) {
         row(1, 1),
         user(1),
         1,
-        &[("name", s("Alpha")), ("archived", Value::Bool(false))],
+        &[
+            ("name", s("Alpha")),
+            ("archived", Value::Bool(false)),
+            ("status", s("active")),
+        ],
     );
     insert(
         db,
@@ -346,7 +356,11 @@ fn v1_rows(db: &Db) {
         row(1, 2),
         user(2),
         2,
-        &[("name", s("Beta")), ("archived", Value::Bool(false))],
+        &[
+            ("name", s("Beta")),
+            ("archived", Value::Bool(false)),
+            ("status", s("paused")),
+        ],
     );
     update(
         db,
@@ -354,7 +368,7 @@ fn v1_rows(db: &Db) {
         row(1, 1),
         user(2),
         3,
-        &[("name", s("Alpha 2"))],
+        &[("name", s("Alpha 2")), ("status", s("done"))],
     );
     insert(
         db,
@@ -402,7 +416,11 @@ fn v1_rows(db: &Db) {
         row(1, 3),
         AuthorSubject::SYSTEM,
         8,
-        &[("name", s("System")), ("archived", Value::Bool(true))],
+        &[
+            ("name", s("System")),
+            ("archived", Value::Bool(true)),
+            ("status", s("done")),
+        ],
     );
     delete(db, "projects", row(1, 3), user(1), 9);
     block_on(db.restore(
