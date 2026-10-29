@@ -34,6 +34,12 @@ nodes and write times:
 
 The receipts that read it back run by exact name in `dev/gates/storage-compat.sh`.
 
+A format-1 file written by a build between #4409 and #4432 (which records
+column types, but enum columns as text) is not read by later builds: its
+enum column's recorded type no longer matches, so opening it is refused
+with "changing the type of `<table>.<column>`". Format 1 had not shipped;
+such a store is recreated, not migrated.
+
 The greenfield removal of `_jazz_shadow` regenerates this format-1 corpus
 in place, without a migration or format bump. Pending writes recover their
 upstream baseline from the current row or the newest history version below

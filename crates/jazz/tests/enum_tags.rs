@@ -798,3 +798,300 @@ fn a_subscription_filtered_by_a_variant_sees_matching_writes() {
         [1]
     );
 }
+
+/// `tasks(title, status: enum(todo, doing, done)?, labels)`, or with
+/// `status` as a nullable boolean.
+fn optional_status(enum_status: bool) -> JazzSchema {
+    let status = if enum_status {
+        enumeration(&["todo", "doing", "done"])
+    } else {
+        ColumnType::Boolean
+    };
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("tasks")
+                    .column("title", ColumnType::Text)
+                    .nullable_column("status", status)
+                    .nullable_column(
+                        "labels",
+                        ColumnType::Array {
+                            element: Box::new(enumeration(&["bug", "ui"])),
+                        },
+                    )
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    )
+}
+
+fn some(value: &str) -> Value {
+    Value::Nullable(Some(Box::new(name(value))))
+}
+
+fn status_is_some(value: &str) -> Predicate {
+    Predicate::Eq(
+        Operand::Column("status".into()),
+        Operand::Literal(some(value)),
+    )
+}
+
+/// The authority stores `status` under another stored name (it was a
+/// boolean there first); a replica that stored it under its own name moves it to
+/// the authority's while it mirrors the catalogue, and keeps the tags it
+/// learned for that name.
+#[test]
+fn a_replica_moving_its_column_to_the_authoritys_name_keeps_the_tags() {
+    let dir = tempfile::tempdir().unwrap();
+    let server_path = dir.path().join("server.sqlite");
+    let server = authority_at(optional_status(false), &server_path);
+    try_insert(
+        &server,
+        9,
+        &[
+            ("title", name("t")),
+            ("status", Value::Nullable(Some(Box::new(Value::Bool(true))))),
+        ],
+    )
+    .unwrap();
+    drop(server);
+    let server = authority_at(optional_status(true), &server_path);
+    try_insert(
+        &server,
+        1,
+        &[("title", name("t")), ("status", some("doing"))],
+    )
+    .unwrap();
+
+    let client_path = dir.path().join("client.sqlite");
+    let client = open_at(optional_status(true), 1, &client_path);
+    let _link = link(&client, &server);
+    let q = client.prepare_query(&Query::from("tasks")).unwrap();
+    let _sub = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
+    pump(&server, &[&client]);
+    assert_eq!(raw_tags(&client_path), raw_tags(&server_path));
+    assert_eq!(
+        ids(
+            &client,
+            Query::from("tasks").filter(status_is_some("doing"))
+        ),
+        [1]
+    );
+    try_insert(
+        &client,
+        2,
+        &[("title", name("t")), ("status", some("todo"))],
+    )
+    .unwrap();
+    assert_eq!(
+        ids(&client, Query::from("tasks").filter(status_is_some("todo"))),
+        [2]
+    );
+    pump(&server, &[&client]);
+    // Its own write holds the authority's tag.
+    let conn = rusqlite::Connection::open(&client_path).unwrap();
+    let todo: Option<i64> = conn
+        .query_row(
+            "SELECT \"status~2\" FROM tasks WHERE typeof(\"status~2\") = 'integer' AND title = 't' \
+             AND \"status~2\" = 0",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+    assert_eq!(todo, Some(0));
+    // A catalogue sent again is taken as it is.
+    drop(client);
+    let client = open_at(optional_status(true), 1, &client_path);
+    let _link = link(&client, &server);
+    let q = client.prepare_query(&Query::from("tasks")).unwrap();
+    let _sub = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
+    pump(&server, &[&client]);
+    assert_eq!(ids(&client, Query::from("tasks")), [1, 2, 9]);
+}
+
+/// A copy has tags of its own: variants added later to the source and to
+/// the copy get the same tag number in each, and a fresh replica reads
+/// both, because it fills a copy by variant name.
+#[test]
+fn a_copy_and_its_source_tag_later_variants_independently() {
+    let dir = tempfile::tempdir().unwrap();
+    let server_path = dir.path().join("server.sqlite");
+    let server = authority_at(v1(), &server_path);
+    insert(&server, 1, "doing");
+    let schema = |status: &[&str], copy: &[&str]| {
+        compile_schema(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("tasks")
+                        .column("title", ColumnType::Text)
+                        .column("status", enumeration(status))
+                        .column("copy", enumeration(copy))
+                        .nullable_column(
+                            "labels",
+                            ColumnType::Array {
+                                element: Box::new(enumeration(&["bug", "ui"])),
+                            },
+                        )
+                        .policies(allow_all_policies()),
+                )
+                .build(),
+        )
+    };
+    let copied = schema(&["todo", "doing", "done"], &["todo", "doing", "done"]);
+    block_on(server.activate_schema_with_lenses(
+        copied.clone(),
+        &[lens(
+            &v1(),
+            &copied,
+            vec![LensOp::CopyColumn {
+                from: "status".into(),
+                to: "copy".into(),
+            }],
+        )],
+    ))
+    .unwrap();
+    let v4 = schema(
+        &["todo", "doing", "done", "later"],
+        &["todo", "doing", "done", "urgent"],
+    );
+    block_on(server.activate_schema_with_lenses(v4.clone(), &[lens(&copied, &v4, vec![])]))
+        .unwrap();
+    try_insert(
+        &server,
+        2,
+        &[
+            ("title", name("t")),
+            ("status", name("later")),
+            ("copy", name("urgent")),
+        ],
+    )
+    .unwrap();
+
+    let client_path = dir.path().join("client.sqlite");
+    let client = open_at(v1(), 1, &client_path);
+    let _link = link(&client, &server);
+    let q = client.prepare_query(&Query::from("tasks")).unwrap();
+    let _sub = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
+    pump(&server, &[&client]);
+    assert_eq!(ids(&client, Query::from("tasks")), [1, 2]);
+    for db in [&server, &client] {
+        let view = block_on(db.register_schema_view(v4.clone())).unwrap();
+        assert_eq!(
+            column(&view, Query::from("tasks"), "copy"),
+            [(1, Some(name("doing"))), (2, Some(name("urgent")))]
+        );
+        assert_eq!(
+            column(&view, Query::from("tasks"), "status"),
+            [(1, Some(name("doing"))), (2, Some(name("later")))]
+        );
+    }
+}
+
+/// A store that has never had the authority's tags (a client before its
+/// first sync) stores names and sorts them by name; once it syncs it
+/// holds the authority's tags and sorts in their order.
+#[test]
+fn a_store_without_the_authoritys_tags_stores_names_until_it_syncs() {
+    let dir = tempfile::tempdir().unwrap();
+    let client_path = dir.path().join("client.sqlite");
+    let client = open_at(v1(), 1, &client_path);
+    insert(&client, 1, "done");
+    insert(&client, 2, "todo");
+    insert(&client, 3, "doing");
+    let mut cells = raw_cells_of(&client_path, "tasks");
+    cells.sort();
+    assert_eq!(
+        cells,
+        ["doing", "done", "todo"].map(|n| ("text".to_owned(), n.to_owned()))
+    );
+    assert_eq!(
+        statuses(&client, by_status()),
+        [(3, "doing".into()), (1, "done".into()), (2, "todo".into())]
+    );
+    assert_eq!(
+        ids(&client, Query::from("tasks").filter(status_is("todo"))),
+        [2]
+    );
+
+    let server = authority_at(v1(), &dir.path().join("server.sqlite"));
+    let _link = link(&client, &server);
+    let q = client.prepare_query(&Query::from("tasks")).unwrap();
+    let _sub = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
+    pump(&server, &[&client]);
+    assert_eq!(raw_cells(&client_path), integers(&[0, 1, 2]));
+    assert_eq!(
+        statuses(&client, by_status()),
+        [(2, "todo".into()), (3, "doing".into()), (1, "done".into())]
+    );
+}
+
+/// A catalogue this store refuses (it keeps a column of the authority's
+/// with another type) leaves no tag learned: its own TEXT cells keep
+/// matching their names.
+#[test]
+fn a_refused_catalogue_learns_no_tags() {
+    let with_rank = |rank: ColumnType| {
+        compile_schema(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("tasks")
+                        .column("title", ColumnType::Text)
+                        .column("status", enumeration(&["todo", "doing", "done"]))
+                        .nullable_column("rank", rank)
+                        .policies(allow_all_policies()),
+                )
+                .build(),
+        )
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let server = authority_at(
+        with_rank(ColumnType::Boolean),
+        &dir.path().join("server.sqlite"),
+    );
+    let client_path = dir.path().join("client.sqlite");
+    let client = open_at(with_rank(ColumnType::Text), 1, &client_path);
+    insert(&client, 1, "done");
+    let _link = link(&client, &server);
+    let q = client.prepare_query(&Query::from("tasks")).unwrap();
+    let _sub = block_on(client.subscribe(&q, ReadOpts::default())).unwrap();
+    pump(&server, &[&client]);
+    let conn = rusqlite::Connection::open(&client_path).unwrap();
+    let tags: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name = '_jazz_enum_tags'",
+            [],
+            |row| row.get(0),
+        )
+        .and_then(|exists: i64| {
+            if exists == 0 {
+                Ok(0)
+            } else {
+                conn.query_row("SELECT count(*) FROM _jazz_enum_tags", [], |row| row.get(0))
+            }
+        })
+        .unwrap();
+    assert_eq!(tags, 0, "the refused catalogue's tags are not kept");
+    assert_eq!(
+        ids(&client, Query::from("tasks").filter(status_is("done"))),
+        [1]
+    );
+}
+
+/// The raw `status` cells of stored table `table`, as `(SQLite type, cell
+/// as text)`, by the stored column `_jazz_names` gives it.
+fn raw_cells_of(path: &Path, table: &str) -> Vec<(String, String)> {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    let (stored, col): (String, String) = conn
+        .query_row(
+            "SELECT stored_tbl, stored_col FROM _jazz_names WHERE tbl = ?1 AND col = 'status' LIMIT 1",
+            [table],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let sql = format!("SELECT typeof(\"{col}\"), CAST(\"{col}\" AS TEXT) FROM \"{stored}\"");
+    let mut stmt = conn.prepare(&sql).unwrap();
+    stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}

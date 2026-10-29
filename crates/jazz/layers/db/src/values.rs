@@ -587,7 +587,23 @@ impl TagRegistry {
                 None => (to.to_owned(), key.1),
                 Some((_, new)) => (key.0, new.to_owned()),
             };
-            map.insert(new, tags);
+            // Tags already kept under the new name (a replica mirroring its
+            // upstream learns them before it moves its own stored column
+            // there) stay; the moved ones join them, and schemas holding
+            // either entry see the same tags.
+            match map.get(&new) {
+                Some(kept) if !Rc::ptr_eq(kept, &tags) => {
+                    for (tag, name) in tags.borrow().iter() {
+                        if kept.borrow().name(tag).is_none() && kept.borrow().tag(name).is_none() {
+                            kept.borrow_mut().insert(name.to_owned(), tag);
+                        }
+                    }
+                    *tags.borrow_mut() = kept.borrow().clone();
+                }
+                _ => {
+                    map.insert(new, tags);
+                }
+            }
         }
     }
 }

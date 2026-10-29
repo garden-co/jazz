@@ -589,21 +589,45 @@ impl Names {
                 if !exists {
                     continue;
                 }
+                // A replica learns its upstream's tags under the stored name
+                // before it moves its own column there: those rows stay, and
+                // the moved ones join them.
+                let (update, merge) = if ddl_table.starts_with("_jazz_enum_") {
+                    ("UPDATE OR IGNORE", true)
+                } else {
+                    ("UPDATE", false)
+                };
                 match column {
                     None => {
                         conn.execute(
-                            &format!("UPDATE {ddl_table} SET tbl = ?2 WHERE tbl = ?1"),
+                            &format!("{update} {ddl_table} SET tbl = ?2 WHERE tbl = ?1"),
                             [from, to],
                         )
                         .map_err(storage)?;
+                        if merge {
+                            conn.execute(
+                                &format!("DELETE FROM {ddl_table} WHERE tbl = ?1"),
+                                [from],
+                            )
+                            .map_err(storage)?;
+                        }
                     }
                     Some((old, new)) => {
                         for col in columns {
                             conn.execute(
-                                &format!("UPDATE {ddl_table} SET {col} = ?3 WHERE tbl = ?1 AND {col} = ?2"),
+                                &format!("{update} {ddl_table} SET {col} = ?3 WHERE tbl = ?1 AND {col} = ?2"),
                                 [from, old, new],
                             )
                             .map_err(storage)?;
+                            if merge {
+                                conn.execute(
+                                    &format!(
+                                        "DELETE FROM {ddl_table} WHERE tbl = ?1 AND {col} = ?2"
+                                    ),
+                                    [from, old],
+                                )
+                                .map_err(storage)?;
+                            }
                         }
                     }
                 }
@@ -612,19 +636,20 @@ impl Names {
         })?;
         self.tags.moved(from, to, column);
         let table_to = if column.is_none() { to } else { from };
-        self.text = std::mem::take(&mut self.text)
-            .into_iter()
-            .map(|((table, stored_column), names)| {
-                if table != from {
-                    return ((table, stored_column), names);
-                }
+        let mut text = BTreeMap::<(String, String), BTreeSet<String>>::new();
+        for ((table, stored_column), names) in std::mem::take(&mut self.text) {
+            let key = if table != from {
+                (table, stored_column)
+            } else {
                 let stored_column = match column {
                     Some((old, new)) if stored_column == old => new.to_owned(),
                     _ => stored_column,
                 };
-                ((table_to.to_owned(), stored_column), names)
-            })
-            .collect();
+                (table_to.to_owned(), stored_column)
+            };
+            text.entry(key).or_default().extend(names);
+        }
+        self.text = text;
         for (_, names) in self.versions.values_mut() {
             for (stored, columns) in names.tables.values_mut() {
                 if stored != from {
@@ -900,35 +925,6 @@ impl Names {
         }
         self.record_tags(conn, &new)?;
         Ok(new)
-    }
-
-    /// Stored column `copy` of stored table `table` is a copy of its stored
-    /// column `source`, which it holds the cells of: it takes its tags.
-    pub(crate) fn copy_tags(
-        &mut self,
-        conn: &Connection,
-        table: &str,
-        source: &str,
-        copy: &str,
-    ) -> Result<(), Error> {
-        let tags: Vec<Tag> = self
-            .tags
-            .column(table, source)
-            .borrow()
-            .iter()
-            .map(|(tag, name)| (table.to_owned(), copy.to_owned(), tag, name.to_owned()))
-            .collect();
-        self.learn(conn, &tags)?;
-        // The copy holds the source's TEXT cells too.
-        if table_exists(conn, "_jazz_enum_text")? {
-            conn.execute(
-                "INSERT OR IGNORE INTO _jazz_enum_text (tbl, col, name, ddl) \
-                 SELECT tbl, ?3, name, 0 FROM _jazz_enum_text WHERE tbl = ?1 AND col = ?2",
-                rusqlite::params![table, source, copy],
-            )
-            .map_err(storage)?;
-        }
-        Ok(())
     }
 
     /// Record `tags`, in the file and then in memory.

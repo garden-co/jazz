@@ -809,24 +809,31 @@ and reads. Only stored cells hold tags.
   is added, so an added enum column's DDL default is a tag too. A column's
   next tag is one past its highest, in declaration order, and a tag is never
   reused: a removed variant keeps its tag, and every name a version ever
-  declared for the stored column still reads back. A copy lens's column
-  takes its source's tags, because it holds the source's cells.
+  declared for the stored column still reads back. A copy lens's column is
+  a stored column with tags of its own (its source may add variants the
+  copy does not, and the other way round); it is filled by variant name,
+  and those names become its tags like any other TEXT cell.
 - **Replicas mirror them.** `Catalogue.tags` carries every tag the sender
   keeps, and a replica takes them before the catalogue's versions and rows.
   Row images travel as stored cells, so they carry tags. Commits carry
   variant names, which the authority binds as its tags. A replica never
   mints a tag, and refuses a catalogue that tags a variant otherwise than it
-  does.
-- **A variant without a tag here** is stored as its TEXT name, and noted in
-  `_jazz_enum_text`. When its tag arrives, the store rewrites those cells
+  does. It takes a catalogue's tags, versions and the cells they retag
+  whole or not at all, and a stored column it moves to the authority's
+  stored name keeps the tags it learned for that name.
+- **A variant without a tag here** (on a store that has not had the
+  authority's catalogue yet, such as a client before its first sync, or for
+  a version only this store admitted) is stored as its TEXT name, and noted
+  in `_jazz_enum_text` (once per name, not per write). When its tag arrives, the store rewrites those cells
   (row and history tables, inside arrays too) to the tag. An enum column a
   store added while its default had no tag keeps that name as its SQLite
   default, so a row inserted without the column writes the tag explicitly
   once there is one.
 - **Order.** `ORDER BY`, `MIN`, `MAX` and range comparisons on an enum
   column follow tag order: the order variants were added, which an index on
-  the column serves. TEXT cells sort after every tag, so on a replica a
-  variant it has no tag for yet sorts after the ones it has.
+  the column serves. TEXT cells sort after every tag, by name, so on a
+  replica a variant it has no tag for yet sorts after the ones it has, and
+  a store with no tags yet sorts its variants by name until it syncs.
 - **Comparisons.** A variant name compared with an enum column (`=`, `IN`,
   array containment, a policy literal or session value) is bound as its tag,
   or as its name while it has none here. Anything else, such as text

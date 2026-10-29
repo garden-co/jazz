@@ -6376,7 +6376,11 @@ impl Db {
             match image {
                 Some(image) => {
                     inner.drop_row(table, *row, key, image.seq)?;
-                    inner.put_image(image, false)?;
+                    // Held since it arrived: names it carried may have
+                    // tags here by now.
+                    let mut image = image.clone();
+                    inner.tag_image_cells(&mut image)?;
+                    inner.put_image(&image, false)?;
                 }
                 None => inner.drop_row(table, *row, key, 0)?,
             }

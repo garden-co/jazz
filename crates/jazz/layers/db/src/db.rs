@@ -2412,19 +2412,18 @@ impl Inner {
                 "the upstream's catalogue is another app's: this store keeps a different authority namespace",
             ));
         }
-        // Tags first: a version this store takes now stores an enum
-        // column's default as its tag.
-        let learned_tags = {
-            let conn = &self.conn;
-            self.names.learn(conn, &tags)?
-        };
+        // The tags, the versions and the cells they retag are taken whole or
+        // not at all: a refused catalogue leaves no tag learned whose TEXT
+        // cells were not rewritten.
         let renamed = !versions.is_empty();
-        if renamed {
-            self.mirror_versions(versions, cells)?;
+        let snapshot = self.names.tags().snapshot();
+        begin_savepoint(&self.conn, "jazz_catalogue")?;
+        let mirrored = self.mirror_tags_and_versions(tags, versions, cells);
+        let ended = end_savepoint(&self.conn, "jazz_catalogue", mirrored.is_ok());
+        if let Err(error) = mirrored.and(ended) {
+            self.names.tags().restore(snapshot);
+            return Err(error);
         }
-        // After the versions: a stored column they renamed holds its TEXT
-        // cells under the authority's name now.
-        self.tags_learned(learned_tags)?;
         let learned = known.is_none() && namespace.is_some();
         if let (true, Some(namespace)) = (learned, namespace) {
             self.persist_namespace(namespace)?;
@@ -2439,6 +2438,26 @@ impl Inner {
             }
         }
         Ok(renamed)
+    }
+
+    fn mirror_tags_and_versions(
+        &mut self,
+        tags: Vec<crate::names::Tag>,
+        versions: Vec<sync::CatalogueVersion>,
+        cells: Vec<sync::CatalogueCell>,
+    ) -> Result<(), Error> {
+        // Tags first: a version this store takes now stores an enum
+        // column's default as its tag.
+        let learned = {
+            let conn = &self.conn;
+            self.names.learn(conn, &tags)?
+        };
+        if !versions.is_empty() {
+            self.mirror_versions(versions, cells)?;
+        }
+        // After the versions: a stored column they renamed holds its TEXT
+        // cells under the authority's name now.
+        self.tags_learned(learned)
     }
 
     /// Take the upstream's versions, names and lens cells: whole or not at
@@ -2769,19 +2788,13 @@ impl Inner {
         self.tags_learned(minted)
     }
 
-    /// Returns the tags it minted.
+    /// Returns the tags whose TEXT cells may now become them: the ones it
+    /// minted and an enum copy's.
     fn write_admission_steps(
         &mut self,
         target: &Schema,
         cells: Vec<crate::names::LensCell>,
     ) -> Result<Vec<crate::names::Tag>, Error> {
-        // A copy holds its source's cells, so it takes its source's tags.
-        for cell in &cells {
-            if let crate::names::LensCellRule::Copy(source) = &cell.rule {
-                self.names
-                    .copy_tags(&self.conn, &cell.table, source, &cell.column)?;
-            }
-        }
         // An authority tags new variants first, so an enum column added
         // with a default stores the default's tag.
         let minted = if self.publishes_catalogue() {
@@ -2797,26 +2810,94 @@ impl Inner {
                 .note_ddl_text(&self.conn, &table, &column, &name)?;
         }
         // A new copy holds its source's values, in every row version.
+        let mut retag = minted.clone();
         for cell in &cells {
             if let crate::names::LensCellRule::Copy(source) = &cell.rule {
-                for table in [cell.table.clone(), format!("{}__h", cell.table)] {
-                    self.conn
-                        .execute(
-                            &format!(
-                                "UPDATE {} SET {} = {}",
-                                quote(&table),
-                                quote(&cell.column),
-                                quote(source)
-                            ),
-                            [],
-                        )
-                        .map_err(storage)?;
-                }
+                retag.extend(self.fill_copy(target, &cell.table, &cell.column, source)?);
             }
         }
         self.names.admit(&self.conn, target)?;
         self.names.record_lens_cells(&self.conn, cells)?;
-        Ok(minted)
+        Ok(retag)
+    }
+
+    /// Fill copy `column` of stored table `table`, in every row version,
+    /// from `source`. An enum copy has tags of its own (the source may tag
+    /// later variants otherwise), so it is filled with the variant names
+    /// and returns its tags, for those names to become them.
+    fn fill_copy(
+        &mut self,
+        target: &Schema,
+        table: &str,
+        column: &str,
+        source: &str,
+    ) -> Result<Vec<crate::names::Tag>, Error> {
+        let copy = target
+            .tables
+            .values()
+            .find(|t| t.stored == table)
+            .and_then(|t| t.columns.iter().find(|c| c.stored == column))
+            .filter(|c| c.is_enum());
+        let source_tags = self.names.tags().column(table, source);
+        for history in [false, true] {
+            let stored = if history {
+                format!("{table}__h")
+            } else {
+                table.to_owned()
+            };
+            let (target_sql, column_sql, source_sql) = (
+                quote(&stored),
+                quote(column),
+                format!("{}.{}", quote(&stored), quote(source)),
+            );
+            let value = match copy {
+                None => source_sql,
+                Some(copy) if crate::values::is_array_type(&copy.ty) => format!(
+                    "CASE WHEN {source_sql} IS NULL THEN NULL ELSE (SELECT json_group_array({} \
+                     ORDER BY j.key) FROM json_each({source_sql}) AS j) END",
+                    source_tags.borrow().name_sql("j.value")
+                ),
+                Some(_) => source_tags.borrow().name_sql(&source_sql),
+            };
+            self.conn
+                .execute(
+                    &format!("UPDATE {target_sql} SET {column_sql} = {value}"),
+                    [],
+                )
+                .map_err(storage)?;
+            if let Some(copy) = copy {
+                let names = if crate::values::is_array_type(&copy.ty) {
+                    format!(
+                        "SELECT DISTINCT j.value FROM {target_sql}, json_each({target_sql}.{column_sql}) AS j \
+                         WHERE j.type = 'text'"
+                    )
+                } else {
+                    format!(
+                        "SELECT DISTINCT {column_sql} FROM {target_sql} WHERE typeof({column_sql}) = 'text'"
+                    )
+                };
+                let names: Vec<String> = self
+                    .conn
+                    .prepare(&names)
+                    .and_then(|mut select| {
+                        select
+                            .query_map([], |row| row.get(0))?
+                            .collect::<Result<_, _>>()
+                    })
+                    .map_err(storage)?;
+                for name in names {
+                    crate::names::Names::note_text(&self.conn, table, column, &name)?;
+                }
+            }
+        }
+        let Some(copy) = copy.and_then(|c| c.tags.as_ref()) else {
+            return Ok(Vec::new());
+        };
+        Ok(copy
+            .borrow()
+            .iter()
+            .map(|(tag, name)| (table.to_owned(), column.to_owned(), tag, name.to_owned()))
+            .collect())
     }
 
     /// Tag the variants the admitted versions declare that have none yet,
@@ -2857,8 +2938,8 @@ impl Inner {
                     let sql = if array {
                         format!(
                             "UPDATE {target} SET {column} = (SELECT json_group_array(CASE \
-                             WHEN j.type = 'text' AND j.value = ?2 THEN ?1 ELSE j.value END) \
-                             FROM json_each({target}.{column}) AS j) WHERE EXISTS (SELECT 1 \
+                             WHEN j.type = 'text' AND j.value = ?2 THEN ?1 ELSE j.value END \
+                             ORDER BY j.key) FROM json_each({target}.{column}) AS j) WHERE EXISTS (SELECT 1 \
                              FROM json_each({target}.{column}) WHERE type = 'text' AND value = ?2)"
                         )
                     } else {
