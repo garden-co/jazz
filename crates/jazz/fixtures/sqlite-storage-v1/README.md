@@ -7,12 +7,13 @@ not read bumps `STORAGE_FORMAT` and adds a new corpus beside this one, and
 never rewrites these. Until then format 1 is still moving, so such a change
 re-runs the producer and re-pins the hashes here and in the test instead
 (for example: per-write timestamps on the wire changed how pending uploads
-are stored, and a rejection's reason name changed how fates are recorded).
+are stored, a rejection's reason name changed how fates are recorded, and
+pending uploads moved from one encoded message to a row per op).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `a7b2f33fa3b2a6c97785ed60e99b6e1b109e553f7d4f32e8081ed669b75cd8c3`.
+  the SQLite file `d78562ef4a8eb970c467e675559c9d7587b3ed0f99811ce032a7aa54802adcb9`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `b4ef918dd0d3c904ac6e209ba0402e129f5ec35c5c316d11e55694694f082fc7`.
+  `190d4428d36b2aa0a4ffe3cf370a81c561e8cd2b4f570493e188dfce8f77cb85`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
@@ -22,6 +23,9 @@ nodes and write times:
   value, bytes, a defaulted column) and `drafts` (branched by `branch_id`);
 - two interned authors, updates (history versions), a soft delete and a row
   on a branch;
+- a client text edit to `documents.body` (text-merging) that the server
+  merged with its own concurrent edit, so its history keeps the client's
+  write as sent (`_st` bit 2, at `_seq` = minus the commit's seq);
 - a client that synced `projects` and `documents`, wrote one row that
   settled, one stamped far ahead of the server's clock that the server
   rejected (so `_jazz_applied` keeps a rejected fate with its reason name),
@@ -37,3 +41,22 @@ in place, without a migration or format bump. Pending writes recover their
 upstream baseline from the current row or the newest history version below
 the replica's local sequence range. Eviction removes current and historical
 versions so reopening cannot restore an evicted baseline.
+
+Dropping the large-value key columns (`$k:<column>`) and `_jazz_lv_scratch`,
+when queries stopped reading chunked values' content, regenerated it the same
+way.
+
+Replacing the authority's `_jazz_text_in` side table with as-sent history
+versions, when `documents.body` became text-merging, regenerated it the same
+way.
+
+Keeping the deploy catalogue as typed rows (`_jazz_versions` numbering the
+admitted versions, `_jazz_names` keyed by that number, `_jazz_stored_columns`,
+and `_jazz_schemas`, `_jazz_lenses` and `_jazz_permissions`) regenerated it
+the same way. A development store with the earlier layout (`_jazz_names`
+keyed by version id) is refused at open with "delete the local store and
+resync".
+
+Moving a commit's bases, access proofs (formerly sources) and deltas onto its
+ops, so each pending op is stored with them and `_jazz_pending_items` keeps
+only ops and serializable reads, regenerated it the same way.

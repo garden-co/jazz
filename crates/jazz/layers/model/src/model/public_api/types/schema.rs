@@ -361,12 +361,11 @@ impl ColumnDescriptor {
                 | ColumnMergeStrategy::Markdown
                 | ColumnMergeStrategy::Html),
             ) => {
-                if self.nullable || !matches!(self.column_type, ColumnType::Text) {
+                if !matches!(self.column_type, ColumnType::Text) {
                     Err(format!(
-                        "{strategy:?} merge strategy is only supported on non-nullable TEXT columns, got {} ({:?}, nullable={})",
+                        "{strategy:?} merge strategy is only supported on TEXT columns, got {} ({:?})",
                         self.name_str(),
                         self.column_type,
-                        self.nullable
                     ))
                 } else {
                     Ok(())

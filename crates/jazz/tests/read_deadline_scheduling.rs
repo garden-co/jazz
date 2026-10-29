@@ -27,7 +27,12 @@ struct GatedTransport {
 }
 impl Transport for GatedTransport {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
-        if let SyncMessage::Fetch { id, .. } = &message {
+        if let SyncMessage::Read {
+            id,
+            span: jazz::db::ReadSpan::Once { .. },
+            ..
+        } = &message
+        {
             if self.gate.blocked.get() {
                 return Err(TransportError::Backpressure);
             }

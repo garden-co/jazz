@@ -447,8 +447,8 @@ impl RuntimeSchema {
                     }
                     MergeStrategy::Text | MergeStrategy::Markdown | MergeStrategy::Html => {
                         assert!(
-                            matches!(column.column_type, StorageColumnType::String),
-                            "text merge strategies require a non-nullable string column: {}.{}",
+                            is_text_column_type(&column.column_type),
+                            "text merge strategies require a string column: {}.{}",
                             table.name,
                             column.name
                         );
@@ -554,6 +554,15 @@ fn is_counter_column_type(column_type: &StorageColumnType) -> bool {
             | StorageColumnType::I32
             | StorageColumnType::I64
     )
+}
+
+/// A string column, optional or not: a NULL merges as an empty base.
+#[cfg(any(test, feature = "testing"))]
+fn is_text_column_type(column_type: &StorageColumnType) -> bool {
+    match column_type {
+        StorageColumnType::Nullable(inner) => matches!(**inner, StorageColumnType::String),
+        column_type => matches!(column_type, StorageColumnType::String),
+    }
 }
 
 #[cfg(any(test, feature = "testing"))]
