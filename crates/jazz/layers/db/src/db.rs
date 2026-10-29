@@ -7027,6 +7027,13 @@ impl Db {
     }
 
     fn stage_op(&self, id: OpenTransactionId, mut op: StagedOp) -> Result<(), Error> {
+        // As for a write outside a transaction (see `write_op`).
+        if op.is_session()
+            && self.is_client()
+            && let Some(author) = op.author()
+        {
+            self.check_serves(author)?;
+        }
         // Validate against the overlay now, so errors surface at the call;
         // a counter write's change is from what the transaction sees.
         self.in_overlay(id, Some(&mut op), |_, _| Ok(()))

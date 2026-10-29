@@ -55,7 +55,12 @@ type SharedWorkerGlobal = typeof globalThis & {
 type TabPeer = {
   tabId: string;
   context: RuntimeContext;
-  /** The author of the tab's own replica, as it connected; the runtime serves only its own. */
+  /**
+   * The author of the tab's own replica, as it connected; the runtime serves
+   * only its own. Anonymous tabs share one storage scope but each mints its
+   * own anonymous identity, so a second anonymous tab of another identity is
+   * refused (`identity_mismatch`) rather than relayed as the first one's.
+   */
   author: Uint8Array;
   port: MessagePort;
   pump: BrowserWorkerTransportPump | null;

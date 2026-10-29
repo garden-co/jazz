@@ -134,6 +134,16 @@ fn a_users_store_refuses_a_write_as_another_session() {
         block_on(relay.insert("notes", body("as user 6"), as_session(user(6)))).unwrap_err();
     assert_eq!(error.reason, Some(Reason::IdentityMismatch));
     block_on(relay.insert("notes", body("as user 5"), as_session(user(5)))).unwrap();
+    // Nor inside a transaction.
+    let tx = jazz::tools::OpenTransactionId::new();
+    block_on(relay.begin_mergeable(tx)).unwrap();
+    let error = block_on(
+        relay
+            .tx_ref(tx)
+            .insert("notes", body("as user 6"), as_session(user(6))),
+    )
+    .unwrap_err();
+    assert_eq!(error.reason, Some(Reason::IdentityMismatch));
     // A system store writes as whichever session it vouches for, and so
     // does a user's store that is no replica (nothing uploads its writes).
     let standalone = open(4, user(4));
