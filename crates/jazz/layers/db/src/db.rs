@@ -93,6 +93,37 @@ pub struct PreparedQuery {
 }
 
 impl PreparedQuery {
+    /// The same query without its window (limit and offset).
+    pub(crate) fn unwindowed(&self) -> PreparedQuery {
+        let mut query = self.query.clone();
+        query.limit = None;
+        query.offset = 0;
+        let shape = blake3::hash(format!("{:?}unwindowed", self.shape.0).as_bytes());
+        PreparedQuery {
+            query,
+            shape: Shape(short(shape)),
+            ..self.clone()
+        }
+    }
+
+    /// The same query narrowed to rows `ids`.
+    pub(crate) fn narrowed(&self, ids: &[RowUuid]) -> PreparedQuery {
+        use crate::query::{Operand, Predicate};
+        let mut query = self.query.clone();
+        query.filters.push(Predicate::In(
+            Operand::Column("id".to_owned()),
+            ids.iter()
+                .map(|id| Operand::Literal(Value::Uuid(id.0)))
+                .collect(),
+        ));
+        let shape = blake3::hash(format!("{query:?}").as_bytes());
+        PreparedQuery {
+            query,
+            shape: Shape(short(shape)),
+            ..self.clone()
+        }
+    }
+
     pub fn shape(&self) -> &Shape {
         &self.shape
     }
@@ -292,6 +323,7 @@ pub struct SubscriptionStream {
         Query,
         BTreeMap<String, Value>,
         bool,
+        ReadViewSourceSpec,
         sync::RemoteReach,
     )>,
 }
@@ -299,8 +331,8 @@ pub struct SubscriptionStream {
 impl Drop for SubscriptionStream {
     fn drop(&mut self) {
         self.dropped.set(self.dropped.get() + 1);
-        if let Some((inner, query, binding, include_deleted, reach)) = self.remote.take() {
-            Db { inner, view: None }.detach_remote(&query, &binding, include_deleted, reach);
+        if let Some((inner, query, binding, include_deleted, view, reach)) = self.remote.take() {
+            Db { inner, view: None }.detach_remote(&query, &binding, include_deleted, &view, reach);
         }
     }
 }
@@ -502,6 +534,9 @@ struct Inner {
     /// Images a replica dropped since the last dispatch (evictions and
     /// rebases), for keyed invalidation.
     gone: RefCell<Vec<sync::Image>>,
+    /// Whether `_jazz_withheld` exists (see `sync::WITHHELD_DDL`): branch
+    /// views over a base read it only then.
+    withheld: std::cell::Cell<bool>,
 }
 
 /// Large-value nodes one tick may reclaim.
@@ -1119,6 +1154,13 @@ impl Db {
         };
         names.admit(&conn, &schema)?;
         conn.execute_batch(sync::SYNC_DDL).map_err(storage)?;
+        let withheld: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = '_jazz_withheld'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(storage)?;
         // The commit seq resumes after the newest stored version.
         let mut seq = 0u64;
         for table in physical.tables.keys() {
@@ -1199,6 +1241,7 @@ impl Db {
                 since_tick: Vec::new(),
                 capture: Vec::new(),
                 gone: RefCell::new(Vec::new()),
+                withheld: std::cell::Cell::new(withheld > 0),
             })),
         };
         {
@@ -1866,14 +1909,17 @@ impl Db {
         let read = ReadSpec::of(&opts, &self.inner())?;
         let client = self.is_client();
         let non_durable = self.inner().non_durable;
+        // A branch view's head (and live base) is kept current upstream,
+        // over a frozen base too: only a snapshot is wholly this store's.
         let reach = client
-            .then(|| sync::remote_reach(&opts, non_durable, read.frozen()))
+            .then(|| sync::remote_reach(&opts, non_durable, read.cut.is_some()))
             .flatten();
         if reach.is_some() {
             self.remote_shape(&prepared.query)?;
         }
-        let remote =
-            reach.and_then(|reach| self.attach_remote(prepared, read.include_deleted, reach));
+        let view = opts.read_view.source.clone();
+        let remote = reach
+            .and_then(|reach| self.attach_remote(prepared, read.include_deleted, &view, reach));
         let settled = match (&remote, client) {
             (Some((answered, _, global)), _) => {
                 sync::SettledBy::Remote(answered.clone(), global.clone())
@@ -1899,7 +1945,22 @@ impl Db {
         };
         let include_deleted = read.include_deleted;
         let mut inner = self.inner();
-        let (queue, group) = inner.subscribe_member(prepared, identity, read, settled)?;
+        let (queue, group) = match inner.subscribe_member(prepared, identity, read, settled) {
+            Ok(member) => member,
+            Err(error) => {
+                drop(inner);
+                if let (Some(_), Some(reach)) = (&remote, reach) {
+                    self.detach_remote(
+                        &prepared.query,
+                        &prepared.binding,
+                        include_deleted,
+                        &view,
+                        reach,
+                    );
+                }
+                return Err(error);
+            }
+        };
         Ok(SubscriptionStream {
             queue,
             dropped: inner.fan.dropped.clone(),
@@ -1912,6 +1973,7 @@ impl Db {
                     prepared.query.clone(),
                     prepared.binding.clone(),
                     include_deleted,
+                    view,
                     reach,
                 )
             }),
@@ -2867,6 +2929,14 @@ impl Inner {
         self.physical.tables.insert(theirs.to_owned(), table);
         let conn = &self.conn;
         self.names.moved(conn, ours, theirs, None)?;
+        if self.withheld.get() {
+            self.conn
+                .execute(
+                    "UPDATE _jazz_withheld SET tbl = ?2 WHERE tbl = ?1",
+                    [ours, theirs],
+                )
+                .map_err(storage)?;
+        }
         self.rename_pending_rows(ours, theirs)
     }
 
@@ -3274,6 +3344,7 @@ impl Inner {
         let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
         Ctx::new(schema, policy, claims, &prepared.binding)
             .with_view(read.view.clone())
+            .with_withheld(self.withheld.get())
             .with_cut(read.cut.clone(), read.settled_only)
             .with_history_origin(self.history_origin())
     }
@@ -3685,7 +3756,10 @@ impl Inner {
         let at = |key: Vec<u8>, cells: BTreeMap<String, Value>| -> Result<Located, Error> {
             Ok(match self.existing(&table.stored, row, &key)? {
                 Some((seq, deleted)) => Located::Row { key, seq, deleted },
-                None => Located::Absent { cells },
+                None => {
+                    self.refuse_withheld(table, row, &key)?;
+                    Located::Absent { cells }
+                }
             })
         };
         match target {
@@ -3727,6 +3801,7 @@ impl Inner {
                         deleted,
                     });
                 }
+                self.refuse_withheld(table, row, &head_key)?;
                 if let Some(base) = base {
                     let base_key = table.selector_key(base)?;
                     if base_key != head_key
@@ -3744,6 +3819,19 @@ impl Inner {
                 Ok(Located::Absent { cells: head_cells })
             }
         }
+    }
+
+    /// A write to a version this replica may not read (a branch view hides
+    /// the row, SPEC 8.4) is refused: it would land over a version nobody
+    /// here can see.
+    fn refuse_withheld(&self, table: &Table, row: RowUuid, key: &[u8]) -> Result<(), Error> {
+        if self.is_withheld(&table.stored, row, key)? {
+            return Err(rejected(format!(
+                "row {} of `{}` is hidden here: its version on this branch is not readable",
+                row.0, table.name
+            )));
+        }
+        Ok(())
     }
 
     /// Evaluate a policy SQL boolean against one stored row.
@@ -5098,6 +5186,7 @@ impl Inner {
         let key = table.row_branch_key(&cells);
         let row = row_id.unwrap_or_else(|| self.ids.next_row_id());
         let cells = self.merged_cells(table, row, None, None, cells)?;
+        self.refuse_withheld(table, row, &key)?;
         match self.existing(&table.stored, row, &key)? {
             Some((_, true)) => return Err(row_already_deleted(row)),
             Some((_, false)) => return Err(row_already_exists(row)),

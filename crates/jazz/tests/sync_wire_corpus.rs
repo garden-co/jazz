@@ -32,6 +32,7 @@ use jazz::db::{
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::model::transaction::OpenTransactionId;
+use jazz::protocol::{BranchSelector, BranchViewBase, ReadViewSourceSpec};
 use jazz::protocol::{LensOp, MigrationLens, PermissionAdviceAction, TableLens};
 use jazz::query::{Query, col, eq, lit};
 use jazz::records::Value;
@@ -364,16 +365,23 @@ impl Transport for Recording {
 }
 
 /// Message shapes the one frame per variant leaves unpinned: a one-shot
-/// `Read` (its span carries a snapshot and a view), `Rows` carrying the
-/// commits behind history versions, a `Catalogue` carrying versions
-/// with their stored names and a lens's cells, and a trusted link's
-/// `Commit`s acting as an attributed author and as a session.
-const SHAPES: [&str; 5] = [
+/// `Read` (as of a seq or a snapshot), `Rows` carrying the commits behind
+/// history versions, a `Catalogue` carrying versions with their stored
+/// names and a lens's cells, a trusted link's `Commit`s acting as an
+/// attributed author and as a session, a live `Read` in a branch view
+/// over a live base, over a frozen base, and of a head alone, and a hidden
+/// `AccessLost` (a branch view's row whose head version the reader may not
+/// read).
+const SHAPES: [&str; 9] = [
     "Read/once",
     "Rows/tx_ids",
     "Catalogue/versions",
     "Commit/attributed",
     "Commit/session",
+    "Read/live-branch-view",
+    "Read/live-branch-view-frozen",
+    "Read/live-branch-head",
+    "AccessLost/hidden",
 ];
 
 fn shape(message: &SyncMessage) -> Option<&'static str> {
@@ -394,6 +402,33 @@ fn shape(message: &SyncMessage) -> Option<&'static str> {
             acting: Acting::Session { claims, .. },
             ..
         } if !claims.is_empty() => Some(SHAPES[4]),
+        SyncMessage::Read {
+            view,
+            span: ReadSpan::Live { .. },
+            ..
+        } if matches!(
+            **view,
+            ReadViewSourceSpec::BranchView {
+                base: Some(BranchViewBase::Current(_)),
+                ..
+            }
+        ) =>
+        {
+            Some(SHAPES[5])
+        }
+        SyncMessage::Read {
+            view,
+            span: ReadSpan::Live { .. },
+            ..
+        } => match **view {
+            ReadViewSourceSpec::BranchView {
+                base: Some(BranchViewBase::Snapshot { .. }),
+                ..
+            } => Some(SHAPES[6]),
+            ReadViewSourceSpec::BranchView { base: None, .. } => Some(SHAPES[7]),
+            _ => None,
+        },
+        SyncMessage::AccessLost { hidden: true, .. } => Some(SHAPES[8]),
         _ => None,
     }
 }
@@ -550,6 +585,33 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     pump(&[&alice, &server, &alice]);
     let _ = block_on(alice.all(&notes, ReadOpts::default())).unwrap();
     pump(&[&alice, &server, &alice]);
+    // Read (live, in a branch view over a live base).
+    let selector = |byte: u8| {
+        BranchSelector::new([("branch", Value::Uuid(uuid::Uuid::from_bytes([byte; 16])))])
+    };
+    let in_draft = ReadOpts::default().branch_view(
+        selector(0xd1),
+        Some(BranchViewBase::Current(selector(0xd2))),
+    );
+    let drafted = block_on(alice.subscribe(&notes, in_draft)).unwrap();
+    pump(&[&alice, &server, &alice]);
+    drop(drafted);
+    // Read (live, in a branch view over a frozen base, and of a head alone).
+    let frozen = block_on(alice.capture_snapshot()).unwrap();
+    let over_frozen = ReadOpts::default().branch_view(
+        selector(0xd1),
+        Some(BranchViewBase::Snapshot {
+            branch: selector(0xd2),
+            snapshot: frozen,
+        }),
+    );
+    let drafted = block_on(alice.subscribe(&notes, over_frozen)).unwrap();
+    pump(&[&alice, &server, &alice]);
+    drop(drafted);
+    let head = ReadOpts::default().branch_view(selector(0xd1), None);
+    let drafted = block_on(alice.subscribe(&notes, head)).unwrap();
+    pump(&[&alice, &server, &alice]);
+    drop(drafted);
 
     // PushChunks, Commit, Fate: a write with a new large value.
     let mine = RowUuid::from_bytes([0x12; 16]);
@@ -726,6 +788,7 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
             include_deleted: false,
             tier: ReadTier::LocalFirst,
             wait: None,
+            view: Box::new(ReadViewSourceSpec::Current),
             span: ReadSpan::Live { since: None },
         },
     ])));
@@ -751,7 +814,69 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
         .borrow_mut()
         .insert("ResendWhole".to_owned(), ("server".to_owned(), frame));
 
+    hidden_in_a_view(&recorded);
     recorded.borrow().clone()
+}
+
+/// AccessLost (hidden): a draft's row over a base row alice reads, whose
+/// draft version she may not read, hides the row in her view of the draft.
+fn hidden_in_a_view(recorded: &Recorded) {
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("drafts")
+                    .column("branch_id", ColumnType::Uuid)
+                    .column("owner", ColumnType::Text)
+                    .branch_by("branch_id")
+                    .policies(read_and_allow_all_writes(session_eq("owner", &ME))),
+            )
+            .build(),
+    );
+    let config = |node: u8, author| {
+        DbConfig::new(
+            schema.clone(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([node; 16]),
+                author,
+            },
+        )
+    };
+    let server = block_on(Db::open(config(0x61, AuthorSubject::SYSTEM))).unwrap();
+    server.set_authority();
+    let selector = |byte: u8| {
+        BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([byte; 16])))])
+    };
+    let (base, head) = (selector(0xe1), selector(0xe2));
+    let row = RowUuid::from_bytes([0x13; 16]);
+    block_on(server.insert(
+        "drafts",
+        BTreeMap::from([("owner".to_owned(), subject(1))]),
+        InsertOptions {
+            row_id: Some(row),
+            target: jazz::db::ExactWriteTarget::Branch(base.clone()),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    block_on(server.update(
+        "drafts",
+        row,
+        BTreeMap::from([("owner".to_owned(), subject(2))]),
+        UpdateOptions {
+            target: jazz::db::WriteTarget::BranchView {
+                head: head.clone(),
+                base: Some(BranchViewBase::Current(base.clone())),
+            },
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    let alice = block_on(Db::open(config(0x62, user(1)))).unwrap();
+    connect(&alice, &server, user(1), recorded);
+    let drafts = alice.prepare_query(&Query::from("drafts")).unwrap();
+    let view = ReadOpts::default().branch_view(head, Some(BranchViewBase::Current(base)));
+    let _view = block_on(alice.subscribe(&drafts, view)).unwrap();
+    pump(&[&alice, &server, &alice]);
 }
 
 /// Writes `fixtures/sqlite_sync_wire_v1.json` when
