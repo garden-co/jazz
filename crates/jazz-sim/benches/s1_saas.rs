@@ -490,7 +490,7 @@ fn subscribe_client(
 fn assert_relevant(sim: &Sim, model: &Model, client: &Client) -> usize {
     let mut shipped = 0;
     for message in sim.downstream_log(&client.name) {
-        if let jazz::db::SyncMessage::Rows { images } = message {
+        if let jazz::db::SyncMessage::Rows { images, .. } = message {
             for image in images.iter().filter(|image| !image.deleted) {
                 shipped += 1;
                 let id = RowUuid::from_bytes(image.id);

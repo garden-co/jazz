@@ -1590,6 +1590,10 @@ struct LoweredRel {
     table: Option<String>,
     filters: Vec<LoweredRelPredicate>,
     joins: Vec<JoinVia>,
+    /// Correlations sourced from `OuterRow` filters, keyed by their path into
+    /// `joins`. `JoinVia::correlated_filters` also carries local compound ON
+    /// equalities, so this provenance must stay separate during rewrites.
+    outer_correlations: BTreeMap<Vec<usize>, Vec<JoinCorrelation>>,
     reachable: Vec<crate::query::ReachableVia>,
     pending_reachable: Option<PendingReachable>,
 }
@@ -1628,10 +1632,10 @@ fn validate_exists_rel_join_conditions(
         RelationExpr::Join {
             left, right, on, ..
         } => {
-            if on.len() > 1 {
+            if on.is_empty() {
                 return Err(err(
                     policy_path(table, path),
-                    "core schema ExistsRel joins support exactly one column equality",
+                    "core schema ExistsRel joins require at least one column equality",
                 ));
             }
             validate_exists_rel_join_conditions(table, path, left)?;
@@ -1725,10 +1729,6 @@ fn rel_has_outer_references(rel: &RelationExpr) -> bool {
     }
 }
 
-fn join_has_outer_correlations(join: &JoinVia) -> bool {
-    !join.correlated_filters.is_empty() || join.nested_joins.iter().any(join_has_outer_correlations)
-}
-
 fn uncorrelated_exists_join(
     table: String,
     filters: Vec<Predicate>,
@@ -1763,10 +1763,19 @@ fn root_exists_rel_at_correlation(
         .iter()
         .any(|filter| matches!(filter.value, Some(LoweredRelValue::OuterRow(_))))
     {
-        let Some(index) = lowered.joins.iter().position(join_has_outer_correlations) else {
+        let Some(index) = (0..lowered.joins.len()).find(|index| {
+            lowered
+                .outer_correlations
+                .keys()
+                .any(|route| route.first() == Some(index))
+        }) else {
             break;
         };
         let mut next = lowered.joins.remove(index);
+        let direct_outer = lowered
+            .outer_correlations
+            .remove(&vec![index])
+            .unwrap_or_default();
         let source_column = next.source_column.take().ok_or_else(|| {
             err(
                 policy_path(table, path),
@@ -1779,6 +1788,27 @@ fn root_exists_rel_at_correlation(
                 "core schema ExistsRel correlation requires a row-producing relation",
             )
         })?;
+        let reverse_index = next.nested_joins.len();
+        let mut forward_correlations = next.correlated_filters;
+        for correlation in &direct_outer {
+            let Some(position) = forward_correlations
+                .iter()
+                .position(|candidate| candidate == correlation)
+            else {
+                return Err(err(
+                    policy_path(table, path),
+                    "core schema ExistsRel lost an outer correlation during root orientation",
+                ));
+            };
+            forward_correlations.remove(position);
+        }
+        let reverse_correlations = forward_correlations
+            .into_iter()
+            .map(|correlation| JoinCorrelation {
+                join_column: correlation.source_column,
+                source_column: correlation.join_column,
+            })
+            .collect();
         let reverse = JoinVia {
             table: previous_table,
             target: if source_column == "id" {
@@ -1787,21 +1817,36 @@ fn root_exists_rel_at_correlation(
                 JoinTarget::Column
             },
             on_column: source_column,
-            source_column: Some(next.on_column),
+            source_column: Some(next.on_column.clone()),
             source_lookup: None,
-            correlated_filters: Vec::new(),
+            correlated_filters: reverse_correlations,
             filters: std::mem::take(&mut lowered.filters)
                 .into_iter()
                 .map(|filter| filter.predicate)
                 .collect(),
             nested_joins: std::mem::take(&mut lowered.joins),
         };
+        let old_outer_correlations = std::mem::take(&mut lowered.outer_correlations);
+        for (route, correlations) in old_outer_correlations {
+            if route.first() == Some(&index) {
+                if route.len() > 1 {
+                    lowered
+                        .outer_correlations
+                        .insert(route[1..].to_vec(), correlations);
+                }
+            } else {
+                lowered.outer_correlations.insert(
+                    rebase_sibling_route(&route, index, reverse_index),
+                    correlations,
+                );
+            }
+        }
         lowered.filters = next
             .filters
             .into_iter()
             .map(LoweredRelPredicate::bare)
             .chain(
-                next.correlated_filters
+                direct_outer
                     .into_iter()
                     .map(|correlation| LoweredRelPredicate {
                         predicate: Predicate::All(Vec::new()),
@@ -1816,6 +1861,22 @@ fn root_exists_rel_at_correlation(
         lowered.scope_paths.clear();
     }
     Ok(())
+}
+
+/// Moves a route through a sibling of the join removed at `removed_index`
+/// under the reversed edge at `reverse_index`. Siblings after the removed join
+/// shift down one position in the reversed edge's `nested_joins`.
+fn rebase_sibling_route(route: &[usize], removed_index: usize, reverse_index: usize) -> Vec<usize> {
+    let mut rebased = vec![reverse_index];
+    if let Some((&first, rest)) = route.split_first() {
+        rebased.push(if first > removed_index {
+            first - 1
+        } else {
+            first
+        });
+        rebased.extend_from_slice(rest);
+    }
+    rebased
 }
 
 fn append_exists_rel_policy_clause(
@@ -1844,7 +1905,7 @@ fn append_exists_rel_policy_clause(
         if rel_has_outer_references(rel)
             || !lowered.reachable.is_empty()
             || lowered.pending_reachable.is_some()
-            || lowered.joins.iter().any(join_has_outer_correlations)
+            || !lowered.outer_correlations.is_empty()
         {
             return Err(err(
                 policy_path(table, path),
@@ -1968,12 +2029,23 @@ fn append_exists_rel_policy_clause(
         // Lift outer correlations on a nested join through its equality edge,
         // so `member.workspace = outer.workspace` constrains the root block's
         // workspace without publishing any proof carrier.
-        for nested in &mut lowered.joins {
-            if nested.nested_joins.iter().any(join_has_outer_correlations) {
+        for (index, nested) in lowered.joins.iter_mut().enumerate() {
+            if lowered
+                .outer_correlations
+                .keys()
+                .any(|route| route.first() == Some(&index) && route.len() > 1)
+            {
                 return Err(err(
                     policy_path(table, path),
                     "core schema ExistsRel does not yet support outer correlations beyond one nested join",
                 ));
+            }
+            let outer = lowered
+                .outer_correlations
+                .remove(&vec![index])
+                .unwrap_or_default();
+            if outer.is_empty() {
+                continue;
             }
             let source_column = nested.source_column.clone().ok_or_else(|| {
                 err(
@@ -1981,7 +2053,7 @@ fn append_exists_rel_policy_clause(
                     "core schema ExistsRel nested join is missing its source column",
                 )
             })?;
-            for correlation in std::mem::take(&mut nested.correlated_filters) {
+            for correlation in &outer {
                 if correlation.join_column != nested.on_column {
                     return Err(err(
                         policy_path(table, path),
@@ -1990,9 +2062,28 @@ fn append_exists_rel_policy_clause(
                 }
                 correlated_filters.push(JoinCorrelation {
                     join_column: source_column.clone(),
-                    source_column: correlation.source_column,
+                    source_column: correlation.source_column.clone(),
                 });
             }
+            for correlation in &outer {
+                let Some(position) = nested
+                    .correlated_filters
+                    .iter()
+                    .position(|candidate| candidate == correlation)
+                else {
+                    return Err(err(
+                        policy_path(table, path),
+                        "core schema ExistsRel lost an outer correlation during lowering",
+                    ));
+                };
+                nested.correlated_filters.remove(position);
+            }
+        }
+        if !lowered.outer_correlations.is_empty() {
+            return Err(err(
+                policy_path(table, path),
+                "core schema ExistsRel has an unresolved outer correlation after lowering",
+            ));
         }
         query.joins.push(JoinVia {
             table: lowered_table.clone(),
@@ -2009,6 +2100,13 @@ fn append_exists_rel_policy_clause(
             nested_joins: lowered.joins,
         });
         return Ok(query);
+    }
+
+    if !lowered.outer_correlations.is_empty() {
+        return Err(err(
+            policy_path(table, path),
+            "core schema ExistsRel has an unresolved outer correlation after lowering",
+        ));
     }
 
     let filters = lowered
@@ -2097,10 +2195,16 @@ fn append_scoped_rel_predicate(
                 for filter in filters {
                     match (filter.column, filter.value) {
                         (Some(join_column), Some(LoweredRelValue::OuterRow(source_column))) => {
-                            join.correlated_filters.push(JoinCorrelation {
+                            let correlation = JoinCorrelation {
                                 join_column,
                                 source_column,
-                            });
+                            };
+                            join.correlated_filters.push(correlation.clone());
+                            lowered
+                                .outer_correlations
+                                .entry(route.clone())
+                                .or_default()
+                                .push(correlation);
                         }
                         _ => join.filters.push(filter.predicate),
                     }
@@ -2150,6 +2254,7 @@ fn lower_exists_rel(
             table: Some(table.as_str().to_owned()),
             filters: Vec::new(),
             joins: Vec::new(),
+            outer_correlations: BTreeMap::new(),
             reachable: Vec::new(),
             pending_reachable: None,
         }),
@@ -2204,23 +2309,38 @@ fn lower_exists_rel(
                     "Gather on the right side of a join is not supported in policies yet",
                 ));
             }
-            // Only one equality becomes the join key; a second would be dropped.
-            let [on] = on.as_slice() else {
+            let Some(primary_on) = on.first() else {
                 return Err(err(
                     policy_path(table, path),
-                    "core schema ExistsRel joins require exactly one column equality",
+                    "core schema ExistsRel joins require at least one column equality",
                 ));
             };
-            let source_route = resolve_rel_column_route(table, path, &left, &on.left)?;
-            let target_route = resolve_rel_column_route(table, path, &right, &on.right)?;
-            if !target_route.is_empty() {
-                return Err(err(
-                    policy_path(table, path),
-                    "core schema ExistsRel join target must be the right relation's root source",
-                ));
+            let source_route = resolve_rel_column_route(table, path, &left, &primary_on.left)?;
+            for condition in on {
+                let condition_source_route =
+                    resolve_rel_column_route(table, path, &left, &condition.left)?;
+                if condition_source_route != source_route {
+                    return Err(err(
+                        policy_path(table, path),
+                        "core schema ExistsRel join equalities must use one left-side source",
+                    ));
+                }
+                let target_route = resolve_rel_column_route(table, path, &right, &condition.right)?;
+                if !target_route.is_empty() {
+                    return Err(err(
+                        policy_path(table, path),
+                        "core schema ExistsRel join target must be the right relation's root source",
+                    ));
+                }
             }
             if let Some(pending) = left.pending_reachable.take() {
-                if on.left.column != "id" {
+                if on.len() > 1 {
+                    return Err(err(
+                        policy_path(table, path),
+                        "compound joins from Gather are not supported in policies yet",
+                    ));
+                }
+                if primary_on.left.column != "id" {
                     return Err(err(
                         policy_path(table, path),
                         "core schema ExistsRel reachable joins must join from reachable id",
@@ -2255,8 +2375,8 @@ fn lower_exists_rel(
                 let mut reachable = crate::query::ReachableVia {
                     access_table: right_table,
                     access_row_column: "__pending_outer_row".to_owned(),
-                    access_team_column: on.right.column.clone(),
-                    access_team_target: if on.right.column == "id" {
+                    access_team_column: primary_on.right.column.clone(),
+                    access_team_target: if primary_on.right.column == "id" {
                         JoinTarget::RowId
                     } else {
                         JoinTarget::Column
@@ -2284,6 +2404,7 @@ fn lower_exists_rel(
                     table: left.table,
                     filters: Vec::new(),
                     joins: left.joins,
+                    outer_correlations: left.outer_correlations,
                     reachable: {
                         let mut reachables = left.reachable;
                         reachables.extend(right.reachable);
@@ -2294,16 +2415,26 @@ fn lower_exists_rel(
                 });
             }
 
-            let mut correlated_filters = Vec::new();
+            let mut correlated_filters = on
+                .iter()
+                .skip(1)
+                .map(|condition| JoinCorrelation {
+                    join_column: condition.right.column.clone(),
+                    source_column: condition.left.column.clone(),
+                })
+                .collect::<Vec<_>>();
+            let mut direct_outer_correlations = Vec::new();
             let filters = right
                 .filters
                 .into_iter()
                 .filter_map(|filter| match (filter.column, filter.value) {
                     (Some(join_column), Some(LoweredRelValue::OuterRow(source_column))) => {
-                        correlated_filters.push(JoinCorrelation {
+                        let correlation = JoinCorrelation {
                             join_column,
                             source_column,
-                        });
+                        };
+                        correlated_filters.push(correlation.clone());
+                        direct_outer_correlations.push(correlation);
                         None
                     }
                     _ => Some(filter.predicate),
@@ -2315,27 +2446,49 @@ fn lower_exists_rel(
                     "core schema ExistsRel joins require a row-producing right relation",
                 )
             })?;
+            let mut join_route = source_route;
+            let join_index = {
+                let mut joins = &mut left.joins;
+                for index in &join_route {
+                    joins = &mut joins[*index].nested_joins;
+                }
+                joins.len()
+            };
+            join_route.push(join_index);
+            let mut right_outer_correlations = right
+                .outer_correlations
+                .into_iter()
+                .map(|(route, correlations)| {
+                    let mut full_route = join_route.clone();
+                    full_route.extend(route);
+                    (full_route, correlations)
+                })
+                .collect::<Vec<_>>();
+            if !direct_outer_correlations.is_empty() {
+                right_outer_correlations.push((join_route.clone(), direct_outer_correlations));
+            }
             let join = JoinVia {
                 table: right_table,
-                on_column: on.right.column.clone(),
-                target: if on.right.column == "id" {
+                on_column: primary_on.right.column.clone(),
+                target: if primary_on.right.column == "id" {
                     JoinTarget::RowId
                 } else {
                     JoinTarget::Column
                 },
-                source_column: Some(on.left.column.clone()),
+                source_column: Some(primary_on.left.column.clone()),
                 source_lookup: None,
                 correlated_filters,
                 filters,
                 nested_joins: right.joins,
             };
-            let mut joins = &mut left.joins;
-            for index in &source_route {
-                joins = &mut joins[*index].nested_joins;
+            {
+                let mut joins = &mut left.joins;
+                for index in &join_route[..join_route.len() - 1] {
+                    joins = &mut joins[*index].nested_joins;
+                }
+                joins.push(join);
             }
-            let mut join_route = source_route;
-            join_route.push(joins.len());
-            joins.push(join);
+            left.outer_correlations.extend(right_outer_correlations);
             for (scope, route) in right.scope_paths {
                 let route = route.map(|route| {
                     let mut full_route = join_route.clone();
@@ -2422,6 +2575,7 @@ fn lower_gather_rel(
         table: output_table,
         filters: Vec::new(),
         joins: Vec::new(),
+        outer_correlations: BTreeMap::new(),
         reachable: Vec::new(),
         pending_reachable: Some(PendingReachable {
             from,
@@ -3085,6 +3239,15 @@ mod tests {
     use crate::query::RelationProjectColumn;
     use crate::query::provider_claim_operand_key;
     use crate::query::{InheritsOperation, JoinTarget, Operand, Predicate};
+
+    #[test]
+    fn rebasing_sibling_routes_accounts_for_the_removed_join() {
+        // Joins [a, b, c] with b (index 1) re-rooted: the reversed edge holds [a, c].
+        assert_eq!(rebase_sibling_route(&[0], 1, 4), vec![4, 0]);
+        assert_eq!(rebase_sibling_route(&[2], 1, 4), vec![4, 1]);
+        assert_eq!(rebase_sibling_route(&[2, 3], 1, 4), vec![4, 1, 3]);
+    }
+
     #[test]
     fn rejects_user_columns_in_the_compiler_aggregate_namespace() {
         let schema = SchemaBuilder::new()
