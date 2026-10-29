@@ -470,7 +470,7 @@ struct Inner {
     non_durable: bool,
     /// Rows the authority named as written for this replica's own commits
     /// whose version was not this replica's image of them (see
-    /// `Inner::install_as_written`), asked for whole instead.
+    /// `Inner::as_written_images`), asked for whole instead.
     pub(crate) as_written_mismatches: u64,
     /// The global authority: what it settles is durable at `Global`.
     authority: bool,

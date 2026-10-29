@@ -311,7 +311,10 @@ only if all of these hold:
 
 1. The row's version just before the commit is the one the writer built on:
    the version its base names (an accepted one, or the version the writer's
-   own earlier commit landed as); or, with no base, no version at all.
+   own earlier commit landed as); or, with no base, no version at all, and
+   every op on the row is an insert or an upsert of an unbranched row. (An
+   upsert into a branch may copy a parent branch's version, create stamp
+   included, which the writer may hold otherwise.)
 2. No text merge changed a value the commit sent (SPEC 4 §4.3), and no op of
    the commit moves the row between branches.
 3. The version is still the row's current one when fan-out ships the
@@ -319,20 +322,20 @@ only if all of these hold:
 
 The writer checks the inference on every such row: each carries the
 authority's 16-byte digest of its version (everything but its seq and the
-stamps), and the writer asks for a row whose image differs whole (`Hold`,
-§19.8) instead of installing it as final. A writer also asks for a row whole
-when it holds no image to compare: the commit was written under another schema
-version than the store's own (through a view of another version, or before a
-reopen with a newer one), or a catalogue with new versions arrived while the
-commit was pending. Until the whole image arrives (after a reconnect, if the
-link drops first), the writer's own image, stamped as above, stands in for the
-accepted version: the row never drops out locally, later writes build on it,
-and the upstream's image of that seq replaces it once it arrives. A miss
-therefore costs one fetch of the row, never a divergent cache. A replica
-whose configured author is not the identity its link was accepted as has
-every row stamped otherwise, so each of its writes costs that fetch.
-Mismatches are counted per replica (`as_written_mismatches`); tests of honest
-writers assert there are none.
+stamps). A row whose image matches is installed. One whose image differs, or
+that the writer holds no image of to compare (the commit was written under
+another schema version than the store's own, through a view of another
+version or before a reopen with a newer one, or a catalogue with new versions
+arrived while it was pending), or whose create stamp it lacks, is asked for
+with `ResendWhole` (§8.12), naming the fate's seq: the server ships the row
+whole and, if a later version superseded it, that seq's version too. The fate
+waits until those rows arrive, and every later fate waits behind it, so the
+commit stays pending meanwhile: its writes never drop out locally and later
+writes build on it as on any pending commit. A miss therefore costs one fetch
+of the row, never a divergent cache. A replica whose configured author is not
+the identity its link was accepted as has every row stamped otherwise, so each
+of its writes costs that fetch. Mismatches are counted per replica
+(`as_written_mismatches`); tests of honest writers assert there are none.
 
 `Stored { tx }` is durability progress from a relay to a non-durable session:
 the relay holds the commit in its store and uploads it, so it is `Local` for a
@@ -342,7 +345,8 @@ which is final.
 
 A fate lost to a disconnect is recovered on the next connection: the replica
 re-uploads its pending commits, and the authority answers a commit it already
-decided with the known fate.
+decided with the known fate, shipping the rows that commit wrote as they now
+are (a resend's writer may not hold them as the commit left them).
 
 ### 8.4 Downstream: reads and rows
 
@@ -635,7 +639,9 @@ chunks are present (`INV-SYNC-46`).
 Within a session the server ships later versions' chunked cells as deltas over
 the version it last shipped of that row. A replica that cannot apply a delta
 (it lacks that base version) sends `ResendWhole { rows }` for those rows, and
-the server ships each whole or evicts it. The replica sends the `ResendWhole`
+the server ships each whole or evicts it. A row also names a seq when the
+replica's own commit produced it there and the replica could not install it
+(§8.3): the server ships that version too, if superseded and still readable. The replica sends the `ResendWhole`
 again on every new connection until the whole image arrives, and stores no watermark
 meanwhile (§8.11). A live read's rows are never declared this way: its opening
 brings them up to date from `since`.

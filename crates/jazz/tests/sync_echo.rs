@@ -877,7 +877,7 @@ fn a_row_its_head_branch_copies_from_a_base_ships() {
 fn a_mismatched_row_stays_until_its_whole_image_arrives() {
     // The authority stamps the link's user 9, the replica its own user 1:
     // the digest differs. Until the whole image arrives, even offline, the
-    // replica keeps its own image as the accepted version, and writes on.
+    // commit stays pending: its row stays, and the replica writes on.
     let server = open(0, AuthorSubject::SYSTEM);
     let client = open(1, user(1));
     let (upstream, _down) = connect(&server, &client, user(9));

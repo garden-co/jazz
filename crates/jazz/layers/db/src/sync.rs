@@ -967,7 +967,9 @@ pub enum SyncMessage {
     /// the replica could not apply: it lacks the version a delta was made
     /// over (SPEC 19.8). The server ships each whole, or evicts it. Sent
     /// when a delta fails, and again on each connection until the row
-    /// arrives whole. The seq is not read.
+    /// arrives whole. A nonzero seq names a version of the row the replica's
+    /// own commit produced and could not install: the server ships it too,
+    /// if superseded and still readable.
     ResendWhole {
         rows: Vec<(String, [u8; 16], Vec<u8>, u64)>,
     },
@@ -1351,6 +1353,17 @@ impl PendingQueue {
     }
 }
 
+/// A row asked for whole: its stored table, id and branch key.
+type WholeRow = (String, [u8; 16], Vec<u8>);
+
+/// A fate held back until rows it names arrive whole (see
+/// `Client::deferred`).
+struct DeferredFate {
+    fate: SyncMessage,
+    /// The rows it waits for; `None` for a fate that only follows one.
+    awaited: Option<HashSet<WholeRow>>,
+}
+
 /// A row an accepted commit wrote that its writer holds as the commit
 /// left it (see `SyncMessage::Fate`): fan-out names it `as_written` rather than
 /// ship it, if that version is still current.
@@ -1510,7 +1523,17 @@ pub(crate) struct Client {
     /// whole image of each arrives. This store holds a stale version of
     /// each, so no result it settles is the server's: no watermark is
     /// stored while any is owed, and each is asked again on reconnect.
-    whole: HashSet<(String, [u8; 16], Vec<u8>)>,
+    /// Each with the version of it this store must also hold, if any: an
+    /// own commit's, which it could not install (0 for none).
+    whole: HashMap<WholeRow, u64>,
+    /// Fates of own commits applied only once rows they name as written,
+    /// which this store could not install, arrived whole (the commit stays
+    /// pending meanwhile, so its writes stay visible), and the fates that
+    /// arrived after them, in order.
+    deferred: VecDeque<DeferredFate>,
+    /// The deferred fate being applied now: its tx, and whether the rows it
+    /// waited for arrived (so it installs the rest without asking again).
+    releasing: Option<(u64, bool)>,
     /// No resume point was stored since they were last all forgotten, so
     /// forgetting them again (another eviction this tick) costs nothing.
     forgotten: bool,
@@ -1757,6 +1780,10 @@ pub(crate) struct Session {
     /// them: the image of each is not shipped while it is the row's current
     /// version.
     echoes: Vec<Echo>,
+    /// Rows the replica asked for whole this tick: they ship even where an
+    /// echo would name them as written, since the replica could not install
+    /// its own image of them.
+    asked_whole: HashSet<RowKey>,
     /// Supporting rows each subscription needs besides its own result.
     support: BTreeMap<u64, Rc<Vec<Support>>>,
     /// The replica's coherence watches: `(table, column, value)` for every
@@ -1844,6 +1871,7 @@ impl Session {
             touched: BTreeSet::new(),
             committed: Vec::new(),
             echoes: Vec::new(),
+            asked_whole: HashSet::new(),
             support: BTreeMap::new(),
             watch: Watches::default(),
             shipped: HashMap::new(),
@@ -3513,19 +3541,7 @@ impl Inner {
                     .borrow_mut()
                     .push((image.table.clone(), row, image.key.clone()));
             }
-            // A settled version stands in for itself only until the
-            // upstream's own image of it arrives: a writer's image of its
-            // own commit that the authority did not ship (see
-            // `install_as_written`).
-            Some(current) if current.seq == image.seq => {
-                if image.seq < LOCAL_BASE && image.content && current != *image {
-                    self.drop_row(&image.table, row, &image.key, image.seq)?;
-                    self.put_image(image, false)?;
-                    self.changed
-                        .borrow_mut()
-                        .push((image.table.clone(), row, image.key.clone()));
-                }
-            }
+            Some(current) if current.seq == image.seq => {}
             Some(current) if relay_older(current.seq, image.seq) => {
                 if self.non_durable {
                     self.put_image(image, true)?;
@@ -3624,32 +3640,28 @@ impl Inner {
 
     /// The rows of own commit `tx` the server did not ship (`as_written`): its
     /// version at `seq` is the one this replica wrote, stamped at
-    /// `accepted_at`, so that becomes the settled image. A newer image
-    /// already received stays. A row whose image is not the authority's
-    /// version (its digest differs: the authority's inference missed a
-    /// difference, such as a stamp by another author), that this store has
-    /// no image of as the upstream names it (written under another schema
-    /// version, or its catalogue changed since), or whose create stamp it
-    /// does not hold, is asked for whole. Until the whole image arrives,
-    /// this replica's own image stands in for the version at `seq`
-    /// (see [`Inner::merge_image`]), so the row never drops out locally.
-    fn install_as_written(
-        &mut self,
+    /// `accepted_at`, so that becomes the settled image. Returns those
+    /// images, the rows it cannot install so (to ask for whole), and how
+    /// many of those are digest mismatches. A row is not installed if its
+    /// image is not the authority's version (its digest differs: the
+    /// authority's inference missed a difference, such as a stamp by
+    /// another author), this store has no image of it as the upstream
+    /// names it (written under another schema version, or its catalogue
+    /// changed since), or it lacks the row's create stamp. Changes nothing.
+    fn as_written_images(
+        &self,
         tx: u64,
         seq: u64,
         accepted_at: Option<u64>,
         as_written: &[AsWritten],
-    ) -> Result<(), Error> {
-        if as_written.is_empty() {
-            return Ok(());
-        }
-        let client = self.client.as_mut().expect("client");
-        let Some(pending) = client.pending.get_mut(tx) else {
-            return Ok(());
-        };
-        let expected = std::mem::take(&mut pending.expected);
-        let mut installs = Vec::new();
+    ) -> Result<(Vec<Image>, Vec<WholeRow>, u64), Error> {
+        let client = self.client.as_ref().expect("client");
+        let mut images = Vec::new();
+        let mut whole = Vec::new();
         let mut mismatched = 0;
+        let Some(pending) = client.pending.iter().find(|p| p.tx == tx) else {
+            return Ok((images, whole, mismatched));
+        };
         for written in as_written {
             let row = pending
                 .ops
@@ -3667,7 +3679,7 @@ impl Inner {
                     written.op
                 )));
             };
-            let entry = match &expected {
+            let entry = match &pending.expected {
                 Some(expected) => {
                     let Some(entry) = expected
                         .iter()
@@ -3679,43 +3691,27 @@ impl Inner {
                         )));
                     };
                     let same = echo_digest(&entry.image) == written.digest;
-                    mismatched += usize::from(!same);
-                    Some((entry, same))
+                    mismatched += u64::from(!same);
+                    same.then_some(entry)
                 }
                 None => None,
             };
-            installs.push((entry, (table.clone(), *row, key.clone())));
-        }
-        let mut images = Vec::new();
-        let mut whole = Vec::new();
-        for (entry, (table, row, key)) in installs {
-            let (image, exact) = match (entry, accepted_at) {
-                (Some((entry, same)), Some(at)) if entry.created == Created::Beneath => {
-                    match self.settled_created(&table, row, &key)? {
-                        Some(created) => (Some(entry.accepted(at, Some(created))), same),
-                        None => (Some(entry.accepted(at, None)), false),
-                    }
-                }
-                (Some((entry, same)), Some(at)) => (Some(entry.accepted(at, None)), same),
-                (Some((entry, _)), None) => (Some(entry.image.clone()), false),
-                (None, _) => (self.version_image(&table, row, &key, tx)?, false),
+            let image = match (entry, accepted_at) {
+                (Some(entry), Some(at)) if entry.created == Created::Beneath => self
+                    .settled_created(table, *row, key)?
+                    .map(|created| entry.accepted(at, Some(created))),
+                (Some(entry), Some(at)) => Some(entry.accepted(at, None)),
+                _ => None,
             };
-            if let Some(mut image) = image {
-                image.seq = seq;
-                images.push(image);
+            match image {
+                Some(mut image) => {
+                    image.seq = seq;
+                    images.push(image);
+                }
+                None => whole.push((table.clone(), *row.0.as_bytes(), key.clone())),
             }
-            if !exact {
-                whole.push((table, *row.0.as_bytes(), key));
-            }
         }
-        self.as_written_mismatches += mismatched as u64;
-        for image in images {
-            self.receive_image(image)?;
-        }
-        for row in whole {
-            self.ask_whole(row)?;
-        }
-        Ok(())
+        Ok((images, whole, mismatched))
     }
 
     /// The `$createdAt` of a row's settled version beneath pending writes:
@@ -5088,9 +5084,9 @@ impl Client {
             .collect();
         self.whole = std::mem::take(&mut self.whole)
             .into_iter()
-            .map(|(table, id, key)| {
+            .map(|((table, id, key), seq)| {
                 let table = if table == from { to.to_owned() } else { table };
-                (table, id, key)
+                ((table, id, key), seq)
             })
             .collect();
     }
@@ -5141,7 +5137,9 @@ impl Client {
             unadmitted: false,
             stranded: false,
             catalogued: false,
-            whole: HashSet::new(),
+            whole: HashMap::new(),
+            deferred: VecDeque::new(),
+            releasing: None,
             forgotten: false,
         }
     }
@@ -5250,7 +5248,7 @@ impl Db {
             let rows = client
                 .whole
                 .iter()
-                .map(|(table, id, key)| (table.clone(), *id, key.clone(), 0))
+                .map(|((table, id, key), seq)| (table.clone(), *id, key.clone(), *seq))
                 .collect();
             client.outbox.push(SyncMessage::ResendWhole { rows });
         }
@@ -6301,7 +6299,26 @@ impl Db {
             }
             // Rows install without their chunks: a chunked cell carries the
             // sort key its indexes need.
-            while let Some(message) = queue.pop_front() {
+            loop {
+                // A deferred fate whose rows arrived whole applies next, in
+                // the order its fates came.
+                let client = inner.client.as_mut().expect("client");
+                if client.releasing.is_none()
+                    && let Some(head) = client.deferred.front()
+                    && head
+                        .awaited
+                        .as_ref()
+                        .is_none_or(|rows| rows.iter().all(|row| !client.whole.contains_key(row)))
+                {
+                    let DeferredFate { fate, awaited } = client.deferred.pop_front().expect("head");
+                    if let SyncMessage::Fate { tx, .. } = &fate {
+                        client.releasing = Some((*tx, awaited.is_some()));
+                    }
+                    queue.push_front(fate);
+                }
+                let Some(message) = queue.pop_front() else {
+                    break;
+                };
                 match message {
                     // Rows and evictions name stored tables and columns, as
                     // this store mirrors its upstream's.
@@ -6317,7 +6334,7 @@ impl Db {
                             };
                             let named = (image.table.clone(), image.id, image.key.clone());
                             if !inner.receive_deltas(&mut image)? {
-                                inner.ask_whole(named)?;
+                                inner.ask_whole(named, 0)?;
                                 continue;
                             }
                             inner.client.as_mut().expect("client").whole.remove(&named);
@@ -6448,19 +6465,62 @@ impl Db {
                         outcome,
                         global,
                     } => {
-                        let result = outcome.result();
-                        let landed = outcome.seq();
+                        let client = inner.client.as_mut().expect("client");
+                        let releasing = client.releasing.take_if(|(at, _)| *at == tx);
+                        // Fates apply in the order they came: one after a
+                        // deferred fate waits behind it.
+                        if releasing.is_none() && !client.deferred.is_empty() {
+                            client.deferred.push_back(DeferredFate {
+                                fate: SyncMessage::Fate {
+                                    tx,
+                                    outcome,
+                                    global,
+                                },
+                                awaited: None,
+                            });
+                            continue;
+                        }
                         let accepted_at = match &outcome {
                             Outcome::Accepted {
                                 seq,
                                 accepted_at,
                                 as_written,
                             } => {
-                                inner.install_as_written(tx, *seq, *accepted_at, as_written)?;
+                                let (images, whole, mismatched) =
+                                    inner.as_written_images(tx, *seq, *accepted_at, as_written)?;
+                                let arrived = matches!(releasing, Some((_, true)));
+                                // Rows it cannot install are asked for whole,
+                                // and the commit stays pending until they
+                                // arrive: its writes never drop out here.
+                                if !whole.is_empty() && !arrived {
+                                    inner.as_written_mismatches += mismatched;
+                                    for row in &whole {
+                                        inner.ask_whole(row.clone(), *seq)?;
+                                    }
+                                    let client = inner.client.as_mut().expect("client");
+                                    client.deferred.push_front(DeferredFate {
+                                        fate: SyncMessage::Fate {
+                                            tx,
+                                            outcome,
+                                            global,
+                                        },
+                                        awaited: Some(whole.into_iter().collect()),
+                                    });
+                                    continue;
+                                }
+                                let client = inner.client.as_mut().expect("client");
+                                if let Some(pending) = client.pending.get_mut(tx) {
+                                    pending.expected = None;
+                                }
+                                for image in images {
+                                    inner.receive_image(image)?;
+                                }
                                 *accepted_at
                             }
                             _ => None,
                         };
+                        let result = outcome.result();
+                        let landed = outcome.seq();
                         let accepted = landed.is_some();
                         let client = inner.client.as_mut().expect("client");
                         let (Outcome::Accepted { seq: through, .. }
@@ -7237,19 +7297,24 @@ impl Inner {
     /// Ask the upstream for a row whole: a `ResendWhole` of it, which it
     /// answers with the row whole or its eviction (SPEC 19.8). Until it arrives
     /// this store holds a stale version, so every watermark is forgotten
-    /// and none is stored (see `Client::whole`).
-    fn ask_whole(&mut self, (table, id, key): (String, [u8; 16], Vec<u8>)) -> Result<(), Error> {
+    /// and none is stored (see `Client::whole`). `seq`: a version of the row
+    /// an own commit produced, which this store must hold too (0 for none).
+    fn ask_whole(&mut self, (table, id, key): WholeRow, seq: u64) -> Result<(), Error> {
         self.forget_watermarks()?;
         let client = self.client.as_mut().expect("client");
-        client.whole.insert((table.clone(), id, key.clone()));
+        let owed = client
+            .whole
+            .entry((table.clone(), id, key.clone()))
+            .or_default();
+        *owed = (*owed).max(seq);
         let asked = client.outbox.iter().any(|message| {
             matches!(message, SyncMessage::ResendWhole { rows } if rows.iter().any(|held| {
-                held.0 == table && held.1 == id && held.2 == key && held.3 == 0
+                held.0 == table && held.1 == id && held.2 == key && held.3 == seq
             }))
         });
         if !asked {
             client.outbox.push(SyncMessage::ResendWhole {
-                rows: vec![(table, id, key, 0)],
+                rows: vec![(table, id, key, seq)],
             });
         }
         Ok(())
@@ -7274,19 +7339,6 @@ impl Inner {
         let overlaid = (image.table.clone(), row, image.key.clone());
         if let Some(baseline) = client.baselines.get_mut(&overlaid) {
             match baseline {
-                // The upstream's own image of a version this replica's
-                // image stood in for (see `merge_image`).
-                Some(old)
-                    if old.seq == image.seq
-                        && image.seq < LOCAL_BASE
-                        && image.content
-                        && *old != image =>
-                {
-                    *old = image.clone();
-                    self.drop_row(&image.table, row, &image.key, image.seq)?;
-                    self.put_image(&image, true)?;
-                    return Ok(true);
-                }
                 Some(old) if old.seq >= image.seq && old.seq < LOCAL_BASE => {
                     self.put_image(&image, true)?;
                     return Ok(false);
@@ -7845,6 +7897,10 @@ impl Db {
             let mut touched = std::mem::take(&mut inner.sessions[index].touched);
             let committed = std::mem::take(&mut inner.sessions[index].committed);
             let mut echoes = std::mem::take(&mut inner.sessions[index].echoes);
+            let asked_whole = std::mem::take(&mut inner.sessions[index].asked_whole);
+            echoes.retain(|echo| {
+                !asked_whole.contains(&(echo.table.clone(), echo.row, echo.key.clone()))
+            });
             let mut watch = std::mem::take(&mut inner.sessions[index].watch);
             let mut held_rows = std::mem::take(&mut inner.sessions[index].held);
             for (table, row, key) in recheck {
@@ -8595,11 +8651,16 @@ impl Db {
             SyncMessage::ResendWhole { rows } => {
                 let mut inner = self.inner.borrow_mut();
                 let session = &mut inner.sessions[index];
-                for (table, id, key, _) in rows {
+                for (table, id, key, seq) in rows {
                     session.shipped.remove(&(table.clone(), id, key.clone()));
-                    session
-                        .touched
-                        .insert((table, RowUuid::from_bytes(id), key));
+                    let row = (table, RowUuid::from_bytes(id), key);
+                    if seq > 0 {
+                        session
+                            .committed
+                            .push((row.0.clone(), row.1, row.2.clone(), seq));
+                    }
+                    session.asked_whole.insert(row.clone());
+                    session.touched.insert(row);
                 }
             }
             SyncMessage::KnownCatalogue { versions } => {
@@ -8943,7 +9004,26 @@ impl Db {
                     return Ok(());
                 }
                 let (result, rows, echoable) = match known {
-                    Some(result) => (result, Vec::new(), Vec::new()),
+                    // A resend's writer may not hold what the commit made of
+                    // its rows (its fate was lost, or it reopened while
+                    // waiting for rows it could not install): they ship as
+                    // they are, unless newer versions do.
+                    Some(result) => {
+                        let landed = match (&result, self.inner.borrow().settled(node, tx)?) {
+                            (Ok(()), Some(Some(seq))) => Some(seq),
+                            _ => None,
+                        };
+                        let rows = match landed {
+                            Some(seq) => ops
+                                .into_iter()
+                                .map(from_wire)
+                                .collect::<Result<Vec<_>, _>>()
+                                .and_then(|ops| self.inner.borrow().written_rows(&ops, seq))
+                                .unwrap_or_default(),
+                            None => Vec::new(),
+                        };
+                        (result, rows, Vec::new())
+                    }
                     None => match commit_who(policy, &acting)
                         .map_err(|error| (error, Vec::new()))
                         .and_then(|who| {
