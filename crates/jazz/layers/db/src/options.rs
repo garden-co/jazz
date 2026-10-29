@@ -441,11 +441,14 @@ pub enum Reason {
     /// deployed: the app was released ahead of its schema (code
     /// `WriteRejected`, SPEC 8.9).
     SchemaVersionNotDeployed,
+    /// A store configured as one user was asked to serve a session of
+    /// another identity (code `Protocol`): relays serve one identity.
+    IdentityMismatch,
 }
 
 impl Reason {
     /// Every reason, in declaration order.
-    pub const ALL: [Reason; 12] = [
+    pub const ALL: [Reason; 13] = [
         Reason::AuthorizationDenied,
         Reason::ClientClockTooFarAhead,
         Reason::SerializationConflict,
@@ -458,6 +461,7 @@ impl Reason {
         Reason::PermissionsHeadMissing,
         Reason::PredecessorRejected,
         Reason::SchemaVersionNotDeployed,
+        Reason::IdentityMismatch,
     ];
 
     /// The stable, snake_case name of this reason.
@@ -480,6 +484,7 @@ impl Reason {
             Reason::PermissionsHeadMissing => "permissions_head_missing",
             Reason::PredecessorRejected => "predecessor_rejected",
             Reason::SchemaVersionNotDeployed => "schema_version_not_deployed",
+            Reason::IdentityMismatch => "identity_mismatch",
         }
     }
 

@@ -98,7 +98,9 @@ fn fresh_client(node: u8) -> Db {
 fn connect(client: &Db, server: &Db) {
     let (client_transport, server_transport) = duplex();
     let _upstream = block_on(client.connect_upstream(client_transport));
-    let _subscriber = server.accept_subscriber(server_transport, AuthorSubject::SYSTEM);
+    let _subscriber = server
+        .accept_subscriber(server_transport, AuthorSubject::SYSTEM)
+        .unwrap();
 }
 
 fn turn(client: &Db, server: Option<&Db>) {

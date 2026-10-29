@@ -960,6 +960,12 @@ impl RelayWorker {
         claims: BTreeMap<String, Value>,
         high_water: u64,
     ) -> Result<u64, RelayError> {
+        // A relay serves its own identity's sessions only: it uploads what
+        // they write as itself.
+        self.persistent
+            .db
+            .check_serves(identity.author)
+            .map_err(|error| RelayError::Host(error.into()))?;
         let db = block_on(Db::open(DbConfig::new(self.schema.clone(), identity)))
             .map_err(|error| RelayError::Host(error.into()))?;
         // Continue after the node's previous holder: its transaction ids
@@ -984,7 +990,10 @@ impl RelayWorker {
         self.persistent
             .db
             .set_identity_claims(identity.author, claims.clone());
-        let served = self.persistent.accept_subscriber(identity.author, claims);
+        let served = self
+            .persistent
+            .accept_subscriber(identity.author, claims)
+            .map_err(RelayError::Host)?;
         let link = binding.connect_upstream();
         self.next_client += 1;
         let id = self.next_client;

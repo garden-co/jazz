@@ -422,7 +422,7 @@ fn a_client_on_the_old_version_writes_into_the_default_branch() {
     .unwrap();
     let (client_side, server_side) = duplex_transport::duplex();
     block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice);
+    server.accept_subscriber(server_side, alice).unwrap();
 
     write(&client, space("a"), "from alice");
     for _ in 0..6 {

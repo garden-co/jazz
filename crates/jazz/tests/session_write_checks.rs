@@ -350,7 +350,9 @@ fn a_trusted_links_session_write_is_checked_as_that_session_at_the_authority() {
     let backend = open(1);
     let (client_side, server_side) = duplex();
     let _upstream = block_on(backend.connect_upstream(client_side));
-    server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+    server
+        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
+        .unwrap();
     let pump = || {
         for _ in 0..4 {
             block_on(backend.tick()).unwrap();
@@ -399,7 +401,9 @@ fn a_replica_leaves_a_relational_read_for_write_upsert_to_the_authority() {
     let backend = open(1);
     let (client_side, server_side) = duplex();
     let _upstream = block_on(backend.connect_upstream(client_side));
-    server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+    server
+        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
+        .unwrap();
     let pump = || {
         for _ in 0..4 {
             block_on(backend.tick()).unwrap();
@@ -456,14 +460,16 @@ fn a_session_links_session_write_is_checked_as_the_link() {
         let client = open(n);
         let (client_side, server_side) = duplex();
         let upstream = block_on(client.connect_upstream(client_side));
-        server.accept_subscriber_with_claims(
-            server_side,
-            author,
-            Some(BTreeMap::from([(
-                jazz::query::provider_claim_key("sub"),
-                text(sub),
-            )])),
-        );
+        server
+            .accept_subscriber_with_claims(
+                server_side,
+                author,
+                Some(BTreeMap::from([(
+                    jazz::query::provider_claim_key("sub"),
+                    text(sub),
+                )])),
+            )
+            .unwrap();
         let prepared = client.prepare_query(&Query::from("protected")).unwrap();
         let stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
         (client, (upstream, stream))
