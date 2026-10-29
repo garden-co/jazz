@@ -2043,7 +2043,16 @@ impl Db {
 
     /// One write. On a client, a local (unauthenticated) write is also an
     /// upload: it is recorded for the authority, which decides its fate.
+    ///
+    /// On a replica configured as a user, a write as a session other than
+    /// its own is refused, as such a session is (see [`Db::check_serves`]):
+    /// it would upload as this replica's identity.
     fn write_op(&self, mut op: StagedOp, who: Who) -> Result<WriteHandle, Error> {
+        if let Who::Session(author) = who
+            && self.is_client()
+        {
+            self.check_serves(author)?;
+        }
         self.with_upload(|| {
             let table = op.table().to_owned();
             let (prior, mark) = {
@@ -7018,6 +7027,13 @@ impl Db {
     }
 
     fn stage_op(&self, id: OpenTransactionId, mut op: StagedOp) -> Result<(), Error> {
+        // As for a write outside a transaction (see `write_op`).
+        if op.is_session()
+            && self.is_client()
+            && let Some(author) = op.author()
+        {
+            self.check_serves(author)?;
+        }
         // Validate against the overlay now, so errors surface at the call;
         // a counter write's change is from what the transaction sees.
         self.in_overlay(id, Some(&mut op), |_, _| Ok(()))

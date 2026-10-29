@@ -110,7 +110,7 @@ impl Fixture {
     fn connect(&self, client: &Db) -> Upstream {
         let (client_side, server_side) = duplex_transport::duplex();
         let upstream = block_on(client.connect_upstream(client_side));
-        self.core.accept_subscriber(server_side, alice());
+        self.core.accept_subscriber(server_side, alice()).unwrap();
         upstream
     }
 

@@ -238,6 +238,18 @@ the same semantic boundary even when their storage-owner and lifecycle
 mechanism differs from the browser's IndexedDB marker. A relay shared across
 auth scopes (server-deployed or otherwise multiplexed) is not supported.
 
+A relay serves one identity: its own. A store configured as a user uploads
+what its sessions write under its own identity, so a session of another user
+would have its writes attributed to the relay's user. Every accept path (the
+core's, and through it the binding host, the browser worker and the native
+relay) refuses such a session with reason `identity_mismatch`; only a system
+store (a server) serves any identity. Each accept names the session's own
+replica author: the browser worker admits a tab as the author the tab
+connected with, never as the worker's own. For the same reason a replica
+configured as a user refuses a local write as another session. A server
+checks a replica's declared identity against the one it authenticated when it
+admits the link (`INV-EDGE-26`).
+
 ### 9.6 The Core/client boundary
 
 The core-client boundary is where the system binds a link to a user identity and

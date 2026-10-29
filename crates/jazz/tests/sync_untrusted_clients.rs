@@ -138,11 +138,11 @@ fn fates(down: &Q) -> Vec<(u64, bool)> {
 fn a_message_the_server_does_not_serve_ends_only_that_session() {
     let server = server();
     let (_bad_client, bad_server, bad_up, _) = pipe();
-    let bad = server.accept_subscriber(bad_server, user(9));
+    let bad = server.accept_subscriber(bad_server, user(9)).unwrap();
     let alice = client(1, user(1));
     let (a_client, a_server, _, _) = pipe();
     let _a = block_on(alice.connect_upstream(a_client));
-    server.accept_subscriber(a_server, user(1));
+    server.accept_subscriber(a_server, user(1)).unwrap();
 
     post(&alice, "hello");
     bad_up.borrow_mut().push_back(SyncMessage::Rows {
@@ -223,10 +223,10 @@ fn a_session_the_server_cannot_send_to_ends_with_why() {
 fn a_stale_subscriber_handle_does_not_close_the_session_reusing_its_slot() {
     let server = server();
     let (_old_client, old_server, _, _) = pipe();
-    let old = server.accept_subscriber(old_server, user(1));
+    let old = server.accept_subscriber(old_server, user(1)).unwrap();
     server.disconnect_subscriber(old);
     let (_new_client, new_server, _, _) = pipe();
-    let new = server.accept_subscriber(new_server, user(2));
+    let new = server.accept_subscriber(new_server, user(2)).unwrap();
     assert_ne!(old, new);
     server.disconnect_subscriber(old);
     assert_eq!(server.open_subscribers(), 1);
@@ -238,9 +238,9 @@ fn a_commit_as_another_identitys_node_is_refused_and_claims_nothing() {
     let alice = client(1, user(1));
     let (a_client, a_server, a_up, a_down) = pipe();
     let _a = block_on(alice.connect_upstream(a_client));
-    server.accept_subscriber(a_server, user(1));
+    server.accept_subscriber(a_server, user(1)).unwrap();
     let (_m_client, m_server, m_up, m_down) = pipe();
-    server.accept_subscriber(m_server, user(9));
+    server.accept_subscriber(m_server, user(9)).unwrap();
 
     post(&alice, "first");
     block_on(alice.tick()).unwrap();
@@ -318,7 +318,7 @@ fn an_upsert_over_a_row_deleted_in_the_same_commit_is_checked_as_an_insert() {
         )
         .unwrap();
     let (_m_client, m_server, m_up, m_down) = pipe();
-    server.accept_subscriber(m_server, user(1));
+    server.accept_subscriber(m_server, user(1)).unwrap();
     m_up.borrow_mut().push_back(SyncMessage::Commit {
         node: [1; 16],
         tx: LOCAL_BASE + 1,
@@ -353,7 +353,7 @@ fn an_upsert_over_a_row_deleted_in_the_same_commit_is_checked_as_an_insert() {
 fn the_authority_refuses_cells_that_are_not_of_their_columns_type() {
     let server = server();
     let (_m_client, m_server, m_up, m_down) = pipe();
-    server.accept_subscriber(m_server, user(2));
+    server.accept_subscriber(m_server, user(2)).unwrap();
     for (i, value) in [Value::I64(5), Value::Nullable(None), Value::Bool(true)]
         .into_iter()
         .enumerate()
@@ -406,7 +406,7 @@ fn a_reopened_authority_continues_after_the_seq_of_a_rowless_commit() {
     };
     let server = open();
     let (_r, r_server, r_up, r_down) = pipe();
-    server.accept_subscriber(r_server, user(2));
+    server.accept_subscriber(r_server, user(2)).unwrap();
     r_up.borrow_mut().push_back(SyncMessage::Commit {
         node: [2; 16],
         tx: LOCAL_BASE + 1,
@@ -449,7 +449,7 @@ fn a_reopened_replica_continues_after_a_pending_commit_that_left_no_rows() {
     let alice = open_alice();
     let (a_client, a_server, _, _) = pipe();
     let up = block_on(alice.connect_upstream(a_client));
-    let session = server.accept_subscriber(a_server, user(1));
+    let session = server.accept_subscriber(a_server, user(1)).unwrap();
     // A delete of a row this replica does not hold writes no local row.
     block_on(alice.delete("messages", row, DeleteOptions::default())).unwrap();
     let before = alice.seq_high_water();
@@ -465,7 +465,7 @@ fn a_reopened_replica_continues_after_a_pending_commit_that_left_no_rows() {
     post(&alice, "after reopen");
     let (a_client, a_server, _, _) = pipe();
     let _up = block_on(alice.connect_upstream(a_client));
-    server.accept_subscriber(a_server, user(1));
+    server.accept_subscriber(a_server, user(1)).unwrap();
     for _ in 0..6 {
         block_on(alice.tick()).unwrap();
         block_on(server.tick()).unwrap();
@@ -488,7 +488,7 @@ fn the_authority_refuses_misplaced_bases() {
         )
         .unwrap();
     let (_m_client, m_server, m_up, m_down) = pipe();
-    server.accept_subscriber(m_server, user(1));
+    server.accept_subscriber(m_server, user(1)).unwrap();
     let base = || WireBase {
         key: Vec::new(),
         on: BuiltOn::Seq(1),
@@ -584,7 +584,7 @@ fn creators(db: &Db) -> Vec<(String, String)> {
 fn a_session_link_may_not_attribute_and_its_session_writes_are_its_own() {
     let server = server();
     let (_m_client, m_server, m_up, m_down) = pipe();
-    server.accept_subscriber(m_server, user(2));
+    server.accept_subscriber(m_server, user(2)).unwrap();
     let insert = |tx: u64, row: u8, body: &str, acting: Acting| SyncMessage::Commit {
         node: [2; 16],
         tx,

@@ -69,6 +69,8 @@ mod large_value_sync;
 mod large_value_tx_update;
 #[path = "../large_values.rs"]
 mod large_values;
+#[path = "../link_identities.rs"]
+mod link_identities;
 #[path = "../local_first_first_load_gate.rs"]
 mod local_first_first_load_gate;
 #[path = "../local_first_server_wait.rs"]

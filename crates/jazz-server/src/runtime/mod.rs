@@ -1031,10 +1031,7 @@ impl ServerRuntimeHandle {
             },
         );
         let opened = self
-            .run(move |owner| {
-                owner.open_session(session, served_as, claims, output, egress);
-                Ok(())
-            })
+            .run(move |owner| owner.open_session(session, served_as, claims, output, egress))
             .await;
         if opened.is_err() {
             self.edges()?.remove(&session);
@@ -1650,7 +1647,7 @@ impl Owner {
         claims: BTreeMap<String, Value>,
         output: tokio_mpsc::UnboundedSender<Outbound>,
         egress: Arc<AtomicUsize>,
-    ) {
+    ) -> Result<(), String> {
         let claims = (identity != AuthorSubject::SYSTEM).then(|| {
             self.db.set_identity_claims(identity, claims.clone());
             claims
@@ -1663,11 +1660,14 @@ impl Owner {
             done: std::cell::Cell::new(false),
             slice: Rc::clone(&self.slice),
         });
-        let subscriber = self.db.accept_subscriber_with_claims(
-            Box::new(SessionTransport(Rc::clone(&queues))),
-            identity,
-            claims,
-        );
+        let subscriber = self
+            .db
+            .accept_subscriber_with_claims(
+                Box::new(SessionTransport(Rc::clone(&queues))),
+                identity,
+                claims,
+            )
+            .map_err(|error| error.to_string())?;
         self.sessions.insert(
             session,
             OwnerSession {
@@ -1688,6 +1688,7 @@ impl Owner {
                 egress,
             },
         );
+        Ok(())
     }
 
     fn receive(&mut self, session: ServerSession, frames: Vec<AbiBytes>) {
@@ -2000,7 +2001,7 @@ mod tests {
                 BTreeMap::new(),
                 output,
                 Arc::default(),
-            );
+            )?;
             let mut inbound = owner.sessions[&ServerSession(1)]
                 .queues
                 .inbound
