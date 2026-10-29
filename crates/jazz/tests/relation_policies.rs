@@ -16,13 +16,17 @@ use jazz::tools::public_schema::{
 use jazz::tools::{ColumnType, PolicyExpr, Schema, SchemaBuilder, TableSchema, Value};
 use std::collections::BTreeMap;
 fn policy_graph_policy_schema() -> Schema {
+    schema_with_resource_policy(resource_access_policy())
+}
+
+fn schema_with_resource_policy(select: PolicyExpr) -> Schema {
     SchemaBuilder::new()
         .table(
             TableSchema::builder("resources")
                 .column("label", ColumnType::Text)
                 .policies(
                     TablePolicies::new()
-                        .with_select(resource_access_policy())
+                        .with_select(select)
                         .with_insert(PolicyExpr::True),
                 ),
         )
@@ -39,7 +43,7 @@ fn policy_graph_policy_schema() -> Schema {
         )
         .table(
             TableSchema::builder("resource_access_edges")
-                .fk_column("resource", "resources")
+                .nullable_fk_column("resource", "resources")
                 .fk_column("team", "teams")
                 .column("grant_role", ColumnType::Text)
                 .policies(TablePolicies::new().with_insert(PolicyExpr::True)),
@@ -173,6 +177,101 @@ fn read_as(db: &Db, sub: &str) -> usize {
     block_on(db.all_for_identity(&prepared, ReadOpts::default(), author))
         .unwrap()
         .len()
+}
+
+fn open(schema: &Schema) -> Db {
+    block_on(Db::open_history_complete(DbConfig::new(
+        compile_schema(schema),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap()
+}
+
+/// A viewer grant on the row itself: `access.resource = outer row id`, the
+/// relation's only reference to the row it guards.
+fn granted_policy() -> PolicyExpr {
+    PolicyExpr::ExistsRel {
+        rel: RelationExpr::Filter {
+            input: Box::new(RelationExpr::TableScan {
+                table: "resource_access_edges".into(),
+                alias: Some("access".to_owned()),
+            }),
+            predicate: RelationPredicate::And(vec![
+                RelationPredicate::Cmp {
+                    left: RelationColumnRef {
+                        scope: Some("access".to_owned()),
+                        column: "resource".to_owned(),
+                    },
+                    op: RelationCmpOp::Eq,
+                    right: RelationValueRef::RowId(RelationRowIdRef::Outer),
+                },
+                RelationPredicate::Cmp {
+                    left: RelationColumnRef {
+                        scope: Some("access".to_owned()),
+                        column: "grant_role".to_owned(),
+                    },
+                    op: RelationCmpOp::Eq,
+                    right: RelationValueRef::literal(Value::Text("viewer".to_owned())),
+                },
+            ]),
+        },
+    }
+}
+
+/// A relation keyed only by the guarded row's id runs once for all rows
+/// rather than once per row, with the same answer: only a matching edge
+/// that names the row grants it; an edge naming no resource grants none.
+///
+/// ```
+/// edges: (granted, viewer) (NULL, viewer) (other, editor)
+/// member ──"has a viewer grant"──► granted   (not open, not other)
+/// ```
+#[test]
+fn a_relation_keyed_by_the_row_id_grants_only_the_rows_it_names() {
+    let s = |v: &str| CoreValue::String(v.to_owned());
+    let u = |r: RowUuid| CoreValue::Uuid(r.0);
+    let seed_rows = |db: &Db| {
+        seed(db, "resources", id(3, 1), &[("label", s("granted"))]);
+        seed(db, "resources", id(3, 2), &[("label", s("open"))]);
+        seed(db, "resources", id(3, 3), &[("label", s("other"))]);
+        seed(db, "teams", id(1, 1), &[("identity_key", s("member"))]);
+        seed(
+            db,
+            "resource_access_edges",
+            id(4, 1),
+            &[
+                ("resource", u(id(3, 1))),
+                ("team", u(id(1, 1))),
+                ("grant_role", s("viewer")),
+            ],
+        );
+        seed(
+            db,
+            "resource_access_edges",
+            id(4, 2),
+            &[
+                ("resource", CoreValue::Nullable(None)),
+                ("team", u(id(1, 1))),
+                ("grant_role", s("viewer")),
+            ],
+        );
+        seed(
+            db,
+            "resource_access_edges",
+            id(4, 3),
+            &[
+                ("resource", u(id(3, 3))),
+                ("team", u(id(1, 1))),
+                ("grant_role", s("editor")),
+            ],
+        );
+    };
+    let db = open(&schema_with_resource_policy(granted_policy()));
+    seed_rows(&db);
+    assert_eq!(read_as(&db, "member"), 1, "only the granted resource");
 }
 
 #[test]
