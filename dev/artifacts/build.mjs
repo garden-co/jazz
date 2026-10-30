@@ -26,6 +26,7 @@ import {
   verifyArtifactBuildLease,
 } from "../gates/build-test-artifacts.mjs";
 import { stripSymbolHashesInFile } from "./wasm-names.mjs";
+import { wasmBuildEnvironment } from "./wasm-toolchain.mjs";
 
 const root = resolve(fileURLToPath(new URL(".", import.meta.url)), "../..");
 const commands = {
@@ -500,6 +501,8 @@ export function buildArtifact(kind, profile = "release", extraArgs = []) {
   const expectedNapiBinding = kind === "napi" && napiBindingForTarget[resolvedNapiTarget];
   if (kind === "napi" && !expectedNapiBinding)
     throw new Error(`unsupported NAPI target ${resolvedNapiTarget ?? "unknown"}`);
+  // Resolve prerequisites before taking the lease or staging any output.
+  const buildEnv = kind === "wasm" ? wasmBuildEnvironment() : process.env;
   // No reader-facing generated file is touched before holding the clone-wide
   // lease. The fingerprint is pure source/tool metadata at this point.
   const artifactLock = acquireArtifactLease();
@@ -529,7 +532,7 @@ export function buildArtifact(kind, profile = "release", extraArgs = []) {
       cwd: root,
       stdio: "inherit",
       shell: process.platform === "win32",
-      env: { ...process.env, JAZZ_NATIVE_ARTIFACT_FINGERPRINT: fingerprint },
+      env: { ...buildEnv, JAZZ_NATIVE_ARTIFACT_FINGERPRINT: fingerprint },
     });
     if (result.error) throw result.error;
     if (result.status !== 0) {

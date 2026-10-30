@@ -633,3 +633,79 @@ fn a_closed_tabs_pending_commit_uploads_after_its_worker_restarts() {
     );
     assert_eq!(worker.pending_upload_count(), 0, "both commits settled");
 }
+
+/// Notes are readable and writable, but the authority refuses inserting
+/// one whose body is "refused".
+fn refusing_schema() -> JazzSchema {
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("body", ColumnType::Text)
+                    .policies(allow_all_policies().with_insert(PolicyExpr::Cmp {
+                        column: "body".to_owned(),
+                        op: CmpOp::Ne,
+                        value: PolicyValue::Literal(PublicValue::Text("refused".into())),
+                    })),
+            )
+            .build(),
+    )
+}
+
+/// A tab's one-shot local-first read, as the bindings run it: answered by
+/// its worker, then read from the tab's replica.
+fn one_shot_bodies(net: &Net, tab: &Db) -> Vec<String> {
+    use jazz::db::SerializedReadResult;
+    use std::future::Future;
+    use std::pin::pin;
+    use std::task::{Context, Poll, Waker};
+    let bytes = postcard::to_allocvec(&Query::from("notes")).unwrap();
+    let mut read = pin!(tab.all_serialized_query(&bytes, ReadOpts::default(), None, None, None));
+    let mut context = Context::from_waker(Waker::noop());
+    for _ in 0..50 {
+        if let Poll::Ready(result) = read.as_mut().poll(&mut context) {
+            let SerializedReadResult::Rows(rows) = result.unwrap() else {
+                panic!("notes is a row query");
+            };
+            return rows
+                .iter()
+                .filter_map(|row| match row.cells().find(|(name, _)| *name == "body") {
+                    Some((_, Some(Value::String(text)))) => Some(text.clone()),
+                    _ => None,
+                })
+                .collect();
+        }
+        net.pump();
+    }
+    panic!("the one-shot read did not complete");
+}
+
+/// A tab that saw another tab's unsettled insert only through one-shot
+/// reads holds no watch on it, yet the refusal still reaches it: the worker
+/// reconciles what it shipped at an unsettled version once that settles.
+///
+/// ```text
+/// tab1 ─insert(refused)─► worker (offline) ─one-shot─► tab0: [refused]
+/// worker online ─► core ✗ refused ─► worker reverts ─► tab0: []
+/// ```
+#[test]
+fn a_refused_write_a_tab_only_read_once_leaves_that_tab_too() {
+    let mut net = Net::with_schema(2, refusing_schema, author(WORKER), author(WORKER));
+    net.pump();
+    net.worker_offline();
+    net.insert(net.tab(1), "refused");
+    net.pump();
+    assert_eq!(one_shot_bodies(&net, net.tab(0)), ["refused"]);
+
+    net.worker_online();
+    for _ in 0..4 {
+        net.pump();
+    }
+    assert!(net.bodies(&net.core).is_empty(), "the authority refused it");
+    assert!(net.bodies(&net.worker).is_empty(), "the worker reverted it");
+    assert!(
+        net.bodies(net.tab(0)).is_empty(),
+        "the tab that read it once dropped it"
+    );
+    assert!(one_shot_bodies(&net, net.tab(0)).is_empty());
+}
