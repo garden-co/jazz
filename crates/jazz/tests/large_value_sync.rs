@@ -2007,6 +2007,7 @@ fn a_snapshot_read_naming_a_held_commit_waits_for_it() {
         tier: ReadTier::Remote,
         wait: None,
         view: Box::new(ReadViewSourceSpec::Snapshot { snapshot }),
+        since: Vec::new(),
         span: ReadSpan::Once { at: Vec::new() },
     });
     let reply = || {

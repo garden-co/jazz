@@ -9,7 +9,6 @@ import {
   resolveEffectiveQueryExecutionOptions,
   publicQueryExecutionOptions,
   type Runtime,
-  type TransactionalRuntime,
   type TxId,
   type MutationErrorEvent,
   type OpenTransactionId,
@@ -99,19 +98,19 @@ function makeFakeRuntime() {
     onMutationError: vi.fn<Runtime["onMutationError"]>((callback) => {
       mutationErrorCallback = callback;
     }),
-    beginTransaction: vi.fn<TransactionalRuntime["beginTransaction"]>((_kind, id) => {
+    beginTransaction: vi.fn<Runtime["beginTransaction"]>((_kind, id) => {
       nextTransactionNumber += 1;
       return id;
     }),
     connect: vi.fn<Runtime["connect"]>(),
     disconnect: vi.fn<Runtime["disconnect"]>(),
-    commitTransaction: vi.fn<TransactionalRuntime["commitTransaction"]>(
+    commitTransaction: vi.fn<Runtime["commitTransaction"]>(
       () => `committed-${nextTransactionNumber}` as TxId,
     ),
     waitForTransaction: vi.fn<Runtime["waitForTransaction"]>(async () => undefined),
-    rollbackTransaction: vi.fn<TransactionalRuntime["rollbackTransaction"]>(async () => false),
+    rollbackTransaction: vi.fn<Runtime["rollbackTransaction"]>(async () => false),
     close: vi.fn(),
-  } satisfies TransactionalRuntime;
+  } satisfies Runtime;
 
   return Object.assign(runtime, {
     emitMutationError(event: MutationErrorEvent) {

@@ -158,6 +158,14 @@ export type AuthUpdate =
  * Common interface for the runtime backing `JazzClient`.
  */
 export interface Runtime {
+  beginTransaction(
+    transactionKind: TransactionKind,
+    id: OpenTransactionId,
+    sessionJson?: string | null,
+  ): OpenTransactionId;
+  /** Completion may include asynchronous preparation before physical submission. */
+  commitTransaction(id: OpenTransactionId): TxId | Promise<TxId>;
+  rollbackTransaction(id: OpenTransactionId): Promise<boolean>;
   /** Capture behind earlier owner operations without waiting for server acceptance. */
   captureSnapshot?(): Promise<SnapshotRef>;
   readonly preparationOwner?: object;
@@ -302,17 +310,6 @@ export interface Runtime {
  * `unknown` means that a local replica or unavailable authority cannot decide.
  */
 export type PermissionAdvice = "allowed" | "denied" | "unknown";
-
-export interface TransactionalRuntime extends Runtime {
-  beginTransaction(
-    transactionKind: TransactionKind,
-    id: OpenTransactionId,
-    sessionJson?: string | null,
-  ): OpenTransactionId;
-  /** Completion may include asynchronous preparation before physical submission. */
-  commitTransaction(id: OpenTransactionId): TxId | Promise<TxId>;
-  rollbackTransaction(id: OpenTransactionId): Promise<boolean>;
-}
 
 declare const openTransactionIdBrand: unique symbol;
 declare const txIdBrand: unique symbol;
@@ -755,18 +752,6 @@ function encodeQueryExecutionOptions(
   }
 
   return JSON.stringify(payload);
-}
-
-function requireTransactionalRuntime(runtime: Runtime): TransactionalRuntime {
-  if (
-    typeof (runtime as Partial<TransactionalRuntime>).beginTransaction === "function" &&
-    typeof (runtime as Partial<TransactionalRuntime>).commitTransaction === "function" &&
-    typeof (runtime as Partial<TransactionalRuntime>).rollbackTransaction === "function"
-  ) {
-    return runtime as TransactionalRuntime;
-  }
-
-  throw new Error("This Jazz runtime does not support transactions");
 }
 
 function committedTxId(result: WriteReceipt): TxId | Promise<TxId> {
@@ -1216,17 +1201,13 @@ export class JazzClient {
         assertCurrent();
         await prerequisite();
         assertCurrent();
-        requireTransactionalRuntime(this.runtime).beginTransaction(kind, id, context);
+        this.runtime.beginTransaction(kind, id, context);
         state.unopened = false;
       });
       state.pending.catch(() => {});
       return id;
     }
-    const opened = requireTransactionalRuntime(this.runtime).beginTransaction(
-      kind,
-      id,
-      this.writeContext(session, attribution),
-    );
+    const opened = this.runtime.beginTransaction(kind, id, this.writeContext(session, attribution));
     this.transactionPreparations.set(opened, { committing: false });
     return opened;
   }
@@ -1363,7 +1344,7 @@ export class JazzClient {
   commitTransaction(id: OpenTransactionId): WriteHandle {
     const state = this.transactionPreparations.get(id);
     if (state?.committing) throw new Error("Transaction is already committing");
-    const runtime = requireTransactionalRuntime(this.runtime);
+    const runtime = this.runtime;
     const submitted = state?.pending
       ? state.pending.then(() => runtime.commitTransaction(id))
       : runtime.commitTransaction(id);
@@ -1389,7 +1370,7 @@ export class JazzClient {
     const unopened = this.transactionPreparations.get(id)?.unopened;
     this.transactionPreparations.delete(id);
     if (unopened) return Promise.resolve(true);
-    return requireTransactionalRuntime(this.runtime).rollbackTransaction(id);
+    return this.runtime.rollbackTransaction(id);
   }
 
   /**
