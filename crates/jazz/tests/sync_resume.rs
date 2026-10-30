@@ -1111,3 +1111,54 @@ fn pending_relay_read_rebuilds_its_checkpoint_after_reconnect() {
     }
     panic!("retried read did not settle");
 }
+
+/// Alice's first device deletes a message and reads once, so its
+/// checkpoint is after the deletion; her second device restores it. The
+/// first device's copy of the row is a cold tombstone (no live read covers
+/// it, and its settled delete keeps no watch), so a local read may still
+/// miss the restore, but its one-shot Remote read resumes from the
+/// checkpoint and must bring the restored row back.
+#[test]
+fn a_one_shot_remote_read_after_a_delete_sees_another_replicas_restore() {
+    let server = seeded(1);
+    let a = open(1, alice());
+    let b = open(2, alice());
+    let (up, down, _) = pipe();
+    let _a_link = block_on(a.connect_upstream(up));
+    server.accept_subscriber(down, alice()).unwrap();
+    let (up, down, _) = pipe();
+    let _b_link = block_on(b.connect_upstream(up));
+    server.accept_subscriber(down, alice()).unwrap();
+
+    // b watches the table, so it holds the deleted version to restore.
+    let prepared = b.prepare_query(&Query::from("messages")).unwrap();
+    let _watching = block_on(b.subscribe(&prepared, ReadOpts::default())).unwrap();
+    pump(&server, &b);
+    assert_eq!(ids(&b, None), [id(3, 0)]);
+    assert_eq!(read_once(&server, &a), [id(3, 0)]);
+    block_on(a.delete("messages", id(3, 0), Default::default())).unwrap();
+    pump(&server, &a);
+    assert_eq!(a.pending_upload_count(), 0, "the deletion settled");
+    assert!(
+        read_once(&server, &a).is_empty(),
+        "checkpoint after the delete"
+    );
+    pump(&server, &b);
+    assert!(ids(&b, None).is_empty(), "the deletion reached b");
+
+    block_on(b.restore("messages", id(3, 0), None, Default::default())).unwrap();
+    pump(&server, &b);
+    assert_eq!(b.pending_upload_count(), 0, "the restore settled");
+    pump(&server, &a);
+    assert_eq!(
+        ids(&a, None),
+        Vec::<RowUuid>::new(),
+        "a's tombstone is a cold copy until a read covers it"
+    );
+    assert_eq!(
+        read_once(&server, &a),
+        [id(3, 0)],
+        "the resumed one-shot Remote read ships the restore"
+    );
+    assert_eq!(ids(&a, None), [id(3, 0)], "and installs it locally");
+}
