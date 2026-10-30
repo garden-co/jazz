@@ -632,9 +632,6 @@ fn rows_messages(mut images: Vec<Image>, tx_ids: Vec<TxName>, limit: usize) -> V
 /// ([`Outcome::Accepted`]).
 const STAMPS: [&str; 2] = ["$createdAt", "$updatedAt"];
 
-/// What a writer and the authority must agree on for a row version the
-/// authority does not ship back (see [`AsWritten`]): everything in an image but
-/// its seq and [`STAMPS`].
 /// `message` with each occurrence of the name `from` that is a whole name
 /// (not part of a longer one) spelled `to`.
 fn replace_name(message: &str, from: &str, to: &str) -> String {
@@ -656,6 +653,9 @@ fn replace_name(message: &str, from: &str, to: &str) -> String {
     out
 }
 
+/// What a writer and the authority must agree on for a row version the
+/// authority does not ship back (see [`AsWritten`]): everything in an image but
+/// its seq and [`STAMPS`].
 fn echo_digest(image: &Image) -> [u8; 16] {
     let mut cells: Vec<&(String, Cell)> = image
         .cells
@@ -8239,15 +8239,9 @@ impl Inner {
         if !self.knows_deployed() {
             return;
         }
-        let mut version = self.sessions[index].version;
+        let version = self.sessions[index].version;
         let mut refused = Vec::new();
         held.retain(|message| match message {
-            SyncMessage::Join {
-                version: declared, ..
-            } => {
-                version = Some(crate::ids::SchemaVersionId::from_bytes(*declared));
-                true
-            }
             SyncMessage::Commit { id, .. } if version.is_some_and(|v| !self.deployed(v)) => {
                 refused.push(*id);
                 false
