@@ -381,17 +381,26 @@ export const ReadTier = {
 export type ReadTier = (typeof ReadTier)[keyof typeof ReadTier];
 
 /**
- * @internal A local-first read's server wait, or `undefined` for none.
- * Throws for a value that is not a non-negative number of milliseconds.
+ * @internal A local-first read's server wait in whole milliseconds, or
+ * `undefined` when the caller gave none. An explicit `0` stays `0`: it opts
+ * out of the client default wait. Throws for a value that is not a
+ * non-negative number of milliseconds.
  */
 export function normalizeFirstLoadRemoteWaitMs(value: unknown): number | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
     throw new Error("firstLoadRemoteWaitMs must be a non-negative number of milliseconds.");
   }
-  const ms = Math.floor(value);
-  return ms > 0 ? ms : undefined;
+  return Math.floor(value);
 }
+
+/**
+ * How long a read that names no tier waits for the server on its first load
+ * in browsers and React Native, when a server is configured. It never waits
+ * offline or after `db.disconnect()`; pass `firstLoadRemoteWaitMs: 0` to show
+ * local data at once.
+ */
+export const DEFAULT_CLIENT_FIRST_LOAD_REMOTE_WAIT_MS = 5_000;
 
 // Keep removed names here solely to provide migration guidance at the public API boundary.
 const REMOVED_READ_TIERS: Readonly<Record<string, string>> = {
@@ -457,13 +466,17 @@ export type ReadTierOptions =
       /**
        * Read tier: {@link ReadTier.LocalFirst} or {@link ReadTier.Remote}.
        *
-       * Reads default to local-first in browsers and React Native, and without a
+       * Reads default to local-first in browsers and React Native (with a brief
+       * first-load server wait when a server is configured), and without a
        * configured server; other environments with a server default to remote.
        */
       tier?: typeof ReadTier.LocalFirst;
       /**
        * How long the initial load may wait for the server's answer, in
-       * milliseconds. Defaults to `0`, which shows local data at once.
+       * milliseconds. A read that names no tier in a browser or React Native
+       * with a server defaults to {@link DEFAULT_CLIENT_FIRST_LOAD_REMOTE_WAIT_MS};
+       * an explicit `tier: "local-first"` defaults to `0`. `0` shows local
+       * data at once.
        *
        * While the client is online (connected, or its connection attempt is still
        * young), a subscription's first callback, or a one-shot read, waits up to
@@ -666,16 +679,22 @@ export function resolveEffectiveQueryExecutionOptions(
   context: QueryExecutionDefaultsContext,
   options?: InternalQueryExecutionOptions,
 ): ResolvedQueryExecutionOptions {
+  const clientRuntime = isBrowserRuntime() || isReactNativeRuntime();
   const tier =
-    options?.tier ??
-    (context.serverUrl && !isBrowserRuntime() && !isReactNativeRuntime()
-      ? ReadTier.Remote
-      : ReadTier.LocalFirst);
+    options?.tier ?? (context.serverUrl && !clientRuntime ? ReadTier.Remote : ReadTier.LocalFirst);
   if (tier !== "local-only") rejectRemovedReadTier(tier);
-  const firstLoadRemoteWaitMs =
-    tier === ReadTier.LocalFirst
-      ? normalizeFirstLoadRemoteWaitMs(options?.firstLoadRemoteWaitMs)
+  // A client read that names no tier is local first, but its first load
+  // waits briefly for the server so it does not show a stale or empty cache.
+  const defaultWaitMs =
+    options?.tier === undefined && context.serverUrl && clientRuntime
+      ? DEFAULT_CLIENT_FIRST_LOAD_REMOTE_WAIT_MS
       : undefined;
+  const requestedWaitMs =
+    tier === ReadTier.LocalFirst
+      ? (normalizeFirstLoadRemoteWaitMs(options?.firstLoadRemoteWaitMs) ?? defaultWaitMs)
+      : undefined;
+  const firstLoadRemoteWaitMs =
+    requestedWaitMs !== undefined && requestedWaitMs > 0 ? requestedWaitMs : undefined;
   return {
     tier,
     ...(firstLoadRemoteWaitMs !== undefined ? { firstLoadRemoteWaitMs } : {}),
