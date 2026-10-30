@@ -83,3 +83,29 @@ opt-level = 2
 lto = false
 debug = 1
 codegen-units = 256
+
+# Size-oriented profile used only by the jazz-rn relay artifact build
+# (`crates/jazz-rn/scripts/build-relay-artifacts.sh`); nothing else selects it.
+#
+# The script must build the relay with `cargo rustc --crate-type staticlib`:
+# rustc silently skips LTO when an rlib is emitted in the same invocation, and
+# `jazz-native-relay` must keep `crate-type = ["rlib", "staticlib"]` because
+# `jazz-napi` depends on the rlib. Fat LTO is only real in a staticlib-only build.
+#
+# Unwind stays at the `release` default. `panic = "abort"` would terminate the
+# host process when the relay owner thread panics. Panics that leave an
+# `extern "C"` entry point already abort since Rust 1.81, so the C boundary is
+# the same either way.
+#
+# Measured on a fully stripped arm64 link proxy referencing all 28 exported
+# symbols (SQLite engine, no RocksDB): 16.7 MB -> 9.9 MB executable, 7.2 MB ->
+# 4.8 MB gzip, device `.a` 69.6 MB -> 21.1 MB. Full table in
+# https://github.com/garden-co/jazz/pull/3016.
+# ponytail: `debug`/`strip` are already the `release` defaults, so they are not
+# restated; the `.a` ships as built (nothing in the normal pipeline strips it)
+# and the inherited `debug = false` is what keeps debuginfo out.
+[profile.release-mobile]
+inherits = "release"
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
