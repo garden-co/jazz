@@ -12,9 +12,9 @@ pending uploads moved from one encoded message to a row per op, and
 watermarks became per-sequencer rows).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `e6fe009096c8d520a4d2405e014edcbdd0b88bd32719a02226a51a25b4408d46`.
+  the SQLite file `1e1731ef32ba93f6c2a1d18918a0cbf129d7394c61abd90b9a585af23c5222f9`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `6ee700dcbcf0251fc79c35483d4f2d997f23343c9712795fbbb6e26327c7a317`.
+  `df49e79d97b65c175574d29b1b97059e2fc38b3e439160a42e06ec131205adf3`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
@@ -98,3 +98,14 @@ node's code instead of a reserved local seq range), regenerated it the same
 way. It adds `_n` to every row and history table (history keyed by
 `(id, _b, _n, _seq)`), `sn` to `_jazz_transactions` and `node` to
 `_jazz_lv_via`.
+
+Naming a pending commit's tables and columns by stored names, so a commit no
+longer depends on the schema version that wrote it, dropped
+`_jazz_pending_versions` and re-encoded the pending ops and serializable reads
+(a read now names the version its query is in), which regenerated it the same
+way.
+
+Giving a replicated insert the backwards defaults of the columns its writer's
+lineage dropped, and a replicated upsert the cells it writes only if it
+creates its row (`created`), changed the encoded pending ops, which
+regenerated it the same way.

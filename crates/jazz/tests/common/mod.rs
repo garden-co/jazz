@@ -128,3 +128,10 @@ pub fn physical_column(conn: &rusqlite::Connection, table: &str, column: &str) -
         .unwrap_or_else(|| panic!("{table} stores no column {column}"));
     format!("\"{name}\"")
 }
+
+/// Where `db`'s current schema stores `table`'s `column`: the name a
+/// hand-built replicated write gives the cell (writes travel by stored
+/// names).
+pub fn stored(db: &jazz::db::Db, table: &str, column: &str) -> String {
+    db.stored_column_for_test(table, column).1
+}

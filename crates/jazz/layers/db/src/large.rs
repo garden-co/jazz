@@ -2324,6 +2324,7 @@ mod tests {
             policies: Default::default(),
             indexes: Vec::new(),
             branch_by: Vec::new(),
+            branch_key_names: Vec::new(),
             provenance: Vec::new(),
             stored_provenance: Vec::new(),
         };
@@ -2383,6 +2384,7 @@ mod tests {
             policies: Default::default(),
             indexes: Vec::new(),
             branch_by: Vec::new(),
+            branch_key_names: Vec::new(),
             provenance: Vec::new(),
             stored_provenance: Vec::new(),
         };
@@ -2699,6 +2701,7 @@ mod tests {
             policies: Default::default(),
             indexes: Vec::new(),
             branch_by: Vec::new(),
+            branch_key_names: Vec::new(),
             provenance: Vec::new(),
             stored_provenance: Vec::new(),
         };
