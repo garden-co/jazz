@@ -143,6 +143,12 @@ impl Ctx<'_> {
             return Err(history_unsupported("history with a branch base"));
         }
         let table = self.table(source)?;
+        if table.latest_only {
+            return Err(unsupported(format!(
+                "reading the history of latest-only table `{}`",
+                table.name
+            )));
+        }
         let versions = versions_table(table);
         let mut stored = String::new();
         for column in table.stored() {

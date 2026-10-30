@@ -3446,8 +3446,35 @@ impl Inner {
         read: &ReadSpec,
     ) -> Result<Compiled, Error> {
         let (policy, claims) = self.read_sessions(prepared, identity);
-        self.read_ctx(prepared, policy.as_ref(), &claims, read)
-            .compile_query(&prepared.query, read.include_deleted)
+        let compiled = self
+            .read_ctx(prepared, policy.as_ref(), &claims, read)
+            .compile_query(&prepared.query, read.include_deleted)?;
+        self.refuse_latest_only_cut(&compiled, read)?;
+        Ok(compiled)
+    }
+
+    /// A read at a past cut (a serializable snapshot, a snapshot reference,
+    /// an explicit seq) needs the versions a latest-only table drops, so it
+    /// is refused rather than answered from another version (SPEC 4 §4.9,
+    /// `INV-HIST-27`). A replica's settled read is not a past cut: it
+    /// reads the superseded version the table keeps.
+    pub(crate) fn refuse_latest_only_cut(
+        &self,
+        compiled: &Compiled,
+        read: &ReadSpec,
+    ) -> Result<(), Error> {
+        if read.cut.is_none() || read.settled_only {
+            return Ok(());
+        }
+        match compiled.tables.iter().find(|table| self.latest_only(table)) {
+            Some(stored) => Err(unsupported(format!(
+                "reading latest-only table `{}` at a snapshot",
+                self.owner
+                    .by_stored(stored)
+                    .map_or(stored.as_str(), |t| &t.name)
+            ))),
+            None => Ok(()),
+        }
     }
 
     /// The compile context of a read of `prepared` (or of one of its

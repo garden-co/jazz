@@ -501,6 +501,7 @@ impl Inner {
         let compiled = self
             .read_ctx(prepared, policy.as_ref(), &claims, read)
             .compile_query(&prepared.query, read.include_deleted)?;
+        self.refuse_latest_only_cut(&compiled, read)?;
         let used = claims.used.get() || policy.as_ref().is_some_and(|p| p.used.get());
         Ok((compiled, used))
     }

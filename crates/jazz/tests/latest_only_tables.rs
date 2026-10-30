@@ -23,7 +23,7 @@ use jazz::large_values::INLINE_VALUE_MAX_BYTES;
 use jazz::query::{Query, col, eq, lit};
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
-use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+use jazz::tools::{ColumnType, OpenTransactionId, SchemaBuilder, TableSchemaBuilder};
 
 use crate::common::{allow_all_policies, compile_schema};
 
@@ -328,6 +328,142 @@ fn pending_writes_rebase_over_a_pruned_latest_only_row() {
     drop((_alice_sub, _bob_sub, _alice_link, _bob_link, alice, bob));
     assert!(history_rows(&alice_path, "presence") <= 1);
     assert!(history_rows(&bob_path, "presence") <= 1);
+}
+
+/// Alice and Bob each move the same row from the same version while
+/// disconnected; Bob's write lands first, so Alice's overrides a version
+/// she never saw. On the full-history `notes` table the authority reports
+/// her write as maybe conflicting; on the latest-only `presence` table,
+/// whose history no longer holds what she missed, it reads as blind.
+#[test]
+fn a_write_to_a_latest_only_table_is_never_maybe_conflicting() {
+    for (table, expected) in [("notes", true), ("presence", false)] {
+        let dir = tempfile::tempdir().unwrap();
+        let server = authority_at(&dir.path().join("server.sqlite"));
+        let alice = open_at(1, &dir.path().join("alice.sqlite"));
+        let bob = open_at(2, &dir.path().join("bob.sqlite"));
+        let _alice_link = link(&alice, &server);
+        let _bob_link = link(&bob, &server);
+        let all = Query::from(table);
+        let _subs = [&alice, &bob].map(|db| {
+            block_on(db.subscribe(&db.prepare_query(&all).unwrap(), ReadOpts::default())).unwrap()
+        });
+        insert(&server, table, row(1), "a", "0");
+        pump(&server, &[&alice, &bob]);
+
+        update(&bob, table, row(1), "a", "bob");
+        pump(&server, &[&bob]);
+        update(&alice, table, row(1), "a", "alice");
+        pump(&server, &[&alice, &bob]);
+
+        let conflicts = server.write_conflicts(table, row(1), None).unwrap();
+        let last = conflicts.last().unwrap();
+        assert_eq!(last.maybe_conflicting, expected, "{table}: {conflicts:?}");
+        assert_eq!(read(&server, table, None), [("a".into(), "alice".into())]);
+    }
+}
+
+/// History reads need every version, which a latest-only table drops, so
+/// `history.presence` is refused with a typed error; `history.notes` lists
+/// each version.
+#[test]
+fn history_reads_of_a_latest_only_table_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = authority_at(&dir.path().join("authority.sqlite"));
+    for table in ["presence", "notes"] {
+        insert(&db, table, row(1), "a", "0");
+        update(&db, table, row(1), "a", "1");
+    }
+    let history = |table: &str| {
+        let query = Query::from(format!("history.{table}").as_str())
+            .filter(eq(col("id"), lit(Value::Uuid(row(1).0))));
+        db.prepare_query(&query)
+            .and_then(|prepared| block_on(db.all(&prepared, ReadOpts::default())))
+    };
+
+    let error = history("presence").expect_err("history of a latest-only table");
+    assert!(
+        error
+            .message
+            .contains("reading the history of latest-only table `presence` is not supported yet"),
+        "{}",
+        error.message
+    );
+    assert_eq!(history("notes").unwrap().len(), 2);
+}
+
+/// A serializable transaction reads at its snapshot, which may name a
+/// version a latest-only table already dropped, so its read of `presence`
+/// is refused; the same read of `notes` works.
+#[test]
+fn a_serializable_read_of_a_latest_only_table_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = authority_at(&dir.path().join("authority.sqlite"));
+    for table in ["presence", "notes"] {
+        insert(&db, table, row(1), "a", "0");
+    }
+    let read_in_tx = |table: &str| {
+        let open = OpenTransactionId::new();
+        block_on(db.begin_serializable(open)).unwrap();
+        let prepared = db.prepare_query(&Query::from(table)).unwrap();
+        block_on(db.tx_ref(open).all_prepared(&prepared)).map(|rows| rows.len())
+    };
+
+    let error = read_in_tx("presence").expect_err("a snapshot read of a latest-only table");
+    assert!(
+        error
+            .message
+            .contains("reading latest-only table `presence` at a snapshot is not supported yet"),
+        "{}",
+        error.message
+    );
+    assert_eq!(read_in_tx("notes").unwrap(), 1);
+}
+
+/// Bob watches the presence in doc `a`, goes offline, and Alice's row
+/// moves to `b` on the authority while he is away. Resuming would read
+/// his prior result as of when he left, a version the table dropped, so
+/// the authority opens his subscription fresh instead: the row leaves his
+/// result, and his subscription stays live when it moves back.
+#[test]
+fn a_subscription_over_a_moved_latest_only_table_resumes_fresh() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = authority_at(&dir.path().join("server.sqlite"));
+    let bob = open_at(2, &dir.path().join("bob.sqlite"));
+    let upstream = link(&bob, &server);
+    insert(&server, "presence", row(1), "a", "0");
+    let in_a = Query::from("presence").filter(eq(col("doc"), lit(Value::String("a".into()))));
+    let mut stream =
+        block_on(bob.subscribe(&bob.prepare_query(&in_a).unwrap(), ReadOpts::default())).unwrap();
+    pump(&server, &[&bob]);
+    assert_eq!(
+        read(&bob, "presence", Some("a")),
+        [("a".into(), "0".into())]
+    );
+    let mut refused = || {
+        std::iter::from_fn(|| stream.try_next_event())
+            .filter(|event| matches!(event, SubscriptionEvent::Rejected { .. }))
+            .count()
+    };
+    assert_eq!(refused(), 0);
+
+    assert!(bob.detach_connection(&upstream));
+    for step in 1..4 {
+        update(&server, "presence", row(1), "a", &step.to_string());
+    }
+    update(&server, "presence", row(1), "b", "4");
+    let _upstream = link(&bob, &server);
+    pump(&server, &[&bob]);
+
+    assert_eq!(read(&bob, "presence", Some("a")), []);
+    assert_eq!(read(&bob, "presence", None), []);
+    update(&server, "presence", row(1), "a", "5");
+    pump(&server, &[&bob]);
+    assert_eq!(
+        read(&bob, "presence", Some("a")),
+        [("a".into(), "5".into())]
+    );
+    assert_eq!(refused(), 0, "the resume is not refused");
 }
 
 /// A chunked value names the version it extends or proves access through,
