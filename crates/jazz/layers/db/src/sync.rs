@@ -9535,6 +9535,9 @@ impl Db {
                 view,
                 span: ReadSpan::Live { since },
             } => {
+                // Refused before the read is set up, so a refused read
+                // holds nothing open.
+                let since = single_position(&since)?;
                 let local = tier == ReadTier::LocalOnly;
                 let prepared = with_claims(db.prepare_query_bound(&query, binding)?);
                 let windowed = crate::db::is_windowed(&query);
@@ -9633,7 +9636,7 @@ impl Db {
                 // A resume point at another sequencer than the one this
                 // store serves at (it gained or lost a server since) opens
                 // fresh.
-                let since = match single_position(&since)? {
+                let since = match since {
                     Some((by, seq)) if by == inner.served_by() => Some(seq),
                     _ => None,
                 };
@@ -9761,6 +9764,20 @@ impl Db {
                 view,
                 span: ReadSpan::Once { at },
             } => {
+                // The position the read is as of, counted at this store:
+                // refused before anything is asked or served.
+                let pinned = match single_position(&at)? {
+                    Some((by, seq)) => Some(Pos {
+                        n: self.inner.borrow().known_code(by)?.ok_or_else(|| {
+                            Error::new(
+                                ErrorCode::Protocol,
+                                "a read as of a sequencer this store does not know",
+                            )
+                        })?,
+                        seq,
+                    }),
+                    None => None,
+                };
                 // A relay asks its upstream first for a Remote read, then
                 // serves it from its store once the answer's rows are in
                 // it; the read waits for that answer while the link is down
@@ -9853,19 +9870,6 @@ impl Db {
                 // for it: only the authority confirms them. One with a wait
                 // (a serializable snapshot) takes this replica's view.
                 let strict = tier == ReadTier::Remote && wait.is_none() && inner.client.is_some();
-                // The position the read is as of, counted at this store.
-                let pinned = match single_position(&at)? {
-                    Some((by, seq)) => Some(Pos {
-                        n: inner.known_code(by)?.ok_or_else(|| {
-                            Error::new(
-                                ErrorCode::Protocol,
-                                "a read as of a sequencer this store does not know",
-                            )
-                        })?,
-                        seq,
-                    }),
-                    None => None,
-                };
                 // The commits a snapshot reference names, as this store
                 // settled them: the reader resolves the reference with them.
                 let mut named = Vec::new();

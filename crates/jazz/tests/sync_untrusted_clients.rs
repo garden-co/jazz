@@ -9,11 +9,12 @@ use std::rc::Rc;
 
 use jazz::db::{
     Acting, BuiltOn, Db, DbConfig, DbIdentity, DeleteOptions, ErrorCode, FileOptions,
-    InsertOptions, ReadOpts, ReadTier, SyncMessage, Transport, TransportError, WireBase, WireKind,
-    WireOp, WireTarget, WireWrite, block_on,
+    InsertOptions, ReadOpts, ReadSpan, ReadTier, SyncMessage, Transport, TransportError, WireBase,
+    WireKind, WireOp, WireTarget, WireWrite, block_on,
 };
 use jazz::ids::RowUuid;
 use jazz::ids::{AuthorSubject, NodeUuid};
+use jazz::protocol::ReadViewSourceSpec;
 use jazz::query::Query;
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
@@ -716,4 +717,103 @@ fn a_session_link_may_not_attribute_and_its_session_writes_are_its_own() {
     assert_eq!(fates(&m_down), vec![(1, false), (2, true)]);
     let (_, link) = user(2).principal_parts();
     assert_eq!(creators(&server), vec![("as a session".to_owned(), link)]);
+}
+
+/// A raw session's read of `messages`, over `span`.
+fn read_messages(id: u64, span: ReadSpan) -> SyncMessage {
+    SyncMessage::Read {
+        id,
+        query: Box::new(Query::from("messages")),
+        binding: BTreeMap::new(),
+        include_deleted: false,
+        tier: ReadTier::Remote,
+        wait: None,
+        view: Box::new(ReadViewSourceSpec::Current),
+        span,
+    }
+}
+
+/// What the server sent read `id`: `Rows` it shipped (any read's) after
+/// its first `Settled`/`Refused` for `id`, and that answer.
+fn answers(down: &Q, id: u64) -> Vec<&'static str> {
+    down.borrow()
+        .iter()
+        .filter_map(|m| match m {
+            SyncMessage::Settled { id: at, .. } if *at == id => Some("settled"),
+            SyncMessage::Refused { id: at, .. } if *at == id => Some("refused"),
+            SyncMessage::Rows { images, .. } if !images.is_empty() => Some("rows"),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Positions across more than one sequencer are not supported yet: a read
+/// naming them is refused before it is set up, so it holds nothing open
+/// and later writes do not reach it.
+#[test]
+fn a_read_naming_several_sequencers_is_refused_and_holds_nothing_open() {
+    let server = server();
+    post(&server, "before");
+    for (id, span) in [
+        (
+            1,
+            ReadSpan::Live {
+                since: vec![(None, 1), (Some([7; 16]), 1)],
+            },
+        ),
+        (
+            2,
+            ReadSpan::Once {
+                at: vec![(None, 1), (Some([7; 16]), 1)],
+            },
+        ),
+        (
+            3,
+            ReadSpan::Once {
+                at: vec![(Some([7; 16]), 1)],
+            },
+        ),
+    ] {
+        let (_client, session, up, down) = pipe();
+        server.accept_subscriber(session, user(1)).unwrap();
+        up.borrow_mut().push_back(read_messages(id, span));
+        block_on(server.tick()).unwrap();
+        assert_eq!(answers(&down, id), ["refused"], "read {id}");
+        down.borrow_mut().clear();
+        post(&server, "after");
+        block_on(server.tick()).unwrap();
+        assert_eq!(
+            answers(&down, id),
+            Vec::<&str>::new(),
+            "read {id} stays closed"
+        );
+    }
+}
+
+/// A live read resuming from a position at another sequencer than the one
+/// the server serves at opens fresh: its opening ships every row.
+#[test]
+fn a_read_resuming_at_another_sequencer_opens_fresh() {
+    let server = server();
+    post(&server, "one");
+    post(&server, "two");
+    let (_client, session, up, down) = pipe();
+    server.accept_subscriber(session, user(1)).unwrap();
+    up.borrow_mut().push_back(read_messages(
+        1,
+        ReadSpan::Live {
+            since: vec![(Some([7; 16]), 1_000)],
+        },
+    ));
+    block_on(server.tick()).unwrap();
+    let shipped: usize = down
+        .borrow()
+        .iter()
+        .map(|m| match m {
+            SyncMessage::Rows { images, .. } => images.len(),
+            _ => 0,
+        })
+        .sum();
+    assert_eq!(shipped, 2, "both rows ship: {:?}", down.borrow());
+    assert_eq!(answers(&down, 1).last(), Some(&"settled"));
 }
