@@ -2984,3 +2984,41 @@ fn a_range_select_takes_its_pages_changes_as_page_splices() {
         assert_eq!(apply_delta_utf16(&before, &splices), shown(&body));
     }
 }
+
+/// An idle server and its idle client run no large-value reclaim pass per
+/// tick: once a synced large value settled, ticks with nothing to send or
+/// apply do no reclaim work on either side.
+///
+/// White-box on purpose: the pass count is the contract, which no read
+/// observes.
+#[test]
+fn idle_sync_ticks_run_no_reclaim_pass() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let alice = open(1, user(1));
+    connect(&server, &alice, user(1));
+    let _stream = subscribe(&alice, Query::from("docs"));
+    insert(
+        &server,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String(text(70, LARGE))),
+            ("blob", Value::Bytes(Vec::new())),
+        ],
+    );
+    pump(&server, &[&alice]);
+    assert!(local_cell(&alice, "docs", 1, "body").unwrap().is_some());
+    let passes = (
+        server.large_value_reclaim_passes_for_test(),
+        alice.large_value_reclaim_passes_for_test(),
+    );
+    pump(&server, &[&alice]);
+    assert_eq!(
+        (
+            server.large_value_reclaim_passes_for_test(),
+            alice.large_value_reclaim_passes_for_test(),
+        ),
+        passes,
+        "idle ticks run no reclaim pass"
+    );
+}

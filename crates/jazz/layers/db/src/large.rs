@@ -1567,14 +1567,28 @@ pub(crate) fn settle_receipts(
 }
 
 /// Drop receipts that expired by `now`; their nodes are reclaimed unless a
-/// commit referenced them meanwhile.
+/// commit referenced them meanwhile. Servers run this every tick: a cached
+/// probe, and the writes only once a receipt expired.
 pub(crate) fn expire_receipts(conn: &Connection, now: i64) -> Result<(), Error> {
-    conn.execute_batch(&format!(
+    let expired: bool = conn
+        .cached_row(
+            "SELECT EXISTS (SELECT 1 FROM _jazz_lv_receipt WHERE expires <= ?1)",
+            [now],
+            |r| r.get(0),
+        )
+        .map_err(storage)?;
+    if !expired {
+        return Ok(());
+    }
+    conn.prepare_cached(
         "INSERT OR IGNORE INTO _jazz_lv_reclaim (root) \
-         SELECT hash FROM _jazz_lv_receipt WHERE expires <= {now}; \
-         DELETE FROM _jazz_lv_receipt WHERE expires <= {now};"
-    ))
-    .map_err(storage)
+         SELECT hash FROM _jazz_lv_receipt WHERE expires <= ?1",
+    )
+    .and_then(|mut statement| statement.execute([now]))
+    .and_then(|_| conn.prepare_cached("DELETE FROM _jazz_lv_receipt WHERE expires <= ?1"))
+    .and_then(|mut statement| statement.execute([now]))
+    .map_err(storage)?;
+    Ok(())
 }
 
 struct Stored<'a> {
@@ -2024,6 +2038,14 @@ fn named_nodes(
         }
     }
     Ok(out)
+}
+
+/// Whether nodes wait in the reclaim queue.
+pub(crate) fn reclaim_queued(conn: &Connection) -> Result<bool, Error> {
+    conn.cached_row("SELECT EXISTS (SELECT 1 FROM _jazz_lv_reclaim)", [], |r| {
+        r.get(0)
+    })
+    .map_err(storage)
 }
 
 /// Delete up to `budget` unreferenced nodes. A root is reclaimed once no
