@@ -1,19 +1,22 @@
 import { describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
 
-const app = s.defineApp({
-  users: s.table(
-    { name: s.string() },
-    { authored: s.reverse("posts", "writer"), saved: s.reverse("posts", "audience") },
-  ),
-  posts: s.table(
-    { authorId: s.uuid().optional(), readerIds: s.array(s.uuid()), title: s.string() },
-    {
-      writer: s.rel("users", "authorId"),
-      audience: s.rel("users", "readerIds"),
-    },
-  ),
-});
+const app = s.defineApp(
+  {
+    users: s.table(
+      { name: s.string() },
+      { authored: s.reverse("posts", "writer"), saved: s.reverse("posts", "audience") },
+    ),
+    posts: s.table(
+      { authorId: s.uuid().optional(), readerIds: s.array(s.uuid()), title: s.string() },
+      {
+        writer: s.rel("users", "authorId"),
+        audience: s.rel("users", "readerIds"),
+      },
+    ),
+  },
+  { migrations: "none" },
+);
 
 describe("declared relationships in permissions", () => {
   it("preserves operation, columns, and both update row images for renamed forward and reverse names", () => {
@@ -62,10 +65,13 @@ describe("declared relationships in permissions", () => {
 
   it("resolves exact whitespace-containing forward and reverse names in hopTo and allowedTo", () => {
     const compile = (forward: string, reverse: string) => {
-      const exact = s.defineApp({
-        roots: s.table({}, { [reverse]: s.reverse("leaves", forward) }),
-        leaves: s.table({ rootId: s.uuid() }, { [forward]: s.rel("roots", "rootId") }),
-      });
+      const exact = s.defineApp(
+        {
+          roots: s.table({}, { [reverse]: s.reverse("leaves", forward) }),
+          leaves: s.table({ rootId: s.uuid() }, { [forward]: s.rel("roots", "rootId") }),
+        },
+        { migrations: "none" },
+      );
       return s.definePermissions(exact, ({ policy, allowedTo }) => {
         policy.leaves.allowRead.where(policy.exists(policy.leaves.hopTo(forward)));
         policy.roots.allowRead.where(policy.exists(policy.roots.hopTo(reverse)));
@@ -87,10 +93,13 @@ describe("declared relationships in permissions", () => {
   });
 
   it("resolves reusable names per rule table without mutating the expression", () => {
-    const reused = s.defineApp({
-      roots: s.table({}, { linked: s.reverse("leaves", "linked") }),
-      leaves: s.table({ rootId: s.uuid() }, { linked: s.rel("roots", "rootId") }),
-    });
+    const reused = s.defineApp(
+      {
+        roots: s.table({}, { linked: s.reverse("leaves", "linked") }),
+        leaves: s.table({ rootId: s.uuid() }, { linked: s.rel("roots", "rootId") }),
+      },
+      { migrations: "none" },
+    );
     const policies = s.definePermissions(reused, ({ policy, allowedTo }) => {
       const grant = allowedTo.read("linked");
       policy.roots.allowRead.where(grant);

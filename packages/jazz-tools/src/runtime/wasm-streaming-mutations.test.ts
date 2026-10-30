@@ -15,25 +15,31 @@ import {
 } from "./testing/wasm-runtime-test-utils.js";
 import { testAccountId, testAuthorBytes } from "./testing/account-fixtures.js";
 
-const app = s.defineApp({
-  todos: s.table(
-    {
-      title: s.string(),
-      done: s.boolean(),
-      metadata: s.json().optional(),
-    },
-    {},
-  ),
-});
-const streamingApp = s.defineApp({
-  todos: s.table(
-    {
-      title: s.string().optional(),
-      done: s.boolean(),
-    },
-    {},
-  ),
-});
+const app = s.defineApp(
+  {
+    todos: s.table(
+      {
+        title: s.string(),
+        done: s.boolean(),
+        metadata: s.json().optional(),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
+const streamingApp = s.defineApp(
+  {
+    todos: s.table(
+      {
+        title: s.string().optional(),
+        done: s.boolean(),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 
 function deferredVoid() {
   let resolve!: () => void;

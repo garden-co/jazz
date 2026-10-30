@@ -33,7 +33,7 @@ const definition = () => ({
 
 describe("explicit relationships", () => {
   it("resolves declared aliases and reverses with column-derived cardinality", () => {
-    const app = s.defineApp(s.defineSchema(definition()));
+    const app = s.defineApp(s.defineSchema(definition()), { migrations: "none" });
     const relations = analyzeRelations(app.wasmSchema);
     expect(
       relations.get("posts")?.map((r) => [r.name, r.fromColumn, r.toTable, r.isArray, r.nullable]),
@@ -67,7 +67,7 @@ describe("explicit relationships", () => {
     ).toThrow(/nested reference array/i);
   });
   it("preserves reference storage identity and excludes aliases from the hash", async () => {
-    const app = s.defineApp(definition());
+    const app = s.defineApp(definition(), { migrations: "none" });
     const legacy = schemaToWasm({
       tables: [
         {
@@ -118,11 +118,11 @@ describe("explicit relationships", () => {
   });
   it("retains metadata through structural table instances and migration schema conversion", () => {
     const input = definition();
-    const ordinary = s.defineApp(input);
+    const ordinary = s.defineApp(input, { migrations: "none" });
     const structural = Object.fromEntries(
       Object.entries(input).map(([name, table]) => [name, { ...table }]),
     );
-    const duplicatePackage = (s.defineApp as any)(structural);
+    const duplicatePackage = (s.defineApp as any)(structural, { migrations: "none" });
     expect(duplicatePackage.wasmSchema).toEqual(ordinary.wasmSchema);
     const ast = schemaDefinitionToAst(input);
     expect(ast.tables.find((t) => t.name === "posts")?.columns.map((c) => c.references)).toEqual([
@@ -137,7 +137,7 @@ describe("explicit relationships", () => {
       expect(() =>
         (s.table as any)({ authorId: s.uuid() }, { [name]: s.rel("users", "authorId") }),
       ).toThrow(/collides/);
-      const schema = s.defineApp(definition()).wasmSchema;
+      const schema = s.defineApp(definition(), { migrations: "none" }).wasmSchema;
       schema.posts!.relations = { [name]: s.rel("users", "authorId") };
       expect(() => analyzeRelations(schema)).toThrow(/collides/);
     }
@@ -200,7 +200,7 @@ describe("explicit relationships", () => {
           { author: { kind: "forward", table: value, column: "owner" } },
         ),
       ).toThrow(/Invalid relationship/);
-      const schema = s.defineApp(definition()).wasmSchema;
+      const schema = s.defineApp(definition(), { migrations: "none" }).wasmSchema;
       schema.posts!.relations = {
         author: { kind: "forward", table: value as any, column: "authorId" },
       };
@@ -249,7 +249,7 @@ describe("explicit relationships", () => {
     ).toThrow(/Conflicting/);
   });
   it("preserves raw column types and infers includes", () => {
-    const app = s.defineApp(s.defineSchema(definition()));
+    const app = s.defineApp(s.defineSchema(definition()), { migrations: "none" });
     const query = app.posts.include({ author: true, editor: true, reviewers: true });
     type Row = s.RowOf<typeof query>;
     expectTypeOf<Row["authorId"]>().toEqualTypeOf<string>();

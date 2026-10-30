@@ -473,7 +473,9 @@ fn pulls_answer_only_for_versions_the_reader_may_read() {
         .find_map(|message| match message {
             SyncMessage::Rows { images, .. } => images.iter().find_map(|image| {
                 let cell = image.cells.iter().find_map(|(name, cell)| match cell {
-                    SyncCell::Large(descriptor) if name.ends_with("body") => Some(descriptor),
+                    SyncCell::Large(descriptor) if common::unhashed(name).ends_with("body") => {
+                        Some(descriptor)
+                    }
                     _ => None,
                 })?;
                 let value = jazz::large_values::decode_large_value_ref(cell).ok()?;
@@ -1044,7 +1046,9 @@ fn pulls_after_read_access_is_lost_are_answered_with_nothing() {
         .find_map(|message| match message {
             SyncMessage::Rows { images, .. } => images.iter().find_map(|image| {
                 let cell = image.cells.iter().find_map(|(name, cell)| match cell {
-                    SyncCell::Large(descriptor) if name.ends_with("text") => Some(descriptor),
+                    SyncCell::Large(descriptor) if common::unhashed(name).ends_with("text") => {
+                        Some(descriptor)
+                    }
                     _ => None,
                 })?;
                 let value = jazz::large_values::decode_large_value_ref(cell).ok()?;
@@ -1120,7 +1124,9 @@ fn an_answer_to_many_pulls_is_bounded_and_the_rest_follows() {
         .find_map(|message| match message {
             SyncMessage::Rows { images, .. } => images.iter().find_map(|image| {
                 let cell = image.cells.iter().find_map(|(name, cell)| match cell {
-                    SyncCell::Large(descriptor) if name.ends_with("blob") => Some(descriptor),
+                    SyncCell::Large(descriptor) if common::unhashed(name).ends_with("blob") => {
+                        Some(descriptor)
+                    }
                     _ => None,
                 })?;
                 let value = jazz::large_values::decode_large_value_ref(cell).ok()?;

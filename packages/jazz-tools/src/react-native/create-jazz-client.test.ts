@@ -46,9 +46,12 @@ import {
   useLocalFirstAuth,
 } from "./index.js";
 
-const app = s.defineApp({
-  notes: s.table({ title: s.string() }, {}),
-});
+const app = s.defineApp(
+  {
+    notes: s.table({ title: s.string() }, {}),
+  },
+  { migrations: "none" },
+);
 
 const nativeRelayCapability = Uint8Array.from({ length: 32 }, (_, index) => index);
 

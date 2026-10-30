@@ -1,3 +1,4 @@
+import type { ClientMigrations } from "../client-migrations.js";
 import { streamingChunks } from "../streaming-source.js";
 import { isHistoryTable, resolveQueryTable } from "../history-relation.js";
 import { AuxiliaryReceiveDeadline } from "./auxiliary-receive-deadline.js";
@@ -86,6 +87,7 @@ import {
   type QueryPredicate,
   type QueryPredicateOp,
   type ValueType,
+  clientMigrationsBytes,
 } from "./native-codec.js";
 import { exactSignedI64 } from "./exact-integer.js";
 import { encodeSchema } from "./schema-codec.js";
@@ -263,7 +265,7 @@ type NativeDb = {
     /** The upstream refused the scope's credential, with its reason. */
     authRejected?: string | null;
   };
-  registerSchema(schema: Uint8Array): NativeDb;
+  registerSchema(schema: Uint8Array, migrations?: Uint8Array): NativeDb;
   beginTransaction(
     openTransactionId: string,
     kind: TransactionKind,
@@ -983,9 +985,16 @@ export class NativeRuntimeAdapter implements Runtime {
     });
   }
 
-  registerSchemaView(schema: WasmSchema): NativeRuntimeAdapter {
+  /** The migrations this runtime's app ships (see {@link ClientMigrations}). */
+  readonly migrations: ClientMigrations | undefined;
+
+  /** A view of `schema`, whose app ships `migrations` (see {@link ClientMigrations}). */
+  registerSchemaView(schema: WasmSchema, migrations?: ClientMigrations): NativeRuntimeAdapter {
     return new NativeRuntimeAdapter(null, schema, this.node, this.peerIdentity, 1, true, {
-      db: this.db.registerSchema(encodeSchema(schema)),
+      db: this.db.registerSchema(
+        encodeSchema(schema),
+        migrations ? clientMigrationsBytes(migrations) : undefined,
+      ),
       // Registered schema views are façades over this same native open. The
       // capability is private to the owner and must survive view creation so
       // backend reads keep selecting the backend ABI rather than identity ABI.
@@ -1013,6 +1022,8 @@ export class NativeRuntimeAdapter implements Runtime {
       owner?: NativeRuntimeAdapter;
       /** Where slow queries are reported (`console.warn`): see {@link SlowQueryLogOptions}. */
       slowQueryLog?: SlowQueryLogOptions;
+      /** The app's versions and migrations: see {@link ClientMigrations}. */
+      migrations?: ClientMigrations;
     },
   ) {
     this.ownerRuntime = opts?.owner?.ownerRuntime ?? this;
@@ -1037,8 +1048,10 @@ export class NativeRuntimeAdapter implements Runtime {
       historyComplete,
       opts?.initialSyncFlushEvery,
       opts?.selfSignedClientProof,
+      opts?.migrations,
     );
     this.peerIdentity = author;
+    this.migrations = opts?.owner?.migrations ?? opts?.migrations;
     this.schemaHash = serializeRuntimeSchema(schema);
     if (opts?.db) {
       this.db = opts.db;
@@ -7064,8 +7077,10 @@ function normalizeSubscriptionRejectionReason(
   if (record.type === "ShapeRegistrationPendingCatalogueAdmission") {
     return { type: "ShapeRegistrationPendingCatalogueAdmission" };
   }
-  if (record.type === "ServerFailure" && typeof record.code === "string") {
-    return { type: "ServerFailure", code: record.code };
+  // NAPI names the server's reason `code`, WASM `detail`.
+  const failure = record.code ?? record.detail;
+  if (record.type === "ServerFailure" && typeof failure === "string") {
+    return { type: "ServerFailure", code: failure };
   }
   if (record.type === "InvalidAuthoritySourceClosure" && typeof record.transition === "string") {
     return {

@@ -128,7 +128,7 @@ export const schema = {
 };
 
 export type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema);
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
 export const { projects, todos } = app;
 export type Todo = s.RowOf<typeof todos>;
 
@@ -153,8 +153,10 @@ export const maintainedIndexedSchema = {
     .indexOnly(["title", "done"]),
 };
 export type MaintainedIndexedSchema = s.Schema<typeof maintainedIndexedSchema>;
-export const maintainedIndexedApp: s.App<MaintainedIndexedSchema> =
-  s.defineApp(maintainedIndexedSchema);
+export const maintainedIndexedApp: s.App<MaintainedIndexedSchema> = s.defineApp(
+  maintainedIndexedSchema,
+  { migrations: "none" },
+);
 export const { todos: maintainedIndexedTodos } = maintainedIndexedApp;
 export type MaintainedIndexedTodo = s.RowOf<typeof maintainedIndexedTodos>;
 
@@ -177,7 +179,9 @@ export const transactionIdentitySchema = {
     )
     .branchBy("branch"),
 };
-export const transactionIdentityApp = s.defineApp(transactionIdentitySchema);
+export const transactionIdentityApp = s.defineApp(transactionIdentitySchema, {
+  migrations: "none",
+});
 export const transactionIdentityPermissions = s.definePermissions(
   transactionIdentityApp,
   ({ policy }) => [
@@ -252,7 +256,9 @@ export const nullableSchema = {
 };
 
 export type NullableSchema = s.Schema<typeof nullableSchema>;
-export const nullableApp: s.App<NullableSchema> = s.defineApp(nullableSchema);
+export const nullableApp: s.App<NullableSchema> = s.defineApp(nullableSchema, {
+  migrations: "none",
+});
 export const nullablePermissions = s.definePermissions(nullableApp, ({ policy }) => [
   policy.todos.allowRead.always(),
   policy.todos.allowInsert.always(),
@@ -287,8 +293,8 @@ export const catalogueSchemaV2 = {
   ),
 };
 
-export const catalogueAppV1 = s.defineApp(catalogueSchemaV1);
-export const catalogueAppV2 = s.defineApp(catalogueSchemaV2);
+export const catalogueAppV1 = s.defineApp(catalogueSchemaV1, { migrations: "none" });
+export const catalogueAppV2 = s.defineApp(catalogueSchemaV2, { migrations: "none" });
 export const { todos: catalogueTodos } = catalogueAppV2;
 export type CatalogueTodo = s.RowOf<typeof catalogueTodos>;
 export const allCatalogueTodos: QueryBuilder<CatalogueTodo> = catalogueAppV2.todos;

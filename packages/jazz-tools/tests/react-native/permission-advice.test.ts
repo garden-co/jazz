@@ -4,9 +4,12 @@ import { ReadTier } from "../../src/runtime/client.js";
 import { withNativeRelayFixture } from "./fixture.js";
 import { encodeNativeForegroundCommand, decodeNativeForegroundResponse } from "jazz-rn/relay";
 
-const app = schema.defineApp({
-  notes: schema.table({ title: schema.string() }, {}),
-});
+const app = schema.defineApp(
+  {
+    notes: schema.table({ title: schema.string() }, {}),
+  },
+  { migrations: "none" },
+);
 const permissions = schema.definePermissions(app, ({ policy, session }) => [
   policy.notes.allowRead.where({ $createdBy: session.user }),
   policy.notes.allowInsert.always(),

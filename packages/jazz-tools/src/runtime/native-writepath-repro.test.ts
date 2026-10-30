@@ -24,7 +24,7 @@ const importSchema = {
   ),
 };
 
-const importApp = s.defineApp(importSchema);
+const importApp = s.defineApp(importSchema, { migrations: "none" });
 const txCount = Number(process.env.JAZZ_WRITEPATH_TXS ?? "100");
 
 function rowId(index: number): string {

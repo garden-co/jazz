@@ -5,12 +5,15 @@ type Priority = "low" | "medium" | "high";
 
 describe("virtual computed columns", () => {
   it("rejects computed permission row references for actions and relation callbacks", () => {
-    const app = s.defineApp({
-      items: s.table(
-        { score: s.int() },
-        { priority: s.computed((row) => (row.score >= 8 ? "high" : "low")) },
-      ),
-    });
+    const app = s.defineApp(
+      {
+        items: s.table(
+          { score: s.int() },
+          { priority: s.computed((row) => (row.score >= 8 ? "high" : "low")) },
+        ),
+      },
+      { migrations: "none" },
+    );
     for (const action of ["allowRead", "allowInsert", "allowUpdate", "allowDelete"] as const) {
       expect(() =>
         s.definePermissions(app, ({ policy }) => {
@@ -44,10 +47,13 @@ describe("virtual computed columns", () => {
   });
 
   it("keeps stored permission references available when another table computes the same name", () => {
-    const app = s.defineApp({
-      items: s.table({ score: s.int() }, { priority: s.computed((row) => row.score) }),
-      stored: s.table({ priority: s.int() }, {}),
-    });
+    const app = s.defineApp(
+      {
+        items: s.table({ score: s.int() }, { priority: s.computed((row) => row.score) }),
+        stored: s.table({ priority: s.int() }, {}),
+      },
+      { migrations: "none" },
+    );
     const permissions = s.definePermissions(app, ({ policy }) => {
       policy.items.allowRead.where((row) => policy.items.exists.where({ score: row.score }));
       policy.stored.allowRead.where((row) =>
@@ -59,10 +65,13 @@ describe("virtual computed columns", () => {
   });
 
   it("rejects computed outer references in permission relation callbacks", () => {
-    const app = s.defineApp({
-      items: s.table({ score: s.int() }, { priority: s.computed((row) => row.score) }),
-      stored: s.table({ priority: s.int() }, {}),
-    });
+    const app = s.defineApp(
+      {
+        items: s.table({ score: s.int() }, { priority: s.computed((row) => row.score) }),
+        stored: s.table({ priority: s.int() }, {}),
+      },
+      { migrations: "none" },
+    );
     for (const action of ["allowRead", "allowInsert", "allowUpdate", "allowDelete"] as const) {
       expect(() =>
         s.definePermissions(app, ({ policy }) => {
@@ -75,10 +84,13 @@ describe("virtual computed columns", () => {
   });
 
   it("allows stored outer references when the permission relation computes the same name", () => {
-    const app = s.defineApp({
-      items: s.table({ score: s.int() }, { priority: s.computed((row) => row.score) }),
-      stored: s.table({ priority: s.int() }, {}),
-    });
+    const app = s.defineApp(
+      {
+        items: s.table({ score: s.int() }, { priority: s.computed((row) => row.score) }),
+        stored: s.table({ priority: s.int() }, {}),
+      },
+      { migrations: "none" },
+    );
     const permissions = s.definePermissions(app, ({ policy }) => {
       const matching = policy.items.where((row: Record<string, RowRefValue>) => ({
         score: row.priority,
@@ -92,10 +104,13 @@ describe("virtual computed columns", () => {
   });
 
   it("checks composed permission relations again for each owning table", () => {
-    const app = s.defineApp({
-      items: s.table({ score: s.int() }, { priority: s.computed((row) => row.score) }),
-      stored: s.table({ priority: s.int() }, {}),
-    });
+    const app = s.defineApp(
+      {
+        items: s.table({ score: s.int() }, { priority: s.computed((row) => row.score) }),
+        stored: s.table({ priority: s.int() }, {}),
+      },
+      { migrations: "none" },
+    );
     const compile = (includeComputedOwner: boolean) =>
       s.definePermissions(app, ({ policy, anyOf }) => {
         const matching = policy.stored.where((row) => ({ priority: row.priority }));
@@ -139,25 +154,28 @@ describe("virtual computed columns", () => {
   });
 
   it("keeps transforms stored and writable while computed fields are virtual and read-only", () => {
-    const app = s.defineApp({
-      items: s.table(
-        {
-          score: s.int(),
-          storedPriority: s.int().transform<Priority>({
-            from: (score) => (score >= 8 ? "high" : score >= 4 ? "medium" : "low"),
-            to: (priority) => ({ low: 1, medium: 5, high: 10 })[priority],
-          }),
-        },
-        {
-          priority: s.computed((row): Priority => {
-            expectTypeOf(row.score).toEqualTypeOf<number>();
-            expectTypeOf(row.storedPriority).toEqualTypeOf<Priority>();
-            expectTypeOf(row.id).toEqualTypeOf<string>();
-            return row.score >= 8 ? "high" : row.score >= 4 ? "medium" : "low";
-          }),
-        },
-      ),
-    });
+    const app = s.defineApp(
+      {
+        items: s.table(
+          {
+            score: s.int(),
+            storedPriority: s.int().transform<Priority>({
+              from: (score) => (score >= 8 ? "high" : score >= 4 ? "medium" : "low"),
+              to: (priority) => ({ low: 1, medium: 5, high: 10 })[priority],
+            }),
+          },
+          {
+            priority: s.computed((row): Priority => {
+              expectTypeOf(row.score).toEqualTypeOf<number>();
+              expectTypeOf(row.storedPriority).toEqualTypeOf<Priority>();
+              expectTypeOf(row.id).toEqualTypeOf<string>();
+              return row.score >= 8 ? "high" : row.score >= 4 ? "medium" : "low";
+            }),
+          },
+        ),
+      },
+      { migrations: "none" },
+    );
 
     expect(app.schemaAst?.tables[0]?.columns.map((column) => column.name)).toEqual([
       "score",

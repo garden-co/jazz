@@ -35,7 +35,7 @@ const schema = {
 };
 // #endregion permissions-schema-ts
 
-const exampleApp = s.defineApp(schema);
+const exampleApp = s.defineApp(schema, { migrations: "none" });
 
 // #region permissions-simple-ts
 s.definePermissions(exampleApp, ({ policy, allOf, session }) => {

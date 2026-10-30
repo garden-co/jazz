@@ -9,7 +9,7 @@ import { createJazzSessionOwner } from "../session/state.js";
 import { accountRegistryUrl } from "./context.js";
 import { prepareAccountManager } from "./persistence.js";
 
-const app = s.defineApp({ carts: s.table({ item: s.string() }, {}) });
+const app = s.defineApp({ carts: s.table({ item: s.string() }, {}) }, { migrations: "none" });
 const permissions = s.definePermissions(app, ({ policy }) => {
   policy.carts.allowRead.always();
   policy.carts.allowInsert.always();

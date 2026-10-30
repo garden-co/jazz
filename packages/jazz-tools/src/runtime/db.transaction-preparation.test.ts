@@ -19,9 +19,12 @@ class PreparationSource extends DefaultRuntimeSource {
   }
 }
 
-const app = s.defineApp({
-  documents: s.table({ payload: s.bytes(), label: s.string().default("untitled") }, {}),
-});
+const app = s.defineApp(
+  {
+    documents: s.table({ payload: s.bytes(), label: s.string().default("untitled") }, {}),
+  },
+  { migrations: "none" },
+);
 let db: Db;
 let source: PreparationSource;
 beforeEach(async () => {

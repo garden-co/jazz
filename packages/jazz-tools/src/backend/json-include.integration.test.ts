@@ -7,16 +7,19 @@ import { createJazzSession } from "./index.js";
 describe("JSON parent includes through the native backend", () => {
   for (const inMemory of [true, false]) {
     it(`hydrates projected and full includes with ${inMemory ? "memory" : "persistent"} server storage`, async () => {
-      const app = s.defineApp({
-        parents: s.table(
-          { name: s.string(), metadata: s.json() },
-          { childrenViaParent: s.reverse("children", "parent") },
-        ),
-        children: s.table(
-          { parentId: s.uuid(), name: s.string() },
-          { parent: s.rel("parents", "parentId") },
-        ),
-      });
+      const app = s.defineApp(
+        {
+          parents: s.table(
+            { name: s.string(), metadata: s.json() },
+            { childrenViaParent: s.reverse("children", "parent") },
+          ),
+          children: s.table(
+            { parentId: s.uuid(), name: s.string() },
+            { parent: s.rel("parents", "parentId") },
+          ),
+        },
+        { migrations: "none" },
+      );
       const server = await startLocalJazzServer({ appId: randomUUID(), inMemory });
       let owner: Awaited<ReturnType<typeof createJazzSession>> | undefined;
       try {
