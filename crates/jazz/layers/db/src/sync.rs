@@ -45,6 +45,7 @@ use crate::values::CachedRow;
 use crate::values::query_error;
 use crate::values::{STATE_AS_SENT, STATE_DELETED, STATE_NO_CONTENT};
 use rusqlite::OptionalExtension;
+use rusqlite::types::Value as SqlValue;
 use std::cell::Cell as StdCell;
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -2908,64 +2909,124 @@ impl Inner {
         images: &mut Vec<Image>,
         seqs: &mut BTreeSet<u64>,
     ) -> Result<(), Error> {
+        let versions: Vec<(RowUuid, Pos)> = versions.into_iter().collect();
+        let found = self.version_images(source, &versions)?;
         let mut current = BTreeSet::new();
-        for (row, at) in versions {
-            let rid = row.0.as_bytes().to_vec();
-            let seq = at.seq as i64;
-            let mut found = self.images_where(source, false, ID_AT, &[&rid, &at.n, &seq])?;
-            if found.is_empty() {
-                found = self.images_where(source, true, ID_AT, &[&rid, &at.n, &seq])?;
-            }
-            for image in &found {
+        for version in &versions {
+            for image in &found[version] {
                 seqs.insert(image.seq);
-                current.insert((row, image.key.clone()));
+                current.insert((version.0, image.key.clone()));
             }
-            images.extend(found);
+            images.extend(found[version].iter().cloned());
         }
-        for (row, key) in current {
-            images.extend(self.current_image(source, row, &key)?);
-        }
+        let currents = self.current_images(source, &current)?;
+        images.extend(current.iter().filter_map(|key| currents.get(key).cloned()));
         Ok(())
     }
 
-    /// The images a flat-join occurrence ships for one joined row of stored
-    /// table `table`: its current images, or for a history source the
-    /// version it names and the row's current image.
+    /// [`Self::history_versions`] for each of `versions` on its own: its
+    /// images, then the current images of its row in their branches.
+    fn history_versions_each(
+        &self,
+        source: &str,
+        versions: &[(RowUuid, Pos)],
+        seqs: &mut BTreeSet<u64>,
+    ) -> Result<HashMap<(RowUuid, Pos), Vec<Image>>, Error> {
+        let found = self.version_images(source, versions)?;
+        let keys: BTreeSet<(RowUuid, Vec<u8>)> = found
+            .iter()
+            .flat_map(|((row, _), images)| images.iter().map(|image| (*row, image.key.clone())))
+            .collect();
+        let currents = self.current_images(source, &keys)?;
+        Ok(found
+            .into_iter()
+            .map(|((row, at), mut images)| {
+                let keys: BTreeSet<Vec<u8>> = images
+                    .iter()
+                    .inspect(|image| {
+                        seqs.insert(image.seq);
+                    })
+                    .map(|image| image.key.clone())
+                    .collect();
+                images.extend(
+                    keys.into_iter()
+                        .filter_map(|key| currents.get(&(row, key)).cloned()),
+                );
+                ((row, at), images)
+            })
+            .collect())
+    }
+
+    /// The images flat-join occurrences ship for their joined rows, one
+    /// list per `(stored table, joined row)` of `joined`, in order: a
+    /// joined row's current images, or for a history source the version it
+    /// names and the row's current image.
     fn joined_images(
         &self,
-        table: &str,
-        joined: &crate::values::JoinedRow,
+        joined: &[(&str, &crate::values::JoinedRow)],
         seqs: &mut BTreeSet<u64>,
-    ) -> Result<Vec<Image>, Error> {
-        let id = joined.row.0.as_bytes().to_vec();
-        let Some((tx, node)) = joined.version else {
-            return self.images_where(table, false, "id = ?1", &[&id]);
-        };
-        // A version's seq: as `_jazz_transactions` recorded its upload,
-        // else this authority's own commit (whose tx is its seq).
-        let recorded = self
-            .conn
-            .prepare_cached(
-                "SELECT t.seq FROM _jazz_transactions AS t JOIN _jazz_nodes AS n \
-                 ON n.n = t.n WHERE t.tx = ?1 AND n.node = ?2 AND t.sn = 0 AND t.seq IS NOT NULL",
-            )
-            .and_then(|mut statement| {
-                statement
-                    .query_row(
-                        rusqlite::params![tx as i64, node.as_bytes().to_vec()],
-                        |r| r.get::<_, i64>(0),
-                    )
-                    .optional()
+    ) -> Result<Vec<Vec<Image>>, Error> {
+        // Each pair's version: `None` for its current images, or the
+        // version's position (`None` inside: a version with no images).
+        let mut at = Vec::with_capacity(joined.len());
+        let mut current: BTreeMap<&str, Vec<RowUuid>> = BTreeMap::new();
+        let mut versions: BTreeMap<&str, Vec<(RowUuid, Pos)>> = BTreeMap::new();
+        for (table, joined) in joined {
+            let Some((tx, node)) = joined.version else {
+                current.entry(table).or_default().push(joined.row);
+                at.push(None);
+                continue;
+            };
+            // A version's seq: as `_jazz_transactions` recorded its upload,
+            // else this authority's own commit (whose tx is its seq).
+            let recorded = self
+                .conn
+                .prepare_cached(
+                    "SELECT t.seq FROM _jazz_transactions AS t JOIN _jazz_nodes AS n \
+                     ON n.n = t.n WHERE t.tx = ?1 AND n.node = ?2 AND t.sn = 0 AND t.seq IS NOT NULL",
+                )
+                .and_then(|mut statement| {
+                    statement
+                        .query_row(
+                            rusqlite::params![tx as i64, node.as_bytes().to_vec()],
+                            |r| r.get::<_, i64>(0),
+                        )
+                        .optional()
+                })
+                .map_err(storage)?;
+            let seq = match recorded {
+                Some(seq) => Some(seq as u64),
+                None if node == self.identity.node => Some(tx),
+                None => None,
+            };
+            if let Some(seq) = seq {
+                versions
+                    .entry(table)
+                    .or_default()
+                    .push((joined.row, Pos::at(seq)));
+            }
+            at.push(Some(seq.map(Pos::at)));
+        }
+        let mut current_of = HashMap::new();
+        for (table, rows) in current {
+            current_of.insert(table, self.rows_images(table, rows)?);
+        }
+        let mut versions_of = HashMap::new();
+        for (table, versions) in versions {
+            versions_of.insert(table, self.history_versions_each(table, &versions, seqs)?);
+        }
+        Ok(joined
+            .iter()
+            .zip(at)
+            .map(|((table, joined), at)| match at {
+                None => current_of[table]
+                    .get(&joined.row)
+                    .cloned()
+                    .unwrap_or_default(),
+                Some(None) => Vec::new(),
+                Some(Some(at)) => versions_of[table][&(joined.row, at)].clone(),
             })
-            .map_err(storage)?;
-        let seq = match recorded {
-            Some(seq) => seq as u64,
-            None if node == self.identity.node => tx,
-            None => return Ok(Vec::new()),
-        };
-        let mut images = Vec::new();
-        self.history_versions(table, [(joined.row, Pos::at(seq))], &mut images, seqs)?;
-        Ok(images)
+            .collect())
     }
 
     /// Who committed each of `seqs`, as (seq, node, tx): `_jazz_transactions`
@@ -3322,13 +3383,18 @@ impl Inner {
             format!("SELECT * FROM {} WHERE {filter}", quote(&name))
         };
         let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
-        let names: Vec<String> = statement
-            .column_names()
-            .iter()
-            .map(|s| (*s).to_owned())
-            .collect();
+        // A cached `SELECT *` prepared before its table gained a column
+        // names the old columns until a step re-prepares it: the names are
+        // read from the first row.
+        let mut names: Vec<String> = Vec::new();
         let rows = statement
             .query_map(params, |r| {
+                if names.is_empty() {
+                    let statement = r.as_ref();
+                    names = (0..statement.column_count())
+                        .map(|i| statement.column_name(i).map(str::to_owned))
+                        .collect::<Result<_, _>>()?;
+                }
                 let mut image = Image {
                     table: table.to_owned(),
                     id: [0; 16],
@@ -3802,7 +3868,233 @@ impl Inner {
         Ok(ids)
     }
 
+    /// Every image of each of `rows` in `table` (or its history).
+    fn images_of(
+        &self,
+        table: &str,
+        history: bool,
+        rows: impl IntoIterator<Item = RowUuid>,
+    ) -> Result<Vec<Image>, Error> {
+        self.images_matching(table, history, rows, |row| {
+            vec![SqlValue::Blob(row.0.as_bytes().to_vec())]
+        })
+    }
+
+    /// The images of `table` (or its history) that match one of `keys`, read
+    /// a chunk of keys per statement. Reads of many images all go through
+    /// here: an opening snapshot ships thousands, a later tick a few. A key
+    /// binds to a row id, or to a row id, node code and seq (an [`ID_AT`]
+    /// version, so a row with a long history reads only the versions asked
+    /// for). A chunk binds its keys to the smallest of a few statement sizes
+    /// that fits, the rest repeating its last key, so a lone key is one seek
+    /// and every size stays prepared. The largest size fits the
+    /// connection's bound-variable limit (100 on a Durable Object).
+    fn images_matching<K: Ord>(
+        &self,
+        table: &str,
+        history: bool,
+        keys: impl IntoIterator<Item = K>,
+        bind: impl Fn(&K) -> Vec<SqlValue>,
+    ) -> Result<Vec<Image>, Error> {
+        const SIZES: [usize; 4] = [1, 8, 64, 512];
+        // Each key once: a key in two chunks would match twice.
+        let keys: Vec<Vec<SqlValue>> = keys
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .iter()
+            .map(bind)
+            .collect();
+        let Some(arity) = keys.first().map(Vec::len) else {
+            return Ok(Vec::new());
+        };
+        let variables = self
+            .conn
+            .limit(rusqlite::limits::Limit::SQLITE_LIMIT_VARIABLE_NUMBER)
+            .map_err(storage)?;
+        let largest = (usize::try_from(variables).unwrap_or(0) / arity).clamp(1, SIZES[3]);
+        let sizes: Vec<usize> = SIZES
+            .into_iter()
+            .filter(|size| *size < largest)
+            .chain([largest])
+            .collect();
+        let mut images = Vec::new();
+        for chunk in keys.chunks(largest) {
+            let size = *sizes
+                .iter()
+                .find(|size| **size >= chunk.len())
+                .expect("a chunk fits the largest size");
+            let filter = match (arity, size) {
+                (1, 1) => "id = ?1".to_owned(),
+                (1, _) => {
+                    let placeholders: Vec<String> = (1..=size).map(|i| format!("?{i}")).collect();
+                    format!("id IN ({})", placeholders.join(", "))
+                }
+                (3, _) => {
+                    let terms: Vec<String> = (0..size)
+                        .map(|i| {
+                            let at = 3 * i;
+                            format!(
+                                "(id = ?{} AND +_n = ?{} AND +_seq = ?{})",
+                                at + 1,
+                                at + 2,
+                                at + 3
+                            )
+                        })
+                        .collect();
+                    terms.join(" OR ")
+                }
+                _ => unreachable!("a key binds a row id or a version"),
+            };
+            let last = chunk.last().expect("a chunk is never empty");
+            let params: Vec<&dyn rusqlite::ToSql> = chunk
+                .iter()
+                .chain(std::iter::repeat(last))
+                .take(size)
+                .flatten()
+                .map(|value| value as &dyn rusqlite::ToSql)
+                .collect();
+            images.extend(self.images_where(table, history, &filter, &params)?);
+        }
+        Ok(images)
+    }
+
+    /// The current images of each of `rows` in `table`, by row.
+    fn rows_images(
+        &self,
+        table: &str,
+        rows: impl IntoIterator<Item = RowUuid>,
+    ) -> Result<HashMap<RowUuid, Vec<Image>>, Error> {
+        let mut by_row: HashMap<RowUuid, Vec<Image>> = HashMap::new();
+        for image in self.images_of(table, false, rows)? {
+            by_row
+                .entry(RowUuid::from_bytes(image.id))
+                .or_default()
+                .push(image);
+        }
+        Ok(by_row)
+    }
+
+    /// The images of `table` (or its history) at each of `versions`.
+    fn images_at(
+        &self,
+        table: &str,
+        history: bool,
+        versions: &[(RowUuid, Pos)],
+    ) -> Result<HashMap<(RowUuid, Pos), Vec<Image>>, Error> {
+        let mut found: HashMap<(RowUuid, Pos), Vec<Image>> = versions
+            .iter()
+            .map(|version| (*version, Vec::new()))
+            .collect();
+        // A current table holds a version or two of a row, read whole by
+        // id; a history may hold thousands, so it reads only these.
+        let images = if history {
+            self.images_matching(table, history, versions.iter().copied(), |(row, at)| {
+                vec![
+                    SqlValue::Blob(row.0.as_bytes().to_vec()),
+                    SqlValue::Integer(at.n),
+                    SqlValue::Integer(at.seq as i64),
+                ]
+            })?
+        } else {
+            self.images_of(table, history, versions.iter().map(|(row, _)| *row))?
+        };
+        for image in images {
+            // A read: a node no version names yet is not interned.
+            let Some(n) = self.known_code(image.by)? else {
+                continue;
+            };
+            let at = Pos { n, seq: image.seq };
+            if let Some(images) = found.get_mut(&(RowUuid::from_bytes(image.id), at)) {
+                images.push(image);
+            }
+        }
+        Ok(found)
+    }
+
+    /// The images of each of `versions` of `source`: in the current table,
+    /// else in its history.
+    fn version_images(
+        &self,
+        source: &str,
+        versions: &[(RowUuid, Pos)],
+    ) -> Result<HashMap<(RowUuid, Pos), Vec<Image>>, Error> {
+        let mut found = self.images_at(source, false, versions)?;
+        let missing: Vec<(RowUuid, Pos)> = versions
+            .iter()
+            .filter(|version| found[*version].is_empty())
+            .copied()
+            .collect();
+        if !missing.is_empty() {
+            found.extend(self.images_at(source, true, &missing)?);
+        }
+        Ok(found)
+    }
+
+    /// The current image of each `(row, branch key)` of `keys` that has one.
+    fn current_images(
+        &self,
+        table: &str,
+        keys: &BTreeSet<(RowUuid, Vec<u8>)>,
+    ) -> Result<HashMap<(RowUuid, Vec<u8>), Image>, Error> {
+        let mut found = HashMap::new();
+        for image in self.images_of(table, false, keys.iter().map(|(row, _)| *row))? {
+            let key = (RowUuid::from_bytes(image.id), image.key.clone());
+            if keys.contains(&key) {
+                found.insert(key, image);
+            }
+        }
+        Ok(found)
+    }
+
+    /// Read the current images of `keys` (stored table, row, branch key)
+    /// at once, for the stores that follow: a replica stores a message's
+    /// images one by one, each after reading what it holds. Until
+    /// [`Self::end_current_batch`], [`Self::current_image`] answers from
+    /// these, and a store or drop of one of them forgets it.
+    fn begin_current_batch(
+        &self,
+        keys: impl IntoIterator<Item = (String, RowUuid, Vec<u8>)>,
+    ) -> Result<(), Error> {
+        let mut by_table: BTreeMap<String, BTreeSet<(RowUuid, Vec<u8>)>> = BTreeMap::new();
+        let baselines = self.client.as_ref().map(|client| &client.baselines);
+        for key in keys {
+            // An image over a pending write's baseline replaces the
+            // baseline, not the stored row.
+            if baselines.is_some_and(|baselines| baselines.contains_key(&key)) {
+                continue;
+            }
+            let (table, row, key) = key;
+            by_table.entry(table).or_default().insert((row, key));
+        }
+        let mut batch = HashMap::new();
+        for (table, keys) in by_table {
+            let mut found = self.current_images(&table, &keys)?;
+            for (row, key) in keys {
+                let image = found.remove(&(row, key.clone()));
+                batch.insert((table.clone(), row, key), image);
+            }
+        }
+        *self.current_batch.borrow_mut() = Some(batch);
+        Ok(())
+    }
+
+    fn end_current_batch(&self) {
+        self.current_batch.borrow_mut().take();
+    }
+
+    /// A store or drop of `(table, row, key)`: a batch read of it is stale.
+    fn forget_current(&self, table: &str, row: RowUuid, key: &[u8]) {
+        if let Some(batch) = self.current_batch.borrow_mut().as_mut() {
+            batch.remove(&(table.to_owned(), row, key.to_vec()));
+        }
+    }
+
     fn current_image(&self, table: &str, row: RowUuid, key: &[u8]) -> Result<Option<Image>, Error> {
+        if let Some(batch) = self.current_batch.borrow().as_ref()
+            && let Some(image) = batch.get(&(table.to_owned(), row, key.to_vec()))
+        {
+            return Ok(image.clone());
+        }
         let id = row.0.as_bytes().to_vec();
         Ok(self
             .images_where(table, false, "id = ?1 AND _b = ?2", &[&id, &key])?
@@ -3810,18 +4102,9 @@ impl Inner {
     }
 
     fn put_image(&self, image: &Image, history: bool) -> Result<(), Error> {
-        let name = if history {
-            format!("{}__h", image.table)
-        } else {
-            image.table.clone()
-        };
-        let mut names = vec![
-            "id".to_owned(),
-            "_b".to_owned(),
-            "_n".to_owned(),
-            "_seq".to_owned(),
-            "_st".to_owned(),
-        ];
+        if !history {
+            self.forget_current(&image.table, RowUuid::from_bytes(image.id), &image.key);
+        }
         let mut values = vec![
             Sql::Blob(image.id.to_vec()),
             Sql::Blob(image.key.clone()),
@@ -3832,22 +4115,42 @@ impl Inner {
                     | if image.content { 0 } else { STATE_NO_CONTENT },
             ),
         ];
+        let mut columns = Vec::new();
         for (column, value) in self.stored_cells(image)? {
-            names.push(quote(&column));
+            columns.push(column);
             values.push(value);
         }
-        let placeholders: Vec<String> = (1..=values.len()).map(|i| format!("?{i}")).collect();
-        let verb = if history {
-            "INSERT OR IGNORE"
-        } else {
-            "INSERT"
-        };
-        let sql = format!(
-            "{verb} INTO {} ({}) VALUES ({})",
-            quote(&name),
-            names.join(", "),
-            placeholders.join(", ")
-        );
+        let mut inserts = self.image_inserts.borrow_mut();
+        let (known, sql) = inserts
+            .entry((image.table.clone(), history))
+            .or_insert_with(|| (Vec::new(), String::new()));
+        if sql.is_empty() || *known != columns {
+            let name = if history {
+                format!("{}__h", image.table)
+            } else {
+                image.table.clone()
+            };
+            let names: Vec<String> = ["id", "_b", "_n", "_seq", "_st"]
+                .into_iter()
+                .map(str::to_owned)
+                .chain(columns.iter().map(|column| quote(column)))
+                .collect();
+            let placeholders: Vec<String> = (1..=values.len()).map(|i| format!("?{i}")).collect();
+            let verb = if history {
+                "INSERT OR IGNORE"
+            } else {
+                "INSERT"
+            };
+            *sql = format!(
+                "{verb} INTO {} ({}) VALUES ({})",
+                quote(&name),
+                names.join(", "),
+                placeholders.join(", ")
+            );
+            *known = columns;
+        }
+        let sql = sql.clone();
+        drop(inserts);
         self.exec(&sql, params_from_iter(values.iter()))
             .map_err(storage)?;
         Ok(())
@@ -3860,6 +4163,7 @@ impl Inner {
         if let Some(image) = self.current_image(table, row, key)? {
             self.gone.borrow_mut().push(image);
         }
+        self.forget_current(table, row, key);
         let id = row.0.as_bytes().to_vec();
         self.exec(
             &format!("DELETE FROM {} WHERE id = ?1 AND _b = ?2", quote(table)),
@@ -7028,29 +7332,42 @@ impl Db {
                             };
                             inner.record_settled(node, tx, Some(at))?;
                         }
-                        for image in images {
-                            let Some(mut image) = inner.stored_image(image) else {
-                                continue;
-                            };
-                            let named = (image.table.clone(), image.id, image.key.clone());
-                            if !inner.receive_deltas(&mut image)? {
-                                inner.ask_whole(named, 0)?;
-                                continue;
-                            }
-                            inner.client.as_mut().expect("client").whole.remove(&named);
-                            if inner.record_vias(&named.0, &image)? {
-                                // A node no version held may be held by
-                                // this one: missing answers are transient.
-                                inner.client.as_mut().expect("client").unavailable.clear();
-                            }
-                            inner.unwithhold(
-                                &image.table,
+                        let images: Vec<Image> = images
+                            .into_iter()
+                            .filter_map(|image| inner.stored_image(image))
+                            .collect();
+                        inner.begin_current_batch(images.iter().map(|image| {
+                            (
+                                image.table.clone(),
                                 RowUuid::from_bytes(image.id),
-                                &image.key,
-                            )?;
-                            let overlaid = inner.receive_image(image)?;
-                            rebase |= overlaid;
-                        }
+                                image.key.clone(),
+                            )
+                        }))?;
+                        let received = (|| {
+                            for mut image in images {
+                                let named = (image.table.clone(), image.id, image.key.clone());
+                                if !inner.receive_deltas(&mut image)? {
+                                    inner.ask_whole(named, 0)?;
+                                    continue;
+                                }
+                                inner.client.as_mut().expect("client").whole.remove(&named);
+                                if inner.record_vias(&named.0, &image)? {
+                                    // A node no version held may be held by
+                                    // this one: missing answers are transient.
+                                    inner.client.as_mut().expect("client").unavailable.clear();
+                                }
+                                inner.unwithhold(
+                                    &image.table,
+                                    RowUuid::from_bytes(image.id),
+                                    &image.key,
+                                )?;
+                                let overlaid = inner.receive_image(image)?;
+                                rebase |= overlaid;
+                            }
+                            Ok::<_, Error>(())
+                        })();
+                        inner.end_current_batch();
+                        received?;
                     }
                     SyncMessage::AccessLost {
                         table,
@@ -7266,9 +7583,15 @@ impl Db {
                                 if let Some(pending) = client.pending.get_mut(tx) {
                                     pending.expected = None;
                                 }
-                                for image in images {
-                                    inner.receive_image(image)?;
-                                }
+                                inner.begin_current_batch(images.iter().map(|image| {
+                                    let row = RowUuid::from_bytes(image.id);
+                                    (image.table.clone(), row, image.key.clone())
+                                }))?;
+                                let received = images
+                                    .into_iter()
+                                    .try_for_each(|image| inner.receive_image(image).map(drop));
+                                inner.end_current_batch();
+                                received?;
                                 *accepted_at
                             }
                             _ => None,
@@ -8848,6 +9171,101 @@ impl Db {
                 // resumes from: not shipped, but watched again, and their
                 // supporting rows followed (and shipped where they changed).
                 let mut held = Vec::new();
+                // Unchanged for a resumed client: a version it held as of
+                // `since` that was in the result then. A row whose
+                // membership inputs changed may have entered the result
+                // without changing: its seq alone cannot say, so the result
+                // as of `since` does. Only the opening snapshot is judged
+                // so: a row a later commit in this tick added joined after
+                // that judgement.
+                let held_as_of = |row: &SubscriptionOutputRow, reset: bool| {
+                    resume.as_ref().is_some_and(|resume| {
+                        reset
+                            && row.seq <= Pos::at(resume.since)
+                            && resume
+                                .prior
+                                .as_ref()
+                                .is_none_or(|prior| prior.contains(&row.id))
+                    })
+                };
+                // Every image this subscription's events ship or touch, read
+                // a chunk of rows per statement: an opening snapshot ships
+                // every row of its result.
+                let mut current: BTreeMap<String, Vec<(RowUuid, Pos)>> = BTreeMap::new();
+                let mut versions: BTreeMap<String, Vec<(RowUuid, Pos)>> = BTreeMap::new();
+                let mut joined_rows = Vec::new();
+                let mut leaving: BTreeMap<&str, Vec<RowUuid>> = BTreeMap::new();
+                for event in &events {
+                    let SubscriptionEvent::Delta {
+                        added,
+                        updated,
+                        removed,
+                        reset,
+                        ..
+                    } = event
+                    else {
+                        continue;
+                    };
+                    for row in added.iter().chain(updated.iter()) {
+                        joined_rows.extend(
+                            joined_tables
+                                .iter()
+                                .map(String::as_str)
+                                .zip(row.joined_rows()),
+                        );
+                        let history = history_source_table(&row.table);
+                        if (history.is_none() && held_as_of(row, *reset) && support.is_none())
+                            || cache.contains_key(&(row.table.to_string(), row.id, row.seq))
+                        {
+                            continue;
+                        }
+                        let wanted = if history.is_some() {
+                            &mut versions
+                        } else {
+                            &mut current
+                        };
+                        wanted
+                            .entry(row.table.to_string())
+                            .or_default()
+                            .push((row.id, row.seq));
+                    }
+                    for gone in removed {
+                        let table = names.stored_table(
+                            history_source_table(&gone.table).unwrap_or(&gone.table),
+                        )?;
+                        leaving.entry(table).or_default().push(gone.row_uuid);
+                        for (table, joined) in joined_tables.iter().zip(&gone.joined) {
+                            leaving.entry(table).or_default().push(joined.row);
+                        }
+                    }
+                }
+                for (table, versions) in current {
+                    let stored = names.stored_table(&table)?;
+                    for ((row, at), found) in inner.images_at(stored, false, &versions)? {
+                        cache.insert((table.clone(), row, at), found);
+                    }
+                }
+                // A history row's version and its row's current images; its
+                // seq goes to `history_seqs` once found, and again each time
+                // the row ships from the cache.
+                let mut fresh = HashSet::new();
+                for (table, versions) in versions {
+                    let stored =
+                        names.stored_table(history_source_table(&table).unwrap_or(&table))?;
+                    for ((row, at), found) in
+                        inner.history_versions_each(stored, &versions, &mut history_seqs)?
+                    {
+                        fresh.insert((table.clone(), row, at));
+                        cache.insert((table.clone(), row, at), found);
+                    }
+                }
+                let mut joined_images = inner
+                    .joined_images(&joined_rows, &mut history_seqs)?
+                    .into_iter();
+                let mut leaving_images = HashMap::new();
+                for (table, rows) in leaving {
+                    leaving_images.insert(table, inner.rows_images(table, rows)?);
+                }
                 for event in events {
                     let SubscriptionEvent::Delta {
                         added,
@@ -8860,30 +9278,15 @@ impl Db {
                         continue;
                     };
                     for row in added.iter().chain(updated.iter()) {
-                        for (table, joined) in joined_tables.iter().zip(row.joined_rows()) {
-                            images.extend(inner.joined_images(table, joined, &mut history_seqs)?);
+                        for _ in row.joined_rows().iter().take(joined_tables.len()) {
+                            images.extend(joined_images.next().unwrap_or_default());
                         }
                         // A history row is a version of its source table.
                         let history = history_source_table(&row.table);
                         let table = names
                             .stored_table(history.unwrap_or(&row.table))?
                             .to_owned();
-                        // Unchanged for a resumed client: a version it held as
-                        // of `since` that was in the result then. A row whose
-                        // membership inputs changed may have entered the
-                        // result without changing: its seq alone cannot say,
-                        // so the result as of `since` does. Only the opening
-                        // snapshot is judged so: a row a later commit in
-                        // this tick added joined after that judgement.
-                        let unchanged = resume.as_ref().is_some_and(|resume| {
-                            reset
-                                && history.is_none()
-                                && row.seq <= Pos::at(resume.since)
-                                && resume
-                                    .prior
-                                    .as_ref()
-                                    .is_none_or(|prior| prior.contains(&row.id))
-                        });
+                        let unchanged = history.is_none() && held_as_of(row, reset);
                         let id_key = wk((
                             table.clone(),
                             "id".to_owned(),
@@ -8894,29 +9297,8 @@ impl Db {
                             continue;
                         }
                         let key = (row.table.to_string(), row.id, row.seq);
-                        if history.is_some() {
-                            if !cache.contains_key(&key) {
-                                let mut found = Vec::new();
-                                inner.history_versions(
-                                    &table,
-                                    [(row.id, row.seq)],
-                                    &mut found,
-                                    &mut history_seqs,
-                                )?;
-                                cache.insert(key.clone(), found);
-                            } else {
-                                history_seqs.insert(row.seq.seq);
-                            }
-                        } else if !cache.contains_key(&key) {
-                            let id = row.id.0.as_bytes().to_vec();
-                            let seq = row.seq.seq as i64;
-                            let found = inner.images_where(
-                                &table,
-                                false,
-                                ID_AT,
-                                &[&id, &row.seq.n, &seq],
-                            )?;
-                            cache.insert(key.clone(), found);
+                        if history.is_some() && !fresh.remove(&key) {
+                            history_seqs.insert(row.seq.seq);
                         }
                         if unchanged {
                             held.extend(cache[&key].iter().cloned());
@@ -8936,22 +9318,18 @@ impl Db {
                             wk((
                                 table.to_owned(),
                                 "id".to_owned(),
-                                watch_key(&Sql::Blob(rid.clone())),
+                                watch_key(&Sql::Blob(rid)),
                             )),
                         );
-                        for image in inner.images_where(table, false, "id = ?1", &[&rid])? {
-                            touched.insert((image.table.clone(), gone.row_uuid, image.key.clone()));
-                        }
+                        let mut touch = |table: &str, row: RowUuid| {
+                            for image in leaving_images[table].get(&row).into_iter().flatten() {
+                                touched.insert((image.table.clone(), row, image.key.clone()));
+                            }
+                        };
+                        touch(table, gone.row_uuid);
                         // A joined row may have left for its permissions.
                         for (table, joined) in joined_tables.iter().zip(&gone.joined) {
-                            let id = joined.row.0.as_bytes().to_vec();
-                            for image in inner.images_where(table, false, "id = ?1", &[&id])? {
-                                touched.insert((
-                                    image.table.clone(),
-                                    joined.row,
-                                    image.key.clone(),
-                                ));
-                            }
+                            touch(table, joined.row);
                         }
                     }
                 }
@@ -8976,10 +9354,13 @@ impl Db {
                     let group = group.borrow();
                     let table = group.root().to_owned();
                     let now: HashSet<RowUuid> = group.rows.iter().map(|row| row.id).collect();
-                    for row in prior.iter().filter(|row| !now.contains(row)) {
-                        let rid = row.0.as_bytes().to_vec();
-                        for image in inner.images_where(&table, false, "id = ?1", &[&rid])? {
-                            touched.insert((table.clone(), *row, image.key));
+                    let gone = inner.rows_images(
+                        &table,
+                        prior.iter().filter(|row| !now.contains(row)).copied(),
+                    )?;
+                    for (row, images) in gone {
+                        for image in images {
+                            touched.insert((table.clone(), row, image.key));
                         }
                     }
                 }
@@ -9898,24 +10279,30 @@ impl Db {
                             .map(str::to_owned)
                     })
                     .collect::<Result<Vec<_>, Error>>()?;
-                for row in &rows {
-                    for (table, joined) in joined_tables.iter().zip(row.joined_rows()) {
-                        images.extend(inner.joined_images(table, joined, &mut seqs)?);
-                    }
-                }
+                let joined: Vec<_> = rows
+                    .iter()
+                    .flat_map(|row| {
+                        joined_tables
+                            .iter()
+                            .map(String::as_str)
+                            .zip(row.joined_rows())
+                    })
+                    .collect();
+                images.extend(
+                    inner
+                        .joined_images(&joined, &mut seqs)?
+                        .into_iter()
+                        .flatten(),
+                );
                 if history.is_some() {
                     let versions = rows.iter().map(|row| (row.id, row.seq));
                     inner.history_versions(&table, versions, &mut images, &mut seqs)?;
                 } else {
-                    for row in &rows {
-                        let rid = row.id.0.as_bytes().to_vec();
-                        let seq = row.seq.seq as i64;
-                        let at = [&rid as &dyn rusqlite::ToSql, &row.seq.n, &seq];
-                        let mut found = inner.images_where(&table, false, ID_AT, &at)?;
-                        if found.is_empty() {
-                            found = inner.images_where(&table, true, ID_AT, &at)?;
-                        }
-                        images.extend(found);
+                    let versions: Vec<(RowUuid, Pos)> =
+                        rows.iter().map(|row| (row.id, row.seq)).collect();
+                    let found = inner.version_images(&table, &versions)?;
+                    for version in &versions {
+                        images.extend(found[version].iter().cloned());
                     }
                 }
                 // A fetched row stays current for the rest of the session,
