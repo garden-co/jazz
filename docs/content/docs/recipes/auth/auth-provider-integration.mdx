@@ -31,7 +31,7 @@ Jazz supports external JWT-based authentication for production use. This recipe 
 3. The Jazz server validates the JWT signature against the provider's JWKS endpoint.
 4. Core atomically resolves the exact `(iss, sub)` assignment or creates its account when fresh. The Jazz session opens the account's client. `session.user` contains the account ID and exact acting identity; provider claims remain under `session.claims`. Revoked assignments remain rejected; login-or-register never reassigns an identity.
 
-If you're unfamiliar with JWTs and JWKS, see the [explainer on the Authentication page](/docs/auth/authentication#external-auth-for-production).
+If you're unfamiliar with JWTs and JWKS, see the [explainer on the Authentication page](/docs/setup/auth/authentication#external-auth-for-production).
 
 ## Provider setup
 
@@ -90,7 +90,7 @@ If you're unfamiliar with JWTs and JWKS, see the [explainer on the Authenticatio
     For a full working example, see the [Better Auth chat example](https://github.com/garden-co/jazz2/tree/main/examples/auth-betterauth-chat).
 
     <Callout type="info">
-      If your users start unauthenticated and sign up later, see [Local-first auth](/docs/auth/local-first-auth#signing-up-with-betterauth) for how to preserve their identity across the transition.
+      If your users start unauthenticated and sign up later, see [Local-first auth](/docs/setup/web-client/local-first-auth#signing-up-with-betterauth) for how to preserve their identity across the transition.
     </Callout>
 
   </Tab>
@@ -116,7 +116,7 @@ If you're unfamiliar with JWTs and JWKS, see the [explainer on the Authenticatio
   </Tab>
 </Tabs>
 
-See [Server setup](/docs/getting-started/server-setup) for the full set of server flags.
+See [Server setup](/docs/setup/backend/trusted) for the full set of server flags.
 
 ## Using JWT claims in permissions
 
@@ -126,7 +126,7 @@ Your auth provider's JWT may include custom claims (roles, organisation IDs, etc
   ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-session-claims-ts
 </include>
 
-See [Permissions](/docs/auth/permissions) for the full claims API.
+See [Permissions](/docs/schemas/policies) for the full claims API.
 
 ## Other providers
 

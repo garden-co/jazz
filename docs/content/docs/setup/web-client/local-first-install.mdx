@@ -4,11 +4,11 @@ description: Build a local-first to-do app with Jazz, step by step.
 reviewedAt: "b29b48d1a"
 ---
 
-import QuickstartSchemaTypesSummary from "../../partials/schema-types-summary.mdx";
+import QuickstartSchemaTypesSummary from "../../../partials/schema-types-summary.mdx";
 
 ## Create a project
 
-Starting a brand-new app? Run `pnpm create jazz` instead and follow the [Quickstart](/docs/quickstart). It scaffolds a complete Jazz app for you, so you can skip the manual steps below.
+Starting a brand-new app? Run `pnpm create jazz` instead and follow the [Quickstart](/docs/setup/run-locally). It scaffolds a complete Jazz app for you, so you can skip the manual steps below.
 
 The rest of this page walks through adding Jazz by hand, either to a new project you set up yourself or to an existing client app. If you already have an app, skip to [Install](#install). Otherwise, create one with your framework's usual tooling:
 
@@ -173,7 +173,7 @@ Create the basic structure for your app with Jazz and a to-do list.
     `appId` identifies your app for storage and sync. Use the UUID you generated
     above&hairsp;—&hairsp;not a human-readable name&hairsp;—&hairsp;so your local data is already
     correctly namespaced when you add a server. For all client config options and runtime source
-    overrides, see [Client Setup](/docs/getting-started/client-setup#client-config-options).
+    overrides, see [Client Setup](/docs/setup/web-client/local-first-setup#client-config-options).
   </Accordion>
 </Accordions>
 
@@ -309,7 +309,7 @@ So far, your to-do list only works locally. To sync across devices, deploy your 
 
 ### Add permissions
 
-Without [permissions](/docs/auth/permissions), permission-scoped server reads return no rows and writes are rejected. For this guide, allow everything:
+Without [permissions](/docs/schemas/policies), permission-scoped server reads return no rows and writes are rejected. For this guide, allow everything:
 
 <include cwd lang="ts" meta='title="permissions.ts"'>
   ../examples/docs/todo-client-localfirst-ts/permissions.ts#quickstart-permissions-ts
@@ -329,12 +329,12 @@ When you update `schema.ts`, run `deploy` again. Compatible schema changes can u
 
 Permissions can be updated without a schema migration by re-running `pnpm dlx jazz-tools@alpha deploy <appId>` with both files present.
 
-For self-hosted deployments, see [Server Setup](/docs/getting-started/server-setup).
+For self-hosted deployments, see [Server Setup](/docs/setup/backend/trusted).
 
 ## Next steps
 
-- [Authentication](/docs/auth/authentication)&hairsp;—&hairsp;local-first and external JWT auth
-- [Permissions](/docs/auth/permissions)&hairsp;—&hairsp;row-level access policies
+- [Authentication](/docs/setup/auth/authentication)&hairsp;—&hairsp;local-first and external JWT auth
+- [Permissions](/docs/schemas/policies)&hairsp;—&hairsp;row-level access policies
 - [Queries](/docs/reading/queries)&hairsp;—&hairsp;filtering, sorting, pagination, and relations
 - [Durability tiers](/docs/writing/writing-data#write-durability-tiers)&hairsp;—&hairsp;control when writes are confirmed
 

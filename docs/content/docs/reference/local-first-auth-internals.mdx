@@ -3,7 +3,7 @@ title: Local-first auth internals
 description: "How a local signing identity founds an offline account and links ordinary provider identities through the core registry."
 ---
 
-[Local-first auth](/docs/auth/local-first-auth) separates a signing identity from the account that owns application data. A local-first account can be created offline; adding an external identity requires the core registry.
+[Local-first auth](/docs/setup/web-client/local-first-auth) separates a signing identity from the account that owns application data. A local-first account can be created offline; adding an external identity requires the core registry.
 
 ## Identity and account derivation
 
@@ -31,4 +31,4 @@ The core linking protocol uses a nonce and two authenticated proofs: a currently
 
 Existing rows retain their original structured authorship. Their account IDs stay unchanged, while new writes record the linked provider identity. Policies comparing `.account` keep ownership stable; comparisons of the entire author also distinguish the acting identity.
 
-If linking fails after the old context was closed, the app may reopen the account still selected by the manager. The manager performs no database shutdown or upload scheduling itself. See [Local-first auth](/docs/auth/local-first-auth) for the application flow.
+If linking fails after the old context was closed, the app may reopen the account still selected by the manager. The manager performs no database shutdown or upload scheduling itself. See [Local-first auth](/docs/setup/web-client/local-first-auth) for the application flow.

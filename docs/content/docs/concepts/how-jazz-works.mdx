@@ -1,0 +1,15 @@
+---
+title: How Jazz Works
+description: "The mental model: an authoritative server, live queries, and optional local replicas."
+---
+
+<Callout type="info">
+  Preview: this page is a rough outline for the server-first docs restructure. The bullets below are
+  what it will cover.
+</Callout>
+
+- The server is the authority: it stores data, checks policies and confirms writes
+- Backends and clients subscribe to queries and get live updates
+- Writes merge by default; serializable transactions when you need them
+- A local replica in the client is an optional optimization (see [Local-first as a client optimization](/docs/recipes/local-first))
+- More detail: [How Sync Works](/docs/concepts/how-sync-works)

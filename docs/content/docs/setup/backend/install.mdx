@@ -4,9 +4,9 @@ description: Build a server-side to-do API with Jazz and Hono, step by step.
 reviewedAt: "b29b48d1a"
 ---
 
-import SchemaSetup from "../../partials/schema-setup.mdx";
-import ServerAuthConfig from "../../partials/server-auth-config.mdx";
-import QuickstartSchemaTypesSummary from "../../partials/schema-types-summary.mdx";
+import SchemaSetup from "../../../partials/schema-setup.mdx";
+import ServerAuthConfig from "../../../partials/server-auth-config.mdx";
+import QuickstartSchemaTypesSummary from "../../../partials/schema-types-summary.mdx";
 
 ## Create a project
 
@@ -50,7 +50,7 @@ Create `schema.ts` at the root of your project (or `src/lib/schema.ts` for Svelt
 
 ### Add permissions
 
-Every operation requires an explicit [permission](/docs/auth/permissions) grant. Omitted operations are denied, including on tables with no policy declarations. For this quickstart, explicitly allow all four operations:
+Every operation requires an explicit [permission](/docs/schemas/policies) grant. Omitted operations are denied, including on tables with no policy declarations. For this quickstart, explicitly allow all four operations:
 
 ```ts title="permissions.ts"
 import { schema as s } from "jazz-tools";
@@ -106,9 +106,9 @@ development only when the URL's WHATWG-canonical hostname is `localhost`,
 The backend rejects every redirect, even to another HTTPS URL, so configure your
 provider's final JWKS URL rather than a redirecting URL.
 
-Each route handler awaits `client.forRequest(c.req)` to get a database handle with [permissions](/docs/auth/permissions) scoped to the request.
+Each route handler awaits `client.forRequest(c.req)` to get a database handle with [permissions](/docs/schemas/policies) scoped to the request.
 For server-owned work, use the ready snapshot's `client.db`. Backend admission requires the core
-even with a memory driver; keep the secret server-side and provide it through `initial` or `session.becomeBackend(...)`. [Server Setup](/docs/getting-started/server-setup)
+even with a memory driver; keep the secret server-side and provide it through `initial` or `session.becomeBackend(...)`. [Server Setup](/docs/setup/backend/trusted)
 covers those patterns in more detail.
 
 <Accordions type="single">
@@ -237,7 +237,7 @@ curl -X DELETE http://localhost:3000/api/todos/<id> \
 
 ## Next steps
 
-- [Authentication](/docs/auth/authentication)&hairsp;—&hairsp;identity providers, JWKS, and session resolution
-- [Permissions](/docs/auth/permissions)&hairsp;—&hairsp;row-level access policies
+- [Authentication](/docs/setup/auth/authentication)&hairsp;—&hairsp;identity providers, JWKS, and session resolution
+- [Permissions](/docs/schemas/policies)&hairsp;—&hairsp;row-level access policies
 - [Queries](/docs/reading/queries)&hairsp;—&hairsp;filtering, sorting, pagination, and relations
-- [Server Setup](/docs/getting-started/server-setup)&hairsp;—&hairsp;hosting, sync, and deployment
+- [Server Setup](/docs/setup/backend/trusted)&hairsp;—&hairsp;hosting, sync, and deployment

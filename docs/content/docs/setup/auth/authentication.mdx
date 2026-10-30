@@ -118,7 +118,7 @@ function Restore() {
 
 Managed `auth` does this for you. In development builds, Jazz warns in the console when an app without managed `auth` keeps writing to an account whose `needsLogin` is still `true` and starts no login within a few seconds.
 
-`jazz.linkJWT(auth)` handles graceful shutdown, linking outside contexts, and opening the replacement client. See [Lifecycle](/docs/auth/lifecycle) for the complete handoff and failure path.
+`jazz.linkJWT(auth)` handles graceful shutdown, linking outside contexts, and opening the replacement client. See [Lifecycle](/docs/setup/auth/lifecycle) for the complete handoff and failure path.
 
 The core orders a two-party protocol: the admitted identity authorizes an expiring nonce committed to the fresh identity, and the fresh identity authenticates acceptance. Both requests use ordinary bearer credentials. The core checks that the approver is still active and allowed to manage identities when acceptance happens.
 
@@ -135,7 +135,7 @@ Public sessions and author columns expose the same structured value:
 
 Compare `.account` for account-owned data. Comparing the whole structure also compares issuer and subject. Two linked identities share account ownership while retaining distinct authorship.
 
-Provider claims remain under `session.claims`. They cannot override `session.user.account` or the acting identity. See [Sessions](/docs/auth/sessions) and [Permissions](/docs/auth/permissions).
+Provider claims remain under `session.claims`. They cannot override `session.user.account` or the acting identity. See [Sessions](/docs/setup/auth/sessions) and [Permissions](/docs/schemas/policies).
 
 ## Backend request contexts
 
