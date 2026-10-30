@@ -1143,9 +1143,6 @@ impl Db {
             // in, and replay by the names of the one now current.
             inner.client = None;
             inner.load_client()?;
-            if inner.client.is_some() {
-                inner.raise_to_local_base();
-            }
         }
         Ok(db)
     }
