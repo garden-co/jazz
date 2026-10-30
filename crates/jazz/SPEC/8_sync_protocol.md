@@ -489,6 +489,11 @@ rows of its result and their supporting rows. One-shot reads collect their
 supporting rows using temporary bookkeeping and retain no watches after
 their answer. Writes reconcile their rows at acceptance or refusal, including
 upstream settlement through a relay, and retain no watches afterward.
+A relay reconciles the same way every session a one-shot answer shipped one
+of its unsettled versions to (another session's pending write): once that
+version settles, the row ships again as it is now, or is evicted. The
+replica orders such a version after every authority position, so no later
+answer's `members` can retire it.
 A row version ships at most once per session across all its reads (`INV-SYNC-8`).
 This state lives only in the serving process and is released on disconnect
 (`INV-SYNC-27`).

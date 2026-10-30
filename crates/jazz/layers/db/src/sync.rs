@@ -1963,6 +1963,12 @@ pub(crate) struct Session {
     outbox: Vec<SyncMessage>,
     /// Images to send this tick: (table, id, branch key).
     touched: BTreeSet<(String, RowUuid, Vec<u8>)>,
+    /// On a relay, rows a one-shot answer shipped at one of this store's
+    /// unsettled versions (by its node and seq), which no watch keeps
+    /// current: each ships again once uploads settle and that version is no
+    /// longer the row's, since a refused write leaves the replica holding a
+    /// version no later answer replaces (SPEC 8 §8.5).
+    unsettled: BTreeMap<(String, RowUuid, Vec<u8>), ([u8; 16], u64)>,
     /// Versions evicted as unreadable while the session still watches
     /// their id (it holds another branch's version of the row): a write
     /// that leaves one unreadable ships nothing more, so the replica learns
@@ -2070,6 +2076,7 @@ impl Session {
             subs: BTreeMap::new(),
             outbox: Vec::new(),
             touched: BTreeSet::new(),
+            unsettled: BTreeMap::new(),
             unreadable: HashSet::new(),
             committed: Vec::new(),
             echoes: Vec::new(),
@@ -6215,7 +6222,11 @@ impl Db {
         self.become_replica();
         let mut inner = self.inner.borrow_mut();
         let client = inner.client.as_mut().expect("client");
-        client.clear_once_requests();
+        // Detaching already ended the one-shot requests sent on the last
+        // link; those queued since were never sent and go out on this one.
+        if client.transport.is_some() {
+            client.clear_once_requests();
+        }
         client.transport = Some(transport);
         let mut link = client.hint.get();
         link.detached = false;
@@ -7056,7 +7067,7 @@ impl Db {
             if !strict
                 && request
                     .asked
-                    .is_some_and(|(_, connection)| connection != client.connection)
+                    .is_some_and(|(_, connection)| connection < client.connection)
             {
                 return Poll::Ready(Ok(None));
             }
@@ -7075,7 +7086,8 @@ impl Db {
                 let id = client.next_id;
                 client.next_id += 1;
                 client.answers.insert(id, None);
-                let connection = client.connection;
+                // Asked while detached, it goes out on the next connection.
+                let connection = client.connection + u64::from(client.transport.is_none());
                 let query = remote_query(&prepared.query).into_owned();
                 let since = inner.register_once_read(
                     id,
@@ -7967,6 +7979,7 @@ impl Db {
         }
         if rebase {
             self.rebase()?;
+            self.inner.borrow_mut().reconcile_unsettled()?;
         }
         // A settled answer lists its result's rows: cached rows the
         // replica's view of that result holds and the server's lacks lost
@@ -8213,6 +8226,36 @@ impl Inner {
                 *remote.refused.borrow_mut() = Some(error.clone());
             }
         }
+    }
+
+    /// After uploads settled: rows sessions were shipped at an unsettled
+    /// version that is no longer current here ship again as they are now,
+    /// accepted or evicted (see [`Session::unsettled`]).
+    fn reconcile_unsettled(&mut self) -> Result<(), Error> {
+        for index in 0..self.sessions.len() {
+            if !self.sessions[index].open || self.sessions[index].unsettled.is_empty() {
+                continue;
+            }
+            let rows = std::mem::take(&mut self.sessions[index].unsettled);
+            let mut still = BTreeMap::new();
+            let mut moved = Vec::new();
+            for ((table, row, key), shipped) in rows {
+                let current = self
+                    .current_image(&table, row, &key)?
+                    .and_then(|image| Some((image.by?, image.seq)));
+                if current != Some(shipped) {
+                    moved.push((table.clone(), row, key.clone()));
+                }
+                // Shipped again below while still unsettled: tracked anew.
+                if let Some(current) = current {
+                    still.insert((table, row, key), current);
+                }
+            }
+            let session = &mut self.sessions[index];
+            session.unsettled = still;
+            session.touched.extend(moved);
+        }
+        Ok(())
     }
 
     /// Drop the upstream link: reads stop waiting, writes queue.
@@ -10726,6 +10769,11 @@ impl Db {
                 };
                 let authority = inner.client.is_none();
                 let session = &mut inner.sessions[index];
+                session.unsettled.extend(images.iter().filter_map(|image| {
+                    let row = RowUuid::from_bytes(image.id);
+                    let key = (image.table.clone(), row, image.key.clone());
+                    Some((key, (image.by?, image.seq)))
+                }));
                 session.outbox.extend(lost);
                 session.outbox.extend(hidden);
                 session
