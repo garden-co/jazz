@@ -45,6 +45,7 @@ use crate::values::CachedRow;
 use crate::values::query_error;
 use crate::values::{STATE_AS_SENT, STATE_DELETED, STATE_NO_CONTENT};
 use rusqlite::OptionalExtension;
+use rusqlite::types::Value as SqlValue;
 use std::cell::Cell as StdCell;
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -3846,44 +3847,77 @@ impl Inner {
         Ok(ids)
     }
 
-    /// Every image of each of `rows` in `table` (or its history), read a
-    /// chunk of rows per statement. Reads of many rows' images all go
-    /// through here: an opening snapshot ships thousands, a later tick a
-    /// few. A chunk binds its ids to the smallest of a few statement sizes
-    /// that fits, the rest repeating its last id, so a lone row is one
-    /// seek and every size stays prepared.
+    /// Every image of each of `rows` in `table` (or its history).
     fn images_of(
         &self,
         table: &str,
         history: bool,
         rows: impl IntoIterator<Item = RowUuid>,
     ) -> Result<Vec<Image>, Error> {
+        self.images_matching(table, history, rows, |row| {
+            vec![SqlValue::Blob(row.0.as_bytes().to_vec())]
+        })
+    }
+
+    /// The images of `table` (or its history) that match one of `keys`, read
+    /// a chunk of keys per statement. Reads of many images all go through
+    /// here: an opening snapshot ships thousands, a later tick a few. A key
+    /// binds to a row id, or to a row id, node code and seq (an [`ID_AT`]
+    /// version, so a row with a long history reads only the versions asked
+    /// for). A chunk binds its keys to the smallest of a few statement sizes
+    /// that fits, the rest repeating its last key, so a lone key is one seek
+    /// and every size stays prepared.
+    fn images_matching<K: Ord>(
+        &self,
+        table: &str,
+        history: bool,
+        keys: impl IntoIterator<Item = K>,
+        bind: impl Fn(&K) -> Vec<SqlValue>,
+    ) -> Result<Vec<Image>, Error> {
         const SIZES: [usize; 4] = [1, 8, 64, 512];
-        // Each row once: a row in two chunks would match twice.
-        let rows: Vec<Vec<u8>> = rows
+        // Each key once: a key in two chunks would match twice.
+        let keys: Vec<Vec<SqlValue>> = keys
             .into_iter()
             .collect::<BTreeSet<_>>()
-            .into_iter()
-            .map(|row| row.0.as_bytes().to_vec())
+            .iter()
+            .map(bind)
             .collect();
         let mut images = Vec::new();
-        for chunk in rows.chunks(SIZES[SIZES.len() - 1]) {
+        for chunk in keys.chunks(SIZES[SIZES.len() - 1]) {
             let size = SIZES
                 .into_iter()
                 .find(|size| *size >= chunk.len())
                 .expect("a chunk fits the largest size");
-            let filter = if size == 1 {
-                "id = ?1".to_owned()
-            } else {
-                let placeholders: Vec<String> = (1..=size).map(|i| format!("?{i}")).collect();
-                format!("id IN ({})", placeholders.join(", "))
+            let arity = chunk[0].len();
+            let filter = match (arity, size) {
+                (1, 1) => "id = ?1".to_owned(),
+                (1, _) => {
+                    let placeholders: Vec<String> = (1..=size).map(|i| format!("?{i}")).collect();
+                    format!("id IN ({})", placeholders.join(", "))
+                }
+                (3, _) => {
+                    let terms: Vec<String> = (0..size)
+                        .map(|i| {
+                            let at = 3 * i;
+                            format!(
+                                "(id = ?{} AND +_n = ?{} AND +_seq = ?{})",
+                                at + 1,
+                                at + 2,
+                                at + 3
+                            )
+                        })
+                        .collect();
+                    terms.join(" OR ")
+                }
+                _ => unreachable!("a key binds a row id or a version"),
             };
             let last = chunk.last().expect("a chunk is never empty");
             let params: Vec<&dyn rusqlite::ToSql> = chunk
                 .iter()
                 .chain(std::iter::repeat(last))
                 .take(size)
-                .map(|id| id as &dyn rusqlite::ToSql)
+                .flatten()
+                .map(|value| value as &dyn rusqlite::ToSql)
                 .collect();
             images.extend(self.images_where(table, history, &filter, &params)?);
         }
@@ -3906,8 +3940,7 @@ impl Inner {
         Ok(by_row)
     }
 
-    /// The images of `table` (or its history) at each of `versions`, as
-    /// [`ID_AT`] selects them one by one.
+    /// The images of `table` (or its history) at each of `versions`.
     fn images_at(
         &self,
         table: &str,
@@ -3918,7 +3951,15 @@ impl Inner {
             .iter()
             .map(|version| (*version, Vec::new()))
             .collect();
-        for image in self.images_of(table, history, versions.iter().map(|(row, _)| *row))? {
+        let images =
+            self.images_matching(table, history, versions.iter().copied(), |(row, at)| {
+                vec![
+                    SqlValue::Blob(row.0.as_bytes().to_vec()),
+                    SqlValue::Integer(at.n),
+                    SqlValue::Integer(at.seq as i64),
+                ]
+            })?;
+        for image in images {
             // A read: a node no version names yet is not interned.
             let Some(n) = self.known_code(image.by)? else {
                 continue;
