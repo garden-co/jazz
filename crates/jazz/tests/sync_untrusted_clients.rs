@@ -739,7 +739,7 @@ fn a_session_link_may_not_attribute_and_its_session_writes_are_its_own() {
 }
 
 /// A raw session's read of `messages`, over `span`.
-fn read_messages(id: u64, span: ReadSpan) -> SyncMessage {
+fn read_messages(id: u64, span: ReadSpan, since: Vec<(Option<[u8; 16]>, u64)>) -> SyncMessage {
     SyncMessage::Read {
         id,
         query: Box::new(Query::from("messages")),
@@ -748,6 +748,7 @@ fn read_messages(id: u64, span: ReadSpan) -> SyncMessage {
         tier: ReadTier::Remote,
         wait: None,
         view: Box::new(ReadViewSourceSpec::Current),
+        since,
         span,
     }
 }
@@ -773,29 +774,26 @@ fn answers(down: &Q, id: u64) -> Vec<&'static str> {
 fn a_read_naming_several_sequencers_is_refused_and_holds_nothing_open() {
     let server = server();
     post(&server, "before");
-    for (id, span) in [
-        (
-            1,
-            ReadSpan::Live {
-                since: vec![(None, 1), (Some([7; 16]), 1)],
-            },
-        ),
+    for (id, span, since) in [
+        (1, ReadSpan::Live, vec![(None, 1), (Some([7; 16]), 1)]),
         (
             2,
             ReadSpan::Once {
                 at: vec![(None, 1), (Some([7; 16]), 1)],
             },
+            Vec::new(),
         ),
         (
             3,
             ReadSpan::Once {
                 at: vec![(Some([7; 16]), 1)],
             },
+            Vec::new(),
         ),
     ] {
         let (_client, session, up, down) = pipe();
         server.accept_subscriber(session, user(1)).unwrap();
-        up.borrow_mut().push_back(read_messages(id, span));
+        up.borrow_mut().push_back(read_messages(id, span, since));
         block_on(server.tick()).unwrap();
         assert_eq!(answers(&down, id), ["refused"], "read {id}");
         down.borrow_mut().clear();
@@ -820,9 +818,8 @@ fn a_read_resuming_at_another_sequencer_opens_fresh() {
     server.accept_subscriber(session, user(1)).unwrap();
     up.borrow_mut().push_back(read_messages(
         1,
-        ReadSpan::Live {
-            since: vec![(Some([7; 16]), 1_000)],
-        },
+        ReadSpan::Live,
+        vec![(Some([7; 16]), 1_000)],
     ));
     block_on(server.tick()).unwrap();
     let shipped: usize = down

@@ -1094,6 +1094,8 @@ pub enum SyncMessage {
         /// view (head over an optional live or frozen base), or a
         /// snapshot. Part of the read's identity (`INV-BVIEW-12`).
         view: Box<ReadViewSourceSpec>,
+        /// Last complete checkpoint for this read, independent of its lifetime.
+        since: Positions,
         span: ReadSpan,
     },
     Unsubscribe {
@@ -1276,10 +1278,7 @@ pub struct CatalogueUpdate {
 pub enum ReadSpan {
     /// Kept current until `Unsubscribe`: what changes in the result
     /// ships as it changes, and each settled state is a `Settled`.
-    /// `since`: resumed, the replica holding the result as it settled
-    /// through those positions; the opening ships only what changed after
-    /// them. Empty: a fresh opening.
-    Live { since: Positions },
+    Live,
     /// Answered once, at the current state (`at` empty) or as of `at`, in
     /// the read's view, whose window and versions the read observes. A
     /// view frozen at a snapshot reference is resolved by the receiver (a
@@ -1528,27 +1527,50 @@ pub(crate) struct Echoable {
     pub(crate) op: u32,
 }
 
-/// One remote attachment: a client query the server maintains.
-pub(crate) struct Remote {
-    id: u64,
+/// Subscription-only state attached to an active read.
+struct LiveRead {
     refs: usize,
+    reach: RemoteReach,
+    answered: Rc<StdCell<bool>>,
+    global: Rc<StdCell<bool>>,
+    refused: Rc<RefCell<Option<Error>>>,
+}
+
+enum ReadLifetime {
+    Once { historical: bool },
+    Live(LiveRead),
+}
+
+/// Query identity and settlement metadata shared by every active upstream read.
+struct ActiveRead {
     query: Query,
     binding: BTreeMap<String, Value>,
     include_deleted: bool,
-    /// The view the server maintains it in (see [`upstream_read`]).
     view: ReadViewSourceSpec,
-    /// How far it reaches (see `SyncMessage::Read`).
-    reach: RemoteReach,
-    pub(crate) answered: Rc<StdCell<bool>>,
-    /// Whether the last answer was the global authority's.
-    pub(crate) global: Rc<StdCell<bool>>,
-    /// Why the server refused this query, once it has.
-    pub(crate) refused: Rc<RefCell<Option<Error>>>,
-    /// Where this query's result was last settled through (the
-    /// sequencer and its seq), kept in `_jazz_watermarks` under
-    /// `watermark`, so a reopened replica resumes from it too.
+    watermark: Option<[u8; 32]>,
     through: Option<(Sequencer, u64)>,
-    watermark: [u8; 32],
+    lifetime: ReadLifetime,
+}
+
+impl ActiveRead {
+    fn live(&self) -> Option<&LiveRead> {
+        match &self.lifetime {
+            ReadLifetime::Live(live) => Some(live),
+            ReadLifetime::Once { .. } => None,
+        }
+    }
+
+    fn live_mut(&mut self) -> Option<&mut LiveRead> {
+        match &mut self.lifetime {
+            ReadLifetime::Live(live) => Some(live),
+            ReadLifetime::Once { .. } => None,
+        }
+    }
+
+    fn since(&self) -> Positions {
+        self.through
+            .map_or_else(Vec::new, |(by, seq)| positions(by, seq))
+    }
 }
 
 /// The snapshot reference a read view is frozen at, if any.
@@ -1596,8 +1618,10 @@ pub(crate) struct Client {
     transport: Option<Box<dyn Transport>>,
     pub(crate) hint: Rc<StdCell<Link>>,
     next_id: u64,
-    remote: HashMap<String, Remote>,
-    remote_ids: HashMap<u64, String>,
+    /// All active reads, keyed by their wire request id.
+    reads: HashMap<u64, ActiveRead>,
+    /// Deduplication index for live reads; owns no query or checkpoint state.
+    live_reads: HashMap<String, u64>,
     outbox: Vec<SyncMessage>,
     pending: PendingQueue,
     unsent: Vec<SyncMessage>,
@@ -2287,11 +2311,6 @@ struct Follow<'w> {
     gone: &'w mut Vec<RowKey>,
     followed: &'w mut HashSet<(usize, u64)>,
 }
-
-/// The owner of a session's watches on rows outside its subscriptions:
-/// what its one-shot reads returned and its commits touched. They stay
-/// current until the session ends.
-const SESSION_OWNER: u64 = u64::MAX;
 
 /// The watch on row `id` of stored table `table`.
 fn id_watch(table: &str, id: [u8; 16]) -> u64 {
@@ -4620,7 +4639,7 @@ pub(crate) const WITHHELD_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_withheld
     WITHOUT ROWID";
 
 /// Per remote query, the positions its result was last settled through
-/// (see `Remote::through`): one row per sequencer, `n` its code as in
+/// (see `ActiveRead::through`): one row per sequencer, `n` its code as in
 /// `_n` (0 for the authority). Created by the first settlement, so that
 /// opening an existing store without one leaves the file byte-identical.
 const WATERMARKS_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_watermarks \
@@ -4650,6 +4669,22 @@ fn watermark_key(
     }
     hasher.update(format!("{author:?}").as_bytes());
     *hasher.finalize().as_bytes()
+}
+
+/// Owns a fetch's transient request state, including when its future is cancelled.
+struct PendingFetch<'a> {
+    db: &'a Db,
+    asked: Option<(u64, u64)>,
+}
+
+impl Drop for PendingFetch<'_> {
+    fn drop(&mut self) {
+        if let Some((id, _)) = self.asked
+            && let Some(client) = self.db.inner.borrow_mut().client.as_mut()
+        {
+            client.forget_once(id);
+        }
+    }
 }
 
 type RowKey = (String, RowUuid, Vec<u8>);
@@ -4944,6 +4979,68 @@ impl Inner {
         single_position(&positions)
     }
 
+    fn active_read(
+        &self,
+        query: Query,
+        binding: BTreeMap<String, Value>,
+        include_deleted: bool,
+        view: ReadViewSourceSpec,
+        lifetime: ReadLifetime,
+    ) -> ActiveRead {
+        let resumable = match &lifetime {
+            ReadLifetime::Live(_) => true,
+            ReadLifetime::Once { historical } => {
+                !historical && matches!(view, ReadViewSourceSpec::Current)
+            }
+        };
+        let watermark = resumable.then(|| {
+            watermark_key(
+                &query,
+                &binding,
+                include_deleted,
+                &view,
+                self.identity.author,
+            )
+        });
+        // A replica that cannot read its watermark opens fresh.
+        let through = watermark
+            .as_ref()
+            .and_then(|key| self.watermark(key).ok().flatten());
+        ActiveRead {
+            query,
+            binding,
+            include_deleted,
+            view,
+            watermark,
+            through,
+            lifetime,
+        }
+    }
+
+    /// Register a one-shot request in the same table as live reads.
+    fn register_once_read(
+        &mut self,
+        id: u64,
+        query: &Query,
+        binding: &BTreeMap<String, Value>,
+        include_deleted: bool,
+        view: &ReadViewSourceSpec,
+        at: &Positions,
+    ) -> Positions {
+        let read = self.active_read(
+            query.clone(),
+            binding.clone(),
+            include_deleted,
+            view.clone(),
+            ReadLifetime::Once {
+                historical: !at.is_empty(),
+            },
+        );
+        let since = read.since();
+        self.client.as_mut().expect("client").reads.insert(id, read);
+        since
+    }
+
     /// Forget every remote query's resume point: this store may no longer
     /// hold a result as it settled (a row it held was evicted, or is owed
     /// whole), so each opens fresh until it settles again. An eviction is
@@ -4958,8 +5055,8 @@ impl Inner {
                 .map_err(storage)?;
         }
         if let Some(client) = self.client.as_mut() {
-            for remote in client.remote.values_mut() {
-                remote.through = None;
+            for read in client.reads.values_mut() {
+                read.through = None;
             }
             client.forgotten = true;
         }
@@ -5995,6 +6092,30 @@ impl Inner {
 }
 
 impl Client {
+    fn forget_once(&mut self, id: u64) {
+        self.answers.remove(&id);
+        self.reads.remove(&id);
+        self.outbox.retain(|message| {
+            !matches!(message, SyncMessage::Read { id: read, span: ReadSpan::Once { .. }, .. } if *read == id)
+        });
+    }
+
+    /// These requests belonged to the old link. Live fetch futures and
+    /// relayed reads re-register when retried; fire-and-forget refreshes end.
+    /// Persisted watermarks describe the cache, so they remain reusable.
+    fn clear_once_requests(&mut self) {
+        self.reads.retain(|_, read| read.live().is_some());
+        self.outbox.retain(|message| {
+            !matches!(
+                message,
+                SyncMessage::Read {
+                    span: ReadSpan::Once { .. },
+                    ..
+                }
+            )
+        });
+    }
+
     /// The local seq of commit `id` this store uploads: its own (its
     /// node's counter is its local seq), or a session's it carries.
     fn local_tx(&self, id: &TxId) -> Option<u64> {
@@ -6024,8 +6145,8 @@ impl Client {
             })),
             next_id: 1,
             next_advice: fresh_advice_base(),
-            remote: HashMap::new(),
-            remote_ids: HashMap::new(),
+            reads: HashMap::new(),
+            live_reads: HashMap::new(),
             outbox: Vec::new(),
             pending: PendingQueue::default(),
             unsent: Vec::new(),
@@ -6094,6 +6215,7 @@ impl Db {
         self.become_replica();
         let mut inner = self.inner.borrow_mut();
         let client = inner.client.as_mut().expect("client");
+        client.clear_once_requests();
         client.transport = Some(transport);
         let mut link = client.hint.get();
         link.detached = false;
@@ -6105,25 +6227,25 @@ impl Db {
         // again and resend unsettled commits (the server dedupes by node
         // and transaction).
         // What the old session refused, the new one answers afresh.
-        for remote in client.remote.values() {
+        for remote in client.reads.values().filter_map(ActiveRead::live) {
             remote.refused.borrow_mut().take();
         }
         let resubscribe: Vec<SyncMessage> = client
-            .remote
-            .values_mut()
-            .map(|r| SyncMessage::Read {
-                id: r.id,
-                query: Box::new(r.query.clone()),
-                binding: r.binding.clone(),
-                include_deleted: r.include_deleted,
-                tier: r.reach.tier,
-                wait: r.reach.wait,
-                view: Box::new(r.view.clone()),
-                span: ReadSpan::Live {
-                    since: r
-                        .through
-                        .map_or_else(Vec::new, |(by, seq)| positions(by, seq)),
-                },
+            .reads
+            .iter()
+            .filter_map(|(&id, read)| {
+                let live = read.live()?;
+                Some(SyncMessage::Read {
+                    id,
+                    query: Box::new(read.query.clone()),
+                    binding: read.binding.clone(),
+                    include_deleted: read.include_deleted,
+                    tier: live.reach.tier,
+                    wait: live.reach.wait,
+                    view: Box::new(read.view.clone()),
+                    since: read.since(),
+                    span: ReadSpan::Live,
+                })
             })
             .collect();
         // Commits, their chunk pushes and chunk requests a full queue held
@@ -6132,7 +6254,7 @@ impl Db {
             !matches!(
                 m,
                 SyncMessage::Read {
-                    span: ReadSpan::Live { .. },
+                    span: ReadSpan::Live,
                     ..
                 } | SyncMessage::Join { .. }
                     | SyncMessage::ResendWhole { .. }
@@ -6181,7 +6303,25 @@ impl Db {
         client
             .outbox
             .retain(|m| !matches!(m, SyncMessage::Read { id, .. } if relayed.contains(id)));
-        client.outbox.extend(reask);
+        // Re-read checkpoints: cache eviction since the original request
+        // can invalidate a relayed request's previously chosen floor.
+        for mut ask in reask {
+            if let SyncMessage::Read {
+                id,
+                query,
+                binding,
+                include_deleted,
+                view,
+                since,
+                span: ReadSpan::Once { at },
+                ..
+            } = &mut ask
+            {
+                *since = inner.register_once_read(*id, query, binding, *include_deleted, view, at);
+            }
+            inner.client.as_mut().expect("client").outbox.push(ask);
+        }
+        let client = inner.client.as_mut().expect("client");
         // Sent-but-unsettled commits go first, in their original order.
         let mut resend = client.sent.clone();
         resend.append(&mut client.unsent);
@@ -6739,7 +6879,12 @@ impl Inner {
     ) {
         let key = remote_key(&query, binding, include_deleted, &view, reach);
         let client = self.client.as_mut().expect("client");
-        if let Some(remote) = client.remote.get_mut(&key) {
+        if let Some(id) = client.live_reads.get(&key) {
+            let remote = client
+                .reads
+                .get_mut(id)
+                .and_then(ActiveRead::live_mut)
+                .expect("live read");
             remote.refs += 1;
             let flags = (
                 remote.answered.clone(),
@@ -6758,41 +6903,33 @@ impl Inner {
                 .or_else(|| client.uncatalogued.clone()),
         ));
         let global = Rc::new(StdCell::new(false));
-        let author = self.identity.author;
-        let watermark = watermark_key(&query, binding, include_deleted, &view, author);
-        // A replica that cannot read its watermark opens the query fresh.
-        let through = self.watermark(&watermark).ok().flatten();
-        let client = self.client.as_mut().expect("client");
-        client.outbox.push(SyncMessage::Read {
-            id,
-            query: Box::new(query.clone()),
-            binding: binding.clone(),
+        let read = self.active_read(
+            query,
+            binding.clone(),
             include_deleted,
-            tier: reach.tier,
-            wait: reach.wait,
-            view: Box::new(view.clone()),
-            span: ReadSpan::Live {
-                since: through.map_or_else(Vec::new, |(by, seq)| positions(by, seq)),
-            },
-        });
-        client.remote.insert(
-            key.clone(),
-            Remote {
-                id,
+            view,
+            ReadLifetime::Live(LiveRead {
                 refs: 1,
-                query,
-                binding: binding.clone(),
-                include_deleted,
-                view,
                 reach,
                 answered: answered.clone(),
                 refused: refused.clone(),
                 global: global.clone(),
-                through,
-                watermark,
-            },
+            }),
         );
-        client.remote_ids.insert(id, key.clone());
+        let client = self.client.as_mut().expect("client");
+        client.outbox.push(SyncMessage::Read {
+            id,
+            query: Box::new(read.query.clone()),
+            binding: read.binding.clone(),
+            include_deleted,
+            tier: reach.tier,
+            wait: reach.wait,
+            view: Box::new(read.view.clone()),
+            since: read.since(),
+            span: ReadSpan::Live,
+        });
+        client.reads.insert(id, read);
+        client.live_reads.insert(key.clone(), id);
         (key, (answered, refused, global))
     }
 
@@ -6802,14 +6939,18 @@ impl Inner {
         let Some(client) = self.client.as_mut() else {
             return;
         };
-        let Some(remote) = client.remote.get_mut(key) else {
+        let Some(&id) = client.live_reads.get(key) else {
             return;
         };
-        remote.refs -= 1;
-        if remote.refs == 0 {
-            let id = remote.id;
-            client.remote.remove(key);
-            client.remote_ids.remove(&id);
+        let live = client
+            .reads
+            .get_mut(&id)
+            .and_then(ActiveRead::live_mut)
+            .expect("live read");
+        live.refs -= 1;
+        if live.refs == 0 {
+            client.live_reads.remove(key);
+            client.reads.remove(&id);
             client.outbox.push(SyncMessage::Unsubscribe { id });
         }
     }
@@ -6884,7 +7025,7 @@ impl Db {
             Some(at) => positions(self.inner.borrow().node_of(at.n)?, at.seq),
             None => Vec::new(),
         };
-        let message = |id: u64| SyncMessage::Read {
+        let message = |id: u64, since: Positions| SyncMessage::Read {
             id,
             query: Box::new(remote_query(&prepared.query).into_owned()),
             binding: prepared.binding.clone(),
@@ -6892,48 +7033,72 @@ impl Db {
             tier,
             wait: reach.wait,
             view: Box::new(view.clone()),
+            since,
             span: ReadSpan::Once { at: at.clone() },
         };
         // The request in flight, and the connection it went out on.
-        let mut asked: Option<(u64, u64)> = None;
+        let mut request = PendingFetch {
+            db: self,
+            asked: None,
+        };
         let answer = poll_fn(|_| {
             let mut inner = self.inner.borrow_mut();
             let answerable = answerable(&inner);
             let client = inner.client.as_mut().expect("client");
-            if let Some((id, _)) = asked
+            if let Some((id, _)) = request.asked
                 && let Some(Some(_)) = client.answers.get(&id)
             {
                 let answer = client.answers.remove(&id).flatten().expect("answered");
                 return Poll::Ready(answer.map(Some));
             }
+            // A non-strict read falls back to local data if its request
+            // belonged to a replaced link, even if it missed the disconnect.
+            if !strict
+                && request
+                    .asked
+                    .is_some_and(|(_, connection)| connection != client.connection)
+            {
+                return Poll::Ready(Ok(None));
+            }
             let ask = if strict {
                 client.transport.is_some()
-                    && asked.is_none_or(|(_, connection)| connection != client.connection)
+                    && request
+                        .asked
+                        .is_none_or(|(_, connection)| connection != client.connection)
             } else {
-                asked.is_none()
+                request.asked.is_none()
             };
             if ask {
-                if let Some((id, _)) = asked {
-                    client.answers.remove(&id);
+                if let Some((id, _)) = request.asked {
+                    client.forget_once(id);
                 }
                 let id = client.next_id;
                 client.next_id += 1;
                 client.answers.insert(id, None);
-                client.outbox.push(message(id));
-                asked = Some((id, client.connection));
+                let connection = client.connection;
+                let query = remote_query(&prepared.query).into_owned();
+                let since = inner.register_once_read(
+                    id,
+                    &query,
+                    &prepared.binding,
+                    include_deleted,
+                    view,
+                    &at,
+                );
+                inner
+                    .client
+                    .as_mut()
+                    .expect("client")
+                    .outbox
+                    .push(message(id, since));
+                request.asked = Some((id, connection));
             }
-            let forget = |client: &mut Client| {
-                if let Some((id, _)) = asked {
-                    client.answers.remove(&id);
-                }
-            };
+            let client = inner.client.as_mut().expect("client");
             if (!strict && !answerable) || deadline.is_some_and(|d| Instant::now() >= d) {
-                forget(client);
                 return Poll::Ready(Ok(None));
             }
             if let Some(expired) = coverage {
                 if client.unadmitted {
-                    forget(client);
                     return Poll::Ready(Err(Error::new(
                         ErrorCode::Schema,
                         "schema version is awaiting published catalogue admission; \
@@ -6941,7 +7106,6 @@ impl Db {
                     )));
                 }
                 if expired() {
-                    forget(client);
                     return Poll::Ready(Err(Error::new(
                         ErrorCode::NotObserved,
                         "Timed out waiting for query coverage",
@@ -6954,19 +7118,9 @@ impl Db {
         // A current answer lists its result's rows: cached rows the
         // replica's settled view of it holds and the answer lacks lost their
         // listing (INV-SYNC-14), though no subscription saw them leave.
-        let Some((through, listed)) = answer else {
+        let Some((through, _listed)) = answer else {
             return Ok(None);
         };
-        if at.is_empty() {
-            self.evict_unanswered(
-                prepared.query.clone(),
-                prepared.binding.clone(),
-                include_deleted,
-                view,
-                &listed,
-                through.seq,
-            )?;
-        }
         Ok(Some(through))
     }
 
@@ -7082,6 +7236,36 @@ impl Db {
             self.wait_for_transaction(tx, tier).await?;
         }
         Ok(())
+    }
+
+    /// One-shot read records, answer slots, and queued one-shot requests.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn pending_once_state_for_test(&self) -> (usize, usize, usize) {
+        let inner = self.inner.borrow();
+        let Some(client) = inner.client.as_ref() else {
+            return (0, 0, 0);
+        };
+        (
+            client
+                .reads
+                .values()
+                .filter(|read| read.live().is_none())
+                .count(),
+            client.answers.len(),
+            client
+                .outbox
+                .iter()
+                .filter(|message| {
+                    matches!(
+                        message,
+                        SyncMessage::Read {
+                            span: ReadSpan::Once { .. },
+                            ..
+                        }
+                    )
+                })
+                .count(),
+        )
     }
 
     /// How many local commits await the upstream's verdict: committed here
@@ -7496,41 +7680,56 @@ impl Db {
                         let (by, through) = required_position(&through, "a settlement")?;
                         let at = inner.learn_known(through, by)?;
                         let client = inner.client.as_mut().expect("client");
-                        // A one-shot read's answer, at the position its
-                        // server counted.
+                        let resumable = client.whole.is_empty();
+                        let mut live_watermark = None;
+                        let mut once = false;
+                        if let Some(read) = client.reads.get_mut(&id) {
+                            let (listed, save_after) = match &mut read.lifetime {
+                                ReadLifetime::Once { historical } => {
+                                    once = true;
+                                    (
+                                        (!*historical).then(|| members.clone().unwrap_or_default()),
+                                        global && by.is_none(),
+                                    )
+                                }
+                                ReadLifetime::Live(live) => {
+                                    live.answered.set(true);
+                                    live.global.set(global);
+                                    if resumable {
+                                        read.through = Some((by, through));
+                                        client.forgotten = false;
+                                        live_watermark = read.watermark;
+                                    }
+                                    (members.clone(), false)
+                                }
+                            };
+                            if let Some(listed) = listed {
+                                answered_remotes.push((
+                                    read.query.clone(),
+                                    read.binding.clone(),
+                                    read.include_deleted,
+                                    read.view.clone(),
+                                    listed,
+                                    through,
+                                    if save_after {
+                                        read.watermark.map(|key| (key, by))
+                                    } else {
+                                        None
+                                    },
+                                ));
+                            }
+                        }
+                        if once {
+                            client.reads.remove(&id);
+                        }
                         if let Some(slot) = client.answers.get_mut(&id) {
                             *slot = Some(Ok((at, members.unwrap_or_default())));
                             client.relay_ready |=
                                 client.relayed_fetches.iter().any(|f| f.upstream == id);
-                            continue;
                         }
-                        let Some(key) = client.remote_ids.get(&id).cloned() else {
-                            continue;
-                        };
-                        let remote = client.remote.get_mut(&key).expect("remote");
-                        remote.answered.set(true);
-                        remote.global.set(global);
-                        // A row owed whole is stale here: this store does
-                        // not hold the result as of `through`.
-                        let resumable = client.whole.is_empty();
-                        if resumable {
-                            remote.through = Some((by, through));
-                            client.forgotten = false;
-                        }
-                        let watermark = remote.watermark;
-                        // Cached rows the server's result lacks are stale.
-                        if let Some(ids) = members {
-                            answered_remotes.push((
-                                remote.query.clone(),
-                                remote.binding.clone(),
-                                remote.include_deleted,
-                                remote.view.clone(),
-                                ids,
-                                through,
-                            ));
-                        }
-                        // In the tick's savepoint, with the rows it settles.
-                        if resumable {
+                        // Live checkpoints retain their existing savepoint ordering:
+                        // a subsequent membership eviction can invalidate them.
+                        if let Some(watermark) = live_watermark {
                             inner.store_watermark(&watermark, by, through)?;
                         }
                     }
@@ -7546,13 +7745,20 @@ impl Db {
                     }
                     SyncMessage::Refused { id, code, message } => {
                         let client = inner.client.as_mut().expect("client");
+                        if client
+                            .reads
+                            .get(&id)
+                            .is_some_and(|read| read.live().is_none())
+                        {
+                            client.reads.remove(&id);
+                        }
                         let error = Error::new(code, message);
                         client.relay_ready |=
                             client.relayed_fetches.iter().any(|f| f.upstream == id);
                         if let Some(slot) = client.answers.get_mut(&id) {
                             *slot = Some(Err(error));
-                        } else if let Some(key) = client.remote_ids.get(&id)
-                            && let Some(remote) = client.remote.get(key)
+                        } else if let Some(remote) =
+                            client.reads.get(&id).and_then(ActiveRead::live)
                         {
                             *remote.refused.borrow_mut() = Some(error);
                         }
@@ -7728,11 +7934,11 @@ impl Db {
                                 else {
                                     continue;
                                 };
-                                // A refused commit's rows go back to the
-                                // session as this store reverts them.
-                                if fate.is_err() {
-                                    session.touched.extend(rows);
-                                }
+                                // Reconcile the writer at settlement even
+                                // without a live subscription. Acceptance may
+                                // have merged concurrent upstream changes;
+                                // refusal restores the upstream versions.
+                                session.touched.extend(rows);
                                 let outcome = match &fate {
                                     Ok(()) if accepted => {
                                         Outcome::accepted(by, landed.seq, accepted_at)
@@ -7766,8 +7972,16 @@ impl Db {
         // replica's view of that result holds and the server's lacks lost
         // their listing (INV-SYNC-14), as rows a commit took away do. A
         // resumed opening lists its result too.
-        for (query, binding, include_deleted, view, listed, through) in answered_remotes {
+        for (query, binding, include_deleted, view, listed, through, watermark) in answered_remotes
+        {
             self.evict_unanswered(query, binding, include_deleted, &view, &listed, through)?;
+            if let Some((watermark, by)) = watermark {
+                let mut inner = self.inner.borrow_mut();
+                if inner.client.as_ref().expect("client").whole.is_empty() {
+                    inner.store_watermark(&watermark, by, through)?;
+                    inner.client.as_mut().expect("client").forgotten = false;
+                }
+            }
         }
         let mut inner = self.inner.borrow_mut();
         let client = inner.client.as_mut().expect("client");
@@ -7995,7 +8209,7 @@ impl Inner {
     fn refuse_upstream(&mut self, error: Error) {
         self.detach_upstream();
         if let Some(client) = self.client.as_mut() {
-            for remote in client.remote.values() {
+            for remote in client.reads.values().filter_map(ActiveRead::live) {
                 *remote.refused.borrow_mut() = Some(error.clone());
             }
         }
@@ -8007,6 +8221,7 @@ impl Inner {
             return;
         };
         client.transport = None;
+        client.clear_once_requests();
         // What the authority deployed is known again once the next
         // upstream sends its catalogue.
         client.catalogued = false;
@@ -8016,7 +8231,7 @@ impl Inner {
         // Nothing settles at the server's tier while detached: a
         // subscription (or one opened meanwhile) is held until the next
         // upstream answers it again.
-        for remote in client.remote.values() {
+        for remote in client.reads.values().filter_map(ActiveRead::live) {
             remote.answered.set(false);
         }
     }
@@ -8028,10 +8243,12 @@ impl Inner {
             return;
         };
         let answers = &mut client.answers;
+        let reads = &mut client.reads;
         client.relayed_fetches.retain(|fetch| {
             let keep = fetch.session != index;
             if !keep {
                 answers.remove(&fetch.upstream);
+                reads.remove(&fetch.upstream);
             }
             keep
         });
@@ -9527,12 +9744,6 @@ impl Db {
                     hidden,
                 });
             }
-            // Rows the session's own commits wrote stay current for the
-            // session, in a subscription or not: its pending writes sit on
-            // them (see the fetch above).
-            for (table, row, ..) in &committed {
-                watch.hold(SESSION_OWNER, id_watch(table, *row.0.as_bytes()));
-            }
             // Superseded versions of the client's own commits land in its
             // history, while the row stays readable.
             for (table, row, key, at) in committed {
@@ -9951,7 +10162,8 @@ impl Db {
                 tier,
                 wait,
                 view,
-                span: ReadSpan::Live { since },
+                since,
+                span: ReadSpan::Live,
             } => {
                 // Refused before the read is set up, so a refused read
                 // holds nothing open.
@@ -10186,6 +10398,7 @@ impl Db {
                 tier,
                 wait,
                 view,
+                since,
                 span: ReadSpan::Once { at },
             } => {
                 // The position the read is as of, counted at this store:
@@ -10233,6 +10446,15 @@ impl Db {
                     let client = inner.client.as_mut().expect("client");
                     let upstream = client.next_id;
                     client.next_id += 1;
+                    let upstream_since = inner.register_once_read(
+                        upstream,
+                        &remote_query(&prepared.query),
+                        &prepared.binding,
+                        include_deleted,
+                        &view,
+                        &at,
+                    );
+                    let client = inner.client.as_mut().expect("client");
                     client.outbox.push(SyncMessage::Read {
                         id: upstream,
                         query: Box::new(remote_query(&prepared.query).into_owned()),
@@ -10241,6 +10463,7 @@ impl Db {
                         tier: ReadTier::Remote,
                         wait: None,
                         view: view.clone(),
+                        since: upstream_since,
                         span: ReadSpan::Once { at: at.clone() },
                     });
                 }
@@ -10250,6 +10473,15 @@ impl Db {
                     let client = inner.client.as_mut().expect("client");
                     let upstream = client.next_id;
                     client.next_id += 1;
+                    let upstream_since = inner.register_once_read(
+                        upstream,
+                        &remote_query(&prepared.query),
+                        &prepared.binding,
+                        include_deleted,
+                        &view,
+                        &at,
+                    );
+                    let client = inner.client.as_mut().expect("client");
                     client.answers.insert(upstream, None);
                     let ask = SyncMessage::Read {
                         id: upstream,
@@ -10259,6 +10491,7 @@ impl Db {
                         tier: ReadTier::Remote,
                         wait: None,
                         view: view.clone(),
+                        since: upstream_since,
                         span: ReadSpan::Once { at: at.clone() },
                     };
                     client.outbox.push(ask.clone());
@@ -10276,6 +10509,7 @@ impl Db {
                             tier,
                             wait,
                             view,
+                            since,
                             span: ReadSpan::Once { at },
                         },
                     });
@@ -10329,7 +10563,44 @@ impl Db {
                     view: viewed.view,
                     splices: Vec::new(),
                 };
+                let support = inner.support_of(&query)?;
+                let since = match single_position(&since)? {
+                    Some((by, seq)) if by == inner.served_by() => Some(seq),
+                    _ => None,
+                };
+                let resume = if at.is_empty()
+                    && matches!(opts.read_view.source, ReadViewSourceSpec::Current)
+                {
+                    since
+                        .map(|since| {
+                            inner.resume_from(
+                                &prepared,
+                                policy,
+                                &read,
+                                &support,
+                                since,
+                                prepared.request_claims.is_some(),
+                            )
+                        })
+                        .transpose()?
+                        .flatten()
+                } else {
+                    None
+                };
                 let rows = inner.run(&prepared, policy, &read)?;
+                let unchanged: HashSet<RowUuid> = rows
+                    .iter()
+                    .filter(|row| {
+                        resume.as_ref().is_some_and(|resume| {
+                            row.seq <= Pos::at(resume.since)
+                                && resume
+                                    .prior
+                                    .as_ref()
+                                    .is_none_or(|prior| prior.contains(&row.id))
+                        })
+                    })
+                    .map(|row| row.id)
+                    .collect();
                 let mut images = Vec::new();
                 // Seqs of shipped history versions, for their tx ids.
                 let mut seqs = BTreeSet::new();
@@ -10372,23 +10643,15 @@ impl Db {
                         images.extend(found[version].iter().cloned());
                     }
                 }
-                // A fetched row stays current for the rest of the session,
-                // as rows the session's own commits touch do: they back its
-                // open transactions and pending writes. Unlike a
-                // subscription's, they are not resumed after a reconnect.
-                let support = inner.support_of(&query)?;
+                // Deduplicate the supporting-row walk within this answer.
+                // These temporary watches are discarded when it settles;
+                // only live reads keep rows current beyond their answer.
                 let mut extra = Vec::new();
-                let mut watch = std::mem::take(&mut inner.sessions[index].watch);
-                let mut held = std::mem::take(&mut inner.sessions[index].held);
-                if policy.is_some() && pinned.is_none() && history.is_none() {
-                    for image in images.iter().filter(|image| image.table == table) {
-                        let row = RowUuid::from_bytes(image.id);
-                        held.keep(SESSION_OWNER, &table, row, &image.key, true);
-                    }
-                }
+                let mut watch = Watches::default();
+                let mut held = Kept::default();
                 let (mut gone, mut followed) = (Vec::new(), HashSet::new());
                 let mut follow = Follow {
-                    owner: SESSION_OWNER,
+                    owner: id,
                     identity: policy,
                     out: &mut extra,
                     watch: &mut watch,
@@ -10397,9 +10660,35 @@ impl Db {
                     followed: &mut followed,
                 };
                 for image in &images {
-                    inner.follow_support(&support, image, None, &mut follow)?;
+                    let floor = unchanged
+                        .contains(&RowUuid::from_bytes(image.id))
+                        .then(|| {
+                            resume.as_ref().map(|resume| Floor {
+                                since: resume.since,
+                                diff: resume.prior.is_some(),
+                            })
+                        })
+                        .flatten();
+                    inner.follow_support(&support, image, floor, &mut follow)?;
                 }
+                images.retain(|image| !unchanged.contains(&RowUuid::from_bytes(image.id)));
                 images.extend(extra);
+                // A dependency may have lost access since the checkpoint.
+                // Send that correction before acknowledging completeness.
+                let mut lost = Vec::new();
+                for (table, row, key) in gone {
+                    match inner.current_image(&table, row, &key)? {
+                        Some(image) if readable(&inner, &table, row, &key, policy)? => {
+                            images.push(image)
+                        }
+                        _ => lost.push(SyncMessage::AccessLost {
+                            table,
+                            id: *row.0.as_bytes(),
+                            key,
+                            hidden: false,
+                        }),
+                    }
+                }
                 // Under a branch view over a base, the head rows that mask
                 // base rows its query matches.
                 let schema = prepared
@@ -10428,12 +10717,6 @@ impl Db {
                         }
                     }
                 }
-                for image in &images {
-                    watch.hold(SESSION_OWNER, id_watch(&image.table, image.id));
-                }
-                let session = &mut inner.sessions[index];
-                session.watch = watch;
-                session.held = held;
                 let mut tx_ids = inner.tx_ids(&seqs)?;
                 tx_ids.extend(named);
                 let through = if at.is_empty() {
@@ -10443,6 +10726,7 @@ impl Db {
                 };
                 let authority = inner.client.is_none();
                 let session = &mut inner.sessions[index];
+                session.outbox.extend(lost);
                 session.outbox.extend(hidden);
                 session
                     .outbox
