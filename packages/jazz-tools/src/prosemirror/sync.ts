@@ -72,6 +72,12 @@ function remember(config: SyncConfig, markdown: string) {
   if (config.written.length > limit) config.written.shift();
 }
 
+/** Whether `tr` applied a value read from the text column, rather than a
+ * local edit. */
+export function isRemoteChange(tr: Transaction): boolean {
+  return tr.getMeta(key)?.remote === true;
+}
+
 /** The document's canonical markdown and its position map. */
 export function markdownOf(state: EditorState): MappedMarkdown {
   let mapped = mappedDocs.get(state.doc);
