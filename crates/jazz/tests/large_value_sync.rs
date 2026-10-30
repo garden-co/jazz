@@ -956,7 +956,7 @@ fn a_delta_over_a_version_the_writer_cannot_read_is_rejected() {
             ..WireWrite::Update {
                 table: "drafts".to_owned(),
                 row: *row(1).0.as_bytes(),
-                cells: [("body".to_owned(), body)].into(),
+                cells: [(common::stored(&server, "drafts", "body"), body)].into(),
                 target: WireTarget::Root,
                 at: None,
             }
@@ -971,7 +971,7 @@ fn a_delta_over_a_version_the_writer_cannot_read_is_rejected() {
             seq,
             Value::Nullable(None),
             vec![CellDelta {
-                column: "body".to_owned(),
+                column: common::stored(&server, "drafts", "body"),
                 depth: 0,
                 key: Vec::new(),
                 delta: WireDelta {
@@ -1224,8 +1224,14 @@ fn naming_a_hidden_trees_hash_reads_nothing() {
                 table: "docs".to_owned(),
                 row: *row(n).0.as_bytes(),
                 cells: [
-                    ("body".to_owned(), Value::Large(Box::new(value.clone()))),
-                    ("blob".to_owned(), Value::Bytes(Vec::new())),
+                    (
+                        common::stored(&server, "docs", "body"),
+                        Value::Large(Box::new(value.clone())),
+                    ),
+                    (
+                        common::stored(&server, "docs", "blob"),
+                        Value::Bytes(Vec::new()),
+                    ),
                 ]
                 .into(),
                 target: WireTarget::Root,
@@ -1332,7 +1338,11 @@ fn an_access_proof_the_writer_cannot_read_proves_nothing() {
             ..WireWrite::Update {
                 table: "shared".to_owned(),
                 row: *row(1).0.as_bytes(),
-                cells: [("body".to_owned(), Value::Large(Box::new(value.clone())))].into(),
+                cells: [(
+                    common::stored(&server, "shared", "body"),
+                    Value::Large(Box::new(value.clone())),
+                )]
+                .into(),
                 target: WireTarget::Root,
                 at: None,
             }
@@ -1403,8 +1413,14 @@ fn a_push_is_never_answered() {
                 table: "docs".to_owned(),
                 row: *row(n).0.as_bytes(),
                 cells: [
-                    ("body".to_owned(), Value::Large(Box::new(hidden.clone()))),
-                    ("blob".to_owned(), Value::Bytes(Vec::new())),
+                    (
+                        common::stored(&server, "docs", "body"),
+                        Value::Large(Box::new(hidden.clone())),
+                    ),
+                    (
+                        common::stored(&server, "docs", "blob"),
+                        Value::Bytes(Vec::new()),
+                    ),
                 ]
                 .into(),
                 target: WireTarget::Root,
@@ -1479,7 +1495,7 @@ fn a_delta_that_does_not_stand_in_for_a_null_cell_is_refused() {
     );
     pump(&server, &[&mallory]);
     let delta = || CellDelta {
-        column: "body".to_owned(),
+        column: common::stored(&server, "docs", "body"),
         depth: 0,
         key: Vec::new(),
         delta: WireDelta {
@@ -1496,7 +1512,7 @@ fn a_delta_that_does_not_stand_in_for_a_null_cell_is_refused() {
             ..WireWrite::Update {
                 table: "docs".to_owned(),
                 row: *row(1).0.as_bytes(),
-                cells: [("body".to_owned(), body)].into(),
+                cells: [(common::stored(&server, "docs", "body"), body)].into(),
                 target: WireTarget::Root,
                 at: None,
             }
@@ -1583,7 +1599,11 @@ fn a_merged_text_write_naming_a_hidden_tree_is_refused() {
             ..WireWrite::Update {
                 table: "merged".to_owned(),
                 row: *row(2).0.as_bytes(),
-                cells: [("body".to_owned(), Value::Large(Box::new(hidden)))].into(),
+                cells: [(
+                    common::stored(&server, "merged", "body"),
+                    Value::Large(Box::new(hidden)),
+                )]
+                .into(),
                 target: WireTarget::Root,
                 at: None,
             }

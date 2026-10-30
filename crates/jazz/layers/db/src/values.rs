@@ -904,6 +904,12 @@ pub struct Table {
     pub indexes: Vec<Vec<String>>,
     /// Branch-key columns. A row's identity is `(id, branch key)`.
     pub branch_by: Vec<String>,
+    /// The names `branch_by`'s columns are keyed by in a row's branch key,
+    /// where those are not the names `branch_by` uses: a stored view's
+    /// table keys rows by the names the app gives its branch columns, as
+    /// every version does (a branch column is never renamed). Empty
+    /// otherwise.
+    pub branch_key_names: Vec<String>,
     /// Engine-maintained provenance columns (`$createdAt`, ...): kept on
     /// every row version, readable by name, never written by the app and
     /// not part of the default projection.
@@ -1163,6 +1169,9 @@ pub struct Schema {
     /// the current schema's policies, compiled under its names (tables
     /// match by stored name; see [`crate::compile::Ctx`]).
     pub policies_from: Option<std::rc::Rc<Schema>>,
+    /// Tables and columns are named by their stored names, as writes travel
+    /// on the wire (see [`Schema::stored_view`]).
+    pub stored_names: bool,
 }
 
 impl Schema {
@@ -1243,6 +1252,7 @@ impl Schema {
                         .unwrap_or_default(),
                     indexes,
                     branch_by: table.branch_by.clone(),
+                    branch_key_names: Vec::new(),
                     provenance: provenance_columns(),
                     stored_provenance: stored_provenance_columns(),
                 },
@@ -1253,6 +1263,7 @@ impl Schema {
             jazz: jazz.clone(),
             version: jazz.version_id(),
             policies_from: None,
+            stored_names: false,
         }
     }
 
@@ -1328,6 +1339,56 @@ impl Schema {
         }
         self.policies_from = Some(current);
         self
+    }
+
+    /// `current` named by stored names, the names writes travel by: each
+    /// table and column takes its stored name, and each table also holds
+    /// the stored columns only other admitted versions name (`physical`'s,
+    /// nullable and without a default), so a write made through any
+    /// version applies without knowing which. Tables only other versions
+    /// hold are kept as stored. Governed by `current`'s policies.
+    pub fn stored_view(current: &std::rc::Rc<Schema>, physical: &Schema) -> Self {
+        let mut tables = BTreeMap::new();
+        for table in current.tables.values() {
+            let mut view = table.physical();
+            view.branch_key_names = table.branch_by.clone();
+            view.references = table
+                .references
+                .iter()
+                .map(|(column, target)| {
+                    let target = current
+                        .tables
+                        .get(target)
+                        .map_or_else(|| target.clone(), |target| target.stored.clone());
+                    (table.stored_name(column).to_owned(), target)
+                })
+                .collect();
+            if let Some(stored) = physical.tables.get(&table.stored) {
+                for column in &stored.columns {
+                    if view.columns.iter().all(|c| c.stored != column.stored) {
+                        view.columns.push(other_versions_column(column));
+                    }
+                }
+            }
+            tables.insert(view.name.clone(), view);
+        }
+        for (name, table) in &physical.tables {
+            if !tables.contains_key(name) {
+                let mut table = table.clone();
+                for column in &mut table.columns {
+                    *column = other_versions_column(column);
+                }
+                tables.insert(name.clone(), table);
+            }
+        }
+        Self {
+            tables,
+            jazz: current.jazz.clone(),
+            version: current.version,
+            policies_from: None,
+            stored_names: true,
+        }
+        .with_policies_of(current.clone())
     }
 
     /// The schema whose names this schema's policies use.
@@ -1419,6 +1480,19 @@ impl Schema {
     }
 }
 
+/// A stored column only versions other than the current one name, in
+/// [`Schema::stored_view`]: a write may leave it out whatever its type was
+/// there (its stored default fills it).
+fn other_versions_column(column: &Column) -> Column {
+    let mut column = column.clone();
+    column.name = column.stored.clone();
+    column.default = None;
+    if !column.nullable() {
+        column.ty = ValueType::Nullable(Box::new(column.ty));
+    }
+    column
+}
+
 /// Where one schema stores its tables and columns: logical table ->
 /// (stored table, logical column -> stored column).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1452,6 +1526,7 @@ impl Table {
             policies: TablePolicies::default(),
             indexes: Vec::new(),
             branch_by: Vec::new(),
+            branch_key_names: Vec::new(),
             provenance: provenance_columns(),
             stored_provenance: stored_provenance_columns(),
         }
@@ -1596,7 +1671,7 @@ impl Table {
                     value = *inner;
                 }
                 values.insert(
-                    column.clone(),
+                    self.branch_key_name(column).to_owned(),
                     crate::protocol::BranchColumnValue::from(value),
                 );
             }
@@ -1613,11 +1688,27 @@ impl Table {
                 value = *inner;
             }
             values.insert(
-                column.clone(),
+                self.branch_key_name(column).to_owned(),
                 crate::protocol::BranchColumnValue::from(value),
             );
         }
         self.normalized_branch_key(values)
+    }
+
+    /// The name branch column `column` is keyed by in a branch key.
+    fn branch_key_name<'a>(&'a self, column: &'a str) -> &'a str {
+        match self.branch_by.iter().position(|c| c == column) {
+            Some(i) => self.branch_key_names.get(i).map_or(column, String::as_str),
+            None => column,
+        }
+    }
+
+    /// The branch column keyed by `name` in a branch key.
+    fn branch_column_keyed<'a>(&'a self, name: &'a str) -> &'a str {
+        match self.branch_key_names.iter().position(|n| n == name) {
+            Some(i) => &self.branch_by[i],
+            None => name,
+        }
     }
 
     /// The branch key of these branch-column values. A branch column at its
@@ -1630,7 +1721,7 @@ impl Table {
         mut values: BTreeMap<String, crate::protocol::BranchColumnValue>,
     ) -> Vec<u8> {
         values.retain(|name, value| {
-            self.branch_default(name)
+            self.branch_default(self.branch_column_keyed(name))
                 .is_none_or(|default| *value != crate::protocol::BranchColumnValue::from(default))
         });
         branch_key(&values)

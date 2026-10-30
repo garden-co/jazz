@@ -97,3 +97,9 @@ node's code instead of a reserved local seq range), regenerated it the same
 way. It adds `_n` to every row and history table (history keyed by
 `(id, _b, _n, _seq)`), `sn` to `_jazz_transactions` and `node` to
 `_jazz_lv_via`.
+
+Naming a pending commit's tables and columns by stored names, so a commit no
+longer depends on the schema version that wrote it, dropped
+`_jazz_pending_versions` and re-encoded the pending ops and serializable reads
+(a read now names the version its query is in), which regenerated it the same
+way.

@@ -850,6 +850,10 @@ impl WireWrite {
 /// snapshot, with their server versions.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WireRead {
+    /// The schema version whose names `query` uses (the one the reading
+    /// view was in): reads stay in a version, which orders their results
+    /// and decides their lens, while writes travel by stored names.
+    pub version: [u8; 16],
     pub query: Query,
     pub binding: BTreeMap<String, Value>,
     /// The read listed deleted rows too (`includeDeleted`).
@@ -1520,10 +1524,6 @@ pub(crate) struct Client {
     unsent: Vec<SyncMessage>,
     /// Commits sent but not settled, for resending after a reconnect.
     sent: Vec<SyncMessage>,
-    /// Pending commits written under a schema version other than the
-    /// current one (before an upgrade), by tx: their ops name tables and
-    /// columns as it does, so they upload under it.
-    versions: HashMap<u64, [u8; 16]>,
     node: [u8; 16],
     connection: u64,
     fates: HashMap<u64, Result<(), Error>>,
@@ -4079,7 +4079,7 @@ impl Inner {
         let mut out = BTreeSet::new();
         for op in ops {
             let Some(row) = op.row() else { continue };
-            let table = self.schema.stored_table(op.table())?;
+            let table = op.table();
             let sql = format!(
                 "SELECT _b FROM {} WHERE id = ?1 UNION SELECT _b FROM {} WHERE {ID_AT}",
                 quote(table),
@@ -4110,7 +4110,7 @@ impl Inner {
         let mut out = BTreeSet::new();
         for op in ops {
             let Some(row) = op.row() else { continue };
-            let table = self.schema.stored_table(op.table())?;
+            let table = op.table();
             let sql = format!("SELECT _b FROM {} WHERE {ID_AT}", quote(table));
             let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
             let keys: Vec<Vec<u8>> = statement
@@ -4165,8 +4165,9 @@ impl Inner {
 /// `_jazz_pending` keeps its `Commit` with its ops and reads left out,
 /// `_jazz_pending_items` each op (with its bases, access proof and deltas) and
 /// serializable read (by [`PendingPart`]), and `_jazz_pending_rows` the
-/// local rows it wrote, and `_jazz_pending_versions` the schema version
-/// its ops name tables and columns by. Deleting a commit's `_jazz_pending`
+/// local rows it wrote. Ops name tables and columns by stored names, so a
+/// commit is the same whichever schema version wrote it or the store
+/// reopens under. Deleting a commit's `_jazz_pending`
 /// row once it settles deletes the rest with it.
 /// A row's values over the inline limit live in large-value storage, so a
 /// stored op is about the size of the row it writes, however large the
@@ -4186,11 +4187,9 @@ pub(crate) const SYNC_DDL: &str = "\
     CREATE TABLE IF NOT EXISTS _jazz_pending (tx INTEGER PRIMARY KEY, header BLOB NOT NULL);\
     CREATE TABLE IF NOT EXISTS _jazz_pending_items (tx INTEGER NOT NULL, part INTEGER NOT NULL, n INTEGER NOT NULL, item BLOB NOT NULL, PRIMARY KEY (tx, part, n));\
     CREATE TABLE IF NOT EXISTS _jazz_pending_rows (tx INTEGER NOT NULL, n INTEGER NOT NULL, tbl TEXT NOT NULL, id BLOB NOT NULL, key BLOB NOT NULL, PRIMARY KEY (tx, n));\
-    CREATE TABLE IF NOT EXISTS _jazz_pending_versions (tx INTEGER PRIMARY KEY, version BLOB NOT NULL);\
     CREATE TRIGGER IF NOT EXISTS _jazz_pending_forget AFTER DELETE ON _jazz_pending BEGIN \
      DELETE FROM _jazz_pending_items WHERE tx = OLD.tx; \
-     DELETE FROM _jazz_pending_rows WHERE tx = OLD.tx; \
-     DELETE FROM _jazz_pending_versions WHERE tx = OLD.tx; END;\
+     DELETE FROM _jazz_pending_rows WHERE tx = OLD.tx; END;\
     CREATE TABLE IF NOT EXISTS _jazz_meta (k TEXT PRIMARY KEY, v BLOB NOT NULL);\
     CREATE TABLE IF NOT EXISTS _jazz_authors (n INTEGER PRIMARY KEY, account BLOB NOT NULL, issuer TEXT NOT NULL, subject TEXT NOT NULL, UNIQUE (account, issuer, subject));\
     CREATE TABLE IF NOT EXISTS _jazz_nodes (n INTEGER PRIMARY KEY, node BLOB NOT NULL UNIQUE, author INTEGER);\
@@ -4406,8 +4405,8 @@ impl Inner {
                 continue;
             }
             let mut named = BTreeSet::new();
+            let table = op.table();
             if let Some(proof) = &op.access_proof
-                && let Ok(table) = self.schema.stored_table(op.table())
                 && let Some(image) = self.held_version(table, row, &proof.key, proof.seq)?
             {
                 named = self.large_roots(table, &image)?;
@@ -4477,13 +4476,7 @@ impl Inner {
         Ok(roots)
     }
 
-    fn persist_pending(
-        &self,
-        tx: u64,
-        commit: &SyncMessage,
-        rows: &[RowKey],
-        version: crate::ids::SchemaVersionId,
-    ) -> Result<(), Error> {
+    fn persist_pending(&self, tx: u64, commit: &SyncMessage, rows: &[RowKey]) -> Result<(), Error> {
         let SyncMessage::Commit {
             id,
             kind,
@@ -4544,13 +4537,6 @@ impl Inner {
             )
             .map_err(storage)?;
         }
-        // Which version's names its ops use (the schema view that wrote
-        // it), should the store reopen under another one before it settles.
-        self.exec(
-            "INSERT OR REPLACE INTO _jazz_pending_versions (tx, version) VALUES (?1, ?2)",
-            rusqlite::params![tx as i64, version.as_bytes().to_vec()],
-        )
-        .map_err(storage)?;
         Ok(())
     }
 
@@ -4778,27 +4764,6 @@ impl Inner {
             )
             .map_err(storage)?;
         Ok(count > 0)
-    }
-
-    /// The schema version each pending commit was written under, where
-    /// one was recorded (stores from before have none: the current one).
-    fn pending_versions(&self) -> Result<HashMap<u64, crate::ids::SchemaVersionId>, Error> {
-        let mut statement = self
-            .conn
-            .prepare("SELECT tx, version FROM _jazz_pending_versions")
-            .map_err(storage)?;
-        let rows = statement
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))
-            .map_err(storage)?;
-        let mut versions = HashMap::new();
-        for row in rows {
-            let (tx, version) = row.map_err(storage)?;
-            let version: [u8; 16] = version.try_into().map_err(|_| {
-                crate::format::unsupported("bad schema version in _jazz_pending_versions")
-            })?;
-            versions.insert(tx as u64, crate::ids::SchemaVersionId::from_bytes(version));
-        }
-        Ok(versions)
     }
 
     pub(super) fn persist_meta(&self, key: &str, value: u64) -> Result<(), Error> {
@@ -5579,7 +5544,6 @@ impl Inner {
             .collect::<Result<Vec<_>, _>>()
             .map_err(storage)?;
         drop(statement);
-        let versions = self.pending_versions()?;
         for (tx, header) in pending {
             let commit = self.pending_commit(tx, &header)?;
             let rows = self.pending_rows(tx)?;
@@ -5599,11 +5563,6 @@ impl Inner {
                 .cloned()
                 .map(from_wire)
                 .collect::<Result<Vec<_>, _>>()?;
-            // Written under an earlier version: it uploads under that one,
-            // and replays here by the current names (see `rebase`).
-            if let Some(version) = versions.get(&tx).filter(|v| **v != self.owner_version) {
-                client.versions.insert(tx, *version.as_bytes());
-            }
             if let Some(author) = acting.author().map(AuthorSubject::from_canonical) {
                 let author = author.map_err(|e| {
                     crate::format::unsupported(format_args!("a pending commit's author: {e}"))
@@ -5613,22 +5572,16 @@ impl Inner {
             }
             // Its rows as this store holds them, each at the commit's local
             // seq (the current version, or history under a later pending
-            // write), as it held them when it sent it. One written under an
-            // earlier schema version is not: the authority applied it under
-            // that version's names.
-            let expected = if client.versions.contains_key(&tx) {
-                None
-            } else {
-                let mut over = HashSet::new();
-                for row_key @ (table, row, key) in &rows {
-                    if client.pending.newest(row_key).is_some()
-                        || self.upstream_baseline(table, *row, key)?.is_some()
-                    {
-                        over.insert(row_key.clone());
-                    }
+            // write), as it held them when it sent it.
+            let mut over = HashSet::new();
+            for row_key @ (table, row, key) in &rows {
+                if client.pending.newest(row_key).is_some()
+                    || self.upstream_baseline(table, *row, key)?.is_some()
+                {
+                    over.insert(row_key.clone());
                 }
-                Some(self.expected_rows(tx, &ops, &rows, &over)?)
-            };
+            }
+            let expected = Some(self.expected_rows(tx, &ops, &rows, &over)?);
             client.pending.push(Pending {
                 tx,
                 id,
@@ -5663,14 +5616,6 @@ impl Client {
         self.pending.iter().find(|p| p.id == *id).map(|p| p.tx)
     }
 
-    /// Pending commits recorded under the current version without saying
-    /// so were written under `version`, about to stop being current.
-    pub(crate) fn keep_version(&mut self, version: [u8; 16]) {
-        for tx in self.pending.iter().map(|p| p.tx) {
-            self.versions.entry(tx).or_insert(version);
-        }
-    }
-
     /// Its host says there is no server: it is the last word on its store.
     fn no_server(&self) -> bool {
         let link = self.hint.get();
@@ -5682,7 +5627,6 @@ impl Client {
             node,
             connection: 0,
             sent: Vec::new(),
-            versions: HashMap::new(),
             transport: None,
             hint: Rc::new(StdCell::new(Link {
                 hint: RemoteLinkHint::NoServer,
@@ -6059,24 +6003,67 @@ impl Db {
     /// transaction the ops join it. It reads and writes the store, so
     /// it runs inside the commit's SQLite transaction: an error leaves the
     /// replica's sync state as it was, and the caller rolls the commit back.
-    /// `version`: the schema version whose names `ops` use (the schema
-    /// view that wrote them), which the commit uploads under.
+    /// `ops` name tables and columns as the schema the write ran under
+    /// (`Inner::schema`: the owner's, or the view's that wrote them); they
+    /// upload by stored names (see [`Inner::stored_op`]), so no schema
+    /// version travels with the commit.
     pub(crate) fn record_upload(
         &self,
         ops: Vec<StagedOp>,
         seq: u64,
         kind: Kind,
         relayed: Option<Relayed>,
-        version: crate::ids::SchemaVersionId,
+    ) -> Result<(), Error> {
+        let ops = {
+            let mut inner = self.inner.borrow_mut();
+            if inner.client.is_none() {
+                return Ok(());
+            }
+            let schema = inner.schema.clone();
+            let ops = ops
+                .into_iter()
+                .map(|op| inner.stored_op(op, &schema))
+                .collect::<Result<Vec<_>, _>>()?;
+            if inner.tx.is_some() {
+                inner.capture.extend(ops);
+                return Ok(());
+            }
+            ops
+        };
+        self.record_stored_upload(ops, seq, kind, relayed)
+    }
+
+    /// [`Db::record_upload`] of ops already named by stored names.
+    pub(crate) fn record_stored_upload(
+        &self,
+        ops: Vec<StagedOp>,
+        seq: u64,
+        kind: Kind,
+        relayed: Option<Relayed>,
     ) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
         if inner.client.is_none() {
             return Ok(());
         }
+        // Its ops are looked up by the names they travel by.
+        let view = inner.stored_view();
+        let active = std::mem::replace(&mut inner.schema, view);
+        drop(inner);
+        let recorded = self.record_upload_under_stored_view(ops, seq, kind, relayed);
+        self.inner.borrow_mut().schema = active;
+        recorded
+    }
+
+    fn record_upload_under_stored_view(
+        &self,
+        ops: Vec<StagedOp>,
+        seq: u64,
+        kind: Kind,
+        relayed: Option<Relayed>,
+    ) -> Result<(), Error> {
+        let mut inner = self.inner.borrow_mut();
         if inner.tx.is_some() {
-            inner
-                .capture
-                .extend(ops.into_iter().map(|op| (version, op)));
+            inner.capture.extend(ops);
             return Ok(());
         }
         // A read-only serializable commit still goes up: the authority
@@ -6193,7 +6180,6 @@ impl Db {
         // does not echo a row it infers is exactly this, and names it
         // `as_written` instead.
         let expected = inner.expected_rows(seq, &ops, &rows, &over)?;
-        let other = version != inner.owner_version;
         let client = inner.client.as_mut().expect("client");
         let added: Vec<RowKey> = baselines.iter().map(|(key, _)| key.clone()).collect();
         client.baselines.extend(baselines);
@@ -6227,23 +6213,13 @@ impl Db {
                     serializable,
                     ops,
                     rows: rows.clone(),
-                    // Under another version's names, this store's images
-                    // are not what the authority applies.
-                    expected: (!other).then_some(expected),
+                    expected: Some(expected),
                 });
-                // Written through a view of another version: it uploads
-                // under that one, whose names its ops use.
-                if other {
-                    client.versions.insert(seq, *version.as_bytes());
-                }
-                let persisted = inner.persist_pending(seq, &commit, &rows, version);
+                let persisted = inner.persist_pending(seq, &commit, &rows);
                 if let Err(error) = persisted {
                     let client = inner.client.as_mut().expect("client");
                     client.unsent.pop();
                     client.pending.pop();
-                    if other {
-                        client.versions.remove(&seq);
-                    }
                     for key in &added {
                         client.baselines.remove(key);
                     }
@@ -7426,7 +7402,6 @@ impl Db {
                 None => break,
             }
         }
-        let current = *inner.owner_version.as_bytes();
         let waiting = commits.split_off(pushes.len());
         let trusted = inner.identity.author == AuthorSubject::SYSTEM;
         let client = inner.client.as_mut().expect("client");
@@ -7471,30 +7446,19 @@ impl Db {
                 client.sent.push(commit.clone());
             }
         }
-        // A commit is sent under the version it was written under: the
-        // server reads its ops by that version's names. An authority keeps
-        // admitting every version it published (a server replays its
-        // catalogue on start); a commit under a version it never deployed
-        // is refused (INV-SYNC-52).
-        let mut declared = current;
+        // A commit names tables and columns by stored names, whichever
+        // version wrote it: it needs no `Schema` ahead of it. One naming
+        // what the server does not hold was written under a version it
+        // never deployed, and is refused (INV-SYNC-52).
         for (commit, (hashes, batches)) in commits.into_iter().zip(pushes) {
             if let SyncMessage::Commit { id, .. } = &commit
                 && let Some(tx) = client.local_tx(id)
+                && !hashes.is_empty()
             {
-                if !hashes.is_empty() {
-                    client.pushed.insert(tx, hashes);
-                }
-                let version = client.versions.get(&tx).copied().unwrap_or(current);
-                if version != declared {
-                    out.push(SyncMessage::Schema { version });
-                    declared = version;
-                }
+                client.pushed.insert(tx, hashes);
             }
             out.extend(batches);
             out.push(commit);
-        }
-        if declared != current {
-            out.push(SyncMessage::Schema { version: current });
         }
         out.extend(reads);
         // A full outbound queue keeps the rest, in order, for the flush its
@@ -7540,33 +7504,10 @@ impl Db {
             .iter()
             .map(|p| (p.tx, p.ops.clone()))
             .collect();
-        // Settled and refused commits no longer name a version.
-        client
-            .versions
-            .retain(|tx, _| pending.iter().any(|(pending, _)| pending == tx));
-        let versions = client.versions.clone();
         let keep: BTreeSet<(String, RowUuid, Vec<u8>)> = client
             .pending
             .iter()
             .flat_map(|p| p.rows.iter().cloned())
-            .collect();
-        // A commit written under another version replays under it while
-        // this store holds that version (a schema view): what
-        // it wrote that the current version lacks stays visible through
-        // the view. One written before an upgrade replays by the names the
-        // current version gives what it wrote.
-        let pending: Vec<(u64, Option<Rc<Schema>>, Vec<StagedOp>)> = pending
-            .into_iter()
-            .map(|(tx, ops)| match versions.get(&tx) {
-                Some(version) => {
-                    let version = crate::ids::SchemaVersionId::from_bytes(*version);
-                    match inner.governed(version) {
-                        Some(schema) => (tx, Some(schema), ops),
-                        None => (tx, None, inner.by_current_names(version, ops)),
-                    }
-                }
-                None => (tx, None, ops),
-            })
             .collect();
         for ((table, row, key), image) in &baseline {
             match image {
@@ -7578,10 +7519,14 @@ impl Db {
                 None => inner.drop_row(table, *row, key, Pos::default())?,
             }
         }
-        let active = inner.schema.clone();
-        let replayed = pending.into_iter().try_for_each(|(tx, schema, ops)| {
+        // Pending ops name tables and columns by stored names, whichever
+        // version wrote them: they replay under the stored view, so what a
+        // view wrote that the current version lacks stays visible through
+        // that view, and nothing is renamed across an upgrade.
+        let view = inner.stored_view();
+        let active = std::mem::replace(&mut inner.schema, view);
+        let replayed = pending.into_iter().try_for_each(|(tx, ops)| {
             begin_savepoint(&inner.conn, "replay")?;
-            inner.schema = schema.unwrap_or_else(|| inner.owner.clone());
             inner.merging = true;
             let replayed = ops.iter().try_for_each(|op| inner.apply(op, tx).map(drop));
             inner.merging = false;
@@ -7802,6 +7747,49 @@ impl Inner {
         self.sessions[index]
             .version
             .is_some_and(|version| !self.deployed(version))
+    }
+
+    /// Whether this store holds every stored table and column `ops`
+    /// name: otherwise they were written under a version it has not
+    /// deployed.
+    fn holds_names(&self, ops: &[WireOp]) -> bool {
+        let view = self.stored_view();
+        ops.iter().all(|op| {
+            let Ok(table) = view.table(op.table()) else {
+                return false;
+            };
+            let cells = match &op.write {
+                WireWrite::Insert { cells, .. }
+                | WireWrite::Update { cells, .. }
+                | WireWrite::Upsert { cells, .. }
+                | WireWrite::Restore {
+                    cells: Some(cells), ..
+                } => Some(cells),
+                _ => None,
+            };
+            cells.is_none_or(|cells| {
+                cells
+                    .keys()
+                    .all(|name| name.starts_with('$') || table.has_column(name))
+            })
+        })
+    }
+
+    /// `message` (about a replicated write, which names tables and
+    /// columns by stored names) with each stored name the current schema
+    /// gives another name spelled by that name, so it reads as the app's.
+    pub(crate) fn by_current_names(&self, message: &str) -> String {
+        let mut message = message.to_owned();
+        for table in self.owner.tables.values() {
+            let names = std::iter::once((&table.stored, &table.name))
+                .chain(table.columns.iter().map(|c| (&c.stored, &c.name)));
+            for (stored, name) in names {
+                if stored != name && message.contains(stored.as_str()) {
+                    message = message.replace(stored.as_str(), name);
+                }
+            }
+        }
+        message
     }
 
     /// Whether this store admitted schema `version`.
@@ -8316,7 +8304,7 @@ impl Db {
         let mut barrier = HeldWrites::default();
         while let Some(message) = inbound.pop_front() {
             if !held.is_empty() && !self.overtakes(index, &barrier, &message) {
-                self.note_held(index, &mut barrier, &message);
+                self.note_held(&mut barrier, &message);
                 held.push_back(message);
                 continue;
             }
@@ -8353,8 +8341,11 @@ impl Db {
             // that way. Once it knows every version the authority
             // deployed, its commits do not wait: they are refused
             // (INV-SYNC-52).
+            // So does a commit naming stored tables or columns it does not
+            // hold yet: a version it has not admitted wrote it.
             let refuses = matches!(message, SyncMessage::Commit { .. })
                 && self.inner.borrow().knows_deployed();
+            let unheld = matches!(&message, SyncMessage::Commit { ops, .. } if !self.inner.borrow().holds_names(ops));
             if !refuses
                 && !matches!(
                     message,
@@ -8362,7 +8353,7 @@ impl Db {
                 )
             {
                 let mut inner = self.inner.borrow_mut();
-                if inner.session_unadmitted(index) {
+                if inner.session_unadmitted(index) || unheld {
                     inbound.push_front(message);
                     held.extend(inbound);
                     // The commits it holds that way are refused now: a
@@ -8410,7 +8401,7 @@ impl Db {
                         .fetched_upstream
                         .insert(id);
                     let fetch = fetch.expect("a fetch");
-                    self.note_held(index, &mut barrier, &fetch);
+                    self.note_held(&mut barrier, &fetch);
                     held.push_back(fetch);
                 }
                 (Err(error), Some(id)) => {
@@ -8466,7 +8457,7 @@ impl Db {
     }
 
     /// Record what a message held for session `index` may change.
-    fn note_held(&self, index: usize, barrier: &mut HeldWrites, message: &SyncMessage) {
+    fn note_held(&self, barrier: &mut HeldWrites, message: &SyncMessage) {
         match message {
             SyncMessage::PushChunks { .. } | SyncMessage::ChunkRequests { .. } => {}
             SyncMessage::Read { id, .. } => {
@@ -8475,12 +8466,7 @@ impl Db {
             SyncMessage::Unsubscribe { .. } | SyncMessage::CheckAllowed { .. } => {}
             SyncMessage::Commit { ops, .. } => {
                 barrier.commits = true;
-                let schema = {
-                    let mut inner = self.inner.borrow_mut();
-                    inner
-                        .session_schema(index)
-                        .unwrap_or_else(|| inner.owner.clone())
-                };
+                let schema = self.inner.borrow().stored_view();
                 for op in ops {
                     let stored = schema.stored_table(op.table()).map(str::to_owned);
                     match (&mut barrier.tables, stored) {
@@ -9399,6 +9385,16 @@ impl Db {
         Ok(())
     }
 
+    /// A handle on this store under its stored view, which replicated
+    /// writes apply under.
+    fn stored_db(&self) -> Db {
+        let view = self.inner.borrow().stored_view();
+        Db {
+            inner: self.inner.clone(),
+            view: Some(view),
+        }
+    }
+
     fn session_db(&self, index: usize) -> Db {
         let view = self.inner.borrow_mut().session_schema(index);
         Db {
@@ -9980,13 +9976,21 @@ impl Db {
                     });
                     return Ok(());
                 }
+                // Its ops name tables and columns by stored names,
+                // whichever version wrote them: they apply under the stored
+                // view, and one naming what this store does not hold was
+                // written under a version it has not deployed.
+                let db = self.stored_db();
                 // A resend after a reconnect gets the recorded fate.
                 let known = self.inner.borrow().applied_fate(node, tx)?;
                 let resent = known.is_some();
                 // A commit written under a version this server has not
                 // deployed is refused at once, loudly: the app that wrote
                 // it was released ahead of its schema (INV-SYNC-52).
-                if known.is_none() && self.inner.borrow().session_unadmitted(index) {
+                if known.is_none()
+                    && (self.inner.borrow().session_unadmitted(index)
+                        || !self.inner.borrow().holds_names(&ops))
+                {
                     self.inner.borrow_mut().refuse_undeployed_commit(index, id);
                     return Ok(());
                 }
@@ -10044,8 +10048,14 @@ impl Db {
                             return Err(error);
                         }
                         Err((error, rows)) => {
-                            let result = Err(wire_error(&error));
                             let inner = self.inner.borrow();
+                            // Read back by the names the current schema
+                            // gives what the commit named by stored ones.
+                            let error = Error {
+                                message: inner.by_current_names(&error.message),
+                                ..error
+                            };
+                            let result = Err(wire_error(&error));
                             inner.record_fate(node, tx, &result)?;
                             inner.record_settled(node, tx, None)?;
                             (result, rows, Vec::new())
@@ -10550,13 +10560,19 @@ impl Db {
                 }
             }
             for read in reads {
+                // A read is evaluated in the version it was made in.
+                let Some(schema) =
+                    inner.governed(crate::ids::SchemaVersionId::from_bytes(read.version))
+                else {
+                    return Err((schema_version_not_deployed(), mentioned(&inner)));
+                };
                 let prepared = PreparedQuery {
                     query: read.query.clone(),
                     binding: read.binding.clone(),
                     shape: Shape([0; 16]),
                     binding_id: Binding([0; 16]),
                     request_claims: None,
-                    schema: self.view.clone(),
+                    schema: Some(schema),
                 };
                 let spec = ReadSpec {
                     include_deleted: read.include_deleted,
@@ -10691,12 +10707,11 @@ impl Db {
         // The authority keeps what each version was built on (INV-HIST-21);
         // a relay passes the bases on instead.
         let finished = if relay {
-            self.record_upload(
+            self.record_stored_upload(
                 ops.clone(),
                 seq,
                 upload,
                 Some(Relayed { origin: id, bases }),
-                self.write_version(),
             )
         } else {
             Ok(())

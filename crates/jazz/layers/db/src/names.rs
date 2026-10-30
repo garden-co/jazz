@@ -500,6 +500,44 @@ impl Names {
         !self.lens_cells.is_empty()
     }
 
+    /// The lens cells of a row a replicated insert (one by stored names,
+    /// from whichever version) writes into stored `table`, decided by the
+    /// stored columns it `given`s rather than by its writer's version: a
+    /// copy it leaves out follows a source it gives, and a dropped column
+    /// it leaves out takes the newest backwards default. As
+    /// [`Names::lens_cells`] for an insert naming every column of its
+    /// version, which a replicated one does.
+    pub(crate) fn stored_lens_cells(
+        &self,
+        table: &str,
+        given: impl Fn(&str) -> bool,
+    ) -> (Vec<(String, String)>, Vec<(String, Sql)>) {
+        let (mut copies, mut dropped) = (Vec::new(), Vec::new());
+        let mut cells: Vec<(i64, &LensCell)> = self
+            .lens_cells
+            .iter()
+            .filter(|cell| cell.table == table && !given(&cell.column))
+            .filter_map(|cell| Some((self.versions.get(&cell.since)?.0, cell)))
+            .collect();
+        cells.sort_by_key(|(since, _)| std::cmp::Reverse(*since));
+        let mut filled = BTreeSet::new();
+        for (_, cell) in cells {
+            if !filled.insert(cell.column.as_str()) {
+                continue;
+            }
+            match &cell.rule {
+                LensCellRule::Copy(source) if given(source) => {
+                    copies.push((source.clone(), cell.column.clone()));
+                }
+                LensCellRule::Dropped(default) => {
+                    dropped.push((cell.column.clone(), default.clone()));
+                }
+                LensCellRule::Copy(_) => {}
+            }
+        }
+        (copies, dropped)
+    }
+
     /// The lens cells a row admitted `version` inserts into `table` fills:
     /// (column, stored copy) for copies later versions' lenses made of its
     /// columns, and (stored column, backwards default) for columns earlier

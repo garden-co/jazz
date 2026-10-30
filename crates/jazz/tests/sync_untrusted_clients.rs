@@ -7,6 +7,8 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 
+use crate::common::stored;
+
 use jazz::db::{
     Acting, BuiltOn, Db, DbConfig, DbIdentity, DeleteOptions, ErrorCode, FileOptions,
     InsertOptions, ReadOpts, ReadTier, SyncMessage, Transport, TransportError, WireBase, WireKind,
@@ -325,7 +327,11 @@ fn a_base_on_another_identitys_commit_is_refused_whether_or_not_it_exists() {
         acting: Acting::Own,
     };
     let body = |text: &str| -> BTreeMap<String, Value> {
-        [("body".to_owned(), Value::String(text.into()))].into()
+        [(
+            stored(&server, "messages", "body"),
+            Value::String(text.into()),
+        )]
+        .into()
     };
     let (_a_client, a_server, a_up, a_down) = pipe();
     server.accept_subscriber(a_server, user(1)).unwrap();
@@ -437,7 +443,11 @@ fn an_upsert_over_a_row_deleted_in_the_same_commit_is_checked_as_an_insert() {
             WireWrite::Upsert {
                 table: "messages".to_owned(),
                 row: [7; 16],
-                cells: [("body".to_owned(), Value::String("rewritten".into()))].into(),
+                cells: [(
+                    stored(&server, "messages", "body"),
+                    Value::String("rewritten".into()),
+                )]
+                .into(),
                 target: WireTarget::Root,
                 at: None,
             }
@@ -466,7 +476,7 @@ fn the_authority_refuses_cells_that_are_not_of_their_columns_type() {
                 WireWrite::Insert {
                     table: "messages".to_owned(),
                     row: [10 + i as u8; 16],
-                    cells: [("body".to_owned(), value)].into(),
+                    cells: [(stored(&server, "messages", "body"), value)].into(),
                     target: WireTarget::Root,
                     at: None,
                 }
@@ -593,7 +603,11 @@ fn the_authority_refuses_misplaced_bases() {
         ..WireWrite::Update {
             table: "messages".to_owned(),
             row: [7; 16],
-            cells: [("body".to_owned(), Value::String(body.into()))].into(),
+            cells: [(
+                stored(&server, "messages", "body"),
+                Value::String(body.into()),
+            )]
+            .into(),
             target: WireTarget::Root,
             at: None,
         }
@@ -684,7 +698,11 @@ fn a_session_link_may_not_attribute_and_its_session_writes_are_its_own() {
             WireWrite::Insert {
                 table: "messages".to_owned(),
                 row: [row; 16],
-                cells: [("body".to_owned(), Value::String(body.to_owned()))].into(),
+                cells: [(
+                    stored(&server, "messages", "body"),
+                    Value::String(body.to_owned()),
+                )]
+                .into(),
                 target: WireTarget::Root,
                 at: None,
             }

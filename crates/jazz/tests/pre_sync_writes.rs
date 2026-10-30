@@ -396,11 +396,11 @@ fn a_client_opened_ahead_uploads_once_its_server_has_the_version() {
     assert_eq!(ids(&client), vec![1, 2]);
 }
 
-/// One commit uploads under one version: a replica refuses a transaction
-/// staged through views of different versions when it commits, and keeps
-/// none of it; one staged through a single view commits.
+/// A commit names tables and columns by stored names, so one transaction
+/// may write through views of different versions: a replica uploads it as
+/// one commit, which lands whole once the server deploys the versions.
 #[test]
-fn a_replica_refuses_a_transaction_through_views_of_different_versions() {
+fn a_replica_uploads_a_transaction_through_views_of_different_versions() {
     let dir = tempfile::tempdir().unwrap();
     let server = authority_at(v1(), &dir.path().join("server.sqlite"));
     let client = open_at(v1(), 1, &dir.path().join("client.sqlite"));
@@ -433,22 +433,11 @@ fn a_replica_refuses_a_transaction_through_views_of_different_versions() {
         row(5),
     ))
     .unwrap();
-    let error = block_on(client.commit_mergeable_handle(mixed)).unwrap_err();
-    assert!(error.message.contains("not supported"), "{}", error.message);
-    assert_eq!(ids(&client), Vec::<u8>::new());
-
-    let single = OpenTransactionId::new();
-    block_on(ahead.begin_mergeable(single)).unwrap();
-    block_on(ahead.tx_ref(single).insert(
-        "notes",
-        cells(&[("title", "v2"), ("tag", "new")]),
-        row(5),
-    ))
-    .unwrap();
-    block_on(ahead.commit_mergeable_handle(single)).unwrap();
+    let tx = block_on(client.commit_mergeable_handle(mixed)).unwrap().0;
+    assert_eq!(ids(&client), vec![4, 5]);
     block_on(server.activate_schema_with_lenses(v2(), &[lens()])).unwrap();
-    pump(&server, &[&client]);
-    assert_eq!(ids(&server), vec![5]);
+    fate(&server, &client, tx).expect("the mixed transaction lands whole");
+    assert_eq!(ids(&server), vec![4, 5]);
     assert_eq!(tag(&server, 5), some("new"));
 }
 
@@ -513,7 +502,7 @@ fn fate_by(client: &Db, tx: u64, mut pump: impl FnMut()) -> Result<(), Error> {
 }
 
 /// A `transaction` opened on the owner whose writes go through a view
-/// uploads under the view's version; one mixing versions is refused.
+/// uploads them by stored names, as does one mixing versions.
 #[test]
 fn a_transaction_uploads_under_the_version_its_writes_name() {
     let dir = tempfile::tempdir().unwrap();
@@ -532,22 +521,22 @@ fn a_transaction_uploads_under_the_version_its_writes_name() {
             .await?;
         Ok(())
     }));
-    let error = mixed.map(drop).unwrap_err();
-    assert!(error.message.contains("not supported"), "{}", error.message);
-    assert_eq!(ids(&client), Vec::<u8>::new());
+    mixed.unwrap();
+    assert_eq!(ids(&client), vec![4, 5]);
 
     block_on(client.transaction(async |_| {
         ahead
-            .insert("notes", cells(&[("title", "v2"), ("tag", "new")]), row(5))
+            .insert("notes", cells(&[("title", "v2"), ("tag", "new")]), row(6))
             .await?;
         Ok(())
     }))
     .unwrap();
     block_on(server.activate_schema_with_lenses(v2(), &[lens()])).unwrap();
     pump(&server, &[&client]);
-    assert_eq!(ids(&client), vec![5]);
-    assert_eq!(ids(&server), vec![5]);
+    assert_eq!(ids(&client), vec![4, 5, 6]);
+    assert_eq!(ids(&server), vec![4, 5, 6]);
     assert_eq!(tag(&server, 5), some("new"));
+    assert_eq!(tag(&server, 6), some("new"));
 }
 
 /// A stranded store answers no `Remote` read: its rows were never the
