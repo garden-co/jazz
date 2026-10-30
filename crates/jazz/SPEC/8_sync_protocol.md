@@ -193,7 +193,8 @@ messages at 2 MiB, the prelude included.
 
 ### 8.2 Upstream: commits
 
-A committed transaction travels as one `Commit { node, tx, kind, ops, … }`;
+A committed transaction travels as one `Commit { id, kind, ops, … }`, `id`
+its writer's transaction id `tx@node`, which it keeps at every hop;
 open transactions never ship (ch. 3, `INV-TX-2`). Each op is a write
 (`Insert`, `Update`, `Upsert`, `Delete`, `Restore`, `Move`) by the session
 schema's table and column names, which the authority resolves to stored names
@@ -229,7 +230,10 @@ The commit's other fields:
   it checks and attributes them as the link's own identity, whatever author
   they name. A session link's `Attributed` commit naming another author is
   refused.
-- `origin`: the session commit a relay uploads this one for.
+
+A link may send a commit only under a node its identity writes as (the
+first identity to send one under a node claims it); a trusted link may send
+any.
 
 A replica keeps every unsettled commit and uploads it in order on each
 connection. It is stored a row per op, not as one encoded message:
@@ -262,7 +266,7 @@ commit, and a writer's commits reach the authority in the order written
 (`INV-HIST-23`). The authority orders commits by arrival.
 
 A relay that receives a session's commit stores it as its own pending commit
-and uploads it with `origin` set. It does not decide it (`INV-TX-23`).
+and uploads it under the session's id. It does not decide it (`INV-TX-23`).
 
 #### 8.2.1 Order and read-your-writes (`INV-SYNC-49`)
 
@@ -280,7 +284,7 @@ read-your-writes end to end.
 
 ### 8.3 Fates downstream
 
-`Fate { tx, outcome, global }` answers a commit. The `outcome` is one of:
+`Fate { id, outcome, global }` answers a commit, by its id. The `outcome` is one of:
 
 - `Accepted { seq, accepted_at, as_written }`: the commit landed at server seq
   `seq`, which the replica records as where it settled; applying a fate never
@@ -343,7 +347,7 @@ the identity its link was accepted as has every row stamped otherwise, so each
 of its writes costs that fetch. Mismatches are counted per replica
 (`as_written_mismatches`); tests of honest writers assert there are none.
 
-`Stored { tx }` is durability progress from a relay to a non-durable session:
+`Stored { id }` is durability progress from a relay to a non-durable session:
 the relay holds the commit in its store and uploads it, so it is `Local` for a
 session whose own store is memory. It is never a decision: a stored commit can
 still be rejected, and a `Fate` always follows it, unlike a non-global `Fate`,

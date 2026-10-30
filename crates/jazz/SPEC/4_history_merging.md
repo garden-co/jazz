@@ -24,14 +24,14 @@ Invariant digest:
 - `INV-HIST-14`: Rejected transactions MUST NOT appear as accepted row-history entries and MUST NOT participate in currentness/domination.
 - `INV-HIST-15`: Core's post-image MUST be a deterministic function of the accepted writes in seq order: no wall clock, writer clock or other node-local state enters a merged value. Concurrent writes to different cells give the same post-image in any seq order, counter and set ops commute, and when two writes change one plain cell the one Core sequences last keeps it.
 - `INV-HIST-17`: Content and deletion history MUST remain independently immutable and independently selected; a combined current row is a derived cache over their winners and MUST be reproducible from retained histories after restart or rebuild.
-- `INV-HIST-20`: Core MUST resolve a write's base or refuse the write: a pending predecessor MUST be an older transaction of the sender's own node, otherwise Core MUST refuse the write; it never substitutes another predecessor. Core MUST NOT wait for a pending predecessor it holds no fate for (unknown there, or held as a relayed or recovered Pending unit): such a predecessor never arrives, and Core MUST reject the write as built on a rejected write. A write chained on a predecessor parked at Core for a missing schema MUST park behind it and be decided after it, for a bounded wait: once the predecessor has been parked that long, Core MUST decide the write as written, as for a predecessor that never arrives. A write built on a rejected write is rejected too (`predecessor_rejected`, §4.6).
+- `INV-HIST-20`: Core MUST resolve a write's base or refuse the write: a pending predecessor is named by its writer's transaction id, and one of the sender's own node MUST be an older transaction of it, otherwise Core MUST refuse the write; a predecessor of another node Core holds no record of MUST be refused too; it never substitutes another predecessor. Core MUST NOT wait for a pending predecessor it holds no fate for (unknown there, or held as a relayed or recovered Pending unit): such a predecessor never arrives, and Core MUST reject the write as built on a rejected write. A write chained on a predecessor parked at Core for a missing schema MUST park behind it and be decided after it, for a bounded wait: once the predecessor has been parked that long, Core MUST decide the write as written, as for a predecessor that never arrives. A write built on a rejected write is rejected too (`predecessor_rejected`, §4.6).
 - `INV-HIST-21`: Whether a write maybe conflicts MUST be derived from the row's accepted history and never stored. A write's base is the version of the row it was built on: an accepted seq, or an unsettled commit (resolved at the authority to the seq it landed at). Its writer saw every version up to a base seq, or a base commit's version and everything that version saw, down the chain. A write is maybe conflicting iff it has a base and an accepted version of the row before it is one its writer never saw; inserts and blind updates are never maybe conflicting. Its conflict analysis MUST be those missed versions whose authored columns overlap the write's. A value-merging column MUST merge a write with its base version's value only when a missed version authored that column, and otherwise keep the write's value as sent.
 - `INV-HIST-23`: One writer node's commit units MUST reach the fate authority in the order they were written, on every link, and Core MUST decide them in arrival order. The order a writer's writes were written in is their `TxId` order: a writer MUST mint a write's `TxId` when the write takes its place in the writer's order (its owner's mutation queue, which publishes one write at a time in that order), never later, so `TxId` order, local commit order, upload order and recovery's `TxId`-sorted replay agree. A writer's link MUST NOT upload a write ahead of an earlier write of the same node that it holds back (for example while a large value waits out a rate limit); other writers' uploads are not held back. A write that reaches Core after Core accepted a newer write of the same node to the same row is a protocol violation: Core MUST reject it with a `MalformedCommit` reason and MUST NOT apply it.
 - `INV-HIST-18`: A version parent MUST identify an exact prior version of the same physical table, branch key, row, and content/deletion layer; it MUST NOT encode a cross-row transaction dependency or a dependency between the content and deletion layers.
 - `INV-REF-1`: A read MUST compose its layers by one rule: the top layer holding a row supplies it whatever its stamp, each layer masks the layers below it before any predicate or relational operator, and content and deletion registers are each stacked by that rule independently.
 - `INV-REF-2`: A read's refs MUST follow its tier: `Global` reads origin alone; `Local` and `None` read the local delta over origin.
 - `INV-REF-3`: A layer narrowed by an access path MUST mask lower layers by a relation exact under that narrowing (its own rows only when one row-id prefix bounds every layer; otherwise its presence, read without the access path: the local delta's presence over origin under an index, read whole or by origin's candidates' row ids, whichever reads fewer rows; the head's presence read by the base candidates' row ids over a branch view's base), and an indexed branch-view read MUST read each content layer only under the index prefix and each deletion-register layer only for the content candidates' row ids.
-- `INV-REF-4`: No stored or sent byte MUST encode that a write's unsettled base is its writer's own: a base names an unsettled commit by its sender's id (only the sender's own may go by how far back it is), and each relay renames bases into names its upstream knows. A replica shows its pending writes over each newer settled image it receives, but a write over a pending write is built on that write alone and never claims the settled images shown under it.
+- `INV-REF-4`: No stored or sent byte MUST encode that a write's unsettled base is its writer's own: a base names an unsettled commit by its writer's id (only the sender's own may go by how far back it is), and each relay renames bases into names its upstream knows. A replica shows its pending writes over each newer settled image it receives, but a write over a pending write is built on that write alone and never claims the settled images shown under it.
 - `INV-REF-5`: A node MUST store its local ref only as the sparse delta over origin: committing, rebasing and settling a pending write MUST NOT store a copy of the origin image it overrides, and a read MUST mask origin by the delta itself.
 - `INV-TX-6`: A write MUST carry the base of the row image it was made over (§4.6). Core orders writes by its own seq, never by writer clocks: a write overrides every value accepted before it whatever its clock, and Core does not reject a write because the writer's clock is behind.
 
@@ -346,8 +346,8 @@ It is one of:
 - `Own { back }` — the writer's own newest write to the row that has no fate
   on its node yet, `back` transactions before this one: the writer saw that
   write as it sent it, and whatever that write was built on;
-- `Commit { node, tx }` — an unsettled commit by its sender's id, as a relay
-  names one of its own (below).
+- `Commit { node, tx }` — an unsettled commit by its writer's id, as a relay
+  names the commit that wrote one of its unsettled versions (below).
 
 A replica shows its pending writes over each newer settled image it
 receives, but a write over a pending write is built on that write alone
@@ -368,8 +368,9 @@ image carried `P`'s values, and applying it would bring them back. How an app
 retries such a chain is its own (`INV-HIST-21`).
 
 **Validating the base at Core.** For an incoming write `W` from node `N`
-built on a pending predecessor `P`, Core refuses the write when `P`'s node
-is not `N` or `P` is not older than `W` (`INV-HIST-20`). Core never
+built on a pending predecessor `P` of `N`, Core refuses the write when `P`
+is not older than `W`; a `P` of another node (a relay's session built on a
+version another session wrote) Core must hold a record of (`INV-HIST-20`). Core never
 substitutes another predecessor. A `Seq` base is not checked against the
 row's history: it only feeds the derived analysis, where a seq the writer
 could not have seen makes the write count as built on less, never more.
@@ -519,13 +520,14 @@ the commit's first op that writes it and its branch key, and the version it
 was built on as `BuiltOn`). A non-durable session (a worker's tab) may hold
 its relay's unsettled version of a row (stored at the relay's node, the
 position of the relay's commit that wrote it) and send it as
-`Commit { relay node, tx }`. A relay renames every base into names its
-upstream knows before it forwards the commit: an upstream seq stays; its own
-unsettled version (one of its own commits, pending or settled), the
-session's `Own` predecessor and the session's own `Commit` all become
-`Commit { relay node, tx }` of the relay's own commit that carries them, or
-the upstream seq that commit already landed at, so Core never sees a
-relay's own positions. A version at the relay's node that is no commit of
+`Commit { relay node, tx }`. A relay forwards a session's commit under the
+session's own id, and renames every base into names its upstream knows
+before it does: an upstream seq, the session's `Own` predecessor and the
+session's own `Commit` stay (Core knows the session's commits by their
+ids); its own unsettled version becomes `Commit { node, tx }` of the commit
+that wrote it (its own, or another session's it carries), or the upstream
+seq that commit already landed at, so Core never sees a relay's own
+positions. A version at the relay's node that is no commit of
 its own (one from before the relay's store was reset) cannot be named
 upstream: the write counts as built
 on the newest version of the row the relay holds accepted upstream, so it may
@@ -537,9 +539,10 @@ sender's is refused.
 Core resolves each base before it applies the commit: `Seq(S)` is the
 accepted version at `S` (not checked against the row's history: a seq the
 row never had only makes the analysis more conservative); `Own` and `Commit`
-(only of the sender's own node) are where the named commit of the sender
-landed (`_jazz_transactions`), and one Core rejected or never received rejects the
-commit (`predecessor_rejected`). It keeps, in the version the commit wrote
+are where the named commit landed (`_jazz_transactions`), and one Core
+rejected, or one of the sender's it never received, rejects the commit
+(`predecessor_rejected`); a `Commit` of another node Core never received is
+refused. It keeps, in the version the commit wrote
 (the row table and history alike), `_base`: the resolved `Seq` as is, or
 the seq the named commit landed at negated; and `_cols`, the authored stored
 columns as a bitmask over their positions in the row table (stored tables
@@ -754,14 +757,14 @@ as `[local, peer, origin]`. Merging all peers into one delta keeps the stack
 short, as a relay's overlay already does. The model leaves room for it,
 because no stored or sent byte encodes "a pending predecessor is the
 writer's own node" (`INV-REF-4`): a base names an unsettled commit by its
-sender's id (only the sender's own may go by how far back it is), and
+writer's id (only the sender's own may go by how far back it is), and
 pending history is keyed by writer. Peers would need:
 
 - per-transaction signatures, so Core can accept a write forwarded by a node
   that did not author it (SPEC 7 is not an end-to-end signature protocol);
 - grant-based sharing of pending rows, since a peer cannot evaluate read
   policy authoritatively;
-- relaxing `INV-HIST-20` to accept a foreign pending predecessor;
+- relaxing `INV-HIST-20` to wait for a foreign predecessor Core has not received;
 - push forwarding the predecessors a write contains ahead of it on the
   pusher's Core link, so link order still puts the predecessor first.
 

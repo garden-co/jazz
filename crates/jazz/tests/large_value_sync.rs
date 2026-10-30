@@ -19,10 +19,12 @@ use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::ReadViewSourceSpec;
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::records::Value;
+use jazz::time::TxTime;
 use jazz::tools::{
     CmpOp, ColumnMergeStrategy, ColumnType, Operation, PolicyExpr, PolicyValue, SchemaBuilder,
     TableName, TableSchemaBuilder,
 };
+use jazz::tx::TxId;
 
 use common::{allow_all_policies, compile_schema};
 
@@ -945,8 +947,7 @@ fn a_delta_over_a_version_the_writer_cannot_read_is_rejected() {
     );
     pump(&server, &[&mallory]);
     let update = |tx: u64, body: Value, deltas: Vec<CellDelta>| SyncMessage::Commit {
-        node: [9; 16],
-        tx,
+        id: TxId::new(TxTime(tx), NodeUuid::from_bytes([9; 16])),
         kind: WireKind::Mergeable,
         ops: vec![WireOp {
             deltas,
@@ -960,7 +961,6 @@ fn a_delta_over_a_version_the_writer_cannot_read_is_rejected() {
             .into()
         }],
         acting: Acting::Own,
-        origin: None,
     };
     // Each version the server could have written the draft at, named as a
     // base: rebuilt, the write would carry the draft's hidden body.
@@ -989,7 +989,9 @@ fn a_delta_over_a_version_the_writer_cannot_read_is_rejected() {
         .iter()
         .filter_map(|message| match message {
             SyncMessage::Fate {
-                tx,
+                id: TxId {
+                    time: TxTime(tx), ..
+                },
                 outcome:
                     Outcome::Refused {
                         error: WireError::Rejected { message, .. },
@@ -997,7 +999,12 @@ fn a_delta_over_a_version_the_writer_cannot_read_is_rejected() {
                     },
                 ..
             } => Some((*tx, message.contains("large-value delta"))),
-            SyncMessage::Fate { tx, .. } => Some((*tx, false)),
+            SyncMessage::Fate {
+                id: TxId {
+                    time: TxTime(tx), ..
+                },
+                ..
+            } => Some((*tx, false)),
             _ => None,
         })
         .collect();
@@ -1204,8 +1211,7 @@ fn naming_a_hidden_trees_hash_reads_nothing() {
     // Mallory names the draft's tree (its hashes are no secret) in a doc
     // she may write and read, pushing nothing; and a tree nobody stored.
     let insert = |tx: u64, n: u8, value: &jazz::large_values::LargeValueRef| SyncMessage::Commit {
-        node: [9; 16],
-        tx,
+        id: TxId::new(TxTime(tx), NodeUuid::from_bytes([9; 16])),
         kind: WireKind::Mergeable,
         ops: vec![
             WireWrite::Insert {
@@ -1222,7 +1228,6 @@ fn naming_a_hidden_trees_hash_reads_nothing() {
             .into(),
         ],
         acting: Acting::Own,
-        origin: None,
     };
     up.borrow_mut().push_back(insert(1, 1, &hidden));
     up.borrow_mut().push_back(insert(2, 2, &unknown));
@@ -1234,7 +1239,9 @@ fn naming_a_hidden_trees_hash_reads_nothing() {
         .iter()
         .filter_map(|message| match message {
             SyncMessage::Fate {
-                tx,
+                id: TxId {
+                    time: TxTime(tx), ..
+                },
                 outcome:
                     Outcome::Refused {
                         error: WireError::Rejected { message, .. },
@@ -1242,7 +1249,12 @@ fn naming_a_hidden_trees_hash_reads_nothing() {
                     },
                 ..
             } => Some((*tx, message.clone())),
-            SyncMessage::Fate { tx, .. } => Some((*tx, "accepted".to_owned())),
+            SyncMessage::Fate {
+                id: TxId {
+                    time: TxTime(tx), ..
+                },
+                ..
+            } => Some((*tx, "accepted".to_owned())),
             _ => None,
         })
         .collect();
@@ -1304,8 +1316,7 @@ fn an_access_proof_the_writer_cannot_read_proves_nothing() {
     // Mallory writes the secret body's tree back into the row, naming the
     // private version as her proof; then a tree nobody stored.
     let update = |tx: u64, value: &jazz::large_values::LargeValueRef| SyncMessage::Commit {
-        node: [9; 16],
-        tx,
+        id: TxId::new(TxTime(tx), NodeUuid::from_bytes([9; 16])),
         kind: WireKind::Mergeable,
         ops: vec![WireOp {
             access_proof: Some(AccessProof {
@@ -1322,7 +1333,6 @@ fn an_access_proof_the_writer_cannot_read_proves_nothing() {
             .into()
         }],
         acting: Acting::Own,
-        origin: None,
     };
     up.borrow_mut().push_back(update(1, &hidden));
     up.borrow_mut().push_back(update(2, &unknown));
@@ -1380,8 +1390,7 @@ fn a_push_is_never_answered() {
     };
     let hidden = prepared(8).value_ref;
     let insert = |tx: u64, n: u8| SyncMessage::Commit {
-        node: [9; 16],
-        tx,
+        id: TxId::new(TxTime(tx), NodeUuid::from_bytes([9; 16])),
         kind: WireKind::Mergeable,
         ops: vec![
             WireWrite::Insert {
@@ -1398,7 +1407,6 @@ fn a_push_is_never_answered() {
             .into(),
         ],
         acting: Acting::Own,
-        origin: None,
     };
     let fates = || -> Vec<bool> {
         down.borrow()
@@ -1475,8 +1483,7 @@ fn a_delta_that_does_not_stand_in_for_a_null_cell_is_refused() {
         },
     };
     let update = |tx: u64, body: Value, deltas: Vec<CellDelta>| SyncMessage::Commit {
-        node: [9; 16],
-        tx,
+        id: TxId::new(TxTime(tx), NodeUuid::from_bytes([9; 16])),
         kind: WireKind::Mergeable,
         ops: vec![WireOp {
             deltas,
@@ -1490,7 +1497,6 @@ fn a_delta_that_does_not_stand_in_for_a_null_cell_is_refused() {
             .into()
         }],
         acting: Acting::Own,
-        origin: None,
     };
     up.borrow_mut()
         .push_back(update(1, Value::Nullable(None), vec![delta(), delta()]));
@@ -1561,8 +1567,7 @@ fn a_merged_text_write_naming_a_hidden_tree_is_refused() {
     // Mallory edits the doc over its first version, which the authority
     // has to merge, naming the draft's tree as her value.
     up.borrow_mut().push_back(SyncMessage::Commit {
-        node: [9; 16],
-        tx: 1,
+        id: TxId::new(TxTime(1), NodeUuid::from_bytes([9; 16])),
         kind: WireKind::Mergeable,
         ops: vec![WireOp {
             bases: vec![WireBase {
@@ -1579,7 +1584,6 @@ fn a_merged_text_write_naming_a_hidden_tree_is_refused() {
             .into()
         }],
         acting: Acting::Own,
-        origin: None,
     });
     for _ in 0..4 {
         block_on(server.tick()).unwrap();
