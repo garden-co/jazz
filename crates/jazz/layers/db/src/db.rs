@@ -4716,7 +4716,10 @@ impl Inner {
         let logical = match inner {
             Value::String(text) => text.as_bytes(),
             Value::Bytes(bytes) => bytes.as_slice(),
-            Value::Large(large) => return self.bind_large(column, large, cells),
+            Value::Large(large) => {
+                self.refuse_latest_only_large(table)?;
+                return self.bind_large(column, large, cells);
+            }
             _ => return Self::bind_value(value),
         };
         if logical.len() <= jazz_types::large_values::INLINE_VALUE_MAX_BYTES
@@ -4724,6 +4727,7 @@ impl Inner {
         {
             return Self::bind_value(value);
         }
+        self.refuse_latest_only_large(table)?;
         let prepared = jazz_types::large_values::prepare(crate::large::kind(column), logical)
             .map_err(|e| rejected(format!("`{}`: {e}", column.name)))?;
         crate::large::store(&self.conn, &self.chunks, &prepared, self.client.is_some())?;
@@ -4732,6 +4736,20 @@ impl Inner {
             &self.chunks,
             &prepared.value_ref,
         )?))
+    }
+
+    /// A chunked value names the version it extends (a delta) or proves
+    /// access through (SPEC 19.4, 19.8), which a latest-only table drops
+    /// (SPEC 4 §4.9), so such a table holds inline values only.
+    fn refuse_latest_only_large(&self, table: &Table) -> Result<(), Error> {
+        if self.latest_only(&table.stored) {
+            return Err(unsupported(format!(
+                "a value over {} bytes in latest-only table `{}`",
+                jazz_types::large_values::INLINE_VALUE_MAX_BYTES,
+                table.name
+            )));
+        }
+        Ok(())
     }
 
     /// A chunked value written by reference: an edit's consolidated tree
@@ -5258,6 +5276,42 @@ impl Inner {
         self.exec(
             &sql,
             rusqlite::params![row.0.as_bytes().to_vec(), key, seq as i64],
+        )
+        .map_err(storage)?;
+        self.prune_history(&table.stored, row, key)
+    }
+
+    /// Whether the owner's schema keeps only the latest version of stored
+    /// table `stored` (SPEC 4 §4.9). The owner's schema decides, so on the
+    /// authority the newest deploy does.
+    pub(crate) fn latest_only(&self, stored: &str) -> bool {
+        self.owner
+            .by_stored(stored)
+            .is_some_and(|table| table.latest_only)
+    }
+
+    /// For a latest-only table, drop the row's accepted versions in history
+    /// older than its newest one there (`INV-HIST-26`). That one stays: it
+    /// is the image just superseded, which keyed fanout and a commit's
+    /// write checks read, or on a replica the settled image under its
+    /// pending writes. Versions at another node's code (unsettled) stay.
+    /// Through the history table's key, so it touches only this row.
+    pub(crate) fn prune_history(
+        &self,
+        stored: &str,
+        row: RowUuid,
+        key: &[u8],
+    ) -> Result<(), Error> {
+        if !self.latest_only(stored) {
+            return Ok(());
+        }
+        let history = quote(&format!("{stored}__h"));
+        self.exec(
+            &format!(
+                "DELETE FROM {history} WHERE id = ?1 AND _b = ?2 AND _n = 0 AND _seq < \
+                 (SELECT max(_seq) FROM {history} WHERE id = ?1 AND _b = ?2 AND _n = 0)"
+            ),
+            rusqlite::params![row.0.as_bytes().to_vec(), key],
         )
         .map_err(storage)?;
         Ok(())

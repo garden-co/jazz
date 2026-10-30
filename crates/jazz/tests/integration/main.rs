@@ -73,6 +73,8 @@ mod large_value_sync;
 mod large_value_tx_update;
 #[path = "../large_values.rs"]
 mod large_values;
+#[path = "../latest_only_tables.rs"]
+mod latest_only_tables;
 #[path = "../link_identities.rs"]
 mod link_identities;
 #[path = "../local_first_first_load_gate.rs"]
