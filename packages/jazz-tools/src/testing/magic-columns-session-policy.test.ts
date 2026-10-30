@@ -7,7 +7,7 @@ const schema = {
   notes: s.table({ title: s.string(), ownerId: s.uuid() }, {}),
 };
 type Schema = s.Schema<typeof schema>;
-const app: s.App<Schema> = s.defineApp(schema);
+const app: s.App<Schema> = s.defineApp(schema, { migrations: "none" });
 
 const sessionPolicy = definePermissions(app, ({ policy, session }) => {
   policy.notes.allowRead.where({ ownerId: session.user.account });

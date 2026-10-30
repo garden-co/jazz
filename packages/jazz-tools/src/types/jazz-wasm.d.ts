@@ -149,7 +149,7 @@ declare module "jazz-wasm" {
     /** Resolves once every commit so far is in the browser store's backing storage. */
     flush(): Promise<void>;
 
-    registerSchema(schema: Uint8Array): WasmDb;
+    registerSchema(schema: Uint8Array, migrations?: Uint8Array): WasmDb;
     captureSnapshot(): Uint8Array | PendingNativeRead;
     beginTransaction(
       openTransactionId: string,

@@ -25,7 +25,7 @@ import { hasJazzWasmBuild, loadWasmModuleForTest } from "./testing/wasm-runtime-
 // A core error crossing a native binding keeps its Rust display text as the
 // message and carries the stable core `ErrorCode` string as `code` (#3691).
 
-const app = s.defineApp({ notes: s.table({ text: s.string() }, {}) });
+const app = s.defineApp({ notes: s.table({ text: s.string() }, {}) }, { migrations: "none" });
 
 function config(label: string): Uint8Array {
   return openConfig(new Uint8Array(16).fill(31), testAuthorBytes(label), 1, true);

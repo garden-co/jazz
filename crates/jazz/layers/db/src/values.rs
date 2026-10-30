@@ -779,25 +779,6 @@ impl TagRegistry {
             })
             .collect();
     }
-
-    /// Stored table `from` (with `column`, its stored column `column.0`) is
-    /// stored as `to` (`column.1`) now: its tags follow it.
-    pub(crate) fn moved(&self, from: &str, to: &str, column: Option<(&str, &str)>) {
-        let mut map = self.map.borrow_mut();
-        let keys: Vec<(String, String)> = map
-            .keys()
-            .filter(|(table, col)| table == from && column.is_none_or(|(old, _)| col == old))
-            .cloned()
-            .collect();
-        for key in keys {
-            let tags = map.remove(&key).expect("listed");
-            let new = match column {
-                None => (to.to_owned(), key.1),
-                Some((_, new)) => (key.0, new.to_owned()),
-            };
-            map.insert(new, tags);
-        }
-    }
 }
 
 /// A [`TagRegistry`]'s entries and their tags at one point.

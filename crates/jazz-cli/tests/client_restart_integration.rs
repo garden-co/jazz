@@ -282,6 +282,7 @@ fn make_context(
         jwt_token: Some(jwt_token),
         backend_secret: None,
         admin_secret: None,
+        migrations: Default::default(),
     }
 }
 
@@ -473,6 +474,7 @@ async fn memory_storage_client_does_not_persist_local_state_to_disk_impl() {
         jwt_token: Some(make_jwt("memory-writer")),
         backend_secret: None,
         admin_secret: None,
+        migrations: Default::default(),
     };
 
     let client = connect_native(context.clone())

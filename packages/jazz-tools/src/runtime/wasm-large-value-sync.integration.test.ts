@@ -5,9 +5,12 @@ import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { createDb } from "./default-create-db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
 
-const app = s.defineApp({
-  docs: s.table({ label: s.string(), body: s.string() }, {}),
-});
+const app = s.defineApp(
+  {
+    docs: s.table({ label: s.string(), body: s.string() }, {}),
+  },
+  { migrations: "none" },
+);
 const permissions = s.definePermissions(app, ({ policy }) => {
   policy.docs.allowRead.always();
   policy.docs.allowInsert.always();

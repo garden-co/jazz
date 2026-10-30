@@ -5,7 +5,7 @@ import { computeSchemaHash, deploy } from "./catalogue.js";
 import type { DeploymentRequest } from "./catalogue-api.js";
 
 const server = { appId: "deploy-test", serverUrl: "http://localhost:1625", adminSecret: "test" };
-const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) });
+const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations: "none" });
 const reply = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 afterEach(() => vi.unstubAllGlobals());
 
@@ -67,10 +67,16 @@ it("surfaces server validation failures without retrying or publishing individua
 });
 
 it("includes historical schemas and multiple migrations in a single request", async () => {
-  const middle = s.defineApp({ notes: s.table({ title: s.string(), a: s.string() }, {}) });
-  const target = s.defineApp({
-    notes: s.table({ title: s.string(), a: s.string(), b: s.string() }, {}),
-  });
+  const middle = s.defineApp(
+    { notes: s.table({ title: s.string(), a: s.string() }, {}) },
+    { migrations: "none" },
+  );
+  const target = s.defineApp(
+    {
+      notes: s.table({ title: s.string(), a: s.string(), b: s.string() }, {}),
+    },
+    { migrations: "none" },
+  );
   const hashes = await Promise.all(
     [app, middle, target].map((app) => computeSchemaHash(app.wasmSchema)),
   );
@@ -119,7 +125,7 @@ it("includes historical schemas and multiple migrations in a single request", as
 
 it("preserves bigint and byte defaults in the deployment JSON", async () => {
   const to = { notes: s.table({ title: s.string(), count: s.bigint(), data: s.bytes() }, {}) };
-  const target = s.defineApp(to);
+  const target = s.defineApp(to, { migrations: "none" });
   const fromHash = await computeSchemaHash(app.wasmSchema);
   const migration = m.defineMigration({
     from: { notes: s.table({ title: s.string() }, {}) },

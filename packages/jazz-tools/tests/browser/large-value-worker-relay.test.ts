@@ -20,17 +20,20 @@ import {
 } from "./support.js";
 import { getJazzServerInfo } from "./testing-server.js";
 
-const app = s.defineApp({
-  values: s.table(
-    {
-      name: s.string(),
-      text: s.string().optional(),
-      bytes: s.bytes().optional(),
-      control: s.boolean(),
-    },
-    {},
-  ),
-});
+const app = s.defineApp(
+  {
+    values: s.table(
+      {
+        name: s.string(),
+        text: s.string().optional(),
+        bytes: s.bytes().optional(),
+        control: s.boolean(),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 
 const permissions = s.definePermissions(app, ({ policy }) => [
   policy.values.allowRead.always(),
@@ -43,25 +46,28 @@ const permissions = s.definePermissions(app, ({ policy }) => [
 // automatic 64 KiB promotion boundary during one user transaction which also
 // authors a referenced project. It is distinct from the streaming receipts
 // below, which each create one row in their own transaction.
-const transactionApp = s.defineApp({
-  projects: s.table(
-    {
-      name: s.string(),
-    },
-    { documentsViaProject: s.reverse("documents", "project") },
-  ),
-  documents: s
-    .table(
+const transactionApp = s.defineApp(
+  {
+    projects: s.table(
       {
-        branch: s.string(),
-        title: s.string(),
-        projectId: s.uuid(),
-        body: s.string(),
+        name: s.string(),
       },
-      { project: s.rel("projects", "projectId") },
-    )
-    .branchBy("branch"),
-});
+      { documentsViaProject: s.reverse("documents", "project") },
+    ),
+    documents: s
+      .table(
+        {
+          branch: s.string(),
+          title: s.string(),
+          projectId: s.uuid(),
+          body: s.string(),
+        },
+        { project: s.rel("projects", "projectId") },
+      )
+      .branchBy("branch"),
+  },
+  { migrations: "none" },
+);
 
 const transactionPermissions = s.definePermissions(transactionApp, ({ policy }) => [
   policy.projects.allowRead.always(),

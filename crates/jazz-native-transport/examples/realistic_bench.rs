@@ -362,6 +362,7 @@ async fn connect_client(
         jwt_token: None,
         backend_secret: None,
         admin_secret: None,
+        migrations: Default::default(),
     };
     Ok(JazzClient::connect_with_native_transport(
         context,

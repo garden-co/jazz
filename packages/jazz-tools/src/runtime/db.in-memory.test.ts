@@ -15,7 +15,7 @@ const schema = {
 };
 
 type AppSchema = s.Schema<typeof schema>;
-const app: s.App<AppSchema> = s.defineApp(schema);
+const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
 type Note = s.RowOf<typeof app.notes>;
 
 const largeValueSchema = {
@@ -30,7 +30,9 @@ const largeValueSchema = {
   ),
 };
 type LargeValueAppSchema = s.Schema<typeof largeValueSchema>;
-const largeValues: s.App<LargeValueAppSchema> = s.defineApp(largeValueSchema);
+const largeValues: s.App<LargeValueAppSchema> = s.defineApp(largeValueSchema, {
+  migrations: "none",
+});
 
 const optionalJsonSchema = {
   jobs: s.table(
@@ -42,7 +44,9 @@ const optionalJsonSchema = {
   ),
 };
 type OptionalJsonAppSchema = s.Schema<typeof optionalJsonSchema>;
-const optionalJson: s.App<OptionalJsonAppSchema> = s.defineApp(optionalJsonSchema);
+const optionalJson: s.App<OptionalJsonAppSchema> = s.defineApp(optionalJsonSchema, {
+  migrations: "none",
+});
 
 describe("createDb in-memory driver", () => {
   let db: Db | undefined;
@@ -359,12 +363,15 @@ describe("createDb in-memory driver", () => {
   });
 
   it("refuses splices on a range-selected column that a computed column makes it read whole", async () => {
-    const computedApp = s.defineApp({
-      documents: s.table(
-        { body: s.string() },
-        { preview: s.computed((row: { body: string }) => row.body.slice(0, 3)) },
-      ),
-    });
+    const computedApp = s.defineApp(
+      {
+        documents: s.table(
+          { body: s.string() },
+          { preview: s.computed((row: { body: string }) => row.body.slice(0, 3)) },
+        ),
+      },
+      { migrations: "none" },
+    );
     db = await createDb({
       ...(await localAccountConfig("in-memory-splices-whole-read-test")),
       driver: { type: "memory" },
@@ -390,10 +397,13 @@ describe("createDb in-memory driver", () => {
   });
 
   it("delivers splices for a hopped query's output rows", async () => {
-    const hopApp = s.defineApp({
-      documents: s.table({ body: s.string() }, {}),
-      links: s.table({ documentId: s.uuid() }, { document: s.rel("documents", "documentId") }),
-    });
+    const hopApp = s.defineApp(
+      {
+        documents: s.table({ body: s.string() }, {}),
+        links: s.table({ documentId: s.uuid() }, { document: s.rel("documents", "documentId") }),
+      },
+      { migrations: "none" },
+    );
     db = await createDb({
       ...(await localAccountConfig("in-memory-splices-hop-test")),
       driver: { type: "memory" },

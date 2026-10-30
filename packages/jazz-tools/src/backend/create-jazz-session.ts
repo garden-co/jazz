@@ -94,7 +94,12 @@ class NodeUserRuntimeSource extends RuntimeSource {
   ) {
     super();
   }
-  override createClient({ config, schema, onAuthFailure }: RuntimeClientContext): RuntimeClient {
+  override createClient({
+    config,
+    schema,
+    migrations,
+    onAuthFailure,
+  }: RuntimeClientContext): RuntimeClient {
     const declaredSchema = resolveSchemaSource(this.host.app);
     if (
       serializeRuntimeSchema(mergePermissionsIntoWasmSchema(declaredSchema, {})) !==
@@ -135,6 +140,7 @@ class NodeUserRuntimeSource extends RuntimeSource {
         selfSignedClientProof: selfSignedClientProofFromConfig(config, session),
         readAuthorizationHost: "client-local",
         slowQueryLog: { appId: this.host.appId, thresholdMs: this.host.slowQueryThresholdMs },
+        migrations,
       },
     );
     const context: AppContext = { ...config, schema: runtimeSchema };

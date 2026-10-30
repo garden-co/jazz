@@ -196,6 +196,38 @@ pub(crate) fn identity(namespace: [u8; 16], table: &str, column: Option<&str>) -
     uuid::Uuid::new_v5(&uuid::Uuid::from_bytes(namespace), &name)
 }
 
+/// The stored column a column named `name` starts in when `version`
+/// introduces it: `name~` and six hex digits of a hash of both, where
+/// `version` is the introducing schema's compatibility id (versions that
+/// differ only in column order, merge strategies or indexes share it, so
+/// whichever of them a store admits first names the column alike). Every
+/// store derives it alike, whatever else it admitted and in whatever order,
+/// so a replica stores a version's new columns where its authority does
+/// without asking (SPEC 10.7). A column keeps its stored column across
+/// renames and later versions; only a new lineage (a column added or
+/// retyped) starts one.
+pub(crate) fn stored_column(version: &SchemaVersionId, name: &str) -> String {
+    stored_name(b"column", version, name)
+}
+
+/// The stored table a table named `name` starts in when `version`, not
+/// the store's first, introduces it: as [`stored_column`]. The first
+/// version's tables keep their own names.
+pub(crate) fn stored_table(version: &SchemaVersionId, name: &str) -> String {
+    stored_name(b"table", version, name)
+}
+
+fn stored_name(kind: &[u8], version: &SchemaVersionId, name: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    for part in [kind, version.as_bytes(), name.as_bytes()] {
+        hasher.update(&(part.len() as u64).to_le_bytes());
+        hasher.update(part);
+    }
+    let hash = hasher.finalize();
+    let [a, b, c, ..] = *hash.as_bytes();
+    format!("{name}~{a:02x}{b:02x}{c:02x}")
+}
+
 /// A digest of where a version stores its tables and columns: equal on
 /// two stores that name it alike.
 pub(crate) fn names_digest(names: &StoredNames) -> [u8; 16] {
@@ -234,6 +266,18 @@ pub(crate) struct Names {
     /// By (stored table, stored column): an enum column's default by name,
     /// where its `ADD COLUMN` default tag is stale (`_jazz_enum_defaults`).
     enum_defaults: std::cell::RefCell<BTreeMap<(String, String), String>>,
+}
+
+/// Two lineages of a table whose derived stored names collide (one in
+/// 2^24 per pair of same-named ones): a store that holds both refuses the
+/// second, with this typed error.
+fn collision(what: String, stored: &str) -> Error {
+    Error::new(
+        ErrorCode::Schema,
+        format!(
+            "{what} would be stored as `{stored}`, which another lineage already uses: stored name collisions are not supported yet"
+        ),
+    )
 }
 
 fn schema_error(message: impl Into<String>) -> Error {
@@ -529,162 +573,6 @@ impl Names {
     /// The lens cells recorded, as an upstream sends them.
     pub(crate) fn cells(&self) -> &[LensCell] {
         &self.lens_cells
-    }
-
-    /// Stored table `from` (or, with `column`, its stored column
-    /// `column.0`) is stored as `to` (`column.1`) now: every version that
-    /// names it, and the lens cells and branch columns kept for it, follow.
-    pub(crate) fn moved(
-        &mut self,
-        conn: &Connection,
-        from: &str,
-        to: &str,
-        column: Option<(&str, &str)>,
-    ) -> Result<(), Error> {
-        in_savepoint(conn, "jazz_names", || {
-            match column {
-                None => {
-                    conn.execute(
-                        "UPDATE _jazz_names SET stored_tbl = ?2 WHERE stored_tbl = ?1",
-                        [from, to],
-                    )
-                    .map_err(storage)?;
-                }
-                Some((old, new)) => {
-                    conn.execute(
-                        "UPDATE _jazz_names SET stored_col = ?3 WHERE stored_tbl = ?1 AND stored_col = ?2",
-                        [from, old, new],
-                    )
-                    .map_err(storage)?;
-                }
-            }
-            for (ddl_table, columns) in [
-                ("_jazz_lens_cells", ["col", "src"].as_slice()),
-                ("_jazz_stored_columns", ["col"].as_slice()),
-                ("_jazz_enum_tags", ["col"].as_slice()),
-                ("_jazz_enum_defaults", ["col"].as_slice()),
-            ] {
-                // The enum catalogue exists only once a column is tagged.
-                if ddl_table.starts_with("_jazz_enum") && !table_exists(conn, ddl_table)? {
-                    continue;
-                }
-                match column {
-                    None => {
-                        conn.execute(
-                            &format!("UPDATE {ddl_table} SET tbl = ?2 WHERE tbl = ?1"),
-                            [from, to],
-                        )
-                        .map_err(storage)?;
-                    }
-                    Some((old, new)) => {
-                        for col in columns {
-                            conn.execute(
-                                &format!("UPDATE {ddl_table} SET {col} = ?3 WHERE tbl = ?1 AND {col} = ?2"),
-                                [from, old, new],
-                            )
-                            .map_err(storage)?;
-                        }
-                    }
-                }
-            }
-            Ok(())
-        })?;
-        self.tags.moved(from, to, column);
-        let table_to = if column.is_none() { to } else { from };
-        for (_, names) in self.versions.values_mut() {
-            for (stored, columns) in names.tables.values_mut() {
-                if stored != from {
-                    continue;
-                }
-                match column {
-                    None => *stored = to.to_owned(),
-                    Some((old, new)) => {
-                        for stored_column in columns.values_mut().filter(|c| *c == old) {
-                            *stored_column = new.to_owned();
-                        }
-                    }
-                }
-            }
-        }
-        for cell in &mut self.lens_cells {
-            if cell.table != from {
-                continue;
-            }
-            cell.table = table_to.to_owned();
-            if let Some((old, new)) = column {
-                if cell.column == old {
-                    cell.column = new.to_owned();
-                }
-                if let LensCellRule::Copy(source) = &mut cell.rule
-                    && source == old
-                {
-                    *source = new.to_owned();
-                }
-            }
-        }
-        self.types = std::mem::take(&mut self.types)
-            .into_iter()
-            .map(|((table, stored_column), ty)| {
-                if table != from {
-                    return ((table, stored_column), ty);
-                }
-                let stored_column = match column {
-                    Some((old, new)) if stored_column == old => new.to_owned(),
-                    _ => stored_column,
-                };
-                ((table_to.to_owned(), stored_column), ty)
-            })
-            .collect();
-        let defaults = std::mem::take(self.enum_defaults.get_mut());
-        *self.enum_defaults.get_mut() = defaults
-            .into_iter()
-            .map(|((table, stored_column), name)| {
-                if table != from {
-                    return ((table, stored_column), name);
-                }
-                let stored_column = match column {
-                    Some((old, new)) if stored_column == old => new.to_owned(),
-                    _ => stored_column,
-                };
-                ((table_to.to_owned(), stored_column), name)
-            })
-            .collect();
-        match column {
-            None => {
-                if let Some(branches) = self.branches.remove(from) {
-                    self.branches.insert(to.to_owned(), branches);
-                }
-            }
-            Some((old, new)) => {
-                if let Some(branches) = self.branches.get_mut(from)
-                    && let Some(default) = branches.remove(old)
-                {
-                    branches.insert(new.to_owned(), default);
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Store `version` under `names` instead of what this file named it
-    /// (an upstream's, which a replica mirrors), keeping its place in
-    /// admission order.
-    pub(crate) fn rename(
-        &mut self,
-        conn: &Connection,
-        version: SchemaVersionId,
-        names: StoredNames,
-    ) -> Result<(), Error> {
-        let Some((n, _)) = self.versions.get(&version).cloned() else {
-            return Ok(());
-        };
-        in_savepoint(conn, "jazz_names", || {
-            conn.execute("DELETE FROM _jazz_names WHERE n = ?1", [n])
-                .map_err(storage)?;
-            write_names(conn, n, &names)
-        })?;
-        self.versions.insert(version, (n, names));
-        Ok(())
     }
 
     /// Record `schema`'s version, names, stored columns and definition
@@ -1077,26 +965,80 @@ impl Names {
         })
     }
 
+    /// Several lenses into `schema` from versions this store admitted (a
+    /// merge of two branches) must agree on where each column comes from:
+    /// a column one lens keeps from its source and another adds, or keeps
+    /// from another stored column, would read as new through the lens
+    /// every store takes, losing the other branch's values. That is not
+    /// supported yet.
+    fn lenses_agree(&self, schema: &JazzSchema, into: &[&MigrationLens]) -> Result<(), Error> {
+        let sources: Vec<(&MigrationLens, &StoredNames, LensEffects)> = into
+            .iter()
+            .filter_map(|lens| self.get(&lens.source).map(|names| (*lens, names)))
+            .map(|(lens, names)| Ok((lens, names, LensEffects::of(lens)?)))
+            .collect::<Result<_, Error>>()?;
+        if sources.len() < 2 {
+            return Ok(());
+        }
+        for table in schema.tables() {
+            for column in &table.columns {
+                let key = (table.name.clone(), column.name.clone());
+                let lineages: BTreeSet<Option<&String>> = sources
+                    .iter()
+                    .map(|(_, names, effects)| {
+                        if effects.defaults.contains_key(&key) || effects.copies.contains_key(&key)
+                        {
+                            return None;
+                        }
+                        let from_table = effects.tables.get(&table.name).unwrap_or(&table.name);
+                        let from = effects.columns.get(&key).unwrap_or(&column.name);
+                        names
+                            .tables
+                            .get(from_table)
+                            .and_then(|(_, columns)| columns.get(from))
+                    })
+                    .collect();
+                if lineages.len() > 1 {
+                    return Err(Error::new(
+                        ErrorCode::Schema,
+                        format!(
+                            "a version whose lenses from {} versions disagree on where `{}.{}` comes from (one adds it or keeps another column) is not supported yet",
+                            sources.len(),
+                            table.name,
+                            column.name
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Where `schema` stores its tables and columns.
     ///
     /// An admitted version keeps the names it was admitted with. Otherwise a
     /// table or column takes the stored name its source has: the source of a
     /// lens into `schema` (`lenses` may name others; only lenses targeting
-    /// `schema` count) where one says it was renamed, else `base`'s table or
-    /// column of the same name, if it has the type that stored column holds
-    /// (a type changed in place makes a new column). A new table is stored
-    /// under its own name
-    /// unless another admitted version stores a differently named one there
-    /// (a rename freed the logical name, not the stored one), when it gets a
-    /// fresh suffix. A column added again without a lens, under a name an
-    /// admitted version stored in its table, continues the stored column the
-    /// last such version kept it in only if it has that column's type: its
-    /// identity is that stored column's, and only values of its type are
-    /// stored there. Any other new column gets a stored name no admitted
-    /// version uses. Where a lens from an admitted source adds a table or
-    /// column, any admitted version storing one there counts: the lens says
-    /// the source lacks it, so one dropped and added again is a new lineage
-    /// with its own default, not the data it held before.
+    /// `schema` count) where one says it was renamed, else the source's
+    /// table or column of the same name, if it has the type that stored
+    /// column holds (a type changed in place starts a new column). Of
+    /// several lenses into `schema`, the source is the smallest admitted
+    /// version, as every store picks it. Without a lens from an admitted
+    /// source, the source is `base`.
+    ///
+    /// What starts a lineage is named after `schema`'s compatibility id
+    /// (SPEC 10.7):
+    /// a new column `name~<hash>` ([`stored_column`]), a table a lens adds
+    /// `name~<hash>` ([`stored_table`]). Followed along the app's lenses,
+    /// every store derives the same names. Without a lens (a store's first
+    /// version, or one admitted without the app's lenses), a table or column
+    /// added again under a name an admitted version stored continues the
+    /// stored one the last such version kept it in, a column only if it has
+    /// that column's type; a new table otherwise keeps its own name when no
+    /// admitted version stores one there. Those names depend on what the
+    /// store admitted before, so a replica agrees with its authority on them
+    /// only through the app's lenses. Two lineages whose derived names
+    /// collide are refused ([`collision`]).
     pub(crate) fn resolve(
         &self,
         schema: &JazzSchema,
@@ -1107,8 +1049,13 @@ impl Names {
         if let Some(names) = self.get(&version) {
             return Ok(Schema::stored_as(schema, names, &self.tags));
         }
-        let into: Vec<&MigrationLens> = lenses.iter().filter(|l| l.target == version).collect();
-        // The first lens whose source this store admitted; else the base.
+        let naming = schema.compatibility_id();
+        let mut into: Vec<&MigrationLens> = lenses.iter().filter(|l| l.target == version).collect();
+        // Of several lenses into `schema`, the one from the smallest source
+        // version this store admitted, as every store picks it (see
+        // `migration_path`); else the base.
+        into.sort_by_key(|lens| lens.source);
+        self.lenses_agree(schema, &into)?;
         let lens = into
             .iter()
             .find(|lens| self.versions.contains_key(&lens.source))
@@ -1140,12 +1087,31 @@ impl Names {
                         "lens renames table `{from}` to `{name}`, but the source has no `{from}`"
                     )));
                 }
-                None => (
-                    self.fresh(name, &taken_tables, |stored, logical| {
-                        self.claims_table(stored, logical, lineage)
-                    }),
-                    None,
-                ),
+                // A table a lens adds is named after the version it adds it
+                // in, alike on every store that follows the lens. One added
+                // without a lens (a store's first version, or a version
+                // admitted without the app's lenses) continues the table the
+                // version last naming one kept it in, else keeps its name.
+                None => {
+                    let previous = (!lineage)
+                        .then(|| self.last_table_stored_as(name))
+                        .flatten()
+                        .filter(|previous| !taken_tables.contains(*previous));
+                    let plain = lens.is_none()
+                        && !taken_tables.contains(name)
+                        && !self.claims_table(name, "", true);
+                    if let Some(previous) = previous {
+                        (previous.to_owned(), None)
+                    } else if plain {
+                        (name.clone(), None)
+                    } else {
+                        let stored = stored_table(&naming, name);
+                        if taken_tables.contains(&stored) || self.claims_table(&stored, "", true) {
+                            return Err(collision(format!("table {name}"), &stored));
+                        }
+                        (stored, None)
+                    }
+                }
             };
             taken_tables.insert(stored.clone());
             let mut columns = BTreeMap::new();
@@ -1212,9 +1178,21 @@ impl Names {
                     });
                 let stored_column = match previous {
                     Some(previous) => previous.to_owned(),
-                    None => self.fresh(&column.name, &taken, |candidate, _| {
-                        self.claims_column(&stored, candidate, "", true)
-                    }),
+                    None => {
+                        let candidate = stored_column(&naming, &column.name);
+                        // Only a hash collision (one in 2^24 per pair of
+                        // same-named lineages of a table) lands here: every
+                        // store refuses the version alike.
+                        if taken.contains(&candidate)
+                            || self.claims_column(&stored, &candidate, "", true)
+                        {
+                            return Err(collision(
+                                format!("column {name}.{}", column.name),
+                                &candidate,
+                            ));
+                        }
+                        candidate
+                    }
                 };
                 taken.insert(stored_column.clone());
                 columns.insert(column.name.clone(), stored_column);
@@ -1223,23 +1201,6 @@ impl Names {
         }
         target = Schema::stored_as(schema, &names, &self.tags);
         Ok(target)
-    }
-
-    /// `name`, or `name~2`, `name~3`, ... : the first not taken here and not
-    /// claimed by another admitted version for a different logical name.
-    fn fresh(
-        &self,
-        name: &str,
-        taken: &BTreeSet<String>,
-        claimed: impl Fn(&str, &str) -> bool,
-    ) -> String {
-        let mut candidate = name.to_owned();
-        let mut n = 1;
-        while taken.contains(&candidate) || claimed(&candidate, name) {
-            n += 1;
-            candidate = format!("{name}~{n}");
-        }
-        candidate
     }
 
     /// Whether an admitted version stores a table other than `logical` (any
@@ -1251,6 +1212,16 @@ impl Names {
                 .iter()
                 .any(|(name, (s, _))| s == stored && (lineage || name != logical))
         })
+    }
+
+    /// The stored table the most recently admitted version naming a table
+    /// `logical` keeps it in.
+    fn last_table_stored_as(&self, logical: &str) -> Option<&str> {
+        self.versions
+            .values()
+            .filter_map(|(n, names)| names.tables.get(logical).map(|(stored, _)| (*n, stored)))
+            .max_by_key(|(n, _)| *n)
+            .map(|(_, stored)| stored.as_str())
     }
 
     /// The stored column the most recently admitted version naming a column
