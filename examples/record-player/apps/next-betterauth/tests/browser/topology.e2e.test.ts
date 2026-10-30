@@ -31,9 +31,12 @@ import { seedDemoLibrary } from "../../src/upload.js";
 const ctx = new TestCleanup();
 afterEach(async () => ctx.cleanup());
 
-const acknowledgementApp = s.defineApp({
-  receipts: s.table({ label: s.string() }, {}),
-});
+const acknowledgementApp = s.defineApp(
+  {
+    receipts: s.table({ label: s.string() }, {}),
+  },
+  { migrations: "none" },
+);
 const acknowledgementPermissions = s.definePermissions(acknowledgementApp, ({ policy }) => {
   policy.receipts.allowRead.always();
   policy.receipts.allowInsert.always();
@@ -42,9 +45,12 @@ const acknowledgementPermissions = s.definePermissions(acknowledgementApp, ({ po
 // Keep this intentionally separate from RecordPlayer's relational policies:
 // it is the smallest external-JWT receipt for a row routed to a recipient by
 // an application-owned canonical session user rather than by `$createdBy`.
-const recipientApp = s.defineApp({
-  invitations: s.table({ subject: s.uuid(), label: s.string() }, {}),
-});
+const recipientApp = s.defineApp(
+  {
+    invitations: s.table({ subject: s.uuid(), label: s.string() }, {}),
+  },
+  { migrations: "none" },
+);
 const recipientPermissions = s.definePermissions(recipientApp, ({ policy, session, anyOf }) => {
   policy.invitations.allowRead.where(
     anyOf([{ subject: session.user.account }, { label: "unmatched control branch" }]),
@@ -54,74 +60,77 @@ const recipientPermissions = s.definePermissions(recipientApp, ({ policy, sessio
 
 // This adds exactly the branch which distinguishes RecordPlayer from the
 // scalar control: a correlated owner path through a referenced playlist.
-const relationalRecipientApp = s.defineApp({
-  ...betterAuthSchema,
-  albums: s
-    .table(
+const relationalRecipientApp = s.defineApp(
+  {
+    ...betterAuthSchema,
+    albums: s
+      .table(
+        {
+          title: s.string(),
+          artist: s.string(),
+          cover_locator: s.string().optional(),
+          cover_image: s.bytes().optional(),
+          cover_mime: s.string().optional(),
+        },
+        { tracksViaAlbum: s.reverse("tracks", "album") },
+      )
+      .indexOnly(["title"]),
+    tracks: s
+      .table(
+        {
+          album_id: s.uuid(),
+          title: s.string(),
+          ordinal: s.int(),
+          duration_ms: s.int(),
+          audio_bytes: s.bytes().optional(),
+          audio_mime: s.string().optional(),
+          audio_byte_length: s.int().optional(),
+        },
+        {
+          album: s.rel("albums", "album_id"),
+          playlist_entriesViaTrack: s.reverse("playlist_entries", "track"),
+          playback_positionsViaTrack: s.reverse("playback_positions", "track"),
+        },
+      )
+      .indexOnly(["album_id", "ordinal"]),
+    playlists: s.table(
+      { name: s.string() },
       {
-        title: s.string(),
-        artist: s.string(),
-        cover_locator: s.string().optional(),
-        cover_image: s.bytes().optional(),
-        cover_mime: s.string().optional(),
+        playlist_entriesViaPlaylist: s.reverse("playlist_entries", "playlist"),
+        invitationsViaPlaylist: s.reverse("invitations", "playlist"),
+        playback_positionsViaPlaylist: s.reverse("playback_positions", "playlist"),
       },
-      { tracksViaAlbum: s.reverse("tracks", "album") },
-    )
-    .indexOnly(["title"]),
-  tracks: s
-    .table(
+    ),
+    playlist_entries: s
+      .table(
+        {
+          playlist_id: s.uuid(),
+          track_id: s.uuid(),
+          position: s.float(),
+        },
+        { playlist: s.rel("playlists", "playlist_id"), track: s.rel("tracks", "track_id") },
+      )
+      .indexOnly(["playlist_id", "position"]),
+    invitations: s.table(
       {
-        album_id: s.uuid(),
-        title: s.string(),
-        ordinal: s.int(),
-        duration_ms: s.int(),
-        audio_bytes: s.bytes().optional(),
-        audio_mime: s.string().optional(),
-        audio_byte_length: s.int().optional(),
+        playlist_id: s.uuid(),
+        subject: s.uuid(),
+        role: s.enum("listener", "editor"),
+        status: s.enum("pending", "accepted", "revoked"),
       },
-      {
-        album: s.rel("albums", "album_id"),
-        playlist_entriesViaTrack: s.reverse("playlist_entries", "track"),
-        playback_positionsViaTrack: s.reverse("playback_positions", "track"),
-      },
-    )
-    .indexOnly(["album_id", "ordinal"]),
-  playlists: s.table(
-    { name: s.string() },
-    {
-      playlist_entriesViaPlaylist: s.reverse("playlist_entries", "playlist"),
-      invitationsViaPlaylist: s.reverse("invitations", "playlist"),
-      playback_positionsViaPlaylist: s.reverse("playback_positions", "playlist"),
-    },
-  ),
-  playlist_entries: s
-    .table(
+      { playlist: s.rel("playlists", "playlist_id") },
+    ),
+    playback_positions: s.table(
       {
         playlist_id: s.uuid(),
         track_id: s.uuid(),
-        position: s.float(),
+        position_ms: s.int(),
       },
       { playlist: s.rel("playlists", "playlist_id"), track: s.rel("tracks", "track_id") },
-    )
-    .indexOnly(["playlist_id", "position"]),
-  invitations: s.table(
-    {
-      playlist_id: s.uuid(),
-      subject: s.uuid(),
-      role: s.enum("listener", "editor"),
-      status: s.enum("pending", "accepted", "revoked"),
-    },
-    { playlist: s.rel("playlists", "playlist_id") },
-  ),
-  playback_positions: s.table(
-    {
-      playlist_id: s.uuid(),
-      track_id: s.uuid(),
-      position_ms: s.int(),
-    },
-    { playlist: s.rel("playlists", "playlist_id"), track: s.rel("tracks", "track_id") },
-  ),
-});
+    ),
+  },
+  { migrations: "none" },
+);
 const relationalRecipientPermissions = {
   ...betterAuthPermissions,
   ...s.definePermissions(relationalRecipientApp, ({ policy, session, allOf, anyOf, allowedTo }) => {

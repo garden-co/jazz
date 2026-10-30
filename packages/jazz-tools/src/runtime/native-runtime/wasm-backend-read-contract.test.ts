@@ -6,13 +6,16 @@ import { loadWasmModuleForTest } from "../testing/wasm-runtime-test-utils.js";
 import { openConfig, queryFromTable, queryWithPredicates } from "./native-codec.js";
 import { encodeSchema } from "./schema-codec.js";
 
-const app = s.defineApp({
-  folders: s.table({ title: s.string() }, { notesViaFolder: s.reverse("notes", "folder") }),
-  notes: s.table(
-    { text: s.string(), folderId: s.uuid() },
-    { folder: s.rel("folders", "folderId") },
-  ),
-});
+const app = s.defineApp(
+  {
+    folders: s.table({ title: s.string() }, { notesViaFolder: s.reverse("notes", "folder") }),
+    notes: s.table(
+      { text: s.string(), folderId: s.uuid() },
+      { folder: s.rel("folders", "folderId") },
+    ),
+  },
+  { migrations: "none" },
+);
 
 describe("WASM backend read capability parity", () => {
   for (const backend of [false, true]) {

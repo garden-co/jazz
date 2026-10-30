@@ -115,9 +115,12 @@ describe("startLocalJazzServer via JazzServer", () => {
     "boots a client with app, query, and raw schema sources",
     async () => {
       globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
-      const app = s.defineApp({
-        todos: s.table({ title: s.string(), done: s.boolean() }, {}),
-      });
+      const app = s.defineApp(
+        {
+          todos: s.table({ title: s.string(), done: s.boolean() }, {}),
+        },
+        { migrations: "none" },
+      );
       const permissions = s.definePermissions(app, ({ policy }) => {
         policy.todos.allowRead.always();
         policy.todos.allowInsert.always();

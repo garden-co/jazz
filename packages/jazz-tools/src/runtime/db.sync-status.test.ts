@@ -8,7 +8,7 @@ import type { SyncStatus } from "./sync-status.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 
-const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) });
+const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations: "none" });
 
 /** Resolve with the first status `matches` accepts, now or after a change. */
 function statusWhere(db: Db, matches: (status: SyncStatus) => boolean): Promise<SyncStatus> {

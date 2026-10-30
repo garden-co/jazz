@@ -80,6 +80,7 @@ struct OpenDbConfigFixture {
     row_id_seed: Option<u64>,
     history_complete: bool,
     initial_sync_flush_every: Option<u32>,
+    migrations: Option<Vec<u8>>,
     system_node: Option<NodeUuid>,
 }
 
@@ -113,6 +114,7 @@ fn fixture_db() -> WasmDb {
         row_id_seed: Some(51),
         history_complete: false,
         initial_sync_flush_every: None,
+        migrations: None,
         system_node: None,
     };
     WasmDb::open_memory(
@@ -163,6 +165,7 @@ async fn self_signed_subscriber_admission_requires_the_exact_proof() {
         row_id_seed: Some(53),
         history_complete: false,
         initial_sync_flush_every: None,
+        migrations: None,
         system_node: None,
     };
     let db = WasmDb::open_memory_with_self_signed_proof(

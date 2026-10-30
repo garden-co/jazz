@@ -741,7 +741,8 @@ impl JazzClient {
         let core_schema = crate::schema::JazzSchema::new(&context.schema)
             .map_err(|error| JazzError::Schema(error.to_string()))?;
         let identity = core_identity(&context, client_id(&context)?, default_session.as_ref())?;
-        let config = DbConfig::new(core_schema, identity);
+        let mut config = DbConfig::new(core_schema, identity);
+        config.migrations = context.migrations.clone();
         let db = match context.storage {
             ClientStorage::Memory => Db::open(config).await,
             ClientStorage::Persistent => {

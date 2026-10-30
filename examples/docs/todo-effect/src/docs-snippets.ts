@@ -224,10 +224,13 @@ export const readProjectsWithTodos = Effect.gen(function* () {
 // #endregion reading-reverse-relation-effect
 
 // #region reading-require-includes-effect
-const requiredReferences = s.defineApp({
-  customers: s.table({ name: s.string() }, { orders: s.reverse("orders", "customer") }),
-  orders: s.table({ customerId: s.uuid() }, { customer: s.rel("customers", "customerId") }),
-});
+const requiredReferences = s.defineApp(
+  {
+    customers: s.table({ name: s.string() }, { orders: s.reverse("orders", "customer") }),
+    orders: s.table({ customerId: s.uuid() }, { customer: s.rel("customers", "customerId") }),
+  },
+  { migrations: "none" },
+);
 
 export const readOrdersWithRequiredCustomer = Effect.gen(function* () {
   const jazz = yield* Jazz;

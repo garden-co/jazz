@@ -11,7 +11,10 @@ import {
 } from "./testing/napi-runtime-test-utils.js";
 import { createWasmRuntime, hasJazzWasmBuild } from "./testing/wasm-runtime-test-utils.js";
 
-const app = s.defineApp({ rooms: s.table({ title: s.string(), code: s.string() }, {}) });
+const app = s.defineApp(
+  { rooms: s.table({ title: s.string(), code: s.string() }, {}) },
+  { migrations: "none" },
+);
 
 it("pins windowed UNION labels while retaining the legacy unmodified label", () => {
   const seeds = [

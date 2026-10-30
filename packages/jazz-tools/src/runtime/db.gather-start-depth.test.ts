@@ -9,17 +9,20 @@ import { deploy, startLocalJazzServer } from "../testing/index.js";
 
 // garden-co/jazz#3778: `gather` honours `start` and `maxDepth` for a backend
 // client and for a user client whose rows are behind a read policy.
-const app = s.defineApp({
-  todos: s.table(
-    {
-      title: s.string(),
-      done: s.boolean(),
-      owner: s.uuid(),
-      parent_id: s.uuid().optional(),
-    },
-    { parent: s.rel("todos", "parent_id") },
-  ),
-});
+const app = s.defineApp(
+  {
+    todos: s.table(
+      {
+        title: s.string(),
+        done: s.boolean(),
+        owner: s.uuid(),
+        parent_id: s.uuid().optional(),
+      },
+      { parent: s.rel("todos", "parent_id") },
+    ),
+  },
+  { migrations: "none" },
+);
 const permissions = definePermissions(app, ({ policy, session }) => {
   policy.todos.allowRead.where({ owner: session.user.account });
   policy.todos.allowInsert.where({ owner: session.user.account });

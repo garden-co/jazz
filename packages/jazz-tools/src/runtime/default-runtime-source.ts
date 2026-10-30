@@ -1,3 +1,4 @@
+import type { ClientMigrations } from "./client-migrations.js";
 import { JazzClient, type ConnectRuntimeOptions } from "./client.js";
 import { loadWasmModule, type WasmModule } from "./wasm-loader.js";
 import type { AppContext } from "./context.js";
@@ -180,6 +181,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
   override createClient({
     config,
     schema,
+    migrations,
     onAuthFailure,
     foregroundNodeLease,
   }: RuntimeClientContext<DbConfig>): JazzClient {
@@ -208,6 +210,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       selfSignedClientProof,
       backendMode,
       { appId: config.appId, thresholdMs: config.slowQueryThresholdMs },
+      migrations,
     );
     if (browserMode) {
       mainThreadPeerRuntime.setNonDurableClient();
@@ -309,6 +312,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         author,
         selfSignedClientProof,
         initialSyncFlushEvery: initialSyncFlushEvery(config),
+        migrations: runtime.migrations,
         appId: config.appId,
         slowQueryThresholdMs: config.slowQueryThresholdMs,
         storageOwner: createBrowserStorageOwner(config),
@@ -373,6 +377,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     selfSignedClientProof?: NativeSelfSignedClientProof,
     backendMode = false,
     slowQueryLog?: SlowQueryLogOptions,
+    migrations?: ClientMigrations,
   ): NativeRuntimeAdapter {
     if (!this.ownerRuntime || this.ownerRuntime.isClosed()) {
       this.ownerRuntime = new NativeRuntimeAdapter(
@@ -382,13 +387,19 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         author,
         1,
         historyComplete,
-        { initialSyncFlushEvery: flushEvery, selfSignedClientProof, backendMode, slowQueryLog },
+        {
+          initialSyncFlushEvery: flushEvery,
+          selfSignedClientProof,
+          backendMode,
+          slowQueryLog,
+          migrations,
+        },
       );
       return this.ownerRuntime;
     }
     return Object.keys(schema).length === 0
       ? this.ownerRuntime
-      : this.ownerRuntime.registerSchemaView(schema);
+      : this.ownerRuntime.registerSchemaView(schema, migrations);
   }
 
   override installTelemetry({

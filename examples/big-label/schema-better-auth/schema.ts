@@ -71,7 +71,7 @@ export const schema = {
   ),
 };
 
-const authApp = s.defineApp(schema);
+const authApp = s.defineApp(schema, { migrations: "none" });
 
 export const permissions = s.definePermissions(authApp, ({ policy }) => {
   policy.better_auth_user.allowRead.never();

@@ -1,5 +1,6 @@
 // #region schema-vue
 import { schema as s } from "jazz-tools";
+import { migrations } from "./migrations";
 
 const schema = {
   projects: s.table(
@@ -25,5 +26,5 @@ const schema = {
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema);
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
 // #endregion schema-vue

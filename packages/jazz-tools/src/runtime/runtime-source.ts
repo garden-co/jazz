@@ -1,3 +1,4 @@
+import type { ClientMigrations } from "./client-migrations.js";
 import type { RemoteLinkState } from "./remote-link-state.js";
 import type { LinkStatus } from "./sync-status.js";
 import type { WasmSchema } from "../drivers/types.js";
@@ -15,6 +16,8 @@ export interface RuntimeTokenOptions {
 export interface RuntimeClientContext<RuntimeConfig extends DbConfig = DbConfig> {
   config: RuntimeConfig;
   schema: WasmSchema;
+  /** The migrations the app defining `schema` ships (see {@link ClientMigrations}). */
+  migrations?: ClientMigrations;
   onAuthFailure: (reason: AuthFailureReason) => void;
   /**
    * Browser-only lease taken from the durable SharedWorker before the

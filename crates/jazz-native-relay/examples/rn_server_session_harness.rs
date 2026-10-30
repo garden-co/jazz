@@ -63,6 +63,7 @@ async fn run() {
         jwt_token: Some(TestJwtIssuer::jwt_for_user("rn-device-core-observer")),
         backend_secret: None,
         admin_secret: Some(core.admin_secret().to_owned()),
+        migrations: Default::default(),
     })
     .await
     .expect("connect read-only Core observer");
@@ -151,6 +152,7 @@ async fn run() {
         )),
         backend_secret: None,
         admin_secret: Some(core.admin_secret().to_owned()),
+        migrations: Default::default(),
     })
     .await
     .expect("connect Core recovery writer");

@@ -15,6 +15,7 @@ import type { AppContext, Session } from "../runtime/context.js";
 import { RuntimeSource, type RuntimeClientContext } from "../runtime/runtime-source.js";
 import { Db, type DbConfig } from "../runtime/db.js";
 import { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
+import { shippedMigrations, type ClientMigrations } from "../runtime/client-migrations.js";
 import { DbAccessContext } from "../runtime/db-access-context.js";
 import { canonicalAuthorSubject, withCanonicalUser } from "../runtime/author-id.js";
 import { authorBytesForSession } from "../runtime/author-id.js";
@@ -175,6 +176,7 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
   override createClient({
     config,
     schema,
+    migrations,
     onAuthFailure,
   }: RuntimeClientContext<DbConfig>): JazzClient {
     this.assertOpen();
@@ -220,6 +222,7 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
           appId: this.config.appId,
           thresholdMs: this.config.slowQueryThresholdMs,
         },
+        migrations,
       },
     );
 
@@ -583,6 +586,12 @@ export class JazzContext {
     this.coreSource = new BackendRuntimeSource(this.config, this.nodeIdentityScope, nodeIdentity);
   }
 
+  /** The migrations the app behind `source` ships (see {@link ClientMigrations}). */
+  private shippedMigrations(source?: BackendSchemaInput): ClientMigrations | undefined {
+    const selected = source ?? this.defaultSchemaInput;
+    return selected ? shippedMigrations(resolveSchemaSource(selected)) : undefined;
+  }
+
   private resolveSchema(source?: BackendSchemaInput): WasmSchema {
     const selected = source ?? this.defaultSchemaInput;
     if (!selected) {
@@ -638,6 +647,7 @@ export class JazzContext {
     return this.coreSource.createClient({
       config: this.buildDbConfig(),
       schema,
+      migrations: this.shippedMigrations(source),
       onAuthFailure: () => {},
     });
   }
@@ -650,6 +660,7 @@ export class JazzContext {
     const client = this.coreSource.createClient({
       config: this.buildDbConfig(),
       schema,
+      migrations: this.shippedMigrations(source),
       onAuthFailure: () => {},
     });
     return { client, schema };

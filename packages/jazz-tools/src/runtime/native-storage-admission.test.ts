@@ -22,7 +22,7 @@ import { encodeSchema } from "./native-runtime/schema-codec.js";
 import { translateQuery } from "./query-adapter.js";
 import { testAuthorBytes } from "./testing/account-fixtures.js";
 
-const app = s.defineApp({ notes: s.table({ text: s.string() }, {}) });
+const app = s.defineApp({ notes: s.table({ text: s.string() }, {}) }, { migrations: "none" });
 const node = new Uint8Array(16).fill(41);
 const author = testAuthorBytes("native-storage-admission");
 const config = openConfig(node, author, 1, true);

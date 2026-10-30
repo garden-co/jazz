@@ -568,9 +568,13 @@ fn a_closed_tabs_pending_commit_uploads_after_its_worker_restarts() {
     };
     let core = open_in(schema(), 0xc0, AuthorSubject::SYSTEM);
 
+    let uploads: Rc<RefCell<VecDeque<SyncMessage>>> = Rc::default();
     let connect = |worker: &Db| {
         let (client_side, server_side) = duplex();
-        let up = block_on(worker.connect_upstream(client_side));
+        let up = block_on(worker.connect_upstream(Box::new(Tap {
+            inner: client_side,
+            sent: Rc::clone(&uploads),
+        })));
         core.accept_subscriber(server_side, author(WORKER)).unwrap();
         worker.set_remote_link_hint(RemoteLinkHint::Live);
         up
@@ -608,5 +612,21 @@ fn a_closed_tabs_pending_commit_uploads_after_its_worker_restarts() {
     pump(&[&tab, &worker, &core]);
 
     assert_eq!(bodies(&core), ["first", "second"]);
+    // Each commit went up under the id of the tab node that wrote it.
+    let nodes: Vec<NodeUuid> = uploads
+        .borrow()
+        .iter()
+        .filter_map(|message| match message {
+            SyncMessage::Commit { id, .. } => Some(id.node),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        nodes,
+        [
+            NodeUuid::from_bytes([WORKER + 1; 16]),
+            NodeUuid::from_bytes([WORKER + 2; 16]),
+        ]
+    );
     assert_eq!(worker.pending_upload_count(), 0, "both commits settled");
 }

@@ -66,7 +66,9 @@ export const betterAuthSchema = {
 };
 
 type BetterAuthSchema = s.Schema<typeof betterAuthSchema>;
-const betterAuthApp: s.App<BetterAuthSchema> = s.defineApp(betterAuthSchema);
+const betterAuthApp: s.App<BetterAuthSchema> = s.defineApp(betterAuthSchema, {
+  migrations: "none",
+});
 
 /**
  * Better Auth is backed by Jazz, but its implementation tables are a trusted

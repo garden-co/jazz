@@ -3,9 +3,12 @@ import { generateAuthSecret, schema, type RowOf } from "../../src/index.js";
 import { createBrowserTestDb as createDb } from "./account-fixtures.js";
 import { waitForCondition } from "./support.js";
 
-const app = schema.defineApp({
-  todos: schema.table({ title: schema.string(), done: schema.boolean() }, {}),
-});
+const app = schema.defineApp(
+  {
+    todos: schema.table({ title: schema.string(), done: schema.boolean() }, {}),
+  },
+  { migrations: "none" },
+);
 
 it("delivers a queued memory transaction to an existing local subscription", async () => {
   const db = await createDb({
