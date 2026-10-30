@@ -6,13 +6,13 @@
 
 use jazz_text::{Anchor, Range, Side};
 use napi_derive::napi;
-use serde_json::Value;
+use serde_json::Value as JsonValue;
 
-fn from_json<T: serde::de::DeserializeOwned>(value: Value) -> napi::Result<T> {
+fn from_json<T: serde::de::DeserializeOwned>(value: JsonValue) -> napi::Result<T> {
     serde_json::from_value(value).map_err(|error| napi::Error::from_reason(error.to_string()))
 }
 
-fn to_json(value: &impl serde::Serialize) -> napi::Result<Value> {
+fn to_json(value: &impl serde::Serialize) -> napi::Result<JsonValue> {
     serde_json::to_value(value).map_err(|error| napi::Error::from_reason(error.to_string()))
 }
 
@@ -22,8 +22,8 @@ pub fn capture_text_anchor(
     text: String,
     version: Option<f64>,
     position: u32,
-    side: Value,
-) -> napi::Result<Value> {
+    side: JsonValue,
+) -> napi::Result<JsonValue> {
     let side: Side = from_json(side)?;
     to_json(&Anchor::capture(
         &text,
@@ -36,10 +36,10 @@ pub fn capture_text_anchor(
 /// Where `anchor` lands in `text`: `{ position, confidence, ambiguous }`.
 #[napi(js_name = "resolveTextAnchor")]
 pub fn resolve_text_anchor(
-    anchor: Value,
+    anchor: JsonValue,
     text: String,
     version: Option<f64>,
-) -> napi::Result<Value> {
+) -> napi::Result<JsonValue> {
     let anchor: Anchor = from_json(anchor)?;
     to_json(&anchor.resolve(&text, version.map(|v| v as u64)))
 }
@@ -51,7 +51,7 @@ pub fn capture_text_range(
     version: Option<f64>,
     start: u32,
     end: u32,
-) -> napi::Result<Value> {
+) -> napi::Result<JsonValue> {
     to_json(&Range::capture(
         &text,
         version.map(|v| v as u64),
@@ -62,7 +62,11 @@ pub fn capture_text_range(
 
 /// Where `range` lands in `text`: `{ start, end, confidence, ambiguous }`.
 #[napi(js_name = "resolveTextRange")]
-pub fn resolve_text_range(range: Value, text: String, version: Option<f64>) -> napi::Result<Value> {
+pub fn resolve_text_range(
+    range: JsonValue,
+    text: String,
+    version: Option<f64>,
+) -> napi::Result<JsonValue> {
     let range: Range = from_json(range)?;
     to_json(&range.resolve(&text, version.map(|v| v as u64)))
 }
