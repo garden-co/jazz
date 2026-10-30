@@ -1704,13 +1704,13 @@ impl Owner {
         for frame in frames {
             match owner_session.joiner.push(&frame) {
                 Ok(None) => {}
-                Ok(Some(SyncMessage::Commit { tx, .. })) if gated => {
+                Ok(Some(SyncMessage::Commit { id, .. })) if gated => {
                     owner_session
                         .queues
                         .outbound
                         .borrow_mut()
                         .push_back(SyncMessage::Fate {
-                            tx,
+                            id,
                             outcome: Outcome::Refused {
                                 through: self.db.seq_high_water(),
                                 error: WireError::Rejected {

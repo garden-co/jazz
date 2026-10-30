@@ -127,6 +127,13 @@ impl Pos {
     }
 }
 
+/// Transaction `seq@node`: the node that wrote it and that node's
+/// counter. A commit keeps it at every hop: a relay forwards a session's
+/// commit under it, and its fate comes back under it.
+pub(crate) fn tx_id(node: [u8; 16], seq: u64) -> TxId {
+    TxId::new(TxTime(seq), crate::ids::NodeUuid::from_bytes(node))
+}
+
 /// A message transport between a client and its server.
 pub trait Transport {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError>;
@@ -1038,17 +1045,14 @@ pub enum SyncMessage {
         global: bool,
         by: Option<[u8; 16]>,
     },
-    /// `acting`: who the writes are (see [`Acting`]).
+    /// `id`: the writer's, at every hop (a relay forwards its sessions'
+    /// commits under theirs). `acting`: who the writes are (see
+    /// [`Acting`]).
     Commit {
-        node: [u8; 16],
-        tx: u64,
+        id: TxId,
         kind: WireKind,
         ops: Vec<WireOp>,
         acting: Acting,
-        /// The session commit a relay uploads this one for, as (node, tx),
-        /// when it is not the sender's own: the writer its bases' unnamed
-        /// `pending` nodes stand for.
-        origin: Option<([u8; 16], u64)>,
     },
     /// Large-value nodes the client lacks, pulled through the row
     /// versions that hold them.
@@ -1095,14 +1099,14 @@ pub enum SyncMessage {
         code: ErrorCode,
         message: String,
     },
-    /// How the authority decided commit `tx` ([`Outcome`]). `global`:
+    /// How the authority decided commit `id` ([`Outcome`]). `global`:
     /// the fate is the global authority's (directly, or relayed from it),
     /// not the last word of a replica with no server, which orders its
     /// sessions' commits but cannot make them `Global`. `by`: as on
     /// [`SyncMessage::Settled`], the node whose positions the outcome's
     /// seq counts when not the authority's.
     Fate {
-        tx: u64,
+        id: TxId,
         outcome: Outcome,
         global: bool,
         by: Option<[u8; 16]>,
@@ -1142,7 +1146,7 @@ pub enum SyncMessage {
     SchemaAdmission {
         admitted: bool,
     },
-    /// A relay holds the session's commit `tx` in its store and uploads
+    /// A relay holds the session's commit `id` in its store and uploads
     /// it: the commit is `Local` for a non-durable session (a tab over its
     /// worker), whose own store is memory. Its fate follows once the
     /// relay's upstream answers.
@@ -1153,7 +1157,7 @@ pub enum SyncMessage {
     /// word of a replica with no upstream, which never comes back with a
     /// global verdict, while a relay's `Stored` promises one.
     Stored {
-        tx: u64,
+        id: TxId,
     },
     /// Client → server, after its first `Schema`: the schema versions
     /// whose stored names this replica keeps, each with
@@ -1268,7 +1272,10 @@ impl Kind {
 }
 
 struct Pending {
+    /// Its local seq: where this store holds its versions.
     tx: u64,
+    /// Its id upstream: this store's own, or the session's it carries.
+    id: TxId,
     /// A serializable commit: its fate is reported as one (INV-TX-9),
     /// whether or not it was ever sent.
     serializable: bool,
@@ -1408,6 +1415,12 @@ impl PendingQueue {
         }
     }
 
+    /// The id pending commit `tx` uploads under: this store's own, or that
+    /// of the session commit it carries.
+    pub(super) fn upload_id(&self, tx: u64) -> Option<TxId> {
+        self.commits.iter().find(|p| p.tx == tx).map(|p| p.id)
+    }
+
     /// The newest pending commit that writes `row`.
     fn newest(&self, row: &RowKey) -> Option<u64> {
         self.by_row.get(row).and_then(|txs| txs.last().copied())
@@ -1429,7 +1442,7 @@ struct DeferredFate {
 /// left it (see `SyncMessage::Fate`): fan-out names it `as_written` rather than
 /// ship it, if that version is still current.
 struct Echo {
-    tx: u64,
+    id: TxId,
     op: u32,
     table: String,
     row: RowUuid,
@@ -1613,9 +1626,9 @@ pub(crate) struct Relayed {
     bases: Vec<(usize, WireBase)>,
 }
 
-/// A session's commit a relay uploads as its own: (session, the session's
-/// tx, the rows it wrote).
-type RelayedFate = (usize, u64, Vec<(String, RowUuid, Vec<u8>)>);
+/// A session's commit a relay uploads: (session, the commit's id, the rows
+/// it wrote).
+type RelayedFate = (usize, TxId, Vec<(String, RowUuid, Vec<u8>)>);
 
 /// A relayed read's upstream answer: its query, binding, whether it read
 /// deleted rows, its read view, the rows it listed and the seq it is
@@ -4483,12 +4496,10 @@ impl Inner {
         version: crate::ids::SchemaVersionId,
     ) -> Result<(), Error> {
         let SyncMessage::Commit {
-            node,
-            tx: sent_as,
+            id,
             kind,
             ops,
             acting,
-            origin,
         } = commit
         else {
             return Err(Error::new(ErrorCode::Storage, "only a Commit is pending"));
@@ -4511,12 +4522,10 @@ impl Inner {
             ),
         };
         let header = SyncMessage::Commit {
-            node: *node,
-            tx: *sent_as,
+            id: *id,
             kind,
             ops: Vec::new(),
             acting: acting.clone(),
-            origin: *origin,
         };
         self.exec(
             "INSERT INTO _jazz_pending (tx, header) VALUES (?1, ?2)",
@@ -4926,6 +4935,25 @@ impl Inner {
             })
             .map_err(storage)?;
         Ok(owner == author)
+    }
+
+    /// Whether `node` is one `identity` writes as (see [`Inner::claim_node`]),
+    /// without claiming it.
+    pub(super) fn writes_as(
+        &self,
+        node: [u8; 16],
+        identity: &AuthorSubject,
+    ) -> Result<bool, Error> {
+        let author = self.author_code(&author_key(identity))?;
+        match self.conn.cached_row(
+            "SELECT author FROM _jazz_nodes WHERE node = ?1",
+            [node.to_vec()],
+            |r| r.get::<_, Option<i64>>(0),
+        ) {
+            Ok(owner) => Ok(owner == Some(author)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+            Err(error) => Err(storage(error)),
+        }
     }
 
     /// Whether the commit that landed at `at` was written as a node that
@@ -5422,64 +5450,42 @@ impl Inner {
         Ok(Some(Resume { since, prior }))
     }
 
-    /// A session's serializable commit as this relay uploads it: the
-    /// session's own commits it names, and its reads of their versions,
-    /// become this store's commits that carry them (the authority places
-    /// each where it settled). Its snapshot and every other read version
-    /// are already the authority's seqs ([`Self::served_through`]).
+    /// A session's serializable commit as this relay uploads it, under
+    /// the session's id: its own commits stay the session's, and a read of
+    /// this relay's unsettled version names the commit that wrote it (the
+    /// authority places each where it settled). Its snapshot and every
+    /// other read version are already the authority's seqs
+    /// ([`Self::served_through`]).
     fn relayed_serializable(
         &self,
-        origin: [u8; 16],
         snapshot: u64,
         by: Option<[u8; 16]>,
         reads: Vec<WireRead>,
         own: Vec<u64>,
     ) -> Result<Kind, Error> {
         let me = *self.identity.node.as_bytes();
-        let mut carried = BTreeMap::new();
-        for tx in own {
-            if let Some(Some(at)) = self.settled(origin, tx)? {
-                carried.insert(tx, at);
-            }
-        }
-        // A carried commit is named as this relay's (or by the authority
-        // seq it settled at).
-        let name = |at: Pos| {
-            if at.accepted() {
-                (None, at.seq)
-            } else {
-                (Some(me), at.seq)
-            }
-        };
-        let reads = reads
+        let pending = &self.client.as_ref().expect("a relay is a client").pending;
+        let named = reads
             .into_iter()
-            .map(|read| WireRead {
-                rows: read
+            .map(|read| {
+                let rows = read
                     .rows
                     .into_iter()
-                    .map(|(row, by, seq)| match by {
-                        Some(node) if node == origin => match carried.get(&seq) {
-                            Some(&at) => {
-                                let (by, seq) = name(at);
-                                (row, by, seq)
-                            }
-                            None => (row, by, seq),
-                        },
+                    .map(|(row, by, seq)| match (by, pending.upload_id(seq)) {
+                        (Some(node), Some(id)) if node == me => {
+                            (row, Some(*id.node.as_bytes()), id.time.0)
+                        }
                         _ => (row, by, seq),
                     })
-                    .collect(),
-                ..read
+                    .collect();
+                WireRead { rows, ..read }
             })
             .collect();
         Ok(Kind::Serializable {
             snapshot,
             by,
-            reads,
-            own: carried
-                .into_values()
-                .filter(|at| !at.accepted())
-                .map(|at| at.seq)
-                .collect(),
+            reads: named,
+            own,
         })
     }
 
@@ -5600,11 +5606,15 @@ impl Inner {
             let commit = self.pending_commit(tx, &header)?;
             let rows = self.pending_rows(tx)?;
             let SyncMessage::Commit {
-                ops, acting, kind, ..
+                id,
+                ops,
+                acting,
+                kind,
             } = &commit
             else {
                 continue;
             };
+            let id = *id;
             let serializable = matches!(kind, WireKind::Serializable { .. });
             let mut ops = ops
                 .iter()
@@ -5643,6 +5653,7 @@ impl Inner {
             };
             client.pending.push(Pending {
                 tx,
+                id,
                 serializable,
                 ops,
                 rows,
@@ -5665,6 +5676,15 @@ impl Inner {
 }
 
 impl Client {
+    /// The local seq of commit `id` this store uploads: its own (its
+    /// node's counter is its local seq), or a session's it carries.
+    fn local_tx(&self, id: &TxId) -> Option<u64> {
+        if *id.node.as_bytes() == self.node {
+            return Some(id.time.0);
+        }
+        self.pending.iter().find(|p| p.id == *id).map(|p| p.tx)
+    }
+
     /// Pending commits recorded under the current version without saying
     /// so were written under `version`, about to stop being current.
     pub(crate) fn keep_version(&mut self, version: [u8; 16]) {
@@ -6201,9 +6221,13 @@ impl Db {
                 ));
             }
         }
-        let (bases, origin) = match relayed {
-            Some(relayed) => (relayed.bases, Some(relayed.origin)),
-            None => (bases, None),
+        // A session's commit goes up under its own id.
+        let (bases, id) = match relayed {
+            Some(relayed) => (relayed.bases, tx_id(relayed.origin.0, relayed.origin.1)),
+            None => (
+                bases,
+                tx_id(inner.client.as_ref().expect("client").node, seq),
+            ),
         };
         let mut wire: Result<Vec<WireOp>, Error> = ops.iter().map(to_wire).collect();
         if let Ok(wire) = &mut wire {
@@ -6246,16 +6270,15 @@ impl Db {
                     },
                 };
                 let commit = SyncMessage::Commit {
-                    node: client.node,
-                    tx: seq,
+                    id,
                     kind,
                     ops: wire,
                     acting,
-                    origin,
                 };
                 client.unsent.push(commit.clone());
                 client.pending.push(Pending {
                     tx: seq,
+                    id,
                     serializable,
                     ops,
                     rows: rows.clone(),
@@ -6286,6 +6309,7 @@ impl Db {
                 client.fates.insert(seq, Err(error));
                 client.pending.push(Pending {
                     tx: seq,
+                    id,
                     serializable,
                     ops: Vec::new(),
                     rows,
@@ -7010,8 +7034,10 @@ impl Db {
                         .is_none_or(|rows| rows.iter().all(|row| !client.whole.contains_key(row)))
                 {
                     let DeferredFate { fate, awaited } = client.deferred.pop_front().expect("head");
-                    if let SyncMessage::Fate { tx, .. } = &fate {
-                        client.releasing = Some((*tx, awaited.is_some()));
+                    if let SyncMessage::Fate { id, .. } = &fate
+                        && let Some(tx) = client.local_tx(id)
+                    {
+                        client.releasing = Some((tx, awaited.is_some()));
                     }
                     queue.push_front(fate);
                 }
@@ -7181,26 +7207,32 @@ impl Db {
                             *remote.refused.borrow_mut() = Some(error);
                         }
                     }
-                    SyncMessage::Stored { tx } => {
+                    SyncMessage::Stored { id } => {
                         let client = inner.client.as_mut().expect("client");
-                        if client.pending.iter().any(|p| p.tx == tx) {
+                        if let Some(tx) = client.local_tx(&id)
+                            && client.pending.iter().any(|p| p.tx == tx)
+                        {
                             client.stored.insert(tx);
                         }
                     }
                     SyncMessage::Fate {
-                        tx,
+                        id,
                         outcome,
                         global,
                         by,
                     } => {
                         let client = inner.client.as_mut().expect("client");
+                        // Not a commit this store uploads: nothing to settle.
+                        let Some(tx) = client.local_tx(&id) else {
+                            continue;
+                        };
                         let releasing = client.releasing.take_if(|(at, _)| *at == tx);
                         // Fates apply in the order they came: one after a
                         // deferred fate waits behind it.
                         if releasing.is_none() && !client.deferred.is_empty() {
                             client.deferred.push_back(DeferredFate {
                                 fate: SyncMessage::Fate {
-                                    tx,
+                                    id,
                                     outcome,
                                     global,
                                     by,
@@ -7234,7 +7266,7 @@ impl Db {
                                     let client = inner.client.as_mut().expect("client");
                                     client.deferred.push_front(DeferredFate {
                                         fate: SyncMessage::Fate {
-                                            tx,
+                                            id,
                                             outcome,
                                             global,
                                             by,
@@ -7272,7 +7304,7 @@ impl Db {
                         client.pending.remove(tx);
                         client.stored.remove(&tx);
                         client.sent.retain(
-                            |m| !matches!(m, SyncMessage::Commit { tx: sent, .. } if *sent == tx),
+                            |m| !matches!(m, SyncMessage::Commit { id: sent, .. } if *sent == id),
                         );
                         let result = result.map_err(from_wire_error);
                         // A relayed session's refusal is that session's to
@@ -7338,7 +7370,7 @@ impl Db {
                             client.relay_ready = true;
                             let fate = client.fates.get(&tx).cloned().unwrap_or(Ok(()));
                             let known = client.known;
-                            for (index, session_tx, rows) in relayed {
+                            for (index, session_id, rows) in relayed {
                                 let Some(session) =
                                     inner.sessions.get_mut(index).filter(|s| s.open)
                                 else {
@@ -7364,7 +7396,7 @@ impl Db {
                                     },
                                 };
                                 session.outbox.push(SyncMessage::Fate {
-                                    tx: session_tx,
+                                    id: session_id,
                                     outcome,
                                     global,
                                     by,
@@ -7455,9 +7487,9 @@ impl Db {
                 )
                 .unwrap_or(usize::MAX);
                 match &commit {
-                    SyncMessage::Commit { tx, .. } if size > limit => {
+                    SyncMessage::Commit { id, .. } if size > limit => {
                         client.refused.push(SyncMessage::Fate {
-                            tx: *tx,
+                            id: *id,
                             outcome: Outcome::Refused {
                                 through: client.known,
                                 error: WireError::Rejected {
@@ -7477,9 +7509,8 @@ impl Db {
             }
             (commits, pushes) = kept.into_iter().unzip();
         }
-        let transport = client.transport.as_mut().expect("transport");
         for commit in &commits {
-            if !client.sent.iter().any(|m| matches!((m, commit), (SyncMessage::Commit { tx: a, .. }, SyncMessage::Commit { tx: b, .. }) if a == b)) {
+            if !client.sent.iter().any(|m| matches!((m, commit), (SyncMessage::Commit { id: a, .. }, SyncMessage::Commit { id: b, .. }) if a == b)) {
                 client.sent.push(commit.clone());
             }
         }
@@ -7490,11 +7521,13 @@ impl Db {
         // is refused (INV-SYNC-52).
         let mut declared = current;
         for (commit, (hashes, batches)) in commits.into_iter().zip(pushes) {
-            if let SyncMessage::Commit { tx, .. } = &commit {
+            if let SyncMessage::Commit { id, .. } = &commit
+                && let Some(tx) = client.local_tx(id)
+            {
                 if !hashes.is_empty() {
-                    client.pushed.insert(*tx, hashes);
+                    client.pushed.insert(tx, hashes);
                 }
-                let version = client.versions.get(tx).copied().unwrap_or(current);
+                let version = client.versions.get(&tx).copied().unwrap_or(current);
                 if version != declared {
                     out.push(SyncMessage::Schema { version });
                     declared = version;
@@ -7509,6 +7542,7 @@ impl Db {
         out.extend(reads);
         // A full outbound queue keeps the rest, in order, for the flush its
         // drain wakes.
+        let transport = client.transport.as_mut().expect("transport");
         let mut out = out.into_iter();
         while let Some(message) = out.next() {
             match transport.send(message.clone()) {
@@ -7846,24 +7880,24 @@ impl Inner {
                 version = Some(crate::ids::SchemaVersionId::from_bytes(*declared));
                 true
             }
-            SyncMessage::Commit { tx, .. } if version.is_some_and(|v| !self.deployed(v)) => {
-                refused.push(*tx);
+            SyncMessage::Commit { id, .. } if version.is_some_and(|v| !self.deployed(v)) => {
+                refused.push(*id);
                 false
             }
             _ => true,
         });
-        for tx in refused {
-            self.refuse_undeployed_commit(index, tx);
+        for id in refused {
+            self.refuse_undeployed_commit(index, id);
         }
     }
 
-    /// Answer session `index`'s commit `tx`, written under a version this
+    /// Answer session `index`'s commit `id`, written under a version this
     /// store has not admitted, with its refusal.
-    fn refuse_undeployed_commit(&mut self, index: usize, tx: u64) {
+    fn refuse_undeployed_commit(&mut self, index: usize, id: TxId) {
         let through = self.served_through();
         let by = self.served_by();
         self.sessions[index].outbox.push(SyncMessage::Fate {
-            tx,
+            id,
             outcome: Outcome::Refused {
                 through,
                 error: wire_error(&schema_version_not_deployed()),
@@ -9158,20 +9192,20 @@ impl Db {
             });
             // The writer's own rows, still at the version its commit
             // produced and exactly as it holds them, settle by its Fate.
-            let mut as_written: BTreeMap<u64, Vec<AsWritten>> = BTreeMap::new();
-            let fated: HashSet<u64> = session
+            let mut as_written: BTreeMap<TxId, Vec<AsWritten>> = BTreeMap::new();
+            let fated: HashSet<TxId> = session
                 .outbox
                 .iter()
                 .filter_map(|message| match message {
                     SyncMessage::Fate {
-                        tx,
+                        id,
                         outcome: Outcome::Accepted { .. },
                         ..
-                    } => Some(*tx),
+                    } => Some(*id),
                     _ => None,
                 })
                 .collect();
-            echoes.retain(|echo| fated.contains(&echo.tx));
+            echoes.retain(|echo| fated.contains(&echo.id));
             if !echoes.is_empty() {
                 images.retain(|image| {
                     let Some(at) = echoes.iter().position(|e| {
@@ -9185,7 +9219,7 @@ impl Db {
                     };
                     let echo = echoes.swap_remove(at);
                     as_written
-                        .entry(echo.tx)
+                        .entry(echo.id)
                         .or_default()
                         .push(AsWritten::of(echo.op, image));
                     hold_shipped(&mut session.shipped, image, echo.at);
@@ -9193,11 +9227,11 @@ impl Db {
                 });
                 for message in &mut session.outbox {
                     if let SyncMessage::Fate {
-                        tx,
+                        id,
                         outcome: Outcome::Accepted { as_written: h, .. },
                         ..
                     } = message
-                        && let Some(mut rows) = as_written.remove(tx)
+                        && let Some(mut rows) = as_written.remove(id)
                     {
                         rows.sort_unstable_by(|a, b| (a.op, &a.key).cmp(&(b.op, &b.key)));
                         *h = rows;
@@ -9960,20 +9994,23 @@ impl Db {
                 });
             }
             SyncMessage::Commit {
-                node,
-                tx,
+                id,
                 kind,
                 ops,
                 acting,
-                origin,
             } => {
+                let (node, tx) = (*id.node.as_bytes(), id.time.0);
+                // A commit keeps its writer's id at every hop: a link may
+                // send one only as a node its identity writes as. A
+                // trusted link (a relay forwarding its sessions' commits)
+                // may send any.
                 let identity = self.inner.borrow().sessions[index].identity;
-                if !self.inner.borrow().claim_node(node, &identity)? {
+                if policy.is_some() && !self.inner.borrow().claim_node(node, &identity)? {
                     let mut inner = self.inner.borrow_mut();
                     let through = inner.served_through();
                     let by = inner.served_by();
                     inner.sessions[index].outbox.push(SyncMessage::Fate {
-                        tx,
+                        id,
                         outcome: Outcome::Refused {
                             through,
                             error: WireError::Rejected {
@@ -9987,19 +10024,6 @@ impl Db {
                     });
                     return Ok(());
                 }
-                // The session commit a relay's carries, when the link may
-                // write as its node (a trusted link, or one whose identity
-                // writes as that node too); otherwise the sender's own. The
-                // bases are in the sender's terms either way.
-                let writer = match origin {
-                    Some(origin)
-                        if policy.is_none()
-                            || self.inner.borrow().claim_node(origin.0, &identity)? =>
-                    {
-                        origin
-                    }
-                    _ => (node, tx),
-                };
                 // A resend after a reconnect gets the recorded fate.
                 let known = self.inner.borrow().applied_fate(node, tx)?;
                 let resent = known.is_some();
@@ -10007,7 +10031,7 @@ impl Db {
                 // deployed is refused at once, loudly: the app that wrote
                 // it was released ahead of its schema (INV-SYNC-52).
                 if known.is_none() && self.inner.borrow().session_unadmitted(index) {
-                    self.inner.borrow_mut().refuse_undeployed_commit(index, tx);
+                    self.inner.borrow_mut().refuse_undeployed_commit(index, id);
                     return Ok(());
                 }
                 let (result, rows, echoable) = match known {
@@ -10049,15 +10073,7 @@ impl Db {
                             };
                             let vouched = vouched(policy, who, acting);
                             self.with_claims(vouched, || {
-                                db.authorize_commit(
-                                    who,
-                                    policy,
-                                    kind,
-                                    ops,
-                                    (node, tx),
-                                    writer,
-                                    possession,
-                                )
+                                db.authorize_commit(who, policy, kind, ops, (node, tx), possession)
                             })
                         }) {
                         // The accepted commit recorded its fate atomically.
@@ -10122,10 +10138,10 @@ impl Db {
                         .relayed_fates
                         .entry(through)
                         .or_default()
-                        .push((index, tx, rows));
+                        .push((index, id, rows));
                     inner.sessions[index]
                         .outbox
-                        .push(SyncMessage::Stored { tx });
+                        .push(SyncMessage::Stored { id });
                 } else {
                     // A replica's own last word (it has no server) orders
                     // the commit at its own position, but is not the
@@ -10140,7 +10156,7 @@ impl Db {
                         for Echoable { row: row_key, op } in echoable {
                             let (table, row, key) = row_key;
                             session.echoes.push(Echo {
-                                tx,
+                                id,
                                 op,
                                 table,
                                 row,
@@ -10154,7 +10170,7 @@ impl Db {
                         Err(error) => Outcome::Refused { through, error },
                     };
                     inner.sessions[index].outbox.push(SyncMessage::Fate {
-                        tx,
+                        id,
                         outcome,
                         global,
                         by,
@@ -10477,8 +10493,7 @@ impl Db {
         identity: Option<AuthorSubject>,
         mut kind: WireKind,
         ops: Vec<WireOp>,
-        origin: ([u8; 16], u64),
-        writer: ([u8; 16], u64),
+        id: ([u8; 16], u64),
         possession: crate::large::Possession,
     ) -> Result<(Vec<RowKey>, Vec<Echoable>), (Error, Vec<RowKey>)> {
         // Each base by the op it travels on; the ops apply without them.
@@ -10524,7 +10539,7 @@ impl Db {
             } if forward => self
                 .inner
                 .borrow()
-                .relayed_serializable(origin.0, snapshot, by, reads, own)
+                .relayed_serializable(snapshot, by, reads, own)
                 .map_err(|e| (e, Vec::new()))?,
             unchanged => {
                 kind = unchanged;
@@ -10545,7 +10560,7 @@ impl Db {
             let mut settled = BTreeMap::new();
             for &tx in own {
                 if let Some(seq) = inner
-                    .settled(origin.0, tx)
+                    .settled(id.0, tx)
                     .map_err(|e| (e, Vec::new()))?
                     .flatten()
                 {
@@ -10598,24 +10613,24 @@ impl Db {
                     .map(|(row, at)| (*row.0.as_bytes(), Some(*at)))
                     .collect();
                 // A row the sender read at an own commit is compared where
-                // that commit settled; one at this store's own commit (a
-                // relay's it shipped the sender) where it is.
+                // that commit settled; one at this store's own position (a
+                // relay's version it shipped the sender) where it is; one a
+                // relay names by the commit that wrote it, where that
+                // settled.
                 let me = *inner.identity.node.as_bytes();
-                let then: Vec<([u8; 16], Option<Pos>)> = read
-                    .rows
-                    .iter()
-                    .map(|&(row, by, seq)| {
-                        let at = match by {
-                            None => Some(Pos::at(seq)),
-                            Some(node) if node == origin.0 => settled.get(&seq).copied(),
-                            Some(node) if node == me && inner.me != 0 => {
-                                Some(Pos { n: inner.me, seq })
-                            }
-                            Some(_) => None,
-                        };
-                        (row, at)
-                    })
-                    .collect();
+                let mut then: Vec<([u8; 16], Option<Pos>)> = Vec::new();
+                for &(row, by, seq) in &read.rows {
+                    let at = match by {
+                        None => Some(Pos::at(seq)),
+                        Some(node) if node == id.0 => settled.get(&seq).copied(),
+                        Some(node) if node == me && inner.me != 0 => Some(Pos { n: inner.me, seq }),
+                        Some(node) => inner
+                            .settled(node, seq)
+                            .map_err(|e| (e, Vec::new()))?
+                            .flatten(),
+                    };
+                    then.push((row, at));
+                }
                 if now != then {
                     let rows = mentioned(&inner);
                     return Err((Error::serialization_conflict(), rows));
@@ -10633,14 +10648,14 @@ impl Db {
             } else if relay {
                 // Where the bases landed in this relay's own history, for
                 // the echo inference alone (see `Echoable`).
-                inner.relay_landed(origin, &ops, &bases).and_then(|landed| {
+                inner.relay_landed(id, &ops, &bases).and_then(|landed| {
                     inner
-                        .relay_bases(origin, &ops, bases)
+                        .relay_bases(id, &ops, bases)
                         .map(|bases| (bases, HashMap::new(), landed))
                 })
             } else {
                 inner
-                    .resolve_bases(origin, &ops, &bases)
+                    .resolve_bases(id, identity.as_ref(), &ops, &bases)
                     .map(|built| (Vec::new(), built, HashMap::new()))
             };
             match resolved {
@@ -10704,8 +10719,8 @@ impl Db {
                 return Err((error, rows));
             }
             let recorded = inner
-                .record_fate(origin.0, origin.1, &Ok(()))
-                .and_then(|()| inner.record_settled(origin.0, origin.1, Some(inner.own_pos(seq))));
+                .record_fate(id.0, id.1, &Ok(()))
+                .and_then(|()| inner.record_settled(id.0, id.1, Some(inner.own_pos(seq))));
             if let Err(error) = recorded {
                 inner.changed.borrow_mut().truncate(mark);
                 end_savepoint(&inner.conn, "upload", false).map_err(|e| (e, Vec::new()))?;
@@ -10724,10 +10739,7 @@ impl Db {
                 ops.clone(),
                 seq,
                 upload,
-                Some(Relayed {
-                    origin: writer,
-                    bases,
-                }),
+                Some(Relayed { origin: id, bases }),
                 self.write_version(),
             )
         } else {
@@ -10738,7 +10750,7 @@ impl Db {
             if !relay {
                 let inner = self.inner.borrow();
                 inner.record_bases(&ops, &by_row, &built, seq, &rows)?;
-                inner.record_as_sent(seq, origin.0, &built, &rows)?;
+                inner.record_as_sent(seq, id.0, &built, &rows)?;
             }
             Ok(rows)
         });
@@ -11215,8 +11227,7 @@ mod tests {
     #[test]
     fn a_current_pending_header_round_trips() {
         let header = SyncMessage::Commit {
-            node: [7; 16],
-            tx: 1,
+            id: tx_id([7; 16], 1),
             kind: WireKind::Mergeable,
             ops: Vec::new(),
             acting: Acting::Session {
@@ -11225,7 +11236,6 @@ mod tests {
                     .to_owned(),
                 claims: BTreeMap::from([("role".to_owned(), Value::String("admin".to_owned()))]),
             },
-            origin: Some(([8; 16], 3)),
         };
         let bytes = encode(&header);
         let decoded: SyncMessage = decode_stored(&bytes).unwrap();

@@ -263,16 +263,18 @@ impl Inner {
         Ok(Some(mask))
     }
 
-    /// A session's bases, renamed into this relay's terms for its upstream
-    /// (SPEC 4 §4.6): an accepted upstream seq stays; a commit of this
-    /// relay's (one of its own unsettled versions it shipped the session, or
-    /// the commit carrying one of the session's) is named as this relay's.
-    /// A base on a commit this relay rejected, or never received, rejects
-    /// the write. An unsettled version of this relay's node that is not one
-    /// of its commits (one from before a reset) cannot be named upstream:
-    /// the write counts as built on the newest version of the row this
-    /// relay holds accepted, so it may be flagged over a version its writer
-    /// saw, never the other way round.
+    /// A session's bases, renamed for this relay's upstream (SPEC 4 §4.6),
+    /// which knows the session's commits by their ids, as this relay
+    /// uploads them: an accepted upstream seq and a base on one of the
+    /// session's own commits stay; one of this relay's unsettled versions
+    /// it shipped the session is named by the id of the commit that wrote
+    /// it (this relay's own, or another session's it carries). A base on a
+    /// commit this relay rejected, or never received, rejects the write. An
+    /// unsettled version of this relay's node that is not one of its
+    /// commits (one from before a reset) cannot be named upstream: the
+    /// write counts as built on the newest version of the row this relay
+    /// holds accepted, so it may be flagged over a version its writer saw,
+    /// never the other way round.
     pub(super) fn relay_bases(
         &self,
         sender: ([u8; 16], u64),
@@ -281,18 +283,6 @@ impl Inner {
     ) -> Result<Vec<(usize, WireBase)>, Error> {
         let me = *self.identity.node.as_bytes();
         let pending = &self.client.as_ref().expect("a relay is a client").pending;
-        // Where a commit this relay carries landed: still one of its own
-        // (named as its commit), or already accepted upstream.
-        let carried = |at: Pos| {
-            if at.accepted() {
-                BuiltOn::Seq(at.seq)
-            } else {
-                BuiltOn::Commit {
-                    node: me,
-                    tx: at.seq,
-                }
-            }
-        };
         bases
             .into_iter()
             .map(|(op, base)| {
@@ -305,11 +295,18 @@ impl Inner {
                             .by_row
                             .get(&row_key)
                             .is_some_and(|txs| txs.contains(&tx));
-                        match self.settled(me, tx)? {
-                            _ if own_pending => BuiltOn::Commit { node: me, tx },
-                            Some(Some(_)) => BuiltOn::Commit { node: me, tx },
-                            Some(None) => return Err(predecessor_rejected()),
-                            None => BuiltOn::Seq(
+                        match (own_pending, self.settled(me, tx)?) {
+                            (true, _) => {
+                                let id = pending.upload_id(tx).expect("a pending commit");
+                                BuiltOn::Commit {
+                                    node: *id.node.as_bytes(),
+                                    tx: id.time.0,
+                                }
+                            }
+                            (false, Some(Some(at))) if at.accepted() => BuiltOn::Seq(at.seq),
+                            (false, Some(Some(_))) => BuiltOn::Commit { node: me, tx },
+                            (false, Some(None)) => return Err(predecessor_rejected()),
+                            (false, None) => BuiltOn::Seq(
                                 self.newest_accepted(table, row, &base.key)?.unwrap_or(0),
                             ),
                         }
@@ -319,10 +316,12 @@ impl Inner {
                             .1
                             .checked_sub(back)
                             .ok_or_else(|| unknown_base("a commit"))?;
-                        carried(predecessor(self.settled(sender.0, tx)?)?)
+                        predecessor(self.settled(sender.0, tx)?)?;
+                        BuiltOn::Own { back }
                     }
                     BuiltOn::Commit { node, tx } if node == sender.0 => {
-                        carried(predecessor(self.settled(node, tx)?)?)
+                        predecessor(self.settled(node, tx)?)?;
+                        BuiltOn::Commit { node, tx }
                     }
                     BuiltOn::Commit { .. } => return Err(unknown_base("another node's commit")),
                 };
@@ -379,11 +378,16 @@ impl Inner {
 
     /// What each based row of an upload was built on, in this authority's
     /// history, keyed by the row: an accepted seq, or where the commit it
-    /// names landed. A base on a commit rejected or never received rejects
-    /// the upload.
+    /// names landed (the sender's own, or another's a relay shipped it). A
+    /// base on a commit rejected, or one of the sender's never received,
+    /// rejects the upload. Over a session link (`identity`), a base on
+    /// another node's commit counts only for a node that identity writes as:
+    /// any other, and one never received, rejects the upload alike, so a
+    /// base cannot probe for another identity's commits.
     pub(super) fn resolve_bases(
         &self,
         sender: ([u8; 16], u64),
+        identity: Option<&AuthorSubject>,
         ops: &[StagedOp],
         bases: &[(usize, WireBase)],
     ) -> Result<HashMap<RowKey, Built>, Error> {
@@ -402,7 +406,16 @@ impl Inner {
                 BuiltOn::Commit { node, tx } if node == sender.0 => {
                     Built::On(predecessor(self.settled(node, tx)?)?.seq)
                 }
-                BuiltOn::Commit { .. } => return Err(unknown_base("another node's commit")),
+                BuiltOn::Commit { node, tx } => match identity {
+                    Some(identity) if !self.writes_as(node, identity)? => {
+                        return Err(predecessor_rejected());
+                    }
+                    Some(_) => Built::On(predecessor(self.settled(node, tx)?)?.seq),
+                    None => match self.settled(node, tx)? {
+                        None => return Err(unknown_base("another node's commit")),
+                        landed => Built::On(predecessor(landed)?.seq),
+                    },
+                },
             };
             built.insert((table.to_owned(), row, base.key.clone()), on);
         }
