@@ -22,8 +22,8 @@ use rusqlite::{Connection, OptionalExtension, params_from_iter};
 
 pub use crate::options::{
     DbConfig, DbIdentity, DeleteOptions, Error, ErrorCode, ExactWriteTarget, InsertOptions,
-    ReadOpts, ReadTier, Reason, RestoreOptions, RowIdSource, SeededRowIdSource, UpdateOptions,
-    UpsertOptions, WriteIdentity, WriteTarget, block_on,
+    Migrations, ReadOpts, ReadTier, Reason, RestoreOptions, RowIdSource, SeededRowIdSource,
+    UpdateOptions, UpsertOptions, WriteIdentity, WriteTarget, block_on,
 };
 
 use crate::compile::{Compiled, Ctx, Cut, Overlay as CutOverlay, Session, View};
@@ -542,6 +542,9 @@ struct Inner {
     /// Images a replica dropped since the last dispatch (evictions and
     /// rebases), for keyed invalidation.
     gone: RefCell<Vec<sync::Image>>,
+    /// The app's versions and lenses (see [`DbConfig::migrations`]): a
+    /// version this store lacks is admitted along them.
+    migrations: Migrations,
     /// Whether `_jazz_withheld` exists (see `sync::WITHHELD_DDL`): branch
     /// views over a base read it only then.
     withheld: std::cell::Cell<bool>,
@@ -1103,6 +1106,75 @@ impl Db {
     }
 
     fn open_on(
+        mut config: DbConfig,
+        conn: Connection,
+        path: Option<(&std::path::Path, Option<&'static str>)>,
+    ) -> Result<Self, Error> {
+        // A schema this store has not admitted is reached along the lenses
+        // the app ships: from a version it admitted, else from the first
+        // version, each admitted as the authority admits it.
+        let steps = {
+            let names = crate::names::Names::load(&conn)?;
+            migration_path(&config.migrations, &config.schema, |version| {
+                names.get(version).is_some()
+            })
+        };
+        let Some((first, _)) = steps.first() else {
+            if let Some(error) = outside_migrations(&config.migrations, &config.schema, |version| {
+                crate::names::Names::load(&conn)
+                    .map(|names| names.get(version).is_some())
+                    .unwrap_or(false)
+            }) {
+                return Err(error);
+            }
+            return Self::open_named(config, conn, path);
+        };
+        let target = std::mem::replace(&mut config.schema, first.clone());
+        let db = Self::open_named(config, conn, path)?;
+        db.admit_along_migrations(&target)?;
+        {
+            let mut inner = db.inner();
+            let owner = Rc::new(inner.named(&target));
+            inner.owner_version = target.version_id();
+            inner.schema = owner.clone();
+            inner.owner = owner;
+            inner.reset_everything();
+            // Pending writes upload under the version they were written
+            // in, and replay by the names of the one now current.
+            inner.client = None;
+            inner.load_client()?;
+        }
+        Ok(db)
+    }
+
+    /// Admit `schema` along the app's lenses when this store lacks it and
+    /// they lead to it from a version it admitted or from the first one
+    /// (SPEC 10.7); whether they did.
+    fn admit_along_migrations(&self, schema: &JazzSchema) -> Result<bool, Error> {
+        let steps = {
+            let inner = self.inner();
+            migration_path(&inner.migrations, schema, |version| {
+                inner.names.get(version).is_some()
+            })
+        };
+        let along = !steps.is_empty();
+        if !along {
+            let inner = self.inner();
+            if let Some(error) = outside_migrations(&inner.migrations, schema, |version| {
+                inner.names.get(version).is_some()
+            }) {
+                return Err(error);
+            }
+        }
+        for (schema, lenses) in steps {
+            if self.inner().names.get(&schema.version_id()).is_none() {
+                self.admit(schema, &lenses, None)?;
+            }
+        }
+        Ok(along)
+    }
+
+    fn open_named(
         config: DbConfig,
         conn: Connection,
         path: Option<(&std::path::Path, Option<&'static str>)>,
@@ -1263,6 +1335,7 @@ impl Db {
                 since_tick: Vec::new(),
                 capture: Vec::new(),
                 gone: RefCell::new(Vec::new()),
+                migrations: config.migrations,
                 withheld: std::cell::Cell::new(withheld > 0),
             })),
         };
@@ -2613,16 +2686,14 @@ impl Db {
 impl Inner {
     /// Admit an upstream's versions under the names it stores them by
     /// (see `SyncMessage::Catalogue`), so this replica stores rows as it
-    /// does. A version this store named otherwise while it did not know
-    /// the upstream's names (opened under it offline) has its columns
-    /// renamed to the upstream's; where the upstream's column is already
-    /// stored here (a renamed column), the one this store added stays
-    /// unused, and the rebase that follows replays pending writes into
-    /// the upstream's. A table named otherwise is not supported yet.
+    /// does. Stored names are derived alike on every store (SPEC 10.7), so
+    /// a version this store admitted has the upstream's names already; one
+    /// it names otherwise (admitted without the app's lenses) is not
+    /// supported yet, and nothing is renamed.
     ///
     /// It then keeps the authority's `namespace` (refusing an upstream of
     /// another app) and the versions the authority `confirmed`. Returns
-    /// whether any version's names changed here.
+    /// whether it took any version.
     pub(crate) fn mirror_catalogue(
         &mut self,
         namespace: Option<[u8; 16]>,
@@ -2639,8 +2710,8 @@ impl Inner {
                 "the upstream's catalogue is another app's: this store keeps a different authority namespace",
             ));
         }
-        let renamed = !versions.is_empty();
-        if renamed {
+        let mirrored = !versions.is_empty();
+        if mirrored {
             self.mirror_versions(versions, cells)?;
         }
         let learned = known.is_none() && namespace.is_some();
@@ -2651,12 +2722,12 @@ impl Inner {
         let told = self.names.confirm(conn, confirmed)? || learned;
         // This store's own sessions (a worker's tabs) are told what it now
         // knows of the authority's catalogue.
-        if told && !renamed {
+        if told && !mirrored {
             for session in &mut self.sessions {
                 session.owe_catalogue();
             }
         }
-        Ok(renamed)
+        Ok(mirrored)
     }
 
     /// Take the upstream's versions, names and lens cells: whole or not at
@@ -2673,9 +2744,8 @@ impl Inner {
             self.admitted.clone(),
         );
         let tags = self.names.tags().snapshot();
-        let mut moved = Vec::new();
         begin_savepoint(&self.conn, "jazz_mirror")?;
-        let mirrored = self.mirror_versions_steps(versions, cells, &mut moved);
+        let mirrored = self.mirror_versions_steps(versions, cells);
         let ended = end_savepoint(&self.conn, "jazz_mirror", mirrored.is_ok());
         if let Err(error) = mirrored.and(ended) {
             self.physical = physical;
@@ -2684,18 +2754,12 @@ impl Inner {
             self.names.tags().restore(tags);
             return Err(error);
         }
-        if let Some(client) = self.client.as_mut() {
-            for (ours, theirs) in &moved {
-                client.moved_table(ours, theirs);
-            }
-        }
         let owner = Rc::new(self.named(&self.owner.jazz));
         self.schema = owner.clone();
         self.owner = owner;
         self.reset_everything();
-        // This store's own sessions (a worker's tabs) store rows by its
-        // names, which may have just changed: each is sent the versions
-        // it now names otherwise.
+        // This store's own sessions (a worker's tabs) are sent the versions
+        // it just took.
         for session in &mut self.sessions {
             session.owe_catalogue();
         }
@@ -2706,7 +2770,6 @@ impl Inner {
         &mut self,
         versions: Vec<sync::CatalogueVersion>,
         cells: Vec<sync::CatalogueCell>,
-        moved: &mut Vec<(String, String)>,
     ) -> Result<(), Error> {
         use crate::names::{LensCell, LensCellRule};
         let cells: Vec<LensCell> = cells
@@ -2740,17 +2803,15 @@ impl Inner {
                 (entry.schema.id, names, entry.schema.schema)
             })
             .collect();
-        // What this store named otherwise takes the upstream's names
-        // first, before a version it lacks stores a table under one of
-        // them.
         let mut fresh = std::collections::HashSet::new();
         for (version, names, _) in &entries {
-            match self.names.get(version).cloned() {
-                Some(local) if local == *names => {}
-                Some(local) => {
-                    self.rename_stored(&local, names, moved)?;
-                    let conn = &self.conn;
-                    self.names.rename(conn, *version, names.clone())?;
+            match self.names.get(version) {
+                Some(local) if local == names => {}
+                Some(_) => {
+                    return Err(unsupported(format!(
+                        "schema version {}, which this store stores otherwise than its upstream (it was opened without the app's lenses into it),",
+                        uuid::Uuid::from_bytes(*version.as_bytes())
+                    )));
                 }
                 None => {
                     fresh.insert(*version);
@@ -2785,56 +2846,6 @@ impl Inner {
         }
         let conn = &self.conn;
         self.names.record_lens_cells(conn, cells)
-    }
-
-    /// Rename the stored columns `local` names otherwise than `upstream`
-    /// does, where the upstream's is not stored here yet.
-    /// Tables it stores under another name are pushed to `moved`, as
-    /// (ours, theirs), for the pending queue to follow once it all holds.
-    fn rename_stored(
-        &mut self,
-        local: &crate::values::StoredNames,
-        upstream: &crate::values::StoredNames,
-        moved: &mut Vec<(String, String)>,
-    ) -> Result<(), Error> {
-        for (name, (stored, columns)) in &upstream.tables {
-            let Some((ours, our_columns)) = local.tables.get(name) else {
-                continue;
-            };
-            if ours != stored {
-                self.rename_stored_table(name, ours, stored)?;
-                moved.push((ours.clone(), stored.clone()));
-            }
-            for (column, theirs) in columns {
-                let Some(mine) = our_columns.get(column).filter(|mine| *mine != theirs) else {
-                    continue;
-                };
-                let Some(table) = self.physical.tables.get_mut(stored) else {
-                    continue;
-                };
-                if table.by_stored(theirs).is_some() {
-                    continue;
-                }
-                for on in [stored.clone(), format!("{stored}__h")] {
-                    self.conn
-                        .execute_batch(&format!(
-                            "ALTER TABLE {} RENAME COLUMN {} TO {}",
-                            quote(&on),
-                            quote(mine),
-                            quote(theirs)
-                        ))
-                        .map_err(storage)?;
-                }
-                for physical in table.columns.iter_mut().filter(|c| c.stored == *mine) {
-                    physical.name = theirs.clone();
-                    physical.stored = theirs.clone();
-                }
-                let conn = &self.conn;
-                self.names
-                    .moved(conn, stored, stored, Some((mine, theirs)))?;
-            }
-        }
-        Ok(())
     }
 
     /// `ops`, which name tables and columns as admitted `version` does,
@@ -2892,73 +2903,6 @@ impl Inner {
                 })
             })
             .collect()
-    }
-
-    /// Store table `ours` (with its history, indexes and triggers) as
-    /// `theirs`, the upstream's name for it. Both stored here is not
-    /// supported yet: their rows would have to merge.
-    fn rename_stored_table(&mut self, name: &str, ours: &str, theirs: &str) -> Result<(), Error> {
-        if self.physical.tables.contains_key(theirs) {
-            return Err(unsupported(format!(
-                "table `{name}`, stored here as `{ours}` beside the upstream's `{theirs}`"
-            )));
-        }
-        let Some(mut table) = self.physical.tables.remove(ours) else {
-            return Ok(());
-        };
-        for (from, to) in [
-            (ours.to_owned(), theirs.to_owned()),
-            (format!("{ours}__h"), format!("{theirs}__h")),
-        ] {
-            self.conn
-                .execute_batch(&format!(
-                    "ALTER TABLE {} RENAME TO {}",
-                    quote(&from),
-                    quote(&to)
-                ))
-                .map_err(storage)?;
-        }
-        // Indexes and triggers are named after their table: renamed along,
-        // so the upstream's DDL finds them under its names.
-        let objects: Vec<(String, String, String)> = self
-            .conn
-            .prepare(
-                "SELECT type, name, sql FROM sqlite_master \
-                 WHERE tbl_name IN (?1, ?2) AND type IN ('index', 'trigger') AND sql IS NOT NULL",
-            )
-            .and_then(|mut statement| {
-                statement
-                    .query_map([theirs.to_owned(), format!("{theirs}__h")], |r| {
-                        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-                    })?
-                    .collect::<Result<_, _>>()
-            })
-            .map_err(storage)?;
-        for (kind, object, sql) in objects {
-            let Some(rest) = object.strip_prefix(ours) else {
-                continue;
-            };
-            let renamed = format!("{theirs}{rest}");
-            let sql = sql.replacen(&quote(&object), &quote(&renamed), 1);
-            let drop = if kind == "index" { "INDEX" } else { "TRIGGER" };
-            self.conn
-                .execute_batch(&format!("DROP {drop} {}; {sql};", quote(&object)))
-                .map_err(storage)?;
-        }
-        table.name = theirs.to_owned();
-        table.stored = theirs.to_owned();
-        self.physical.tables.insert(theirs.to_owned(), table);
-        let conn = &self.conn;
-        self.names.moved(conn, ours, theirs, None)?;
-        if self.withheld.get() {
-            self.conn
-                .execute(
-                    "UPDATE _jazz_withheld SET tbl = ?2 WHERE tbl = ?1",
-                    [ours, theirs],
-                )
-                .map_err(storage)?;
-        }
-        self.rename_pending_rows(ours, theirs)
     }
 
     /// An upstream image as this store keeps it: `None` for a table it
@@ -6535,9 +6479,6 @@ fn same_tables(
 }
 
 impl Db {
-    /// Register a typed schema view. The handle shares this owner's store,
-    /// batches, clock and subscriptions; it reads and writes its own columns
-    /// of the physical tables, which hold the union of every admitted view.
     /// A handle that reads and writes as a sync session declaring schema
     /// `version` is served: by that admitted version's names, governed by
     /// the current schema's policies. `None` while `version` is not
@@ -6550,7 +6491,41 @@ impl Db {
         })
     }
 
+    /// Ship more of the app's versions and lenses (see
+    /// [`DbConfig::with_migrations`]): a client learns an app's migrations
+    /// when it first sees the app, not only when it opens.
+    pub fn add_migrations(&self, migrations: Migrations) {
+        let mut inner = self.inner();
+        for schema in migrations.schemas {
+            let version = schema.version_id();
+            if !inner
+                .migrations
+                .schemas
+                .iter()
+                .any(|s| s.version_id() == version)
+            {
+                inner.migrations.schemas.push(schema);
+            }
+        }
+        for lens in migrations.lenses {
+            if !inner
+                .migrations
+                .lenses
+                .iter()
+                .any(|l| l.source == lens.source && l.target == lens.target)
+            {
+                inner.migrations.lenses.push(lens);
+            }
+        }
+    }
+
+    /// Register a typed schema view. The handle shares this owner's store,
+    /// batches, clock and subscriptions; it reads and writes its own columns
+    /// of the physical tables, which hold the union of every admitted view.
     pub async fn register_schema_view(&self, schema: JazzSchema) -> Result<Db, Error> {
+        // A version the app's lenses lead to is admitted as the authority
+        // admits it, not named against the current one.
+        self.admit_along_migrations(&schema)?;
         let logical = {
             let mut inner = self.inner.borrow_mut();
             let version = schema.version_id();
@@ -7898,5 +7873,140 @@ impl Db {
             tx: self.tx_ref(id),
             committed: false,
         })
+    }
+}
+
+/// The versions, each with the lenses into it, a store passes through to
+/// reach `target` along `migrations`: starting at a version it `admitted`
+/// (else at a version no lens leads to), ending at `target`. Empty when the
+/// store admitted `target` or no such path exists.
+/// Why a store shipping the app's `migrations` may not take `schema`: it
+/// has not admitted it, and they do not lead to it, so it would name it
+/// otherwise than the server does (SPEC 10.7). None for a store shipping
+/// none (an authority, a tool reading any version) and for the empty schema.
+fn outside_migrations(
+    migrations: &Migrations,
+    schema: &JazzSchema,
+    admitted: impl Fn(&crate::ids::SchemaVersionId) -> bool,
+) -> Option<Error> {
+    let version = schema.version_id();
+    let shipped = migrations.schemas.iter().any(|s| s.version_id() == version)
+        || migrations.lenses.iter().any(|lens| lens.target == version);
+    if migrations.schemas.is_empty()
+        || shipped
+        || schema.runtime().tables.is_empty()
+        || admitted(&version)
+    {
+        return None;
+    }
+    Some(schema_error(format!(
+        "schema version {} is not among the app's migrations: regenerate them \
+         (`jazz-tools validate`) and pass them to the client",
+        uuid::Uuid::from_bytes(*version.as_bytes())
+    )))
+}
+
+/// The versions to admit, each with the lens it is admitted along, to
+/// reach `target` along the app's migrations: every store takes the same
+/// path, so each derives the names its authority did (SPEC 10.7).
+///
+/// Of several lenses into a version, every source is admitted first and
+/// the version is named by the lens from the smallest one, as the
+/// authority's `Names::resolve` picks it. A version no lens leads into but
+/// compatible with one some lens does (the same tables and columns, see
+/// `compatibility_id`) is reached from that one by an empty lens, as
+/// deployment connects them.
+fn migration_path(
+    migrations: &Migrations,
+    target: &JazzSchema,
+    admitted: impl Fn(&crate::ids::SchemaVersionId) -> bool,
+) -> Vec<(JazzSchema, Vec<MigrationLens>)> {
+    fn walk(
+        migrations: &Migrations,
+        schema: &JazzSchema,
+        admitted: &dyn Fn(&crate::ids::SchemaVersionId) -> bool,
+        visiting: &mut BTreeSet<crate::ids::SchemaVersionId>,
+    ) -> Option<Vec<(JazzSchema, Vec<MigrationLens>)>> {
+        let version = schema.version_id();
+        if admitted(&version) {
+            return Some(vec![(schema.clone(), Vec::new())]);
+        }
+        if !visiting.insert(version) {
+            return None;
+        }
+        let path = step(migrations, schema, admitted, visiting);
+        visiting.remove(&version);
+        path
+    }
+    fn step(
+        migrations: &Migrations,
+        schema: &JazzSchema,
+        admitted: &dyn Fn(&crate::ids::SchemaVersionId) -> bool,
+        visiting: &mut BTreeSet<crate::ids::SchemaVersionId>,
+    ) -> Option<Vec<(JazzSchema, Vec<MigrationLens>)>> {
+        let version = schema.version_id();
+        let source_of = |id: crate::ids::SchemaVersionId| {
+            migrations.schemas.iter().find(|s| s.version_id() == id)
+        };
+        let mut into: Vec<&MigrationLens> = migrations
+            .lenses
+            .iter()
+            .filter(|lens| lens.target == version)
+            .collect();
+        into.sort_by_key(|lens| lens.source);
+        if !into.is_empty() {
+            // Every lens's source is admitted first, as on the authority,
+            // so this version is named by the lens from the smallest one
+            // and refused where the lenses disagree (`Names::resolve`). A
+            // lens from a version the app's migrations lack leaves no
+            // path: without it this version could be named otherwise.
+            let mut path: Vec<(JazzSchema, Vec<MigrationLens>)> = Vec::new();
+            for lens in &into {
+                let source = source_of(lens.source)?;
+                for step in walk(migrations, source, admitted, visiting)? {
+                    let version = step.0.version_id();
+                    if !path.iter().any(|(s, _)| s.version_id() == version) {
+                        path.push(step);
+                    }
+                }
+            }
+            path.push((
+                schema.clone(),
+                into.iter().map(|lens| (*lens).clone()).collect(),
+            ));
+            return Some(path);
+        }
+        // No lens leads here: from the smallest compatible version one
+        // leads into (or this store admitted), by an empty lens.
+        let compatibility = schema.compatibility_id();
+        let mut anchors: Vec<&JazzSchema> = migrations
+            .schemas
+            .iter()
+            .filter(|s| s.version_id() != version && s.compatibility_id() == compatibility)
+            .filter(|s| {
+                let id = s.version_id();
+                admitted(&id) || migrations.lenses.iter().any(|lens| lens.target == id)
+            })
+            .collect();
+        anchors.sort_by_key(|s| s.version_id());
+        for anchor in anchors {
+            let Ok(empty) = MigrationLens::new(anchor.version_id(), version, Vec::new()) else {
+                continue;
+            };
+            if let Some(mut path) = walk(migrations, anchor, admitted, visiting) {
+                path.push((schema.clone(), vec![empty]));
+                return Some(path);
+            }
+        }
+        // A first version: admitted without a lens.
+        Some(vec![(schema.clone(), Vec::new())])
+    }
+    if admitted(&target.version_id()) {
+        return Vec::new();
+    }
+    let mut visiting = BTreeSet::new();
+    match walk(migrations, target, &admitted, &mut visiting) {
+        Some(path) if path.len() > 1 || !path[0].1.is_empty() => path,
+        _ => Vec::new(),
     }
 }

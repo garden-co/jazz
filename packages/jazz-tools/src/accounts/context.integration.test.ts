@@ -11,7 +11,10 @@ function failAuth(db: object, reason: AuthFailureReason): void {
 describe("account context authority", () => {
   it("opens locally without activating its registry transport and rejects another app or authority", async () => {
     const { serverUrl: _serverUrl, ...config } = await localAccountConfig("local-only-account");
-    const app = schema.defineApp({ notes: schema.table({ text: schema.string() }, {}) });
+    const app = schema.defineApp(
+      { notes: schema.table({ text: schema.string() }, {}) },
+      { migrations: "none" },
+    );
     const db = await createDb(config);
     try {
       const { value: row } = await db.insert(app.notes, { text: "offline" });

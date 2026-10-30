@@ -6,9 +6,14 @@ import { computeSchemaHash } from "../../src/dev/catalogue.js";
 import { deploy, startLocalJazzServer } from "../../src/testing/index.js";
 import { createDb } from "../../src/runtime/default-create-db.js";
 import { localAccountConfig } from "../../src/runtime/testing/account-fixtures.js";
+import { appMigrations } from "../../src/testing/client-migrations.js";
+import { shipMigrations } from "../../src/runtime/client-migrations.js";
 import type { Db, QueryBuilder } from "../../src/runtime/db.js";
 
-const app = s.defineApp({ notes: s.table({ title: s.string(), done: s.boolean() }, {}) });
+const app = s.defineApp(
+  { notes: s.table({ title: s.string(), done: s.boolean() }, {}) },
+  { migrations: "none" },
+);
 const permissions = s.definePermissions(app, ({ policy }) => {
   policy.notes.allowRead.where({ done: false });
   policy.notes.allowInsert.always();
@@ -720,8 +725,8 @@ describe("TS Query API history schema migrations", () => {
   const schemaV2 = {
     notes: s.table({ heading: s.string(), category: s.string() }, {}),
   };
-  const v1 = s.defineApp(schemaV1);
-  const v2 = s.defineApp(schemaV2);
+  const v1 = s.defineApp(schemaV1, { migrations: "none" });
+  const v2 = s.defineApp(schemaV2, { migrations: "none" });
   const permissionsV1 = s.definePermissions(v1, ({ policy }) => {
     policy.notes.allowRead.always();
     policy.notes.allowInsert.always();
@@ -746,24 +751,22 @@ describe("TS Query API history schema migrations", () => {
       adminSecret: server.adminSecret,
     };
     const deployed = await deploy({ ...deployment, schema: v1, permissions: permissionsV1 });
-    await deploy({
-      ...deployment,
-      schema: v2,
-      permissions: permissionsV2,
-      migration: m.defineMigration({
-        fromHash: deployed.schema.hash,
-        toHash: await computeSchemaHash(v2.wasmSchema),
-        from: schemaV1,
-        to: schemaV2,
-        migrate: {
-          notes: {
-            heading: m.renameFrom("title"),
-            category: m.add.string({ default: "uncategorized" }),
-            legacy: m.drop.string({ backwardsDefault: "" }),
-          },
+    const migration = m.defineMigration({
+      fromHash: deployed.schema.hash,
+      toHash: await computeSchemaHash(v2.wasmSchema),
+      from: schemaV1,
+      to: schemaV2,
+      migrate: {
+        notes: {
+          heading: m.renameFrom("title"),
+          category: m.add.string({ default: "uncategorized" }),
+          legacy: m.drop.string({ backwardsDefault: "" }),
         },
-      }),
+      },
     });
+    await deploy({ ...deployment, schema: v2, permissions: permissionsV2, migration });
+    // v2 ships the migration, as its generated module would hold it.
+    shipMigrations(v2.wasmSchema, await appMigrations(v1, { to: v2, migration }));
     writer = await createDb({
       ...(await localAccountConfig(server.appId, server.url)),
       driver: { type: "persistent" },
@@ -1030,11 +1033,14 @@ describe("TS Query API upstream history", () => {
 });
 
 describe("TS Query API branch history", () => {
-  const branches = s.defineApp({
-    notes: s
-      .table({ branch: s.string(), title: s.string(), done: s.boolean() }, {})
-      .branchBy("branch"),
-  });
+  const branches = s.defineApp(
+    {
+      notes: s
+        .table({ branch: s.string(), title: s.string(), done: s.boolean() }, {})
+        .branchBy("branch"),
+    },
+    { migrations: "none" },
+  );
   const branchPermissions = s.definePermissions(branches, ({ policy }) => {
     policy.notes.allowRead.where({ done: false });
     policy.notes.allowInsert.always();
@@ -1193,9 +1199,12 @@ describe("TS Query API branch history", () => {
 });
 
 describe("TS Query API private draft branch history", () => {
-  const drafts = s.defineApp({
-    notes: s.table({ branch: s.string(), title: s.string() }, {}).branchBy("branch"),
-  });
+  const drafts = s.defineApp(
+    {
+      notes: s.table({ branch: s.string(), title: s.string() }, {}).branchBy("branch"),
+    },
+    { migrations: "none" },
+  );
   const draftPermissions = s.definePermissions(drafts, ({ policy, anyOf, isCreator }) => {
     policy.notes.allowRead.where(anyOf([{ branch: "main" }, isCreator]));
     policy.notes.allowInsert.always();
@@ -1273,20 +1282,23 @@ describe("TS Query API private draft branch history", () => {
 });
 
 describe("TS Query API branch history with relational read policies", () => {
-  const projectsApp = s.defineApp({
-    projects: s
-      .table(
-        { branch: s.string(), name: s.string() },
-        { notesViaProject: s.reverse("notes", "project") },
-      )
-      .branchBy("branch"),
-    notes: s
-      .table(
-        { branch: s.string(), project_id: s.uuid(), title: s.string() },
-        { project: s.rel("projects", "project_id") },
-      )
-      .branchBy("branch"),
-  });
+  const projectsApp = s.defineApp(
+    {
+      projects: s
+        .table(
+          { branch: s.string(), name: s.string() },
+          { notesViaProject: s.reverse("notes", "project") },
+        )
+        .branchBy("branch"),
+      notes: s
+        .table(
+          { branch: s.string(), project_id: s.uuid(), title: s.string() },
+          { project: s.rel("projects", "project_id") },
+        )
+        .branchBy("branch"),
+    },
+    { migrations: "none" },
+  );
   const projectPermissions = s.definePermissions(
     projectsApp,
     ({ policy, anyOf, isCreator, allowedTo }) => {

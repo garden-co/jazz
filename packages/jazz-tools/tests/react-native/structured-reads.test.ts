@@ -2,20 +2,23 @@ import { describe, expect, it } from "vitest";
 import { schema } from "../../src/index.js";
 import { withNativeRelayFixture } from "./fixture.js";
 
-const app = schema.defineApp({
-  groups: schema.table(
-    { name: schema.string() },
-    { tasksViaGroup: schema.reverse("tasks", "group") },
-  ),
-  tasks: schema.table(
-    { title: schema.string(), group_id: schema.uuid() },
-    { group: schema.rel("groups", "group_id"), notesViaTask: schema.reverse("notes", "task") },
-  ),
-  notes: schema.table(
-    { body: schema.string(), task_id: schema.uuid() },
-    { task: schema.rel("tasks", "task_id") },
-  ),
-});
+const app = schema.defineApp(
+  {
+    groups: schema.table(
+      { name: schema.string() },
+      { tasksViaGroup: schema.reverse("tasks", "group") },
+    ),
+    tasks: schema.table(
+      { title: schema.string(), group_id: schema.uuid() },
+      { group: schema.rel("groups", "group_id"), notesViaTask: schema.reverse("notes", "task") },
+    ),
+    notes: schema.table(
+      { body: schema.string(), task_id: schema.uuid() },
+      { task: schema.rel("tasks", "task_id") },
+    ),
+  },
+  { migrations: "none" },
+);
 const query = app.groups
   .include({
     tasksViaGroup: app.tasks.select("title").include({ notesViaTask: true }),

@@ -25,9 +25,12 @@ import {
 } from "./support.js";
 import { getJazzServerInfo } from "./testing-server.js";
 
-const app = s.defineApp({
-  files: s.table({ name: s.string(), contents: s.bytes() }, {}),
-});
+const app = s.defineApp(
+  {
+    files: s.table({ name: s.string(), contents: s.bytes() }, {}),
+  },
+  { migrations: "none" },
+);
 
 const permissions = s.definePermissions(app, ({ policy }) => [
   policy.files.allowRead.always(),

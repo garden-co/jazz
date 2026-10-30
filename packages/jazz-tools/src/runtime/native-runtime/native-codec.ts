@@ -13,7 +13,9 @@ import {
 } from "./native-row-codec.js";
 import { parseCanonicalAuthorSubject } from "../author-id.js";
 import { exactSignedI64 } from "./exact-integer.js";
+import { runtimeSchemaJsonReplacer } from "../../drivers/schema-wire.js";
 import { encodeRelationQueryPostcard, type RelExpr } from "../../ir.js";
+import type { ClientMigrations } from "../client-migrations.js";
 
 const fatalUtf8Decoder = new Utf8Decoder({ fatal: true });
 
@@ -101,6 +103,7 @@ export function openConfig(
   historyComplete = false,
   initialSyncFlushEvery?: number,
   selfSignedClientProof?: NativeSelfSignedClientProof,
+  migrations?: ClientMigrations,
 ): Uint8Array {
   const writer = new PostcardWriter();
   writer.bytes(node);
@@ -116,9 +119,13 @@ export function openConfig(
   } else {
     writer.some((value) => value.u64(initialSyncFlushEvery));
   }
-  // The native binding keeps a trailing `backend_credential` slot solely to
-  // reject legacy raw ingress. New configs must never serialize one.
-  writer.none();
+  // The app's versions and migrations, as JSON the binding lowers into the
+  // lenses its store opens along (SPEC 10.7).
+  if (migrations == null) {
+    writer.none();
+  } else {
+    writer.some((value) => value.bytes(clientMigrationsBytes(migrations)));
+  }
   return writer.finish();
 }
 
@@ -797,6 +804,11 @@ export function assertBytes(value: unknown, label: string): Uint8Array {
     return Uint8Array.from(value);
   }
   throw new Error(`expected ${label} to be bytes`);
+}
+
+/** An app's migrations as the bindings take them (JSON). */
+export function clientMigrationsBytes(migrations: ClientMigrations): Uint8Array {
+  return utf8(JSON.stringify(migrations, runtimeSchemaJsonReplacer));
 }
 
 export function utf8(value: string): Uint8Array {

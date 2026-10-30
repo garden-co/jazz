@@ -1356,20 +1356,6 @@ impl std::ops::Deref for PendingQueue {
 }
 
 impl PendingQueue {
-    /// Stored table `from` is stored as `to` now.
-    fn moved_table(&mut self, from: &str, to: &str) {
-        let commits = std::mem::take(&mut self.commits);
-        self.by_row.clear();
-        for mut pending in commits {
-            for row in &mut pending.rows {
-                if row.0 == from {
-                    row.0 = to.to_owned();
-                }
-            }
-            self.push(pending);
-        }
-    }
-
     fn push(&mut self, pending: Pending) {
         for row in &pending.rows {
             self.by_row
@@ -1408,7 +1394,7 @@ impl PendingQueue {
         self.commits.iter_mut().find(|p| p.tx == tx)
     }
 
-    /// No commit's images are named as the upstream names them any more.
+    /// No commit's images can be compared with the upstream's any more.
     fn forget_expected(&mut self) {
         for pending in &mut self.commits {
             pending.expected = None;
@@ -1594,6 +1580,9 @@ pub(crate) struct Client {
     /// This store committed writes before it became a replica (see
     /// [`stranded`]): it refuses every upstream.
     stranded: bool,
+    /// Why this store refused its upstream's catalogue, until one is
+    /// mirrored: remote reads opened meanwhile fail with it at once.
+    uncatalogued: Option<Error>,
     /// The upstream sent its catalogue on this connection: this store
     /// knows every version the authority deployed, so its own sessions'
     /// commits under a version it still lacks are refused (INV-SYNC-52).
@@ -4717,17 +4706,6 @@ impl Inner {
         Ok(())
     }
 
-    /// The rows pending commits recorded in stored table `from`, which is
-    /// stored as `to` now.
-    pub(crate) fn rename_pending_rows(&self, from: &str, to: &str) -> Result<(), Error> {
-        self.exec(
-            "UPDATE _jazz_pending_rows SET tbl = ?2 WHERE tbl = ?1",
-            [from, to],
-        )
-        .map_err(storage)?;
-        Ok(())
-    }
-
     /// Pending commit `tx` as `persist_pending` stored it: its header
     /// with its lists filled from `_jazz_pending_items`.
     fn pending_commit(&self, tx: u64, header: &[u8]) -> Result<SyncMessage, Error> {
@@ -5693,40 +5671,6 @@ impl Client {
         }
     }
 
-    /// Stored table `from` is stored as `to` now (a replica took its
-    /// upstream's name for it).
-    pub(crate) fn moved_table(&mut self, from: &str, to: &str) {
-        self.pending.moved_table(from, to);
-        self.baselines = std::mem::take(&mut self.baselines)
-            .into_iter()
-            .map(|((table, row, key), mut image)| {
-                if let Some(image) = image.as_mut().filter(|image| image.table == from) {
-                    image.table = to.to_owned();
-                }
-                let table = if table == from { to.to_owned() } else { table };
-                ((table, row, key), image)
-            })
-            .collect();
-        self.whole = std::mem::take(&mut self.whole)
-            .into_iter()
-            .map(|((table, id, key), seq)| {
-                let table = if table == from { to.to_owned() } else { table };
-                ((table, id, key), seq)
-            })
-            .collect();
-        for deferred in &mut self.deferred {
-            if let Some(awaited) = deferred.awaited.as_mut() {
-                *awaited = std::mem::take(awaited)
-                    .into_iter()
-                    .map(|(table, id, key)| {
-                        let table = if table == from { to.to_owned() } else { table };
-                        (table, id, key)
-                    })
-                    .collect();
-            }
-        }
-    }
-
     /// Its host says there is no server: it is the last word on its store.
     fn no_server(&self) -> bool {
         let link = self.hint.get();
@@ -5773,6 +5717,7 @@ impl Client {
             relay_ready: false,
             unadmitted: false,
             stranded: false,
+            uncatalogued: None,
             catalogued: false,
             whole: HashMap::new(),
             deferred: VecDeque::new(),
@@ -6441,7 +6386,12 @@ impl Inner {
         let id = client.next_id;
         client.next_id += 1;
         let answered = Rc::new(StdCell::new(false));
-        let refused = Rc::new(RefCell::new(client.stranded.then(stranded)));
+        let refused = Rc::new(RefCell::new(
+            client
+                .stranded
+                .then(stranded)
+                .or_else(|| client.uncatalogued.clone()),
+        ));
         let global = Rc::new(StdCell::new(false));
         let author = self.identity.author;
         let watermark = watermark_key(&query, binding, include_deleted, &view, author);
@@ -7116,22 +7066,29 @@ impl Db {
                         confirmed,
                     } => {
                         match inner.mirror_catalogue(namespace, versions, cells, &confirmed) {
-                            Ok(renamed) => {
-                                rebase |= renamed;
+                            // Versions it took rebuilt the store's
+                            // schema: its pending commits replay on top.
+                            Ok(mirrored) => {
+                                rebase |= mirrored;
                                 // The authority may apply commits already
-                                // sent under the new names: what this store
-                                // made of them is no image of the result.
-                                if renamed {
+                                // sent under a version this store just
+                                // took: what it made of them is no image
+                                // of the result, so their rows come whole.
+                                if mirrored {
                                     let client = inner.client.as_mut().expect("client");
                                     client.pending.forget_expected();
                                 }
-                                inner.client.as_mut().expect("client").catalogued = true;
+                                let client = inner.client.as_mut().expect("client");
+                                client.catalogued = true;
+                                client.uncatalogued = None;
                             }
                             // This store cannot store rows as its upstream
                             // does: it stops syncing with it, nothing that
                             // follows applies, and its remote reads fail
                             // with why. Local reads are served as before.
                             Err(error) => {
+                                inner.client.as_mut().expect("client").uncatalogued =
+                                    Some(error.clone());
                                 inner.refuse_upstream(error);
                                 queue.clear();
                             }
@@ -7593,9 +7550,8 @@ impl Db {
             .iter()
             .flat_map(|p| p.rows.iter().cloned())
             .collect();
-        // A commit written under another version replays under it, as its
-        // names stand now (an upstream's catalogue may have renamed them
-        // since), while this store holds that version (a schema view): what
+        // A commit written under another version replays under it while
+        // this store holds that version (a schema view): what
         // it wrote that the current version lacks stays visible through
         // the view. One written before an upgrade replays by the names the
         // current version gives what it wrote.

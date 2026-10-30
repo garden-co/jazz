@@ -2777,7 +2777,7 @@ mod tests {
             row_seed: u64,
             author: AuthorSubject,
         ) -> Self {
-            let db = Db::open(
+            Self::open(
                 DbConfig::new(
                     schema,
                     DbIdentity {
@@ -2788,7 +2788,10 @@ mod tests {
                 .with_id_source(SeededRowIdSource::new(row_seed)),
             )
             .await
-            .expect("open client db");
+        }
+
+        async fn open(config: DbConfig) -> Self {
+            let db = Db::open(config).await.expect("open client db");
             let transport = TestWireTransport::default();
             let received = Rc::new(RefCell::new(Vec::new()));
             db.connect_upstream(Box::new(ObservedTransport {
@@ -4030,6 +4033,7 @@ mod tests {
             .build();
         let v1_hash = SchemaHash::compute(&v1);
         let v2_hash = SchemaHash::compute(&v2);
+        let (v1_source, v2_source) = (v1.clone(), v2.clone());
         let state = ServerBuilder::new(AppId::random())
             .with_auth_config(AuthConfig {
                 admin_secret: Some("admin-secret".to_owned()),
@@ -4060,13 +4064,30 @@ mod tests {
             },
             false,
         );
+        let lens = Lens::new(v1_hash, v2_hash, transform);
         state
             .catalogue
-            .publish_lens(
-                &state.catalogue_store,
-                &Lens::new(v1_hash, v2_hash, transform),
-            )
+            .publish_lens(&state.catalogue_store, &lens)
             .expect("persist target lineage");
+        // Clients ship the app's versions and lenses (SPEC 10.7), so they
+        // store `title` where the authority does.
+        let bundled = |node: u8, row: u64| {
+            DbConfig::new(
+                ws_public_schema_convert(),
+                DbIdentity {
+                    node: NodeUuid::from_bytes([node; 16]),
+                    author: AuthorSubject::for_test_bytes([node; 16]),
+                },
+            )
+            .with_id_source(SeededRowIdSource::new(row))
+            .with_migrations(
+                vec![JazzSchema::new(&v1_source).expect("v1 compiles")],
+                vec![
+                    jazz::tools::schema_lens::runtime::compile_lens(&lens, &v1_source, &v2_source)
+                        .expect("lens compiles"),
+                ],
+            )
+        };
 
         let addr = start_ws_test_server(state.clone()).await;
         let policies = public_table_policies().with_select(PolicyExpr::eq_session(
@@ -4098,7 +4119,7 @@ mod tests {
 
         let reader_identity = AuthorSubject::for_test_bytes([0xb2; 16]);
         let (_, visible_title) = issuer_and_subject(reader_identity);
-        let writer = TestClient::new(ws_public_schema_convert(), 0xa1, 0xa100).await;
+        let writer = TestClient::open(bundled(0xa1, 0xa100)).await;
         let mut writer_ws =
             open_negotiated_ws(addr, &state, AuthorSubject::for_test_bytes([0xa1; 16])).await;
         let (_, writer_attachment) = settle_ws_todos_query(&writer, &mut writer_ws).await;
@@ -4114,7 +4135,7 @@ mod tests {
         }
         writer.detach_query(writer_attachment);
 
-        let reader = TestClient::new(ws_public_schema_convert(), 0xb2, 0xb200).await;
+        let reader = TestClient::open(bundled(0xb2, 0xb200)).await;
         let mut reader_ws = open_negotiated_ws_session(addr, &state, reader_identity).await;
         let (query, attachment) = settle_ws_todos_query(&reader, &mut reader_ws).await;
         assert_eq!(

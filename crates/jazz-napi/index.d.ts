@@ -84,8 +84,11 @@ export declare class NapiDb {
    */
   static openPersistentAsBackend(dataPath: string, schema: Uint8Array, config: Uint8Array): NapiDb
   static openPersistentWithSelfSignedProof(dataPath: string, schema: Uint8Array, config: Uint8Array, token: string, appId: string, claimedAuthor: string): NapiDb
-  /** Register and return a typed view backed by this same runtime owner. */
-  registerSchema(schema: Uint8Array): NapiDb
+  /**
+   * Register and return a typed view backed by this same runtime owner,
+   * of an app shipping `migrations` (its bundle as JSON).
+   */
+  registerSchema(schema: Uint8Array, migrations?: Uint8Array | undefined | null): NapiDb
   /** Begin one owner-wide transaction. */
   beginTransaction(openTransactionId: string, kind: string, author?: Uint8Array | undefined | null, attribution?: Uint8Array | undefined | null): void
   /** Commit an owner-wide transaction by id and optional kind. */

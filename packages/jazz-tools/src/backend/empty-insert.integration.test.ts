@@ -6,10 +6,13 @@ import { createJazzSession } from "./index.js";
 
 describe("inserting with every optional column omitted through the native backend", () => {
   it("creates the row and syncs it to another session", async () => {
-    const app = s.defineApp({
-      notes: s.table({ label: s.string().optional(), rank: s.int().optional() }, {}),
-      posters: s.table({ title: s.string().optional(), metadata: s.json().optional() }, {}),
-    });
+    const app = s.defineApp(
+      {
+        notes: s.table({ label: s.string().optional(), rank: s.int().optional() }, {}),
+        posters: s.table({ title: s.string().optional(), metadata: s.json().optional() }, {}),
+      },
+      { migrations: "none" },
+    );
     const server = await startLocalJazzServer({ appId: randomUUID(), inMemory: true });
     const sessions: Awaited<ReturnType<typeof createJazzSession>>[] = [];
     const openSession = async () => {

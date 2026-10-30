@@ -10,11 +10,14 @@ import { createAccountManager, createDb, upgradeToLocalFirst } from "./index.js"
 import { LOCAL_FIRST_ISSUER, mintSelfSignedToken } from "./self-signed-token.js";
 import { parseSnapshotRef, serializeSnapshotRef } from "../runtime/snapshot-ref.js";
 
-const app = s.defineApp({
-  notes: s.table({ text: s.string(), done: s.boolean() }, {}),
-  documents: s.table({ branch: s.string(), title: s.string() }, {}).branchBy("branch"),
-  files: s.table({ name: s.string(), data: s.bytes() }, {}),
-});
+const app = s.defineApp(
+  {
+    notes: s.table({ text: s.string(), done: s.boolean() }, {}),
+    documents: s.table({ branch: s.string(), title: s.string() }, {}).branchBy("branch"),
+    files: s.table({ name: s.string(), data: s.bytes() }, {}),
+  },
+  { migrations: "none" },
+);
 const permissions = definePermissions(app, ({ policy, session }) => {
   policy.notes.allowRead.where({ $createdBy: session.user });
   policy.notes.allowInsert.always();

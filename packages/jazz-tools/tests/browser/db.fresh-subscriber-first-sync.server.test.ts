@@ -4,9 +4,12 @@ import { deploy } from "../../src/dev/catalogue.js";
 import { TestCleanup, createBrowserTestDb, uniqueDbName, waitForCondition } from "./support.js";
 import { getJazzServerInfo } from "./testing-server.js";
 
-const app = schema.defineApp({
-  docs: schema.table({ label: schema.string(), body: schema.string() }, {}),
-});
+const app = schema.defineApp(
+  {
+    docs: schema.table({ label: schema.string(), body: schema.string() }, {}),
+  },
+  { migrations: "none" },
+);
 const permissions = schema.definePermissions(app, ({ policy }) => [
   policy.docs.allowRead.always(),
   policy.docs.allowInsert.always(),

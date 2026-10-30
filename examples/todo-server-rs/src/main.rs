@@ -104,6 +104,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         schema.len()
     );
 
+    // The app's schema versions and lenses, as `jazz-tools validate` writes
+    // them beside schema.ts, so this client stores each version as the
+    // server does.
+    let migrations = jazz::tools::deployment::published::client_migrations_module(
+        &std::fs::read_to_string(format!("{schema_root}/migrations/index.ts"))?,
+    )?;
+
     // Create Jazz client
     let context = AppContext {
         app_id: AppId::from_string(&app_id).unwrap_or_else(|_| AppId::from_name(&app_id)),
@@ -116,6 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         jwt_token: Some(jwt_token),
         backend_secret: None,
         admin_secret: None,
+        migrations,
     };
 
     let client = TodoClient::connect(context).await?;

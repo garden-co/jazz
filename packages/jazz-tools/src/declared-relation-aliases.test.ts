@@ -6,10 +6,13 @@ import { definePermissions } from "./permissions/index.js";
 
 describe("declared relation names", () => {
   it("uses the same aliases for includes, reverse relations, and permission hops", () => {
-    const app = s.defineApp({
-      people: s.table({ name: s.string() }, { groupsViaPeople: s.reverse("groups", "people") }),
-      groups: s.table({ personIds: s.array(s.uuid()) }, { people: s.rel("people", "personIds") }),
-    });
+    const app = s.defineApp(
+      {
+        people: s.table({ name: s.string() }, { groupsViaPeople: s.reverse("groups", "people") }),
+        groups: s.table({ personIds: s.array(s.uuid()) }, { people: s.rel("people", "personIds") }),
+      },
+      { migrations: "none" },
+    );
     expect(JSON.parse(app.groups.include({ people: true })._build()).includes).toEqual({
       people: true,
     });

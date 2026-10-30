@@ -51,7 +51,7 @@ const schema = {
     },
   ),
 };
-const app = s.defineApp(schema);
+const app = s.defineApp(schema, { migrations });
 ```
 
 `author` is the public relation name, `users` is its target table, and `authorId` is the
@@ -84,8 +84,22 @@ When you change your schema on a shared app, prepare any required migration and 
 
 ## Exporting the app
 
-`s.defineApp(schema)` converts your schema definition into a typed `app` object. This is what you
-pass to queries, mutations, and subscriptions throughout your application code.
+`s.defineApp(schema, { migrations })` converts your schema definition into a typed `app` object.
+This is what you pass to queries, mutations, and subscriptions throughout your application code.
+
+`migrations` comes from `migrations/index.ts` beside your `schema.ts`. `jazz-tools` writes that
+file on every `validate` and `deploy` of an app that imports it, even while your app has a single
+schema version, so the import always looks the same:
+
+```ts title="schema.ts"
+import { migrations } from "./migrations";
+```
+
+The file holds every schema version of your app and the migrations between them. Clients use it to
+lay out storage exactly like the server does and to read data written under older versions. A client
+whose schema is missing from it refuses to open with a message telling you to regenerate it. Commit
+the file with your schema. Apps that are never deployed, like a throwaway test app, can pass
+`{ migrations: "none" }`.
 
 <include cwd lang="ts" meta='title="schema.ts"'>
   ../examples/docs/todo-client-localfirst-ts/schema.ts#schema-define-app-ts
@@ -105,7 +119,7 @@ Extract precise TypeScript types from any table handle:
 
 ## Very Large Schemas
 
-For most apps, `s.defineApp(schema)` is the right export: it gives you one typed table handle for
+For most apps, `s.defineApp(schema, { migrations })` is the right export: it gives you one typed table handle for
 each table in the schema, and Jazz uses the same schema for runtime validation, migrations, query
 planning, and TypeScript inference.
 
@@ -114,11 +128,12 @@ tables, while a given feature area only works with a much smaller subset. Becaus
 and reverse relations are declared in the app schema, asking TypeScript to understand the whole
 graph can make editor and build performance worse than the code you are writing actually needs.
 
-Use `s.defineSliceableApp(schema)` when you want one complete runtime schema but smaller typed app
+Use `s.defineSliceableApp(schema, { migrations })` when you want one complete runtime schema but smaller typed app
 surfaces:
 
 ```ts title="schema.ts"
 import { schema as s } from "jazz-tools";
+import { migrations } from "./migrations";
 
 const schema = {
   accounts: s.table({ name: s.string() }, {}),
@@ -159,7 +174,7 @@ const schema = {
   ),
 };
 
-const sliceableApp = s.defineSliceableApp(schema);
+const sliceableApp = s.defineSliceableApp(schema, { migrations });
 
 export const commerceApp = sliceableApp.slice(
   "accounts",

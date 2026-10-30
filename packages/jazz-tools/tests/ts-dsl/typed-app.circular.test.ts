@@ -51,7 +51,7 @@ const schema = {
 };
 
 type CircularAppSchema = s.Schema<typeof schema>;
-const app: s.App<CircularAppSchema> = s.defineApp(schema);
+const app: s.App<CircularAppSchema> = s.defineApp(schema, { migrations: "none" });
 
 describe("typed app circular schemas", () => {
   it("serializes self and circular include trees", () => {

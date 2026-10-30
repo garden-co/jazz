@@ -8,11 +8,14 @@ import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer, startTestJwtIssuer } from "../testing/index.js";
 import { Jazz, JazzBackend, JazzWriteRejected } from "./backend/index.js";
 
-const app = s.defineApp({
-  notes: s.table({ text: s.string() }, {}),
-  posts: s.table({ text: s.string() }, {}),
-  diaries: s.table({ text: s.string() }, {}),
-});
+const app = s.defineApp(
+  {
+    notes: s.table({ text: s.string() }, {}),
+    posts: s.table({ text: s.string() }, {}),
+    diaries: s.table({ text: s.string() }, {}),
+  },
+  { migrations: "none" },
+);
 const permissions = s.definePermissions(app, ({ policy, isCreator }) => {
   policy.diaries.allowRead.where(isCreator);
   policy.diaries.allowInsert.always();
