@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { defaultMarkdownParser } from "prosemirror-markdown";
 import { EditorState, TextSelection } from "prosemirror-state";
 import { applyMarkdown, docPosition, markdownOf, markdownSync, textPosition } from "./sync.js";
@@ -8,13 +8,9 @@ const parse = (markdown: string) => defaultMarkdownParser.parse(markdown);
 
 /** An editor on `markdown` with the cursor at `‸` (or the selection
  * between `‹` and `›`), recording what it writes. */
-function editor(marked: string, writeEvery?: number) {
+function editor(marked: string) {
   const written: string[] = [];
-  const plugin = markdownSync({
-    parse,
-    writeEvery,
-    onChange: (markdown) => written.push(markdown),
-  });
+  const plugin = markdownSync({ parse, onChange: (markdown) => written.push(markdown) });
   const markdown = marked.replace(/[‸‹›]/g, "");
   let state = EditorState.create({ doc: parse(markdown), plugins: [plugin] });
   const at = (marker: string) => {
@@ -62,42 +58,6 @@ function editor(marked: string, writeEvery?: number) {
 }
 
 describe("markdownSync", () => {
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  it("throttles writes with writeEvery: the first at once, then the latest", () => {
-    vi.useFakeTimers();
-    const ed = editor("Hello‸", 300);
-    ed.local((s) => s.tr.insertText(" w"));
-    ed.local((s) => s.tr.insertText("or"));
-    ed.local((s) => s.tr.insertText("ld"));
-    expect(ed.written).toEqual(["Hello w"]);
-    vi.advanceTimersByTime(300);
-    expect(ed.written).toEqual(["Hello w", "Hello world"]);
-    vi.advanceTimersByTime(300);
-    expect(ed.written).toEqual(["Hello w", "Hello world"]);
-  });
-
-  it("keeps edits not written yet when a merged value arrives", () => {
-    vi.useFakeTimers();
-    const ed = editor("Every stop is a reason to stay‸\n\nIntro: palm muted", 300);
-    ed.local((s) => s.tr.insertText(" to"));
-    ed.local((s) => s.tr.insertText("night"));
-    // The authority merged the first write with someone else's edit; this
-    // editor's "night" is not in it yet.
-    expect(
-      ed.remote("Every stop is a reason to stay to\n\nIntro: palm muted, then a bass slide"),
-    ).toBe(true);
-    expect(ed.marked()).toBe(
-      "Every stop is a reason to stay tonight‸\n\nIntro: palm muted, then a bass slide",
-    );
-    vi.advanceTimersByTime(300);
-    expect(ed.written.at(-1)).toBe(
-      "Every stop is a reason to stay tonight\n\nIntro: palm muted, then a bass slide",
-    );
-  });
-
   it("writes only its own change, leaving text it would write differently", () => {
     const ed = editor("Every stop is a reason to stay\n\nIntro: palm muted‸");
     // Someone else is typing after "stay": the value ends that line in a
@@ -107,17 +67,6 @@ describe("markdownSync", () => {
     expect(ed.written).toEqual([
       "Every stop is a reason to stay \n\nIntro: palm muted, then a bass slide",
     ]);
-  });
-
-  it("keeps its own edit where a merged value changed the same words", () => {
-    vi.useFakeTimers();
-    const ed = editor("Ride it to the end‸", 300);
-    ed.local((s) => s.tr.insertText(" of"));
-    ed.local((s) => s.tr.insertText(" the line"));
-    expect(ed.remote("Ride it to the end of the road")).toBe(false);
-    expect(ed.marked()).toBe("Ride it to the end of the line‸");
-    vi.advanceTimersByTime(300);
-    expect(ed.written.at(-1)).toBe("Ride it to the end of the line");
   });
 
   it("writes local changes as markdown", () => {

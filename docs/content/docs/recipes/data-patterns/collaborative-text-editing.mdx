@@ -69,9 +69,10 @@ server's result arrives, the device shows its own text, then switches to the mer
 
 A few habits keep an editor pleasant to use with a text merge column:
 
-- **Debounce writes.** Write the editor's value after a short pause in typing (a few hundred
-  milliseconds) rather than on every keystroke. Each write is still merged correctly; fewer writes
-  just mean less work and less history.
+- **Write every change.** Write the editor's value on each change, without debouncing. Until the
+  server's merge of a write comes back, the client keeps showing that write, so every merged value
+  that arrives already contains everything typed before it. An editor that holds edits back
+  instead has text the incoming value doesn't know about, and applying that value deletes it.
 - **Apply incoming values as a change, not a reset.** When the merged value arrives, compute the
   difference from what the editor shows and apply only that, so the cursor and selection stay where
   they are. Replacing the editor's whole content moves the cursor to the start.
