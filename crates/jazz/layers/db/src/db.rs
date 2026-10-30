@@ -7898,11 +7898,12 @@ fn outside_migrations(
 /// reach `target` along the app's migrations: every store takes the same
 /// path, so each derives the names its authority did (SPEC 10.7).
 ///
-/// Of several lenses into a version, the one from the smallest source
-/// version is taken, as the authority's `Names::resolve` picks it. A
-/// version no lens leads into but compatible with one some lens does (the
-/// same tables and columns, see `compatibility_id`) is reached from that
-/// one by an empty lens, as deployment connects them.
+/// Of several lenses into a version, every source is admitted first and
+/// the version is named by the lens from the smallest one, as the
+/// authority's `Names::resolve` picks it. A version no lens leads into but
+/// compatible with one some lens does (the same tables and columns, see
+/// `compatibility_id`) is reached from that one by an empty lens, as
+/// deployment connects them.
 fn migration_path(
     migrations: &Migrations,
     target: &JazzSchema,
@@ -7941,18 +7942,27 @@ fn migration_path(
             .filter(|lens| lens.target == version)
             .collect();
         into.sort_by_key(|lens| lens.source);
-        for lens in &into {
-            // A lens from a version the app's migrations lack: taking the
-            // next one would name this version otherwise than the
-            // authority, so there is no path.
-            let source = source_of(lens.source)?;
-            if let Some(mut path) = walk(migrations, source, admitted, visiting) {
-                path.push((schema.clone(), vec![(*lens).clone()]));
-                return Some(path);
-            }
-        }
         if !into.is_empty() {
-            return None;
+            // Every lens's source is admitted first, as on the authority,
+            // so this version is named by the lens from the smallest one
+            // and refused where the lenses disagree (`Names::resolve`). A
+            // lens from a version the app's migrations lack leaves no
+            // path: without it this version could be named otherwise.
+            let mut path: Vec<(JazzSchema, Vec<MigrationLens>)> = Vec::new();
+            for lens in &into {
+                let source = source_of(lens.source)?;
+                for step in walk(migrations, source, admitted, visiting)? {
+                    let version = step.0.version_id();
+                    if !path.iter().any(|(s, _)| s.version_id() == version) {
+                        path.push(step);
+                    }
+                }
+            }
+            path.push((
+                schema.clone(),
+                into.iter().map(|lens| (*lens).clone()).collect(),
+            ));
+            return Some(path);
         }
         // No lens leads here: from the smallest compatible version one
         // leads into (or this store admitted), by an empty lens.

@@ -1311,12 +1311,12 @@ fn a_compatible_revision_after_a_lens_keeps_the_lenss_columns() {
 }
 
 /// Two branches add `a` and `x` and merge, with a lens from each into the
-/// merge (as the deploy error for diverged branches recommends). Every
-/// store takes the lens from the smallest source version, whatever order
-/// the app's migrations list them in, so fresh clients store the merge's
-/// columns where the authority does.
+/// merge (as the deploy error for diverged branches recommends). Each lens
+/// adds the column the other branch added, so the merge would read one
+/// branch's values as new: the authority refuses it, and so does a fresh
+/// client, which admits both branches first as the authority did.
 #[test]
-fn several_lenses_into_one_version_name_its_columns_alike_everywhere() {
+fn a_merge_whose_lenses_disagree_on_a_columns_lineage_is_refused() {
     let v0 = notes_with(&[], false);
     let a = notes_with(&["a"], false);
     let x = notes_with(&["x"], false);
@@ -1330,8 +1330,60 @@ fn several_lenses_into_one_version_name_its_columns_alike_everywhere() {
     let server = authority(v0.clone(), 0);
     block_on(server.admit_schema_with_lenses(a.clone(), &lenses[0..1])).unwrap();
     block_on(server.admit_schema_with_lenses(x.clone(), &lenses[1..2])).unwrap();
+    let refused = block_on(server.activate_schema_with_lenses(merged.clone(), &lenses[2..4]))
+        .expect_err("a merge losing a branch's values");
+    assert_eq!(refused.code, ErrorCode::Schema);
+    assert!(
+        refused.to_string().contains("not supported yet"),
+        "{refused}"
+    );
+
+    let client = block_on(Db::open(
+        config(merged.clone(), 1, AuthorSubject::SYSTEM)
+            .with_migrations(vec![v0, a, x, merged], lenses),
+    ));
+    let refused = client.err().expect("the client refuses it too");
+    assert!(
+        refused.to_string().contains("not supported yet"),
+        "{refused}"
+    );
+}
+
+/// A version with lenses from two sources that agree on every column (the
+/// second source extends the first with a column the merge drops): every
+/// store names it by the lens from the smallest source, whatever order the
+/// app's migrations list them in, so fresh clients store it where the
+/// authority does.
+#[test]
+fn several_lenses_into_one_version_name_its_columns_alike_everywhere() {
+    let v0 = notes_with(&[], false);
+    let a = notes_with(&["a"], false);
+    let wide = notes_with(&["a", "tmp"], false);
+    let merged = notes_with(&["a", "x"], false);
+    let lenses = vec![
+        adds(&v0, &a, &["a"]),
+        adds(&a, &wide, &["tmp"]),
+        adds(&a, &merged, &["x"]),
+        rename(
+            &wide,
+            &merged,
+            vec![
+                LensOp::DropColumn {
+                    column: "tmp".into(),
+                    backwards_default: Value::Nullable(None),
+                },
+                LensOp::AddColumn {
+                    column: "x".into(),
+                    default: Value::Nullable(None),
+                },
+            ],
+        ),
+    ];
+    let server = authority(v0.clone(), 0);
+    block_on(server.admit_schema_with_lenses(a.clone(), &lenses[0..1])).unwrap();
+    block_on(server.admit_schema_with_lenses(wide.clone(), &lenses[1..2])).unwrap();
     block_on(server.activate_schema_with_lenses(merged.clone(), &lenses[2..4])).unwrap();
-    let schemas = vec![v0, a, x, merged.clone()];
+    let schemas = vec![v0, a, wide, merged.clone()];
     let dir = tempfile::tempdir().unwrap();
     let mut stored = Vec::new();
     for (node, reversed) in [(1u8, false), (2, true)] {

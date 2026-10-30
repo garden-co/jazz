@@ -965,6 +965,55 @@ impl Names {
         })
     }
 
+    /// Several lenses into `schema` from versions this store admitted (a
+    /// merge of two branches) must agree on where each column comes from:
+    /// a column one lens keeps from its source and another adds, or keeps
+    /// from another stored column, would read as new through the lens
+    /// every store takes, losing the other branch's values. That is not
+    /// supported yet.
+    fn lenses_agree(&self, schema: &JazzSchema, into: &[&MigrationLens]) -> Result<(), Error> {
+        let sources: Vec<(&MigrationLens, &StoredNames, LensEffects)> = into
+            .iter()
+            .filter_map(|lens| self.get(&lens.source).map(|names| (*lens, names)))
+            .map(|(lens, names)| Ok((lens, names, LensEffects::of(lens)?)))
+            .collect::<Result<_, Error>>()?;
+        if sources.len() < 2 {
+            return Ok(());
+        }
+        for table in schema.tables() {
+            for column in &table.columns {
+                let key = (table.name.clone(), column.name.clone());
+                let lineages: BTreeSet<Option<&String>> = sources
+                    .iter()
+                    .map(|(_, names, effects)| {
+                        if effects.defaults.contains_key(&key) || effects.copies.contains_key(&key)
+                        {
+                            return None;
+                        }
+                        let from_table = effects.tables.get(&table.name).unwrap_or(&table.name);
+                        let from = effects.columns.get(&key).unwrap_or(&column.name);
+                        names
+                            .tables
+                            .get(from_table)
+                            .and_then(|(_, columns)| columns.get(from))
+                    })
+                    .collect();
+                if lineages.len() > 1 {
+                    return Err(Error::new(
+                        ErrorCode::Schema,
+                        format!(
+                            "a version whose lenses from {} versions disagree on where `{}.{}` comes from (one adds it or keeps another column) is not supported yet",
+                            sources.len(),
+                            table.name,
+                            column.name
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Where `schema` stores its tables and columns.
     ///
     /// An admitted version keeps the names it was admitted with. Otherwise a
@@ -1006,6 +1055,7 @@ impl Names {
         // version this store admitted, as every store picks it (see
         // `migration_path`); else the base.
         into.sort_by_key(|lens| lens.source);
+        self.lenses_agree(schema, &into)?;
         let lens = into
             .iter()
             .find(|lens| self.versions.contains_key(&lens.source))
