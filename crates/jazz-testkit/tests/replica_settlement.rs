@@ -97,7 +97,9 @@ mod relay_topology {
         let seeder = open_db(0x41, bob);
         let (seeder_transport, authority_seed_transport) = duplex();
         let _seeder_connection = block_on(seeder.connect_upstream(seeder_transport));
-        let _authority_seed_subscriber = authority.accept_subscriber(authority_seed_transport, bob);
+        let _authority_seed_subscriber = authority
+            .accept_subscriber(authority_seed_transport, bob)
+            .unwrap();
         let seeded = block_on(seeder.insert(
             "documents",
             document_cells("settled at the authority"),
@@ -110,15 +112,18 @@ mod relay_topology {
 
         let (client_transport, relay_subscriber_transport) = duplex();
         let _client_connection = block_on(client.connect_upstream(client_transport));
-        let _relay_subscriber = relay.accept_subscriber(relay_subscriber_transport, alice);
+        let _relay_subscriber = relay
+            .accept_subscriber(relay_subscriber_transport, alice)
+            .unwrap();
         let (relay_upstream_transport, authority_transport) = duplex();
         let _relay_upstream = block_on(relay.connect_upstream(relay_upstream_transport));
         // The relay-to-authority hop is a trusted backend link. It delegates
         // Alice's immutable session binding inside its propagated
         // subscription; Core must not model the physical transport as Alice's
         // direct session link.
-        let _authority_subscriber =
-            authority.accept_subscriber(authority_transport, AuthorSubject::SYSTEM);
+        let _authority_subscriber = authority
+            .accept_subscriber(authority_transport, AuthorSubject::SYSTEM)
+            .unwrap();
 
         let documents = client
             .prepare_query(&client.table("documents"))
@@ -199,7 +204,9 @@ mod relay_topology {
 
         let (client_transport, relay_subscriber_transport) = duplex();
         let _client_connection = block_on(client.connect_upstream(client_transport));
-        let _relay_subscriber = relay.accept_subscriber(relay_subscriber_transport, alice);
+        let _relay_subscriber = relay
+            .accept_subscriber(relay_subscriber_transport, alice)
+            .unwrap();
 
         // Install the relay's upstream transport but leave the far end
         // unattached so the handshake never completes during the hold phase.
@@ -234,8 +241,9 @@ mod relay_topology {
         // session. Keeping the same admission model in the delayed-handshake
         // case proves that non-settlement is caused by the missing upstream
         // frontier, rather than rejected delegated policy context.
-        let _authority_subscriber =
-            authority.accept_subscriber(held_authority_transport, AuthorSubject::SYSTEM);
+        let _authority_subscriber = authority
+            .accept_subscriber(held_authority_transport, AuthorSubject::SYSTEM)
+            .unwrap();
         let mut events = premature;
         for _ in 0..4 {
             tick(&authority, "process the queued handshake");
@@ -283,7 +291,7 @@ mod relay_topology {
         client.set_non_durable_client();
         let (client_transport, relay_transport) = duplex();
         let _client_connection = block_on(client.connect_upstream(client_transport));
-        let _relay_subscriber = relay.accept_subscriber(relay_transport, alice);
+        let _relay_subscriber = relay.accept_subscriber(relay_transport, alice).unwrap();
 
         let documents = client
             .prepare_query(&client.table("documents"))
@@ -394,7 +402,9 @@ mod relay_topology {
              pending: {premature:?}"
         );
 
-        let _authority_subscriber = authority.accept_subscriber(held_authority_transport, alice);
+        let _authority_subscriber = authority
+            .accept_subscriber(held_authority_transport, alice)
+            .unwrap();
         let mut events = Vec::new();
         for _ in 0..4 {
             tick(&authority, "process the queued handshake");
@@ -463,7 +473,9 @@ mod relay_topology {
 
         let (client_transport, authority_transport) = duplex();
         let _client_connection = block_on(client.connect_upstream(client_transport));
-        let _authority_subscriber = authority.accept_subscriber(authority_transport, alice);
+        let _authority_subscriber = authority
+            .accept_subscriber(authority_transport, alice)
+            .unwrap();
 
         let documents = client
             .prepare_query(&client.table("documents"))
@@ -571,7 +583,9 @@ mod relay_topology {
         let authority = open_authority(0x38);
         let (replacement_transport, authority_transport) = duplex();
         let _replacement = block_on(node.connect_upstream(replacement_transport));
-        let _subscriber = authority.accept_subscriber(authority_transport, alice);
+        let _subscriber = authority
+            .accept_subscriber(authority_transport, alice)
+            .unwrap();
         for _ in 0..3 {
             tick(
                 &node,

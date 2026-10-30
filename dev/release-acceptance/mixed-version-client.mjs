@@ -20,9 +20,12 @@ const version = JSON.parse(
 ).version;
 
 // Keep in sync with FIXTURE_SCHEMA in mixed-version.mjs (deployed via the CLI).
-const app = s.defineApp({
-  docs: s.table({ label: s.string(), body: s.string(), author: s.string() }, {}),
-});
+const app = s.defineApp(
+  {
+    docs: s.table({ label: s.string(), body: s.string(), author: s.string() }, {}),
+  },
+  { migrations: "none" },
+);
 const permissions = s.definePermissions(app, ({ policy }) => {
   for (const op of ["allowRead", "allowInsert", "allowUpdate", "allowDelete"])
     policy.docs[op].always();

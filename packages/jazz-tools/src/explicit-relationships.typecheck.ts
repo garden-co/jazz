@@ -24,9 +24,9 @@ const invalidTarget = {
 // @ts-expect-error Unknown table rejected at schema construction.
 s.defineSchema(invalidTarget);
 // @ts-expect-error Unknown table rejected at app construction.
-s.defineApp(invalidTarget);
+s.defineApp(invalidTarget, { migrations: "none" });
 // @ts-expect-error Whole schema validated even before slicing.
-s.defineSliceableApp(invalidTarget);
+s.defineSliceableApp(invalidTarget, { migrations: "none" });
 const invalidReverse = {
   posts: s.table({ authorId: s.uuid() }, { author: s.rel("users", "authorId") }),
   users: s.table({}, { posts: s.reverse("posts", "authorId") }),
@@ -46,14 +46,14 @@ const schema = s.defineSchema({
     .indexOnly(["authorId"]),
   users: s.table({ name: s.string() }, { authored: s.reverse("posts", "author") }).branchBy("name"),
 });
-const app = s.defineApp(schema);
+const app = s.defineApp(schema, { migrations: "none" });
 app.posts.include({ author: true });
 app.users.hopTo("authored");
 // @ts-expect-error No inferred inverse.
 app.users.hopTo("postsViaAuthor");
 // @ts-expect-error Stored UUID column is not a relationship alias.
 app.posts.hopTo("authorId");
-const slice = s.defineSliceableApp(schema).slice("posts", "users");
+const slice = s.defineSliceableApp(schema, { migrations: "none" }).slice("posts", "users");
 slice.posts.include({ author: true });
 slice.users.hopTo("authored");
 // @ts-expect-error Legacy shortcut removed.

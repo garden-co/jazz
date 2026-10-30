@@ -11,9 +11,9 @@ are stored, a rejection's reason name changed how fates are recorded, and
 pending uploads moved from one encoded message to a row per op).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `0bd49cd130a2a205eadac2356299665f49eb6569cd2caee8bfbe360b31dc69f3`.
+  the SQLite file `402231c79722e32351f383a72d69fa7c9d0a1d238ecd31ffecf31b122da9e9f4`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `fcbd981b7c8e257e0c383fbeb37542c49cb720b9fcde1dda326479ab25c13034`.
+  `44f2a0cc172df020d1b57a68f2a076ee1a94175b867f340907cda06c8beb77e8`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
@@ -90,3 +90,10 @@ same way). A storage change re-pins this corpus and the browser corpus;
 `server-data-dir-v1` is re-pinned only when an authority's bytes change (an
 authority never writes `_jazz_withheld`, and that producer is not
 byte-deterministic).
+
+Storing every version at a position `(_n, _seq)`, `_n` being the code of the
+node that numbered it (0 for the authority; a replica's own writes at its
+node's code instead of a reserved local seq range), regenerated it the same
+way. It adds `_n` to every row and history table (history keyed by
+`(id, _b, _n, _seq)`), `sn` to `_jazz_transactions` and `node` to
+`_jazz_lv_via`.

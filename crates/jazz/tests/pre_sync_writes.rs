@@ -111,13 +111,15 @@ fn link(client: &Db, server: &Db) -> jazz::db::Upstream {
         out: up.clone(),
         inbound: down.clone(),
     })));
-    server.accept_subscriber(
-        Box::new(Pipe {
-            out: down,
-            inbound: up,
-        }),
-        AuthorSubject::SYSTEM,
-    );
+    server
+        .accept_subscriber(
+            Box::new(Pipe {
+                out: down,
+                inbound: up,
+            }),
+            AuthorSubject::SYSTEM,
+        )
+        .unwrap();
     link
 }
 
@@ -366,7 +368,21 @@ fn a_client_opened_ahead_uploads_once_its_server_has_the_version() {
     let dir = tempfile::tempdir().unwrap();
     let server = authority_at(v1(), &dir.path().join("server.sqlite"));
     insert(&server, 1, &[("title", "on the server")]);
-    let client = open_at(v2(), 1, &dir.path().join("client.sqlite"));
+    // The app ships its versions and lenses, so the client names v2's
+    // columns as its server will (SPEC 10.7).
+    let client = block_on(Db::open_at(
+        DbConfig::new(
+            v2(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([1; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        )
+        .with_migrations(vec![v1(), v2()], vec![lens()]),
+        &dir.path().join("client.sqlite"),
+        FileOptions::default(),
+    ))
+    .unwrap();
     client.become_replica();
     insert(&client, 2, &[("title", "ahead"), ("tag", "new")]);
     block_on(server.activate_schema_with_lenses(v2(), &[lens()])).unwrap();

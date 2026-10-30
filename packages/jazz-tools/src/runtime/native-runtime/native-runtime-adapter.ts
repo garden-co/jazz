@@ -1,3 +1,4 @@
+import type { ClientMigrations } from "../client-migrations.js";
 import { streamingChunks } from "../streaming-source.js";
 import { isHistoryTable, resolveQueryTable } from "../history-relation.js";
 import { AuxiliaryReceiveDeadline } from "./auxiliary-receive-deadline.js";
@@ -86,6 +87,7 @@ import {
   type QueryPredicate,
   type QueryPredicateOp,
   type ValueType,
+  clientMigrationsBytes,
 } from "./native-codec.js";
 import { exactSignedI64 } from "./exact-integer.js";
 import { encodeSchema } from "./schema-codec.js";
@@ -263,7 +265,7 @@ type NativeDb = {
     /** The upstream refused the scope's credential, with its reason. */
     authRejected?: string | null;
   };
-  registerSchema(schema: Uint8Array): NativeDb;
+  registerSchema(schema: Uint8Array, migrations?: Uint8Array): NativeDb;
   beginTransaction(
     openTransactionId: string,
     kind: TransactionKind,
@@ -983,9 +985,16 @@ export class NativeRuntimeAdapter implements Runtime {
     });
   }
 
-  registerSchemaView(schema: WasmSchema): NativeRuntimeAdapter {
+  /** The migrations this runtime's app ships (see {@link ClientMigrations}). */
+  readonly migrations: ClientMigrations | undefined;
+
+  /** A view of `schema`, whose app ships `migrations` (see {@link ClientMigrations}). */
+  registerSchemaView(schema: WasmSchema, migrations?: ClientMigrations): NativeRuntimeAdapter {
     return new NativeRuntimeAdapter(null, schema, this.node, this.peerIdentity, 1, true, {
-      db: this.db.registerSchema(encodeSchema(schema)),
+      db: this.db.registerSchema(
+        encodeSchema(schema),
+        migrations ? clientMigrationsBytes(migrations) : undefined,
+      ),
       // Registered schema views are façades over this same native open. The
       // capability is private to the owner and must survive view creation so
       // backend reads keep selecting the backend ABI rather than identity ABI.
@@ -1013,6 +1022,8 @@ export class NativeRuntimeAdapter implements Runtime {
       owner?: NativeRuntimeAdapter;
       /** Where slow queries are reported (`console.warn`): see {@link SlowQueryLogOptions}. */
       slowQueryLog?: SlowQueryLogOptions;
+      /** The app's versions and migrations: see {@link ClientMigrations}. */
+      migrations?: ClientMigrations;
     },
   ) {
     this.ownerRuntime = opts?.owner?.ownerRuntime ?? this;
@@ -1037,8 +1048,10 @@ export class NativeRuntimeAdapter implements Runtime {
       historyComplete,
       opts?.initialSyncFlushEvery,
       opts?.selfSignedClientProof,
+      opts?.migrations,
     );
     this.peerIdentity = author;
+    this.migrations = opts?.owner?.migrations ?? opts?.migrations;
     this.schemaHash = serializeRuntimeSchema(schema);
     if (opts?.db) {
       this.db = opts.db;
@@ -1309,8 +1322,18 @@ export class NativeRuntimeAdapter implements Runtime {
     return await this.db.evictExpiredStagedLargeValues();
   }
 
-  async acceptPeer(claims: Record<string, unknown> = {}, localEpoch?: bigint): Promise<Transport> {
-    if (this !== this.ownerRuntime) return this.ownerRuntime.acceptPeer(claims, localEpoch);
+  /**
+   * Serve a peer (a tab) whose replica is `identity`. A store configured as
+   * a user serves only its own identity: it uploads what its peers write as
+   * itself, so a peer of another identity is refused (`identity_mismatch`).
+   */
+  async acceptPeer(
+    claims: Record<string, unknown> = {},
+    localEpoch?: bigint,
+    identity: Uint8Array = this.peerIdentity,
+  ): Promise<Transport> {
+    if (this !== this.ownerRuntime)
+      return this.ownerRuntime.acceptPeer(claims, localEpoch, identity);
     if (this.closed) throw new Error("Native runtime is closed");
     return this.runWhenCoreIdle(async () => {
       if (this.closed) throw new Error("Native runtime is closed");
@@ -1327,6 +1350,8 @@ export class NativeRuntimeAdapter implements Runtime {
         const proof = this.selfSignedClientProof;
         let subscriber: Transport;
         if (proof) {
+          // The proof is this store's own: it vouches for no other identity.
+          if (!sameBytes(identity, this.peerIdentity)) throw identityMismatchError();
           if (!this.db.acceptSubscriberWithSelfSignedProof) {
             throw new Error(
               "Native runtime does not support self-signed subscriber admission; rebuild the matching Jazz WASM artifact",
@@ -1343,7 +1368,7 @@ export class NativeRuntimeAdapter implements Runtime {
           if (!this.db.acceptSubscriber) {
             throw new Error("Native runtime does not expose subscriber links");
           }
-          subscriber = await this.db.acceptSubscriber(this.peerIdentity, claims, localEpoch);
+          subscriber = await this.db.acceptSubscriber(identity, claims, localEpoch);
         }
         if (this.closed) {
           // We still own the slot. Awaiting gated retirement here would wait
@@ -5367,6 +5392,14 @@ function errorMessage(error: unknown): string {
   return String(error);
 }
 
+/** The refusal the engine gives a peer of another identity, with its reason. */
+function identityMismatchError(): Error {
+  return Object.assign(
+    new Error("a store configured as one user serves only its own identity's peers"),
+    { code: "protocol", reason: "identity_mismatch" satisfies NativeCoreErrorReason },
+  );
+}
+
 function contextualError(context: string, error: unknown): Error {
   const cause = error instanceof Error ? error : new Error(errorMessage(error));
   return new Error(`${context}: ${cause.message}`, { cause });
@@ -5389,6 +5422,8 @@ const REJECTION_CODES_BY_REASON: Readonly<Record<NativeCoreErrorReason, string>>
   permissions_head_missing: "write_rejected",
   predecessor_rejected: "write_rejected",
   schema_version_not_deployed: "write_rejected",
+  // A refused subscriber, never a write's fate.
+  identity_mismatch: "write_rejected",
 };
 
 /** A rejected wait's code, from the core reason every binding carries on it. */
@@ -7042,8 +7077,10 @@ function normalizeSubscriptionRejectionReason(
   if (record.type === "ShapeRegistrationPendingCatalogueAdmission") {
     return { type: "ShapeRegistrationPendingCatalogueAdmission" };
   }
-  if (record.type === "ServerFailure" && typeof record.code === "string") {
-    return { type: "ServerFailure", code: record.code };
+  // NAPI names the server's reason `code`, WASM `detail`.
+  const failure = record.code ?? record.detail;
+  if (record.type === "ServerFailure" && typeof failure === "string") {
+    return { type: "ServerFailure", code: failure };
   }
   if (record.type === "InvalidAuthoritySourceClosure" && typeof record.transition === "string") {
     return {

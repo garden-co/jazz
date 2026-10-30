@@ -18,18 +18,21 @@ class PreparationSource extends DefaultRuntimeSource {
 it.each(["mergeable", "serializable"] as const)(
   "keeps generated IDs native for immediate %s transaction inserts without dependencies",
   async (kind) => {
-    const app = s.defineApp({
-      plain: s.table({ title: s.string() }, {}),
-      transformed: s.table(
-        {
-          title: s.string().transform({
-            from: (value) => value.toUpperCase(),
-            to: (value: string) => value.toLowerCase(),
-          }),
-        },
-        {},
-      ),
-    });
+    const app = s.defineApp(
+      {
+        plain: s.table({ title: s.string() }, {}),
+        transformed: s.table(
+          {
+            title: s.string().transform({
+              from: (value) => value.toUpperCase(),
+              to: (value: string) => value.toLowerCase(),
+            }),
+          },
+          {},
+        ),
+      },
+      { migrations: "none" },
+    );
     const source = new PreparationSource();
     const db = await createAccountDbWithRuntimeSource(
       await localAccountConfig(`transform-insert-${crypto.randomUUID()}`),
@@ -58,19 +61,22 @@ it.each(["mergeable", "serializable"] as const)(
 );
 
 it("retains transaction admission when an earlier transform lookup delays opening", async () => {
-  const app = s.defineApp({
-    prices: s.table(
-      {
-        amount: s.float().transform({
-          dependsOn: ["scale"],
-          from: (value, context: Readonly<{ scale: number }>) => value / context.scale,
-          to: (value: number, context: Readonly<{ scale: number }>) => value * context.scale,
-        }),
-        scale: s.float().default(100),
-      },
-      {},
-    ),
-  });
+  const app = s.defineApp(
+    {
+      prices: s.table(
+        {
+          amount: s.float().transform({
+            dependsOn: ["scale"],
+            from: (value, context: Readonly<{ scale: number }>) => value / context.scale,
+            to: (value: number, context: Readonly<{ scale: number }>) => value * context.scale,
+          }),
+          scale: s.float().default(100),
+        },
+        {},
+      ),
+    },
+    { migrations: "none" },
+  );
   const source = new PreparationSource();
   const db = await createAccountDbWithRuntimeSource(
     await localAccountConfig(`transform-admission-${crypto.randomUUID()}`),

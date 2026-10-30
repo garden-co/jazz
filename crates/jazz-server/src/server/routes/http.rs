@@ -13,8 +13,7 @@ use std::{collections::HashMap, sync::Arc};
 use crate::middleware::auth::validate_admin_secret;
 use crate::server::catalogue::MigrationGraph;
 use crate::server::{ServerState, ShutdownPhase};
-use jazz::tools::public_schema::{ColumnType, Schema, TableName, TablePolicies, Value};
-use jazz::tools::schema_lens::{Lens, LensOp, LensTransform};
+use jazz::tools::public_schema::{Schema, TablePolicies};
 use jazz::tools::transport_error::ErrorResponse;
 
 use super::utils::{
@@ -92,45 +91,6 @@ pub(super) struct AdminSubscriptionIntrospectionResponse {
     app_id: String,
     generated_at: u64,
     queries: Vec<serde_json::Value>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct PublishMigrationRequest {
-    pub(crate) from_hash: String,
-    pub(crate) to_hash: String,
-    forward: Vec<PublishTableLens>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct PublishTableLens {
-    table: String,
-    #[serde(default)]
-    added: bool,
-    #[serde(default)]
-    removed: bool,
-    renamed_from: Option<String>,
-    operations: Vec<PublishLensOp>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub(super) enum PublishLensOp {
-    Introduce {
-        column: String,
-        column_type: ColumnType,
-        value: Value,
-    },
-    Drop {
-        column: String,
-        column_type: ColumnType,
-        value: Value,
-    },
-    Rename {
-        column: String,
-        value: String,
-    },
 }
 
 #[derive(Debug, Serialize)]
@@ -253,118 +213,6 @@ pub(super) async fn permissions_handler(
             permissions: None,
         },
     }))
-}
-
-/// Lower a deployment migration against its resolved source and target schemas.
-pub(crate) fn lower_migration(
-    request: PublishMigrationRequest,
-    source_schema: &Schema,
-    target_schema: &Schema,
-) -> Result<Lens, String> {
-    let source_hash = parse_schema_hash_param(&request.from_hash)?;
-    let target_hash = parse_schema_hash_param(&request.to_hash)?;
-    let tables = request.forward;
-    let mut forward = LensTransform::new();
-    for table_lens in tables {
-        let table_name = table_lens.table;
-        if table_lens.added && table_lens.removed {
-            return Err(format!(
-                "table {} cannot be both added and removed",
-                table_name
-            ));
-        }
-        if (table_lens.added || table_lens.removed) && table_lens.renamed_from.is_some() {
-            return Err(format!(
-                "table {} cannot combine added/removed markers with renamedFrom",
-                table_name
-            ));
-        }
-        if (table_lens.added || table_lens.removed) && !table_lens.operations.is_empty() {
-            return Err(format!(
-                "table {} cannot combine added/removed markers with column operations",
-                table_name
-            ));
-        }
-        if table_lens.added {
-            let target_table_name = TableName::from(table_name.clone());
-            let schema = match target_schema.get(&target_table_name) {
-                Some(schema) => schema.clone(),
-                None => {
-                    return Err(format!(
-                        "createTables references unknown target table {}",
-                        table_name
-                    ));
-                }
-            };
-            forward.push(
-                LensOp::AddTable {
-                    table: table_name.clone(),
-                    schema,
-                },
-                false,
-            );
-        }
-        if table_lens.removed {
-            let source_table_name = TableName::from(table_name.clone());
-            let schema = match source_schema.get(&source_table_name) {
-                Some(schema) => schema.clone(),
-                None => {
-                    return Err(format!(
-                        "dropTables references unknown source table {}",
-                        table_name
-                    ));
-                }
-            };
-            forward.push(
-                LensOp::RemoveTable {
-                    table: table_name.clone(),
-                    schema,
-                },
-                false,
-            );
-        }
-        if let Some(renamed_from) = table_lens.renamed_from {
-            forward.push(
-                LensOp::RenameTable {
-                    old_name: renamed_from,
-                    new_name: table_name.clone(),
-                },
-                false,
-            );
-        }
-        for operation in table_lens.operations {
-            let op = match operation {
-                PublishLensOp::Introduce {
-                    column,
-                    column_type,
-                    value,
-                } => LensOp::AddColumn {
-                    table: table_name.clone(),
-                    column,
-                    column_type,
-                    default: value,
-                },
-                PublishLensOp::Drop {
-                    column,
-                    column_type,
-                    value,
-                } => LensOp::RemoveColumn {
-                    table: table_name.clone(),
-                    column,
-                    column_type,
-                    default: value,
-                },
-                PublishLensOp::Rename { column, value } => LensOp::RenameColumn {
-                    table: table_name.clone(),
-                    old_name: column,
-                    new_name: value,
-                },
-            };
-            forward.push(op, false);
-        }
-    }
-
-    Ok(Lens::new(source_hash, target_hash, forward))
 }
 
 pub(super) async fn admin_subscription_introspection_handler(

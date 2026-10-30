@@ -9,15 +9,17 @@ use std::rc::Rc;
 
 use jazz::db::{
     Acting, BuiltOn, Db, DbConfig, DbIdentity, DeleteOptions, ErrorCode, FileOptions,
-    InsertOptions, LOCAL_BASE, ReadOpts, ReadTier, SyncMessage, Transport, TransportError,
-    WireBase, WireKind, WireOp, WireTarget, WireWrite, block_on,
+    InsertOptions, ReadOpts, ReadTier, SyncMessage, Transport, TransportError, WireBase, WireKind,
+    WireOp, WireTarget, WireWrite, block_on,
 };
 use jazz::ids::RowUuid;
 use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::query::Query;
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
+use jazz::time::TxTime;
 use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
+use jazz::tx::TxId;
 
 fn allow_all() -> TablePolicies {
     TablePolicies::new()
@@ -130,7 +132,13 @@ fn fates(down: &Q) -> Vec<(u64, bool)> {
     down.borrow()
         .iter()
         .filter_map(|m| match m {
-            SyncMessage::Fate { tx, outcome, .. } => Some((*tx, outcome.result().is_ok())),
+            SyncMessage::Fate {
+                id: TxId {
+                    time: TxTime(tx), ..
+                },
+                outcome,
+                ..
+            } => Some((*tx, outcome.result().is_ok())),
             _ => None,
         })
         .collect()
@@ -140,11 +148,11 @@ fn fates(down: &Q) -> Vec<(u64, bool)> {
 fn a_message_the_server_does_not_serve_ends_only_that_session() {
     let server = server();
     let (_bad_client, bad_server, bad_up, _) = pipe();
-    let bad = server.accept_subscriber(bad_server, user(9));
+    let bad = server.accept_subscriber(bad_server, user(9)).unwrap();
     let alice = client(1, user(1));
     let (a_client, a_server, _, _) = pipe();
     let _a = block_on(alice.connect_upstream(a_client));
-    server.accept_subscriber(a_server, user(1));
+    server.accept_subscriber(a_server, user(1)).unwrap();
 
     post(&alice, "hello");
     bad_up.borrow_mut().push_back(SyncMessage::Rows {
@@ -195,13 +203,15 @@ fn a_session_the_server_cannot_send_to_ends_with_why() {
         let alice = client(1, user(1));
         let (a_client, _, up, _) = pipe();
         let _a = block_on(alice.connect_upstream(a_client));
-        let session = server.accept_subscriber(
-            Box::new(Refusing {
-                error: error.clone(),
-                inbound: up,
-            }),
-            user(1),
-        );
+        let session = server
+            .accept_subscriber(
+                Box::new(Refusing {
+                    error: error.clone(),
+                    inbound: up,
+                }),
+                user(1),
+            )
+            .unwrap();
         let prepared = alice.prepare_query(&Query::from("messages")).unwrap();
         let _live = block_on(alice.subscribe(&prepared, ReadOpts::default())).unwrap();
         for _ in 0..4 {
@@ -228,7 +238,7 @@ fn closed_sessions_are_kept_only_for_a_host_that_tracks_them() {
     let server = block_on(Db::open_history_complete(config(0, AuthorSubject::SYSTEM))).unwrap();
     for _ in 0..3 {
         let (_client, server_side, up, _) = pipe();
-        server.accept_subscriber(server_side, user(9));
+        server.accept_subscriber(server_side, user(9)).unwrap();
         up.borrow_mut().push_back(SyncMessage::Rows {
             images: Vec::new(),
             tx_ids: Vec::new(),
@@ -247,10 +257,10 @@ fn closed_sessions_are_kept_only_for_a_host_that_tracks_them() {
 fn a_stale_subscriber_handle_does_not_close_the_session_reusing_its_slot() {
     let server = server();
     let (_old_client, old_server, _, _) = pipe();
-    let old = server.accept_subscriber(old_server, user(1));
+    let old = server.accept_subscriber(old_server, user(1)).unwrap();
     server.disconnect_subscriber(old);
     let (_new_client, new_server, _, _) = pipe();
-    let new = server.accept_subscriber(new_server, user(2));
+    let new = server.accept_subscriber(new_server, user(2)).unwrap();
     assert_ne!(old, new);
     server.disconnect_subscriber(old);
     assert_eq!(server.open_subscribers(), 1);
@@ -262,13 +272,13 @@ fn a_commit_as_another_identitys_node_is_refused_and_claims_nothing() {
     let alice = client(1, user(1));
     let (a_client, a_server, a_up, a_down) = pipe();
     let _a = block_on(alice.connect_upstream(a_client));
-    server.accept_subscriber(a_server, user(1));
+    server.accept_subscriber(a_server, user(1)).unwrap();
     let (_m_client, m_server, m_up, m_down) = pipe();
-    server.accept_subscriber(m_server, user(9));
+    server.accept_subscriber(m_server, user(9)).unwrap();
 
     post(&alice, "first");
     block_on(alice.tick()).unwrap();
-    let Some(SyncMessage::Commit { node, tx, kind, .. }) = a_up
+    let Some(SyncMessage::Commit { id, kind, .. }) = a_up
         .borrow()
         .iter()
         .find(|m| matches!(m, SyncMessage::Commit { .. }))
@@ -276,6 +286,7 @@ fn a_commit_as_another_identitys_node_is_refused_and_claims_nothing() {
     else {
         panic!("alice's commit");
     };
+    let tx = id.time.0;
     for _ in 0..4 {
         block_on(server.tick()).unwrap();
         block_on(alice.tick()).unwrap();
@@ -284,12 +295,10 @@ fn a_commit_as_another_identitys_node_is_refused_and_claims_nothing() {
 
     // Mallory, another user, writes as alice's node at alice's next tx.
     m_up.borrow_mut().push_back(SyncMessage::Commit {
-        node,
-        tx: tx + 1,
+        id: TxId::new(TxTime(tx + 1), id.node),
         kind,
         ops: Vec::new(),
         acting: Acting::Own,
-        origin: None,
     });
     block_on(server.tick()).unwrap();
     assert_eq!(fates(&m_down), vec![(tx + 1, false)]);
@@ -301,6 +310,78 @@ fn a_commit_as_another_identitys_node_is_refused_and_claims_nothing() {
     }
     assert!(fates(&a_down).iter().all(|(_, ok)| *ok));
     assert_eq!(count(&server), 2, "alice's second write landed");
+}
+
+/// A base on another identity's commit tells its sender nothing: whether
+/// the commit exists, was accepted or was rejected, the write is refused
+/// alike.
+#[test]
+fn a_base_on_another_identitys_commit_is_refused_whether_or_not_it_exists() {
+    let server = server();
+    let write = |node: u8, tx: u64, op: WireWrite, bases: Vec<WireBase>| SyncMessage::Commit {
+        id: TxId::new(TxTime(tx), NodeUuid::from_bytes([node; 16])),
+        kind: WireKind::Mergeable,
+        ops: vec![WireOp { bases, ..op.into() }],
+        acting: Acting::Own,
+    };
+    let body = |text: &str| -> BTreeMap<String, Value> {
+        [("body".to_owned(), Value::String(text.into()))].into()
+    };
+    let (_a_client, a_server, a_up, a_down) = pipe();
+    server.accept_subscriber(a_server, user(1)).unwrap();
+    a_up.borrow_mut().push_back(write(
+        1,
+        1,
+        WireWrite::Insert {
+            table: "messages".to_owned(),
+            row: [7; 16],
+            cells: body("alice's"),
+            target: WireTarget::Root,
+            at: None,
+        },
+        Vec::new(),
+    ));
+    block_on(server.tick()).unwrap();
+    assert_eq!(fates(&a_down), vec![(1, true)]);
+
+    let (_m_client, m_server, m_up, m_down) = pipe();
+    server.accept_subscriber(m_server, user(9)).unwrap();
+    for (tx, named) in [(1, 1), (2, 99)] {
+        m_up.borrow_mut().push_back(write(
+            9,
+            tx,
+            WireWrite::Update {
+                table: "messages".to_owned(),
+                row: [7; 16],
+                cells: body("mallory's"),
+                target: WireTarget::Root,
+                at: None,
+            },
+            vec![WireBase {
+                key: Vec::new(),
+                on: BuiltOn::Commit {
+                    node: [1; 16],
+                    tx: named,
+                },
+            }],
+        ));
+    }
+    block_on(server.tick()).unwrap();
+    let refusals: Vec<String> = m_down
+        .borrow()
+        .iter()
+        .filter_map(|m| match m {
+            SyncMessage::Fate { outcome, .. } => Some(format!("{:?}", outcome.result())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(refusals.len(), 2, "{refusals:?}");
+    assert_eq!(
+        refusals[0], refusals[1],
+        "the existing commit is not told apart"
+    );
+    assert!(refusals[0].contains("predecessor_rejected"), "{refusals:?}");
+    assert!(rows(&server).contains("alice's"));
 }
 
 #[test]
@@ -341,10 +422,9 @@ fn an_upsert_over_a_row_deleted_in_the_same_commit_is_checked_as_an_insert() {
         )
         .unwrap();
     let (_m_client, m_server, m_up, m_down) = pipe();
-    server.accept_subscriber(m_server, user(1));
+    server.accept_subscriber(m_server, user(1)).unwrap();
     m_up.borrow_mut().push_back(SyncMessage::Commit {
-        node: [1; 16],
-        tx: LOCAL_BASE + 1,
+        id: TxId::new(TxTime(1), NodeUuid::from_bytes([1; 16])),
         kind: WireKind::Mergeable,
         ops: vec![
             WireWrite::Delete {
@@ -364,10 +444,9 @@ fn an_upsert_over_a_row_deleted_in_the_same_commit_is_checked_as_an_insert() {
             .into(),
         ],
         acting: Acting::Own,
-        origin: None,
     });
     block_on(server.tick()).unwrap();
-    assert_eq!(fates(&m_down), vec![(LOCAL_BASE + 1, false)]);
+    assert_eq!(fates(&m_down), vec![(1, false)]);
     assert!(rows(&server).contains("original"), "{}", rows(&server));
 }
 
@@ -375,14 +454,13 @@ fn an_upsert_over_a_row_deleted_in_the_same_commit_is_checked_as_an_insert() {
 fn the_authority_refuses_cells_that_are_not_of_their_columns_type() {
     let server = server();
     let (_m_client, m_server, m_up, m_down) = pipe();
-    server.accept_subscriber(m_server, user(2));
+    server.accept_subscriber(m_server, user(2)).unwrap();
     for (i, value) in [Value::I64(5), Value::Nullable(None), Value::Bool(true)]
         .into_iter()
         .enumerate()
     {
         m_up.borrow_mut().push_back(SyncMessage::Commit {
-            node: [2; 16],
-            tx: LOCAL_BASE + 1 + i as u64,
+            id: TxId::new(TxTime(1 + i as u64), NodeUuid::from_bytes([2; 16])),
             kind: WireKind::Mergeable,
             ops: vec![
                 WireWrite::Insert {
@@ -395,7 +473,6 @@ fn the_authority_refuses_cells_that_are_not_of_their_columns_type() {
                 .into(),
             ],
             acting: Acting::Own,
-            origin: None,
         });
     }
     block_on(server.tick()).unwrap();
@@ -427,17 +504,15 @@ fn a_reopened_authority_continues_after_the_seq_of_a_rowless_commit() {
     };
     let server = open();
     let (_r, r_server, r_up, r_down) = pipe();
-    server.accept_subscriber(r_server, user(2));
+    server.accept_subscriber(r_server, user(2)).unwrap();
     r_up.borrow_mut().push_back(SyncMessage::Commit {
-        node: [2; 16],
-        tx: LOCAL_BASE + 1,
+        id: TxId::new(TxTime(1), NodeUuid::from_bytes([2; 16])),
         kind: WireKind::Mergeable,
         ops: Vec::new(),
         acting: Acting::Own,
-        origin: None,
     });
     block_on(server.tick()).unwrap();
-    assert_eq!(fates(&r_down), vec![(LOCAL_BASE + 1, true)]);
+    assert_eq!(fates(&r_down), vec![(1, true)]);
     let before = server.seq_high_water();
     block_on(server.close()).unwrap();
     drop(server);
@@ -469,7 +544,7 @@ fn a_reopened_replica_continues_after_a_pending_commit_that_left_no_rows() {
     let alice = open_alice();
     let (a_client, a_server, _, _) = pipe();
     let up = block_on(alice.connect_upstream(a_client));
-    let session = server.accept_subscriber(a_server, user(1));
+    let session = server.accept_subscriber(a_server, user(1)).unwrap();
     // A delete of a row this replica does not hold writes no local row.
     block_on(alice.delete("messages", row, DeleteOptions::default())).unwrap();
     let before = alice.seq_high_water();
@@ -485,7 +560,7 @@ fn a_reopened_replica_continues_after_a_pending_commit_that_left_no_rows() {
     post(&alice, "after reopen");
     let (a_client, a_server, _, _) = pipe();
     let _up = block_on(alice.connect_upstream(a_client));
-    server.accept_subscriber(a_server, user(1));
+    server.accept_subscriber(a_server, user(1)).unwrap();
     for _ in 0..6 {
         block_on(alice.tick()).unwrap();
         block_on(server.tick()).unwrap();
@@ -508,7 +583,7 @@ fn the_authority_refuses_misplaced_bases() {
         )
         .unwrap();
     let (_m_client, m_server, m_up, m_down) = pipe();
-    server.accept_subscriber(m_server, user(1));
+    server.accept_subscriber(m_server, user(1)).unwrap();
     let base = || WireBase {
         key: Vec::new(),
         on: BuiltOn::Seq(1),
@@ -525,12 +600,10 @@ fn the_authority_refuses_misplaced_bases() {
         .into()
     };
     let commit = |n: u64, ops: Vec<WireOp>| SyncMessage::Commit {
-        node: [1; 16],
-        tx: LOCAL_BASE + n,
+        id: TxId::new(TxTime(n), NodeUuid::from_bytes([1; 16])),
         kind: WireKind::Mergeable,
         ops,
         acting: Acting::Own,
-        origin: None,
     };
     // On the row's second op; twice on its first; then as SPEC 8.2 says.
     m_up.borrow_mut().push_back(commit(
@@ -603,10 +676,9 @@ fn creators(db: &Db) -> Vec<(String, String)> {
 fn a_session_link_may_not_attribute_and_its_session_writes_are_its_own() {
     let server = server();
     let (_m_client, m_server, m_up, m_down) = pipe();
-    server.accept_subscriber(m_server, user(2));
+    server.accept_subscriber(m_server, user(2)).unwrap();
     let insert = |tx: u64, row: u8, body: &str, acting: Acting| SyncMessage::Commit {
-        node: [2; 16],
-        tx,
+        id: TxId::new(TxTime(tx), NodeUuid::from_bytes([2; 16])),
         kind: WireKind::Mergeable,
         ops: vec![
             WireWrite::Insert {
@@ -619,12 +691,11 @@ fn a_session_link_may_not_attribute_and_its_session_writes_are_its_own() {
             .into(),
         ],
         acting,
-        origin: None,
     };
     let other = user(3).canonical().to_owned();
     m_up.borrow_mut().extend([
         insert(
-            LOCAL_BASE + 1,
+            1,
             1,
             "attributed",
             Acting::Attributed {
@@ -632,7 +703,7 @@ fn a_session_link_may_not_attribute_and_its_session_writes_are_its_own() {
             },
         ),
         insert(
-            LOCAL_BASE + 2,
+            2,
             2,
             "as a session",
             Acting::Session {
@@ -642,10 +713,7 @@ fn a_session_link_may_not_attribute_and_its_session_writes_are_its_own() {
         ),
     ]);
     block_on(server.tick()).unwrap();
-    assert_eq!(
-        fates(&m_down),
-        vec![(LOCAL_BASE + 1, false), (LOCAL_BASE + 2, true)]
-    );
+    assert_eq!(fates(&m_down), vec![(1, false), (2, true)]);
     let (_, link) = user(2).principal_parts();
     assert_eq!(creators(&server), vec![("as a session".to_owned(), link)]);
 }

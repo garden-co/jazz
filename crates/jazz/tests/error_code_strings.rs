@@ -71,6 +71,7 @@ fn pinned_reason(reason: Reason) -> &'static str {
         Reason::PermissionsHeadMissing => "permissions_head_missing",
         Reason::PredecessorRejected => "predecessor_rejected",
         Reason::SchemaVersionNotDeployed => "schema_version_not_deployed",
+        Reason::IdentityMismatch => "identity_mismatch",
     }
 }
 
@@ -134,6 +135,7 @@ fn a_public_api_error_keeps_its_display_text_and_exposes_the_stable_code() {
         },
         id_source: None,
         chunk_store: None,
+        migrations: Default::default(),
     }))
     .expect("alice opens a database");
 

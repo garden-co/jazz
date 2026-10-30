@@ -3,27 +3,30 @@ import { schema } from "../../src/index.js";
 // #3816, shaped like MusicAgent: a conversation holds a large attachment and a
 // reply that a backend rewrites word by word. The browser reads both only
 // through a conversation it created, and lists attachments without their bytes.
-export const largeValueRewriteApp = schema.defineApp({
-  conversations: schema.table(
-    { title: schema.string() },
-    {
-      turnsViaConversation: schema.reverse("turns", "conversation"),
-      attachmentsViaConversation: schema.reverse("attachments", "conversation"),
-    },
-  ),
-  turns: schema.table(
-    { conversation_id: schema.uuid(), body: schema.string() },
-    { conversation: schema.rel("conversations", "conversation_id") },
-  ),
-  attachments: schema.table(
-    {
-      conversation_id: schema.uuid(),
-      filename: schema.string(),
-      payload: schema.bytes(),
-    },
-    { conversation: schema.rel("conversations", "conversation_id") },
-  ),
-});
+export const largeValueRewriteApp = schema.defineApp(
+  {
+    conversations: schema.table(
+      { title: schema.string() },
+      {
+        turnsViaConversation: schema.reverse("turns", "conversation"),
+        attachmentsViaConversation: schema.reverse("attachments", "conversation"),
+      },
+    ),
+    turns: schema.table(
+      { conversation_id: schema.uuid(), body: schema.string() },
+      { conversation: schema.rel("conversations", "conversation_id") },
+    ),
+    attachments: schema.table(
+      {
+        conversation_id: schema.uuid(),
+        filename: schema.string(),
+        payload: schema.bytes(),
+      },
+      { conversation: schema.rel("conversations", "conversation_id") },
+    ),
+  },
+  { migrations: "none" },
+);
 
 export const largeValueRewritePermissions = schema.definePermissions(
   largeValueRewriteApp,

@@ -1,8 +1,8 @@
-//! A worker and its tabs each number their own unsettled versions. A tab's
-//! replica holds the worker's unsettled versions (other tabs' writes the
-//! worker has not settled yet) next to its own, so the two numberings must
-//! never collide in a tab's history: the worker's start at `LOCAL_BASE`,
-//! a tab's at `NON_DURABLE_BASE`.
+//! A worker and its tabs each number their own unsettled versions, from 1.
+//! A tab's replica holds the worker's unsettled versions (other tabs'
+//! writes the worker has not settled yet) next to its own; each is keyed
+//! by the node that numbered it, so the two numberings never collide in a
+//! tab's history.
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
@@ -13,8 +13,8 @@ use std::rc::Rc;
 
 use duplex_transport::duplex;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, ErrorCode, Image, LOCAL_BASE, NON_DURABLE_BASE, ReadOpts,
-    RemoteLinkHint, SyncCell, SyncMessage, Transport, TransportError, Upstream, block_on,
+    Db, DbConfig, DbIdentity, ErrorCode, Image, ReadOpts, RemoteLinkHint, SyncCell, SyncMessage,
+    Transport, TransportError, Upstream, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::Query;
@@ -114,17 +114,24 @@ struct Net {
 
 impl Net {
     fn new(tabs: usize) -> Self {
-        Self::with_schema(tabs, schema, author(WORKER))
+        Self::with_schema(tabs, schema, author(WORKER), author(WORKER))
     }
 
-    /// Tabs of `tab_author` (a relay applies a session's read policy
-    /// unless the session is its own identity).
-    fn with_schema(tabs: usize, schema: fn() -> JazzSchema, tab_author: AuthorSubject) -> Self {
+    /// A worker configured as `worker_author` (and served as it), with
+    /// tabs of `tab_author` (a relay applies a session's read policy
+    /// unless the session is its own identity). Only a system worker
+    /// serves tabs of another identity.
+    fn with_schema(
+        tabs: usize,
+        schema: fn() -> JazzSchema,
+        worker_author: AuthorSubject,
+        tab_author: AuthorSubject,
+    ) -> Self {
         let mut net = Net {
             core: open_in(schema(), 0xc0, AuthorSubject::SYSTEM),
-            worker: open_in(schema(), WORKER, author(WORKER)),
+            worker: open_in(schema(), WORKER, worker_author),
             worker_up: None,
-            worker_as: author(WORKER),
+            worker_as: worker_author,
             tabs: Vec::new(),
             to_tabs: Vec::new(),
         };
@@ -136,13 +143,15 @@ impl Net {
             let (client_side, server_side) = duplex();
             block_on(tab.connect_upstream(client_side));
             let sent = Rc::default();
-            net.worker.accept_subscriber(
-                Box::new(Tap {
-                    inner: server_side,
-                    sent: Rc::clone(&sent),
-                }),
-                tab_author.clone(),
-            );
+            net.worker
+                .accept_subscriber(
+                    Box::new(Tap {
+                        inner: server_side,
+                        sent: Rc::clone(&sent),
+                    }),
+                    tab_author.clone(),
+                )
+                .unwrap();
             net.to_tabs.push(sent);
             net.tabs.push(tab);
         }
@@ -153,7 +162,8 @@ impl Net {
         let (client_side, server_side) = duplex();
         self.worker_up = Some(block_on(self.worker.connect_upstream(client_side)));
         self.core
-            .accept_subscriber(server_side, self.worker_as.clone());
+            .accept_subscriber(server_side, self.worker_as.clone())
+            .unwrap();
         self.worker.set_remote_link_hint(RemoteLinkHint::Live);
     }
 
@@ -250,12 +260,6 @@ fn a_tab_writes_again_over_another_tabs_unsettled_version_from_its_worker() {
         txs.push(net.update(net.tab(tab), row, text));
         net.pump();
     }
-    for tx in &txs {
-        assert!(
-            *tx > NON_DURABLE_BASE,
-            "a tab numbers its writes in its own range"
-        );
-    }
 
     net.worker_online();
     net.settle(net.tab(0), txs[4]);
@@ -326,11 +330,11 @@ fn a_tabs_unsettled_insert_stays_its_own_once_its_worker_stored_it() {
     );
 }
 
-/// Only a durable store relays to non-durable clients: a version shipped
-/// in a tab's own range would come from a third tier, whose numbering
-/// could meet the tab's, so the tab refuses it rather than store it.
+/// An upstream ships accepted versions and its own unsettled ones; a
+/// version numbered by the tab's own node can only be a misbehaving
+/// upstream's, so the tab refuses it rather than store it.
 #[test]
-fn a_tab_refuses_an_upstream_version_numbered_in_its_own_range() {
+fn a_tab_refuses_an_upstream_version_numbered_by_its_own_node() {
     let tab = open(WORKER + 1, author(WORKER));
     tab.set_non_durable_client();
     tab.set_remote_link_hint(RemoteLinkHint::Live);
@@ -342,7 +346,8 @@ fn a_tab_refuses_an_upstream_version_numbered_in_its_own_range() {
                 table: "notes".to_owned(),
                 id: [7; 16],
                 key: Vec::new(),
-                seq: NON_DURABLE_BASE + 1,
+                seq: 1,
+                by: Some([WORKER + 1; 16]),
                 deleted: false,
                 content: true,
                 cells: Vec::new(),
@@ -370,7 +375,9 @@ fn a_tabs_transaction_over_its_own_commit_settled_by_a_worker_without_a_server_c
     tab.set_remote_link_hint(RemoteLinkHint::Live);
     let (client_side, server_side) = duplex();
     block_on(tab.connect_upstream(client_side));
-    worker.accept_subscriber(server_side, author(WORKER));
+    worker
+        .accept_subscriber(server_side, author(WORKER))
+        .unwrap();
     let pump = || {
         for _ in 0..4 {
             block_on(tab.tick()).unwrap();
@@ -403,12 +410,12 @@ fn drive<T>(pump: &impl Fn(), future: impl std::future::Future<Output = T>) -> T
     panic!("did not complete");
 }
 
-/// Moving a tab's numbering to its own base hands out no seq: a session
-/// that writes nothing leaves its node's high water where it found it, and
-/// its first write lands above the base.
+/// Becoming a non-durable client hands out no seq: a session that writes
+/// nothing leaves its node's high water where it found it, and its first
+/// write lands just above it.
 #[test]
 fn a_tabs_high_water_moves_only_when_it_writes() {
-    let floor = LOCAL_BASE + 2;
+    let floor = 2;
     let tab = open(WORKER + 1, author(WORKER));
     tab.seed_seq_floor(floor);
     tab.set_non_durable_client();
@@ -417,7 +424,7 @@ fn a_tabs_high_water_moves_only_when_it_writes() {
     let tx = block_on(tab.insert("notes", body("first"), Default::default()))
         .unwrap()
         .mergeable_tx_id();
-    assert_eq!(tx, NON_DURABLE_BASE + 1);
+    assert_eq!(tx, floor + 1);
     assert_eq!(tab.seq_high_water(), tx);
 }
 
@@ -466,10 +473,7 @@ fn a_tabs_row_stays_while_its_worker_settles_the_insert_under_its_update() {
 /// everything the relay holds.)
 #[test]
 fn a_session_gets_no_unreadable_version_under_its_own_pending_write() {
-    let mut net = Net::with_schema(1, secret_schema, author(0x70));
-    net.worker_as = AuthorSubject::SYSTEM;
-    net.worker_offline();
-    net.worker_online();
+    let net = Net::with_schema(1, secret_schema, AuthorSubject::SYSTEM, author(0x70));
     let inserted = block_on(
         net.tab(0)
             .insert("notes", body("plain"), Default::default()),

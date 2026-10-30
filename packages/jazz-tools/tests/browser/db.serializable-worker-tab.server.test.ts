@@ -18,10 +18,13 @@ import {
 } from "./support.js";
 import { getJazzServerInfo } from "./testing-server.js";
 
-const app = schema.defineApp({
-  seats: schema.table({ show: schema.string(), holder: schema.string() }, {}),
-  audit: schema.table({ note: schema.string() }, {}),
-});
+const app = schema.defineApp(
+  {
+    seats: schema.table({ show: schema.string(), holder: schema.string() }, {}),
+    audit: schema.table({ note: schema.string() }, {}),
+  },
+  { migrations: "none" },
+);
 
 const permissions = schema.definePermissions(app, ({ policy }) => [
   policy.seats.allowRead.always(),

@@ -3,25 +3,28 @@ import { schema as s } from "../index.js";
 import { createPolicyTestApp } from "../testing/index.js";
 
 // Trimmed from examples/record-player: albums plus streamed track audio.
-const app = s.defineApp({
-  albums: s
-    .table(
-      { title: s.string(), artist: s.string() },
-      { tracksViaAlbum: s.reverse("tracks", "album") },
-    )
-    .indexOnly(["title"]),
-  tracks: s
-    .table(
-      {
-        album_id: s.uuid(),
-        title: s.string(),
-        ordinal: s.int(),
-        audio_bytes: s.bytes().optional(),
-      },
-      { album: s.rel("albums", "album_id") },
-    )
-    .indexOnly(["album_id", "ordinal"]),
-});
+const app = s.defineApp(
+  {
+    albums: s
+      .table(
+        { title: s.string(), artist: s.string() },
+        { tracksViaAlbum: s.reverse("tracks", "album") },
+      )
+      .indexOnly(["title"]),
+    tracks: s
+      .table(
+        {
+          album_id: s.uuid(),
+          title: s.string(),
+          ordinal: s.int(),
+          audio_bytes: s.bytes().optional(),
+        },
+        { album: s.rel("albums", "album_id") },
+      )
+      .indexOnly(["album_id", "ordinal"]),
+  },
+  { migrations: "none" },
+);
 
 const permissions = s.definePermissions(app, ({ policy, session }) => {
   policy.albums.allowRead.where({});

@@ -20,17 +20,18 @@ use std::task::{Context, Poll, Waker};
 use duplex_transport::duplex;
 use jazz::db::{
     Acting, BuiltOn, Db, DbConfig, DbIdentity, ExactWriteTarget, FileOptions, InsertOptions,
-    LOCAL_BASE, ReadOpts, Reason, RemoteLinkHint, SubscriptionStream, SyncMessage, UpdateOptions,
-    Upstream, WireBase, WireKind, WireOp, WireTarget, WireWrite, WriteConflict, WriteTarget,
-    block_on,
+    ReadOpts, Reason, RemoteLinkHint, SubscriptionStream, SyncMessage, UpdateOptions, Upstream,
+    WireBase, WireKind, WireOp, WireTarget, WireWrite, WriteConflict, WriteTarget, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::BranchSelector;
 use jazz::query::Query;
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
+use jazz::time::TxTime;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
+use jazz::tx::TxId;
 
 use common::{allow_all_policies, compile_schema};
 
@@ -179,13 +180,15 @@ impl Net {
         match client.via {
             None => self
                 .core
-                .accept_subscriber(server_side, author(client.node)),
+                .accept_subscriber(server_side, author(client.node))
+                .unwrap(),
             Some(_) => self
                 .worker
                 .as_ref()
                 .expect("worker")
                 .db
-                .accept_subscriber(server_side, author(WORKER)),
+                .accept_subscriber(server_side, author(WORKER))
+                .unwrap(),
         };
     }
 
@@ -193,7 +196,9 @@ impl Net {
         let (client_side, server_side) = duplex();
         let worker = self.worker.as_mut().expect("worker");
         worker.up = Some(block_on(worker.db.connect_upstream(client_side)));
-        self.core.accept_subscriber(server_side, author(WORKER));
+        self.core
+            .accept_subscriber(server_side, author(WORKER))
+            .unwrap();
     }
 
     fn worker_offline(&mut self) {
@@ -311,12 +316,16 @@ impl Net {
     }
 
     /// The accepted writes the worker uploaded for its tabs, in the order
-    /// it relayed them: the authority knows a relayed write by the
-    /// worker's commit.
+    /// it relayed them: the authority knows a relayed write by its tab's
+    /// own id.
     fn relayed(&self, row: RowUuid) -> Vec<WriteConflict> {
         self.conflicts(row)
             .into_iter()
-            .filter(|conflict| conflict.writer.0 == [WORKER; 16])
+            .filter(|conflict| {
+                self.clients
+                    .iter()
+                    .any(|tab| tab.via.is_some() && conflict.writer.0 == [tab.node; 16])
+            })
             .collect()
     }
 
@@ -714,7 +723,8 @@ fn a_relays_commit_a_write_was_built_on_is_what_its_writer_saw() {
     // renamed to the worker's own commits.
     let core = open(CORE, AuthorSubject::SYSTEM);
     let (mut relay, server_side) = duplex();
-    core.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+    core.accept_subscriber(server_side, AuthorSubject::SYSTEM)
+        .unwrap();
     let relay_node = [0x77; 16];
     let row = block_on(core.insert(
         "todos",
@@ -733,8 +743,7 @@ fn a_relays_commit_a_write_was_built_on_is_what_its_writer_saw() {
     ))
     .unwrap();
     let commit = |tx: u64, target: [u8; 16], title: &str, on: BuiltOn| SyncMessage::Commit {
-        node: relay_node,
-        tx,
+        id: TxId::new(TxTime(tx), NodeUuid::from_bytes(relay_node)),
         kind: WireKind::Mergeable,
         ops: vec![WireOp {
             bases: vec![WireBase {
@@ -751,9 +760,8 @@ fn a_relays_commit_a_write_was_built_on_is_what_its_writer_saw() {
             .into()
         }],
         acting: Acting::Own,
-        origin: Some(([0xa1; 16], LOCAL_BASE + tx)),
     };
-    let tx = |n: u64| LOCAL_BASE + n;
+    let tx = |n: u64| n;
     relay
         .send(commit(
             tx(1),
@@ -806,7 +814,14 @@ fn a_relays_commit_a_write_was_built_on_is_what_its_writer_saw() {
 
     let mut fates = BTreeMap::new();
     while let Some(message) = relay.try_recv() {
-        if let SyncMessage::Fate { tx, outcome, .. } = message {
+        if let SyncMessage::Fate {
+            id: TxId {
+                time: TxTime(tx), ..
+            },
+            outcome,
+            ..
+        } = message
+        {
             fates.insert(tx, outcome.result());
         }
     }
@@ -841,48 +856,34 @@ fn a_relays_commit_a_write_was_built_on_is_what_its_writer_saw() {
 }
 
 #[test]
-fn a_session_the_relay_may_not_write_as_is_not_its_writer_and_keeps_its_base() {
+fn a_tabs_commit_as_a_node_another_identity_claimed_is_refused() {
     // A direct client claims a node first; a tab behind the worker then
-    // uses the same node, which the worker's identity may not write as.
+    // uses the same node. The worker forwards the tab's commit under the
+    // tab's id, which the worker's identity may not write as.
     let mut net = Net::new(0);
     net.add_client(WORKER + 1, None);
     let row = net.seed(0);
     net.add_worker();
     net.add_client(WORKER + 1, Some(0));
-    // The tab writes over the seed; a write it never saw lands first.
     net.worker_offline();
-    let tab_write =
-        block_on(
-            net.db(1)
-                .update("todos", row, cells(&[("title", "tab")]), Default::default()),
-        )
-        .unwrap();
+    block_on(
+        net.db(1)
+            .update("todos", row, cells(&[("title", "tab")]), Default::default()),
+    )
+    .unwrap();
     net.edit_settled(0, row, &[("title", "claimer")]);
     net.worker_online();
     net.pump();
     assert_eq!(
         net.title(row),
-        Some(Value::String("tab".to_owned())),
-        "the tab's edit landed"
+        Some(Value::String("claimer".to_owned())),
+        "the tab's edit was refused"
     );
-    let _ = tab_write;
-
-    let conflicts = net.conflicts(row);
-    assert_eq!(
-        conflicts
-            .iter()
-            .filter(|conflict| conflict.writer.0 == [WORKER + 1; 16])
-            .count(),
-        2,
-        "only the claiming client's seed and edit name its node: the tab's commit is the worker's"
-    );
-    let worker = conflicts
-        .iter()
-        .find(|conflict| conflict.writer.0 == [WORKER; 16])
-        .expect("the worker wrote the tab's edit");
     assert!(
-        worker.maybe_conflicting,
-        "the base is the worker's to name: the tab never saw the claimer's edit"
+        net.conflicts(row)
+            .iter()
+            .all(|conflict| conflict.writer.0 != [WORKER; 16]),
+        "the worker writes nothing as itself"
     );
 }
 
@@ -1150,94 +1151,6 @@ fn a_resent_write_keeps_the_base_it_was_accepted_with() {
     let second = net.conflict(row, second);
     assert!(second.maybe_conflicting);
     assert_eq!(writers(&second.overlapping), vec![foreign]);
-}
-
-#[test]
-fn behind_two_relays_a_write_over_the_upper_relays_version_is_kept_conservatively() {
-    // core <- upper (durable) <- lower (durable) <- tab (non-durable). The
-    // lower relay holds the upper's unsettled version at a seq in its own
-    // local range, which is no commit of its own: it cannot name it
-    // upstream, so the tab's write counts as built on what it holds
-    // accepted. It is kept, flagged over the upper's write.
-    const UPPER: u8 = 0xa1;
-    const LOWER: u8 = 0xa2;
-    const TAB: u8 = 0xa3;
-    let core = open(CORE, AuthorSubject::SYSTEM);
-    let upper = open(UPPER, author(UPPER));
-    let lower = open(LOWER, author(LOWER));
-    let tab = open(TAB, author(LOWER));
-    tab.set_non_durable_client();
-    let link = |client: &Db, server: &Db, as_: u8| {
-        let (client_side, server_side) = duplex();
-        client.set_remote_link_hint(RemoteLinkHint::Live);
-        let up = block_on(client.connect_upstream(client_side));
-        server.accept_subscriber(server_side, author(as_));
-        up
-    };
-    let upper_up = link(&upper, &core, UPPER);
-    let _lower_up = link(&lower, &upper, LOWER);
-    let _tab_up = link(&tab, &lower, LOWER);
-    let stores = [&tab, &lower, &upper, &core];
-    let pump = || {
-        for _ in 0..4 {
-            for db in stores.iter().chain(stores.iter().rev()) {
-                block_on(db.tick()).unwrap();
-            }
-        }
-    };
-    let todos = Query::from("todos");
-    let _held: Vec<_> = [&upper, &lower, &tab]
-        .map(|db| {
-            let prepared = db.prepare_query(&todos).unwrap();
-            let mut stream = pin!(db.subscribe(&prepared, ReadOpts::default()));
-            let mut context = Context::from_waker(Waker::noop());
-            loop {
-                if let Poll::Ready(stream) = stream.as_mut().poll(&mut context) {
-                    break stream.unwrap();
-                }
-                pump();
-            }
-        })
-        .into_iter()
-        .collect();
-    let row = block_on(core.insert(
-        "todos",
-        cells(&[("title", "seed"), ("note", "seed")]),
-        Default::default(),
-    ))
-    .unwrap()
-    .row_uuid();
-    pump();
-
-    assert!(upper.detach_connection(&upper_up));
-    upper.set_remote_link_hint(RemoteLinkHint::Failed);
-    block_on(upper.update(
-        "todos",
-        row,
-        cells(&[("title", "upper")]),
-        Default::default(),
-    ))
-    .unwrap();
-    pump();
-    let write =
-        block_on(tab.update("todos", row, cells(&[("title", "tab")]), Default::default())).unwrap();
-    pump();
-    let _upper_up = link(&upper, &core, UPPER);
-    pump();
-    let mut turn = pin!(tab.wait_for_transaction(write.mergeable_tx_id(), DurabilityTier::Global));
-    let mut context = Context::from_waker(Waker::noop());
-    let fate = loop {
-        if let Poll::Ready(fate) = turn.as_mut().poll(&mut context) {
-            break fate;
-        }
-        pump();
-    };
-    fate.expect("the tab's write is kept");
-
-    let conflicts = core.write_conflicts("todos", row, None).unwrap();
-    let [_seed, upper_write, tab_write] = <[_; 3]>::try_from(conflicts).unwrap();
-    assert!(tab_write.maybe_conflicting);
-    assert_eq!(writers(&tab_write.overlapping), vec![upper_write.writer]);
 }
 
 #[test]

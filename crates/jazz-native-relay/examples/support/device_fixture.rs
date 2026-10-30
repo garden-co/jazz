@@ -140,6 +140,7 @@ mod tests {
                             ))),
                             backend_secret: None,
                             admin_secret: None,
+                            migrations: Default::default(),
                         };
                         enroll_test_context(&mut context).await.unwrap();
                         let client = connect(context).await.unwrap();

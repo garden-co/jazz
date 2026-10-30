@@ -17,7 +17,7 @@ const todoSchema = {
   ),
 };
 type TodoSchema = s.Schema<typeof todoSchema>;
-const app: s.App<TodoSchema> = s.defineApp(todoSchema);
+const app: s.App<TodoSchema> = s.defineApp(todoSchema, { migrations: "none" });
 
 const todoRow: Row = {
   id: "todo-1",

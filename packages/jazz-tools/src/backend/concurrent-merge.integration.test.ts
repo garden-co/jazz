@@ -10,18 +10,21 @@ import { createJazzSession } from "./index.js";
 
 describe("finite concurrent local write convergence", () => {
   for (const withGSet of [false, true]) {
-    const app = s.defineApp({
-      records: s.table(
-        {
-          title: s.string(),
-          archived: s.boolean(),
-          revision: s.float(),
-          count: s.int().merge("counter"),
-          tags: withGSet ? s.array(s.string()).merge("g-set") : s.array(s.string()),
-        },
-        {},
-      ),
-    });
+    const app = s.defineApp(
+      {
+        records: s.table(
+          {
+            title: s.string(),
+            archived: s.boolean(),
+            revision: s.float(),
+            count: s.int().merge("counter"),
+            tags: withGSet ? s.array(s.string()).merge("g-set") : s.array(s.string()),
+          },
+          {},
+        ),
+      },
+      { migrations: "none" },
+    );
     const permissions = s.definePermissions(app, ({ policy }) => policy.records.allowRead.always());
     for (const offline of [false, true]) {
       it(`settles a fresh editor with ${withGSet ? "GSet and Counter" : "Counter"} after concurrent ${offline ? "offline" : "online"} write chains`, async () => {

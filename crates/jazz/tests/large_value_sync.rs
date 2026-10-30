@@ -19,10 +19,12 @@ use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::ReadViewSourceSpec;
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::records::Value;
+use jazz::time::TxTime;
 use jazz::tools::{
     CmpOp, ColumnMergeStrategy, ColumnType, Operation, PolicyExpr, PolicyValue, SchemaBuilder,
     TableName, TableSchemaBuilder,
 };
+use jazz::tx::TxId;
 
 use common::{allow_all_policies, compile_schema};
 
@@ -170,14 +172,16 @@ fn connect_wires(server: &Db, client: &Db, identity: AuthorSubject) -> (Log, Wir
         inbound: down.clone(),
         log: log.clone(),
     })));
-    server.accept_subscriber(
-        Box::new(Pipe {
-            out: down.clone(),
-            inbound: up.clone(),
-            log: log.clone(),
-        }),
-        identity,
-    );
+    server
+        .accept_subscriber(
+            Box::new(Pipe {
+                out: down.clone(),
+                inbound: up.clone(),
+                log: log.clone(),
+            }),
+            identity,
+        )
+        .unwrap();
     (log, up, down)
 }
 
@@ -469,7 +473,9 @@ fn pulls_answer_only_for_versions_the_reader_may_read() {
         .find_map(|message| match message {
             SyncMessage::Rows { images, .. } => images.iter().find_map(|image| {
                 let cell = image.cells.iter().find_map(|(name, cell)| match cell {
-                    SyncCell::Large(descriptor) if name.ends_with("body") => Some(descriptor),
+                    SyncCell::Large(descriptor) if common::unhashed(name).ends_with("body") => {
+                        Some(descriptor)
+                    }
                     _ => None,
                 })?;
                 let value = jazz::large_values::decode_large_value_ref(cell).ok()?;
@@ -484,6 +490,7 @@ fn pulls_answer_only_for_versions_the_reader_may_read() {
         id: *row(id).0.as_bytes(),
         key: key.clone(),
         seq,
+        by: None,
         root,
         nodes,
         span: Some((0, LARGE as u64)),
@@ -658,14 +665,16 @@ fn connect_spied(server: &Db, client: &Db, identity: AuthorSubject) -> (Sizes, S
         inbound: down.clone(),
         sizes: sent.clone(),
     })));
-    server.accept_subscriber(
-        Box::new(Spy {
-            out: down,
-            inbound: up,
-            sizes: received.clone(),
-        }),
-        identity,
-    );
+    server
+        .accept_subscriber(
+            Box::new(Spy {
+                out: down,
+                inbound: up,
+                sizes: received.clone(),
+            }),
+            identity,
+        )
+        .unwrap();
     (sent, received)
 }
 
@@ -821,16 +830,18 @@ fn a_delta_over_a_version_the_replica_lacks_heals_by_asking_for_the_row() {
         inbound: down.clone(),
         log: Log::default(),
     })));
-    server.accept_subscriber(
-        Box::new(Spoil {
-            out: down,
-            inbound: up,
-            spoiled: spoiled.clone(),
-            holds: holds.clone(),
-            lose_holds: false,
-        }),
-        user(2),
-    );
+    server
+        .accept_subscriber(
+            Box::new(Spoil {
+                out: down,
+                inbound: up,
+                spoiled: spoiled.clone(),
+                holds: holds.clone(),
+                lose_holds: false,
+            }),
+            user(2),
+        )
+        .unwrap();
     let _bob_stream = subscribe(&bob, Query::from("docs"));
     let mut expected = text(6, LARGE);
     insert(
@@ -879,16 +890,18 @@ fn a_row_asked_for_whole_heals_after_its_hold_is_lost() {
         inbound: down.clone(),
         log: Log::default(),
     })));
-    server.accept_subscriber(
-        Box::new(Spoil {
-            out: down,
-            inbound: up,
-            spoiled: spoiled.clone(),
-            holds: holds.clone(),
-            lose_holds: true,
-        }),
-        user(2),
-    );
+    server
+        .accept_subscriber(
+            Box::new(Spoil {
+                out: down,
+                inbound: up,
+                spoiled: spoiled.clone(),
+                holds: holds.clone(),
+                lose_holds: true,
+            }),
+            user(2),
+        )
+        .unwrap();
     let bob_stream = subscribe(&bob, Query::from("docs"));
     let mut expected = text(6, LARGE);
     insert(
@@ -936,8 +949,7 @@ fn a_delta_over_a_version_the_writer_cannot_read_is_rejected() {
     );
     pump(&server, &[&mallory]);
     let update = |tx: u64, body: Value, deltas: Vec<CellDelta>| SyncMessage::Commit {
-        node: [9; 16],
-        tx,
+        id: TxId::new(TxTime(tx), NodeUuid::from_bytes([9; 16])),
         kind: WireKind::Mergeable,
         ops: vec![WireOp {
             deltas,
@@ -951,7 +963,6 @@ fn a_delta_over_a_version_the_writer_cannot_read_is_rejected() {
             .into()
         }],
         acting: Acting::Own,
-        origin: None,
     };
     // Each version the server could have written the draft at, named as a
     // base: rebuilt, the write would carry the draft's hidden body.
@@ -980,7 +991,9 @@ fn a_delta_over_a_version_the_writer_cannot_read_is_rejected() {
         .iter()
         .filter_map(|message| match message {
             SyncMessage::Fate {
-                tx,
+                id: TxId {
+                    time: TxTime(tx), ..
+                },
                 outcome:
                     Outcome::Refused {
                         error: WireError::Rejected { message, .. },
@@ -988,7 +1001,12 @@ fn a_delta_over_a_version_the_writer_cannot_read_is_rejected() {
                     },
                 ..
             } => Some((*tx, message.contains("large-value delta"))),
-            SyncMessage::Fate { tx, .. } => Some((*tx, false)),
+            SyncMessage::Fate {
+                id: TxId {
+                    time: TxTime(tx), ..
+                },
+                ..
+            } => Some((*tx, false)),
             _ => None,
         })
         .collect();
@@ -1028,7 +1046,9 @@ fn pulls_after_read_access_is_lost_are_answered_with_nothing() {
         .find_map(|message| match message {
             SyncMessage::Rows { images, .. } => images.iter().find_map(|image| {
                 let cell = image.cells.iter().find_map(|(name, cell)| match cell {
-                    SyncCell::Large(descriptor) if name.ends_with("text") => Some(descriptor),
+                    SyncCell::Large(descriptor) if common::unhashed(name).ends_with("text") => {
+                        Some(descriptor)
+                    }
                     _ => None,
                 })?;
                 let value = jazz::large_values::decode_large_value_ref(cell).ok()?;
@@ -1053,6 +1073,7 @@ fn pulls_after_read_access_is_lost_are_answered_with_nothing() {
             id: *row(5).0.as_bytes(),
             key,
             seq,
+            by: None,
             root,
             nodes: vec![root],
             span: Some((0, LARGE as u64)),
@@ -1103,7 +1124,9 @@ fn an_answer_to_many_pulls_is_bounded_and_the_rest_follows() {
         .find_map(|message| match message {
             SyncMessage::Rows { images, .. } => images.iter().find_map(|image| {
                 let cell = image.cells.iter().find_map(|(name, cell)| match cell {
-                    SyncCell::Large(descriptor) if name.ends_with("blob") => Some(descriptor),
+                    SyncCell::Large(descriptor) if common::unhashed(name).ends_with("blob") => {
+                        Some(descriptor)
+                    }
                     _ => None,
                 })?;
                 let value = jazz::large_values::decode_large_value_ref(cell).ok()?;
@@ -1119,6 +1142,7 @@ fn an_answer_to_many_pulls_is_bounded_and_the_rest_follows() {
         id: *row(1).0.as_bytes(),
         key: key.clone(),
         seq,
+        by: None,
         root,
         nodes: vec![root],
         span: Some((at * 4 * MB, (at + 1) * 4 * MB)),
@@ -1193,8 +1217,7 @@ fn naming_a_hidden_trees_hash_reads_nothing() {
     // Mallory names the draft's tree (its hashes are no secret) in a doc
     // she may write and read, pushing nothing; and a tree nobody stored.
     let insert = |tx: u64, n: u8, value: &jazz::large_values::LargeValueRef| SyncMessage::Commit {
-        node: [9; 16],
-        tx,
+        id: TxId::new(TxTime(tx), NodeUuid::from_bytes([9; 16])),
         kind: WireKind::Mergeable,
         ops: vec![
             WireWrite::Insert {
@@ -1211,7 +1234,6 @@ fn naming_a_hidden_trees_hash_reads_nothing() {
             .into(),
         ],
         acting: Acting::Own,
-        origin: None,
     };
     up.borrow_mut().push_back(insert(1, 1, &hidden));
     up.borrow_mut().push_back(insert(2, 2, &unknown));
@@ -1223,7 +1245,9 @@ fn naming_a_hidden_trees_hash_reads_nothing() {
         .iter()
         .filter_map(|message| match message {
             SyncMessage::Fate {
-                tx,
+                id: TxId {
+                    time: TxTime(tx), ..
+                },
                 outcome:
                     Outcome::Refused {
                         error: WireError::Rejected { message, .. },
@@ -1231,7 +1255,12 @@ fn naming_a_hidden_trees_hash_reads_nothing() {
                     },
                 ..
             } => Some((*tx, message.clone())),
-            SyncMessage::Fate { tx, .. } => Some((*tx, "accepted".to_owned())),
+            SyncMessage::Fate {
+                id: TxId {
+                    time: TxTime(tx), ..
+                },
+                ..
+            } => Some((*tx, "accepted".to_owned())),
             _ => None,
         })
         .collect();
@@ -1293,8 +1322,7 @@ fn an_access_proof_the_writer_cannot_read_proves_nothing() {
     // Mallory writes the secret body's tree back into the row, naming the
     // private version as her proof; then a tree nobody stored.
     let update = |tx: u64, value: &jazz::large_values::LargeValueRef| SyncMessage::Commit {
-        node: [9; 16],
-        tx,
+        id: TxId::new(TxTime(tx), NodeUuid::from_bytes([9; 16])),
         kind: WireKind::Mergeable,
         ops: vec![WireOp {
             access_proof: Some(AccessProof {
@@ -1311,7 +1339,6 @@ fn an_access_proof_the_writer_cannot_read_proves_nothing() {
             .into()
         }],
         acting: Acting::Own,
-        origin: None,
     };
     up.borrow_mut().push_back(update(1, &hidden));
     up.borrow_mut().push_back(update(2, &unknown));
@@ -1369,8 +1396,7 @@ fn a_push_is_never_answered() {
     };
     let hidden = prepared(8).value_ref;
     let insert = |tx: u64, n: u8| SyncMessage::Commit {
-        node: [9; 16],
-        tx,
+        id: TxId::new(TxTime(tx), NodeUuid::from_bytes([9; 16])),
         kind: WireKind::Mergeable,
         ops: vec![
             WireWrite::Insert {
@@ -1387,7 +1413,6 @@ fn a_push_is_never_answered() {
             .into(),
         ],
         acting: Acting::Own,
-        origin: None,
     };
     let fates = || -> Vec<bool> {
         down.borrow()
@@ -1464,8 +1489,7 @@ fn a_delta_that_does_not_stand_in_for_a_null_cell_is_refused() {
         },
     };
     let update = |tx: u64, body: Value, deltas: Vec<CellDelta>| SyncMessage::Commit {
-        node: [9; 16],
-        tx,
+        id: TxId::new(TxTime(tx), NodeUuid::from_bytes([9; 16])),
         kind: WireKind::Mergeable,
         ops: vec![WireOp {
             deltas,
@@ -1479,7 +1503,6 @@ fn a_delta_that_does_not_stand_in_for_a_null_cell_is_refused() {
             .into()
         }],
         acting: Acting::Own,
-        origin: None,
     };
     up.borrow_mut()
         .push_back(update(1, Value::Nullable(None), vec![delta(), delta()]));
@@ -1550,8 +1573,7 @@ fn a_merged_text_write_naming_a_hidden_tree_is_refused() {
     // Mallory edits the doc over its first version, which the authority
     // has to merge, naming the draft's tree as her value.
     up.borrow_mut().push_back(SyncMessage::Commit {
-        node: [9; 16],
-        tx: 1,
+        id: TxId::new(TxTime(1), NodeUuid::from_bytes([9; 16])),
         kind: WireKind::Mergeable,
         ops: vec![WireOp {
             bases: vec![WireBase {
@@ -1568,7 +1590,6 @@ fn a_merged_text_write_naming_a_hidden_tree_is_refused() {
             .into()
         }],
         acting: Acting::Own,
-        origin: None,
     });
     for _ in 0..4 {
         block_on(server.tick()).unwrap();
@@ -2033,9 +2054,9 @@ fn requests(log: &Log) -> usize {
 fn a_range_read_through_a_relay_fetches_only_its_path_at_every_hop() {
     let core = open(0, AuthorSubject::SYSTEM);
     let relay = open(5, user(5));
-    let tab = open(6, user(6));
+    let tab = open(6, user(5));
     let upstream = connect(&core, &relay, user(5));
-    let downstream = connect(&relay, &tab, user(6));
+    let downstream = connect(&relay, &tab, user(5));
     let blob: Vec<u8> = (0..LARGE * 16).map(|n| (n * 7 % 251) as u8).collect();
     insert(
         &core,
@@ -2071,8 +2092,8 @@ fn a_range_read_through_a_relay_fetches_only_its_path_at_every_hop() {
     );
     assert_eq!(at_tab, at_relay, "the tab holds the same path");
     // A second tab reading the same range is answered by the relay alone.
-    let other = open(7, user(7));
-    let beside = connect(&relay, &other, user(7));
+    let other = open(7, user(5));
+    let beside = connect(&relay, &other, user(5));
     let _other_stream = subscribe(&other, Query::from("docs").select(["body"]));
     pump_chain(&core, &relay, &other);
     upstream.borrow_mut().clear();
@@ -2088,9 +2109,9 @@ fn a_range_read_through_a_relay_fetches_only_its_path_at_every_hop() {
 fn a_whole_value_reaches_a_tab_through_its_relay() {
     let core = open(0, AuthorSubject::SYSTEM);
     let relay = open(5, user(5));
-    let tab = open(6, user(6));
+    let tab = open(6, user(5));
     connect(&core, &relay, user(5));
-    connect(&relay, &tab, user(6));
+    connect(&relay, &tab, user(5));
     let body = text(3, LARGE);
     insert(
         &core,
@@ -2113,9 +2134,9 @@ fn a_whole_value_reaches_a_tab_through_its_relay() {
 fn a_relay_forwards_no_pull_its_tab_may_not_make() {
     let core = open(0, AuthorSubject::SYSTEM);
     let relay = open(5, user(5));
-    let tab = open(9, user(9));
+    let tab = open(9, user(5));
     let upstream = connect(&core, &relay, user(5));
-    let (_, up, down) = connect_wires(&relay, &tab, user(9));
+    let (_, up, down) = connect_wires(&relay, &tab, user(5));
     let _relay_stream = subscribe(&relay, Query::from("docs").select(["blob"]));
     let _stream = subscribe(&tab, Query::from("docs").select(["blob"]));
     pump_chain(&core, &relay, &tab);
@@ -2165,6 +2186,7 @@ fn a_relay_forwards_no_pull_its_tab_may_not_make() {
         id: *row(id).0.as_bytes(),
         key: key.clone(),
         seq,
+        by: None,
         root,
         nodes: vec![draft],
         span: Some((0, LARGE as u64)),
@@ -2289,9 +2311,9 @@ fn a_partial_select_through_a_relay_fetches_only_its_range_and_follows_edits() {
     use jazz::query::Part;
     let core = open(0, AuthorSubject::SYSTEM);
     let relay = open(5, user(5));
-    let tab = open(6, user(6));
+    let tab = open(6, user(5));
     let upstream = connect(&core, &relay, user(5));
-    let downstream = connect(&relay, &tab, user(6));
+    let downstream = connect(&relay, &tab, user(5));
     let mut blob: Vec<u8> = (0..LARGE * 16).map(|n| (n * 7 % 251) as u8).collect();
     insert(
         &core,
@@ -2367,9 +2389,9 @@ fn a_partial_select_in_an_include_fetches_only_its_range_through_a_relay() {
     use jazz::result_tree::ResultRelation;
     let core = open(0, AuthorSubject::SYSTEM);
     let relay = open(5, user(5));
-    let tab = open(6, user(6));
+    let tab = open(6, user(5));
     let upstream = connect(&core, &relay, user(5));
-    let downstream = connect(&relay, &tab, user(6));
+    let downstream = connect(&relay, &tab, user(5));
     let mut blob: Vec<u8> = (0..LARGE * 16).map(|n| (n * 11 % 251) as u8).collect();
     insert(
         &core,
@@ -2660,7 +2682,7 @@ fn value_delta_turns_one_version_into_another() {
         ),
     )
     .unwrap()
-    .mergeable_tx_id();
+    .version();
     let at = v1_text.char_indices().nth(1_000_000).unwrap().0 as u64;
     let v2 = block_on(db.splice_value(
         "docs",
@@ -2674,10 +2696,10 @@ fn value_delta_turns_one_version_into_another() {
         Default::default(),
     ))
     .unwrap()
-    .mergeable_tx_id();
+    .version();
     let v3 = block_on(db.append_value("docs", row(1), "body", " and appended".into()))
         .unwrap()
-        .mergeable_tx_id();
+        .version();
     let mut v3_text = v1_text.clone();
     v3_text.replace_range(at as usize..at as usize + 4, "spliced é");
     v3_text.push_str(" and appended");
@@ -2703,7 +2725,7 @@ fn value_delta_turns_one_version_into_another() {
         Default::default(),
     ))
     .unwrap()
-    .mergeable_tx_id();
+    .version();
     let rewritten = block_on(db.value_delta("docs", row(1), "body", v3, v4)).unwrap();
     assert_eq!(apply_delta_utf16(&v3_text, &rewritten), v4_text);
     let moved: usize = rewritten
@@ -2719,7 +2741,7 @@ fn value_delta_turns_one_version_into_another() {
         Default::default(),
     ))
     .unwrap()
-    .mergeable_tx_id();
+    .version();
     let to_inline = block_on(db.value_delta("docs", row(1), "body", v4, v5)).unwrap();
     assert_eq!(apply_delta_utf16(&v4_text, &to_inline), "short");
     let from_inline = block_on(db.value_delta("docs", row(1), "body", v5, v1)).unwrap();
@@ -2734,7 +2756,7 @@ fn value_delta_turns_one_version_into_another() {
             Default::default(),
         ))
         .unwrap()
-        .mergeable_tx_id()
+        .version()
     };
     let (v6, v7) = (inline("short é text"), inline("short é text"));
     assert_eq!(
@@ -2762,11 +2784,18 @@ fn value_delta_needs_both_versions_readable() {
         },
     ))
     .unwrap();
-    let seq = handle.mergeable_tx_id();
+    let seq = handle.version();
     let error = block_on(db.value_delta("drafts", row(3), "body", seq, seq)).unwrap_err();
     assert!(error.to_string().contains("not readable"), "{error}");
     let system = open(0, AuthorSubject::SYSTEM);
-    let missing = block_on(system.value_delta("docs", row(4), "body", 1, 2)).unwrap_err();
+    let missing = block_on(system.value_delta(
+        "docs",
+        row(4),
+        "body",
+        jazz::db::Pos::at(1),
+        jazz::db::Pos::at(2),
+    ))
+    .unwrap_err();
     assert!(missing.to_string().contains("not held"), "{missing}");
 }
 

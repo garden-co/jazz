@@ -103,7 +103,9 @@ fn fresh_client(node: u8) -> Db {
 fn connect(client: &Db, server: &Db) {
     let (client_transport, server_transport) = duplex();
     let _upstream = block_on(client.connect_upstream(client_transport));
-    let _subscriber = server.accept_subscriber(server_transport, AuthorSubject::SYSTEM);
+    let _subscriber = server
+        .accept_subscriber(server_transport, AuthorSubject::SYSTEM)
+        .unwrap();
 }
 
 fn turn(client: &Db, server: Option<&Db>) {
@@ -355,7 +357,9 @@ fn losing_the_own_upstream_releases_a_held_opening() {
     let alice = fresh_client(0x67);
     let (client_transport, server_transport) = duplex();
     let upstream = block_on(alice.connect_upstream(client_transport));
-    let _subscriber = server.accept_subscriber(server_transport, AuthorSubject::SYSTEM);
+    let _subscriber = server
+        .accept_subscriber(server_transport, AuthorSubject::SYSTEM)
+        .unwrap();
     let mut stream = subscribe(&alice, &items(), gated());
     assert_withheld(&mut stream, &alice, None, 5);
 
@@ -368,7 +372,9 @@ fn losing_the_own_upstream_releases_a_held_opening() {
     let bob = fresh_client(0x69);
     let (client_transport, server_transport) = duplex();
     let upstream = block_on(bob.connect_upstream(client_transport));
-    let _subscriber = server.accept_subscriber(server_transport, AuthorSubject::SYSTEM);
+    let _subscriber = server
+        .accept_subscriber(server_transport, AuthorSubject::SYSTEM)
+        .unwrap();
     bob.set_remote_link_hint(RemoteLinkHint::Live);
     let mut stream = subscribe(&bob, &items(), gated());
     assert_withheld(&mut stream, &bob, None, 5);
@@ -441,7 +447,9 @@ fn an_offset_window_falls_back_to_the_warm_cache_when_the_remote_cannot_answer()
     let alice = fresh_client(0x69);
     let (client_transport, server_transport) = duplex();
     let upstream = block_on(alice.connect_upstream(client_transport));
-    let _subscriber = server.accept_subscriber(server_transport, AuthorSubject::SYSTEM);
+    let _subscriber = server
+        .accept_subscriber(server_transport, AuthorSubject::SYSTEM)
+        .unwrap();
     let remote = ReadOpts {
         tier: jazz::db::ReadTier::Remote,
         ..ReadOpts::default()
@@ -557,13 +565,15 @@ fn worker_connected_to(node: u8, server: &Db) -> Db {
     worker
 }
 
-fn foreground_over(node: u8, worker: Db) -> Foreground {
-    let tab = fresh_client(node);
+/// The tab is the worker's user, at its own node: a worker serves its own
+/// identity's tabs only.
+fn foreground_over(node: u8, worker_node: u8, worker: Db) -> Foreground {
+    let author = AuthorSubject::for_test_bytes([worker_node; 16]);
+    let tab = block_on(Db::open(config(node, author))).expect("open tab");
     tab.set_non_durable_client();
     let (tab_transport, worker_transport) = duplex();
     let _upstream = block_on(tab.connect_upstream(tab_transport));
-    let _foreground =
-        worker.accept_subscriber(worker_transport, AuthorSubject::for_test_bytes([node; 16]));
+    let _foreground = worker.accept_subscriber(worker_transport, author).unwrap();
     Foreground { tab, worker }
 }
 
@@ -630,7 +640,7 @@ impl Foreground {
 #[test]
 fn a_foreground_opening_waits_for_the_servers_rows_through_its_owner() {
     let server = seeded_server();
-    let foreground = foreground_over(0x71, worker_connected_to(0x70, &server));
+    let foreground = foreground_over(0x71, 0x70, worker_connected_to(0x70, &server));
     foreground.tab.set_remote_link_hint(RemoteLinkHint::Live);
 
     let mut stream = subscribe(&foreground.tab, &items(), gated());
@@ -650,7 +660,7 @@ fn a_foreground_opening_waits_for_the_servers_rows_through_its_owner() {
 
     // One-shot: a second foreground reads the server's rows through its
     // owner rather than the owner's empty local answer.
-    let other = foreground_over(0x72, worker_connected_to(0x73, &server));
+    let other = foreground_over(0x72, 0x73, worker_connected_to(0x73, &server));
     other.tab.set_remote_link_hint(RemoteLinkHint::Live);
     let mut rows = other.one_shot(Some(&server), &items());
     rows.sort();
@@ -671,7 +681,7 @@ fn an_empty_authority_answer_releases_a_foreground_opening() {
         AuthorSubject::SYSTEM,
     )))
     .expect("open empty server");
-    let foreground = foreground_over(0x75, worker_connected_to(0x74, &server));
+    let foreground = foreground_over(0x75, 0x74, worker_connected_to(0x74, &server));
     foreground.tab.set_remote_link_hint(RemoteLinkHint::Live);
 
     let mut stream = subscribe(&foreground.tab, &items(), gated());
@@ -694,7 +704,7 @@ fn an_empty_authority_answer_releases_a_foreground_opening() {
 /// ```
 #[test]
 fn a_foreground_whose_owner_link_failed_opens_at_once() {
-    let foreground = foreground_over(0x77, fresh_client(0x76));
+    let foreground = foreground_over(0x77, 0x76, fresh_client(0x76));
     foreground.tab.set_remote_link_hint(RemoteLinkHint::Failed);
 
     let mut stream = subscribe(&foreground.tab, &items(), gated());
@@ -736,7 +746,7 @@ fn warm_worker(node: u8, server: &Db) -> Db {
 #[test]
 fn a_warm_owner_cache_waits_for_the_authority_answer() {
     let server = seeded_server();
-    let answered = foreground_over(0x79, warm_worker(0x78, &server));
+    let answered = foreground_over(0x79, 0x78, warm_worker(0x78, &server));
     seed(&server, 10, "k");
     answered.tab.set_remote_link_hint(RemoteLinkHint::Live);
     let mut stream = subscribe(&answered.tab, &items(), gated());
@@ -761,7 +771,7 @@ fn a_warm_owner_cache_waits_for_the_authority_answer() {
     // A second server stays silent once it has warmed its owner: the
     // foreground's timeout releases the owner's cached rows.
     let quiet_server = seeded_server();
-    let silent = foreground_over(0x7e, warm_worker(0x7d, &quiet_server));
+    let silent = foreground_over(0x7e, 0x7d, warm_worker(0x7d, &quiet_server));
     silent.tab.set_remote_link_hint(RemoteLinkHint::Live);
     let mut stream = subscribe(&silent.tab, &items(), wait_for_remote(SHORT));
     for _ in 0..3 {
@@ -789,7 +799,7 @@ fn a_warm_owner_cache_waits_for_the_authority_answer() {
 #[test]
 fn a_held_foreground_opening_is_released_when_its_owner_link_fails() {
     let server = seeded_server();
-    let foreground = foreground_over(0x7b, warm_worker(0x7a, &server));
+    let foreground = foreground_over(0x7b, 0x7a, warm_worker(0x7a, &server));
     foreground.tab.set_remote_link_hint(RemoteLinkHint::Live);
     let mut stream = subscribe(&foreground.tab, &items(), gated());
     for _ in 0..6 {
@@ -927,7 +937,9 @@ fn a_host_shutdown_link_sequence_releases_held_reads_and_closes_cleanly() {
     alice.set_remote_link_hint(RemoteLinkHint::Attempting);
     let (client_transport, server_transport) = duplex();
     let upstream = block_on(alice.connect_upstream(client_transport));
-    let _subscriber = server.accept_subscriber(server_transport, AuthorSubject::SYSTEM);
+    let _subscriber = server
+        .accept_subscriber(server_transport, AuthorSubject::SYSTEM)
+        .unwrap();
     alice.set_remote_link_hint(RemoteLinkHint::Live);
 
     let mut answered = subscribe(&alice, &items(), gated());
@@ -1030,7 +1042,7 @@ fn a_foreground_over_an_owner_without_a_server_reads_the_owners_store() {
     // A binding's store is a replica from the start, server or not.
     let worker = fresh_client(0x80);
     worker.become_replica();
-    let foreground = foreground_over(0x81, worker);
+    let foreground = foreground_over(0x81, 0x80, worker);
     block_on(foreground.tab.insert(
         "items",
         BTreeMap::from([("label".to_owned(), Value::String("local".to_owned()))]),
@@ -1044,13 +1056,15 @@ fn a_foreground_over_an_owner_without_a_server_reads_the_owners_store() {
     let (_, rows, _) = opening(foreground.first_event(&mut stream, None));
     assert_eq!(rows, vec![row(30)]);
 
-    let other = fresh_client(0x82);
+    let owner = AuthorSubject::for_test_bytes([0x80; 16]);
+    let other = block_on(Db::open(config(0x82, owner))).expect("open second tab");
     other.set_non_durable_client();
     let (tab_transport, worker_transport) = duplex();
     let _upstream = block_on(other.connect_upstream(tab_transport));
     let _foreground = foreground
         .worker
-        .accept_subscriber(worker_transport, AuthorSubject::for_test_bytes([0x82; 16]));
+        .accept_subscriber(worker_transport, owner)
+        .unwrap();
     let mut stream = subscribe(&other, &items(), ReadOpts::default());
     let rows = (0..MAX_TURNS)
         .find_map(|_| {
@@ -1078,7 +1092,7 @@ fn a_foreground_over_an_owner_without_a_server_reads_the_owners_store() {
 #[test]
 fn a_foreground_one_shot_falls_back_to_its_owner_when_a_live_server_is_silent() {
     let server = seeded_server();
-    let foreground = foreground_over(0x75, worker_connected_to(0x74, &server));
+    let foreground = foreground_over(0x75, 0x74, worker_connected_to(0x74, &server));
     foreground.tab.set_remote_link_hint(RemoteLinkHint::Live);
     foreground.worker.set_remote_link_hint(RemoteLinkHint::Live);
 

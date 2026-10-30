@@ -29,6 +29,19 @@ pub struct DbConfig {
     /// Where settled large-value leaf bytes live. `None` keeps them in the
     /// SQLite file ([`crate::chunk_store`]).
     pub chunk_store: Option<std::sync::Arc<dyn crate::chunk_store::ChunkStore>>,
+    /// The app's earlier schema versions and the lenses between them, as
+    /// it ships them. A store that has not admitted `schema` admits the
+    /// versions on a lens path to it first, so it stores each column where
+    /// the authority does without asking (SPEC 10.7).
+    pub migrations: Migrations,
+}
+
+/// Schema versions and the lenses between them (see
+/// [`DbConfig::with_migrations`]).
+#[derive(Clone, Debug, Default)]
+pub struct Migrations {
+    pub schemas: Vec<JazzSchema>,
+    pub lenses: Vec<crate::protocol::MigrationLens>,
 }
 
 impl DbConfig {
@@ -39,6 +52,7 @@ impl DbConfig {
             identity,
             id_source: None,
             chunk_store: None,
+            migrations: Migrations::default(),
         }
     }
 
@@ -55,6 +69,17 @@ impl DbConfig {
         store: std::sync::Arc<dyn crate::chunk_store::ChunkStore>,
     ) -> Self {
         self.chunk_store = Some(store);
+        self
+    }
+
+    /// Ship the app's earlier `schemas` and the `lenses` between them (see
+    /// [`DbConfig::migrations`]).
+    pub fn with_migrations(
+        mut self,
+        schemas: Vec<JazzSchema>,
+        lenses: Vec<crate::protocol::MigrationLens>,
+    ) -> Self {
+        self.migrations = Migrations { schemas, lenses };
         self
     }
 }
@@ -441,11 +466,14 @@ pub enum Reason {
     /// deployed: the app was released ahead of its schema (code
     /// `WriteRejected`, SPEC 8.9).
     SchemaVersionNotDeployed,
+    /// A store configured as one user was asked to serve a session of
+    /// another identity (code `Protocol`): relays serve one identity.
+    IdentityMismatch,
 }
 
 impl Reason {
     /// Every reason, in declaration order.
-    pub const ALL: [Reason; 12] = [
+    pub const ALL: [Reason; 13] = [
         Reason::AuthorizationDenied,
         Reason::ClientClockTooFarAhead,
         Reason::SerializationConflict,
@@ -458,6 +486,7 @@ impl Reason {
         Reason::PermissionsHeadMissing,
         Reason::PredecessorRejected,
         Reason::SchemaVersionNotDeployed,
+        Reason::IdentityMismatch,
     ];
 
     /// The stable, snake_case name of this reason.
@@ -480,6 +509,7 @@ impl Reason {
             Reason::PermissionsHeadMissing => "permissions_head_missing",
             Reason::PredecessorRejected => "predecessor_rejected",
             Reason::SchemaVersionNotDeployed => "schema_version_not_deployed",
+            Reason::IdentityMismatch => "identity_mismatch",
         }
     }
 

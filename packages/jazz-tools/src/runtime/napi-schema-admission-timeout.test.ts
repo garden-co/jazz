@@ -11,11 +11,14 @@ import { testAuthorBytes } from "./testing/account-fixtures.js";
 // A connected carrier that never delivers a catalogue must preserve the native
 // read deadline, even though no application query can be attached yet (#2999).
 it("times out pending schema admission on a silent native upstream and closes", async () => {
-  const before = s.defineApp({ notes: s.table({ text: s.string() }, {}) });
-  const after = s.defineApp({
-    notes: s.table({ text: s.string() }, {}),
-    controls: s.table({ value: s.string() }, {}),
-  });
+  const before = s.defineApp({ notes: s.table({ text: s.string() }, {}) }, { migrations: "none" });
+  const after = s.defineApp(
+    {
+      notes: s.table({ text: s.string() }, {}),
+      controls: s.table({ value: s.string() }, {}),
+    },
+    { migrations: "none" },
+  );
   const path = await mkdtemp(join(tmpdir(), "jazz-schema-admission-timeout-"));
   const config = openConfig(
     new Uint8Array(16).fill(29),

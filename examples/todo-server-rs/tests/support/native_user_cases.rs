@@ -39,6 +39,7 @@ async fn ordinary_user_enrols_retries_and_syncs_without_privileged_credentials()
         jwt_token: Some(TestJwtIssuer::jwt_for_user("alice")),
         backend_secret: None,
         admin_secret: None,
+        migrations: Default::default(),
     };
 
     let writer = TodoClient::connect(context.clone())

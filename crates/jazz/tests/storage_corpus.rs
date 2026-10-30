@@ -59,8 +59,8 @@ const CLIENT_FILE: &str = "sqlite-storage-v1/client.sqlite.gz.base64";
 /// change re-runs the producer and re-pins these; after that the corpus is
 /// immutable and a new storage format gets a new corpus beside it (see
 /// `fixtures/sqlite-storage-v1/README.md`).
-const SERVER_SHA256: &str = "0bd49cd130a2a205eadac2356299665f49eb6569cd2caee8bfbe360b31dc69f3";
-const CLIENT_SHA256: &str = "fcbd981b7c8e257e0c383fbeb37542c49cb720b9fcde1dda326479ab25c13034";
+const SERVER_SHA256: &str = "d0f138bf694943252942efe773601a49865c63dc9a9e59698e50e117ce3a4489";
+const CLIENT_SHA256: &str = "47de2de6f3745f74c69a4ecfc3aabce40aba5b9de2c49c6130bf2dbe07c354ca";
 
 const SERVER_NODE: [u8; 16] = [0xa0; 16];
 const CLIENT_NODE: [u8; 16] = [0xc0; 16];
@@ -492,7 +492,7 @@ fn produce_sqlite_storage_corpus_v1() {
         // its writes never reach the server before it quits.
         let (client_side, server_side) = duplex();
         let _upstream = block_on(client.connect_upstream(client_side));
-        server.accept_subscriber(server_side, user(3));
+        server.accept_subscriber(server_side, user(3)).unwrap();
         let streams: Vec<_> = ["projects", "documents"]
             .into_iter()
             .map(|table| {
@@ -905,7 +905,7 @@ fn pinned_sqlite_corpus_reopens_and_accepts_current_writes() {
         // Its pending uploads are resent and land on the server.
         let (client_side, server_side) = duplex();
         let _upstream = block_on(client.connect_upstream(client_side));
-        server.accept_subscriber(server_side, user(3));
+        server.accept_subscriber(server_side, user(3)).unwrap();
         drive(
             &[&client, &server, &client],
             client.wait_for_pending_writes(DurabilityTier::Global),
@@ -1112,18 +1112,6 @@ fn another_storage_format_is_refused_without_changing_the_file() {
         (
             "versioned names",
             "ALTER TABLE _jazz_names ADD COLUMN version BLOB",
-        ),
-        // One from before a commit's record was one `_jazz_transactions`
-        // row: fates and landings in their own tables.
-        (
-            "per-table fates",
-            "CREATE TABLE _jazz_applied (node BLOB NOT NULL, tx INTEGER NOT NULL, result BLOB, \
-             PRIMARY KEY (node, tx))",
-        ),
-        (
-            "uninterned nodes",
-            "DROP TABLE _jazz_nodes; \
-             CREATE TABLE _jazz_nodes (node BLOB PRIMARY KEY, author INTEGER) WITHOUT ROWID",
         ),
     ] {
         let path = edited_server_corpus(name, sql);

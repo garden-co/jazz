@@ -82,7 +82,7 @@ fn replica(schema: JazzSchema, server: &Db, node: u8, author: AuthorSubject) -> 
     .unwrap();
     let (client_side, server_side) = duplex_transport::duplex();
     block_on(db.connect_upstream(client_side));
-    server.accept_subscriber(server_side, author);
+    server.accept_subscriber(server_side, author).unwrap();
     db.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
     db
 }

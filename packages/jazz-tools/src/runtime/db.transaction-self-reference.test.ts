@@ -10,16 +10,22 @@ import { deploy, startLocalJazzServer } from "../testing/index.js";
 // The string-typed parent column is the control shape without a relation.
 const apps = {
   "nullable self-reference": () =>
-    s.defineApp({
-      categories: s.table(
-        { name: s.string(), parentId: s.uuid().optional() },
-        { parent: s.rel("categories", "parentId") },
-      ),
-    }),
+    s.defineApp(
+      {
+        categories: s.table(
+          { name: s.string(), parentId: s.uuid().optional() },
+          { parent: s.rel("categories", "parentId") },
+        ),
+      },
+      { migrations: "none" },
+    ),
   "optional string parent column": () =>
-    s.defineApp({
-      categories: s.table({ name: s.string(), parentId: s.string().optional() }, {}),
-    }),
+    s.defineApp(
+      {
+        categories: s.table({ name: s.string(), parentId: s.string().optional() }, {}),
+      },
+      { migrations: "none" },
+    ),
 };
 
 describe("transaction-committed rows in a hierarchical table", () => {

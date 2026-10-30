@@ -11,11 +11,14 @@ The model is small:
 - The **authority** (the server, or a node with no upstream) is a database
   holding complete history. Every accepted commit gets the next server seq.
 - A **replica** is a database whose store is a partial copy of server versions
-  plus its own optimistic writes. Replica rows carry the server seq they were
-  shipped at, so cuts and history on the replica are over server versions.
-  Optimistic local writes number from `LOCAL_BASE` up (a non-durable client
-  from `NON_DURABLE_BASE` up), above every server seq, so no cut at a server
-  seq sees them.
+  plus its own optimistic writes. Every stored version sits at a position
+  `(_n, _seq)`: `_n` is the code of the node that numbered it (0 for the
+  authority) and `_seq` that node's counter. Replica rows carry the server
+  seq they were shipped at, at `_n = 0`, so cuts and history on the replica
+  are over server versions. A replica numbers its own optimistic writes
+  from 1 at its own node's code (role bits over its `_jazz_nodes` code:
+  `RELAY` for a durable replica, `LEAF` for a non-durable one), which sorts
+  after every server position, so no cut at a server seq sees them.
 - **Writes travel up** as one `Commit` per transaction and come back as one
   `Fate`.
 - **Reads travel up** as one `Read` per query and come back as rows plus
@@ -54,7 +57,7 @@ source of truth and names each invariant's tests):
 - `INV-SYNC-46`: A replica missing the chunks of a large value MUST request them and install the row only once its chunks are present; a writer pushes a value's new chunks before the commit that uses them.
 - `INV-SYNC-48`: A Remote read MUST NOT report rows the server's answer no longer lists.
 - `INV-SYNC-49`: A server MUST process a session's messages in the order sent, so a read sent after a commit is served after that commit.
-- `INV-SYNC-50`: A non-durable client's local seqs MUST NOT collide with its relay's.
+- `INV-SYNC-50`: A non-durable client's local versions MUST NOT collide with its relay's: each is stored at the position of the node that numbered it.
 - `INV-SYNC-51`: A store that committed writes before it became a replica MUST keep them and refuse every upstream, saying why.
 - `INV-SYNC-52`: A replica MUST upload each commit under the schema version of the view that wrote it, keeping it pending while offline; a server MUST refuse a commit under a version it has not deployed, at once, with reason `schema_version_not_deployed`.
 - `INV-SYNC-53`: The authority MUST NOT name a writer's own row as written (instead of shipping it) unless the commit applied unmerged over the very version the writer built on and that version is still current (§8.3); every other row ships, and a writer whose image differs from the digest asks for the row whole.
@@ -190,7 +193,8 @@ messages at 2 MiB, the prelude included.
 
 ### 8.2 Upstream: commits
 
-A committed transaction travels as one `Commit { node, tx, kind, ops, … }`;
+A committed transaction travels as one `Commit { id, kind, ops, … }`, `id`
+its writer's transaction id `tx@node`, which it keeps at every hop;
 open transactions never ship (ch. 3, `INV-TX-2`). Each op is a write
 (`Insert`, `Update`, `Upsert`, `Delete`, `Restore`, `Move`) by the session
 schema's table and column names, which the authority resolves to stored names
@@ -226,7 +230,10 @@ The commit's other fields:
   it checks and attributes them as the link's own identity, whatever author
   they name. A session link's `Attributed` commit naming another author is
   refused.
-- `origin`: the session commit a relay uploads this one for.
+
+A link may send a commit only under a node its identity writes as (the
+first identity to send one under a node claims it); a trusted link may send
+any.
 
 A replica keeps every unsettled commit and uploads it in order on each
 connection. It is stored a row per op, not as one encoded message:
@@ -259,7 +266,7 @@ commit, and a writer's commits reach the authority in the order written
 (`INV-HIST-23`). The authority orders commits by arrival.
 
 A relay that receives a session's commit stores it as its own pending commit
-and uploads it with `origin` set. It does not decide it (`INV-TX-23`).
+and uploads it under the session's id. It does not decide it (`INV-TX-23`).
 
 #### 8.2.1 Order and read-your-writes (`INV-SYNC-49`)
 
@@ -277,7 +284,7 @@ read-your-writes end to end.
 
 ### 8.3 Fates downstream
 
-`Fate { tx, outcome, global }` answers a commit. The `outcome` is one of:
+`Fate { id, outcome, global }` answers a commit, by its id. The `outcome` is one of:
 
 - `Accepted { seq, accepted_at, as_written }`: the commit landed at server seq
   `seq`, which the replica records as where it settled; applying a fate never
@@ -340,7 +347,7 @@ the identity its link was accepted as has every row stamped otherwise, so each
 of its writes costs that fetch. Mismatches are counted per replica
 (`as_written_mismatches`); tests of honest writers assert there are none.
 
-`Stored { tx }` is durability progress from a relay to a non-durable session:
+`Stored { id }` is durability progress from a relay to a non-durable session:
 the relay holds the commit in its store and uploads it, so it is `Local` for a
 session whose own store is memory. It is never a decision: a stored commit can
 still be rejected, and a `Fate` always follows it, unlike a non-global `Fate`,
@@ -722,11 +729,14 @@ for its sessions (tabs). It serves a session's reads from its store per the
 read's tier, asking its upstream with the same `Read` where the tier needs
 the authority's answer, and tells its sessions the authority's seq it knows
 (`served_through`), so a session's snapshot is one the authority validates as
-it is. It numbers its unsettled versions from `LOCAL_BASE` and ships them to
-its sessions; a non-durable session numbers its own writes from
-`NON_DURABLE_BASE` (`INV-SYNC-50`). A relay stores a session's commit as its
-own pending commit, answers `Stored`, and relays the authority's `Fate`
-(§8.3).
+it is. It numbers its unsettled versions at its own node and ships them to
+its sessions with `Image.by` naming that node; a non-durable session numbers
+its own writes at its own node, so the two never collide in the session's
+store (`INV-SYNC-50`). A relay stores a session's commit as its own pending
+commit, answers `Stored`, and relays the authority's `Fate` (§8.3). A relay
+whose host says it has no server is its sessions' last word: its `Fate` and
+`Settled` carry `by`, its own node, since their `through` counts its
+positions rather than the authority's.
 
 ## Open Questions
 

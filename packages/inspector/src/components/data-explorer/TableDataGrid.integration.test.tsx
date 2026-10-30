@@ -12,20 +12,23 @@ import { GenericQueryBuilder } from "../../utility/generic-query-builder.js";
 const issuer = "https://inspector-save.test";
 const userId = "editor";
 const permittedOwner = "00000000-0000-4000-8000-000000000001";
-const inspectorSaveApp = s.defineApp({
-  todos: s.table(
-    {
-      title: s.string(),
-      owner_id: s.uuid(),
-      rank: s.bigint().optional(),
-      largeCounts: s.array(s.bigint()).optional(),
-      textNumber: s.string().optional().default("restored-default"),
-      jsonNumber: s.json().optional(),
-      payload: s.bytes().optional(),
-    },
-    {},
-  ),
-});
+const inspectorSaveApp = s.defineApp(
+  {
+    todos: s.table(
+      {
+        title: s.string(),
+        owner_id: s.uuid(),
+        rank: s.bigint().optional(),
+        largeCounts: s.array(s.bigint()).optional(),
+        textNumber: s.string().optional().default("restored-default"),
+        jsonNumber: s.json().optional(),
+        payload: s.bytes().optional(),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 const inspectorSavePermissions = s.definePermissions(inspectorSaveApp, ({ policy, session }) => {
   policy.todos.allowRead.where({ owner_id: session.user.account });
   policy.todos.allowInsert.where({ owner_id: session.user.account });
@@ -35,16 +38,19 @@ const inspectorSavePermissions = s.definePermissions(inspectorSaveApp, ({ policy
 
 // Keep the BYTEA regression independent of unrelated nullable JSON semantics
 // tracked in #2733, while exercising the complete grid query against a real Db.
-const inspectorByteaApp = s.defineApp({
-  todos: s.table(
-    {
-      title: s.string(),
-      owner_id: s.uuid(),
-      payload: s.bytes().optional(),
-    },
-    {},
-  ),
-});
+const inspectorByteaApp = s.defineApp(
+  {
+    todos: s.table(
+      {
+        title: s.string(),
+        owner_id: s.uuid(),
+        payload: s.bytes().optional(),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 const inspectorByteaPermissions = s.definePermissions(inspectorByteaApp, ({ policy, session }) => {
   policy.todos.allowRead.where({ owner_id: session.user.account });
   policy.todos.allowInsert.where({ owner_id: session.user.account });

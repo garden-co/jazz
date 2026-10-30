@@ -164,14 +164,16 @@ fn connect_raw(
         inbound: down.clone(),
         log: None,
     })));
-    server.accept_subscriber(
-        Box::new(Pipe {
-            out: down,
-            inbound: up.clone(),
-            log: Some(log.clone()),
-        }),
-        identity,
-    );
+    server
+        .accept_subscriber(
+            Box::new(Pipe {
+                out: down,
+                inbound: up.clone(),
+                log: Some(log.clone()),
+            }),
+            identity,
+        )
+        .unwrap();
     (upstream, log, up)
 }
 
@@ -223,7 +225,7 @@ fn snapshot_of(db: &Db, table: &str, opts: ReadOpts) -> Vec<String> {
         .iter()
         .map(|r| {
             let cells: Vec<String> = r.cells().map(|(n, v)| format!("{n}={v:?}")).collect();
-            format!("{:?} @{} {}", r.row_uuid(), r.seq(), cells.join(" "))
+            format!("{:?} @{:?} {}", r.row_uuid(), r.seq(), cells.join(" "))
         })
         .collect()
 }

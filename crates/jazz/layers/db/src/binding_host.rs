@@ -412,6 +412,10 @@ pub struct OpenConfig {
     /// The public `initialSyncFlushEvery` option. Each applied batch commits
     /// on its own, so there is nothing to tune and any value is accepted.
     pub initial_sync_flush_every: Option<u32>,
+    /// The app's schema versions and migrations as JSON (a deployment's
+    /// `schemas` and `migrations`), which the binding lowers into
+    /// [`DbConfig::with_migrations`] (SPEC 10.7).
+    pub migrations: Option<Vec<u8>>,
 }
 
 /// The identity in an [`OpenConfig`].
@@ -866,7 +870,18 @@ impl Binding {
 
     /// A typed schema view backed by the same runtime.
     pub fn register_schema(&self, schema: &[u8]) -> HostResult<Self> {
+        self.register_schema_shipping(schema, crate::db::Migrations::default())
+    }
+
+    /// A typed schema view of an app that ships `migrations` (see
+    /// [`crate::db::Db::add_migrations`]), backed by the same runtime.
+    pub fn register_schema_shipping(
+        &self,
+        schema: &[u8],
+        migrations: crate::db::Migrations,
+    ) -> HostResult<Self> {
         let schema = decode_schema(schema)?;
+        self.db.add_migrations(migrations);
         let view = block_on(self.db.register_schema_view(schema))?;
         Ok(Self {
             db: Rc::new(view),
@@ -1684,21 +1699,23 @@ impl Binding {
     }
 
     /// Serve a subscriber (another replica) as `identity` with `claims`.
-    pub fn accept_subscriber(&self, identity: AuthorSubject, claims: Cells) -> Link {
-        self.db.set_identity_claims(identity, claims);
+    /// A store configured as a user refuses any other identity (see
+    /// [`Db::accept_subscriber`]).
+    pub fn accept_subscriber(&self, identity: AuthorSubject, claims: Cells) -> HostResult<Link> {
         let queues = WireQueues::default();
         let transport = Box::new(WireTransportAdapter::current(QueueTransport {
             queues: queues.clone(),
         }));
-        let subscriber = self.db.accept_subscriber(transport, identity);
-        Link {
+        let subscriber = self.db.accept_subscriber(transport, identity)?;
+        self.db.set_identity_claims(identity, claims);
+        Ok(Link {
             binding: self.clone(),
             queues,
             kind: LinkKind::Subscriber {
                 id: Some(subscriber),
                 identity,
             },
-        }
+        })
     }
 
     /// Close the database (a schema view leaves its owner open).
