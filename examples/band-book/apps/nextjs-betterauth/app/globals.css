@@ -82,3 +82,66 @@ body {
   height: auto;
   border-radius: var(--radius-container);
 }
+
+/*
+ * Song sheets: a ProseMirror editor styled as the page's body text, with
+ * comment highlights and collaborators' carets drawn over it.
+ */
+.bb-sheet-layout {
+  display: flex;
+  gap: var(--spacing-4);
+  align-items: flex-start;
+  width: 100%;
+}
+
+.bb-sheet-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.bb-sheet-comments {
+  flex: 0 0 280px;
+}
+
+/* Narrow screens: the comments go under the sheet. */
+@media (max-width: 760px) {
+  .bb-sheet-layout {
+    flex-direction: column;
+  }
+
+  .bb-sheet-comments {
+    flex-basis: auto;
+    width: 100%;
+  }
+}
+
+.bb-sheet .ProseMirror {
+  min-height: 240px;
+  outline: none;
+  font-family: var(--font-family-body);
+  font-size: var(--text-body-size);
+  line-height: 1.6;
+}
+
+.bb-sheet .ProseMirror :is(h1, h2, h3) {
+  margin-block: var(--spacing-5) var(--spacing-2);
+}
+
+.bb-sheet .ProseMirror pre {
+  font-family: var(--font-family-code);
+  background: var(--color-background-gray);
+  padding: var(--spacing-3);
+  border-radius: var(--radius-container);
+}
+
+.bb-sheet .ProseMirror blockquote {
+  margin-inline: 0;
+  padding-inline-start: var(--spacing-3);
+  border-inline-start: 3px solid var(--color-border-gray);
+  font-style: italic;
+}
+
+.bb-sheet-comment {
+  background: var(--color-background-yellow);
+  border-bottom: 2px solid var(--color-border-yellow);
+}

@@ -1,0 +1,100 @@
+---
+title: "Rich text editor"
+description: Connect a ProseMirror editor to a Markdown merge column, then draw comments and other people's cursors over the text.
+---
+
+[Collaborative text editing](/docs/recipes/data-patterns/collaborative-text-editing) covers the
+column: a text merge column stores plain Markdown or HTML and the server merges concurrent edits
+inside it. This recipe connects a rich text editor to that column and adds the two things people
+expect from a shared document: comments that stay on their words, and live cursors.
+
+Everything here comes from the song sheets in the [BandBook example](https://github.com/garden-co/jazz/tree/main/examples/band-book). The
+editor is ProseMirror; `jazz-tools/prosemirror` holds the glue and has no collaboration logic of
+its own, because the merge happens on the server.
+
+```sh
+pnpm add prosemirror-model prosemirror-state prosemirror-view prosemirror-markdown
+```
+
+## Schema
+
+The document is one Markdown merge column. Comments and presence are ordinary rows next to it:
+they point into the text with **anchors** and **ranges** (the text before, the text itself, the
+text after) instead of character offsets, so they survive edits that move the text around.
+
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/band-book/apps/nextjs-betterauth/schema.ts#rich-text-schema
+</include>
+
+## Reading Markdown into the editor
+
+The editor's document model must round-trip through Markdown: loading a value and saving it again
+without edits has to give back the same string. Using `prosemirror-markdown`'s CommonMark schema
+and parser guarantees that; `jazz-tools/prosemirror` serializes to the same canonical form.
+
+<include cwd lang="ts" meta='title="song-editor.ts"'>
+  ../examples/band-book/apps/nextjs-betterauth/src/lib/song-editor.ts#rich-text-parse
+</include>
+
+## Connecting the editor
+
+`markdownSync` calls `onChange` with the document's Markdown after each local edit. Write that
+whole value with `db.update`: each write is one version, and the server merges it with whatever
+other people wrote meanwhile. When the merged value comes back, `applyMarkdown` turns it into the
+smallest ProseMirror change, so the local cursor and undo history stay where they were.
+
+<include cwd lang="tsx" meta='title="SongSheet.tsx"'>
+  ../examples/band-book/apps/nextjs-betterauth/src/components/SongSheet.tsx#rich-text-editor
+</include>
+
+## Comments that stay on their words
+
+`captureRange` stores a selection as the text it covers plus a little text on either side.
+`overlays` finds every range again in the current document and draws it as a decoration; when
+the text under a comment changes, it is found by its surroundings with lower confidence, and when
+the text is gone the comment is reported as orphaned instead of jumping somewhere else.
+
+<include cwd lang="tsx" meta='title="SongSheet.tsx"'>
+  ../examples/band-book/apps/nextjs-betterauth/src/components/SongSheet.tsx#rich-text-overlays
+</include>
+
+Each placed overlay comes back through `onPlaced` with its position and how it was found. A
+comment found with less confidence than usual has `drifted`: its words were edited. Storing it
+again from the current text keeps later lookups exact:
+
+<include cwd lang="tsx" meta='title="SongSheet.tsx"'>
+  ../examples/band-book/apps/nextjs-betterauth/src/components/SongSheet.tsx#rich-text-reanchor
+</include>
+
+The sidebar inserts new comments from the current selection, and uses the placed positions to sort
+comments in document order and to jump to one:
+
+<include cwd lang="tsx" meta='title="SongSheet.tsx"'>
+  ../examples/band-book/apps/nextjs-betterauth/src/components/SongSheet.tsx#rich-text-comments
+</include>
+
+Ranges are plain JSON, so a server job or an LLM can create them too: a range with only `matched`
+(and optionally `before` and `after`) is found wherever that text is.
+
+## Live cursors
+
+Each open editor keeps one presence row with its cursor (an anchor) and selection (a range).
+`capturePresence` makes both from the editor state; `presenceOverlays` turns other people's rows
+into a caret with their name and a selection highlight, which go through the same `setOverlays`
+as comments.
+
+<include cwd lang="ts" meta='title="use-sheet-presence.ts"'>
+  ../examples/band-book/apps/nextjs-betterauth/src/components/use-sheet-presence.ts#rich-text-presence
+</include>
+
+Presence rows are written a few times a second and keep their history like any row. Throttle the
+writes, refresh the row on an interval while the editor is open, delete it on close, and ignore
+rows that have not been refreshed for a while.
+
+## Permissions
+
+Comments and presence carry their own `pageId`, so they can follow the page's permissions while
+having rules of their own: anyone who can read the page may comment and be seen, while only the
+author edits a comment and only its owner moves a cursor. See the `songSheets`, `sheetComments`
+and `sheetPresence` policies in BandBook's
+[permissions.ts](https://github.com/garden-co/jazz/blob/main/examples/band-book/apps/nextjs-betterauth/permissions.ts).

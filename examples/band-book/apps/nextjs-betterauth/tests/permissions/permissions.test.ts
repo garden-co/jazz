@@ -78,7 +78,7 @@ async function page(
   workspaceId: string,
   title: string,
   parentId: string | null = null,
-  kind: "doc" | "issues" | "issue" = "doc",
+  kind: "doc" | "issues" | "issue" | "song" = "doc",
 ) {
   return db.insert(app.pages, { workspaceId, parentId, title, kind }).wait(global);
 }
@@ -506,5 +506,81 @@ describe("ordering", () => {
     expect(times[0]).toBeLessThan(times[1]!);
     expect(times[1]).toBeLessThan(times[2]!);
     expect(rows.map((row) => row.id)).toEqual(created.map((row) => row.id));
+  });
+});
+
+describe("song sheets", () => {
+  const range = { before: "the windows ", matched: "fogged and gold", after: "" };
+  const cursor = { side: "after", before: "fogged", after: " and gold" };
+
+  it("are edited by the band, commented on by crew, and show only one's own presence as writable", async () => {
+    const owner = person("owner");
+    const crew = person("crew");
+    const band = await createBand(owner, "owner");
+    await addMember(owner, band.id, "crew", "viewer");
+    const song = await page(owner, band.id, "Night bus home", null, "song");
+    const sheet = await owner
+      .insert(app.songSheets, {
+        workspaceId: band.id,
+        pageId: song.id,
+        body: "the windows fogged and gold",
+      })
+      .wait(global);
+
+    // Crew read the sheet but cannot change its text...
+    const read = await crew.all(app.songSheets.where({ pageId: song.id }), remote);
+    expect(read.map((row) => row.body)).toEqual(["the windows fogged and gold"]);
+    await crew.expectDenied((db) => db.update(app.songSheets, sheet.id, { body: "rewritten" }));
+
+    // ...but can comment, as themselves only,
+    const comment = await crew
+      .insert(app.sheetComments, {
+        workspaceId: band.id,
+        pageId: song.id,
+        author: accountFor("crew"),
+        range,
+        text: "Love this line",
+        resolved: false,
+      })
+      .wait(global);
+    await crew.expectDenied((db) =>
+      db.insert(app.sheetComments, {
+        workspaceId: band.id,
+        pageId: song.id,
+        author: accountFor("owner"),
+        range,
+        text: "Signed as someone else",
+        resolved: false,
+      }),
+    );
+    // and the band's editors can resolve any comment.
+    await owner.update(app.sheetComments, comment.id, { resolved: true }).wait(global);
+
+    // Presence rows are written only by their own account.
+    const mine = await crew
+      .insert(app.sheetPresence, {
+        workspaceId: band.id,
+        pageId: song.id,
+        account: accountFor("crew"),
+        name: "crew",
+        color: "var(--color-icon-blue)",
+        cursor,
+        selection: null,
+        seenAt: 1,
+      })
+      .wait(global);
+    await owner.expectDenied((db) => db.update(app.sheetPresence, mine.id, { seenAt: 2 }));
+    await crew.update(app.sheetPresence, mine.id, { seenAt: 2 }).wait(global);
+    // A page's editors may clear it, so deleting the page leaves nothing behind.
+    await owner.delete(app.sheetPresence, mine.id).wait(global);
+  });
+
+  it("only belong to song pages", async () => {
+    const owner = person("owner");
+    const band = await createBand(owner, "owner");
+    const doc = await page(owner, band.id, "Setlist");
+    await owner.expectDenied((db) =>
+      db.insert(app.songSheets, { workspaceId: band.id, pageId: doc.id, body: "" }),
+    );
   });
 });
