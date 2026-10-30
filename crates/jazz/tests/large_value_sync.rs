@@ -488,6 +488,7 @@ fn pulls_answer_only_for_versions_the_reader_may_read() {
         id: *row(id).0.as_bytes(),
         key: key.clone(),
         seq,
+        by: None,
         root,
         nodes,
         span: Some((0, LARGE as u64)),
@@ -1065,6 +1066,7 @@ fn pulls_after_read_access_is_lost_are_answered_with_nothing() {
             id: *row(5).0.as_bytes(),
             key,
             seq,
+            by: None,
             root,
             nodes: vec![root],
             span: Some((0, LARGE as u64)),
@@ -1133,6 +1135,7 @@ fn an_answer_to_many_pulls_is_bounded_and_the_rest_follows() {
         id: *row(1).0.as_bytes(),
         key: key.clone(),
         seq,
+        by: None,
         root,
         nodes: vec![root],
         span: Some((at * 4 * MB, (at + 1) * 4 * MB)),
@@ -2179,6 +2182,7 @@ fn a_relay_forwards_no_pull_its_tab_may_not_make() {
         id: *row(id).0.as_bytes(),
         key: key.clone(),
         seq,
+        by: None,
         root,
         nodes: vec![draft],
         span: Some((0, LARGE as u64)),
@@ -2674,7 +2678,7 @@ fn value_delta_turns_one_version_into_another() {
         ),
     )
     .unwrap()
-    .mergeable_tx_id();
+    .version();
     let at = v1_text.char_indices().nth(1_000_000).unwrap().0 as u64;
     let v2 = block_on(db.splice_value(
         "docs",
@@ -2688,10 +2692,10 @@ fn value_delta_turns_one_version_into_another() {
         Default::default(),
     ))
     .unwrap()
-    .mergeable_tx_id();
+    .version();
     let v3 = block_on(db.append_value("docs", row(1), "body", " and appended".into()))
         .unwrap()
-        .mergeable_tx_id();
+        .version();
     let mut v3_text = v1_text.clone();
     v3_text.replace_range(at as usize..at as usize + 4, "spliced é");
     v3_text.push_str(" and appended");
@@ -2717,7 +2721,7 @@ fn value_delta_turns_one_version_into_another() {
         Default::default(),
     ))
     .unwrap()
-    .mergeable_tx_id();
+    .version();
     let rewritten = block_on(db.value_delta("docs", row(1), "body", v3, v4)).unwrap();
     assert_eq!(apply_delta_utf16(&v3_text, &rewritten), v4_text);
     let moved: usize = rewritten
@@ -2733,7 +2737,7 @@ fn value_delta_turns_one_version_into_another() {
         Default::default(),
     ))
     .unwrap()
-    .mergeable_tx_id();
+    .version();
     let to_inline = block_on(db.value_delta("docs", row(1), "body", v4, v5)).unwrap();
     assert_eq!(apply_delta_utf16(&v4_text, &to_inline), "short");
     let from_inline = block_on(db.value_delta("docs", row(1), "body", v5, v1)).unwrap();
@@ -2748,7 +2752,7 @@ fn value_delta_turns_one_version_into_another() {
             Default::default(),
         ))
         .unwrap()
-        .mergeable_tx_id()
+        .version()
     };
     let (v6, v7) = (inline("short é text"), inline("short é text"));
     assert_eq!(
@@ -2776,11 +2780,18 @@ fn value_delta_needs_both_versions_readable() {
         },
     ))
     .unwrap();
-    let seq = handle.mergeable_tx_id();
+    let seq = handle.version();
     let error = block_on(db.value_delta("drafts", row(3), "body", seq, seq)).unwrap_err();
     assert!(error.to_string().contains("not readable"), "{error}");
     let system = open(0, AuthorSubject::SYSTEM);
-    let missing = block_on(system.value_delta("docs", row(4), "body", 1, 2)).unwrap_err();
+    let missing = block_on(system.value_delta(
+        "docs",
+        row(4),
+        "body",
+        jazz::db::Pos::at(1),
+        jazz::db::Pos::at(2),
+    ))
+    .unwrap_err();
     assert!(missing.to_string().contains("not held"), "{missing}");
 }
 

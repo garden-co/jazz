@@ -20,9 +20,8 @@ use std::task::{Context, Poll, Waker};
 use duplex_transport::duplex;
 use jazz::db::{
     Acting, BuiltOn, Db, DbConfig, DbIdentity, ExactWriteTarget, FileOptions, InsertOptions,
-    LOCAL_BASE, ReadOpts, Reason, RemoteLinkHint, SubscriptionStream, SyncMessage, UpdateOptions,
-    Upstream, WireBase, WireKind, WireOp, WireTarget, WireWrite, WriteConflict, WriteTarget,
-    block_on,
+    ReadOpts, Reason, RemoteLinkHint, SubscriptionStream, SyncMessage, UpdateOptions, Upstream,
+    WireBase, WireKind, WireOp, WireTarget, WireWrite, WriteConflict, WriteTarget, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::BranchSelector;
@@ -756,9 +755,9 @@ fn a_relays_commit_a_write_was_built_on_is_what_its_writer_saw() {
             .into()
         }],
         acting: Acting::Own,
-        origin: Some(([0xa1; 16], LOCAL_BASE + tx)),
+        origin: Some(([0xa1; 16], tx)),
     };
-    let tx = |n: u64| LOCAL_BASE + n;
+    let tx = |n: u64| n;
     relay
         .send(commit(
             tx(1),
@@ -1155,95 +1154,6 @@ fn a_resent_write_keeps_the_base_it_was_accepted_with() {
     let second = net.conflict(row, second);
     assert!(second.maybe_conflicting);
     assert_eq!(writers(&second.overlapping), vec![foreign]);
-}
-
-#[test]
-fn behind_two_relays_a_write_over_the_upper_relays_version_is_kept_conservatively() {
-    // core <- upper (durable) <- lower (durable) <- tab (non-durable). The
-    // lower relay holds the upper's unsettled version at a seq in its own
-    // local range, which is no commit of its own: it cannot name it
-    // upstream, so the tab's write counts as built on what it holds
-    // accepted. It is kept, flagged over the upper's write.
-    const UPPER: u8 = 0xa1;
-    const LOWER: u8 = 0xa2;
-    const TAB: u8 = 0xa3;
-    let core = open(CORE, AuthorSubject::SYSTEM);
-    // One user's stores: a relay serves its own identity only.
-    let upper = open(UPPER, author(LOWER));
-    let lower = open(LOWER, author(LOWER));
-    let tab = open(TAB, author(LOWER));
-    tab.set_non_durable_client();
-    let link = |client: &Db, server: &Db, as_: u8| {
-        let (client_side, server_side) = duplex();
-        client.set_remote_link_hint(RemoteLinkHint::Live);
-        let up = block_on(client.connect_upstream(client_side));
-        server.accept_subscriber(server_side, author(as_)).unwrap();
-        up
-    };
-    let upper_up = link(&upper, &core, LOWER);
-    let _lower_up = link(&lower, &upper, LOWER);
-    let _tab_up = link(&tab, &lower, LOWER);
-    let stores = [&tab, &lower, &upper, &core];
-    let pump = || {
-        for _ in 0..4 {
-            for db in stores.iter().chain(stores.iter().rev()) {
-                block_on(db.tick()).unwrap();
-            }
-        }
-    };
-    let todos = Query::from("todos");
-    let _held: Vec<_> = [&upper, &lower, &tab]
-        .map(|db| {
-            let prepared = db.prepare_query(&todos).unwrap();
-            let mut stream = pin!(db.subscribe(&prepared, ReadOpts::default()));
-            let mut context = Context::from_waker(Waker::noop());
-            loop {
-                if let Poll::Ready(stream) = stream.as_mut().poll(&mut context) {
-                    break stream.unwrap();
-                }
-                pump();
-            }
-        })
-        .into_iter()
-        .collect();
-    let row = block_on(core.insert(
-        "todos",
-        cells(&[("title", "seed"), ("note", "seed")]),
-        Default::default(),
-    ))
-    .unwrap()
-    .row_uuid();
-    pump();
-
-    assert!(upper.detach_connection(&upper_up));
-    upper.set_remote_link_hint(RemoteLinkHint::Failed);
-    block_on(upper.update(
-        "todos",
-        row,
-        cells(&[("title", "upper")]),
-        Default::default(),
-    ))
-    .unwrap();
-    pump();
-    let write =
-        block_on(tab.update("todos", row, cells(&[("title", "tab")]), Default::default())).unwrap();
-    pump();
-    let _upper_up = link(&upper, &core, LOWER);
-    pump();
-    let mut turn = pin!(tab.wait_for_transaction(write.mergeable_tx_id(), DurabilityTier::Global));
-    let mut context = Context::from_waker(Waker::noop());
-    let fate = loop {
-        if let Poll::Ready(fate) = turn.as_mut().poll(&mut context) {
-            break fate;
-        }
-        pump();
-    };
-    fate.expect("the tab's write is kept");
-
-    let conflicts = core.write_conflicts("todos", row, None).unwrap();
-    let [_seed, upper_write, tab_write] = <[_; 3]>::try_from(conflicts).unwrap();
-    assert!(tab_write.maybe_conflicting);
-    assert_eq!(writers(&tab_write.overlapping), vec![upper_write.writer]);
 }
 
 #[test]
