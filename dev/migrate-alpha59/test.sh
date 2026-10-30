@@ -51,7 +51,9 @@ cp -R "$work/a60" "$work/tampered"
 python3 - "$work/tampered/jazz.sqlite" <<'PY'
 import sqlite3, sys
 c = sqlite3.connect(sys.argv[1])
-c.execute("update projects set name = 'tampered' where rowid = (select min(rowid) from projects)")
+# Stored column names may carry a `~<hash>` suffix.
+col = next(r[1] for r in c.execute("pragma table_info(projects)") if r[1].split("~")[0] == "name")
+c.execute(f'update projects set "{col}" = \'tampered\' where rowid = (select min(rowid) from projects)')
 c.commit()
 PY
 if "$t60/release/sqlite-import" verify --dump "$work/dump" --data-dir "$work/tampered" --app-id "$app"; then
