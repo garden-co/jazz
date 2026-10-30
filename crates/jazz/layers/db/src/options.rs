@@ -29,6 +29,9 @@ pub struct DbConfig {
     /// Where settled large-value leaf bytes live. `None` keeps them in the
     /// SQLite file ([`crate::chunk_store`]).
     pub chunk_store: Option<std::sync::Arc<dyn crate::chunk_store::ChunkStore>>,
+    /// The node SYSTEM provenance names, when it is not this replica's own:
+    /// a backend that draws a fresh node per open keeps one stable subject.
+    pub system_node: Option<NodeUuid>,
 }
 
 impl DbConfig {
@@ -39,7 +42,14 @@ impl DbConfig {
             identity,
             id_source: None,
             chunk_store: None,
+            system_node: None,
         }
+    }
+
+    /// Stamp SYSTEM provenance as `node` instead of this replica's node.
+    pub fn with_system_node(mut self, node: NodeUuid) -> Self {
+        self.system_node = Some(node);
+        self
     }
 
     /// Override the row id source, typically with [`SeededRowIdSource`] in tests.

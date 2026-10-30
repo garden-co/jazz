@@ -480,6 +480,8 @@ struct Inner {
     /// Open transaction batches, by id.
     batches: HashMap<OpenTransactionId, Batch>,
     identity: DbIdentity,
+    /// The node SYSTEM provenance names ([`crate::options::DbConfig::system_node`]).
+    system_node: crate::ids::NodeUuid,
     /// Provenance for the write being applied (set by `apply_as`).
     writer: Option<Stamp>,
     /// The commit seq and time of the last local stamp: writes of one commit
@@ -1235,6 +1237,7 @@ impl Db {
                 names,
                 views: BTreeMap::new(),
                 batches: HashMap::new(),
+                system_node: config.system_node.unwrap_or(config.identity.node),
                 identity: config.identity,
                 writer: None,
                 last_stamp: (0, 0),
@@ -4491,7 +4494,7 @@ impl Inner {
     /// system writes to the node that made them).
     pub(crate) fn stamp_author(&self) -> AuthorSubject {
         match self.identity.author {
-            AuthorSubject::SYSTEM => AuthorSubject::system_at(self.identity.node),
+            AuthorSubject::SYSTEM => AuthorSubject::system_at(self.system_node),
             author => author,
         }
     }

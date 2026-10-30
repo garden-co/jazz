@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { admitBackendSecret } from "./admission.js";
 import type { BackendRequestOptions } from "./request-auth.js";
 import { NapiDb, mintLocalFirstToken } from "jazz-napi";
@@ -232,17 +232,11 @@ export async function createJazzSession(
           },
         });
       }
-      // A memory store starts its counter over on every open, so it draws a
-      // node of its own: transaction ids are `seq@node`. A persistent one
-      // keeps its counter, and its node with it.
-      const node =
-        config.driver.type === "memory"
-          ? new Uint8Array(randomBytes(16))
-          : uuidBytes(backend.nodeId);
       // The class remains internal; only a validated opaque account can reach it.
+      // Its SYSTEM provenance names the backend's node.
       const context = new JazzContext(
         { ...config, backendSecret: backend.backendSecret } as BackendContextConfig,
-        node,
+        uuidBytes(backend.nodeId),
       );
       let db: Db;
       let client: SharedJazzClient;

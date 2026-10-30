@@ -101,6 +101,7 @@ export function openConfig(
   historyComplete = false,
   initialSyncFlushEvery?: number,
   selfSignedClientProof?: NativeSelfSignedClientProof,
+  systemNode?: Uint8Array,
 ): Uint8Array {
   const writer = new PostcardWriter();
   writer.bytes(node);
@@ -116,9 +117,13 @@ export function openConfig(
   } else {
     writer.some((value) => value.u64(initialSyncFlushEvery));
   }
-  // The native binding keeps a trailing `backend_credential` slot solely to
-  // reject legacy raw ingress. New configs must never serialize one.
-  writer.none();
+  // The node SYSTEM provenance names, when a backend's runtime node is drawn
+  // fresh per open but its subject stays stable.
+  if (systemNode == null) {
+    writer.none();
+  } else {
+    writer.some((value) => value.bytes(systemNode));
+  }
   return writer.finish();
 }
 

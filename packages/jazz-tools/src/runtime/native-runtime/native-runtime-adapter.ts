@@ -945,18 +945,18 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverPumpAgain = false;
   private serverConnectionGeneration = 0;
   private closed = false;
-  // A foreground lease handoff closes mutation admission and drains started
+  // A foreground handoff closes mutation admission and drains started
   // work, but physical native disposal still happens through the ordinary
   // client shutdown path.
-  private foregroundLeaseQuiesced = false;
-  // A concurrent ordinary close must not dispose native state between a lease
+  private foregroundQuiesced = false;
+  // A concurrent ordinary close must not dispose native state between a
   // handoff's mutation drain and its end.
-  private foregroundLeaseCapture: Promise<void> | null = null;
+  private foregroundDrain: Promise<void> | null = null;
   // While that drain runs, already-started native futures may hold the node
   // lock until a core tick completes their host continuation (cold storage,
   // admission deadlines). Mutation admission stays closed, but core progress
   // must continue, or the drain waits behind them forever.
-  private foregroundLeaseDraining = false;
+  private foregroundDraining = false;
   private physicalCloseStarted = false;
   private nextSubscriptionId = 1;
 
@@ -1007,6 +1007,8 @@ export class NativeRuntimeAdapter implements Runtime {
       scopeIsolatedRelay?: boolean;
       readAuthorizationHost?: ReadAuthorizationHost;
       backendMode?: boolean;
+      /** The node a backend's SYSTEM provenance names, when not `node`. */
+      systemNode?: Uint8Array;
       owner?: NativeRuntimeAdapter;
       /** Where slow queries are reported (`console.warn`): see {@link SlowQueryLogOptions}. */
       slowQueryLog?: SlowQueryLogOptions;
@@ -1034,6 +1036,7 @@ export class NativeRuntimeAdapter implements Runtime {
       historyComplete,
       opts?.initialSyncFlushEvery,
       opts?.selfSignedClientProof,
+      opts?.systemNode,
     );
     this.peerIdentity = author;
     this.schemaHash = serializeRuntimeSchema(schema);
@@ -1230,23 +1233,23 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this !== this.ownerRuntime) {
       return this.ownerRuntime.quiesceForeground();
     }
-    if (this.foregroundLeaseCapture) return this.foregroundLeaseCapture;
+    if (this.foregroundDrain) return this.foregroundDrain;
     if (this.closed) throw new Error("Native runtime is already closed");
     this.closed = true;
     this.clearCoreDeadline();
-    this.foregroundLeaseQuiesced = true;
-    this.foregroundLeaseDraining = true;
+    this.foregroundQuiesced = true;
+    this.foregroundDraining = true;
     const capture = this.drainForeground().finally(() => {
-      this.foregroundLeaseDraining = false;
+      this.foregroundDraining = false;
       this.clearCoreDeadline();
     });
-    this.foregroundLeaseCapture = capture;
+    this.foregroundDrain = capture;
     return capture;
   }
 
-  /** Core ticks run while open, and while a lease handoff drains started work. */
+  /** Core ticks run while open, and while a foreground handoff drains started work. */
   private coreProgressAllowed(): boolean {
-    return !this.closed || this.foregroundLeaseDraining;
+    return !this.closed || this.foregroundDraining;
   }
 
   private async drainForeground(): Promise<void> {
@@ -1562,7 +1565,7 @@ export class NativeRuntimeAdapter implements Runtime {
       return;
     }
     if (this.physicalCloseStarted) return;
-    if (this.closed && !this.foregroundLeaseQuiesced) return;
+    if (this.closed && !this.foregroundQuiesced) return;
     this.physicalCloseStarted = true;
     // Stop admitting/scheduling work first, but keep every WASM receiver alive
     // until the evaluator future that may currently borrow it has unwound.
@@ -1570,7 +1573,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.clearCoreDeadline();
     for (const cancel of this.pendingNativeAdmissionCancels) cancel();
     for (const cancel of this.pendingNativeReadCancels) cancel();
-    await this.foregroundLeaseCapture?.catch(() => undefined);
+    await this.foregroundDrain?.catch(() => undefined);
     if (this.pendingStreamingMutations.size > 0) {
       await Promise.all(this.pendingStreamingMutations);
     }

@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { accountRegistryUrl } from "../accounts/context.js";
 import { NapiDb } from "jazz-napi";
 import type { JWK } from "jose";
@@ -193,11 +194,18 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
 
     this.initializedSchemaJson = schemaJson;
     const env = this.config.env ?? "dev";
+    // SYSTEM provenance names this stable node. A persistent store keeps its
+    // transaction counter, so it writes as that node too; a memory store
+    // starts its counter over on every open, so it draws a node of its own
+    // (transaction ids are `seq@node`).
+    const systemNode =
+      this.nodeIdentity ??
+      deterministicBytes(`${this.config.appId}:${env}:${this.nodeIdentityScope}:node`);
+    const persistent = this.config.driver.type === "persistent";
     this.runtime = new NativeRuntimeAdapter(
       NapiDb,
       schema,
-      this.nodeIdentity ??
-        deterministicBytes(`${this.config.appId}:${env}:${this.nodeIdentityScope}:node`),
+      persistent ? systemNode : new Uint8Array(randomBytes(16)),
       authorBytesForSession({ issuer: "https://jazz.invalid", user_id: "backend-open" }),
       1,
       true,
@@ -207,6 +215,7 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
           : {}),
         readAuthorizationHost: "trusted-serving",
         backendMode: true,
+        systemNode,
         slowQueryLog: {
           appId: this.config.appId,
           thresholdMs: this.config.slowQueryThresholdMs,

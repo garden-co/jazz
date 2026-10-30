@@ -268,16 +268,17 @@ Browser and React Native hosts reject backend selection through their absent
 backend admission adapter.
 
 Backend handles use the nil SYSTEM account UUID and exact identity
-`{ issuer: "urn:jazz:system", subject: originatingNodeUUID }`. Native runtime
-construction uses that same node UUID. Backend credential material lives in a
+`{ issuer: "urn:jazz:system", subject: backendNodeUUID }`, and SYSTEM
+provenance on rows the backend writes names that same UUID. A persistent
+backend's runtime also writes transactions as that node; a memory backend's
+runtime draws a fresh node per open (its counter starts over), so its
+transaction ids name that node while its provenance keeps the backend's. Backend credential material lives in a
 private WeakMap; it never enters snapshots or persisted account preferences.
 Graceful backend shutdown fences all request scopes and waits for every
 transaction originating on its node, regardless of the credited user. Trusted
 backend reopen recovers those same pending uploads. Ordinary user barriers
 remain author-scoped. Reopening an in-memory backend handle after a failed
-transition seeds the retained node-clock high-water before accepting new writes;
-an incomplete clock handoff prevents reuse. This receipt is process-local and
-adds no durable encoding.
+transition opens a fresh runtime node, so it carries no clock state over.
 
 Copied handles and SYSTEM identity objects confer no authority. Ordinary JWT
 registration, login, linking, and token extraction cannot mint or use backend

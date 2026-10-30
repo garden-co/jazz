@@ -70,6 +70,7 @@ fn open_db() -> Db {
         },
         id_source: None,
         chunk_store: None,
+        system_node: None,
     }))
     .expect("open db")
 }
