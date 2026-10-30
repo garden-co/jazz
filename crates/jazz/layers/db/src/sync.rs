@@ -9511,6 +9511,18 @@ impl Db {
         message: SyncMessage,
         claims: Option<BTreeMap<String, Value>>,
     ) -> Result<(), Error> {
+        // A close reads and writes nothing: it is not served as the session.
+        if let SyncMessage::Close { at } = message {
+            let mut inner = self.inner.borrow_mut();
+            // A store counting commits up closes where it is.
+            if let Some(clock) = &inner.clock {
+                let reach = crate::db::hlc(clock() + crate::db::HLC_MAX_OFFSET_MS);
+                let _ = inner.observe(at.min(reach));
+            }
+            let session = &mut inner.sessions[index];
+            session.closing = Some(session.closing.map_or(at, |was| was.max(at)));
+            return Ok(());
+        }
         let identity = self.inner.borrow().sessions[index].identity;
         // A subscription's group keeps the session's claims for later runs.
         let with_claims = |prepared: PreparedQuery| match &claims {
@@ -9676,16 +9688,6 @@ impl Db {
                     session.asked_whole.insert(row.clone());
                     session.touched.insert(row);
                 }
-            }
-            SyncMessage::Close { at } => {
-                let mut inner = self.inner.borrow_mut();
-                // A store counting commits up closes where it is.
-                if let Some(clock) = &inner.clock {
-                    let reach = crate::db::hlc(clock() + crate::db::HLC_MAX_OFFSET_MS);
-                    let _ = inner.observe(at.min(reach));
-                }
-                let session = &mut inner.sessions[index];
-                session.closing = Some(session.closing.map_or(at, |was| was.max(at)));
             }
             SyncMessage::KnownCatalogue { versions } => {
                 let mut inner = self.inner.borrow_mut();
