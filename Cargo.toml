@@ -92,16 +92,14 @@ codegen-units = 256
 # `jazz-native-relay` must keep `crate-type = ["rlib", "staticlib"]` because
 # `jazz-napi` depends on the rlib. Fat LTO is only real in a staticlib-only build.
 #
-# `panic = "abort"` is deliberate. On the SQLite engine it is worth ~2.2 MB of
-# unwind tables on the link proxy below. Consequence: a panic in a relay tokio
-# task terminates the host process instead of being contained by that task.
-# Panics already abort at the crate's `extern "C"` boundary since Rust 1.81
-# (unconditional for `extern "C"`, not an edition rule), so this narrows, not
-# introduces, the exposure.
+# Unwind stays at the `release` default. `panic = "abort"` would terminate the
+# host process when the relay owner thread panics. Panics that leave an
+# `extern "C"` entry point already abort since Rust 1.81, so the C boundary is
+# the same either way.
 #
 # Measured on a fully stripped arm64 link proxy referencing all 28 exported
-# symbols (SQLite engine, no RocksDB): 16.7 MB -> 8.1 MB executable, 7.2 MB ->
-# 4.1 MB gzip, device `.a` 69.6 MB -> 18.4 MB. Full table in
+# symbols (SQLite engine, no RocksDB): 16.7 MB -> 9.9 MB executable, 7.2 MB ->
+# 4.8 MB gzip, device `.a` 69.6 MB -> 21.1 MB. Full table in
 # https://github.com/garden-co/jazz/pull/3016.
 # ponytail: `debug`/`strip` are already the `release` defaults, so they are not
 # restated; the `.a` ships as built (nothing in the normal pipeline strips it)
@@ -111,4 +109,3 @@ inherits = "release"
 opt-level = "s"
 lto = "fat"
 codegen-units = 1
-panic = "abort"

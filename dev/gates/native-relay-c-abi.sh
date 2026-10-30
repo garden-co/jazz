@@ -5,7 +5,7 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 output_dir=$(mktemp -d)
 trap 'rm -rf "$output_dir"' EXIT
 
-# Exercise the profile the relay actually ships under (fat LTO + panic=abort),
+# Exercise the profile the relay actually ships under (fat LTO, opt-level "s"),
 # mirroring crates/jazz-rn/scripts/build-relay-artifacts.sh.
 cargo rustc --manifest-path "$root/crates/jazz-native-relay/Cargo.toml" --crate-type staticlib --profile release-mobile
 
