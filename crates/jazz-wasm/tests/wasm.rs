@@ -81,6 +81,7 @@ struct OpenDbConfigFixture {
     history_complete: bool,
     initial_sync_flush_every: Option<u32>,
     migrations: Option<Vec<u8>>,
+    system_node: Option<NodeUuid>,
 }
 
 #[derive(Serialize)]
@@ -114,6 +115,7 @@ fn fixture_db() -> WasmDb {
         history_complete: false,
         initial_sync_flush_every: None,
         migrations: None,
+        system_node: None,
     };
     WasmDb::open_memory(
         serde_json::to_vec(&schema).expect("encode public schema JSON"),
@@ -164,6 +166,7 @@ async fn self_signed_subscriber_admission_requires_the_exact_proof() {
         history_complete: false,
         initial_sync_flush_every: None,
         migrations: None,
+        system_node: None,
     };
     let db = WasmDb::open_memory_with_self_signed_proof(
         serde_json::to_vec(&schema).expect("encode public schema JSON"),

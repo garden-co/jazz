@@ -104,6 +104,7 @@ export function openConfig(
   initialSyncFlushEvery?: number,
   selfSignedClientProof?: NativeSelfSignedClientProof,
   migrations?: ClientMigrations,
+  systemNode?: Uint8Array,
 ): Uint8Array {
   const writer = new PostcardWriter();
   writer.bytes(node);
@@ -125,6 +126,13 @@ export function openConfig(
     writer.none();
   } else {
     writer.some((value) => value.bytes(clientMigrationsBytes(migrations)));
+  }
+  // The node SYSTEM provenance names, when a backend's runtime node is drawn
+  // fresh per open but its subject stays stable.
+  if (systemNode == null) {
+    writer.none();
+  } else {
+    writer.some((value) => value.bytes(systemNode));
   }
   return writer.finish();
 }

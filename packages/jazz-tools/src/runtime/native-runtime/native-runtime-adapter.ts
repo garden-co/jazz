@@ -1019,6 +1019,8 @@ export class NativeRuntimeAdapter implements Runtime {
       scopeIsolatedRelay?: boolean;
       readAuthorizationHost?: ReadAuthorizationHost;
       backendMode?: boolean;
+      /** The node a backend's SYSTEM provenance names, when not `node`. */
+      systemNode?: Uint8Array;
       owner?: NativeRuntimeAdapter;
       /** Where slow queries are reported (`console.warn`): see {@link SlowQueryLogOptions}. */
       slowQueryLog?: SlowQueryLogOptions;
@@ -1049,6 +1051,7 @@ export class NativeRuntimeAdapter implements Runtime {
       opts?.initialSyncFlushEvery,
       opts?.selfSignedClientProof,
       opts?.migrations,
+      opts?.systemNode,
     );
     this.peerIdentity = author;
     this.migrations = opts?.owner?.migrations ?? opts?.migrations;

@@ -513,3 +513,123 @@ fn a_session_gets_no_unreadable_version_under_its_own_pending_write() {
     net.settle(net.tab(0), mine);
     assert_eq!(net.bodies(net.tab(0)), ["mine"]);
 }
+
+/// A tab's commit the worker stored while offline uploads under the tab's
+/// own id after the tab is gone and the worker has restarted, next to a
+/// commit from the fresh node the tab's next open draws.
+#[test]
+fn a_closed_tabs_pending_commit_uploads_after_its_worker_restarts() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("worker.sqlite");
+    let open_worker = || {
+        block_on(Db::open_at(
+            DbConfig::new(
+                schema(),
+                DbIdentity {
+                    node: NodeUuid::from_bytes([WORKER; 16]),
+                    author: author(WORKER),
+                },
+            ),
+            &path,
+            jazz::db::FileOptions::default(),
+        ))
+        .unwrap()
+    };
+    let attach_tab = |worker: &Db, node: u8| {
+        let tab = open(node, author(WORKER));
+        tab.set_non_durable_client();
+        tab.set_remote_link_hint(RemoteLinkHint::Live);
+        let (client_side, server_side) = duplex();
+        block_on(tab.connect_upstream(client_side));
+        worker
+            .accept_subscriber(server_side, author(WORKER))
+            .unwrap();
+        tab
+    };
+    let pump = |dbs: &[&Db]| {
+        for _ in 0..6 {
+            for db in dbs {
+                block_on(db.tick()).unwrap();
+            }
+        }
+    };
+    let bodies = |db: &Db| {
+        let prepared = db.prepare_query(&Query::from("notes")).unwrap();
+        let mut bodies: Vec<String> = block_on(db.all(&prepared, ReadOpts::default()))
+            .unwrap()
+            .iter()
+            .filter_map(|row| match row.cells().find(|(name, _)| *name == "body") {
+                Some((_, Some(Value::String(text)))) => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        bodies.sort();
+        bodies
+    };
+    let insert = |db: &Db, text: &str| {
+        block_on(db.insert("notes", body(text), Default::default())).unwrap();
+    };
+    let core = open_in(schema(), 0xc0, AuthorSubject::SYSTEM);
+
+    let uploads: Rc<RefCell<VecDeque<SyncMessage>>> = Rc::default();
+    let connect = |worker: &Db| {
+        let (client_side, server_side) = duplex();
+        let up = block_on(worker.connect_upstream(Box::new(Tap {
+            inner: client_side,
+            sent: Rc::clone(&uploads),
+        })));
+        core.accept_subscriber(server_side, author(WORKER)).unwrap();
+        worker.set_remote_link_hint(RemoteLinkHint::Live);
+        up
+    };
+
+    // A worker with a server that is offline holds its tabs' commits for
+    // upload.
+    let worker = open_worker();
+    let up = connect(&worker);
+    pump(&[&worker, &core]);
+    assert!(worker.detach_connection(&up));
+    worker.set_remote_link_hint(RemoteLinkHint::Failed);
+    let tab = attach_tab(&worker, WORKER + 1);
+    insert(&tab, "first");
+    pump(&[&tab, &worker]);
+    assert_eq!(
+        bodies(&worker),
+        ["first"],
+        "the worker stored the tab's commit"
+    );
+    assert_eq!(worker.pending_upload_count(), 1);
+    drop(tab);
+    block_on(worker.close()).unwrap();
+
+    let worker = open_worker();
+    let tab = attach_tab(&worker, WORKER + 2);
+    insert(&tab, "second");
+    pump(&[&tab, &worker]);
+    assert_eq!(
+        worker.pending_upload_count(),
+        2,
+        "the closed tab's commit survived"
+    );
+    let _up = connect(&worker);
+    pump(&[&tab, &worker, &core]);
+
+    assert_eq!(bodies(&core), ["first", "second"]);
+    // Each commit went up under the id of the tab node that wrote it.
+    let nodes: Vec<NodeUuid> = uploads
+        .borrow()
+        .iter()
+        .filter_map(|message| match message {
+            SyncMessage::Commit { id, .. } => Some(id.node),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        nodes,
+        [
+            NodeUuid::from_bytes([WORKER + 1; 16]),
+            NodeUuid::from_bytes([WORKER + 2; 16]),
+        ]
+    );
+    assert_eq!(worker.pending_upload_count(), 0, "both commits settled");
+}

@@ -34,6 +34,9 @@ pub struct DbConfig {
     /// versions on a lens path to it first, so it stores each column where
     /// the authority does without asking (SPEC 10.7).
     pub migrations: Migrations,
+    /// The node SYSTEM provenance names, when it is not this replica's own:
+    /// a backend that draws a fresh node per open keeps one stable subject.
+    pub system_node: Option<NodeUuid>,
 }
 
 /// Schema versions and the lenses between them (see
@@ -53,7 +56,14 @@ impl DbConfig {
             id_source: None,
             chunk_store: None,
             migrations: Migrations::default(),
+            system_node: None,
         }
+    }
+
+    /// Stamp SYSTEM provenance as `node` instead of this replica's node.
+    pub fn with_system_node(mut self, node: NodeUuid) -> Self {
+        self.system_node = Some(node);
+        self
     }
 
     /// Override the row id source, typically with [`SeededRowIdSource`] in tests.
