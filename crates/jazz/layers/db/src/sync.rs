@@ -810,6 +810,10 @@ pub enum WireWrite {
         table: String,
         row: [u8; 16],
         cells: BTreeMap<String, Value>,
+        /// What the columns `cells` leaves out take if the upsert creates
+        /// the row: its writer's version's defaults and the backwards
+        /// defaults of columns its lineage dropped (SPEC 8.9).
+        created: BTreeMap<String, Value>,
         target: WireTarget,
         at: Option<u64>,
     },
@@ -1134,18 +1138,10 @@ pub enum SyncMessage {
         result: PermissionAdvice,
     },
     // client → server
-    /// The schema version the client reads by, sent first on every
-    /// connection. Its queries use that version's table and column names,
-    /// which the server resolves to its stored names, and are served in
-    /// that version; writes, row images and evictions travel by stored
-    /// names whatever the version. A version the server has not admitted
-    /// is named like the server's current schema.
-    Schema {
-        version: [u8; 16],
-    },
     // server → client
     /// Whether the server has admitted the schema version the session
-    /// declared, sent when that changes. Until it is admitted the server
+    /// declared, sent when that changes after the [`SyncMessage::Welcome`]
+    /// told it first. Until it is admitted the server
     /// holds the session's messages (a draft awaiting its lens), so a
     /// read that must be covered by the server fails with the reason
     /// rather than waiting out its budget.
@@ -1165,34 +1161,49 @@ pub enum SyncMessage {
     Stored {
         id: TxId,
     },
-    /// Client → server, after its first `Schema`: the schema versions
-    /// whose stored names this replica keeps, each with
-    /// [`names_digest`] of them. The server answers with the
-    /// [`SyncMessage::Catalogue`] entries it lacks or keeps otherwise.
-    KnownCatalogue {
-        versions: Vec<([u8; 16], [u8; 16])>,
+    /// Client → server, first on every connection: the schema version
+    /// the client reads and writes by (as [`SyncMessage::Schema`] names
+    /// it), and the versions whose stored names this replica keeps, each
+    /// with [`names_digest`] of them. Never held behind an unadmitted
+    /// version. The server answers with one [`SyncMessage::Welcome`].
+    Join {
+        version: [u8; 16],
+        known: Vec<([u8; 16], [u8; 16])>,
     },
     /// Server → client: schema versions this store admitted, in admission
     /// order, with where it stores their tables and columns, and the lens
     /// cells its lenses made. A replica stores rows as its upstream does
     /// (rows travel by stored names, untranslated), so it admits each
     /// version under these names, renaming what it named otherwise while
-    /// it did not know them. Sent ahead of any row after a
-    /// `KnownCatalogue`, and again when the store admits a version or learns
-    /// more of its authority's catalogue.
-    ///
-    /// `namespace`: the authority's (see `Inner::namespace`), once the
-    /// sender knows it; a replica that holds another one is another app's
-    /// and refuses this upstream. `confirmed`: the versions whose names are
-    /// the authority's, each with its names' digest (every version the
-    /// authority admitted; on a relay, those its upstream confirmed). Only
-    /// a confirmed version's tables and columns have an identity.
-    Catalogue {
-        namespace: Option<[u8; 16]>,
-        versions: Vec<CatalogueVersion>,
-        cells: Vec<CatalogueCell>,
-        confirmed: Vec<([u8; 16], [u8; 16])>,
+    /// it did not know them. The first rides in the
+    /// [`SyncMessage::Welcome`]; this one is sent when the store admits a
+    /// version or learns more of its authority's catalogue.
+    Catalogue(CatalogueUpdate),
+    /// Server → client, the answer to a [`SyncMessage::Join`], ahead of
+    /// any row: whether the declared version is admitted (later changes
+    /// follow as [`SyncMessage::SchemaAdmission`]) and the catalogue
+    /// entries the client lacks or keeps otherwise.
+    Welcome {
+        admitted: bool,
+        catalogue: CatalogueUpdate,
     },
+}
+
+/// The catalogue entries a [`SyncMessage::Catalogue`] or
+/// [`SyncMessage::Welcome`] carries.
+///
+/// `namespace`: the authority's (see `Inner::namespace`), once the sender
+/// knows it; a replica that holds another one is another app's and refuses
+/// this upstream. `confirmed`: the versions whose names are the
+/// authority's, each with its names' digest (every version the authority
+/// admitted; on a relay, those its upstream confirmed). Only a confirmed
+/// version's tables and columns have an identity.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CatalogueUpdate {
+    pub namespace: Option<[u8; 16]>,
+    pub versions: Vec<CatalogueVersion>,
+    pub cells: Vec<CatalogueCell>,
+    pub confirmed: Vec<([u8; 16], [u8; 16])>,
 }
 
 /// How long a [`SyncMessage::Read`] lasts.
@@ -1249,11 +1260,11 @@ impl SyncMessage {
             Self::Fate { .. } => "Fate",
             Self::CheckAllowed { .. } => "CheckAllowed",
             Self::CheckAllowedResult { .. } => "CheckAllowedResult",
-            Self::Schema { .. } => "Schema",
             Self::SchemaAdmission { .. } => "SchemaAdmission",
             Self::Stored { .. } => "Stored",
-            Self::KnownCatalogue { .. } => "KnownCatalogue",
-            Self::Catalogue { .. } => "Catalogue",
+            Self::Join { .. } => "Join",
+            Self::Catalogue(_) => "Catalogue",
+            Self::Welcome { .. } => "Welcome",
         }
     }
 }
@@ -1929,10 +1940,12 @@ pub(crate) struct Session {
     /// The client was told its declared version is not admitted.
     told_unadmitted: bool,
     /// The versions the client keeps names for, with their digests
-    /// (`None` until its `KnownCatalogue`), and whether it is owed a
-    /// `Catalogue`.
+    /// (`None` until its `Join`), and whether it is owed a `Catalogue`.
     known_catalogue: Option<HashMap<[u8; 16], [u8; 16]>>,
     catalogue_owed: bool,
+    /// The client's `Join` is not answered yet: its catalogue and
+    /// admission go out together as a `Welcome`.
+    welcome_owed: bool,
     /// The namespace and confirmations the client was last sent.
     told: Option<(Option<[u8; 16]>, Vec<([u8; 16], [u8; 16])>)>,
     /// On a relay, the upstream subscription each of the client's
@@ -1988,6 +2001,7 @@ impl Session {
             told_unadmitted: false,
             known_catalogue: None,
             catalogue_owed: false,
+            welcome_owed: false,
             told: None,
             schema: None,
             relayed: BTreeMap::new(),
@@ -2494,10 +2508,11 @@ fn to_wire(op: &StagedOp) -> Result<WireOp, Error> {
             target: wire_target(&opts.target)?,
             at: opts.updated_at_ms,
         },
-        StagedOp::Upsert(table, row, cells, opts) => WireWrite::Upsert {
+        StagedOp::Upsert(table, row, cells, created, opts) => WireWrite::Upsert {
             table: table.clone(),
             row: bytes(row),
             cells: cells.clone(),
+            created: created.clone(),
             target: wire_target(&opts.target)?,
             at: opts.updated_at_ms,
         },
@@ -2591,12 +2606,14 @@ fn from_wire(op: WireOp) -> Result<StagedOp, Error> {
             table,
             row,
             cells,
+            created,
             target,
             at,
         } => StagedOp::Upsert(
             table,
             id(row),
             cells,
+            created,
             UpsertOptions {
                 target: view_target(target),
                 updated_at_ms: at,
@@ -5200,9 +5217,10 @@ impl Inner {
         Ok(at)
     }
 
-    /// The `Catalogue` session `index` is owed: the admitted versions it
-    /// keeps no names for, or other names for.
-    fn catalogue_for(&mut self, index: usize) -> Result<Option<SyncMessage>, Error> {
+    /// The catalogue session `index` is owed: the admitted versions it
+    /// keeps no names for, or other names for. Its first, after a `Join`,
+    /// is always owed: it rides in the `Welcome`.
+    fn catalogue_for(&mut self, index: usize) -> Result<Option<CatalogueUpdate>, Error> {
         if !std::mem::take(&mut self.sessions[index].catalogue_owed) {
             return Ok(None);
         }
@@ -5290,7 +5308,7 @@ impl Inner {
         known_catalogue.extend(sent);
         let (namespace, confirmed) = told.clone();
         self.sessions[index].told = Some(told);
-        Ok(Some(SyncMessage::Catalogue {
+        Ok(Some(CatalogueUpdate {
             namespace,
             versions,
             cells,
@@ -5738,8 +5756,7 @@ impl Db {
                 SyncMessage::Read {
                     span: ReadSpan::Live { .. },
                     ..
-                } | SyncMessage::Schema { .. }
-                    | SyncMessage::KnownCatalogue { .. }
+                } | SyncMessage::Join { .. }
                     | SyncMessage::ResendWhole { .. }
                     | SyncMessage::Commit { .. }
                     | SyncMessage::PushChunks { .. }
@@ -5751,7 +5768,7 @@ impl Db {
         // holds: the server sends those it stores otherwise, or it has and
         // this store lacks. One only an earlier process admitted is sent
         // again, so this one holds it and can serve its own sessions by it.
-        let versions = inner
+        let known = inner
             .names
             .in_order()
             .into_iter()
@@ -5759,10 +5776,9 @@ impl Db {
             .map(|(version, names)| (*version.as_bytes(), crate::names::names_digest(names)))
             .collect();
         let client = inner.client.as_mut().expect("client");
-        client.outbox.insert(0, SyncMessage::Schema { version });
         client
             .outbox
-            .insert(1, SyncMessage::KnownCatalogue { versions });
+            .insert(0, SyncMessage::Join { version, known });
         // What the old session could not answer, the new one may.
         client.unavailable.clear();
         client.outbox.extend(resubscribe);
@@ -7031,12 +7047,21 @@ impl Db {
                         let client = inner.client.as_mut().expect("client");
                         client.whole.remove(&(table, id, key));
                     }
-                    SyncMessage::Catalogue {
+                    // The answer to this client's `Join`: the catalogue
+                    // applies first, as rows that follow are stored by it.
+                    SyncMessage::Welcome {
+                        admitted,
+                        catalogue,
+                    } => {
+                        queue.push_front(SyncMessage::SchemaAdmission { admitted });
+                        queue.push_front(SyncMessage::Catalogue(catalogue));
+                    }
+                    SyncMessage::Catalogue(CatalogueUpdate {
                         namespace,
                         versions,
                         cells,
                         confirmed,
-                    } => {
+                    }) => {
                         match inner.mirror_catalogue(namespace, versions, cells, &confirmed) {
                             // Versions it took rebuilt the store's
                             // schema: its pending commits replay on top.
@@ -7443,7 +7468,7 @@ impl Db {
             }
         }
         // A commit names tables and columns by stored names, whichever
-        // version wrote it: it needs no `Schema` ahead of it. One naming
+        // version wrote it, so no version travels with it. One naming
         // what the server does not hold was written under a version it
         // never deployed, and is refused (INV-SYNC-52).
         for (commit, (hashes, batches)) in commits.into_iter().zip(pushes) {
@@ -7763,11 +7788,15 @@ impl Inner {
                 } => Some(cells),
                 _ => None,
             };
-            cells.is_none_or(|cells| {
-                cells
-                    .keys()
-                    .all(|name| name.starts_with('$') || table.has_column(name))
-            })
+            let created = match &op.write {
+                WireWrite::Upsert { created, .. } => Some(created),
+                _ => None,
+            };
+            cells
+                .into_iter()
+                .chain(created)
+                .flat_map(|cells| cells.keys())
+                .all(|name| name.starts_with('$') || table.has_column(name))
         })
     }
 
@@ -7816,7 +7845,9 @@ impl Inner {
         let mut version = self.sessions[index].version;
         let mut refused = Vec::new();
         held.retain(|message| match message {
-            SyncMessage::Schema { version: declared } => {
+            SyncMessage::Join {
+                version: declared, ..
+            } => {
                 version = Some(crate::ids::SchemaVersionId::from_bytes(*declared));
                 true
             }
@@ -8342,12 +8373,7 @@ impl Db {
             let refuses = matches!(message, SyncMessage::Commit { .. })
                 && self.inner.borrow().knows_deployed();
             let unheld = matches!(&message, SyncMessage::Commit { ops, .. } if !self.inner.borrow().holds_names(ops));
-            if !refuses
-                && !matches!(
-                    message,
-                    SyncMessage::Schema { .. } | SyncMessage::KnownCatalogue { .. }
-                )
-            {
+            if !refuses && !matches!(message, SyncMessage::Join { .. }) {
                 let mut inner = self.inner.borrow_mut();
                 if inner.session_unadmitted(index) || unheld {
                     inbound.push_front(message);
@@ -8416,10 +8442,11 @@ impl Db {
         if !held.is_empty() {
             inner.sessions[index].backlog = held;
         }
-        // Tell the client when its declared version's admission changes.
+        // Tell the client when its declared version's admission changes:
+        // the `Welcome` it is still owed tells it first.
         let unadmitted = inner.session_unadmitted(index);
         let session = &mut inner.sessions[index];
-        if session.open && session.told_unadmitted != unadmitted {
+        if session.open && !session.welcome_owed && session.told_unadmitted != unadmitted {
             session.told_unadmitted = unadmitted;
             session.outbox.push(SyncMessage::SchemaAdmission {
                 admitted: !unadmitted,
@@ -9105,9 +9132,19 @@ impl Db {
                 .retain(|(table, row, _)| watch.contains(&id_watch(table, *row.0.as_bytes())));
             let mut out = Vec::new();
             // Rows travel by stored names: the versions they are stored by
-            // reach the client first.
+            // reach the client first, in the `Welcome` it is owed.
             if let Some(catalogue) = inner.catalogue_for(index)? {
-                out.push(catalogue);
+                let unadmitted = inner.session_unadmitted(index);
+                let session = &mut inner.sessions[index];
+                out.push(if std::mem::take(&mut session.welcome_owed) {
+                    session.told_unadmitted = unadmitted;
+                    SyncMessage::Welcome {
+                        admitted: !unadmitted,
+                        catalogue,
+                    }
+                } else {
+                    SyncMessage::Catalogue(catalogue)
+                });
             }
             let tx_ids = if history_seqs.is_empty() {
                 Vec::new()
@@ -9459,12 +9496,6 @@ impl Db {
         // schema version does; commits by stored names (see below).
         let db = self.session_db(index);
         match message {
-            SyncMessage::Schema { version } => {
-                let mut inner = self.inner.borrow_mut();
-                let session = &mut inner.sessions[index];
-                session.version = Some(crate::ids::SchemaVersionId::from_bytes(version));
-                session.schema = None;
-            }
             SyncMessage::Read {
                 id,
                 query,
@@ -9613,11 +9644,17 @@ impl Db {
                     session.touched.insert(row);
                 }
             }
-            SyncMessage::KnownCatalogue { versions } => {
+            // Declares the version the client reads by, and owes the
+            // `Welcome` with the catalogue the client lacks.
+            SyncMessage::Join { version, known } => {
                 let mut inner = self.inner.borrow_mut();
                 let session = &mut inner.sessions[index];
-                session.known_catalogue = Some(versions.into_iter().collect());
+                session.version = Some(crate::ids::SchemaVersionId::from_bytes(version));
+                session.schema = None;
+                session.known_catalogue = Some(known.into_iter().collect());
                 session.catalogue_owed = true;
+                session.told = None;
+                session.welcome_owed = true;
             }
             SyncMessage::Unsubscribe { id } => {
                 let mut inner = self.inner.borrow_mut();

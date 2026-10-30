@@ -239,7 +239,7 @@ impl Inner {
             };
             match op {
                 StagedOp::Insert(..) | StagedOp::Move(..) => return Ok(None),
-                StagedOp::Update(_, _, cells, _) | StagedOp::Upsert(_, _, cells, _) => {
+                StagedOp::Update(_, _, cells, _) | StagedOp::Upsert(_, _, cells, _, _) => {
                     authored.extend(stored(cells));
                 }
                 StagedOp::Delete(..) => {

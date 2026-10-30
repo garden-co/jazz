@@ -103,3 +103,8 @@ longer depends on the schema version that wrote it, dropped
 `_jazz_pending_versions` and re-encoded the pending ops and serializable reads
 (a read now names the version its query is in), which regenerated it the same
 way.
+
+Giving a replicated insert the backwards defaults of the columns its writer's
+lineage dropped, and a replicated upsert the cells it writes only if it
+creates its row (`created`), changed the encoded pending ops, which
+regenerated it the same way.

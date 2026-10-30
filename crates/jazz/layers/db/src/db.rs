@@ -2202,7 +2202,7 @@ impl Db {
         opts: UpsertOptions,
     ) -> Result<WriteHandle, Error> {
         let who = who(opts.identity);
-        let op = StagedOp::Upsert(table.to_owned(), row, cells, opts);
+        let op = StagedOp::Upsert(table.to_owned(), row, cells, BTreeMap::new(), opts);
         self.fetching_with(op, |op| self.write_op(op, who)).await
     }
 
@@ -3218,6 +3218,46 @@ impl Inner {
                 .collect()
         };
         let name = table.stored.clone();
+        // The columns this version's lineage dropped, with their backwards
+        // defaults: a receiver cannot tell which lenses a writer descends
+        // from, so the writer names them (SPEC 8.9).
+        let version = if std::ptr::eq(schema, &*self.owner) {
+            self.owner_version
+        } else {
+            schema.jazz.version_id()
+        };
+        let mut dropped = BTreeMap::new();
+        if self.names.has_lens_cells() {
+            let physical = self.physical.tables.get(&table.stored);
+            for (column, default) in self.names.lens_cells(&version, table).1 {
+                let Some(stored) = physical.and_then(|physical| physical.column(&column)) else {
+                    continue;
+                };
+                let value = crate::values::column_from_sql(stored, default.as_ref(), &self.chunks)?
+                    .unwrap_or(Value::Nullable(None));
+                dropped.insert(column, value);
+            }
+        }
+        // What a write that creates its row gives the columns it leaves out:
+        // its version's defaults (branch columns stay as given: the target,
+        // or else the column's immutable default, keys the row,
+        // INV-BVIEW-19) and the dropped columns' backwards defaults.
+        let created = |cells: &BTreeMap<String, Value>| -> BTreeMap<String, Value> {
+            let mut created = BTreeMap::new();
+            for column in &table.columns {
+                if cells.contains_key(&column.name) || table.branch_by.contains(&column.name) {
+                    continue;
+                }
+                let value = match &column.default {
+                    Some(default) => default.clone(),
+                    None if column.nullable() => Value::Nullable(None),
+                    None => continue,
+                };
+                created.insert(column.stored.clone(), value);
+            }
+            created.extend(dropped.clone());
+            created
+        };
         // Branch selectors name branch columns too.
         let selector = |selector: BranchSelector| BranchSelector {
             values: selector
@@ -3244,26 +3284,21 @@ impl Inner {
             },
         };
         Ok(match op {
-            StagedOp::Insert(_, mut cells, mut opts) => {
+            StagedOp::Insert(_, cells, mut opts) => {
                 opts.target = exact(opts.target);
-                // Branch columns stay as given: the target, or else the
-                // column's immutable default, keys the row (INV-BVIEW-19).
-                for column in &table.columns {
-                    if !cells.contains_key(&column.name) && !table.branch_by.contains(&column.name)
-                    {
-                        let value = column.default.clone().unwrap_or(Value::Nullable(None));
-                        cells.insert(column.name.clone(), value);
-                    }
-                }
-                StagedOp::Insert(name, stored(cells), opts)
+                let created = created(&cells);
+                let mut cells = stored(cells);
+                cells.extend(created);
+                StagedOp::Insert(name, cells, opts)
             }
             StagedOp::Update(_, row, cells, mut opts) => {
                 opts.target = view(opts.target);
                 StagedOp::Update(name, row, stored(cells), opts)
             }
-            StagedOp::Upsert(_, row, cells, mut opts) => {
+            StagedOp::Upsert(_, row, cells, mut extra, mut opts) => {
                 opts.target = view(opts.target);
-                StagedOp::Upsert(name, row, stored(cells), opts)
+                extra.extend(created(&cells));
+                StagedOp::Upsert(name, row, stored(cells), extra, opts)
             }
             StagedOp::Delete(_, row, mut opts) => {
                 opts.target = view(opts.target);
@@ -4861,7 +4896,7 @@ impl Inner {
         let (table_name, cells) = match op {
             StagedOp::Insert(t, c, _)
             | StagedOp::Update(t, _, c, _)
-            | StagedOp::Upsert(t, _, c, _) => (t.clone(), c),
+            | StagedOp::Upsert(t, _, c, _, _) => (t.clone(), c),
             StagedOp::Restore(t, _, Some(c), _) => (t.clone(), c),
             _ => return Ok(edits),
         };
@@ -4898,7 +4933,7 @@ impl Inner {
     pub(crate) fn counter_deltas(&self, op: &mut StagedOp) -> Result<(), Error> {
         let (table_name, row, cells, target) = match op {
             StagedOp::Update(t, r, c, o) => (t.clone(), *r, c, &o.target),
-            StagedOp::Upsert(t, r, c, o) => (t.clone(), *r, c, &o.target),
+            StagedOp::Upsert(t, r, c, _, o) => (t.clone(), *r, c, &o.target),
             _ => return Ok(()),
         };
         let schema = self.schema.clone();
@@ -5414,8 +5449,10 @@ impl Inner {
         let (copies, dropped) = if !self.names.has_lens_cells() {
             Default::default()
         } else if schema.stored_names {
-            self.names
-                .stored_lens_cells(&table.stored, |column| cells.contains_key(column))
+            let copies = self
+                .names
+                .stored_copies(&table.stored, |column| cells.contains_key(column));
+            (copies, Vec::new())
         } else {
             let version = if Rc::ptr_eq(&schema, &self.owner) {
                 self.owner_version
@@ -5440,15 +5477,15 @@ impl Inner {
             let given = match (cells.get(&column.name), &column.default) {
                 (Some(value), _) => Some((value, source)),
                 // A replicated insert names every column its writer's
-                // version declares: one it leaves out, that version lacks,
-                // so the stored column's own default or a lens cell fills
+                // version declares, and the backwards defaults of columns
+                // its lineage dropped: one it leaves out, a later version
+                // added, so the stored column's own default or a copy fills
                 // it. Only a required column nothing fills is refused.
                 (None, default)
                     if schema.stored_names
                         && (default.is_some()
                             || column.nullable()
-                            || copies.iter().any(|(_, copy)| *copy == column.stored)
-                            || dropped.iter().any(|(stored, _)| *stored == column.stored)) =>
+                            || copies.iter().any(|(_, copy)| *copy == column.stored)) =>
                 {
                     continue;
                 }
@@ -5593,16 +5630,21 @@ impl Inner {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// An update, or with `created` an upsert, which gives the columns
+    /// `cells` leaves out `created`'s values if it creates the row.
+    #[allow(clippy::too_many_arguments)]
     fn patch(
         &mut self,
         table_name: &str,
         row: RowUuid,
         cells: BTreeMap<String, Value>,
+        created: Option<BTreeMap<String, Value>>,
         target: &Target,
         who: Who,
         seq: u64,
-        upsert: bool,
     ) -> Result<WriteHandle, Error> {
+        let upsert = created.is_some();
+        let created = created.unwrap_or_default();
         let verb = if upsert { "UPSERT" } else { "UPDATE" };
         let schema = self.schema.clone();
         let table = schema.table(table_name)?;
@@ -5626,6 +5668,9 @@ impl Inner {
             Located::Absent { cells: branch, .. } if upsert => {
                 let mut cells = cells;
                 cells.extend(branch);
+                for (column, value) in created {
+                    cells.entry(column).or_insert(value);
+                }
                 return self.insert(
                     table_name,
                     cells,
@@ -5670,6 +5715,9 @@ impl Inner {
                     // Every column is written, as by an insert: nothing
                     // of the deleted version carries over.
                     reinserted = true;
+                    for (column, value) in created {
+                        cells.entry(column).or_insert(value);
+                    }
                     for column in &table.columns {
                         // Branch columns are the row's key and stay.
                         if cells.contains_key(&column.name)
@@ -5752,19 +5800,24 @@ impl Inner {
         who: Who,
         seq: u64,
     ) -> Result<WriteHandle, Error> {
-        self.patch(table, row, cells, target, who, seq, false)
+        self.patch(table, row, cells, None, target, who, seq)
     }
 
+    /// Upsert `cells` into `row`; if it creates the row, `created` fills
+    /// the columns `cells` leaves out (a replicated upsert's writer's
+    /// defaults, see `stored_op`).
+    #[allow(clippy::too_many_arguments)]
     fn upsert(
         &mut self,
         table: &str,
         row: RowUuid,
         cells: BTreeMap<String, Value>,
+        created: BTreeMap<String, Value>,
         target: &Target,
         who: Who,
         seq: u64,
     ) -> Result<WriteHandle, Error> {
-        self.patch(table, row, cells, target, who, seq, true)
+        self.patch(table, row, cells, Some(created), target, who, seq)
     }
 
     fn delete(
@@ -6153,7 +6206,16 @@ pub struct MergeableTxHandle<'a> {
 pub(crate) enum StagedOp {
     Insert(String, BTreeMap<String, Value>, InsertOptions),
     Update(String, RowUuid, BTreeMap<String, Value>, UpdateOptions),
-    Upsert(String, RowUuid, BTreeMap<String, Value>, UpsertOptions),
+    /// The fourth field is what the upsert gives the columns it leaves
+    /// out if it creates the row, by stored names: a replicated upsert's
+    /// writer's defaults (see `Inner::stored_op`); empty on a local one.
+    Upsert(
+        String,
+        RowUuid,
+        BTreeMap<String, Value>,
+        BTreeMap<String, Value>,
+        UpsertOptions,
+    ),
     Delete(String, RowUuid, DeleteOptions),
     Restore(
         String,
@@ -6309,9 +6371,13 @@ impl MergeableTxHandle<'_> {
         opts: UpsertOptions,
     ) -> Result<(), Error> {
         self.db.inner().require_mutation_admission()?;
-        self.ops
-            .borrow_mut()
-            .push(StagedOp::Upsert(table.to_owned(), row, cells, opts));
+        self.ops.borrow_mut().push(StagedOp::Upsert(
+            table.to_owned(),
+            row,
+            cells,
+            BTreeMap::new(),
+            opts,
+        ));
         Ok(())
     }
 
@@ -6389,7 +6455,7 @@ impl MergeableTxHandle<'_> {
                             )
                             .await
                             .map(drop)?,
-                        StagedOp::Upsert(t, r, c, o) => db
+                        StagedOp::Upsert(t, r, c, _, o) => db
                             .upsert(
                                 &t,
                                 r,
@@ -6909,9 +6975,9 @@ impl Inner {
                 let target = Target::of(&o.target, self)?;
                 self.update(&t, r, c, &target, who, seq)
             }
-            StagedOp::Upsert(t, r, c, o) => {
+            StagedOp::Upsert(t, r, c, created, o) => {
                 let target = Target::of(&o.target, self)?;
-                self.upsert(&t, r, c, &target, who, seq)
+                self.upsert(&t, r, c, created, &target, who, seq)
             }
             StagedOp::Delete(t, r, o) => {
                 let target = Target::of(&o.target, self)?;
@@ -7646,8 +7712,14 @@ impl TxRef<'_> {
         cells: BTreeMap<String, Value>,
         opts: UpsertOptions,
     ) -> Result<WriteHandle, Error> {
-        self.stage(StagedOp::Upsert(table.to_owned(), row, cells, opts))
-            .await?;
+        self.stage(StagedOp::Upsert(
+            table.to_owned(),
+            row,
+            cells,
+            BTreeMap::new(),
+            opts,
+        ))
+        .await?;
         Ok(WriteHandle {
             row,
             seq: Pos::default(),

@@ -448,6 +448,7 @@ fn an_upsert_over_a_row_deleted_in_the_same_commit_is_checked_as_an_insert() {
                     Value::String("rewritten".into()),
                 )]
                 .into(),
+                created: Default::default(),
                 target: WireTarget::Root,
                 at: None,
             }
