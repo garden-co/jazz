@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useAll, useDb } from "jazz-tools/react";
 import {
   Banner,
@@ -18,9 +18,9 @@ import {
 } from "@astryxdesign/core";
 import { app, type Block, type BlockKind } from "@/schema";
 import { comparePositioned, positionBetween } from "@/src/lib/positions";
-import { textSplice } from "@/src/lib/text-splice";
 import { AttachmentBlock } from "./AttachmentBlock";
-import { InlineText } from "./InlineText";
+import { markdownToPlainText } from "@/src/lib/rich-text";
+import { RichText, type RichTextHandle, type RichTextKeyInfo } from "./RichText";
 import { UploadDialog } from "./UploadDialog";
 import { useWorkspace } from "./workspace-context";
 
@@ -55,15 +55,19 @@ const SHORTCUTS: [prefix: string, kind: BlockKind][] = [
 /**
  * An ordered, nested list of blocks. Every edit is a direct Jazz write: it is
  * visible immediately, survives going offline, and reaches everyone else with
- * access to the page as it syncs.
+ * access to the page as it syncs. A block's text is inline rich text stored as
+ * Markdown in a text merge column, so two people editing the same block keep
+ * both edits.
  */
 export function BlockEditor({ pageId, editable }: { pageId: string; editable: boolean }) {
   const db = useDb();
   const { workspace } = useWorkspace();
   const { data: blocks } = useAll(app.blocks.where({ pageId }).select("*", "$createdAt"));
   const [uploading, setUploading] = useState(false);
-  const [writeError, setWriteError] = useState<string | null>(null);
-  const inputs = useRef(new Map<string, HTMLTextAreaElement>());
+  const [writeError, setWriteError] = useState<{ title: string; message: string } | null>(null);
+  const failed = (title: string) => (cause: unknown) =>
+    setWriteError({ title, message: cause instanceof Error ? cause.message : String(cause) });
+  const inputs = useRef(new Map<string, RichTextHandle>());
   const [focusRequest, setFocusRequest] = useState<{ id: string; at: "start" | "end" } | null>(
     null,
   );
@@ -90,9 +94,7 @@ export function BlockEditor({ pageId, editable }: { pageId: string; editable: bo
     if (!focusRequest) return;
     const input = inputs.current.get(focusRequest.id);
     if (!input) return;
-    input.focus();
-    const at = focusRequest.at === "start" ? 0 : input.value.length;
-    input.setSelectionRange(at, at);
+    input.focus(focusRequest.at);
     setFocusRequest(null);
   }, [focusRequest, blocks]);
 
@@ -150,9 +152,7 @@ export function BlockEditor({ pageId, editable }: { pageId: string; editable: bo
     db.transaction((tx) => {
       for (const row of doomed) tx.delete(app.blocks, row.id);
       if (block.attachmentId) tx.delete(app.attachments, block.attachmentId);
-    }).catch((cause: unknown) =>
-      setWriteError(cause instanceof Error ? cause.message : String(cause)),
-    );
+    }).catch(failed("Could not delete the block"));
   };
 
   const indent = (block: Row) => {
@@ -180,62 +180,72 @@ export function BlockEditor({ pageId, editable }: { pageId: string; editable: bo
     setFocusRequest({ id: block.id, at: "end" });
   };
 
-  const changeText = (block: Row, next: string, base: string) => {
-    if (block.kind === "paragraph") {
-      if (next === "---") {
-        db.update(app.blocks, block.id, { kind: "divider", text: "" });
-        insertBlock("paragraph", { after: block });
-        return;
-      }
-      const shortcut = SHORTCUTS.find(([prefix]) => next.startsWith(prefix));
-      if (shortcut) {
-        db.update(app.blocks, block.id, {
-          kind: shortcut[1],
-          text: next.slice(shortcut[0].length),
-        });
-        return;
-      }
+  const writeText = (block: Row, text: string) => {
+    try {
+      db.update(app.blocks, block.id, { text });
+    } catch (cause) {
+      // The block was deleted (here or by someone else) before the write.
+      failed("Could not save the text")(cause);
     }
-    const splice = textSplice(base, next);
-    if (!splice) return;
-    db.update(
-      app.blocks,
-      block.id,
-      {},
-      { applyDiffs: { text: { within: { from: 0, to: base.length }, splices: [splice] } } },
-    );
   };
 
-  const handleKey = (block: Row, event: KeyboardEvent<HTMLTextAreaElement>) => {
-    const input = event.currentTarget;
+  // Typing a Markdown-style prefix into an empty-ish paragraph turns it into
+  // another kind of block, as in most block editors.
+  const handleInput = (block: Row, plainText: string) => {
+    if (block.kind !== "paragraph") return false;
+    const input = inputs.current.get(block.id);
+    if (!input) return false;
+    if (plainText === "---") {
+      input.takeLeading(3);
+      db.update(app.blocks, block.id, { kind: "divider", text: "" });
+      insertBlock("paragraph", { after: block });
+      return true;
+    }
+    const shortcut = SHORTCUTS.find(([prefix]) => plainText.startsWith(prefix));
+    if (!shortcut) return false;
+    const text = input.takeLeading(shortcut[0].length);
+    db.update(app.blocks, block.id, { kind: shortcut[1], text });
+    setFocusRequest({ id: block.id, at: "start" });
+    return true;
+  };
+
+  const handleKey = (block: Row, event: KeyboardEvent, caret: RichTextKeyInfo) => {
     const index = flat.findIndex((candidate) => candidate.id === block.id);
-    const caretAtStart = input.selectionStart === 0 && input.selectionEnd === 0;
-    const caretAtEnd = input.selectionStart === input.value.length;
-    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
       const continuesList = block.kind === "todo" || block.kind === "bullet";
-      if (continuesList && input.value === "") {
+      if (continuesList && caret.isEmpty) {
         // An empty list item ends the list, as in most editors.
         db.update(app.blocks, block.id, { kind: "paragraph" });
-        return;
+        return true;
       }
       insertBlock(continuesList ? block.kind : "paragraph", { after: block });
-    } else if (event.key === "Backspace" && caretAtStart && input.value === "") {
+      return true;
+    }
+    if (event.key === "Backspace" && caret.isEmpty) {
       event.preventDefault();
       const previous = flat[index - 1];
       deleteBlock(block);
       if (previous) setFocusRequest({ id: previous.id, at: "end" });
-    } else if (event.key === "Tab") {
+      return true;
+    }
+    if (event.key === "Tab") {
       event.preventDefault();
       if (event.shiftKey) outdent(block);
       else indent(block);
-    } else if (event.key === "ArrowUp" && caretAtStart && index > 0) {
+      return true;
+    }
+    if (event.key === "ArrowUp" && caret.caretAtStart && index > 0) {
       event.preventDefault();
       setFocusRequest({ id: flat[index - 1].id, at: "end" });
-    } else if (event.key === "ArrowDown" && caretAtEnd && index < flat.length - 1) {
+      return true;
+    }
+    if (event.key === "ArrowDown" && caret.caretAtEnd && index < flat.length - 1) {
       event.preventDefault();
       setFocusRequest({ id: flat[index + 1].id, at: "start" });
+      return true;
     }
+    return false;
   };
 
   // Consecutive bullets share one list, so they read as a single list.
@@ -288,12 +298,13 @@ export function BlockEditor({ pageId, editable }: { pageId: string; editable: bo
             <BlockContent
               block={block}
               editable={editable}
-              registerInput={(node) => {
-                if (node) inputs.current.set(block.id, node);
+              registerInput={(handle) => {
+                if (handle) inputs.current.set(block.id, handle);
                 else inputs.current.delete(block.id);
               }}
-              onText={(next, base) => changeText(block, next, base)}
-              onKey={(event) => handleKey(block, event)}
+              onWrite={(text) => writeText(block, text)}
+              onInput={(plainText) => handleInput(block, plainText)}
+              onKey={(event, caret) => handleKey(block, event, caret)}
               onToggle={(checked) => db.update(app.blocks, block.id, { checked })}
             />
           </VStack>
@@ -326,8 +337,8 @@ export function BlockEditor({ pageId, editable }: { pageId: string; editable: bo
       {writeError && (
         <Banner
           status="error"
-          title="Could not delete the block"
-          description={writeError}
+          title={writeError.title}
+          description={writeError.message}
           collapsible={false}
         />
       )}
@@ -367,27 +378,30 @@ function BlockContent({
   block,
   editable,
   registerInput,
-  onText,
+  onWrite,
+  onInput,
   onKey,
   onToggle,
 }: {
   block: Row;
   editable: boolean;
-  registerInput: (node: HTMLTextAreaElement | null) => void;
-  onText: (next: string, base: string) => void;
-  onKey: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
+  registerInput: (handle: RichTextHandle | null) => void;
+  onWrite: (text: string) => void;
+  onInput: (plainText: string) => boolean;
+  onKey: (event: KeyboardEvent, caret: RichTextKeyInfo) => boolean;
   onToggle: (checked: boolean) => void;
 }) {
   const text = (label: string, variant: "body" | "heading" = "body", isChecked = false) => (
-    <InlineText
-      inputRef={registerInput}
+    <RichText
+      handleRef={registerInput}
       label={label}
       variant={variant}
       value={block.text}
       placeholder={PLACEHOLDERS[block.kind]}
       isReadOnly={!editable}
       isChecked={isChecked}
-      onChange={onText}
+      onWrite={onWrite}
+      onInput={onInput}
       onKeyDown={onKey}
     />
   );
@@ -398,7 +412,7 @@ function BlockContent({
       return (
         <HStack gap={2} align="start">
           <CheckboxInput
-            label={block.text || "To-do"}
+            label={markdownToPlainText(block.text) || "To-do"}
             isLabelHidden
             value={block.checked}
             isReadOnly={!editable}
