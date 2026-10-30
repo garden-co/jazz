@@ -4,11 +4,11 @@ description: Set up Jazz in your app — works out of the box with most framewor
 reviewedAt: "20017a2694"
 ---
 
-import CreateJazzClientReference from "../../partials/create-jazz-client-reference.mdx";
+import CreateJazzClientReference from "../../../partials/create-jazz-client-reference.mdx";
 
 ## Configure one session
 
-A Jazz session owns account selection and its current client. Give it the app configuration once, with `initial: "local-first"` to restore a saved account or start offline without signup. Its commands handle graceful shutdown and context replacement when authentication changes. See [Lifecycle](/docs/auth/lifecycle).
+A Jazz session owns account selection and its current client. Give it the app configuration once, with `initial: "local-first"` to restore a saved account or start offline without signup. Its commands handle graceful shutdown and context replacement when authentication changes. See [Lifecycle](/docs/setup/auth/lifecycle).
 
 <Tabs
   groupId="jazz-framework"
@@ -57,48 +57,6 @@ A Jazz session owns account selection and its current client. Give it the app co
 
 The browser account store retains the local signing root and selection. Provider JWTs are refreshed through `getToken` and are never persisted in this store.
 
-## React Native and Expo
-
-React Native and Expo use the same session API with platform-specific runtime and account storage adapters:
-
-```tsx
-import { JazzSessionProvider } from "jazz-tools/expo";
-
-function App() {
-  return (
-    <JazzSessionProvider config={{ appId, serverUrl, initial: "local-first" }}>
-      <TodoApp />
-    </JazzSessionProvider>
-  );
-}
-```
-
-Install `jazz-rn` directly in the application alongside `jazz-tools`, add its
-Expo config plugin, and build the native app. Expo Go cannot load the relay. A
-bare React Native host uses the same direct dependency and New Architecture,
-with an OS-protected account store. The [canonical Expo
-scaffold](https://github.com/garden-co/jazz/tree/main/examples/todo-client-localfirst-expo)
-shows the complete lifecycle and platform configuration. The alpha has not yet
-proven two physical JSI runtimes attached to one relay.
-
-<Callout type="info">
-  For a local-only context, pass `{ ...config, serverUrl: undefined }`. The handle keeps its registry authority; writes stay locally durable. A later context using the matching server URL can synchronize them.
-</Callout>
-
-<Callout type="warn">
-  The local-first root is that identity's signing credential. If it is lost, the account needs
-  another linked identity or a recovery backup to regain access. Plan for recovery with [backup and
-  restore](/docs/auth/local-first-auth#backing-up-and-restoring-the-secret).
-</Callout>
-
-<Accordions type="single">
-<Accordion title="Runtime assets not loading?">
-
-Some bundlers and runtimes cannot automatically resolve Jazz's Wasm and worker assets. See [Runtime source overrides](#runtime-source-overrides) below.
-
-</Accordion>
-</Accordions>
-
 ## Client config options
 
 <CreateJazzClientReference />
@@ -117,7 +75,7 @@ After the shared worker acknowledges startup, runtime initialisation has a five-
 
 While control requests are waiting for worker replies, Jazz probes the connection every 30 seconds and allows 30 seconds for a response. These are connection-health checks, not query or storage-operation timeouts: a responsive worker can continue a long operation, and idle connections are not continuously probed.
 
-An unresponsive-worker error does not prove that an outstanding operation failed. It may already have completed. Jazz does not automatically retry operations with an unknown outcome or clear IndexedDB. Use the existing [client and session lifecycle](/docs/auth/lifecycle) to recover, and establish a mutation's outcome before retrying it. Terminal shutdown reports the causal failure without waiting indefinitely for an unresponsive worker; it does not claim that an unacknowledged durable handoff succeeded.
+An unresponsive-worker error does not prove that an outstanding operation failed. It may already have completed. Jazz does not automatically retry operations with an unknown outcome or clear IndexedDB. Use the existing [client and session lifecycle](/docs/setup/auth/lifecycle) to recover, and establish a mutation's outcome before retrying it. Terminal shutdown reports the causal failure without waiting indefinitely for an unresponsive worker; it does not claim that an unacknowledged durable handoff succeeded.
 
 An intentional storage reset releases the old foreground identity without returning it to the erased store. `deleteClientStorage()` waits for a fresh identity before the same application client can be used again. If shutdown starts during that acquisition, Jazz retires the unused identity instead. Inspector attachments are session-scoped: after a reset, open a new attachment rather than reusing the old one.
 
@@ -141,7 +99,7 @@ if (navigator.storage?.persist) {
 }
 ```
 
-Check `navigator.storage.persisted()` on subsequent loads to see whether the grant is still in effect. Pair this with the [backup and restore](/docs/auth/local-first-auth#backing-up-and-restoring-the-secret) flow so the local-first secret can be recovered if storage is ever cleared.
+Check `navigator.storage.persisted()` on subsequent loads to see whether the grant is still in effect. Pair this with the [backup and restore](/docs/setup/web-client/local-first-auth#backing-up-and-restoring-the-secret) flow so the local-first secret can be recovered if storage is ever cleared.
 
 ## Dev plugins
 
@@ -260,7 +218,7 @@ All plugins accept the same base options:
 | `appId`       | Override the app ID. Defaults to the value in `.env`, otherwise a generated UUID persisted on first run.                                                                                      |
 | `adminSecret` | Required when `server` is a URL. For the embedded server, used as its admin secret unless `server.adminSecret` is set; otherwise a random secret is generated.                                |
 
-When `server` is an object, the embedded server accepts: `port` (default: random), `appId`, `adminSecret`, `dataDir` (default: `node_modules/.cache/jazz-dev-server`), `inMemory`, `allowLocalFirstAuth`, and `jwksUrl`. See [Server Setup](/docs/getting-started/server-setup) for the full semantics.
+When `server` is an object, the embedded server accepts: `port` (default: random), `appId`, `adminSecret`, `dataDir` (default: `node_modules/.cache/jazz-dev-server`), `inMemory`, `allowLocalFirstAuth`, and `jwksUrl`. See [Server Setup](/docs/setup/backend/trusted) for the full semantics.
 
 ### Connecting to an existing server
 

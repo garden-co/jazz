@@ -6,8 +6,6 @@
     "framework-patterns",
     "upgrading-from-alpha-55",
     "examples",
-    "inspector",
-    "agent-skills",
     "internals",
     "local-first-auth-internals"
   ]

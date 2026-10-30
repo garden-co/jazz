@@ -12,7 +12,7 @@ sees the rows the transaction creates or updates, so you can create a row and th
 on it for permissions in one transaction. A row the transaction deletes is still seen as it was
 before the transaction. Each write must also be allowed by the state the whole transaction
 leaves behind, whatever order you made the writes in. Writes from other transactions stay
-invisible until they are accepted. See [Permissions](/docs/auth/permissions#share-based-access).
+invisible until they are accepted. See [Permissions](/docs/schemas/policies#share-based-access).
 
 Jazz has two transaction types. The difference is how they handle concurrent changes:
 
@@ -176,7 +176,7 @@ transaction if it is dropped before `commit()` succeeds.
   The authority checks only the reads the writing client reports. That keeps honest writers from
   acting on stale data, but it is not a security boundary: a client that under-reports its reads can
   commit anyway. Enforce rules that must hold for every writer, such as "a membership needs a live
-  invite", in [permission policies](/docs/auth/permissions), or perform the write on your backend,
+  invite", in [permission policies](/docs/schemas/policies), or perform the write on your backend,
   as the [invite links](/docs/recipes/access-control/invite-links) recipe does.
 </Callout>
 

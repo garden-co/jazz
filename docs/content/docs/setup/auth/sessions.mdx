@@ -99,7 +99,7 @@ const permissions = s.definePermissions(app, ({ policy, session }) => {
 });
 ```
 
-Declaring those policies leaves update and delete denied until explicitly granted. See [Permissions](/docs/auth/permissions).
+Declaring those policies leaves update and delete denied until explicitly granted. See [Permissions](/docs/schemas/policies).
 
 ## Session claims and authorship
 
@@ -117,4 +117,4 @@ Backend request contexts have two distinct uses:
 
 A copied account ID or provider claim is not authorization. Ordinary clients create contexts from opaque account handles; the server verifies their credentials independently.
 
-See [Authentication](/docs/auth/authentication) for preparing handles and [Lifecycle](/docs/auth/lifecycle) for closing, linking, logout, and recovery.
+See [Authentication](/docs/setup/auth/authentication) for preparing handles and [Lifecycle](/docs/setup/auth/lifecycle) for closing, linking, logout, and recovery.

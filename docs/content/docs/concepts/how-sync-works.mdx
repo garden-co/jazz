@@ -23,7 +23,7 @@ When your app [subscribes to a query](/docs/reading/queries) (say, all todos whe
 [`done = false`](/docs/reading/filters-and-sorting)), Jazz sends that query subscription upstream.
 The server evaluates the query against its own current relational state, finds the matching rows,
 and sends them back. The client only ever sees rows it has asked for (and
-[has permission to read](/docs/auth/permissions)).
+[has permission to read](/docs/schemas/policies)).
 
 The set of active queries on a client defines the rows it can see and will keep receiving updates
 for.

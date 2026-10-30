@@ -1,10 +1,15 @@
 ---
 title: Overview
-description: The database that syncs.
-reviewedAt: "b29b48d1a"
+description: A relational database with live queries, permissions and mergeable writes, deployed into your own cloud.
 ---
 
-Jazz is a local-first relational database with row-level permissions, real-time sync, and offline support&hairsp;—&hairsp;no separate API layer needed. Your app reads from and writes to a local replica, and Jazz syncs it with a server in the background.
+Jazz is a relational database with live queries, row-level permissions and mergeable writes&hairsp;—&hairsp;no separate API layer needed. You deploy it into your own cloud (Vercel, Cloudflare, your own servers) or run it on Jazz Cloud. Your backend and clients talk to the Jazz server; clients can stay thin, or keep a local replica when you want instant UI and offline support.
+
+<Callout type="info">
+  Preview: this overview is being reworked for the server-first docs. The snippet below is still the
+  client-side one; it will become schema + one policy + a user-scoped backend route + a client
+  subscribing to the same query.
+</Callout>
 
 ```ts
 import { schema as s } from "jazz-tools";
@@ -34,33 +39,25 @@ Jazz works with React, Vue, Svelte, Solid, Expo/React Native, plain TypeScript, 
 
 (Looking for [classic Jazz docs?](https://classic.jazz.tools/docs))
 
-## Quickstart
+## Start here
 
 <Cards>
-  <Card title="Quickstart" href="/docs/quickstart" />
+  <Card title="Run locally" href="/docs/setup/run-locally" />
+  <Card title="Why Jazz" href="/docs/evaluating/why-jazz" />
+  <Card title="How Jazz works" href="/docs/concepts/how-jazz-works" />
 </Cards>
 
-## Install
+## What you'll learn, in order
 
-<Cards>
-  <Card title="Client" href="/docs/install/client" />
-  <Card title="TypeScript Server" href="/docs/install/typescript-server" />
-</Cards>
+- [Setup](/docs/setup/run-locally)&hairsp;—&hairsp;run locally, deploy to Vercel, Cloudflare or your own server, add a backend, then a client
+- [Schemas & Policies](/docs/schemas/defining-tables)&hairsp;—&hairsp;tables, column types, relationships, who can do what, and migrations
+- [Reading Data](/docs/reading/queries)&hairsp;—&hairsp;queries, live subscriptions and framework hooks
+- [Writing Data](/docs/writing/writing-data)&hairsp;—&hairsp;inserts, updates, transactions and mergeable text
+- [Operating Jazz](/docs/operating/monitoring)&hairsp;—&hairsp;backups, upgrades, monitoring and scaling
+- [Tooling](/docs/tooling/cli-and-mcp)&hairsp;—&hairsp;CLI, MCP, inspector, agent skills and testing
 
-## Setup
+## Coming next on this page
 
-<Cards>
-  <Card title="Client Setup" href="/docs/getting-started/client-setup" />
-  <Card title="Server Setup" href="/docs/getting-started/server-setup" />
-</Cards>
-
-## Reference
-
-<Cards>
-  <Card title="Authentication" href="/docs/auth/authentication" />
-  <Card title="Schemas" href="/docs/schemas/defining-tables" />
-  <Card title="Reading Data" href="/docs/reading/queries" />
-  <Card title="Writing Data" href="/docs/writing/writing-data" />
-  <Card title="Permissions" href="/docs/auth/permissions" />
-  <Card title="Migrations" href="/docs/schemas/migrations" />
-</Cards>
+- Usage scenarios, each linking to its path through the docs
+- An overview of recipes
+- Links to [examples](/docs/reference/examples), [Discord](https://discord.gg/RN9UKh52be) and [GitHub](https://github.com/garden-co/jazz) for help

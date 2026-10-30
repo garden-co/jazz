@@ -129,7 +129,7 @@ const features: {
         </p>
       </>
     ),
-    links: [{ label: "Permissions", href: "/docs/auth/permissions" }],
+    links: [{ label: "Permissions", href: "/docs/schemas/policies" }],
     diagram: <PermissionsDiagram />,
     caption: "A query and its read policy, planned together",
   },
@@ -198,8 +198,8 @@ const features: {
       </>
     ),
     links: [
-      { label: "Branches", href: "/docs/concepts/branches" },
-      { label: "Edit metadata", href: "/docs/reading/queries#magic-columns" },
+      { label: "Branches", href: "/docs/recipes/drafts-and-branches" },
+      { label: "Edit metadata", href: "/docs/reading/metadata" },
     ],
     diagram: <HistoryDiagram />,
     caption: "The history of one row, with a draft branch",
@@ -239,9 +239,9 @@ const features: {
       </>
     ),
     links: [
-      { label: "Server setup", href: "/docs/getting-started/server-setup" },
+      { label: "Server setup", href: "/docs/setup/backend/trusted" },
       { label: "Auth providers", href: "/docs/recipes/auth/auth-provider-integration" },
-      { label: "Permissions", href: "/docs/auth/permissions" },
+      { label: "Permissions", href: "/docs/schemas/policies" },
       { label: "How sync works", href: "/docs/concepts/how-sync-works" },
     ],
     diagram: <BackendDiagram />,
@@ -438,7 +438,7 @@ export default function HomePage() {
           </div>
           <Text as="p" display="block" color="secondary" className="mt-6">
             Also for Vue, Svelte, Solid, React Native, plain TypeScript and Rust.{" "}
-            <AppLink href="/docs/install/client">Install guides</AppLink>
+            <AppLink href="/docs/setup/web-client/local-first-install">Install guides</AppLink>
           </Text>
         </div>
       </section>
@@ -536,7 +536,7 @@ export default function HomePage() {
                     <Button
                       label="How to self-host"
                       variant="secondary"
-                      href="/docs/getting-started/server-setup#self-hosted-database-server"
+                      href="/docs/setup/deployment/own-server"
                     />
                   </TableCell>
                   <TableCell>
@@ -617,7 +617,7 @@ export default function HomePage() {
           <div className="flex flex-col gap-4 lg:col-span-5 lg:items-end">
             <CreateJazzCommand />
             <Text as="p" display="block" color="secondary">
-              Read the <AppLink href="/docs/quickstart">quickstart</AppLink> or join the{" "}
+              Read the <AppLink href="/docs/setup/run-locally">quickstart</AppLink> or join the{" "}
               <AstryxLink href="https://discord.gg/RN9UKh52be">Jazz Discord</AstryxLink>.
             </Text>
           </div>

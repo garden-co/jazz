@@ -1,4 +1,4 @@
 {
-  "title": "Schemas",
-  "pages": ["defining-tables", "column-types", "migrations"]
+  "title": "Schemas & Policies",
+  "pages": ["defining-tables", "column-types", "relationships", "policies", "migrations"]
 }

@@ -25,7 +25,7 @@ await window.__jazz.clearStorage("my-app::alice");
 
 The helper requires a live registered client on this page. Do not shut it down before calling the helper. If the client never finishes opening or no live namespace is listed, this helper cannot perform the reset.
 
-If you're working directly with a `Db` handle instead of the window helper, `await db.deleteClientStorage()` is the underlying API. See [Auth Lifecycle](/docs/auth/lifecycle#storage-reset) for how this differs from logout and local-first identity storage.
+If you're working directly with a `Db` handle instead of the window helper, `await db.deleteClientStorage()` is the underlying API. See [Auth Lifecycle](/docs/setup/auth/lifecycle#storage-reset) for how this differs from logout and local-first identity storage.
 
 - Browser persistent storage only.
 - If exactly one live namespace exists, `clearStorage()` uses it automatically.
@@ -53,7 +53,7 @@ in local persistent storage, while other runtimes use their configured local dri
 
 <Accordion id="local-first-to-external" title="Can I upgrade from local-first auth to external auth without losing data?">
 
-Yes. When a user signs up with an external provider, their identity carries over. See [Signing up with BetterAuth](/docs/auth/local-first-auth#signing-up-with-betterauth).
+Yes. When a user signs up with an external provider, their identity carries over. See [Signing up with BetterAuth](/docs/setup/web-client/local-first-auth#signing-up-with-betterauth).
 
 </Accordion>
 
@@ -73,7 +73,7 @@ accepted it. A rejected write throws `PersistedWriteRejectedError`, which provid
 Use `db.onMutationError()` as a fallback for rejected writes that do not have an active `wait()`
 call. The callback receives the rejection `code`, `reason`, and local transaction record. See
 [Writing data](/docs/writing/writing-data#write-durability-tiers) for an example and
-[Permissions](/docs/auth/permissions) for how the server decides whether to accept a write.
+[Permissions](/docs/schemas/policies) for how the server decides whether to accept a write.
 
 </Accordion>
 

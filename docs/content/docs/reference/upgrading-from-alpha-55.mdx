@@ -100,7 +100,7 @@ with no permissions at all, gets no data back from the server and has every writ
 writes still apply optimistically, then fail on the server.
 
 Before upgrading the server, make sure `permissions.ts` defines a policy for every table and
-operation your app uses. See [Permissions](/docs/auth/permissions).
+operation your app uses. See [Permissions](/docs/schemas/policies).
 
 ### Publish with `deploy`
 
@@ -226,7 +226,7 @@ React Native reports the code and message only.
 There is no migration. To recover, delete the local store and let the client resync from Core:
 
 - In the browser, call `await db.deleteClientStorage()` (see
-  [Storage reset](/docs/auth/lifecycle#storage-reset)).
+  [Storage reset](/docs/setup/auth/lifecycle#storage-reset)).
 - In Node, close the client and delete its data directory.
 
 Writes that were still pending in the old store, and never reached Core, are lost.

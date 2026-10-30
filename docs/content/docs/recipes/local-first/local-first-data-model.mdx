@@ -111,7 +111,7 @@ enough row history to converge deterministically after peers reconnect.
 When concurrent writes touch the same field of the same row, Core resolves the visible result
 [field by field against what each writer saw](/docs/concepts/how-sync-works#consistency-model): a
 write replaces the values its writer had seen, and when two writers changed the same field from the
-same starting point, the [edit Core receives first wins](/docs/concepts/how-sync-works#concurrent-edits).
+same starting point, the [edit Core receives first wins](/docs/recipes/local-first/local-first-data-model#concurrent-edits).
 
 If two peers update different fields, both changes can still be preserved in the resulting visible
 row state. Fields with a [merge strategy](/docs/reference/internals#merge-strategies) go further and

@@ -13,7 +13,7 @@ Any column can be made nullable by chaining `.optional()`.
 ## Mergeable Text Columns
 
 By default, a string column keeps one value: when two people edit it at the same time from the same
-starting point, [one edit wins the whole field](/docs/concepts/how-sync-works#concurrent-edits).
+starting point, [one edit wins the whole field](/docs/recipes/local-first/local-first-data-model#concurrent-edits).
 For prose that several people edit at once, opt the column into a text merge strategy instead:
 
 ```ts title="schema.ts"
