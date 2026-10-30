@@ -31,7 +31,7 @@ Jazz supports external JWT-based authentication for production use. This recipe 
 3. The Jazz server validates the JWT signature against the provider's JWKS endpoint.
 4. Core atomically resolves the exact `(iss, sub)` assignment or creates its account when fresh. The Jazz session opens the account's client. `session.user` contains the account ID and exact acting identity; provider claims remain under `session.claims`. Revoked assignments remain rejected; login-or-register never reassigns an identity.
 
-If you're unfamiliar with JWTs and JWKS, see the [explainer on the Authentication page](/docs/setup/auth/authentication#external-auth-for-production).
+If you're unfamiliar with JWTs and JWKS, see the [explainer on the Authentication page](/docs/setup/auth/authentication#external-authentication).
 
 ## Provider setup
 

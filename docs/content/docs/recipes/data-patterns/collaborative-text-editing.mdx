@@ -10,7 +10,7 @@ declare the column as a text merge column and keep writing it as a plain string.
 ## Why a plain string column is not enough
 
 A plain string column works well for replacing a value. When two people change it at the same time,
-[one edit wins the whole field](/docs/concepts/how-sync-works#concurrent-edits). The other edit stays
+[one edit wins the whole field](/docs/recipes/local-first/local-first-data-model#concurrent-edits). The other edit stays
 in the row's history, but it disappears from the text.
 
 ## Declare a text merge column
