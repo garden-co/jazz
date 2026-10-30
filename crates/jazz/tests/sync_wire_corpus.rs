@@ -437,13 +437,13 @@ fn shape(message: &SyncMessage) -> Option<&'static str> {
         },
         SyncMessage::AccessLost { hidden: true, .. } => Some(SHAPES[8]),
         SyncMessage::Commit {
-            kind: WireKind::Serializable { by: None, .. },
+            kind: WireKind::Serializable { snapshot, .. },
             ..
-        } => Some(SHAPES[9]),
-        SyncMessage::Commit {
-            kind: WireKind::Serializable { by: Some(_), .. },
-            ..
-        } => Some(SHAPES[10]),
+        } => match snapshot.as_slice() {
+            [(None, _)] => Some(SHAPES[9]),
+            [(Some(_), _)] => Some(SHAPES[10]),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -893,7 +893,7 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
             tier: ReadTier::LocalFirst,
             wait: None,
             view: Box::new(ReadViewSourceSpec::Current),
-            span: ReadSpan::Live { since: None },
+            span: ReadSpan::Live { since: Vec::new() },
         },
     ])));
     server
