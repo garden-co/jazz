@@ -6482,9 +6482,18 @@ fn same_tables(
 }
 
 impl Db {
-    /// Register a typed schema view. The handle shares this owner's store,
-    /// batches, clock and subscriptions; it reads and writes its own columns
-    /// of the physical tables, which hold the union of every admitted view.
+    /// A handle that reads and writes as a sync session declaring schema
+    /// `version` is served: by that admitted version's names, governed by
+    /// the current schema's policies. `None` while `version` is not
+    /// admitted.
+    pub fn governed_view(&self, version: crate::ids::SchemaVersionId) -> Option<Db> {
+        let view = self.inner.borrow().governed(version)?;
+        Some(Db {
+            inner: self.inner.clone(),
+            view: Some(view),
+        })
+    }
+
     /// Ship more of the app's versions and lenses (see
     /// [`DbConfig::with_migrations`]): a client learns an app's migrations
     /// when it first sees the app, not only when it opens.
@@ -6513,6 +6522,9 @@ impl Db {
         }
     }
 
+    /// Register a typed schema view. The handle shares this owner's store,
+    /// batches, clock and subscriptions; it reads and writes its own columns
+    /// of the physical tables, which hold the union of every admitted view.
     pub async fn register_schema_view(&self, schema: JazzSchema) -> Result<Db, Error> {
         // A version the app's lenses lead to is admitted as the authority
         // admits it, not named against the current one.

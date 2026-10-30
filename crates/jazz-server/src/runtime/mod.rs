@@ -13,6 +13,7 @@
 //! runtime's [`Db`] opens on the same connection once a schema is known.
 
 pub mod auth_admission;
+mod thin;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -1086,6 +1087,56 @@ impl ServerRuntimeHandle {
         }))
     }
 
+    /// Admit an authenticated thin client connection (SPEC 8.14). It is
+    /// served as its session, or as SYSTEM for a trusted link, like a sync
+    /// session, and takes its output from [`Self::open_wire_stream`].
+    pub async fn open_thin_session(
+        &self,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+        trust: CommitUnitTrust,
+    ) -> Result<ServerSession, String> {
+        let served_as = match trust {
+            CommitUnitTrust::Session => identity,
+            CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAuthority => {
+                AuthorSubject::SYSTEM
+            }
+        };
+        let session = ServerSession(self.inner.next_session.fetch_add(1, Ordering::Relaxed));
+        let (output, receiver) = tokio_mpsc::unbounded_channel();
+        let egress = Arc::new(AtomicUsize::new(0));
+        self.edges()?.insert(
+            session,
+            Edge {
+                output: Some(receiver),
+                ingress: Arc::new(AtomicUsize::new(0)),
+                egress: Arc::clone(&egress),
+            },
+        );
+        let opened = self
+            .run(move |owner| {
+                owner.open_thin_session(session, served_as, claims, output, egress);
+                Ok(())
+            })
+            .await;
+        if opened.is_err() {
+            self.edges()?.remove(&session);
+        }
+        opened.map(|()| session)
+    }
+
+    /// Queue a thin client's request for the owner.
+    pub fn receive_thin_request(
+        &self,
+        session: ServerSession,
+        request: jazz::thin::ThinRequest,
+    ) -> Result<(), String> {
+        if !self.edges()?.contains_key(&session) {
+            return Err("unknown server session".to_owned());
+        }
+        self.send(Box::new(move |owner| owner.thin_request(session, request)))
+    }
+
     /// Ask the owner for a tick; requests coalesce. Output reaches every
     /// session's stream after each tick.
     pub fn request_wire_tick(&self, _session: ServerSession) -> Result<(), String> {
@@ -1321,6 +1372,8 @@ impl From<CatalogueApplyError> for String {
 struct Owner {
     db: Db,
     sessions: HashMap<ServerSession, OwnerSession>,
+    /// Thin client connections (SPEC 8.14), which are not sync sessions.
+    thin: HashMap<ServerSession, thin::ThinSession>,
     /// The tick in progress's time slice, shared with every session's queues.
     slice: Rc<TickSlice>,
     catalogue: Catalogue,
@@ -1591,6 +1644,7 @@ impl Owner {
         Ok(Self {
             db,
             sessions: HashMap::new(),
+            thin: HashMap::new(),
             slice: Rc::default(),
             catalogue,
             awaiting_permissions: awaiting_permissions && head.is_none(),
@@ -1639,6 +1693,7 @@ impl Owner {
         for (_, session) in self.sessions.drain() {
             self.db.disconnect_subscriber(session.subscriber);
         }
+        self.thin.clear();
     }
 
     fn open_session(
@@ -1765,6 +1820,7 @@ impl Owner {
         if let Some(session) = self.sessions.remove(&session) {
             self.db.disconnect_subscriber(session.subscriber);
         }
+        self.close_thin_session(session);
     }
 
     fn inbound_pending(&self) -> bool {
@@ -1847,6 +1903,7 @@ impl Owner {
         for id in gone {
             self.close_session(id);
         }
+        self.pump_thin();
     }
 
     /// An activation at a revision older than the current one is stale: the

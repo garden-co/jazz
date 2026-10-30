@@ -158,6 +158,16 @@ export type AuthUpdate =
  * Common interface for the runtime backing `JazzClient`.
  */
 export interface Runtime {
+  /**
+   * Wait until every write committed so far reaches `tier`. `throughOutage`
+   * keeps the wait pending through outages until a terminal failure.
+   */
+  waitForPendingWrites?(
+    tier?: string,
+    options?: { throughOutage?: boolean; signal?: AbortSignal },
+  ): Promise<void>;
+  /** @internal Close mutation admission and report the foreground TxTime high-water. */
+  quiesceForegroundTxTimeHighWater?(): Promise<bigint>;
   /** Capture behind earlier owner operations without waiting for server acceptance. */
   captureSnapshot?(): Promise<SnapshotRef>;
   readonly preparationOwner?: object;
