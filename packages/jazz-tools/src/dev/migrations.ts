@@ -204,7 +204,9 @@ function renderSchemaWitness(schema: WasmSchema): string {
         tableSchema.branchBy === undefined
           ? ""
           : `.branchBy(${JSON.stringify(tableSchema.branchBy)})`;
-      return `${JSON.stringify(tableName)}: s.table({\n${indentBlock(columnLines.join("\n"), 2)}\n}, {\n${indentBlock(relationLines.join("\n"), 2)}\n})${index}${compositeIndexes}${branch}`;
+      const history =
+        tableSchema.history === undefined ? "" : `.history(${JSON.stringify(tableSchema.history)})`;
+      return `${JSON.stringify(tableName)}: s.table({\n${indentBlock(columnLines.join("\n"), 2)}\n}, {\n${indentBlock(relationLines.join("\n"), 2)}\n})${index}${compositeIndexes}${branch}${history}`;
     });
 
   if (tableEntries.length === 0) {

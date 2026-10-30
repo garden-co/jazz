@@ -572,5 +572,17 @@
       ],
       "hash": "9206d3bb7999f301f3143b827b0ad1fbe8cccdd3f996126a6d6de5b9dc8e461b"
     }
+  ],
+  "historyCases": [
+    {
+      "name": "full",
+      "history": null,
+      "hash": "9da9085d13c72df3665d499aa39ac57ce97cb11a505c21dc8c81bfb19b27c3ec"
+    },
+    {
+      "name": "latest",
+      "history": "latest",
+      "hash": "363d9e6879e25133e48913d1339d659196bf8e2962c4033046a89c96155a776d"
+    }
   ]
 }

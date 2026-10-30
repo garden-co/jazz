@@ -698,3 +698,30 @@ async fn deploy_revert_then_new_branch_reopens_and_rejects_stored_sibling() {
     deploy_ok(&router, request(&b, &[], vec![])).await;
     reopened.shutdown().await;
 }
+
+/// Switching the active schema's `notes` to latest-only over HTTP is
+/// refused with `drops_history` naming the table, and nothing changes;
+/// the same request with `allowDroppingHistory` deploys it.
+#[tokio::test]
+async fn switching_a_table_to_latest_only_needs_allow_dropping_history() {
+    let server = builder(None).build().await.unwrap();
+    let router = create_router(server.state.clone());
+    let full = schema(&[]);
+    let mut latest = full.clone();
+    latest.get_mut(&TableName::new("notes")).unwrap().history =
+        jazz::tools::HistoryRetention::Latest;
+    deploy_ok(&router, request(&full, &[&full], vec![])).await;
+    let before = graph(&router).await;
+
+    let switch = request(&latest, &[&latest], vec![]);
+    let (status, error) = http(&router, "POST", "/deploy", switch.clone()).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+    assert_eq!(error["code"], "drops_history", "{error}");
+    assert_eq!(error["details"]["tables"], json!(["notes"]));
+    assert_eq!(graph(&router).await, before);
+
+    let mut confirmed = switch;
+    confirmed["allowDroppingHistory"] = json!(true);
+    assert_eq!(deploy_ok(&router, confirmed).await["changed"], true);
+    server.shutdown().await;
+}

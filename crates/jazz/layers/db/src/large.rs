@@ -2326,6 +2326,7 @@ mod tests {
             branch_by: Vec::new(),
             provenance: Vec::new(),
             stored_provenance: Vec::new(),
+            latest_only: false,
         };
         let column = Column {
             name: "body".to_owned(),
@@ -2385,6 +2386,7 @@ mod tests {
             branch_by: Vec::new(),
             provenance: Vec::new(),
             stored_provenance: Vec::new(),
+            latest_only: false,
         };
         let column = |name: &str| Column {
             name: name.to_owned(),
@@ -2701,6 +2703,7 @@ mod tests {
             branch_by: Vec::new(),
             provenance: Vec::new(),
             stored_provenance: Vec::new(),
+            latest_only: false,
         };
         let column = Column {
             name: "body".to_owned(),

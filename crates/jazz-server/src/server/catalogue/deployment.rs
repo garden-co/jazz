@@ -181,6 +181,7 @@ mod tests {
                     schemas,
                     migrations,
                     permissions,
+                    allow_dropping_history: false,
                 },
             )
             .unwrap();

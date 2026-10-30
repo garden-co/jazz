@@ -260,6 +260,8 @@ export interface Table {
   indexedColumns?: string[];
   compositeIndexes?: string[][];
   branchBy?: string[];
+  /** `"latest"` keeps only each row's latest version; absent keeps full history. */
+  history?: "latest";
   policies?: TablePolicies;
 }
 

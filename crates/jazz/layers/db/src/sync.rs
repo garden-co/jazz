@@ -3829,6 +3829,9 @@ impl Inner {
         );
         self.exec(&sql, params_from_iter(values.iter()))
             .map_err(storage)?;
+        if history {
+            self.prune_history(&image.table, RowUuid::from_bytes(image.id), &image.key)?;
+        }
         Ok(())
     }
 
@@ -5411,6 +5414,11 @@ impl Inner {
         }
         // A branch view's prior result reads its head (and live base) as
         // of `since`; a frozen base keeps its own cut.
+        // Its prior result would read a latest-only input as of `since`,
+        // a version that table may have dropped: it opens fresh instead.
+        if moved && inputs.iter().any(|table| self.latest_only(table)) {
+            return Ok(None);
+        }
         let prior = if moved {
             let read = ReadSpec {
                 cut: Some(Cut::at(Pos::at(since))),

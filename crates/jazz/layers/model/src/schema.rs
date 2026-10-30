@@ -17,6 +17,7 @@ use jazz_types::records::{
 
 use crate::ids::SchemaVersionId;
 use crate::model::branch::{BranchColumnValue, BranchKey, BranchSelector};
+pub use crate::model::public_schema::HistoryRetention;
 use crate::model::public_schema::Schema as PublicSchema;
 use crate::query::Query;
 #[cfg(test)]
@@ -879,6 +880,10 @@ pub struct TableSchema {
     /// Per-column merge strategy. Columns omitted here use [`MergeStrategy::Lww`].
     #[serde(default)]
     pub merge_strategies: BTreeMap<String, MergeStrategy>,
+    /// How much of each row's history nodes keep (SPEC 4 §4.9). It does
+    /// not change how rows are stored, so it is not part of the version id.
+    #[serde(default)]
+    pub history: HistoryRetention,
 }
 
 impl TableSchema {
@@ -897,6 +902,7 @@ impl TableSchema {
             indexed_columns: BTreeSet::new(),
             composite_indexes: BTreeSet::new(),
             merge_strategies: BTreeMap::new(),
+            history: HistoryRetention::Full,
         }
     }
 

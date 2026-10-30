@@ -261,7 +261,7 @@ export class DeploymentError extends Error {
     message: string,
     readonly status: number,
     readonly code?: string,
-    readonly details?: { target?: string; active?: string; roots?: string[] },
+    readonly details?: { target?: string; active?: string; roots?: string[]; tables?: string[] },
   ) {
     super(message);
   }
@@ -269,7 +269,11 @@ export class DeploymentError extends Error {
 
 export async function publishDeployment(
   serverUrl: string,
-  options: { appId: string; adminSecret: string } & DeploymentArtifacts,
+  options: {
+    appId: string;
+    adminSecret: string;
+    allowDroppingHistory?: boolean;
+  } & DeploymentArtifacts,
 ): Promise<DeploymentResponse> {
   const response = await fetch(appScopedUrl(serverUrl, options.appId, "admin/deploy"), {
     method: "POST",
@@ -283,6 +287,7 @@ export async function publishDeployment(
         schemas: options.schemas.map(({ hash, schema }) => ({ hash, schema: { tables: schema } })),
         migrations: options.migrations,
         permissions: normalizePermissionsForWasm(options.permissions),
+        ...(options.allowDroppingHistory ? { allowDroppingHistory: true } : {}),
       },
       runtimeSchemaJsonReplacer,
     ),

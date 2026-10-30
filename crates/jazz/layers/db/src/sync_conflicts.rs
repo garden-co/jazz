@@ -562,12 +562,16 @@ impl Inner {
             .map(|(seq, _, node, tx)| (seq, (node, tx)))
             .collect();
         let writer = |seq: u64| writers.get(&seq).copied().unwrap_or(([0; 16], seq));
+        // A latest-only table dropped the versions a writer may have
+        // missed, so each of its writes reads as blind (SPEC 4 §4.9).
+        let blind = self.latest_only(table);
         let mut conflicts = Vec::with_capacity(history.len());
         for (index, version) in history.iter().enumerate() {
             let earlier = &history[..index];
             let previous = earlier.last().map(|v| v.seq);
-            let Some(built) = version.built else {
-                // An insert, a blind write, or the authority's own.
+            let Some(built) = version.built.filter(|_| !blind) else {
+                // An insert, a blind write, the authority's own, or any
+                // write to a latest-only table.
                 conflicts.push(WriteConflict {
                     seq: version.seq,
                     writer: writer(version.seq),
