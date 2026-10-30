@@ -1,0 +1,19 @@
+# Built inside a SQLite-engine checkout by ../prepare.sh, as a member of that
+# checkout's workspace, so it links exactly the Jazz alpha.60 ships.
+[package]
+name = "migrate-alpha59-import"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "sqlite-import"
+path = "src/main.rs"
+
+[dependencies]
+jazz = { workspace = true, features = ["runtime"] }
+jazz-server = { path = "../../../crates/jazz-server" }
+migrate-alpha59-dump = { path = "../dump" }
+serde_json = "1.0"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+uuid = "1"
