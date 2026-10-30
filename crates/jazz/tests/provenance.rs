@@ -501,3 +501,125 @@ fn a_transaction_for_an_identity_attributes_its_writes_and_fixes_their_identity(
         2
     );
 }
+
+/// A code interned for an author inside a transaction that rolls back is
+/// undone with it, and SQLite may hand it to the next new author: the
+/// first author's later writes must not reuse it.
+///
+/// Actors: one database; writers 5 and 6.
+/// Flow: open tx → 5 writes (code N interned) → abandon (N undone) →
+/// 6 writes (N reused for 6) → 5 writes again → 5's row reads as 5's.
+#[test]
+fn an_author_code_rolled_back_is_not_reused_for_its_author() {
+    let db = db();
+    let open = OpenTransactionId::new();
+    block_on(db.begin_serializable(open)).unwrap();
+    block_on(
+        db.tx_ref(open)
+            .insert("notes", body("rolled back"), as_user(5, row(1))),
+    )
+    .unwrap();
+    db.abandon_transaction_handle(open).unwrap();
+    block_on(db.insert("notes", body("six"), as_user(6, row(2)))).unwrap();
+    block_on(db.insert("notes", body("five"), as_user(5, row(3)))).unwrap();
+
+    let select = db
+        .prepare_query(&Query::from("notes").select(["body", "$createdBy.identity.subject"]))
+        .unwrap();
+    let authors: BTreeMap<RowUuid, String> = block_on(db.all(&select, ReadOpts::default()))
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                row.row_uuid(),
+                subject_cell(row, "$createdBy.identity.subject"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        authors,
+        BTreeMap::from([
+            (row(2), user(6).principal_parts().1),
+            (row(3), user(5).principal_parts().1),
+        ])
+    );
+}
+
+/// A first sync ships a large result in chunks of rows, and the client
+/// stores them in one batch that interns each author once: every row
+/// arrives, with its own body and author.
+///
+/// Actors: a server holding 1,100 notes by three writers; a client.
+/// Flow: server inserts → client subscribes → ticks → the client's rows
+/// equal the server's, row by row.
+#[test]
+fn a_first_sync_of_many_rows_keeps_every_body_and_author() {
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("body", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    );
+    let open = |node: u8, author: AuthorSubject| {
+        DbConfig::new(
+            schema.clone(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([node; 16]),
+                author,
+            },
+        )
+    };
+    let server = block_on(Db::open_history_complete(open(1, AuthorSubject::SYSTEM))).unwrap();
+    let client = block_on(Db::open(open(2, user(7)))).unwrap();
+    let many = |n: u16| {
+        let mut bytes = [0; 16];
+        bytes[..2].copy_from_slice(&n.to_be_bytes());
+        RowUuid::from_bytes(bytes)
+    };
+    for n in 0..1100u16 {
+        block_on(server.insert(
+            "notes",
+            body(&format!("note {n}")),
+            InsertOptions {
+                row_id: Some(many(n)),
+                identity: WriteIdentity::Session(user(1 + (n % 3) as u8)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    }
+    let (up, down) = duplex();
+    let _upstream = block_on(client.connect_upstream(up));
+    server.accept_subscriber(down, user(7)).unwrap();
+    let select = Query::from("notes").select(["body", "$createdBy.identity.subject"]);
+    let prepared = client.prepare_query(&select).unwrap();
+    let _live = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
+    for _ in 0..6 {
+        block_on(client.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+    }
+
+    let read = |db: &Db| -> BTreeMap<RowUuid, (String, String)> {
+        let prepared = db.prepare_query(&select).unwrap();
+        block_on(db.all(&prepared, ReadOpts::default()))
+            .unwrap()
+            .iter()
+            .map(|row| {
+                (
+                    row.row_uuid(),
+                    (
+                        subject_cell(row, "body"),
+                        subject_cell(row, "$createdBy.identity.subject"),
+                    ),
+                )
+            })
+            .collect()
+    };
+    let on_server = read(&server);
+    assert_eq!(on_server.len(), 1100);
+    assert_eq!(on_server[&many(4)].1, user(2).principal_parts().1);
+    assert_eq!(read(&client), on_server);
+}
