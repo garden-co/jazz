@@ -488,6 +488,10 @@ struct Inner {
     last_stamp: (u64, i64),
     /// Interned author codes (see [`Inner::author_code`]), cached both ways.
     authors: RefCell<AuthorCodes>,
+    /// By stored table and whether into its history: the columns the last
+    /// image stored there had, and the insert that stores them. A sync
+    /// batch stores thousands of images of a few tables.
+    image_inserts: RefCell<HashMap<(String, bool), (Vec<String>, String)>>,
     ids: Box<dyn RowIdSource>,
     /// The newest commit seq handed out: the authority's seq, or on a
     /// replica its own node's counter.
@@ -648,6 +652,11 @@ fn who(identity: WriteIdentity) -> Who {
 pub(crate) struct AuthorCodes {
     codes: HashMap<AuthorKey, i64>,
     parts: HashMap<i64, AuthorKey>,
+    /// Codes found or interned inside an open transaction, with the
+    /// connection's rollback count then: one holds until a rollback, which
+    /// may have undone it. A sync batch interns a code per new author and
+    /// then finds it for every row that author wrote.
+    uncommitted: HashMap<AuthorKey, (i64, u64)>,
 }
 
 /// Who wrote a row version, and when (Unix ms).
@@ -1216,8 +1225,13 @@ impl Db {
         }))
         .map_err(storage)?;
         let rolled_back = chunks.clone();
-        conn.rollback_hook(Some(move || rolled_back.unpin()))
-            .map_err(storage)?;
+        // SQLite's own rollbacks (after a full disk, say) count too.
+        let rollback_key = crate::values::rollback_key(&conn);
+        conn.rollback_hook(Some(move || {
+            rolled_back.unpin();
+            crate::values::note_rollback(rollback_key);
+        }))
+        .map_err(storage)?;
         let fresh: i64 = conn
             // Durable Object SQLite keeps its own `_cf_*` tables in the file.
             .query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '\\_jazz\\_%' ESCAPE '\\' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\'", [], |r| r.get(0))
@@ -1311,6 +1325,7 @@ impl Db {
                 writer: None,
                 last_stamp: (0, 0),
                 authors: RefCell::new(AuthorCodes::default()),
+                image_inserts: RefCell::default(),
                 ids: config
                     .id_source
                     .unwrap_or_else(|| Box::new(crate::options::ProductionRowIdSource)),
@@ -4452,8 +4467,16 @@ impl Inner {
     /// this small integer instead of repeating them in every version;
     /// codes are local to this database and resolved back at egress.
     pub(crate) fn author_code(&self, key: &AuthorKey) -> Result<i64, Error> {
-        if let Some(code) = self.authors.borrow().codes.get(key) {
-            return Ok(*code);
+        {
+            let authors = self.authors.borrow();
+            if let Some(code) = authors.codes.get(key) {
+                return Ok(*code);
+            }
+            if let Some((code, rollbacks)) = authors.uncommitted.get(key)
+                && *rollbacks == crate::values::rollbacks(&self.conn)
+            {
+                return Ok(*code);
+            }
         }
         let (account, issuer, subject) = key;
         let account = account.as_bytes().to_vec();
@@ -4481,14 +4504,19 @@ impl Inner {
         Ok(code)
     }
 
-    /// Cache an author's code, but only once it is committed: one interned
-    /// inside a savepoint (a transaction overlay, a batch that may fail) is
-    /// undone by its rollback, and its code may then go to another author.
+    /// Cache an author's code. One interned inside a savepoint (a
+    /// transaction overlay, a batch that may fail) is undone by its
+    /// rollback, and its code may then go to another author: until it is
+    /// committed it holds only while no rollback happened.
     fn remember_author(&self, key: &AuthorKey, code: i64) {
+        let mut authors = self.authors.borrow_mut();
         if self.conn.is_autocommit() {
-            let mut authors = self.authors.borrow_mut();
+            authors.uncommitted.remove(key);
             authors.codes.insert(key.clone(), code);
             authors.parts.insert(code, key.clone());
+        } else {
+            let rollbacks = crate::values::rollbacks(&self.conn);
+            authors.uncommitted.insert(key.clone(), (code, rollbacks));
         }
     }
 

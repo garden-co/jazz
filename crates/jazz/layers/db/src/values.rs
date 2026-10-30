@@ -81,6 +81,35 @@ fn undo_key(conn: &rusqlite::Connection) -> usize {
 /// it, and a later connection may get its handle's address.
 pub(crate) fn forget_tag_undo(conn: &rusqlite::Connection) {
     TAG_UNDO.with(|undo| undo.borrow_mut().remove(&undo_key(conn)));
+    ROLLBACKS.with(|rollbacks| rollbacks.borrow_mut().remove(&undo_key(conn)));
+}
+
+thread_local! {
+    /// By connection: how many times it rolled back a savepoint or a whole
+    /// transaction. What a cache learned inside an open transaction holds
+    /// while this count stays as it was.
+    static ROLLBACKS: RefCell<std::collections::HashMap<usize, u64>> = RefCell::default();
+}
+
+/// How many rollbacks `conn` has seen (see [`ROLLBACKS`]).
+pub(crate) fn rollbacks(conn: &rusqlite::Connection) -> u64 {
+    ROLLBACKS.with(|rollbacks| {
+        rollbacks
+            .borrow()
+            .get(&undo_key(conn))
+            .copied()
+            .unwrap_or(0)
+    })
+}
+
+/// Count a rollback on the connection whose [`rollback_key`] is `key`.
+pub(crate) fn note_rollback(key: usize) {
+    ROLLBACKS.with(|rollbacks| *rollbacks.borrow_mut().entry(key).or_default() += 1);
+}
+
+/// `conn`'s key for [`note_rollback`], for a hook that cannot borrow it.
+pub(crate) fn rollback_key(conn: &rusqlite::Connection) -> usize {
+    undo_key(conn)
 }
 
 /// Stored enum column `tags` is about to change on `conn`: the innermost
@@ -152,6 +181,9 @@ pub(crate) fn end_savepoint(
     match conn.execute_batch(&sql) {
         Ok(()) => {
             close_tag_undo(conn, keep, false);
+            if !keep {
+                note_rollback(undo_key(conn));
+            }
             Ok(())
         }
         Err(error) => {

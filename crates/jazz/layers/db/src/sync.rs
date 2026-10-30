@@ -3301,13 +3301,18 @@ impl Inner {
             format!("SELECT * FROM {} WHERE {filter}", quote(&name))
         };
         let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
-        let names: Vec<String> = statement
-            .column_names()
-            .iter()
-            .map(|s| (*s).to_owned())
-            .collect();
+        // A cached `SELECT *` prepared before its table gained a column
+        // names the old columns until a step re-prepares it: the names are
+        // read from the first row.
+        let mut names: Vec<String> = Vec::new();
         let rows = statement
             .query_map(params, |r| {
+                if names.is_empty() {
+                    let statement = r.as_ref();
+                    names = (0..statement.column_count())
+                        .map(|i| statement.column_name(i).map(str::to_owned))
+                        .collect::<Result<_, _>>()?;
+                }
                 let mut image = Image {
                     table: table.to_owned(),
                     id: [0; 16],
@@ -3781,6 +3786,49 @@ impl Inner {
         Ok(ids)
     }
 
+    /// The images of `table`'s rows at each of `versions` (as [`ID_AT`]
+    /// selects them one by one), read a chunk of rows per statement: an
+    /// opening snapshot ships thousands.
+    fn images_at(
+        &self,
+        table: &str,
+        versions: &[(RowUuid, Pos)],
+    ) -> Result<HashMap<(RowUuid, Pos), Vec<Image>>, Error> {
+        use std::fmt::Write as _;
+        const CHUNK: usize = 512;
+        let mut found: HashMap<(RowUuid, Pos), Vec<Image>> = versions
+            .iter()
+            .map(|version| (*version, Vec::new()))
+            .collect();
+        for chunk in versions.chunks(CHUNK) {
+            let mut ids = String::with_capacity(2 + chunk.len() * 35);
+            ids.push('[');
+            for (i, (row, _)) in chunk.iter().enumerate() {
+                if i > 0 {
+                    ids.push(',');
+                }
+                ids.push('"');
+                for byte in row.0.as_bytes() {
+                    let _ = write!(ids, "{byte:02x}");
+                }
+                ids.push('"');
+            }
+            ids.push(']');
+            for image in self.images_where(
+                table,
+                false,
+                "id IN (SELECT unhex(value) FROM json_each(?1))",
+                &[&ids],
+            )? {
+                let at = self.pos(&image)?;
+                if let Some(images) = found.get_mut(&(RowUuid::from_bytes(image.id), at)) {
+                    images.push(image);
+                }
+            }
+        }
+        Ok(found)
+    }
+
     fn current_image(&self, table: &str, row: RowUuid, key: &[u8]) -> Result<Option<Image>, Error> {
         let id = row.0.as_bytes().to_vec();
         Ok(self
@@ -3789,18 +3837,6 @@ impl Inner {
     }
 
     fn put_image(&self, image: &Image, history: bool) -> Result<(), Error> {
-        let name = if history {
-            format!("{}__h", image.table)
-        } else {
-            image.table.clone()
-        };
-        let mut names = vec![
-            "id".to_owned(),
-            "_b".to_owned(),
-            "_n".to_owned(),
-            "_seq".to_owned(),
-            "_st".to_owned(),
-        ];
         let mut values = vec![
             Sql::Blob(image.id.to_vec()),
             Sql::Blob(image.key.clone()),
@@ -3811,22 +3847,42 @@ impl Inner {
                     | if image.content { 0 } else { STATE_NO_CONTENT },
             ),
         ];
+        let mut columns = Vec::new();
         for (column, value) in self.stored_cells(image)? {
-            names.push(quote(&column));
+            columns.push(column);
             values.push(value);
         }
-        let placeholders: Vec<String> = (1..=values.len()).map(|i| format!("?{i}")).collect();
-        let verb = if history {
-            "INSERT OR IGNORE"
-        } else {
-            "INSERT"
-        };
-        let sql = format!(
-            "{verb} INTO {} ({}) VALUES ({})",
-            quote(&name),
-            names.join(", "),
-            placeholders.join(", ")
-        );
+        let mut inserts = self.image_inserts.borrow_mut();
+        let (known, sql) = inserts
+            .entry((image.table.clone(), history))
+            .or_insert_with(|| (Vec::new(), String::new()));
+        if sql.is_empty() || *known != columns {
+            let name = if history {
+                format!("{}__h", image.table)
+            } else {
+                image.table.clone()
+            };
+            let names: Vec<String> = ["id", "_b", "_n", "_seq", "_st"]
+                .into_iter()
+                .map(str::to_owned)
+                .chain(columns.iter().map(|column| quote(column)))
+                .collect();
+            let placeholders: Vec<String> = (1..=values.len()).map(|i| format!("?{i}")).collect();
+            let verb = if history {
+                "INSERT OR IGNORE"
+            } else {
+                "INSERT"
+            };
+            *sql = format!(
+                "{verb} INTO {} ({}) VALUES ({})",
+                quote(&name),
+                names.join(", "),
+                placeholders.join(", ")
+            );
+            *known = columns;
+        }
+        let sql = sql.clone();
+        drop(inserts);
         self.exec(&sql, params_from_iter(values.iter()))
             .map_err(storage)?;
         Ok(())
@@ -8814,6 +8870,56 @@ impl Db {
                 // resumes from: not shipped, but watched again, and their
                 // supporting rows followed (and shipped where they changed).
                 let mut held = Vec::new();
+                // Unchanged for a resumed client: a version it held as of
+                // `since` that was in the result then. A row whose
+                // membership inputs changed may have entered the result
+                // without changing: its seq alone cannot say, so the result
+                // as of `since` does. Only the opening snapshot is judged
+                // so: a row a later commit in this tick added joined after
+                // that judgement.
+                let held_as_of = |row: &SubscriptionOutputRow, reset: bool| {
+                    resume.as_ref().is_some_and(|resume| {
+                        reset
+                            && row.seq <= Pos::at(resume.since)
+                            && resume
+                                .prior
+                                .as_ref()
+                                .is_none_or(|prior| prior.contains(&row.id))
+                    })
+                };
+                // The current versions this subscription ships, read a chunk
+                // of rows per statement: an opening snapshot ships every
+                // row of its result.
+                let mut wanted: BTreeMap<String, Vec<(RowUuid, Pos)>> = BTreeMap::new();
+                for event in &events {
+                    let SubscriptionEvent::Delta {
+                        added,
+                        updated,
+                        reset,
+                        ..
+                    } = event
+                    else {
+                        continue;
+                    };
+                    for row in added.iter().chain(updated.iter()) {
+                        if history_source_table(&row.table).is_some()
+                            || (held_as_of(row, *reset) && support.is_none())
+                            || cache.contains_key(&(row.table.to_string(), row.id, row.seq))
+                        {
+                            continue;
+                        }
+                        wanted
+                            .entry(row.table.to_string())
+                            .or_default()
+                            .push((row.id, row.seq));
+                    }
+                }
+                for (table, versions) in wanted {
+                    let stored = names.stored_table(&table)?;
+                    for ((row, at), found) in inner.images_at(stored, &versions)? {
+                        cache.insert((table.clone(), row, at), found);
+                    }
+                }
                 for event in events {
                     let SubscriptionEvent::Delta {
                         added,
@@ -8834,22 +8940,7 @@ impl Db {
                         let table = names
                             .stored_table(history.unwrap_or(&row.table))?
                             .to_owned();
-                        // Unchanged for a resumed client: a version it held as
-                        // of `since` that was in the result then. A row whose
-                        // membership inputs changed may have entered the
-                        // result without changing: its seq alone cannot say,
-                        // so the result as of `since` does. Only the opening
-                        // snapshot is judged so: a row a later commit in
-                        // this tick added joined after that judgement.
-                        let unchanged = resume.as_ref().is_some_and(|resume| {
-                            reset
-                                && history.is_none()
-                                && row.seq <= Pos::at(resume.since)
-                                && resume
-                                    .prior
-                                    .as_ref()
-                                    .is_none_or(|prior| prior.contains(&row.id))
-                        });
+                        let unchanged = history.is_none() && held_as_of(row, reset);
                         let id_key = wk((
                             table.clone(),
                             "id".to_owned(),
