@@ -267,6 +267,10 @@ struct ReadSpec {
     settled_only: bool,
     view: Option<View>,
     cut: Option<Cut>,
+    /// A live read's subscription position (see `Remote::visible`): the
+    /// result reads as of it, plus this replica's own writes, while the
+    /// store holds others' accepted versions past it.
+    visible: Option<Rc<std::cell::Cell<Option<u64>>>>,
     /// Columns whose changes updated rows carry as splices
     /// ([`ReadOpts::splices`]).
     splices: Vec<String>,
@@ -305,6 +309,7 @@ impl ReadSpec {
             settled_only: inner.client.is_some() && opts.tier == ReadTier::Remote,
             view,
             cut,
+            visible: None,
             splices: opts.splices.clone(),
         })
     }
@@ -2014,14 +2019,14 @@ impl Db {
         let remote = reach
             .and_then(|reach| self.attach_remote(prepared, read.include_deleted, &view, reach));
         let settled = match (&remote, client) {
-            (Some((answered, _, global)), _) => {
+            (Some((answered, _, global, _)), _) => {
                 sync::SettledBy::Remote(answered.clone(), global.clone())
             }
             (None, true) => sync::SettledBy::Never,
             (None, false) => sync::SettledBy::Always(self.inner().authority),
         };
         let gate = match (&remote, self.link_hint()) {
-            (Some((answered, _, global)), Some(hint)) => {
+            (Some((answered, _, global, _)), Some(hint)) => {
                 let deadline =
                     sync::remote_deadline(&opts, non_durable, sync::may_wait(hint.get()));
                 let live = hint.get().hint == RemoteLinkHint::Live;
@@ -2037,6 +2042,12 @@ impl Db {
             _ => None,
         };
         let include_deleted = read.include_deleted;
+        // A live result reads as of its own subscription's settled
+        // position (on an upstream that settles per subscription).
+        let read = ReadSpec {
+            visible: remote.as_ref().map(|(.., visible)| visible.clone()),
+            ..read
+        };
         let mut inner = self.inner();
         let (queue, group) = match inner.subscribe_member(prepared, identity, read, settled) {
             Ok(member) => member,
@@ -2059,7 +2070,7 @@ impl Db {
             dropped: inner.fan.dropped.clone(),
             gate,
             group,
-            refused: remote.as_ref().map(|(_, refused, _)| refused.clone()),
+            refused: remote.as_ref().map(|(_, refused, ..)| refused.clone()),
             remote: remote.zip(reach).map(|(_, reach)| {
                 (
                     self.inner.clone(),
@@ -4213,6 +4224,7 @@ impl Inner {
             seq: self.own_pos(self.seq),
             own,
             extra: Vec::new(),
+            unsettled: false,
             overlay: Some(overlay),
         };
         let session = self.session(author);
@@ -4380,6 +4392,7 @@ impl Inner {
                 seq: self.own_pos(seq.saturating_sub(1)),
                 own: self.own_pos(seq),
                 extra: Vec::new(),
+                unsettled: false,
                 overlay: Some(CutOverlay::Grounded(Arc::new(grounded.clone()))),
             };
             let mut passed = Vec::new();
@@ -4527,6 +4540,7 @@ impl Inner {
                 seq: self.own_pos(seq.saturating_sub(1)),
                 own: self.own_pos(seq),
                 extra: Vec::new(),
+                unsettled: false,
                 overlay: Some(CutOverlay::Except {
                     table: stored.clone(),
                     row: *check.row.0.as_bytes(),
@@ -4580,6 +4594,7 @@ impl Inner {
             seq: before,
             own: before,
             extra: Vec::new(),
+            unsettled: false,
             overlay: None,
         };
         Ok(matches!(

@@ -1483,6 +1483,10 @@ pub(crate) struct Remote {
     /// in `_jazz_watermarks` under `watermark`, so a reopened replica
     /// resumes from it too.
     through: Option<u64>,
+    /// The position its live result reads as of, on an upstream whose
+    /// throughs are per subscription (a sharded gateway): the highest
+    /// `through` it settled at. Unset until the first answer.
+    pub(crate) visible: Rc<StdCell<Option<u64>>>,
     watermark: [u8; 32],
 }
 
@@ -1563,6 +1567,21 @@ pub(crate) struct Client {
     pub(crate) known_n: i64,
     /// The `known` cut last written to `_jazz_meta`.
     persisted_known: u64,
+    /// The upstream settles per subscription (a sharded gateway, which
+    /// says so with a first `Closed` before anything else): each live
+    /// result reads as of its own subscription's `through`, and `known` is
+    /// what `Closed` names, the position the whole connection is settled
+    /// through. Neither a subscription's settle nor a fate moves it. It
+    /// stays set across links: results read as of their positions while
+    /// detached too.
+    pub(crate) per_query: bool,
+    /// The newest accepted position of a version the upstream sent.
+    pub(crate) newest_foreign: u64,
+    /// This replica's own commits accepted past `known`: seq → tx. A live
+    /// result reading as of an earlier position still shows them.
+    pub(crate) own_accepted: BTreeMap<u64, u64>,
+    /// A live result's visibility position moved since results last ran.
+    visibility_moved: bool,
     answers: HashMap<u64, Option<Result<(Pos, Vec<[u8; 16]>), Error>>>,
     /// Permission preflights asked for; `None` until answered.
     advice: HashMap<u64, Option<PermissionAdvice>>,
@@ -5511,10 +5530,16 @@ impl Inner {
     }
 
     /// The own commits a replica's serializable transaction began over:
-    /// those still unsettled (none on the authority).
+    /// those still unsettled (none on the authority), and on an upstream
+    /// that settles per subscription those accepted past what it knows.
     pub(crate) fn unsettled_own(&self) -> Vec<u64> {
         self.client.as_ref().map_or_else(Vec::new, |client| {
-            client.pending.iter().map(|p| p.tx).collect()
+            client
+                .pending
+                .iter()
+                .map(|p| p.tx)
+                .chain(client.own_accepted.values().copied())
+                .collect()
         })
     }
 
@@ -5768,6 +5793,10 @@ impl Client {
             known: 0,
             known_n: 0,
             persisted_known: 0,
+            per_query: false,
+            newest_foreign: 0,
+            own_accepted: BTreeMap::new(),
+            visibility_moved: false,
             answers: HashMap::new(),
             advice: HashMap::new(),
             requested: BTreeSet::new(),
@@ -6379,6 +6408,7 @@ impl Db {
         Rc<StdCell<bool>>,
         Rc<RefCell<Option<Error>>>,
         Rc<StdCell<bool>>,
+        Rc<StdCell<Option<u64>>>,
     )> {
         let mut inner = self.inner.borrow_mut();
         inner.client.as_ref()?;
@@ -6428,6 +6458,7 @@ impl Inner {
             Rc<StdCell<bool>>,
             Rc<RefCell<Option<Error>>>,
             Rc<StdCell<bool>>,
+            Rc<StdCell<Option<u64>>>,
         ),
     ) {
         let key = remote_key(&query, binding, include_deleted, &view, reach);
@@ -6438,6 +6469,7 @@ impl Inner {
                 remote.answered.clone(),
                 remote.refused.clone(),
                 remote.global.clone(),
+                remote.visible.clone(),
             );
             return (key, flags);
         }
@@ -6446,6 +6478,7 @@ impl Inner {
         let answered = Rc::new(StdCell::new(false));
         let refused = Rc::new(RefCell::new(client.stranded.then(stranded)));
         let global = Rc::new(StdCell::new(false));
+        let visible = Rc::new(StdCell::new(None));
         let author = self.identity.author;
         let watermark = watermark_key(&query, binding, include_deleted, &view, author);
         // A replica that cannot read its watermark opens the query fresh.
@@ -6475,11 +6508,12 @@ impl Inner {
                 refused: refused.clone(),
                 global: global.clone(),
                 through,
+                visible: visible.clone(),
                 watermark,
             },
         );
         client.remote_ids.insert(id, key.clone());
-        (key, (answered, refused, global))
+        (key, (answered, refused, global, visible))
     }
 
     /// Drop one reference to an upstream read by its key; the last one
@@ -6692,12 +6726,16 @@ impl Db {
             owner: node,
             global_base: GlobalTime(client.known),
             local_base: TxTime(0),
+            // Own commits accepted past what it knows (per subscription)
+            // are named too.
             dots: client
                 .pending
                 .iter()
-                .filter(|p| captured.contains(&p.tx))
-                .map(|p| TxId {
-                    time: TxTime(p.tx),
+                .map(|p| p.tx)
+                .filter(|tx| captured.contains(tx))
+                .chain(client.own_accepted.values().copied())
+                .map(|tx| TxId {
+                    time: TxTime(tx),
                     node,
                 })
                 .collect(),
@@ -7062,6 +7100,11 @@ impl Db {
                             let Some(mut image) = inner.stored_image(image) else {
                                 continue;
                             };
+                            let at = inner.pos(&image)?;
+                            let client = inner.client.as_mut().expect("client");
+                            if at.accepted() && at.seq > client.newest_foreign {
+                                client.newest_foreign = at.seq;
+                            }
                             let named = (image.table.clone(), image.id, image.key.clone());
                             if !inner.receive_deltas(&mut image)? {
                                 inner.ask_whole(named, 0)?;
@@ -7145,7 +7188,16 @@ impl Db {
                         global,
                         by,
                     } => {
-                        let at = inner.learn_known(through, by)?;
+                        // Per subscription, a settle says nothing of the
+                        // rest of the connection.
+                        let at = if inner.client.as_ref().expect("client").per_query {
+                            Pos {
+                                n: inner.code_of(by)?,
+                                seq: through,
+                            }
+                        } else {
+                            inner.learn_known(through, by)?
+                        };
                         let client = inner.client.as_mut().expect("client");
                         // A one-shot read's answer, at the position its
                         // server counted.
@@ -7161,6 +7213,10 @@ impl Db {
                         let remote = client.remote.get_mut(&key).expect("remote");
                         remote.answered.set(true);
                         remote.global.set(global);
+                        if client.per_query && remote.visible.get().is_none_or(|v| v < through) {
+                            remote.visible.set(Some(through));
+                            client.visibility_moved = true;
+                        }
                         // A row owed whole is stale here: this store does
                         // not hold the result as of `through`.
                         let resumable = client.whole.is_empty();
@@ -7286,7 +7342,20 @@ impl Db {
                         let (Outcome::Accepted { seq: through, .. }
                         | Outcome::Refused { through, .. }) = &outcome;
                         // A relay's own last word is at its own position.
-                        let landed = if global || by.is_some() {
+                        // Per subscription, an accepted commit is this
+                        // replica's own past what it knows.
+                        let per_query = inner.client.as_ref().expect("client").per_query;
+                        let landed = if per_query {
+                            let client = inner.client.as_mut().expect("client");
+                            if accepted && *through > client.known {
+                                client.own_accepted.insert(*through, tx);
+                                client.visibility_moved = true;
+                            }
+                            Pos {
+                                n: inner.code_of(by)?,
+                                seq: *through,
+                            }
+                        } else if global || by.is_some() {
                             inner.learn_known(*through, by)?
                         } else {
                             Pos::at(*through)
@@ -7399,14 +7468,32 @@ impl Db {
                             }
                         }
                     }
-                    // A gateway's cut; a client settles by its reads.
-                    SyncMessage::Closed { .. } => {}
+                    // A sharded gateway: the position the connection is
+                    // settled through, and that it settles per subscription.
+                    SyncMessage::Closed { through } => {
+                        let client = inner.client.as_mut().expect("client");
+                        client.per_query = true;
+                        if through > client.known || client.known_n != 0 {
+                            client.known = through;
+                            client.known_n = 0;
+                        }
+                        let known = client.known;
+                        client.own_accepted = client.own_accepted.split_off(&(known + 1));
+                        client.visibility_moved = true;
+                    }
                     other => return Err(unsupported(format!("client received {other:?}"))),
                 }
             }
         }
         if rebase {
             self.rebase()?;
+        }
+        {
+            let mut inner = self.inner.borrow_mut();
+            let client = inner.client.as_mut().expect("client");
+            if std::mem::take(&mut client.visibility_moved) {
+                inner.refresh_visibility();
+            }
         }
         // A settled answer lists its result's rows: cached rows the
         // replica's view of that result holds and the server's lacks lost
@@ -9616,7 +9703,7 @@ impl Db {
                         ..viewed
                     },
                     match relayed {
-                        Some((answered, _, global)) => {
+                        Some((answered, _, global, _)) => {
                             SettledBy::Remote(answered.clone(), global.clone())
                         }
                         None => SettledBy::Always(authority),
@@ -9895,6 +9982,7 @@ impl Db {
                     include_deleted,
                     settled_only: strict,
                     view: viewed.view,
+                    visible: None,
                     splices: Vec::new(),
                 };
                 let rows = inner.run(&prepared, policy, &read)?;

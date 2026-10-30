@@ -43,6 +43,10 @@ struct GroupKey {
     partial: String,
     /// The columns whose changes updated rows carry as splices.
     splices: Vec<String>,
+    /// The subscription position a live result reads as of (see
+    /// `ReadSpec::visible`), by identity: results of different
+    /// subscriptions settle apart.
+    visible: Option<usize>,
 }
 
 struct Member {
@@ -94,6 +98,8 @@ pub(super) struct Group {
     /// Under a branch view over a base (live or frozen), what the head
     /// rows of each branched table it reads mask (see [`ViewMask`]).
     masks: Vec<ViewMask>,
+    /// The visibility cut the last run read as of, if any.
+    applied: std::cell::Cell<Option<(u64, usize)>>,
 }
 
 type SortKey = Vec<(Sql, bool)>;
@@ -135,6 +141,9 @@ pub struct FanoutStats {
     pub rechecked: u64,
     /// Woken groups that re-ran their query and diffed the whole result.
     pub reran: u64,
+    /// Runs of a live result as of its subscription's position, past
+    /// which the store held others' accepted versions.
+    pub cut_runs: u64,
 }
 
 #[derive(Default)]
@@ -146,6 +155,7 @@ pub(super) struct Fanout {
     keys: HashMap<(String, String, String), BTreeSet<u64>>,
     key_columns: HashMap<String, BTreeSet<String>>,
     stats: FanoutStats,
+    cut_runs: std::cell::Cell<u64>,
     /// Bumped by every dropped stream, so `collect` scans only when needed.
     pub(super) dropped: Rc<std::cell::Cell<usize>>,
 }
@@ -262,6 +272,7 @@ impl Fanout {
     pub(super) fn stats(&self) -> FanoutStats {
         FanoutStats {
             groups: self.groups.len(),
+            cut_runs: self.cut_runs.get(),
             ..self.stats.clone()
         }
     }
@@ -311,6 +322,7 @@ impl Inner {
             relations: format!("{:?}", prepared.query.array_subqueries),
             partial: format!("{:?}", compiled.partial),
             splices: read.splices.clone(),
+            visible: read.visible.as_ref().map(|v| Rc::as_ptr(v) as usize),
         };
         let now = settled.get();
         let member = |queue: &Queue| Member {
@@ -350,9 +362,16 @@ impl Inner {
             return Ok((queue, Rc::downgrade(&handle)));
         }
         // A replica missing chunks the result needs opens it once they arrive.
-        let (rows, awaiting) = match self
-            .execute(&compiled, &prepared.query.table)
-            .and_then(|rows| self.nest_relations(prepared, identity, &read, rows))
+        let effective = self.effective_read(&read);
+        let applied = std::cell::Cell::new(visibility_of(&effective));
+        let (rows, awaiting) = match if effective.cut.is_some() && read.cut.is_none() {
+            self.fan.cut_runs.set(self.fan.cut_runs.get() + 1);
+            self.compile(prepared, identity, &effective)
+                .and_then(|compiled| self.execute(&compiled, &prepared.query.table))
+        } else {
+            self.execute(&compiled, &prepared.query.table)
+        }
+        .and_then(|rows| self.nest_relations(prepared, identity, &effective, rows))
         {
             Ok(rows) => (rows, false),
             Err(error) if crate::large::is_missing(&error) => (Vec::new(), true),
@@ -409,6 +428,7 @@ impl Inner {
             opened: !awaiting,
             branches,
             masks,
+            applied,
         }));
         self.read_keys(&mut handle.borrow_mut());
         let weak = Rc::downgrade(&handle);
@@ -1203,8 +1223,61 @@ impl Inner {
 
     /// A group's rows, with array relations nested in their cells.
     fn group_rows(&self, group: &Group) -> Result<Vec<CurrentRow>, Error> {
-        let rows = self.run(&group.prepared, group.identity, &group.read)?;
-        self.nest_relations(&group.prepared, group.identity, &group.read, rows)
+        let read = self.effective_read(&group.read);
+        group.applied.set(visibility_of(&read));
+        if group.applied.get().is_some() {
+            self.fan.cut_runs.set(self.fan.cut_runs.get() + 1);
+        }
+        let rows = self.run(&group.prepared, group.identity, &read)?;
+        self.nest_relations(&group.prepared, group.identity, &read, rows)
+    }
+
+    /// The read a live result runs as. On an upstream that settles per
+    /// subscription, a result whose store holds others' accepted versions
+    /// past its subscription's position (or the connection's, when that
+    /// is further) reads as of that position: what its server settled it
+    /// through, never part of a commit its other shards have not settled.
+    /// This replica's own writes show wherever they are: still unsettled,
+    /// or accepted past the position.
+    pub(super) fn effective_read<'r>(&self, read: &'r ReadSpec) -> std::borrow::Cow<'r, ReadSpec> {
+        use std::borrow::Cow;
+        let (Some(visible), Some(client)) = (&read.visible, &self.client) else {
+            return Cow::Borrowed(read);
+        };
+        if !client.per_query || read.cut.is_some() {
+            return Cow::Borrowed(read);
+        }
+        let through = visible.get().unwrap_or(0).max(client.known);
+        if client.newest_foreign <= through {
+            return Cow::Borrowed(read);
+        }
+        let mut cut = Cut::at(sync::Pos::at(through));
+        cut.extra = client
+            .own_accepted
+            .range(through + 1..)
+            .map(|(&seq, _)| sync::Pos::at(seq))
+            .collect();
+        cut.unsettled = !read.settled_only;
+        Cow::Owned(ReadSpec {
+            cut: Some(cut),
+            ..read.clone()
+        })
+    }
+
+    /// Re-run the live results whose visibility cut moved: a
+    /// subscription's position rose, the connection's did, or an own commit
+    /// was accepted past it.
+    pub(super) fn refresh_visibility(&mut self) {
+        let groups: Vec<Rc<RefCell<Group>>> = self.fan.groups.values().cloned().collect();
+        for group in groups {
+            let mut group = group.borrow_mut();
+            if group.read.visible.is_none()
+                || visibility_of(&self.effective_read(&group.read)) == group.applied.get()
+            {
+                continue;
+            }
+            self.refresh_group(&mut group, None);
+        }
     }
 
     fn reset_group(&self, group: &mut Group) {
@@ -1337,7 +1410,9 @@ impl Inner {
         } else {
             group.rows.iter().map(|row| (row.id, row.clone())).collect()
         };
-        if let Some(ids) = ids.filter(|_| group.recheck) {
+        // A result read through a visibility cut re-runs whole.
+        let cut = visibility_of(&self.effective_read(&group.read)).is_some();
+        if let Some(ids) = ids.filter(|_| group.recheck && !cut) {
             match self.recheck_rows(group, ids) {
                 Some(Ok(Some(mut event))) => {
                     self.add_splices(group, &prior, &mut event);
@@ -1548,6 +1623,7 @@ pub(crate) fn view_masks<'t>(
             base_cut: None,
         }),
         cut: view.base_cut.clone(),
+        visible: None,
         splices: Vec::new(),
     };
     let mut out: Vec<ViewMask> = Vec::new();
@@ -1935,4 +2011,13 @@ fn row_pin(policy: &PolicyExpr, session: &Session) -> Option<(String, String)> {
         PolicyExpr::And(list) => list.iter().find_map(|p| row_pin(p, session)),
         _ => None,
     }
+}
+
+/// A run's visibility cut, as [`Group::applied`] keeps it: its position and
+/// how many own commits past it show.
+fn visibility_of(read: &ReadSpec) -> Option<(u64, usize)> {
+    read.visible
+        .as_ref()
+        .and(read.cut.as_ref())
+        .map(|cut| (cut.seq.seq, cut.extra.len()))
 }
