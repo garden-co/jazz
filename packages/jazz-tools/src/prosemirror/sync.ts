@@ -15,9 +15,14 @@ export interface MarkdownSyncOptions {
   parse(markdown: string): Node;
   /** Writers for nodes and marks beyond CommonMark's. */
   spec?: MarkdownSpec;
-  /** Called with the document's markdown after each local change; write it
-   * to the text column. */
+  /** Called with the document's markdown to write to the text column: after
+   * each local change, or at most every {@link writeEvery} milliseconds. */
   onChange?(markdown: string): void;
+  /** Writes at most this often while typing: the first change at once, then
+   * the latest one each time the interval passes. Throttle here rather than
+   * around `onChange`, so that a merged value arriving between writes is
+   * merged with the edits not written yet instead of replacing them. */
+  writeEvery?: number;
   /** How many values this editor wrote are remembered, so that their echoes
    * are not applied as changes. */
   rememberWrites?: number;
@@ -30,6 +35,9 @@ interface SyncState {
 interface SyncConfig {
   options: MarkdownSyncOptions;
   written: string[];
+  /** The latest value both this editor and the text column have: the last
+   * one written or applied. Local edits since are not written yet. */
+  base: string | null;
 }
 
 const key = new PluginKey<SyncState>("jazzMarkdownSync");
@@ -44,24 +52,70 @@ const mappedDocs = new WeakMap<Node, MappedMarkdown>();
  * text went.
  */
 export function markdownSync(options: MarkdownSyncOptions): Plugin<SyncState> {
-  const config: SyncConfig = { options, written: [] };
+  const config: SyncConfig = { options, written: [], base: null };
   const plugin: Plugin<SyncState> = new Plugin<SyncState>({
     key,
     state: {
       init: () => ({ remote: false }),
       apply: (tr, value) => (tr.docChanged ? { remote: tr.getMeta(key)?.remote === true } : value),
     },
-    view: () => ({
-      update(view, previous) {
-        if (view.state.doc === previous.doc || key.getState(view.state)?.remote) return;
-        const markdown = markdownOf(view.state).text;
+    view: (initial) => {
+      config.base ??= markdownOf(initial.state).text;
+      let view = initial;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      let dirty = false;
+      const write = () => {
+        dirty = false;
+        const markdown = ownChanges(config, markdownOf(view.state).text);
+        if (markdown === config.base) return;
         remember(config, markdown);
         options.onChange?.(markdown);
-      },
-    }),
+      };
+      const tick = () => {
+        timer = null;
+        if (!dirty) return;
+        write();
+        timer = setTimeout(tick, options.writeEvery);
+      };
+      return {
+        update(next, previous) {
+          view = next;
+          if (next.state.doc === previous.doc || key.getState(next.state)?.remote) return;
+          dirty = true;
+          if (!options.writeEvery) return write();
+          if (timer) return;
+          write();
+          timer = setTimeout(tick, options.writeEvery);
+        },
+        destroy() {
+          if (timer) clearTimeout(timer);
+          if (dirty) write();
+        },
+      };
+    },
   });
   configs.set(plugin, config);
   return plugin;
+}
+
+/**
+ * `markdown`, the document's canonical markdown, as a change to the last
+ * value the column had: only the text this editor changed is rewritten.
+ * Where that value is written differently than this editor would write it
+ * (a trailing space someone is typing, another editor's markup), a write
+ * leaves it as it is instead of undoing it for everyone.
+ */
+function ownChanges(config: SyncConfig, markdown: string): string {
+  const base = config.base;
+  if (base === null || base === markdown) return markdown;
+  const canonical = toMarkdown(config.options.parse(base), config.options.spec).text;
+  if (canonical === base || canonical === markdown) return canonical === base ? markdown : base;
+  const { start, endBefore, endAfter } = changedMiddle(canonical, markdown);
+  return (
+    base.slice(0, mapOffset(canonical, base, start, "before")) +
+    markdown.slice(start, endAfter) +
+    base.slice(mapOffset(canonical, base, endBefore, "after"))
+  );
 }
 
 function remember(config: SyncConfig, markdown: string) {
@@ -70,6 +124,7 @@ function remember(config: SyncConfig, markdown: string) {
   if (index >= 0) config.written.splice(index, 1);
   config.written.push(markdown);
   if (config.written.length > limit) config.written.shift();
+  config.base = markdown;
 }
 
 /** Whether `tr` applied a value read from the text column, rather than a
@@ -117,6 +172,16 @@ export function applyMarkdown(state: EditorState, markdown: string): Transaction
   const config = configOf(state);
   const current = markdownOf(state);
   if (markdown === current.text || config.written.includes(markdown)) return null;
+  const base = config.base ?? current.text;
+  config.base = markdown;
+  // Edits made here since the last write are not in the value: carry them
+  // over onto it rather than letting the value replace them.
+  if (base !== current.text) {
+    const canonical = (value: string) =>
+      toMarkdown(config.options.parse(value), config.options.spec).text;
+    const ownBase = canonical(base);
+    if (ownBase !== current.text) markdown = rebase(ownBase, current.text, canonical(markdown));
+  }
   const doc = config.options.parse(markdown);
   const next = toMarkdown(doc, config.options.spec);
   mappedDocs.set(doc, next);
@@ -180,6 +245,27 @@ export function applyMarkdown(state: EditorState, markdown: string): Transaction
     tr.setSelection(TextSelection.between(tr.doc.resolve(newAnchor), tr.doc.resolve(newHead)));
   }
   return tr.setMeta(key, { remote: true }).setMeta("addToHistory", false);
+}
+
+/**
+ * `theirs` with the change from `base` to `ours` applied as well. Where both
+ * changed the same text, `ours` is kept there: it is written next, and is the
+ * later edit for the authority's merge too.
+ */
+function rebase(base: string, ours: string, theirs: string): string {
+  const mine = changedMiddle(base, ours);
+  const other = changedMiddle(base, theirs);
+  const otherInsert = other.start === other.endBefore;
+  const overlaps =
+    (other.start < mine.endBefore && mine.start < other.endBefore) ||
+    (otherInsert && mine.start === mine.endBefore && other.start === mine.start);
+  if (overlaps) return ours;
+  const inserted = theirs.slice(other.start, other.endAfter);
+  if (other.endBefore <= mine.start) {
+    return ours.slice(0, other.start) + inserted + ours.slice(other.endBefore);
+  }
+  const shift = mine.endAfter - mine.endBefore;
+  return ours.slice(0, other.start + shift) + inserted + ours.slice(other.endBefore + shift);
 }
 
 /** The index of the top-level block holding `pos`. */
