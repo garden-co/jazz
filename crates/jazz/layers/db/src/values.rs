@@ -779,7 +779,6 @@ impl TagRegistry {
             })
             .collect();
     }
-
 }
 
 /// A [`TagRegistry`]'s entries and their tags at one point.
