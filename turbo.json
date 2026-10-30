@@ -97,6 +97,10 @@
         "$TURBO_ROOT$/turbo.json"
       ],
       "passThroughEnv": [
+        "AR_wasm32-unknown-unknown",
+        "AR_wasm32_unknown_unknown",
+        "TARGET_AR",
+        "AR",
         "JAZZ_TEST_ARTIFACT_LOCK_PATH",
         "JAZZ_ARTIFACT_BUILD_LEASE",
         "JAZZ_ARTIFACT_BUILD_LOCK_PATH",
@@ -125,6 +129,10 @@
         "$TURBO_ROOT$/turbo.json"
       ],
       "passThroughEnv": [
+        "AR_wasm32-unknown-unknown",
+        "AR_wasm32_unknown_unknown",
+        "TARGET_AR",
+        "AR",
         "JAZZ_TEST_ARTIFACT_LOCK_PATH",
         "JAZZ_ARTIFACT_BUILD_LEASE",
         "JAZZ_ARTIFACT_BUILD_LOCK_PATH",

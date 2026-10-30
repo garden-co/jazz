@@ -24,6 +24,15 @@ This requires a working C compiler:
 - macOS: `xcode-select --install` is enough.
 - Linux: install `build-essential` (Debian/Ubuntu) or `gcc` (Fedora).
 
+### WASM builds on macOS
+
+Install Homebrew LLVM with `brew install llvm`. The WASM build script selects
+`llvm-ar` from `PATH` or Homebrew's LLVM installation automatically; no shell
+`PATH` changes are needed. Apple's archive tools cannot bundle SQLite's WASM
+object files. This selection applies only to WASM builds, leaving native builds
+unchanged. Explicit `AR_wasm32-unknown-unknown`, `AR_wasm32_unknown_unknown`,
+`TARGET_AR`, and `AR` environment overrides take precedence.
+
 ## API documentation
 
 Keep API documentation attached to an authoritative, maintained source rather
