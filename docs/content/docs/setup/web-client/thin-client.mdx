@@ -14,12 +14,11 @@ description: "A small browser client that talks to your server, with no local da
   - `createDb({ appId, serverUrl, account })`&hairsp;—&hairsp;returns the normal `Db`; queries, `subscribe`, insert/update/upsert/delete and the framework hooks all work
 - Where it connects: `serverUrl` points at a Jazz server's native endpoint (your self-hosted server or Jazz Cloud). The server runs every query under the signed-in session's policies and sends finished rows; writes commit on the server
 - User auth integration
+- Runs on the server: transactions (mergeable and serializable), branch and snapshot views (`db.captureSnapshot`, branch/base options), large-value streaming (`insertStreaming` / `upsertStreaming`)
 - Limitations, each an explicit "not supported" error:
-  - no offline use
-  - writes are not optimistic: they show after one round trip, and `wait()` resolves when the server answered
-  - no transactions
-  - no branch or snapshot views
-  - no large-value streaming
+  - no offline use; writes are not optimistic: they show after one round trip, and `wait()` resolves when the server answered
+  - no attributed writes
+  - no streaming inside a transaction
   - no admin secret in the browser
 - Upgrading lazily to the [local-first client](/docs/recipes/local-first) with `upgradeToLocalFirst(thinDb, () => import("jazz-tools").then((jazz) => jazz.createDb(config)))`: it loads every subscribed query into a local-first `Db` for the same account, lets the thin `Db` finish its writes, and hands back the new `Db` to swap in
 - Not yet: serving thin clients from your own Node backend
