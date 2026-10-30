@@ -1712,7 +1712,7 @@ impl Owner {
                         .push_back(SyncMessage::Fate {
                             id,
                             outcome: Outcome::Refused {
-                                through: self.db.seq_high_water(),
+                                through: vec![(None, self.db.seq_high_water())],
                                 error: WireError::Rejected {
                                     reason: Some(
                                         Reason::PermissionsHeadMissing.as_str().to_owned(),
@@ -1723,7 +1723,6 @@ impl Owner {
                                 },
                             },
                             global: true,
-                            by: None,
                         });
                 }
                 Ok(Some(

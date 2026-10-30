@@ -7752,7 +7752,7 @@ impl TxRef<'_> {
             && self.db.is_client()
             && tier != ReadTier::LocalOnly
         {
-            let at = pinned.then_some(snapshot.seq);
+            let at = pinned.then_some(snapshot);
             self.db.remote_shape(&prepared.query)?;
             let through = self
                 .db
