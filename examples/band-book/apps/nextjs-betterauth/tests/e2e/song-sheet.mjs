@@ -150,6 +150,17 @@ try {
     await waitForText(page, "palm muted, then a bass slide");
   }
 
+  // Longer bursts from both at once, typed faster than a round trip.
+  const ownerLine = " and the driver hums along to the radio, every word of it";
+  const guestLine = ", then the whole band comes crashing in on the downbeat";
+  await caretAfter(owner, "against the cold");
+  await caretAfter(guest, "drums on the second line");
+  await Promise.all([owner.keyboard.type(ownerLine), guest.keyboard.type(guestLine)]);
+  for (const page of [owner, guest]) {
+    await waitForText(page, `against the cold${ownerLine}`);
+    await waitForText(page, `drums on the second line${guestLine}`);
+  }
+
   // Each sees the other's cursor, labelled with their name.
   await guest.locator(".jazz-presence-caret", { hasText: "Ada" }).waitFor();
   await owner.locator(".jazz-presence-caret", { hasText: "Bo" }).waitFor();

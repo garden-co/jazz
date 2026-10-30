@@ -35,9 +35,6 @@ import { editingPlugins, parseSheet, SHEET_TOOLS, toggleLink } from "@/src/lib/s
 import { useSheetPresence } from "./use-sheet-presence";
 import { memberName, useWorkspace } from "./workspace-context";
 
-/** How often typing writes the sheet: the first edit at once, then at most this often. */
-const WRITE_EVERY_MS = 300;
-
 /**
  * A song sheet: one rich-text document stored as Markdown, with everyone
  * else's cursors and a comment sidebar drawn over it.
@@ -67,12 +64,11 @@ function SheetEditor({ sheet, editable }: { sheet: SongSheetRow; editable: boole
         doc: parseSheet(sheet.body),
         plugins: [
           ...editingPlugins(),
-          // Whole-value writes: the first edit goes out at once, then at most
-          // one write every 300 ms while typing. Each write is one version,
-          // and the authority merges it with whatever others wrote meanwhile.
+          // Every change is written as the whole value, at once. Each write is
+          // one version, and the authority merges it with whatever others
+          // wrote meanwhile.
           markdownSync({
             parse: parseSheet,
-            writeEvery: WRITE_EVERY_MS,
             onChange: (body) => db.update(app.songSheets, sheet.id, { body }),
           }),
           overlays({ anchors: () => db.textAnchors(), onPlaced: setPlaced }),
