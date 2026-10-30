@@ -34,6 +34,22 @@ pub struct DbConfig {
     /// positions of every shard compare by time. `None` counts positions
     /// up by one ([`crate::db::wall_clock_ms`] is the system clock).
     pub clock: Option<Box<dyn Fn() -> u64>>,
+    /// The app's earlier schema versions and the lenses between them, as
+    /// it ships them. A store that has not admitted `schema` admits the
+    /// versions on a lens path to it first, so it stores each column where
+    /// the authority does without asking (SPEC 10.7).
+    pub migrations: Migrations,
+    /// The node SYSTEM provenance names, when it is not this replica's own:
+    /// a backend that draws a fresh node per open keeps one stable subject.
+    pub system_node: Option<NodeUuid>,
+}
+
+/// Schema versions and the lenses between them (see
+/// [`DbConfig::with_migrations`]).
+#[derive(Clone, Debug, Default)]
+pub struct Migrations {
+    pub schemas: Vec<JazzSchema>,
+    pub lenses: Vec<crate::protocol::MigrationLens>,
 }
 
 impl DbConfig {
@@ -45,7 +61,15 @@ impl DbConfig {
             id_source: None,
             chunk_store: None,
             clock: None,
+            migrations: Migrations::default(),
+            system_node: None,
         }
+    }
+
+    /// Stamp SYSTEM provenance as `node` instead of this replica's node.
+    pub fn with_system_node(mut self, node: NodeUuid) -> Self {
+        self.system_node = Some(node);
+        self
     }
 
     /// Override the row id source, typically with [`SeededRowIdSource`] in tests.
@@ -68,6 +92,17 @@ impl DbConfig {
     /// clock: a simulation's virtual time, or a skewed clock in a test.
     pub fn with_clock(mut self, clock: impl Fn() -> u64 + 'static) -> Self {
         self.clock = Some(Box::new(clock));
+        self
+    }
+
+    /// Ship the app's earlier `schemas` and the `lenses` between them (see
+    /// [`DbConfig::migrations`]).
+    pub fn with_migrations(
+        mut self,
+        schemas: Vec<JazzSchema>,
+        lenses: Vec<crate::protocol::MigrationLens>,
+    ) -> Self {
+        self.migrations = Migrations { schemas, lenses };
         self
     }
 }

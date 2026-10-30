@@ -18,7 +18,7 @@ const schema = {
 };
 
 type AppSchema = s.Schema<typeof schema>;
-const app: s.App<AppSchema> = s.defineApp(schema);
+const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
 
 const referenceSchema = {
   scenarios: s.table(
@@ -44,7 +44,9 @@ const referenceSchema = {
 };
 
 type ReferenceAppSchema = s.Schema<typeof referenceSchema>;
-const referenceApp: s.App<ReferenceAppSchema> = s.defineApp(referenceSchema);
+const referenceApp: s.App<ReferenceAppSchema> = s.defineApp(referenceSchema, {
+  migrations: "none",
+});
 
 describe("branch API", () => {
   let db: Db | undefined;

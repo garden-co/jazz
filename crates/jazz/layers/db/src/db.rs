@@ -22,8 +22,8 @@ use rusqlite::{Connection, OptionalExtension, params_from_iter};
 
 pub use crate::options::{
     DbConfig, DbIdentity, DeleteOptions, Error, ErrorCode, ExactWriteTarget, InsertOptions,
-    ReadOpts, ReadTier, Reason, RestoreOptions, RowIdSource, SeededRowIdSource, UpdateOptions,
-    UpsertOptions, WriteIdentity, WriteTarget, block_on,
+    Migrations, ReadOpts, ReadTier, Reason, RestoreOptions, RowIdSource, SeededRowIdSource,
+    UpdateOptions, UpsertOptions, WriteIdentity, WriteTarget, block_on,
 };
 
 use crate::compile::{Compiled, Ctx, Cut, Overlay as CutOverlay, Session, View};
@@ -464,6 +464,13 @@ struct Inner {
     staging: LargeValueStagingPolicy,
     /// Dropped uploads queue cleanup without recursively borrowing the owner.
     upload_cleanup: Rc<RefCell<Vec<[u8; 32]>>>,
+    /// `conn.total_changes()` after the last large-value reclaim pass that
+    /// committed and left nothing queued: until a row changes again (a
+    /// trigger's change counts), a pass would find nothing. `None` runs the
+    /// next pass, as an opened store does, for work a crash left queued.
+    reclaimed_at: Option<u64>,
+    /// Large-value reclaim passes run (diagnostics).
+    reclaim_passes: u64,
     /// The staging ingress window: (start ms, encoded bytes admitted).
     ingress: RefCell<(u64, u64)>,
     /// The schema the current operation runs under: the owner's, or the
@@ -476,6 +483,10 @@ struct Inner {
     /// The stored tables: the union of every admitted schema, keyed and
     /// named by stored names.
     physical: Schema,
+    /// The current schema named by stored names, which replicated writes
+    /// apply under ([`Schema::stored_view`]), keyed by the owner it was
+    /// built from and how many stored columns there were.
+    stored_view: RefCell<Option<(*const Schema, usize, Rc<Schema>)>>,
     /// Admitted structural schemas with their version ids (hashing a
     /// whole schema is too slow to repeat per session per tick).
     admitted: Vec<(crate::ids::SchemaVersionId, JazzSchema)>,
@@ -485,6 +496,8 @@ struct Inner {
     /// Open transaction batches, by id.
     batches: HashMap<OpenTransactionId, Batch>,
     identity: DbIdentity,
+    /// The node SYSTEM provenance names ([`crate::options::DbConfig::system_node`]).
+    system_node: crate::ids::NodeUuid,
     /// Provenance for the write being applied (set by `apply_as`).
     writer: Option<Stamp>,
     /// The commit seq and time of the last local stamp: writes of one commit
@@ -493,6 +506,13 @@ struct Inner {
     last_stamp: (u64, i64),
     /// Interned author codes (see [`Inner::author_code`]), cached both ways.
     authors: RefCell<AuthorCodes>,
+    /// By stored table and whether into its history: the columns the last
+    /// image stored there had, and the insert that stores them. A sync
+    /// batch stores thousands of images of a few tables.
+    image_inserts: RefCell<HashMap<(String, bool), (Vec<String>, String)>>,
+    /// While a replica stores a message's images: their rows' current
+    /// images, read at once (see `Inner::begin_current_batch`).
+    current_batch: RefCell<Option<HashMap<(String, RowUuid, Vec<u8>), Option<sync::Image>>>>,
     ids: Box<dyn RowIdSource>,
     /// The newest commit seq handed out: the authority's seq, or on a
     /// replica its own node's counter. Seqs are hybrid-clock timestamps
@@ -555,12 +575,14 @@ struct Inner {
     accepted: u64,
     /// Rows written since the last server tick (only while serving).
     since_tick: Vec<(String, RowUuid, Vec<u8>)>,
-    /// Ops of the open local transaction, for upload, each with the
-    /// schema version whose names it uses.
-    pub(crate) capture: Vec<(crate::ids::SchemaVersionId, StagedOp)>,
+    /// Ops of the open local transaction, for upload, by stored names.
+    pub(crate) capture: Vec<StagedOp>,
     /// Images a replica dropped since the last dispatch (evictions and
     /// rebases), for keyed invalidation.
     gone: RefCell<Vec<sync::Image>>,
+    /// The app's versions and lenses (see [`DbConfig::migrations`]): a
+    /// version this store lacks is admitted along them.
+    migrations: Migrations,
     /// Whether `_jazz_withheld` exists (see `sync::WITHHELD_DDL`): branch
     /// views over a base read it only then.
     withheld: std::cell::Cell<bool>,
@@ -664,6 +686,11 @@ fn who(identity: WriteIdentity) -> Who {
 pub(crate) struct AuthorCodes {
     codes: HashMap<AuthorKey, i64>,
     parts: HashMap<i64, AuthorKey>,
+    /// Codes found or interned inside an open transaction, with the
+    /// connection's rollback count then: one holds until a rollback, which
+    /// may have undone it. A sync batch interns a code per new author and
+    /// then finds it for every row that author wrote.
+    uncommitted: HashMap<AuthorKey, (i64, u64)>,
 }
 
 /// Who wrote a row version, and when (Unix ms).
@@ -743,6 +770,7 @@ fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> 
         jazz: jazz.clone(),
         version: jazz.version_id(),
         policies_from: None,
+        stored_names: false,
     })
 }
 
@@ -1122,6 +1150,75 @@ impl Db {
     }
 
     fn open_on(
+        mut config: DbConfig,
+        conn: Connection,
+        path: Option<(&std::path::Path, Option<&'static str>)>,
+    ) -> Result<Self, Error> {
+        // A schema this store has not admitted is reached along the lenses
+        // the app ships: from a version it admitted, else from the first
+        // version, each admitted as the authority admits it.
+        let steps = {
+            let names = crate::names::Names::load(&conn)?;
+            migration_path(&config.migrations, &config.schema, |version| {
+                names.get(version).is_some()
+            })
+        };
+        let Some((first, _)) = steps.first() else {
+            if let Some(error) = outside_migrations(&config.migrations, &config.schema, |version| {
+                crate::names::Names::load(&conn)
+                    .map(|names| names.get(version).is_some())
+                    .unwrap_or(false)
+            }) {
+                return Err(error);
+            }
+            return Self::open_named(config, conn, path);
+        };
+        let target = std::mem::replace(&mut config.schema, first.clone());
+        let db = Self::open_named(config, conn, path)?;
+        db.admit_along_migrations(&target)?;
+        {
+            let mut inner = db.inner();
+            let owner = Rc::new(inner.named(&target));
+            inner.owner_version = target.version_id();
+            inner.schema = owner.clone();
+            inner.owner = owner;
+            inner.reset_everything();
+            // Pending writes upload under the version they were written
+            // in, and replay by the names of the one now current.
+            inner.client = None;
+            inner.load_client()?;
+        }
+        Ok(db)
+    }
+
+    /// Admit `schema` along the app's lenses when this store lacks it and
+    /// they lead to it from a version it admitted or from the first one
+    /// (SPEC 10.7); whether they did.
+    fn admit_along_migrations(&self, schema: &JazzSchema) -> Result<bool, Error> {
+        let steps = {
+            let inner = self.inner();
+            migration_path(&inner.migrations, schema, |version| {
+                inner.names.get(version).is_some()
+            })
+        };
+        let along = !steps.is_empty();
+        if !along {
+            let inner = self.inner();
+            if let Some(error) = outside_migrations(&inner.migrations, schema, |version| {
+                inner.names.get(version).is_some()
+            }) {
+                return Err(error);
+            }
+        }
+        for (schema, lenses) in steps {
+            if self.inner().names.get(&schema.version_id()).is_none() {
+                self.admit(schema, &lenses, None)?;
+            }
+        }
+        Ok(along)
+    }
+
+    fn open_named(
         config: DbConfig,
         conn: Connection,
         path: Option<(&std::path::Path, Option<&'static str>)>,
@@ -1163,8 +1260,13 @@ impl Db {
         }))
         .map_err(storage)?;
         let rolled_back = chunks.clone();
-        conn.rollback_hook(Some(move || rolled_back.unpin()))
-            .map_err(storage)?;
+        // SQLite's own rollbacks (after a full disk, say) count too.
+        let rollback_key = crate::values::rollback_key(&conn);
+        conn.rollback_hook(Some(move || {
+            rolled_back.unpin();
+            crate::values::note_rollback(rollback_key);
+        }))
+        .map_err(storage)?;
         let fresh: i64 = conn
             // Durable Object SQLite keeps its own `_cf_*` tables in the file.
             .query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '\\_jazz\\_%' ESCAPE '\\' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\'", [], |r| r.get(0))
@@ -1178,6 +1280,7 @@ impl Db {
                 jazz: config.schema.clone(),
                 version: config.schema.version_id(),
                 policies_from: None,
+                stored_names: false,
             };
             physical.union(&schema)?;
             physical
@@ -1240,11 +1343,14 @@ impl Db {
                 possession: None,
                 staging: LargeValueStagingPolicy::default(),
                 upload_cleanup: Rc::default(),
+                reclaimed_at: None,
+                reclaim_passes: 0,
                 ingress: RefCell::new((0, 0)),
                 schema: owner.clone(),
                 owner_version: owner.jazz.version_id(),
                 owner,
                 physical,
+                stored_view: RefCell::new(None),
                 admitted: {
                     let version = config.schema.version_id();
                     admitted.retain(|(id, _)| *id != version);
@@ -1254,10 +1360,13 @@ impl Db {
                 names,
                 views: BTreeMap::new(),
                 batches: HashMap::new(),
+                system_node: config.system_node.unwrap_or(config.identity.node),
                 identity: config.identity,
                 writer: None,
                 last_stamp: (0, 0),
                 authors: RefCell::new(AuthorCodes::default()),
+                image_inserts: RefCell::default(),
+                current_batch: RefCell::default(),
                 ids: config
                     .id_source
                     .unwrap_or_else(|| Box::new(crate::options::ProductionRowIdSource)),
@@ -1285,6 +1394,7 @@ impl Db {
                 since_tick: Vec::new(),
                 capture: Vec::new(),
                 gone: RefCell::new(Vec::new()),
+                migrations: config.migrations,
                 withheld: std::cell::Cell::new(withheld > 0),
             })),
         };
@@ -1516,16 +1626,6 @@ impl Db {
         })
     }
 
-    /// The schema version this handle writes under: its view's, else the
-    /// owner's. A replica uploads each commit under the version that
-    /// wrote it.
-    pub(crate) fn write_version(&self) -> crate::ids::SchemaVersionId {
-        match &self.view {
-            Some(view) => view.version,
-            None => self.inner.borrow().owner_version,
-        }
-    }
-
     /// The shared state, set up to run under this handle's schema.
     fn inner(&self) -> std::cell::RefMut<'_, Inner> {
         let mut inner = self.inner.borrow_mut();
@@ -1721,6 +1821,19 @@ impl Db {
         self.inner().failing_ticks.extend(codes);
     }
 
+    /// Where the current schema stores `table`'s `column`: (stored table,
+    /// stored column), the names a hand-built replicated write uses.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn stored_column_for_test(&self, table: &str, column: &str) -> (String, String) {
+        let inner = self.inner();
+        let table = inner
+            .owner
+            .table(table)
+            .expect("a table of the current schema");
+        (table.stored.clone(), table.stored_name(column).to_owned())
+    }
+
     /// Diagnostics: stored large-value nodes, and roots referenced by cells.
     #[doc(hidden)]
     pub fn large_value_nodes_for_test(&self) -> Result<(u64, u64), Error> {
@@ -1734,6 +1847,12 @@ impl Db {
                 |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
             )
             .map_err(storage)
+    }
+
+    /// Diagnostics: large-value reclaim passes this store ran.
+    #[doc(hidden)]
+    pub fn large_value_reclaim_passes_for_test(&self) -> u64 {
+        self.inner().reclaim_passes
     }
 
     /// Diagnostics: (epochs, encoded edit bytes they hold).
@@ -2203,7 +2322,7 @@ impl Db {
         opts: UpsertOptions,
     ) -> Result<WriteHandle, Error> {
         let who = who(opts.identity);
-        let op = StagedOp::Upsert(table.to_owned(), row, cells, opts);
+        let op = StagedOp::Upsert(table.to_owned(), row, cells, BTreeMap::new(), opts);
         self.fetching_with(op, |op| self.write_op(op, who)).await
     }
 
@@ -2257,15 +2376,7 @@ impl Db {
             // The upload record joins the write's SQLite transaction: if it
             // fails, `with_upload` rolls both back, and nobody has been told.
             if let Err(error) = committed
-                .then(|| {
-                    self.record_upload(
-                        vec![op],
-                        handle.seq.seq,
-                        sync::Kind::Mergeable,
-                        None,
-                        self.write_version(),
-                    )
-                })
+                .then(|| self.record_upload(vec![op], handle.seq.seq, sync::Kind::Mergeable, None))
                 .transpose()
             {
                 let mut inner = self.inner();
@@ -2403,17 +2514,7 @@ impl Db {
         let value = result?;
         let (seq, _) = changed.expect("committed");
         // The upload record joins the transaction's SQLite savepoint.
-        let recorded = self
-            .upload_version(captured.iter().map(|(version, _)| *version))
-            .and_then(|version| {
-                self.record_upload(
-                    captured.into_iter().map(|(_, op)| op).collect(),
-                    seq,
-                    sync::Kind::Mergeable,
-                    None,
-                    version,
-                )
-            });
+        let recorded = self.record_stored_upload(captured, seq, sync::Kind::Mergeable, None);
         if let Err(error) = recorded {
             let mut inner = self.inner();
             inner.seq = prior;
@@ -2653,12 +2754,6 @@ impl Db {
             }
             inner.write_admission(&target, cells, make_current)?;
             if make_current {
-                // Pending commits written under the version current until
-                // now keep uploading under it (INV-SYNC-52).
-                let previous = *inner.owner_version.as_bytes();
-                if let Some(client) = inner.client.as_mut() {
-                    client.keep_version(previous);
-                }
                 inner.owner_version = target.jazz.version_id();
                 inner.owner = Rc::new(target);
                 // Read policies that changed may read differently from
@@ -2760,16 +2855,14 @@ impl Inner {
 impl Inner {
     /// Admit an upstream's versions under the names it stores them by
     /// (see `SyncMessage::Catalogue`), so this replica stores rows as it
-    /// does. A version this store named otherwise while it did not know
-    /// the upstream's names (opened under it offline) has its columns
-    /// renamed to the upstream's; where the upstream's column is already
-    /// stored here (a renamed column), the one this store added stays
-    /// unused, and the rebase that follows replays pending writes into
-    /// the upstream's. A table named otherwise is not supported yet.
+    /// does. Stored names are derived alike on every store (SPEC 10.7), so
+    /// a version this store admitted has the upstream's names already; one
+    /// it names otherwise (admitted without the app's lenses) is not
+    /// supported yet, and nothing is renamed.
     ///
     /// It then keeps the authority's `namespace` (refusing an upstream of
     /// another app) and the versions the authority `confirmed`. Returns
-    /// whether any version's names changed here.
+    /// whether it took any version.
     pub(crate) fn mirror_catalogue(
         &mut self,
         namespace: Option<[u8; 16]>,
@@ -2786,8 +2879,8 @@ impl Inner {
                 "the upstream's catalogue is another app's: this store keeps a different authority namespace",
             ));
         }
-        let renamed = !versions.is_empty();
-        if renamed {
+        let mirrored = !versions.is_empty();
+        if mirrored {
             self.mirror_versions(versions, cells)?;
         }
         let learned = known.is_none() && namespace.is_some();
@@ -2798,12 +2891,12 @@ impl Inner {
         let told = self.names.confirm(conn, confirmed)? || learned;
         // This store's own sessions (a worker's tabs) are told what it now
         // knows of the authority's catalogue.
-        if told && !renamed {
+        if told && !mirrored {
             for session in &mut self.sessions {
                 session.owe_catalogue();
             }
         }
-        Ok(renamed)
+        Ok(mirrored)
     }
 
     /// Take the upstream's versions, names and lens cells: whole or not at
@@ -2820,9 +2913,8 @@ impl Inner {
             self.admitted.clone(),
         );
         let tags = self.names.tags().snapshot();
-        let mut moved = Vec::new();
         begin_savepoint(&self.conn, "jazz_mirror")?;
-        let mirrored = self.mirror_versions_steps(versions, cells, &mut moved);
+        let mirrored = self.mirror_versions_steps(versions, cells);
         let ended = end_savepoint(&self.conn, "jazz_mirror", mirrored.is_ok());
         if let Err(error) = mirrored.and(ended) {
             self.physical = physical;
@@ -2831,18 +2923,12 @@ impl Inner {
             self.names.tags().restore(tags);
             return Err(error);
         }
-        if let Some(client) = self.client.as_mut() {
-            for (ours, theirs) in &moved {
-                client.moved_table(ours, theirs);
-            }
-        }
         let owner = Rc::new(self.named(&self.owner.jazz));
         self.schema = owner.clone();
         self.owner = owner;
         self.reset_everything();
-        // This store's own sessions (a worker's tabs) store rows by its
-        // names, which may have just changed: each is sent the versions
-        // it now names otherwise.
+        // This store's own sessions (a worker's tabs) are sent the versions
+        // it just took.
         for session in &mut self.sessions {
             session.owe_catalogue();
         }
@@ -2853,7 +2939,6 @@ impl Inner {
         &mut self,
         versions: Vec<sync::CatalogueVersion>,
         cells: Vec<sync::CatalogueCell>,
-        moved: &mut Vec<(String, String)>,
     ) -> Result<(), Error> {
         use crate::names::{LensCell, LensCellRule};
         let cells: Vec<LensCell> = cells
@@ -2887,17 +2972,15 @@ impl Inner {
                 (entry.schema.id, names, entry.schema.schema)
             })
             .collect();
-        // What this store named otherwise takes the upstream's names
-        // first, before a version it lacks stores a table under one of
-        // them.
         let mut fresh = std::collections::HashSet::new();
         for (version, names, _) in &entries {
-            match self.names.get(version).cloned() {
-                Some(local) if local == *names => {}
-                Some(local) => {
-                    self.rename_stored(&local, names, moved)?;
-                    let conn = &self.conn;
-                    self.names.rename(conn, *version, names.clone())?;
+            match self.names.get(version) {
+                Some(local) if local == names => {}
+                Some(_) => {
+                    return Err(unsupported(format!(
+                        "schema version {}, which this store stores otherwise than its upstream (it was opened without the app's lenses into it),",
+                        uuid::Uuid::from_bytes(*version.as_bytes())
+                    )));
                 }
                 None => {
                     fresh.insert(*version);
@@ -2932,180 +3015,6 @@ impl Inner {
         }
         let conn = &self.conn;
         self.names.record_lens_cells(conn, cells)
-    }
-
-    /// Rename the stored columns `local` names otherwise than `upstream`
-    /// does, where the upstream's is not stored here yet.
-    /// Tables it stores under another name are pushed to `moved`, as
-    /// (ours, theirs), for the pending queue to follow once it all holds.
-    fn rename_stored(
-        &mut self,
-        local: &crate::values::StoredNames,
-        upstream: &crate::values::StoredNames,
-        moved: &mut Vec<(String, String)>,
-    ) -> Result<(), Error> {
-        for (name, (stored, columns)) in &upstream.tables {
-            let Some((ours, our_columns)) = local.tables.get(name) else {
-                continue;
-            };
-            if ours != stored {
-                self.rename_stored_table(name, ours, stored)?;
-                moved.push((ours.clone(), stored.clone()));
-            }
-            for (column, theirs) in columns {
-                let Some(mine) = our_columns.get(column).filter(|mine| *mine != theirs) else {
-                    continue;
-                };
-                let Some(table) = self.physical.tables.get_mut(stored) else {
-                    continue;
-                };
-                if table.by_stored(theirs).is_some() {
-                    continue;
-                }
-                for on in [stored.clone(), format!("{stored}__h")] {
-                    self.conn
-                        .execute_batch(&format!(
-                            "ALTER TABLE {} RENAME COLUMN {} TO {}",
-                            quote(&on),
-                            quote(mine),
-                            quote(theirs)
-                        ))
-                        .map_err(storage)?;
-                }
-                for physical in table.columns.iter_mut().filter(|c| c.stored == *mine) {
-                    physical.name = theirs.clone();
-                    physical.stored = theirs.clone();
-                }
-                let conn = &self.conn;
-                self.names
-                    .moved(conn, stored, stored, Some((mine, theirs)))?;
-            }
-        }
-        Ok(())
-    }
-
-    /// `ops`, which name tables and columns as admitted `version` does,
-    /// named as the current schema does instead: by where each is stored.
-    /// What the current schema does not name (a table or column it
-    /// dropped) is left out, as is a write to a table it lacks; the
-    /// commit itself still uploads under `version`, whole.
-    pub(crate) fn by_current_names(
-        &self,
-        version: crate::ids::SchemaVersionId,
-        ops: Vec<StagedOp>,
-    ) -> Vec<StagedOp> {
-        let Some(from) = self.names.get(&version) else {
-            return ops;
-        };
-        let rename = |table: &str| -> Option<(String, BTreeMap<String, String>)> {
-            let (stored, columns) = from.tables.get(table)?;
-            let current = self.owner.by_stored(stored)?;
-            let columns = columns
-                .iter()
-                .filter_map(|(column, stored)| {
-                    let now = current.by_stored(stored)?;
-                    Some((column.clone(), now.name.clone()))
-                })
-                .collect();
-            Some((current.name.clone(), columns))
-        };
-        let cells = |columns: &BTreeMap<String, String>, cells: BTreeMap<String, Value>| {
-            cells
-                .into_iter()
-                .filter_map(|(column, value)| {
-                    if column.starts_with('$') {
-                        return Some((column, value));
-                    }
-                    columns.get(&column).map(|now| (now.clone(), value))
-                })
-                .collect()
-        };
-        ops.into_iter()
-            .filter_map(|op| {
-                let (table, columns) = rename(op.table())?;
-                Some(match op {
-                    StagedOp::Insert(_, c, o) => StagedOp::Insert(table, cells(&columns, c), o),
-                    StagedOp::Update(_, r, c, o) => {
-                        StagedOp::Update(table, r, cells(&columns, c), o)
-                    }
-                    StagedOp::Upsert(_, r, c, o) => {
-                        StagedOp::Upsert(table, r, cells(&columns, c), o)
-                    }
-                    StagedOp::Delete(_, r, o) => StagedOp::Delete(table, r, o),
-                    StagedOp::Restore(_, r, c, o) => {
-                        StagedOp::Restore(table, r, c.map(|c| cells(&columns, c)), o)
-                    }
-                    StagedOp::Move(_, from, to, r) => StagedOp::Move(table, from, to, r),
-                })
-            })
-            .collect()
-    }
-
-    /// Store table `ours` (with its history, indexes and triggers) as
-    /// `theirs`, the upstream's name for it. Both stored here is not
-    /// supported yet: their rows would have to merge.
-    fn rename_stored_table(&mut self, name: &str, ours: &str, theirs: &str) -> Result<(), Error> {
-        if self.physical.tables.contains_key(theirs) {
-            return Err(unsupported(format!(
-                "table `{name}`, stored here as `{ours}` beside the upstream's `{theirs}`"
-            )));
-        }
-        let Some(mut table) = self.physical.tables.remove(ours) else {
-            return Ok(());
-        };
-        for (from, to) in [
-            (ours.to_owned(), theirs.to_owned()),
-            (format!("{ours}__h"), format!("{theirs}__h")),
-        ] {
-            self.conn
-                .execute_batch(&format!(
-                    "ALTER TABLE {} RENAME TO {}",
-                    quote(&from),
-                    quote(&to)
-                ))
-                .map_err(storage)?;
-        }
-        // Indexes and triggers are named after their table: renamed along,
-        // so the upstream's DDL finds them under its names.
-        let objects: Vec<(String, String, String)> = self
-            .conn
-            .prepare(
-                "SELECT type, name, sql FROM sqlite_master \
-                 WHERE tbl_name IN (?1, ?2) AND type IN ('index', 'trigger') AND sql IS NOT NULL",
-            )
-            .and_then(|mut statement| {
-                statement
-                    .query_map([theirs.to_owned(), format!("{theirs}__h")], |r| {
-                        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-                    })?
-                    .collect::<Result<_, _>>()
-            })
-            .map_err(storage)?;
-        for (kind, object, sql) in objects {
-            let Some(rest) = object.strip_prefix(ours) else {
-                continue;
-            };
-            let renamed = format!("{theirs}{rest}");
-            let sql = sql.replacen(&quote(&object), &quote(&renamed), 1);
-            let drop = if kind == "index" { "INDEX" } else { "TRIGGER" };
-            self.conn
-                .execute_batch(&format!("DROP {drop} {}; {sql};", quote(&object)))
-                .map_err(storage)?;
-        }
-        table.name = theirs.to_owned();
-        table.stored = theirs.to_owned();
-        self.physical.tables.insert(theirs.to_owned(), table);
-        let conn = &self.conn;
-        self.names.moved(conn, ours, theirs, None)?;
-        if self.withheld.get() {
-            self.conn
-                .execute(
-                    "UPDATE _jazz_withheld SET tbl = ?2 WHERE tbl = ?1",
-                    [ours, theirs],
-                )
-                .map_err(storage)?;
-        }
-        self.rename_pending_rows(ours, theirs)
     }
 
     /// An upstream image as this store keeps it: `None` for a table it
@@ -3450,6 +3359,140 @@ impl Inner {
             Some(names) => Schema::stored_as(schema, names, self.names.tags()),
             None => Schema::new(schema, self.names.tags()),
         }
+    }
+
+    /// The current schema named by stored names: the schema replicated
+    /// writes travel and apply by (see [`Schema::stored_view`]).
+    pub(crate) fn stored_view(&self) -> Rc<Schema> {
+        let columns = self
+            .physical
+            .tables
+            .values()
+            .map(|table| table.columns.len() + 1)
+            .sum();
+        let owner = Rc::as_ptr(&self.owner);
+        let mut cached = self.stored_view.borrow_mut();
+        if let Some((built, count, view)) = &*cached
+            && *built == owner
+            && *count == columns
+        {
+            return view.clone();
+        }
+        let view = Rc::new(Schema::stored_view(&self.owner, &self.physical));
+        *cached = Some((owner, columns, view.clone()));
+        view
+    }
+
+    /// `op`, written through `schema`, as it travels: by the stored names
+    /// of its table and cells. An insert carries every column `schema`
+    /// declares (its default, or null), so its receiver, which applies it
+    /// under [`Inner::stored_view`], fills only what that version lacks.
+    pub(crate) fn stored_op(&self, op: StagedOp, schema: &Schema) -> Result<StagedOp, Error> {
+        if schema.stored_names {
+            return Ok(op);
+        }
+        let table = schema.table(op.table())?;
+        let stored = |cells: BTreeMap<String, Value>| -> BTreeMap<String, Value> {
+            cells
+                .into_iter()
+                .map(|(name, value)| (table.stored_name(&name).to_owned(), value))
+                .collect()
+        };
+        let name = table.stored.clone();
+        // The columns this version's lineage dropped, with their backwards
+        // defaults: a receiver cannot tell which lenses a writer descends
+        // from, so the writer names them (SPEC 8.9).
+        let version = if std::ptr::eq(schema, &*self.owner) {
+            self.owner_version
+        } else {
+            schema.jazz.version_id()
+        };
+        let mut dropped = BTreeMap::new();
+        if self.names.has_lens_cells() {
+            let physical = self.physical.tables.get(&table.stored);
+            for (column, default) in self.names.lens_cells(&version, table).1 {
+                let Some(stored) = physical.and_then(|physical| physical.column(&column)) else {
+                    continue;
+                };
+                let value = crate::values::column_from_sql(stored, default.as_ref(), &self.chunks)?
+                    .unwrap_or(Value::Nullable(None));
+                dropped.insert(column, value);
+            }
+        }
+        // What a write that creates its row gives the columns it leaves out:
+        // its version's defaults (branch columns stay as given: the target,
+        // or else the column's immutable default, keys the row,
+        // INV-BVIEW-19) and the dropped columns' backwards defaults.
+        let created = |cells: &BTreeMap<String, Value>| -> BTreeMap<String, Value> {
+            let mut created = BTreeMap::new();
+            for column in &table.columns {
+                if cells.contains_key(&column.name) || table.branch_by.contains(&column.name) {
+                    continue;
+                }
+                let value = match &column.default {
+                    Some(default) => default.clone(),
+                    None if column.nullable() => Value::Nullable(None),
+                    None => continue,
+                };
+                created.insert(column.stored.clone(), value);
+            }
+            created.extend(dropped.clone());
+            created
+        };
+        // Branch selectors name branch columns too.
+        let selector = |selector: BranchSelector| BranchSelector {
+            values: selector
+                .values
+                .into_iter()
+                .map(|(name, value)| (table.stored_name(&name).to_owned(), value))
+                .collect(),
+        };
+        let exact = |target: ExactWriteTarget| match target {
+            ExactWriteTarget::Root => ExactWriteTarget::Root,
+            ExactWriteTarget::Branch(branch) => ExactWriteTarget::Branch(selector(branch)),
+        };
+        let view = |target: WriteTarget| match target {
+            WriteTarget::Root => WriteTarget::Root,
+            WriteTarget::BranchView { head, base } => WriteTarget::BranchView {
+                head: selector(head),
+                base: base.map(|base| match base {
+                    BranchViewBase::Current(base) => BranchViewBase::Current(selector(base)),
+                    BranchViewBase::Snapshot { branch, snapshot } => BranchViewBase::Snapshot {
+                        branch: selector(branch),
+                        snapshot,
+                    },
+                }),
+            },
+        };
+        Ok(match op {
+            StagedOp::Insert(_, cells, mut opts) => {
+                opts.target = exact(opts.target);
+                let created = created(&cells);
+                let mut cells = stored(cells);
+                cells.extend(created);
+                StagedOp::Insert(name, cells, opts)
+            }
+            StagedOp::Update(_, row, cells, mut opts) => {
+                opts.target = view(opts.target);
+                StagedOp::Update(name, row, stored(cells), opts)
+            }
+            StagedOp::Upsert(_, row, cells, mut extra, mut opts) => {
+                opts.target = view(opts.target);
+                extra.extend(created(&cells));
+                StagedOp::Upsert(name, row, stored(cells), extra, opts)
+            }
+            StagedOp::Delete(_, row, mut opts) => {
+                opts.target = view(opts.target);
+                StagedOp::Delete(name, row, opts)
+            }
+            StagedOp::Restore(_, row, cells, mut opts) => {
+                opts.target = exact(opts.target);
+                StagedOp::Restore(name, row, cells.map(stored), opts)
+            }
+            StagedOp::Move(_, from, to, row) => {
+                StagedOp::Move(name, selector(from), selector(to), row)
+            }
+        })
     }
 
     /// The lens cells the lenses into `target` make on this store: a copy
@@ -4650,7 +4693,7 @@ impl Inner {
     /// system writes to the node that made them).
     pub(crate) fn stamp_author(&self) -> AuthorSubject {
         match self.identity.author {
-            AuthorSubject::SYSTEM => AuthorSubject::system_at(self.identity.node),
+            AuthorSubject::SYSTEM => AuthorSubject::system_at(self.system_node),
             author => author,
         }
     }
@@ -4659,8 +4702,16 @@ impl Inner {
     /// this small integer instead of repeating them in every version;
     /// codes are local to this database and resolved back at egress.
     pub(crate) fn author_code(&self, key: &AuthorKey) -> Result<i64, Error> {
-        if let Some(code) = self.authors.borrow().codes.get(key) {
-            return Ok(*code);
+        {
+            let authors = self.authors.borrow();
+            if let Some(code) = authors.codes.get(key) {
+                return Ok(*code);
+            }
+            if let Some((code, rollbacks)) = authors.uncommitted.get(key)
+                && *rollbacks == crate::values::rollbacks(&self.conn)
+            {
+                return Ok(*code);
+            }
         }
         let (account, issuer, subject) = key;
         let account = account.as_bytes().to_vec();
@@ -4688,14 +4739,19 @@ impl Inner {
         Ok(code)
     }
 
-    /// Cache an author's code, but only once it is committed: one interned
-    /// inside a savepoint (a transaction overlay, a batch that may fail) is
-    /// undone by its rollback, and its code may then go to another author.
+    /// Cache an author's code. One interned inside a savepoint (a
+    /// transaction overlay, a batch that may fail) is undone by its
+    /// rollback, and its code may then go to another author: until it is
+    /// committed it holds only while no rollback happened.
     fn remember_author(&self, key: &AuthorKey, code: i64) {
+        let mut authors = self.authors.borrow_mut();
         if self.conn.is_autocommit() {
-            let mut authors = self.authors.borrow_mut();
+            authors.uncommitted.remove(key);
             authors.codes.insert(key.clone(), code);
             authors.parts.insert(code, key.clone());
+        } else {
+            let rollbacks = crate::values::rollbacks(&self.conn);
+            authors.uncommitted.insert(key.clone(), (code, rollbacks));
         }
     }
 
@@ -4745,11 +4801,26 @@ impl Inner {
     }
 
     /// Delete up to `budget` large-value nodes no cell or branch references.
+    /// A pass runs only when one could find work: a row changed since the
+    /// last pass that emptied the queue, or an upload was dropped.
     fn reclaim_large_values(&mut self, budget: usize) -> Result<usize, Error> {
+        if self.reclaimed_at == Some(self.conn.total_changes())
+            && self.upload_cleanup.borrow().is_empty()
+        {
+            return Ok(0);
+        }
+        self.reclaim_passes += 1;
+        self.reclaimed_at = None;
         self.release_dropped_uploads()?;
-        in_savepoint(&self.conn, "reclaim", || {
+        let deleted = in_savepoint(&self.conn, "reclaim", || {
             crate::large::reclaim(&self.conn, &self.chunks, budget)
-        })
+        })?;
+        // A pass inside an open transaction may yet roll back, and one
+        // that ran out of budget left work queued: both run again.
+        if self.conn.is_autocommit() && !crate::large::reclaim_queued(&self.conn)? {
+            self.reclaimed_at = Some(self.conn.total_changes());
+        }
+        Ok(deleted)
     }
 
     /// A written cell must be of its column's type: writes from any replica
@@ -5038,7 +5109,7 @@ impl Inner {
         let (table_name, cells) = match op {
             StagedOp::Insert(t, c, _)
             | StagedOp::Update(t, _, c, _)
-            | StagedOp::Upsert(t, _, c, _) => (t.clone(), c),
+            | StagedOp::Upsert(t, _, c, _, _) => (t.clone(), c),
             StagedOp::Restore(t, _, Some(c), _) => (t.clone(), c),
             _ => return Ok(edits),
         };
@@ -5075,7 +5146,7 @@ impl Inner {
     pub(crate) fn counter_deltas(&self, op: &mut StagedOp) -> Result<(), Error> {
         let (table_name, row, cells, target) = match op {
             StagedOp::Update(t, r, c, o) => (t.clone(), *r, c, &o.target),
-            StagedOp::Upsert(t, r, c, o) => (t.clone(), *r, c, &o.target),
+            StagedOp::Upsert(t, r, c, _, o) => (t.clone(), *r, c, &o.target),
             _ => return Ok(()),
         };
         let schema = self.schema.clone();
@@ -5566,6 +5637,17 @@ impl Inner {
                 }
             }
         }
+        // A replicated insert from a version without a branch column keys
+        // its row by that column's immutable default (INV-BVIEW-19).
+        if schema.stored_names {
+            for column in &table.branch_by {
+                if !cells.contains_key(column)
+                    && let Some(default) = table.column(column).and_then(|c| c.default.clone())
+                {
+                    cells.insert(column.clone(), default);
+                }
+            }
+        }
         let key = table.row_branch_key(&cells);
         let row = row_id.unwrap_or_else(|| self.ids.next_row_id());
         let cells = self.merged_cells(table, row, None, None, cells)?;
@@ -5577,15 +5659,20 @@ impl Inner {
         }
         // Most stores have no lens cells; the owner's version is cached
         // (hashing a schema per insert would dominate a large batch's replay).
-        let (copies, dropped) = if self.names.has_lens_cells() {
+        let (copies, dropped) = if !self.names.has_lens_cells() {
+            Default::default()
+        } else if schema.stored_names {
+            let copies = self
+                .names
+                .stored_copies(&table.stored, |column| cells.contains_key(column));
+            (copies, Vec::new())
+        } else {
             let version = if Rc::ptr_eq(&schema, &self.owner) {
                 self.owner_version
             } else {
                 schema.jazz.version_id()
             };
             self.names.lens_cells(&version, table)
-        } else {
-            Default::default()
         };
         let mut names = vec![
             "id".to_owned(),
@@ -5602,6 +5689,19 @@ impl Inner {
         for column in &table.columns {
             let given = match (cells.get(&column.name), &column.default) {
                 (Some(value), _) => Some((value, source)),
+                // A replicated insert names every column its writer's
+                // version declares, and the backwards defaults of columns
+                // its lineage dropped: one it leaves out, a later version
+                // added, so the stored column's own default or a copy fills
+                // it. Only a required column nothing fills is refused.
+                (None, default)
+                    if schema.stored_names
+                        && (default.is_some()
+                            || column.nullable()
+                            || copies.iter().any(|(_, copy)| *copy == column.stored)) =>
+                {
+                    continue;
+                }
                 (None, Some(default)) => Some((default, Cells::Authored)),
                 (None, None) if column.nullable() => None,
                 (None, None) => {
@@ -5742,17 +5842,21 @@ impl Inner {
         Ok(())
     }
 
+    /// An update, or with `created` an upsert, which gives the columns
+    /// `cells` leaves out `created`'s values if it creates the row.
     #[allow(clippy::too_many_arguments)]
     fn patch(
         &mut self,
         table_name: &str,
         row: RowUuid,
         cells: BTreeMap<String, Value>,
+        created: Option<BTreeMap<String, Value>>,
         target: &Target,
         who: Who,
         seq: u64,
-        upsert: bool,
     ) -> Result<WriteHandle, Error> {
+        let upsert = created.is_some();
+        let created = created.unwrap_or_default();
         let verb = if upsert { "UPSERT" } else { "UPDATE" };
         let schema = self.schema.clone();
         let table = schema.table(table_name)?;
@@ -5776,6 +5880,9 @@ impl Inner {
             Located::Absent { cells: branch, .. } if upsert => {
                 let mut cells = cells;
                 cells.extend(branch);
+                for (column, value) in created {
+                    cells.entry(column).or_insert(value);
+                }
                 return self.insert(
                     table_name,
                     cells,
@@ -5820,6 +5927,9 @@ impl Inner {
                     // Every column is written, as by an insert: nothing
                     // of the deleted version carries over.
                     reinserted = true;
+                    for (column, value) in created {
+                        cells.entry(column).or_insert(value);
+                    }
                     for column in &table.columns {
                         // Branch columns are the row's key and stay.
                         if cells.contains_key(&column.name)
@@ -5902,19 +6012,24 @@ impl Inner {
         who: Who,
         seq: u64,
     ) -> Result<WriteHandle, Error> {
-        self.patch(table, row, cells, target, who, seq, false)
+        self.patch(table, row, cells, None, target, who, seq)
     }
 
+    /// Upsert `cells` into `row`; if it creates the row, `created` fills
+    /// the columns `cells` leaves out (a replicated upsert's writer's
+    /// defaults, see `stored_op`).
+    #[allow(clippy::too_many_arguments)]
     fn upsert(
         &mut self,
         table: &str,
         row: RowUuid,
         cells: BTreeMap<String, Value>,
+        created: BTreeMap<String, Value>,
         target: &Target,
         who: Who,
         seq: u64,
     ) -> Result<WriteHandle, Error> {
-        self.patch(table, row, cells, target, who, seq, true)
+        self.patch(table, row, cells, Some(created), target, who, seq)
     }
 
     fn delete(
@@ -6303,7 +6418,16 @@ pub struct MergeableTxHandle<'a> {
 pub(crate) enum StagedOp {
     Insert(String, BTreeMap<String, Value>, InsertOptions),
     Update(String, RowUuid, BTreeMap<String, Value>, UpdateOptions),
-    Upsert(String, RowUuid, BTreeMap<String, Value>, UpsertOptions),
+    /// The fourth field is what the upsert gives the columns it leaves
+    /// out if it creates the row, by stored names: a replicated upsert's
+    /// writer's defaults (see `Inner::stored_op`); empty on a local one.
+    Upsert(
+        String,
+        RowUuid,
+        BTreeMap<String, Value>,
+        BTreeMap<String, Value>,
+        UpsertOptions,
+    ),
     Delete(String, RowUuid, DeleteOptions),
     Restore(
         String,
@@ -6459,9 +6583,13 @@ impl MergeableTxHandle<'_> {
         opts: UpsertOptions,
     ) -> Result<(), Error> {
         self.db.inner().require_mutation_admission()?;
-        self.ops
-            .borrow_mut()
-            .push(StagedOp::Upsert(table.to_owned(), row, cells, opts));
+        self.ops.borrow_mut().push(StagedOp::Upsert(
+            table.to_owned(),
+            row,
+            cells,
+            BTreeMap::new(),
+            opts,
+        ));
         Ok(())
     }
 
@@ -6539,7 +6667,7 @@ impl MergeableTxHandle<'_> {
                             )
                             .await
                             .map(drop)?,
-                        StagedOp::Upsert(t, r, c, o) => db
+                        StagedOp::Upsert(t, r, c, _, o) => db
                             .upsert(
                                 &t,
                                 r,
@@ -6607,29 +6735,6 @@ fn schema_error(message: impl Into<String>) -> Error {
     Error::new(ErrorCode::Schema, message)
 }
 
-impl Db {
-    /// The schema version a transaction's commit uploads under: the one
-    /// every write in it (each with its `versions` entry) names its tables
-    /// and columns by. A replica cannot upload one commit under several, so
-    /// a transaction written through views of different versions is
-    /// refused there; elsewhere nothing uploads.
-    fn upload_version(
-        &self,
-        versions: impl IntoIterator<Item = crate::ids::SchemaVersionId>,
-    ) -> Result<crate::ids::SchemaVersionId, Error> {
-        let mut versions = versions.into_iter();
-        let Some(first) = versions.next() else {
-            return Ok(self.write_version());
-        };
-        if self.is_client() && versions.any(|version| version != first) {
-            return Err(unsupported(
-                "a transaction writing through schema views of different versions on a replica",
-            ));
-        }
-        Ok(first)
-    }
-}
-
 /// The changes a schema view may make over the owner's schema without an
 /// explicit lens: add and drop columns, add tables. Everything else names
 /// what it changed (Jazz's `direct_schema_view_lens` rules).
@@ -6689,7 +6794,38 @@ impl Db {
     /// Register a typed schema view. The handle shares this owner's store,
     /// batches, clock and subscriptions; it reads and writes its own columns
     /// of the physical tables, which hold the union of every admitted view.
+    /// Ship more of the app's versions and lenses (see
+    /// [`DbConfig::with_migrations`]): a client learns an app's migrations
+    /// when it first sees the app, not only when it opens.
+    pub fn add_migrations(&self, migrations: Migrations) {
+        let mut inner = self.inner();
+        for schema in migrations.schemas {
+            let version = schema.version_id();
+            if !inner
+                .migrations
+                .schemas
+                .iter()
+                .any(|s| s.version_id() == version)
+            {
+                inner.migrations.schemas.push(schema);
+            }
+        }
+        for lens in migrations.lenses {
+            if !inner
+                .migrations
+                .lenses
+                .iter()
+                .any(|l| l.source == lens.source && l.target == lens.target)
+            {
+                inner.migrations.lenses.push(lens);
+            }
+        }
+    }
+
     pub async fn register_schema_view(&self, schema: JazzSchema) -> Result<Db, Error> {
+        // A version the app's lenses lead to is admitted as the authority
+        // admits it, not named against the current one.
+        self.admit_along_migrations(&schema)?;
         let logical = {
             let mut inner = self.inner.borrow_mut();
             let version = schema.version_id();
@@ -7051,9 +7187,9 @@ impl Inner {
                 let target = Target::of(&o.target, self)?;
                 self.update(&t, r, c, &target, who, seq)
             }
-            StagedOp::Upsert(t, r, c, o) => {
+            StagedOp::Upsert(t, r, c, created, o) => {
                 let target = Target::of(&o.target, self)?;
-                self.upsert(&t, r, c, &target, who, seq)
+                self.upsert(&t, r, c, created, &target, who, seq)
             }
             StagedOp::Delete(t, r, o) => {
                 let target = Target::of(&o.target, self)?;
@@ -7332,6 +7468,12 @@ impl Db {
                     .iter()
                     .map(|read| {
                         Ok(sync::WireRead {
+                            version: *read
+                                .prepared
+                                .schema
+                                .as_ref()
+                                .map_or(inner.owner_version, |schema| schema.version)
+                                .as_bytes(),
                             query: read.prepared.query.clone(),
                             binding: read.prepared.binding.clone(),
                             include_deleted: read.include_deleted,
@@ -7416,17 +7558,13 @@ impl Db {
         };
         // `commit_ops` holds the upload record and the commit in one SQLite
         // transaction and rolls both back on an error.
-        let recorded = self
-            .upload_version(ops.iter().map(|(schema, _)| schema.version))
-            .and_then(|version| {
-                self.record_upload(
-                    ops.iter().map(|(_, op)| op.clone()).collect(),
-                    seq,
-                    kind,
-                    None,
-                    version,
-                )
-            });
+        // Each op travels by stored names, so one transaction may write
+        // through views of several versions.
+        let recorded = ops
+            .iter()
+            .map(|(schema, op)| self.inner().stored_op(op.clone(), schema))
+            .collect::<Result<Vec<_>, _>>()
+            .and_then(|ops| self.record_stored_upload(ops, seq, kind, None));
         if let Err(error) = recorded {
             let mut inner = self.inner();
             inner.seq = prior;
@@ -7786,8 +7924,14 @@ impl TxRef<'_> {
         cells: BTreeMap<String, Value>,
         opts: UpsertOptions,
     ) -> Result<WriteHandle, Error> {
-        self.stage(StagedOp::Upsert(table.to_owned(), row, cells, opts))
-            .await?;
+        self.stage(StagedOp::Upsert(
+            table.to_owned(),
+            row,
+            cells,
+            BTreeMap::new(),
+            opts,
+        ))
+        .await?;
         Ok(WriteHandle {
             row,
             seq: Pos::default(),
@@ -7925,7 +8069,7 @@ impl TxRef<'_> {
             && self.db.is_client()
             && tier != ReadTier::LocalOnly
         {
-            let at = pinned.then_some(snapshot.seq);
+            let at = pinned.then_some(snapshot);
             self.db.remote_shape(&prepared.query)?;
             let through = self
                 .db
@@ -8037,5 +8181,140 @@ impl Db {
             tx: self.tx_ref(id),
             committed: false,
         })
+    }
+}
+
+/// The versions, each with the lenses into it, a store passes through to
+/// reach `target` along `migrations`: starting at a version it `admitted`
+/// (else at a version no lens leads to), ending at `target`. Empty when the
+/// store admitted `target` or no such path exists.
+/// Why a store shipping the app's `migrations` may not take `schema`: it
+/// has not admitted it, and they do not lead to it, so it would name it
+/// otherwise than the server does (SPEC 10.7). None for a store shipping
+/// none (an authority, a tool reading any version) and for the empty schema.
+fn outside_migrations(
+    migrations: &Migrations,
+    schema: &JazzSchema,
+    admitted: impl Fn(&crate::ids::SchemaVersionId) -> bool,
+) -> Option<Error> {
+    let version = schema.version_id();
+    let shipped = migrations.schemas.iter().any(|s| s.version_id() == version)
+        || migrations.lenses.iter().any(|lens| lens.target == version);
+    if migrations.schemas.is_empty()
+        || shipped
+        || schema.runtime().tables.is_empty()
+        || admitted(&version)
+    {
+        return None;
+    }
+    Some(schema_error(format!(
+        "schema version {} is not among the app's migrations: regenerate them \
+         (`jazz-tools validate`) and pass them to the client",
+        uuid::Uuid::from_bytes(*version.as_bytes())
+    )))
+}
+
+/// The versions to admit, each with the lens it is admitted along, to
+/// reach `target` along the app's migrations: every store takes the same
+/// path, so each derives the names its authority did (SPEC 10.7).
+///
+/// Of several lenses into a version, every source is admitted first and
+/// the version is named by the lens from the smallest one, as the
+/// authority's `Names::resolve` picks it. A version no lens leads into but
+/// compatible with one some lens does (the same tables and columns, see
+/// `compatibility_id`) is reached from that one by an empty lens, as
+/// deployment connects them.
+fn migration_path(
+    migrations: &Migrations,
+    target: &JazzSchema,
+    admitted: impl Fn(&crate::ids::SchemaVersionId) -> bool,
+) -> Vec<(JazzSchema, Vec<MigrationLens>)> {
+    fn walk(
+        migrations: &Migrations,
+        schema: &JazzSchema,
+        admitted: &dyn Fn(&crate::ids::SchemaVersionId) -> bool,
+        visiting: &mut BTreeSet<crate::ids::SchemaVersionId>,
+    ) -> Option<Vec<(JazzSchema, Vec<MigrationLens>)>> {
+        let version = schema.version_id();
+        if admitted(&version) {
+            return Some(vec![(schema.clone(), Vec::new())]);
+        }
+        if !visiting.insert(version) {
+            return None;
+        }
+        let path = step(migrations, schema, admitted, visiting);
+        visiting.remove(&version);
+        path
+    }
+    fn step(
+        migrations: &Migrations,
+        schema: &JazzSchema,
+        admitted: &dyn Fn(&crate::ids::SchemaVersionId) -> bool,
+        visiting: &mut BTreeSet<crate::ids::SchemaVersionId>,
+    ) -> Option<Vec<(JazzSchema, Vec<MigrationLens>)>> {
+        let version = schema.version_id();
+        let source_of = |id: crate::ids::SchemaVersionId| {
+            migrations.schemas.iter().find(|s| s.version_id() == id)
+        };
+        let mut into: Vec<&MigrationLens> = migrations
+            .lenses
+            .iter()
+            .filter(|lens| lens.target == version)
+            .collect();
+        into.sort_by_key(|lens| lens.source);
+        if !into.is_empty() {
+            // Every lens's source is admitted first, as on the authority,
+            // so this version is named by the lens from the smallest one
+            // and refused where the lenses disagree (`Names::resolve`). A
+            // lens from a version the app's migrations lack leaves no
+            // path: without it this version could be named otherwise.
+            let mut path: Vec<(JazzSchema, Vec<MigrationLens>)> = Vec::new();
+            for lens in &into {
+                let source = source_of(lens.source)?;
+                for step in walk(migrations, source, admitted, visiting)? {
+                    let version = step.0.version_id();
+                    if !path.iter().any(|(s, _)| s.version_id() == version) {
+                        path.push(step);
+                    }
+                }
+            }
+            path.push((
+                schema.clone(),
+                into.iter().map(|lens| (*lens).clone()).collect(),
+            ));
+            return Some(path);
+        }
+        // No lens leads here: from the smallest compatible version one
+        // leads into (or this store admitted), by an empty lens.
+        let compatibility = schema.compatibility_id();
+        let mut anchors: Vec<&JazzSchema> = migrations
+            .schemas
+            .iter()
+            .filter(|s| s.version_id() != version && s.compatibility_id() == compatibility)
+            .filter(|s| {
+                let id = s.version_id();
+                admitted(&id) || migrations.lenses.iter().any(|lens| lens.target == id)
+            })
+            .collect();
+        anchors.sort_by_key(|s| s.version_id());
+        for anchor in anchors {
+            let Ok(empty) = MigrationLens::new(anchor.version_id(), version, Vec::new()) else {
+                continue;
+            };
+            if let Some(mut path) = walk(migrations, anchor, admitted, visiting) {
+                path.push((schema.clone(), vec![empty]));
+                return Some(path);
+            }
+        }
+        // A first version: admitted without a lens.
+        Some(vec![(schema.clone(), Vec::new())])
+    }
+    if admitted(&target.version_id()) {
+        return Vec::new();
+    }
+    let mut visiting = BTreeSet::new();
+    match walk(migrations, target, &admitted, &mut visiting) {
+        Some(path) if path.len() > 1 || !path[0].1.is_empty() => path,
+        _ => Vec::new(),
     }
 }

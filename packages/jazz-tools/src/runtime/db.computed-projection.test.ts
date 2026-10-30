@@ -18,13 +18,16 @@ class ProjectionSource extends DefaultRuntimeSource {
 it.each(["constant", "identity"] as const)(
   "uses an ID-only physical projection when selecting only the %s computed field",
   async (column) => {
-    const app = s.defineApp({
-      rows: s.table(
-        { large: s.bytes() },
-        { constant: s.computed(() => "constant"), identity: s.computed((row) => row.id) },
-      ),
-      parents: s.table({ targetId: s.uuid() }, { target: s.rel("rows", "targetId") }),
-    });
+    const app = s.defineApp(
+      {
+        rows: s.table(
+          { large: s.bytes() },
+          { constant: s.computed(() => "constant"), identity: s.computed((row) => row.id) },
+        ),
+        parents: s.table({ targetId: s.uuid() }, { target: s.rel("rows", "targetId") }),
+      },
+      { migrations: "none" },
+    );
     const source = new ProjectionSource();
     const db = await createAccountDbWithRuntimeSource(
       await localAccountConfig(`computed-id-projection-${crypto.randomUUID()}`),
@@ -84,12 +87,15 @@ it("fetches only the stored inputs of callbacks evaluated by a computed read", a
     },
     { derived: s.computed((row) => row.amount) },
   );
-  const app = s.defineApp({
-    rows: s.table(base.columns, {
-      ...base.relations,
-      nested: s.computed((row) => `value:${row.derived}`),
-    }),
-  });
+  const app = s.defineApp(
+    {
+      rows: s.table(base.columns, {
+        ...base.relations,
+        nested: s.computed((row) => `value:${row.derived}`),
+      }),
+    },
+    { migrations: "none" },
+  );
   const source = new ProjectionSource();
   const db = await createAccountDbWithRuntimeSource(
     await localAccountConfig(`computed-projection-${crypto.randomUUID()}`),
@@ -128,12 +134,15 @@ it("fetches only the stored inputs of callbacks evaluated by a computed read", a
 });
 
 it("reuses available inputs and batches missing dependencies without whole-row reads", async () => {
-  const app = s.defineApp({
-    rows: s.table(
-      { useLeft: s.boolean(), left: s.int(), right: s.int(), large: s.bytes() },
-      { value: s.computed((row) => (row.useLeft ? row.left : row.right)) },
-    ),
-  });
+  const app = s.defineApp(
+    {
+      rows: s.table(
+        { useLeft: s.boolean(), left: s.int(), right: s.int(), large: s.bytes() },
+        { value: s.computed((row) => (row.useLeft ? row.left : row.right)) },
+      ),
+    },
+    { migrations: "none" },
+  );
   const source = new ProjectionSource();
   const db = await createAccountDbWithRuntimeSource(
     await localAccountConfig(`computed-lazy-${crypto.randomUUID()}`),
@@ -164,12 +173,15 @@ it("reuses available inputs and batches missing dependencies without whole-row r
 });
 
 it("reuses subscription dependencies while still discovering newly taken branches", async () => {
-  const app = s.defineApp({
-    rows: s.table(
-      { useLeft: s.boolean(), left: s.int(), right: s.int(), large: s.bytes() },
-      { value: s.computed((row) => (row.useLeft ? row.left : row.right)) },
-    ),
-  });
+  const app = s.defineApp(
+    {
+      rows: s.table(
+        { useLeft: s.boolean(), left: s.int(), right: s.int(), large: s.bytes() },
+        { value: s.computed((row) => (row.useLeft ? row.left : row.right)) },
+      ),
+    },
+    { migrations: "none" },
+  );
   const source = new ProjectionSource();
   const db = await createAccountDbWithRuntimeSource(
     await localAccountConfig(`computed-subscription-cache-${crypto.randomUUID()}`),
@@ -230,12 +242,15 @@ it("reuses subscription dependencies while still discovering newly taken branche
 });
 
 it("keeps an in-flight read independent of another read extending partially warm hints", async () => {
-  const app = s.defineApp({
-    rows: s.table(
-      { useLeft: s.boolean(), left: s.int(), right: s.int() },
-      { value: s.computed((row) => (row.useLeft ? row.left : row.right)) },
-    ),
-  });
+  const app = s.defineApp(
+    {
+      rows: s.table(
+        { useLeft: s.boolean(), left: s.int(), right: s.int() },
+        { value: s.computed((row) => (row.useLeft ? row.left : row.right)) },
+      ),
+    },
+    { migrations: "none" },
+  );
   const source = new ProjectionSource();
   const db = await createAccountDbWithRuntimeSource(
     await localAccountConfig(`computed-concurrent-cache-${crypto.randomUUID()}`),

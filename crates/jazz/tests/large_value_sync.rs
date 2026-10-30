@@ -19,10 +19,12 @@ use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::ReadViewSourceSpec;
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::records::Value;
+use jazz::time::TxTime;
 use jazz::tools::{
     CmpOp, ColumnMergeStrategy, ColumnType, Operation, PolicyExpr, PolicyValue, SchemaBuilder,
     TableName, TableSchemaBuilder,
 };
+use jazz::tx::TxId;
 
 use common::{allow_all_policies, compile_schema};
 
@@ -471,7 +473,9 @@ fn pulls_answer_only_for_versions_the_reader_may_read() {
         .find_map(|message| match message {
             SyncMessage::Rows { images, .. } => images.iter().find_map(|image| {
                 let cell = image.cells.iter().find_map(|(name, cell)| match cell {
-                    SyncCell::Large(descriptor) if name.ends_with("body") => Some(descriptor),
+                    SyncCell::Large(descriptor) if common::unhashed(name).ends_with("body") => {
+                        Some(descriptor)
+                    }
                     _ => None,
                 })?;
                 let value = jazz::large_values::decode_large_value_ref(cell).ok()?;
@@ -945,22 +949,20 @@ fn a_delta_over_a_version_the_writer_cannot_read_is_rejected() {
     );
     pump(&server, &[&mallory]);
     let update = |tx: u64, body: Value, deltas: Vec<CellDelta>| SyncMessage::Commit {
-        node: [9; 16],
-        tx,
+        id: TxId::new(TxTime(tx), NodeUuid::from_bytes([9; 16])),
         kind: WireKind::Mergeable,
         ops: vec![WireOp {
             deltas,
             ..WireWrite::Update {
                 table: "drafts".to_owned(),
                 row: *row(1).0.as_bytes(),
-                cells: [("body".to_owned(), body)].into(),
+                cells: [(common::stored(&server, "drafts", "body"), body)].into(),
                 target: WireTarget::Root,
                 at: None,
             }
             .into()
         }],
         acting: Acting::Own,
-        origin: None,
     };
     // Each version the server could have written the draft at, named as a
     // base: rebuilt, the write would carry the draft's hidden body.
@@ -969,7 +971,7 @@ fn a_delta_over_a_version_the_writer_cannot_read_is_rejected() {
             seq,
             Value::Nullable(None),
             vec![CellDelta {
-                column: "body".to_owned(),
+                column: common::stored(&server, "drafts", "body"),
                 depth: 0,
                 key: Vec::new(),
                 delta: WireDelta {
@@ -989,7 +991,9 @@ fn a_delta_over_a_version_the_writer_cannot_read_is_rejected() {
         .iter()
         .filter_map(|message| match message {
             SyncMessage::Fate {
-                tx,
+                id: TxId {
+                    time: TxTime(tx), ..
+                },
                 outcome:
                     Outcome::Refused {
                         error: WireError::Rejected { message, .. },
@@ -997,7 +1001,12 @@ fn a_delta_over_a_version_the_writer_cannot_read_is_rejected() {
                     },
                 ..
             } => Some((*tx, message.contains("large-value delta"))),
-            SyncMessage::Fate { tx, .. } => Some((*tx, false)),
+            SyncMessage::Fate {
+                id: TxId {
+                    time: TxTime(tx), ..
+                },
+                ..
+            } => Some((*tx, false)),
             _ => None,
         })
         .collect();
@@ -1037,7 +1046,9 @@ fn pulls_after_read_access_is_lost_are_answered_with_nothing() {
         .find_map(|message| match message {
             SyncMessage::Rows { images, .. } => images.iter().find_map(|image| {
                 let cell = image.cells.iter().find_map(|(name, cell)| match cell {
-                    SyncCell::Large(descriptor) if name.ends_with("text") => Some(descriptor),
+                    SyncCell::Large(descriptor) if common::unhashed(name).ends_with("text") => {
+                        Some(descriptor)
+                    }
                     _ => None,
                 })?;
                 let value = jazz::large_values::decode_large_value_ref(cell).ok()?;
@@ -1113,7 +1124,9 @@ fn an_answer_to_many_pulls_is_bounded_and_the_rest_follows() {
         .find_map(|message| match message {
             SyncMessage::Rows { images, .. } => images.iter().find_map(|image| {
                 let cell = image.cells.iter().find_map(|(name, cell)| match cell {
-                    SyncCell::Large(descriptor) if name.ends_with("blob") => Some(descriptor),
+                    SyncCell::Large(descriptor) if common::unhashed(name).ends_with("blob") => {
+                        Some(descriptor)
+                    }
                     _ => None,
                 })?;
                 let value = jazz::large_values::decode_large_value_ref(cell).ok()?;
@@ -1204,16 +1217,21 @@ fn naming_a_hidden_trees_hash_reads_nothing() {
     // Mallory names the draft's tree (its hashes are no secret) in a doc
     // she may write and read, pushing nothing; and a tree nobody stored.
     let insert = |tx: u64, n: u8, value: &jazz::large_values::LargeValueRef| SyncMessage::Commit {
-        node: [9; 16],
-        tx,
+        id: TxId::new(TxTime(tx), NodeUuid::from_bytes([9; 16])),
         kind: WireKind::Mergeable,
         ops: vec![
             WireWrite::Insert {
                 table: "docs".to_owned(),
                 row: *row(n).0.as_bytes(),
                 cells: [
-                    ("body".to_owned(), Value::Large(Box::new(value.clone()))),
-                    ("blob".to_owned(), Value::Bytes(Vec::new())),
+                    (
+                        common::stored(&server, "docs", "body"),
+                        Value::Large(Box::new(value.clone())),
+                    ),
+                    (
+                        common::stored(&server, "docs", "blob"),
+                        Value::Bytes(Vec::new()),
+                    ),
                 ]
                 .into(),
                 target: WireTarget::Root,
@@ -1222,7 +1240,6 @@ fn naming_a_hidden_trees_hash_reads_nothing() {
             .into(),
         ],
         acting: Acting::Own,
-        origin: None,
     };
     up.borrow_mut().push_back(insert(1, 1, &hidden));
     up.borrow_mut().push_back(insert(2, 2, &unknown));
@@ -1234,7 +1251,9 @@ fn naming_a_hidden_trees_hash_reads_nothing() {
         .iter()
         .filter_map(|message| match message {
             SyncMessage::Fate {
-                tx,
+                id: TxId {
+                    time: TxTime(tx), ..
+                },
                 outcome:
                     Outcome::Refused {
                         error: WireError::Rejected { message, .. },
@@ -1242,7 +1261,12 @@ fn naming_a_hidden_trees_hash_reads_nothing() {
                     },
                 ..
             } => Some((*tx, message.clone())),
-            SyncMessage::Fate { tx, .. } => Some((*tx, "accepted".to_owned())),
+            SyncMessage::Fate {
+                id: TxId {
+                    time: TxTime(tx), ..
+                },
+                ..
+            } => Some((*tx, "accepted".to_owned())),
             _ => None,
         })
         .collect();
@@ -1304,8 +1328,7 @@ fn an_access_proof_the_writer_cannot_read_proves_nothing() {
     // Mallory writes the secret body's tree back into the row, naming the
     // private version as her proof; then a tree nobody stored.
     let update = |tx: u64, value: &jazz::large_values::LargeValueRef| SyncMessage::Commit {
-        node: [9; 16],
-        tx,
+        id: TxId::new(TxTime(tx), NodeUuid::from_bytes([9; 16])),
         kind: WireKind::Mergeable,
         ops: vec![WireOp {
             access_proof: Some(AccessProof {
@@ -1315,14 +1338,17 @@ fn an_access_proof_the_writer_cannot_read_proves_nothing() {
             ..WireWrite::Update {
                 table: "shared".to_owned(),
                 row: *row(1).0.as_bytes(),
-                cells: [("body".to_owned(), Value::Large(Box::new(value.clone())))].into(),
+                cells: [(
+                    common::stored(&server, "shared", "body"),
+                    Value::Large(Box::new(value.clone())),
+                )]
+                .into(),
                 target: WireTarget::Root,
                 at: None,
             }
             .into()
         }],
         acting: Acting::Own,
-        origin: None,
     };
     up.borrow_mut().push_back(update(1, &hidden));
     up.borrow_mut().push_back(update(2, &unknown));
@@ -1380,16 +1406,21 @@ fn a_push_is_never_answered() {
     };
     let hidden = prepared(8).value_ref;
     let insert = |tx: u64, n: u8| SyncMessage::Commit {
-        node: [9; 16],
-        tx,
+        id: TxId::new(TxTime(tx), NodeUuid::from_bytes([9; 16])),
         kind: WireKind::Mergeable,
         ops: vec![
             WireWrite::Insert {
                 table: "docs".to_owned(),
                 row: *row(n).0.as_bytes(),
                 cells: [
-                    ("body".to_owned(), Value::Large(Box::new(hidden.clone()))),
-                    ("blob".to_owned(), Value::Bytes(Vec::new())),
+                    (
+                        common::stored(&server, "docs", "body"),
+                        Value::Large(Box::new(hidden.clone())),
+                    ),
+                    (
+                        common::stored(&server, "docs", "blob"),
+                        Value::Bytes(Vec::new()),
+                    ),
                 ]
                 .into(),
                 target: WireTarget::Root,
@@ -1398,7 +1429,6 @@ fn a_push_is_never_answered() {
             .into(),
         ],
         acting: Acting::Own,
-        origin: None,
     };
     let fates = || -> Vec<bool> {
         down.borrow()
@@ -1465,7 +1495,7 @@ fn a_delta_that_does_not_stand_in_for_a_null_cell_is_refused() {
     );
     pump(&server, &[&mallory]);
     let delta = || CellDelta {
-        column: "body".to_owned(),
+        column: common::stored(&server, "docs", "body"),
         depth: 0,
         key: Vec::new(),
         delta: WireDelta {
@@ -1475,22 +1505,20 @@ fn a_delta_that_does_not_stand_in_for_a_null_cell_is_refused() {
         },
     };
     let update = |tx: u64, body: Value, deltas: Vec<CellDelta>| SyncMessage::Commit {
-        node: [9; 16],
-        tx,
+        id: TxId::new(TxTime(tx), NodeUuid::from_bytes([9; 16])),
         kind: WireKind::Mergeable,
         ops: vec![WireOp {
             deltas,
             ..WireWrite::Update {
                 table: "docs".to_owned(),
                 row: *row(1).0.as_bytes(),
-                cells: [("body".to_owned(), body)].into(),
+                cells: [(common::stored(&server, "docs", "body"), body)].into(),
                 target: WireTarget::Root,
                 at: None,
             }
             .into()
         }],
         acting: Acting::Own,
-        origin: None,
     };
     up.borrow_mut()
         .push_back(update(1, Value::Nullable(None), vec![delta(), delta()]));
@@ -1561,8 +1589,7 @@ fn a_merged_text_write_naming_a_hidden_tree_is_refused() {
     // Mallory edits the doc over its first version, which the authority
     // has to merge, naming the draft's tree as her value.
     up.borrow_mut().push_back(SyncMessage::Commit {
-        node: [9; 16],
-        tx: 1,
+        id: TxId::new(TxTime(1), NodeUuid::from_bytes([9; 16])),
         kind: WireKind::Mergeable,
         ops: vec![WireOp {
             bases: vec![WireBase {
@@ -1572,14 +1599,17 @@ fn a_merged_text_write_naming_a_hidden_tree_is_refused() {
             ..WireWrite::Update {
                 table: "merged".to_owned(),
                 row: *row(2).0.as_bytes(),
-                cells: [("body".to_owned(), Value::Large(Box::new(hidden)))].into(),
+                cells: [(
+                    common::stored(&server, "merged", "body"),
+                    Value::Large(Box::new(hidden)),
+                )]
+                .into(),
                 target: WireTarget::Root,
                 at: None,
             }
             .into()
         }],
         acting: Acting::Own,
-        origin: None,
     });
     for _ in 0..4 {
         block_on(server.tick()).unwrap();
@@ -1977,7 +2007,8 @@ fn a_snapshot_read_naming_a_held_commit_waits_for_it() {
         tier: ReadTier::Remote,
         wait: None,
         view: Box::new(ReadViewSourceSpec::Snapshot { snapshot }),
-        span: ReadSpan::Once { at: None },
+        since: Vec::new(),
+        span: ReadSpan::Once { at: Vec::new() },
     });
     let reply = || {
         down.borrow().iter().find_map(|message| match message {
@@ -2952,4 +2983,42 @@ fn a_range_select_takes_its_pages_changes_as_page_splices() {
         let splices = splices.expect("page splices");
         assert_eq!(apply_delta_utf16(&before, &splices), shown(&body));
     }
+}
+
+/// An idle server and its idle client run no large-value reclaim pass per
+/// tick: once a synced large value settled, ticks with nothing to send or
+/// apply do no reclaim work on either side.
+///
+/// White-box on purpose: the pass count is the contract, which no read
+/// observes.
+#[test]
+fn idle_sync_ticks_run_no_reclaim_pass() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let alice = open(1, user(1));
+    connect(&server, &alice, user(1));
+    let _stream = subscribe(&alice, Query::from("docs"));
+    insert(
+        &server,
+        "docs",
+        1,
+        vec![
+            ("body", Value::String(text(70, LARGE))),
+            ("blob", Value::Bytes(Vec::new())),
+        ],
+    );
+    pump(&server, &[&alice]);
+    assert!(local_cell(&alice, "docs", 1, "body").unwrap().is_some());
+    let passes = (
+        server.large_value_reclaim_passes_for_test(),
+        alice.large_value_reclaim_passes_for_test(),
+    );
+    pump(&server, &[&alice]);
+    assert_eq!(
+        (
+            server.large_value_reclaim_passes_for_test(),
+            alice.large_value_reclaim_passes_for_test(),
+        ),
+        passes,
+        "idle ticks run no reclaim pass"
+    );
 }

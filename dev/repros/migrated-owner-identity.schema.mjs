@@ -2,8 +2,8 @@ import { schema as s, migration as m } from "../../packages/jazz-tools/dist/inde
 
 export const before = { entries: s.table({ text: s.string() }, {}) };
 export const after = { ...before, controls: s.table({ value: s.string() }, {}) };
-export const oldApp = s.defineApp(before);
-export const newApp = s.defineApp(after);
+export const oldApp = s.defineApp(before, { migrations: "none" });
+export const newApp = s.defineApp(after, { migrations: "none" });
 export const oldPermissions = s.definePermissions(oldApp, ({ policy }) => {
   policy.entries.allowRead.always();
   policy.entries.allowInsert.always();

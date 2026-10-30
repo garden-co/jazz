@@ -28,8 +28,10 @@ use jazz::protocol::BranchSelector;
 use jazz::query::Query;
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
+use jazz::time::TxTime;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
+use jazz::tx::TxId;
 
 use common::{allow_all_policies, compile_schema};
 
@@ -314,12 +316,16 @@ impl Net {
     }
 
     /// The accepted writes the worker uploaded for its tabs, in the order
-    /// it relayed them: the authority knows a relayed write by the
-    /// worker's commit.
+    /// it relayed them: the authority knows a relayed write by its tab's
+    /// own id.
     fn relayed(&self, row: RowUuid) -> Vec<WriteConflict> {
         self.conflicts(row)
             .into_iter()
-            .filter(|conflict| conflict.writer.0 == [WORKER; 16])
+            .filter(|conflict| {
+                self.clients
+                    .iter()
+                    .any(|tab| tab.via.is_some() && conflict.writer.0 == [tab.node; 16])
+            })
             .collect()
     }
 
@@ -737,8 +743,7 @@ fn a_relays_commit_a_write_was_built_on_is_what_its_writer_saw() {
     ))
     .unwrap();
     let commit = |tx: u64, target: [u8; 16], title: &str, on: BuiltOn| SyncMessage::Commit {
-        node: relay_node,
-        tx,
+        id: TxId::new(TxTime(tx), NodeUuid::from_bytes(relay_node)),
         kind: WireKind::Mergeable,
         ops: vec![WireOp {
             bases: vec![WireBase {
@@ -748,14 +753,13 @@ fn a_relays_commit_a_write_was_built_on_is_what_its_writer_saw() {
             ..WireWrite::Update {
                 table: "todos".to_owned(),
                 row: target,
-                cells: cells(&[("title", title)]),
+                cells: cells(&[(&common::stored(&core, "todos", "title"), title)]),
                 target: WireTarget::Root,
                 at: None,
             }
             .into()
         }],
         acting: Acting::Own,
-        origin: Some(([0xa1; 16], tx)),
     };
     let tx = |n: u64| n;
     relay
@@ -810,7 +814,14 @@ fn a_relays_commit_a_write_was_built_on_is_what_its_writer_saw() {
 
     let mut fates = BTreeMap::new();
     while let Some(message) = relay.try_recv() {
-        if let SyncMessage::Fate { tx, outcome, .. } = message {
+        if let SyncMessage::Fate {
+            id: TxId {
+                time: TxTime(tx), ..
+            },
+            outcome,
+            ..
+        } = message
+        {
             fates.insert(tx, outcome.result());
         }
     }
@@ -845,48 +856,34 @@ fn a_relays_commit_a_write_was_built_on_is_what_its_writer_saw() {
 }
 
 #[test]
-fn a_session_the_relay_may_not_write_as_is_not_its_writer_and_keeps_its_base() {
+fn a_tabs_commit_as_a_node_another_identity_claimed_is_refused() {
     // A direct client claims a node first; a tab behind the worker then
-    // uses the same node, which the worker's identity may not write as.
+    // uses the same node. The worker forwards the tab's commit under the
+    // tab's id, which the worker's identity may not write as.
     let mut net = Net::new(0);
     net.add_client(WORKER + 1, None);
     let row = net.seed(0);
     net.add_worker();
     net.add_client(WORKER + 1, Some(0));
-    // The tab writes over the seed; a write it never saw lands first.
     net.worker_offline();
-    let tab_write =
-        block_on(
-            net.db(1)
-                .update("todos", row, cells(&[("title", "tab")]), Default::default()),
-        )
-        .unwrap();
+    block_on(
+        net.db(1)
+            .update("todos", row, cells(&[("title", "tab")]), Default::default()),
+    )
+    .unwrap();
     net.edit_settled(0, row, &[("title", "claimer")]);
     net.worker_online();
     net.pump();
     assert_eq!(
         net.title(row),
-        Some(Value::String("tab".to_owned())),
-        "the tab's edit landed"
+        Some(Value::String("claimer".to_owned())),
+        "the tab's edit was refused"
     );
-    let _ = tab_write;
-
-    let conflicts = net.conflicts(row);
-    assert_eq!(
-        conflicts
-            .iter()
-            .filter(|conflict| conflict.writer.0 == [WORKER + 1; 16])
-            .count(),
-        2,
-        "only the claiming client's seed and edit name its node: the tab's commit is the worker's"
-    );
-    let worker = conflicts
-        .iter()
-        .find(|conflict| conflict.writer.0 == [WORKER; 16])
-        .expect("the worker wrote the tab's edit");
     assert!(
-        worker.maybe_conflicting,
-        "the base is the worker's to name: the tab never saw the claimer's edit"
+        net.conflicts(row)
+            .iter()
+            .all(|conflict| conflict.writer.0 != [WORKER; 16]),
+        "the worker writes nothing as itself"
     );
 }
 

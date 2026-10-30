@@ -846,12 +846,17 @@ impl Inner {
             let Ok(mut statement) = self.conn.prepare_cached(&sql) else {
                 return Vec::new();
             };
-            let names: Vec<String> = statement
-                .column_names()
-                .iter()
-                .map(|s| (*s).to_owned())
-                .collect();
+            // Names from the first row: a cached `SELECT *` prepared before
+            // its table gained a column names the old columns until a step
+            // re-prepares it.
+            let mut names: Vec<String> = Vec::new();
             let rows = statement.query_map(params, |r| {
+                if names.is_empty() {
+                    let statement = r.as_ref();
+                    names = (0..statement.column_count())
+                        .map(|i| statement.column_name(i).map(str::to_owned))
+                        .collect::<Result<_, _>>()?;
+                }
                 let mut seq = (0, 0);
                 let mut branch = Vec::new();
                 let mut out = Vec::new();

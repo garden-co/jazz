@@ -14,6 +14,8 @@ import type { AppContext, Session } from "../runtime/context.js";
 import { RuntimeSource, type RuntimeClientContext } from "../runtime/runtime-source.js";
 import { Db, type DbConfig } from "../runtime/db.js";
 import { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
+import { randomNodeUuidBytes } from "../runtime/runtime-entropy.js";
+import { shippedMigrations, type ClientMigrations } from "../runtime/client-migrations.js";
 import { DbAccessContext } from "../runtime/db-access-context.js";
 import { canonicalAuthorSubject, withCanonicalUser } from "../runtime/author-id.js";
 import { authorBytesForSession } from "../runtime/author-id.js";
@@ -93,8 +95,14 @@ type ResolvedBackendContextConfig = BackendContextConfig & {
   allowLocalFirstAuth: boolean;
 };
 
-/** @internal A memory handle retains its node clock across failed-transition reopen. */
+/**
+ * @internal A memory handle retains its node, and that node's clock, across
+ * failed-transition reopen: its runtimes reuse one pooled node rather than
+ * minting a new one per open.
+ */
 export interface BackendNodeClock {
+  /** The pooled node, a random version-4 UUID. */
+  node: Uint8Array;
   initialHighWater?: bigint;
   closed(highWater: bigint): void;
 }
@@ -181,6 +189,7 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
   override createClient({
     config,
     schema,
+    migrations,
     onAuthFailure,
   }: RuntimeClientContext<DbConfig>): JazzClient {
     this.assertOpen();
@@ -200,11 +209,19 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
 
     this.initializedSchemaJson = schemaJson;
     const env = this.config.env ?? "dev";
+    // SYSTEM provenance names this stable node. A persistent store keeps its
+    // transaction counter, so it writes as that node too. A memory store
+    // starts its counter over on every open, so it writes as a random node:
+    // its handle's pooled one (with that node's clock), or else a fresh one
+    // (transaction ids are `seq@node`).
+    const systemNode =
+      this.nodeIdentity ??
+      deterministicBytes(`${this.config.appId}:${env}:${this.nodeIdentityScope}:node`);
+    const persistent = this.config.driver.type === "persistent";
     this.runtime = new NativeRuntimeAdapter(
       NapiDb,
       schema,
-      this.nodeIdentity ??
-        deterministicBytes(`${this.config.appId}:${env}:${this.nodeIdentityScope}:node`),
+      persistent ? systemNode : (this.nodeClock?.node.slice() ?? randomNodeUuidBytes()),
       authorBytesForSession({ issuer: "https://jazz.invalid", user_id: "backend-open" }),
       1,
       true,
@@ -214,10 +231,12 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
           : {}),
         readAuthorizationHost: "trusted-serving",
         backendMode: true,
+        systemNode,
         slowQueryLog: {
           appId: this.config.appId,
           thresholdMs: this.config.slowQueryThresholdMs,
         },
+        migrations,
       },
     );
 
@@ -600,6 +619,12 @@ export class JazzContext {
     );
   }
 
+  /** The migrations the app behind `source` ships (see {@link ClientMigrations}). */
+  private shippedMigrations(source?: BackendSchemaInput): ClientMigrations | undefined {
+    const selected = source ?? this.defaultSchemaInput;
+    return selected ? shippedMigrations(resolveSchemaSource(selected)) : undefined;
+  }
+
   private resolveSchema(source?: BackendSchemaInput): WasmSchema {
     const selected = source ?? this.defaultSchemaInput;
     if (!selected) {
@@ -655,6 +680,7 @@ export class JazzContext {
     return this.coreSource.createClient({
       config: this.buildDbConfig(),
       schema,
+      migrations: this.shippedMigrations(source),
       onAuthFailure: () => {},
     });
   }
@@ -667,6 +693,7 @@ export class JazzContext {
     const client = this.coreSource.createClient({
       config: this.buildDbConfig(),
       schema,
+      migrations: this.shippedMigrations(source),
       onAuthFailure: () => {},
     });
     return { client, schema };

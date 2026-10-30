@@ -345,13 +345,14 @@ fn a_reopened_replica_resumes_its_subscription_from_its_stored_watermark() {
     );
     let since = sent.iter().find_map(|m| match m {
         SyncMessage::Read {
-            span: ReadSpan::Live { since },
+            since,
+            span: ReadSpan::Live,
             ..
-        } => Some(*since),
+        } => Some(since.clone()),
         _ => None,
     });
     assert!(
-        matches!(since, Some(Some(seq)) if seq > 0),
+        matches!(since.as_deref(), Some([(None, seq)]) if *seq > 0),
         "the subscription resumes from its stored watermark: {since:?}"
     );
     assert_eq!(labels(&client), ["held"]);

@@ -588,6 +588,11 @@ fn a_clean_handoff_reuses_the_node_above_its_high_water() {
     let capability = fixture.admit(&directory.path().join("handoff.sqlite"), "alice", 0xc1);
     let first = fixture.open(&capability);
     let node = fixture.metadata_node(first);
+    assert_eq!(
+        (node[6] >> 4, node[8] >> 6),
+        (4, 0b10),
+        "the pool mints random version-4 nodes"
+    );
     let first_tx = fixture.insert_todo(first, [0xd1; 16], "first lease holder");
     fixture.close(first);
 

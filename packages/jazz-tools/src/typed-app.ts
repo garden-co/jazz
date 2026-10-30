@@ -27,6 +27,7 @@ import { bytesToHex } from "@noble/hashes/utils.js";
 import { hasExternalProvenanceNameAllowance, isComputedColumn } from "./dsl.js";
 import { schemaToWasm } from "./codegen/schema-reader.js";
 import type { ColumnType, WasmSchema } from "./drivers/types.js";
+import { shipMigrations, type ClientMigrations } from "./runtime/client-migrations.js";
 import {
   magicColumnType,
   type ProvenanceMagicColumn,
@@ -155,7 +156,8 @@ export class DefinedTable<
  *   }),
  * });
  * type AppSchema = s.Schema<typeof schema>;
- * export const app: s.App<AppSchema> = s.defineApp(schema);
+ * // The module `jazz-tools` generates beside schema.ts.
+ * export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
  * ```
  */
 declare const tableRelationsBrand: unique symbol;
@@ -2123,22 +2125,42 @@ export function defineSchema<const TSchema extends SchemaDefinition>(
  *   }),
  * });
  * type AppSchema = s.Schema<typeof schema>;
- * export const app: s.App<AppSchema> = s.defineApp(schema);
+ * // The module `jazz-tools` generates beside schema.ts.
+ * export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
  * ```
  */
-export function defineApp<const TSchema extends Schema<any>>(definition: TSchema): App<TSchema>;
+/**
+ * What an app's clients ship besides its schema.
+ */
+export interface DefineAppOptions {
+  /**
+   * The app's schema versions and migrations, from the module `jazz-tools`
+   * generates beside schema.ts (`import { migrations } from "./migrations"`),
+   * even while the app has a single version. `"none"` is for an app defined
+   * in code that has no other versions, such as a test's.
+   */
+  migrations: ClientMigrations | "none";
+}
+
+export function defineApp<const TSchema extends Schema<any>>(
+  definition: TSchema,
+  options: DefineAppOptions,
+): App<TSchema>;
 export function defineApp<const TSchema extends SchemaDefinition>(
   definition: TSchema &
     ValidateSchemaRefs<TSchema> &
     ValidateSchemaColumnNames<TSchema> &
     ValidateSchemaTransformContexts<TSchema>,
+  options: DefineAppOptions,
 ): App<Schema<TSchema>>;
 export function defineApp(
   definition: SchemaDefinition | Schema<any>,
+  options: DefineAppOptions,
 ): App<Schema<SchemaDefinition>> {
   const normalizedDefinition = definition as unknown as SchemaDefinition;
   const schema = definitionToSchema(normalizedDefinition);
   const wasmSchema = schemaToWasm(schema);
+  shipMigrations(wasmSchema, options?.migrations);
   return createAppForTables(
     Object.keys(normalizedDefinition),
     wasmSchema,
@@ -2156,25 +2178,29 @@ export function defineApp(
  *
  * @example
  * ```typescript
- * const app = s.defineSliceableApp(schema);
+ * const app = s.defineSliceableApp(schema, { migrations });
  * export const orgApp = app.slice("teams", "projects", "members");
  * ```
  */
 export function defineSliceableApp<const TSchema extends Schema<any>>(
   definition: TSchema,
+  options: DefineAppOptions,
 ): SliceableApp<TSchema>;
 export function defineSliceableApp<const TSchema extends SchemaDefinition>(
   definition: TSchema &
     ValidateSchemaRefs<TSchema> &
     ValidateSchemaColumnNames<TSchema> &
     ValidateSchemaTransformContexts<TSchema>,
+  options: DefineAppOptions,
 ): SliceableApp<Schema<TSchema>>;
 export function defineSliceableApp(
   definition: SchemaDefinition | Schema<any>,
+  options: DefineAppOptions,
 ): SliceableApp<Schema<SchemaDefinition>> {
   const normalizedDefinition = definition as unknown as SchemaDefinition;
   const schema = definitionToSchema(normalizedDefinition);
   const wasmSchema = schemaToWasm(schema);
+  shipMigrations(wasmSchema, options?.migrations);
 
   return {
     wasmSchema,

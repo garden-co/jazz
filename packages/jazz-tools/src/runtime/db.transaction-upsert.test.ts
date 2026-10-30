@@ -4,26 +4,32 @@ import { createDb } from "./default-create-db.js";
 import type { Db } from "./db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
 
-const app = s.defineApp({
-  items: s.table(
-    {
-      title: s.string(),
-      note: s.string().default("default note"),
-      tags: s.array(s.string()).default([]),
-    },
-    {},
-  ),
-});
+const app = s.defineApp(
+  {
+    items: s.table(
+      {
+        title: s.string(),
+        note: s.string().default("default note"),
+        tags: s.array(s.string()).default([]),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 
-const requiredArrayApp = s.defineApp({
-  items: s.table(
-    {
-      title: s.string(),
-      tags: s.array(s.string()),
-    },
-    {},
-  ),
-});
+const requiredArrayApp = s.defineApp(
+  {
+    items: s.table(
+      {
+        title: s.string(),
+        tags: s.array(s.string()),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 
 let db: Db | undefined;
 afterEach(async () => {

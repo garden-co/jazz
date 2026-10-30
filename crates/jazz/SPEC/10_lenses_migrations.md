@@ -623,7 +623,7 @@ API/wire boundaries; local resolution happens only at the storage boundary.
 ### 10.7 Stored identities (SQLite engine)
 
 On the SQLite engine the catalogue is the stored names (`_jazz_names`,
-`crates/jazz/layers/db/src/names.rs`) and it syncs as `KnownCatalogue` and
+`crates/jazz/layers/db/src/names.rs`) and it syncs in `Join`, `Welcome` and
 `Catalogue` (ch. 8). There is no second store of identities: a table's
 identity, and each column's, is a name-based UUID (RFC 9562 version 5) of
 the **authority namespace** and the stored table (and stored column) name.
@@ -650,9 +650,53 @@ schema version.
 - A column added again without a lens, under a name an earlier version
   stored in its table, continues the stored column that the last such
   version kept it in, and keeps that column's identity, only if its type is
-  the recorded one. Otherwise it gets a stored name no version uses, which
-  gives it a new identity. A column a lens adds always starts a new stored
-  column, because the lens says the source lacks it.
+  the recorded one. Otherwise it starts a new stored column, which gives it
+  a new identity. A column a lens adds always starts a new stored column,
+  because the lens says the source lacks it.
+- A new stored column's name is derived, never minted: a column `name`
+  that version `v` introduces (a column of a new table, one a lens adds or
+  copies, one whose type changed, one added without a lens that continues
+  no stored column) is stored as `name~` and the first six hex digits of
+  BLAKE3 over the length-prefixed parts `"column"`, the 16 bytes of `v`'s
+  compatibility id, and `name`. A table a lens adds is stored as `name~`
+  and the same hash over `"table"`, `v`'s compatibility id and `name`. The
+  compatibility id is the version id of `v` with its columns sorted by
+  name and without merge strategies or indexes: versions that differ only
+  in those are compatible (deployment connects them with an empty lens),
+  share it, and so name what they introduce alike, whichever a store
+  admits first. A column or table a version
+  keeps from its source (untouched or renamed) keeps the source's stored
+  one.
+- The app's lenses make the names agree. An app ships its schema versions
+  and the lenses between them (`DbConfig::with_migrations`; the JSON a
+  deployment publishes, which `jazz-tools validate` and `deploy` write to
+  `migrations/index.ts` beside `schema.ts`, and which TypeScript apps pass
+  to `defineApp`). A store opening, or viewing, a version it has not
+  admitted first admits the versions on a lens path to it, starting at one
+  it admitted or at the app's first version, as the authority admitted
+  them. Of several lenses into a version, every store, the authority
+  included, takes the one from the smallest source version id. A version
+  no lens leads into is reached by an empty lens from the smallest
+  compatible version one does (or the store admitted). Deployment may
+  anchor its empty lens on another member of the compatible group; the
+  names agree either way, since compatible versions share a compatibility
+  id and an empty lens keeps every name. Along those lenses every store derives the same names, whatever
+  else it admitted and in whatever order, so a replica stores a version's
+  columns where its authority does without asking, and the authority's
+  `Catalogue.confirmed` digest only checks it.
+- A version admitted without a lens (a store's first version, or one
+  opened without the app's lenses into it) is named against the store's
+  current version: a table or column of a name an admitted version stored
+  continues it (a column only with its type), and a new table keeps its
+  own name where no admitted version stores one. Those names depend on
+  what the store admitted before. A replica never renames what it stores:
+  if its upstream's catalogue names a version it admitted otherwise, the
+  replica refuses that catalogue ("not supported yet"); its remote reads
+  say why and its local reads go on.
+- Two lineages of one table that share a name collide only if their hashes
+  do (one in 2^24 per pair). A store that admits both refuses the second
+  with a typed `Schema` error; a store that only admits one cannot tell,
+  and its upstream's catalogue then refuses it as above.
 
 This is how the SQLite engine meets `INV-LENS-24`: an identity is never
 reused for another column epoch, and only a compatible re-addition keeps its

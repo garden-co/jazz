@@ -11,7 +11,7 @@ import { deploy, startLocalJazzServer } from "../testing/index.js";
 // pinned for tabs over a browser worker and for React Native foregrounds over
 // the native relay.
 it("waits for the server while offline and answers once it reconnects", async () => {
-  const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) });
+  const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations: "none" });
   const permissions = definePermissions(app, ({ policy }) => {
     policy.notes.allowRead.always();
     policy.notes.allowInsert.always();
@@ -56,7 +56,7 @@ it("waits for the server while offline and answers once it reconnects", async ()
 // A Global wait outlives a disconnect (#3923): it settles once the write
 // reaches the server, and only a caller-chosen timeout ends it early.
 it("keeps a Global wait pending while offline unless the caller sets a timeout", async () => {
-  const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) });
+  const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations: "none" });
   const permissions = definePermissions(app, ({ policy }) => {
     policy.notes.allowRead.always();
     policy.notes.allowInsert.always();

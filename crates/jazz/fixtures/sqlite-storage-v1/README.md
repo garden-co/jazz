@@ -7,13 +7,14 @@ not read bumps `STORAGE_FORMAT` and adds a new corpus beside this one, and
 never rewrites these. Until then format 1 is still moving, so such a change
 re-runs the producer and re-pins the hashes here and in the test instead
 (for example: enum columns stored as tags, per-write timestamps on the wire changed how pending uploads
-are stored, a rejection's reason name changed how fates are recorded, and
-pending uploads moved from one encoded message to a row per op).
+are stored, a rejection's reason name changed how fates are recorded,
+pending uploads moved from one encoded message to a row per op, and
+watermarks became per-sequencer rows).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `c41e383bab8f2147f8dc4c54d88280432e280f0d6c0e25ede11455f5d4bb23e3`.
+  the SQLite file `1e1731ef32ba93f6c2a1d18918a0cbf129d7394c61abd90b9a585af23c5222f9`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `58e68f4080776303153301f21c362f645e76cbfa672946eb137343900335d191`.
+  `df49e79d97b65c175574d29b1b97059e2fc38b3e439160a42e06ec131205adf3`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,
@@ -97,3 +98,14 @@ node's code instead of a reserved local seq range), regenerated it the same
 way. It adds `_n` to every row and history table (history keyed by
 `(id, _b, _n, _seq)`), `sn` to `_jazz_transactions` and `node` to
 `_jazz_lv_via`.
+
+Naming a pending commit's tables and columns by stored names, so a commit no
+longer depends on the schema version that wrote it, dropped
+`_jazz_pending_versions` and re-encoded the pending ops and serializable reads
+(a read now names the version its query is in), which regenerated it the same
+way.
+
+Giving a replicated insert the backwards defaults of the columns its writer's
+lineage dropped, and a replicated upsert the cells it writes only if it
+creates its row (`created`), changed the encoded pending ops, which
+regenerated it the same way.

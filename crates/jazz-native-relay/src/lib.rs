@@ -1056,7 +1056,7 @@ impl NativeRelayHost {
             let mut bytes = [0_u8; 16];
             getrandom::fill(&mut bytes)
                 .map_err(|error| relay_status(RelayError::Entropy(error.to_string())))?;
-            match pool.acquire_fresh(NodeUuid::from_bytes(bytes)) {
+            match pool.acquire_fresh(NodeUuid::random_from(bytes)) {
                 Ok(lease) => return Ok(lease),
                 // CSPRNG collision against a live, reusable, or retired node
                 // is vanishingly unlikely, but never turn one into a lease
@@ -1966,7 +1966,7 @@ impl NativeRelayHost {
                 scope,
                 sqlite_path,
                 identity: DbIdentity {
-                    node: NodeUuid::from_bytes(node),
+                    node: NodeUuid::random_from(node),
                     author,
                 },
                 socket: Some(PrivateRelaySocketSession {
@@ -2198,7 +2198,7 @@ fn fresh_client_identity(author: jazz::ids::AuthorSubject) -> Result<DbIdentity,
     let mut node = [0_u8; 16];
     getrandom::fill(&mut node).map_err(|error| RelayError::Entropy(error.to_string()))?;
     Ok(DbIdentity {
-        node: jazz::ids::NodeUuid::from_bytes(node),
+        node: jazz::ids::NodeUuid::random_from(node),
         author,
     })
 }

@@ -71,6 +71,8 @@ fn open_db() -> Db {
         id_source: None,
         chunk_store: None,
         clock: None,
+        migrations: Default::default(),
+        system_node: None,
     }))
     .expect("open db")
 }

@@ -741,7 +741,8 @@ impl JazzClient {
         let core_schema = crate::schema::JazzSchema::new(&context.schema)
             .map_err(|error| JazzError::Schema(error.to_string()))?;
         let identity = core_identity(&context, client_id(&context)?, default_session.as_ref())?;
-        let config = DbConfig::new(core_schema, identity);
+        let mut config = DbConfig::new(core_schema, identity);
+        config.migrations = context.migrations.clone();
         let db = match context.storage {
             ClientStorage::Memory => Db::open(config).await,
             ClientStorage::Persistent => {
@@ -1837,8 +1838,9 @@ fn client_id(context: &AppContext) -> Result<Uuid> {
     if let Some(id) = context.client_id {
         return Ok(id.0);
     }
+    // Minted nodes are random version-4 UUIDs (INV-DATA-5).
     if context.storage == ClientStorage::Memory {
-        return Ok(Uuid::now_v7());
+        return Ok(Uuid::new_v4());
     }
     if context.data_dir.join(PRE_SQLITE_STORE).exists() {
         return Err(JazzError::UnsupportedStorage(format!(
@@ -1853,7 +1855,7 @@ fn client_id(context: &AppContext) -> Result<Uuid> {
             JazzError::Storage(format!("invalid client id in {}: {error}", path.display()))
         }),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let id = Uuid::now_v7();
+            let id = Uuid::new_v4();
             std::fs::write(&path, id.to_string())?;
             Ok(id)
         }

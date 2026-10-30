@@ -346,7 +346,7 @@ const projectBoardSchema = {
     },
   ),
 };
-const projectBoardApp = s.defineApp(projectBoardSchema);
+const projectBoardApp = s.defineApp(projectBoardSchema, { migrations: "none" });
 
 function resolveBrowserLimitOverrides(): BrowserLimitOverrides {
   const raw = (__JAZZ_REALISTIC_BROWSER_LIMIT_OVERRIDES_JSON__ ?? "").trim();

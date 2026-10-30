@@ -60,14 +60,17 @@ function makeSchema(): WasmSchema {
 }
 
 function makeTodosApp() {
-  return s.defineApp({
-    todos: s.table(
-      {
-        title: s.string(),
-      },
-      {},
-    ),
-  });
+  return s.defineApp(
+    {
+      todos: s.table(
+        {
+          title: s.string(),
+        },
+        {},
+      ),
+    },
+    { migrations: "none" },
+  );
 }
 
 function toBase64Url(value: unknown): string {
