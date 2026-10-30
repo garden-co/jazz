@@ -1387,6 +1387,13 @@ impl PendingQueue {
         self.commits.iter_mut().find(|p| p.tx == tx)
     }
 
+    /// No commit's images can be compared with the upstream's any more.
+    fn forget_expected(&mut self) {
+        for pending in &mut self.commits {
+            pending.expected = None;
+        }
+    }
+
     /// The newest pending commit that writes `row`.
     fn newest(&self, row: &RowKey) -> Option<u64> {
         self.by_row.get(row).and_then(|txs| txs.last().copied())
@@ -7037,6 +7044,14 @@ impl Db {
                             // schema: its pending commits replay on top.
                             Ok(mirrored) => {
                                 rebase |= mirrored;
+                                // The authority may apply commits already
+                                // sent under a version this store just
+                                // took: what it made of them is no image
+                                // of the result, so their rows come whole.
+                                if mirrored {
+                                    let client = inner.client.as_mut().expect("client");
+                                    client.pending.forget_expected();
+                                }
                                 let client = inner.client.as_mut().expect("client");
                                 client.catalogued = true;
                                 client.uncatalogued = None;
