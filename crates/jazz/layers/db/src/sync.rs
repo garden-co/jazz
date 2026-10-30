@@ -3866,7 +3866,8 @@ impl Inner {
     /// version, so a row with a long history reads only the versions asked
     /// for). A chunk binds its keys to the smallest of a few statement sizes
     /// that fits, the rest repeating its last key, so a lone key is one seek
-    /// and every size stays prepared.
+    /// and every size stays prepared. The largest size fits the
+    /// connection's bound-variable limit (100 on a Durable Object).
     fn images_matching<K: Ord>(
         &self,
         table: &str,
@@ -3882,13 +3883,25 @@ impl Inner {
             .iter()
             .map(bind)
             .collect();
+        let Some(arity) = keys.first().map(Vec::len) else {
+            return Ok(Vec::new());
+        };
+        let variables = self
+            .conn
+            .limit(rusqlite::limits::Limit::SQLITE_LIMIT_VARIABLE_NUMBER)
+            .map_err(storage)?;
+        let largest = (usize::try_from(variables).unwrap_or(0) / arity).clamp(1, SIZES[3]);
+        let sizes: Vec<usize> = SIZES
+            .into_iter()
+            .filter(|size| *size < largest)
+            .chain([largest])
+            .collect();
         let mut images = Vec::new();
-        for chunk in keys.chunks(SIZES[SIZES.len() - 1]) {
-            let size = SIZES
-                .into_iter()
-                .find(|size| *size >= chunk.len())
+        for chunk in keys.chunks(largest) {
+            let size = *sizes
+                .iter()
+                .find(|size| **size >= chunk.len())
                 .expect("a chunk fits the largest size");
-            let arity = chunk[0].len();
             let filter = match (arity, size) {
                 (1, 1) => "id = ?1".to_owned(),
                 (1, _) => {
@@ -3951,14 +3964,19 @@ impl Inner {
             .iter()
             .map(|version| (*version, Vec::new()))
             .collect();
-        let images =
+        // A current table holds a version or two of a row, read whole by
+        // id; a history may hold thousands, so it reads only these.
+        let images = if history {
             self.images_matching(table, history, versions.iter().copied(), |(row, at)| {
                 vec![
                     SqlValue::Blob(row.0.as_bytes().to_vec()),
                     SqlValue::Integer(at.n),
                     SqlValue::Integer(at.seq as i64),
                 ]
-            })?;
+            })?
+        } else {
+            self.images_of(table, history, versions.iter().map(|(row, _)| *row))?
+        };
         for image in images {
             // A read: a node no version names yet is not interned.
             let Some(n) = self.known_code(image.by)? else {
