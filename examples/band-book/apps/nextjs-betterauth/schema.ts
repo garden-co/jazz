@@ -87,6 +87,7 @@ const schema = {
       },
     )
     .indexOnly(["pageId", "position"]),
+  // #region rich-text-schema
   // A song sheet page is one rich-text document: lyrics, chords and notes as
   // Markdown. The authority merges concurrent edits to it (SPEC 4 §4.3), so
   // two people rewriting different lines, online or offline, keep both.
@@ -134,6 +135,7 @@ const schema = {
       { workspace: s.rel("workspaces", "workspaceId"), page: s.rel("pages", "pageId") },
     )
     .indexOnly(["pageId"]),
+  // #endregion rich-text-schema
   // Attachment bytes are a large value written with `insertStreaming`. List
   // queries select the metadata columns only, so a page never downloads a
   // file it does not render.

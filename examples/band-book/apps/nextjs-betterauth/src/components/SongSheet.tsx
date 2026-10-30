@@ -62,28 +62,19 @@ function SheetEditor({ sheet, editable }: { sheet: SongSheetRow; editable: boole
 
   // #region rich-text-editor
   useEffect(() => {
-    // Whole-value writes: the first edit goes out at once, then at most one
-    // write every 300 ms while typing. Each write is one version, and the
-    // authority merges it with whatever others wrote meanwhile.
-    let latest: string | null = null;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const write = (body: string) => {
-      latest = body;
-      if (timer) return;
-      db.update(app.songSheets, sheet.id, { body });
-      latest = null;
-      timer = setTimeout(function flush() {
-        timer = null;
-        if (latest !== null) write(latest);
-      }, WRITE_EVERY_MS);
-    };
-
     const editor = new EditorView(mount.current!, {
       state: EditorState.create({
         doc: parseSheet(sheet.body),
         plugins: [
           ...editingPlugins(),
-          markdownSync({ parse: parseSheet, onChange: write }),
+          // Whole-value writes: the first edit goes out at once, then at most
+          // one write every 300 ms while typing. Each write is one version,
+          // and the authority merges it with whatever others wrote meanwhile.
+          markdownSync({
+            parse: parseSheet,
+            writeEvery: WRITE_EVERY_MS,
+            onChange: (body) => db.update(app.songSheets, sheet.id, { body }),
+          }),
           overlays({ anchors: () => db.textAnchors(), onPlaced: setPlaced }),
         ],
       }),
@@ -97,15 +88,12 @@ function SheetEditor({ sheet, editable }: { sheet: SongSheetRow; editable: boole
     });
     setView(editor);
     setState(editor.state);
-    return () => {
-      if (timer) clearTimeout(timer);
-      if (latest !== null) db.update(app.songSheets, sheet.id, { body: latest });
-      editor.destroy();
-    };
+    return () => editor.destroy();
   }, [db, sheet.id]);
 
   // A newer value (someone else's edit, merged by the authority) is applied
-  // as the smallest change, so the cursor stays on the text it was on.
+  // as the smallest change, so the cursor stays on the text it was on, and
+  // edits typed since the last write are kept on top of it.
   useEffect(() => {
     if (!view) return;
     const tr = applyMarkdown(view.state, sheet.body);
@@ -157,7 +145,7 @@ function SheetEditor({ sheet, editable }: { sheet: SongSheetRow; editable: boole
   };
 
   return (
-    <HStack gap={4} align="start" width="100%">
+    <div className="bb-sheet-layout">
       <div className="bb-sheet-main">
         <VStack gap={3} width="100%">
           <HStack gap={2} justify="between" align="center" wrap="wrap">
@@ -219,7 +207,7 @@ function SheetEditor({ sheet, editable }: { sheet: SongSheetRow; editable: boole
         pageId={sheet.pageId}
         name={(account) => memberName(members, account)}
       />
-    </HStack>
+    </div>
   );
 }
 
@@ -284,7 +272,11 @@ function CommentSidebar(props: {
         </VStack>
         {ordered.map((comment) => {
           const spot = spotOf(comment.id);
-          const quote = (comment.range as unknown as TextRange).matched;
+          // The commented words as they read now, or as they were stored.
+          const quote =
+            spot && !spot.orphaned && state
+              ? state.doc.textBetween(spot.from, spot.to, " ")
+              : (comment.range as unknown as TextRange).matched;
           return (
             <Card key={comment.id} padding={3}>
               <VStack gap={1}>
