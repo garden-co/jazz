@@ -5174,10 +5174,14 @@ impl Inner {
     /// relay tells them the authority's seq it knows (its own local seqs
     /// number nothing the authority can check), so a session's snapshot
     /// is one the authority validates against as it is.
-    fn served_through(&self) -> u64 {
+    pub(crate) fn served_through(&self) -> u64 {
         match &self.client {
             Some(client) if self.relays_upstream() => client.known,
-            _ => self.seq,
+            // A held position's commit may still land at or above it.
+            _ => match self.holds.keys().next() {
+                Some(held) => self.seq.min(held - 1),
+                None => self.seq,
+            },
         }
     }
 
@@ -8587,6 +8591,7 @@ impl Db {
         let mut inner = self.inner.borrow_mut();
         let through = inner.served_through();
         let by = inner.served_by();
+        let resettle = std::mem::take(&mut inner.resettle);
         let mut cache: HashMap<(String, RowUuid, Pos), Vec<Image>> = HashMap::new();
         // Rows written since the last tick, with the watch keys they match.
         let written = std::mem::take(&mut inner.since_tick);
@@ -8696,7 +8701,8 @@ impl Db {
                     }
                 }
             }
-            if recheck.is_empty()
+            if !resettle
+                && recheck.is_empty()
                 && masking.is_empty()
                 && inner.sessions[index].idle()
                 && !inner.sessions[index].catalogue_owed
@@ -8761,12 +8767,12 @@ impl Db {
             }
             let mut evictions = Vec::new();
             let mut settled = Vec::new();
-            let subs: Vec<(u64, fanout::Queue, Weak<RefCell<fanout::Group>>, bool)> = inner
+            let subs: Vec<(u64, fanout::Queue, Weak<RefCell<fanout::Group>>, bool, bool)> = inner
                 .sessions[index]
                 .subs
                 .iter_mut()
                 .map(|(id, (q, g, windowed, opened))| {
-                    (*id, q.clone(), g.clone(), *windowed || !*opened)
+                    (*id, q.clone(), g.clone(), *windowed || !*opened, *opened)
                 })
                 .collect();
             let mut images = Vec::new();
@@ -8775,9 +8781,41 @@ impl Db {
             // Branch views opening (or reset) this tick: the head rows that
             // mask base rows they match ship with them.
             let mut opening_masks = Vec::new();
-            for (id, queue, group, list) in subs {
+            // A store settling again tells each session once: one opened
+            // read, unwindowed if it has one, settles through the new
+            // position (its link then is), the rest as they change.
+            let mut ping = resettle
+                .then(|| {
+                    subs.iter()
+                        .filter(|sub| sub.4)
+                        .min_by_key(|sub| sub.3)
+                        .map(|sub| sub.0)
+                })
+                .flatten();
+            for (id, queue, group, list, opened) in subs {
                 let events: Vec<SubscriptionEvent> = queue.borrow_mut().drain(..).collect();
                 if events.is_empty() {
+                    // A released hold moved what this store serves as
+                    // settled: an unchanged result is settled through it.
+                    if opened && ping == Some(id) {
+                        ping = None;
+                        // A window lists its rows on every settle.
+                        let members = list.then(|| group.upgrade()).flatten().map(|group| {
+                            group
+                                .borrow()
+                                .rows
+                                .iter()
+                                .map(|row| *row.id.0.as_bytes())
+                                .collect()
+                        });
+                        settled.push(SyncMessage::Settled {
+                            id,
+                            through,
+                            members,
+                            global: true,
+                            by,
+                        });
+                    }
                     continue;
                 }
                 if events
@@ -10003,6 +10041,17 @@ impl Db {
                 // A resend after a reconnect gets the recorded fate.
                 let known = self.inner.borrow().applied_fate(node, tx)?;
                 let resent = known.is_some();
+                // A part that already landed holds nothing (a hold taken
+                // again for its resend).
+                if resent {
+                    let mut inner = self.inner.borrow_mut();
+                    inner.fixed.remove(&(node, tx));
+                    let before = inner.holds.len();
+                    inner.holds.retain(|_, key| *key != (node, tx));
+                    if inner.holds.len() != before {
+                        inner.resettle = true;
+                    }
+                }
                 // A commit written under a version this server has not
                 // deployed is refused at once, loudly: the app that wrote
                 // it was released ahead of its schema (INV-SYNC-52).
@@ -10665,9 +10714,34 @@ impl Db {
             previous
         };
         let merged: HashSet<RowKey>;
-        let (seq, mark) = {
+        let (seq, mark, prior) = {
             let mut inner = self.inner();
-            let seq = inner.seq + 1;
+            // A cross-shard commit's part lands where all its parts do.
+            let fixed = inner.fixed.remove(&origin);
+            let seq = fixed.unwrap_or_else(|| inner.next_seq());
+            let prior = inner.seq;
+            // It lands under commits accepted since its hold, which wrote
+            // none of its rows: one that did would sit above it.
+            if fixed.is_some() {
+                for op in &ops {
+                    let Some(row) = op.row() else { continue };
+                    let newest = inner
+                        .schema
+                        .stored_table(op.table())
+                        .and_then(|table| inner.newest_seq(table, row))
+                        .map_err(|e| (e, Vec::new()))?;
+                    if newest.is_some_and(|at| at.seq > seq) {
+                        return Err((
+                            Error::new(
+                                ErrorCode::Protocol,
+                                "a row of this cross-shard part was written above its position \
+                                 (holds do not block writers yet)",
+                            ),
+                            Vec::new(),
+                        ));
+                    }
+                }
+            }
             begin_savepoint(&inner.conn, "upload").map_err(|e| (e, Vec::new()))?;
             let mark = inner.changed.borrow().len();
             // The unit's write checks run at its end, grounded (SPEC 7).
@@ -10711,8 +10785,13 @@ impl Db {
                 end_savepoint(&inner.conn, "upload", false).map_err(|e| (e, Vec::new()))?;
                 return Err((error, Vec::new()));
             }
-            inner.seq = seq;
-            (seq, mark)
+            inner.seq = inner.seq.max(seq);
+            let before = inner.holds.len();
+            inner.holds.retain(|_, key| *key != origin);
+            if inner.holds.len() != before {
+                inner.resettle = true;
+            }
+            (seq, mark, prior)
         };
         // The relay's own upload record and the rows the sender hears about
         // are read before the commit is released, so a storage error
@@ -10766,7 +10845,7 @@ impl Db {
                 inner.as_sent.borrow_mut().clear();
                 inner.changed.borrow_mut().truncate(mark);
                 end_savepoint(&inner.conn, "upload", false).map_err(|e| (e, Vec::new()))?;
-                inner.seq = seq - 1;
+                inner.seq = prior;
                 Err((error, Vec::new()))
             }
         }

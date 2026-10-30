@@ -490,8 +490,25 @@ struct Inner {
     authors: RefCell<AuthorCodes>,
     ids: Box<dyn RowIdSource>,
     /// The newest commit seq handed out: the authority's seq, or on a
-    /// replica its own node's counter.
+    /// replica its own node's counter. Seqs are hybrid-clock timestamps
+    /// ([`hlc`]): each one at least the clock's reading, and above every
+    /// position this node handed out or observed.
     seq: u64,
+    /// The wall clock (Unix ms) [`Inner::next_seq`] reads; `None` counts
+    /// positions up from the newest instead (see [`DbConfig::clock`]).
+    clock: Option<Box<dyn Fn() -> u64>>,
+    /// Positions held for commits that land later at a position fixed
+    /// elsewhere (a cross-shard commit's part, at the timestamp all its
+    /// parts share): position → the commit's (node, tx). What this store
+    /// serves as settled stays below the lowest (see
+    /// [`Inner::served_through`]).
+    pub(crate) holds: BTreeMap<u64, ([u8; 16], u64)>,
+    /// Commits to land at a fixed position when they arrive: (node, tx) →
+    /// position.
+    pub(crate) fixed: HashMap<([u8; 16], u64), u64>,
+    /// Settle every live subscription again next tick: a hold was released,
+    /// so what this store serves as settled moved without a write to them.
+    pub(crate) resettle: bool,
     /// A replica's own node code (`_n` of its unsettled versions, see
     /// [`sync::RELAY`]); 0 until it becomes one.
     pub(crate) me: i64,
@@ -1243,6 +1260,10 @@ impl Db {
                     .id_source
                     .unwrap_or_else(|| Box::new(crate::options::ProductionRowIdSource)),
                 seq: 0,
+                clock: config.clock,
+                holds: BTreeMap::new(),
+                fixed: HashMap::new(),
+                resettle: false,
                 me: 0,
                 claims: HashMap::new(),
                 fan: fanout::Fanout::default(),
@@ -1295,6 +1316,72 @@ impl Db {
     pub fn seed_seq_floor(&self, floor: u64) {
         let mut inner = self.inner.borrow_mut();
         inner.seq = inner.seq.max(floor);
+    }
+
+    /// Close this store at `position`: nothing it commits later lands at or
+    /// below it (a hybrid-clock receive). Refused when `position` is
+    /// further ahead of this node's clock than [`HLC_MAX_OFFSET_MS`].
+    pub fn observe_position(&self, position: u64) -> Result<(), Error> {
+        self.inner.borrow_mut().observe(position)
+    }
+
+    /// The position this store serves as settled: its newest, or just below
+    /// its lowest hold.
+    pub fn served_through(&self) -> u64 {
+        self.inner.borrow().served_through()
+    }
+
+    /// Hold a position for commit `(node, tx)`, which lands later at a
+    /// position at or above it (see [`Db::fix_position`]): a cross-shard
+    /// commit's part, prepared. Until it lands, what this store serves as
+    /// settled stays below the hold. Returns the held position.
+    pub fn hold_position(&self, node: [u8; 16], tx: u64) -> u64 {
+        let mut inner = self.inner.borrow_mut();
+        let held = inner.next_seq();
+        inner.seq = held;
+        inner.holds.insert(held, (node, tx));
+        held
+    }
+
+    /// Land commit `(node, tx)` at `position` when it arrives: the
+    /// timestamp every part of its cross-shard commit shares, at or above
+    /// this store's hold for it. Commits this store accepted meanwhile may
+    /// sit above it; none sits in what it served as settled.
+    pub fn fix_position(&self, node: [u8; 16], tx: u64, position: u64) -> Result<(), Error> {
+        let mut inner = self.inner.borrow_mut();
+        if let Some((&held, _)) = inner.holds.iter().find(|(_, key)| **key == (node, tx))
+            && position < held
+        {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                format!("position {position} is below the hold at {held}"),
+            ));
+        }
+        inner.observe(position)?;
+        inner.fixed.insert((node, tx), position);
+        Ok(())
+    }
+
+    /// Settle every live subscription again at the next tick, at the
+    /// position this store serves as settled: a quiet shard closing at a
+    /// position it observed (on request, or on a heartbeat).
+    pub fn settle_subscriptions(&self) {
+        self.inner.borrow_mut().resettle = true;
+    }
+
+    /// The lowest position held for a commit still to land, if any: a read
+    /// or a validation as of a position at or above it waits for it.
+    pub fn lowest_hold(&self) -> Option<u64> {
+        self.inner.borrow().holds.keys().next().copied()
+    }
+
+    /// Drop the hold of commit `(node, tx)` without it landing (its
+    /// cross-shard commit was refused).
+    pub fn release_position(&self, node: [u8; 16], tx: u64) {
+        let mut inner = self.inner.borrow_mut();
+        inner.holds.retain(|_, key| *key != (node, tx));
+        inner.fixed.remove(&(node, tx));
+        inner.resettle = true;
     }
 
     /// Every SQLite store holds complete history; this one is also the
@@ -2223,7 +2310,7 @@ impl Db {
             let mut inner = self.inner();
             let (seq, standalone) = match &inner.tx {
                 Some((seq, _)) => (*seq, false),
-                None => (inner.seq + 1, true),
+                None => (inner.next_seq(), true),
             };
             begin_savepoint(&inner.conn, "w")?;
             let mark = inner.changed.borrow().len();
@@ -2286,7 +2373,7 @@ impl Db {
             }
             begin_savepoint(&inner.conn, "tx")?;
             inner.changed.borrow_mut().clear();
-            let seq = inner.seq + 1;
+            let seq = inner.next_seq();
             inner.tx = Some((seq, BTreeSet::new()));
         }
         let mut tx = MergeableTx { db: self, identity };
@@ -2606,6 +2693,67 @@ impl Db {
         for session in &mut inner.sessions {
             session.owe_catalogue();
         }
+        Ok(())
+    }
+}
+
+/// Commit positions are hybrid-clock timestamps: the wall clock in ms since
+/// [`HLC_EPOCH_MS`] above [`HLC_COUNTER_BITS`] bits of counter, so every
+/// position fits a JS number (Durable Object SQLite returns integers as
+/// one): 42 bits of ms last 139 years, and a node handing out more than
+/// 2,048 in a millisecond runs ahead of its clock until the clock catches
+/// up. Positions of different nodes then compare by time, and every part
+/// of a cross-shard commit can land at one.
+pub const HLC_EPOCH_MS: u64 = 1_735_689_600_000;
+/// The counter bits below the ms of an [`hlc`] position.
+pub const HLC_COUNTER_BITS: u32 = 11;
+/// How far ahead of this node's clock an observed position may be (ms):
+/// further is a peer whose clock (or claim) cannot be trusted.
+pub const HLC_MAX_OFFSET_MS: u64 = 500;
+
+/// The first position at wall-clock time `ms`.
+pub fn hlc(ms: u64) -> u64 {
+    ms.saturating_sub(HLC_EPOCH_MS) << HLC_COUNTER_BITS
+}
+
+/// The wall-clock ms a position was handed out at (or, for a node that ran
+/// ahead, the ms it ran ahead to).
+pub fn hlc_ms(position: u64) -> u64 {
+    (position >> HLC_COUNTER_BITS) + HLC_EPOCH_MS
+}
+
+/// The system clock, in Unix ms.
+pub fn wall_clock_ms() -> u64 {
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
+impl Inner {
+    /// The position the next commit lands at: above every position handed
+    /// out or observed, and no earlier than the clock.
+    pub(crate) fn next_seq(&self) -> u64 {
+        match &self.clock {
+            Some(clock) => (self.seq + 1).max(hlc(clock())),
+            None => self.seq + 1,
+        }
+    }
+
+    /// Note a position a peer named: nothing this node commits later lands
+    /// at or below it. One further ahead of the clock than
+    /// [`HLC_MAX_OFFSET_MS`] is refused.
+    pub(crate) fn observe(&mut self, position: u64) -> Result<(), Error> {
+        if let Some(clock) = &self.clock
+            && position > hlc(clock() + HLC_MAX_OFFSET_MS)
+        {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                format!(
+                    "position {position} is more than {HLC_MAX_OFFSET_MS} ms ahead of this node's clock"
+                ),
+            ));
+        }
+        self.seq = self.seq.max(position);
         Ok(())
     }
 }
@@ -7243,7 +7391,7 @@ impl Db {
         let ops = &batch.ops;
         let (seq, prior, mark) = {
             let mut inner = self.inner();
-            let seq = inner.seq + 1;
+            let seq = inner.next_seq();
             begin_savepoint(&inner.conn, "commit_batch")?;
             let mark = inner.changed.borrow().len();
             inner.defer_checks();
