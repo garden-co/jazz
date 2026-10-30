@@ -3848,42 +3848,44 @@ impl Inner {
 
     /// Every image of each of `rows` in `table` (or its history), read a
     /// chunk of rows per statement. Reads of many rows' images all go
-    /// through here: an opening snapshot ships thousands.
+    /// through here: an opening snapshot ships thousands, a later tick a
+    /// few. A chunk binds its ids to the smallest of a few statement sizes
+    /// that fits, the rest repeating its last id, so a lone row is one
+    /// seek and every size stays prepared.
     fn images_of(
         &self,
         table: &str,
         history: bool,
         rows: impl IntoIterator<Item = RowUuid>,
     ) -> Result<Vec<Image>, Error> {
-        use std::fmt::Write as _;
-        const CHUNK: usize = 512;
+        const SIZES: [usize; 4] = [1, 8, 64, 512];
         // Each row once: a row in two chunks would match twice.
-        let rows: Vec<RowUuid> = rows
+        let rows: Vec<Vec<u8>> = rows
             .into_iter()
             .collect::<BTreeSet<_>>()
             .into_iter()
+            .map(|row| row.0.as_bytes().to_vec())
             .collect();
         let mut images = Vec::new();
-        for chunk in rows.chunks(CHUNK) {
-            let mut ids = String::with_capacity(2 + chunk.len() * 35);
-            ids.push('[');
-            for (i, row) in chunk.iter().enumerate() {
-                if i > 0 {
-                    ids.push(',');
-                }
-                ids.push('"');
-                for byte in row.0.as_bytes() {
-                    let _ = write!(ids, "{byte:02x}");
-                }
-                ids.push('"');
-            }
-            ids.push(']');
-            images.extend(self.images_where(
-                table,
-                history,
-                "id IN (SELECT unhex(value) FROM json_each(?1))",
-                &[&ids],
-            )?);
+        for chunk in rows.chunks(SIZES[SIZES.len() - 1]) {
+            let size = SIZES
+                .into_iter()
+                .find(|size| *size >= chunk.len())
+                .expect("a chunk fits the largest size");
+            let filter = if size == 1 {
+                "id = ?1".to_owned()
+            } else {
+                let placeholders: Vec<String> = (1..=size).map(|i| format!("?{i}")).collect();
+                format!("id IN ({})", placeholders.join(", "))
+            };
+            let last = chunk.last().expect("a chunk is never empty");
+            let params: Vec<&dyn rusqlite::ToSql> = chunk
+                .iter()
+                .chain(std::iter::repeat(last))
+                .take(size)
+                .map(|id| id as &dyn rusqlite::ToSql)
+                .collect();
+            images.extend(self.images_where(table, history, &filter, &params)?);
         }
         Ok(images)
     }
@@ -3974,7 +3976,14 @@ impl Inner {
         keys: impl IntoIterator<Item = (String, RowUuid, Vec<u8>)>,
     ) -> Result<(), Error> {
         let mut by_table: BTreeMap<String, BTreeSet<(RowUuid, Vec<u8>)>> = BTreeMap::new();
-        for (table, row, key) in keys {
+        let baselines = self.client.as_ref().map(|client| &client.baselines);
+        for key in keys {
+            // An image over a pending write's baseline replaces the
+            // baseline, not the stored row.
+            if baselines.is_some_and(|baselines| baselines.contains_key(&key)) {
+                continue;
+            }
+            let (table, row, key) = key;
             by_table.entry(table).or_default().insert((row, key));
         }
         let mut batch = HashMap::new();
