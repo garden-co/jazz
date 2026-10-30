@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::hint::black_box;
 use std::time::Instant;
 
-use jazz::db::{Db, ReadOpts, block_on};
+use jazz::db::{Db, ReadOpts, ReadTier, block_on};
 use jazz::ids::AuthorSubject;
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::records::Value;
@@ -123,6 +123,28 @@ fn all_items(db: &Db) -> oracle::Rows {
     oracle::read(db, &Query::from(ITEMS), ReadOpts::default())
 }
 
+/// A one-shot Remote read, answered by the authority. (`Db::all` reads
+/// the local store whatever the tier, so it cannot be used here.)
+fn remote_items(sim: &Sim, db: &Db) -> oracle::Rows {
+    let query = postcard::to_allocvec(&Query::from(ITEMS)).expect("encode");
+    let rows = match sim
+        .drive(db.all_serialized_query(
+            &query,
+            ReadOpts::for_read_tier(ReadTier::Remote),
+            None,
+            None,
+            None,
+        ))
+        .expect("remote read")
+    {
+        jazz::db::SerializedReadResult::Rows(rows) => rows,
+        _ => unreachable!(),
+    };
+    rows.iter()
+        .map(|row| (row.row_uuid(), oracle::cells(row)))
+        .collect()
+}
+
 /// TxTime minting is strictly monotone, also when the clock stalls or
 /// steps back.
 fn hlc_mint(config: &Config) -> Latencies {
@@ -218,9 +240,13 @@ fn deletion_restore(config: &Config) -> Latencies {
         settle(&sim, sim.db("c2"), &restored);
         sim.settle();
         latencies.record_duration_us(start.elapsed());
+        // c1 holds no live read, and its settled delete keeps no watch
+        // (SPEC 8.5), so its tombstone is a cold copy the restore does not
+        // reach: a local read there still misses it. A Remote one-shot
+        // read covers the row and brings it up to date.
         for node in ["core", "c1", "c2"] {
             assert_eq!(
-                all_items(sim.db(node)),
+                remote_items(&sim, sim.db(node)),
                 BTreeMap::from([(id, item("doomed", 7))]),
                 "{node} reads the restored row"
             );

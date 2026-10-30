@@ -536,7 +536,9 @@ fn a_worker_without_a_server_validates_its_tabs_serializable_commits() {
         let write = block_on(net.tab(0).delete("invites", invite, Default::default())).unwrap();
         net.never_global(net.tab(0), write.mergeable_tx_id());
     });
-    assert_conflict(revoked);
+    // The one-shot snapshot read does not stream the revocation to the tab.
+    // Its worker detects the conflict when validating the uploaded commit.
+    common::assert_serialization_conflict(&revoked.expect_err("worker rejects stale read"));
     let members = net.worker.prepare_query(&members_query("abc")).unwrap();
     assert_eq!(
         block_on(net.worker.all(&members, ReadOpts::default()))
