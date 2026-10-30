@@ -885,3 +885,89 @@ fn one_shot_relay_reuses_its_own_checkpoint() {
     assert_eq!(read_once_via(&[&relay, &server], &cold).len(), 3);
     assert_eq!(*shipped.borrow(), before);
 }
+
+/// Alice reads messages once while Bob later revokes her membership.
+/// The cache stays cold until Alice explicitly reads again, which rechecks access.
+#[test]
+fn one_shot_rows_and_support_go_cold_until_read_again() {
+    let server = seeded(1);
+    let client = open(1, alice());
+    let (up, down, shipped) = pipe();
+    let _connection = block_on(client.connect_upstream(up));
+    server.accept_subscriber(down, alice()).unwrap();
+    assert_eq!(read_once(&server, &client), [id(3, 0)]);
+    let before = *shipped.borrow();
+    block_on(server.delete("memberships", id(2, 0), Default::default())).unwrap();
+    pump(&server, &client);
+    assert_eq!(
+        *shipped.borrow(),
+        before,
+        "no background supporting-row delivery"
+    );
+    assert_eq!(
+        ids(&client, None),
+        [id(3, 0)],
+        "local reads retain the cold result"
+    );
+    assert!(
+        read_once(&server, &client).is_empty(),
+        "remote read reconciles revocation"
+    );
+}
+
+/// Alice's own write settles without subscribing. Bob's later deletion does
+/// not stream to Alice; a live read refreshes it and stays current until dropped.
+#[test]
+fn settled_writes_go_cold_but_live_reads_stay_current() {
+    let server = seeded(1);
+    let client = open(1, alice());
+    let (up, down, _) = pipe();
+    let _connection = block_on(client.connect_upstream(up));
+    server.accept_subscriber(down, alice()).unwrap();
+    assert_eq!(read_once(&server, &client), [id(3, 0)]);
+    block_on(client.update(
+        "messages",
+        id(3, 0),
+        cells(&[("body", Value::String("alice".into()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    pump(&server, &client);
+    assert_eq!(
+        client.pending_upload_count(),
+        0,
+        "write settles without a watch"
+    );
+    block_on(server.delete("messages", id(3, 0), Default::default())).unwrap();
+    pump(&server, &client);
+    assert_eq!(
+        ids(&client, None),
+        [id(3, 0)],
+        "settled write does not retain a watch"
+    );
+    let query = client.prepare_query(&Query::from("messages")).unwrap();
+    let live = block_on(client.subscribe(&query, ReadOpts::default())).unwrap();
+    pump(&server, &client);
+    assert!(ids(&client, None).is_empty());
+    server
+        .seed_settled_mergeable_for_bootstrap(
+            "messages",
+            id(3, 2),
+            AuthorSubject::SYSTEM,
+            cells(&[
+                ("room", Value::Uuid(id(1, 0).0)),
+                ("body", Value::String("bob".into())),
+            ]),
+        )
+        .unwrap();
+    pump(&server, &client);
+    assert_eq!(ids(&client, None), [id(3, 2)]);
+    // A one-shot read overlapping the live one must not extend its lifetime.
+    assert_eq!(read_once(&server, &client), [id(3, 2)]);
+    drop(live);
+    pump(&server, &client);
+    block_on(server.delete("messages", id(3, 2), Default::default())).unwrap();
+    pump(&server, &client);
+    assert_eq!(ids(&client, None), [id(3, 2)]);
+    assert!(read_once(&server, &client).is_empty());
+}

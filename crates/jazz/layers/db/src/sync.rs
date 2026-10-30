@@ -2288,11 +2288,6 @@ struct Follow<'w> {
     followed: &'w mut HashSet<(usize, u64)>,
 }
 
-/// The owner of a session's watches on rows outside its subscriptions:
-/// what its one-shot reads returned and its commits touched. They stay
-/// current until the session ends.
-const SESSION_OWNER: u64 = u64::MAX;
-
 /// The watch on row `id` of stored table `table`.
 fn id_watch(table: &str, id: [u8; 16]) -> u64 {
     wk((
@@ -7818,11 +7813,11 @@ impl Db {
                                 else {
                                     continue;
                                 };
-                                // A refused commit's rows go back to the
-                                // session as this store reverts them.
-                                if fate.is_err() {
-                                    session.touched.extend(rows);
-                                }
+                                // Reconcile the writer at settlement even
+                                // without a live subscription. Acceptance may
+                                // have merged concurrent upstream changes;
+                                // refusal restores the upstream versions.
+                                session.touched.extend(rows);
                                 let outcome = match &fate {
                                     Ok(()) if accepted => {
                                         Outcome::accepted(by, landed.seq, accepted_at)
@@ -9627,12 +9622,6 @@ impl Db {
                     hidden,
                 });
             }
-            // Rows the session's own commits wrote stay current for the
-            // session, in a subscription or not: its pending writes sit on
-            // them (see the fetch above).
-            for (table, row, ..) in &committed {
-                watch.hold(SESSION_OWNER, id_watch(table, *row.0.as_bytes()));
-            }
             // Superseded versions of the client's own commits land in its
             // history, while the row stays readable.
             for (table, row, key, at) in committed {
@@ -10532,22 +10521,15 @@ impl Db {
                         images.extend(found[version].iter().cloned());
                     }
                 }
-                // A fetched row stays current for the rest of the session,
-                // as rows the session's own commits touch do: they back its
-                // open transactions and pending writes. Unlike a
-                // subscription's, they are not resumed after a reconnect.
+                // Deduplicate the supporting-row walk within this answer.
+                // These temporary watches are discarded when it settles;
+                // only live reads keep rows current beyond their answer.
                 let mut extra = Vec::new();
-                let mut watch = std::mem::take(&mut inner.sessions[index].watch);
-                let mut held = std::mem::take(&mut inner.sessions[index].held);
-                if policy.is_some() && pinned.is_none() && history.is_none() {
-                    for image in images.iter().filter(|image| image.table == table) {
-                        let row = RowUuid::from_bytes(image.id);
-                        held.keep(SESSION_OWNER, &table, row, &image.key, true);
-                    }
-                }
+                let mut watch = Watches::default();
+                let mut held = Kept::default();
                 let (mut gone, mut followed) = (Vec::new(), HashSet::new());
                 let mut follow = Follow {
-                    owner: SESSION_OWNER,
+                    owner: id,
                     identity: policy,
                     out: &mut extra,
                     watch: &mut watch,
@@ -10566,10 +10548,6 @@ impl Db {
                         })
                         .flatten();
                     inner.follow_support(&support, image, floor, &mut follow)?;
-                }
-                // Even unchanged roots retain their session watches.
-                for image in &images {
-                    watch.hold(SESSION_OWNER, id_watch(&image.table, image.id));
                 }
                 images.retain(|image| !unchanged.contains(&RowUuid::from_bytes(image.id)));
                 images.extend(extra);
@@ -10617,12 +10595,6 @@ impl Db {
                         }
                     }
                 }
-                for image in &images {
-                    watch.hold(SESSION_OWNER, id_watch(&image.table, image.id));
-                }
-                let session = &mut inner.sessions[index];
-                session.watch = watch;
-                session.held = held;
                 let mut tx_ids = inner.tx_ids(&seqs)?;
                 tx_ids.extend(named);
                 let through = if at.is_empty() {

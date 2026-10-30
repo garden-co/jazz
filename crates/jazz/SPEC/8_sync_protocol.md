@@ -41,7 +41,7 @@ source of truth and names each invariant's tests):
 - `INV-SYNC-11`: A reset after reconnect MUST replace the subscription's whole result (members no longer listed leave) while the server keeps skipping versions the peer is known to hold.
 - `INV-SYNC-12`: A server MUST ship other peers accepted rows only, never another node's pending or refused writes.
 - `INV-SYNC-13`: A server MUST apply the peer identity's read policy before shipping any row image, support row or count to it.
-- `INV-SYNC-14`: When a reader loses read access to a row (through a write or a read-policy change), the server MUST evict it; the replica drops its local copy. Local copies are not a redaction boundary, so eviction is about coherence, not secrecy.
+- `INV-SYNC-14`: When a reader loses read access to a row covered by an active subscription (through a write or a read-policy change), the server MUST evict it; the replica drops its local copy. Cold cached rows are reconciled on the next covering remote read. Local copies are not a redaction boundary, so eviction is about coherence, not secrecy.
 - `INV-SYNC-15`: A serializable commit MUST be decided and applied whole at the authority and reach replicas whole.
 - `INV-SYNC-16`: Mergeable writes MUST apply per column without waiting for other writes.
 - `INV-SYNC-17`: A row image MUST carry its deleted flag, so a replica can tell a deleted row from one it was never sent, including for rows it cached from an ended read.
@@ -485,17 +485,21 @@ it ships again if the reader may still read it (a deleted row ships as its
 deleted version, `INV-SYNC-17`), else it is evicted.
 
 Per session, the server keeps refcounted watches: each live read holds the
-rows of its result and their supporting rows, and the session itself
-(`SESSION_OWNER`) holds the rows its one-shot reads returned and the rows its
-own commits wrote, so those stay current for the rest of the session. A row
-version ships at most once per session across all its reads (`INV-SYNC-8`).
+rows of its result and their supporting rows. One-shot reads collect their
+supporting rows using temporary bookkeeping and retain no watches after
+their answer. Writes reconcile their rows at acceptance or refusal, including
+upstream settlement through a relay, and retain no watches afterward.
+A row version ships at most once per session across all its reads (`INV-SYNC-8`).
 This state lives only in the serving process and is released on disconnect
 (`INV-SYNC-27`).
 
 `Unsubscribe { id }` releases the read's watches. A row no watch holds stops
 being kept current: the replica keeps it as a cold copy, which local reads may
 still return, and a later read that covers it brings it up to date (its
-opening ships what changed, and its `members` drops what left).
+opening ships what changed, and its `members` drops what left). The same
+cold-cache behavior applies after a one-shot answer or a settled write when
+no live read covers the row. Its `since` checkpoint remains usable: a later
+read reconciles changes, deletions and access changes before settling.
 
 ### 8.6 Policy narrowing and eviction
 
@@ -503,8 +507,8 @@ The server applies the session identity's read policy before shipping any
 image, supporting row or count (`INV-SYNC-13`), and ships accepted rows only,
 never another node's pending or refused writes (`INV-SYNC-12`).
 
-When a reader loses read access to a row it holds, through a write or a policy
-change, the server sends `AccessLost { table, id, key, hidden }` and the
+When a reader loses read access to a watched row it holds, through a write
+or a policy change, the server sends `AccessLost { table, id, key, hidden }` and the
 replica drops its copy (`INV-SYNC-14`). `hidden` says the row still exists as
 a version the reader may not read, rather than being gone: in a branch view
 over a base it still overrides the base's row, so the replica keeps a marker
@@ -512,9 +516,10 @@ that masks that row (§8.4). An eviction of a version that still exists keeps
 the session watching the row's id, since the replica may hold the row on
 another branch, and later writes that leave that version unreadable send
 nothing more, whichever of the session's reads watches the id; a version
-that becomes readable ships again. This includes a row the reader's own accepted commit
-wrote and cannot read (a write-only insert): the commit's fate reports its
-acceptance. Local copies are not a redaction boundary; eviction keeps the
+that becomes readable ships again while a live read keeps it watched. A row
+the reader's own accepted commit wrote and cannot read (a write-only insert)
+is reconciled at settlement: the commit's fate reports acceptance without
+creating a persistent watch. Local copies are not a redaction boundary; eviction keeps the
 replica coherent, not secret.
 
 `CheckAllowed { id, action, acting }` asks whether the session would be
