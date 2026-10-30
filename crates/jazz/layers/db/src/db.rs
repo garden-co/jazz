@@ -7002,12 +7002,20 @@ impl Db {
     }
 
     /// A serializable transaction: snapshot reads, validated at commit.
-    /// On a client the snapshot is the position the replica is known
-    /// complete through ([`Inner::frontier`]).
+    /// On a client the snapshot is the position its server served it
+    /// complete through, plus its own unsettled commits: never positions it
+    /// numbered itself, which would hold every authority version.
     pub async fn begin_serializable(&self, id: OpenTransactionId) -> Result<(), Error> {
         let (snapshot, own) = {
             let inner = self.inner.borrow();
-            (inner.frontier(), inner.unsettled_own())
+            let snapshot = match &inner.client {
+                Some(client) => Pos {
+                    n: client.known_n,
+                    seq: client.known,
+                },
+                None => inner.frontier(),
+            };
+            (snapshot, inner.unsettled_own())
         };
         self.begin(
             id,

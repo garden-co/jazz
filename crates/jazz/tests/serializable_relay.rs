@@ -1185,3 +1185,104 @@ fn a_resent_commit_settled_upstream_reaches_global_and_the_tab_commits_on() {
         "an unrelated insert from the tab reaches Global"
     );
 }
+
+/// The authority's seats, as debug strings.
+fn core_seats(net: &Net) -> Vec<String> {
+    let prepared = net.core.prepare_query(&Query::from("seats")).unwrap();
+    block_on(net.core.all(&prepared, ReadOpts::default()))
+        .unwrap()
+        .iter()
+        .map(|row| format!("{row:?}"))
+        .collect()
+}
+
+/// A synced seat the direct client inserted.
+fn synced_seat(net: &Net) -> RowUuid {
+    let mut cells = holder("");
+    cells.insert("show".to_owned(), Value::String("s".to_owned()));
+    let write = block_on(net.direct.insert("seats", cells, Default::default())).unwrap();
+    net.settle(&net.direct, write.mergeable_tx_id()).unwrap();
+    for _ in 0..5 {
+        net.pump();
+    }
+    write.row_uuid()
+}
+
+/// A worker pins its own serializable snapshot while it has no server: at
+/// the authority's position it knows, not one it numbered itself. A server
+/// is added and a foreign update of a seat syncs in; the worker's blind
+/// delete of the seat it never saw updated does not land.
+#[test]
+fn a_serverless_workers_own_snapshot_misses_an_update_synced_after_a_server_is_added() {
+    let mut net = Net::new(0);
+    let _watch = net.watch_seats(&net.worker);
+    let seat = synced_seat(&net);
+    net.worker_offline();
+    net.worker.set_remote_link_hint(RemoteLinkHint::NoServer);
+    for _ in 0..3 {
+        net.pump();
+    }
+    let open = net.begin_pinned(&net.worker);
+    net.worker_online();
+    for _ in 0..10 {
+        net.pump();
+    }
+    let update = block_on(
+        net.direct
+            .update("seats", seat, holder("direct"), Default::default()),
+    )
+    .unwrap();
+    net.settle(&net.direct, update.mergeable_tx_id()).unwrap();
+    for _ in 0..10 {
+        net.pump();
+    }
+    net.drive(
+        net.worker
+            .tx_ref(open)
+            .delete("seats", seat, Default::default()),
+    )
+    .unwrap();
+    if let Ok(receipt) = net.drive(net.worker.commit_serializable_handle(open)) {
+        fate_within_turns(&net, &net.worker, receipt.0);
+    }
+    assert_eq!(core_seats(&net).len(), 1, "the authority kept the update");
+}
+
+/// Offline first: a worker synced a seat and lost its server, and the
+/// authority then accepted a foreign update of it. The serverless worker's
+/// blind delete commits locally, and once a server is added the authority
+/// refuses it: the snapshot was the authority position the worker knew.
+#[test]
+fn a_serverless_workers_own_blind_delete_over_an_update_it_never_synced_is_refused() {
+    let mut net = Net::new(0);
+    let _watch = net.watch_seats(&net.worker);
+    let seat = synced_seat(&net);
+    net.worker_offline();
+    net.worker.set_remote_link_hint(RemoteLinkHint::NoServer);
+    for _ in 0..3 {
+        net.pump();
+    }
+    let update = block_on(
+        net.direct
+            .update("seats", seat, holder("direct"), Default::default()),
+    )
+    .unwrap();
+    net.settle(&net.direct, update.mergeable_tx_id()).unwrap();
+    let open = net.begin_pinned(&net.worker);
+    net.drive(
+        net.worker
+            .tx_ref(open)
+            .delete("seats", seat, Default::default()),
+    )
+    .unwrap();
+    let receipt = net
+        .drive(net.worker.commit_serializable_handle(open))
+        .expect("no local conflict: the worker never saw the update");
+    for _ in 0..5 {
+        net.pump();
+    }
+    net.worker_online();
+    let fate = fate_within_turns(&net, &net.worker, receipt.0).expect("the authority decides");
+    common::assert_serialization_conflict(&fate.unwrap_err());
+    assert_eq!(core_seats(&net).len(), 1, "the authority kept the update");
+}

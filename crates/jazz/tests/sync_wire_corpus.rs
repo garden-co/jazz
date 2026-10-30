@@ -373,7 +373,7 @@ impl Transport for Recording {
 /// over a live base, over a frozen base, and of a head alone, and a hidden
 /// `AccessLost` (a branch view's row whose head version the reader may not
 /// read), and serializable `Commit`s with a snapshot the authority served
-/// and one the writer numbered itself (offline, with no server).
+/// and one a worker with no server numbered.
 const SHAPES: [&str; 11] = [
     "Read/once",
     "Rows/tx_ids",
@@ -717,22 +717,33 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     .unwrap();
     pump(&[&alice, &server, &alice]);
 
-    // Commit (serializable, at a snapshot the writer numbered): a replica
-    // with no server commits on its own, and uploads once it has one.
-    let carol = open(0x57, user(3), false);
-    carol.set_remote_link_hint(RemoteLinkHint::NoServer);
+    // Commit (serializable, at a snapshot a worker numbered): a tab of a
+    // worker with no server pins at the worker's position.
+    let wendy = open(0x57, user(1), false);
+    wendy.set_remote_link_hint(RemoteLinkHint::NoServer);
+    let tab = open(0x58, user(1), false);
+    tab.set_non_durable_client();
+    tab.set_remote_link_hint(RemoteLinkHint::Live);
+    connect(&tab, &wendy, user(1), &recorded);
+    let tab_notes = tab.prepare_query(&Query::from("notes")).unwrap();
     let open_tx = OpenTransactionId::new();
-    block_on(carol.begin_serializable(open_tx)).unwrap();
-    block_on(
-        carol
-            .tx_ref(open_tx)
-            .insert("notes", note(3, vec![10]), InsertOptions::default()),
+    block_on(tab.begin_serializable(open_tx)).unwrap();
+    let _ = drive(
+        &[&tab, &wendy, &tab],
+        tab.tx_ref(open_tx).all_prepared(&tab_notes),
+    );
+    drive(
+        &[&tab, &wendy, &tab],
+        tab.tx_ref(open_tx)
+            .insert("notes", note(1, vec![10]), InsertOptions::default()),
     )
     .unwrap();
-    block_on(carol.commit_serializable_handle(open_tx)).unwrap();
-    connect(&carol, &server, user(3), &recorded);
-    carol.set_remote_link_hint(RemoteLinkHint::Live);
-    pump(&[&carol, &server, &carol]);
+    drive(
+        &[&tab, &wendy, &tab],
+        tab.commit_serializable_handle(open_tx),
+    )
+    .unwrap();
+    pump(&[&tab, &wendy, &tab]);
 
     // A history subscription ships superseded versions, with the commits
     // behind them.
