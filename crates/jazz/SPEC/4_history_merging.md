@@ -18,6 +18,8 @@ Invariant digest:
 - `INV-HIST-9`: `MergeStrategy::Counter` MUST be declared only on non-nullable integer user columns.
 - `INV-HIST-10`: For `MergeStrategy::Counter`, a write MUST travel as its delta from the row image it was made over, and Core MUST add each accepted delta to the current value, so concurrent increments from the same base sum exactly. Core MUST reject a write whose delta would take the counter outside its column type's range rather than wrap, and a write that does not author a merge column MUST NOT replace that column's accepted ops with the writer's snapshot, also across schema versions.
 - `INV-HIST-24`: A text-merging column (`MergeStrategy::Text`, `Markdown` or `Html`) MUST be declared only on a string user column, nullable or not, and MUST store a plain string or NULL; writes to it travel as plain values. Only Core merges: when a version before the write that its writer never saw (§4.6) authored the column, Core MUST three-way merge the value its writer last saw of the column (the newest commit on its chain that authored the column, as that commit sent it, or else the accepted version the chain was built on), the value it holds and the write's value at token boundaries: changes to disjoint parts of the base all apply, a change both sides made applies once, inserts at one point apply in seq order, overlapping pure inserts and deletes union (as do one side's inserts with the other's replacements), and of two overlapping replacements the write sequenced later wins. Otherwise, or when the merge would spend more than a fixed budget of diff steps, the write's value stands as sent. On a nullable column a NULL base merges as the empty string, and a write of NULL or a write over a held NULL stands as sent: the later write wins the whole value. For a version whose value a merge changed, Core MUST also keep that version as its writer sent it, flagged as sent in its state bits, and MUST NOT list, sync or read it as a version.
+- `INV-HIST-25`: A table MAY declare latest-only history retention. Retention MUST NOT change the table's `SchemaVersionId`, the structural `SchemaHash` MUST cover it only when it is latest-only, and a schema MUST fail to compile when a latest-only table declares `branchBy` or a text-merging column.
+- `INV-HIST-26`: For each row of a latest-only table a node MUST keep its newest accepted version and every version above it (its own or a relay's unsettled ones), and MAY drop an older version only once the commit that superseded it has been dispatched. A read that needs a dropped version MUST fail with a typed not-supported error or ship whole, never answer with another version, and a write to a latest-only table is never maybe conflicting.
 - `INV-HIST-11`: Content and deletion state MUST be separate layers; content writes MUST NOT change the deletion register, and a current `DeletionEvent::Deleted` MUST hide the content-current row until a current `DeletionEvent::Restored` reveals it.
 - `INV-HIST-12`: Accepted globally settled versions that become per-layer winners MUST be reflected in `jazz_{table}_global_current` or `jazz_{table}_register_global_current`.
 - `INV-HIST-13`: Re-ingesting the same commit unit with identical version rows in a different order MUST be idempotent and MUST NOT create a conflict.
@@ -779,6 +781,48 @@ area over this chapter's deterministic merge contract. Built-in strategies cover
 the first engine paths; richer set/map/rich-text/custom strategies must still
 produce deterministic, grouping-insensitive merge results and must fail closed
 without wedging authority progress.
+
+### 4.9 History retention
+
+A table keeps full history by default: every accepted version stays in its
+history, for history reads (`history.<table>`), serializable snapshots,
+snapshot references and branch views. A table whose rows are overwritten
+often and whose past is worthless, such as editor presence, can declare
+**latest-only** retention instead (`table.history("latest")`, a public
+`TableSchema` with `history: "latest"`).
+
+Retention is a property of what nodes keep, not of how rows are stored. It
+is not part of the `SchemaVersionId` (ch. 2 §2.4), so a retention change is
+a schema that differs from its predecessor only in its structural hash; it
+deploys without a migration, joined by an empty lens like an index-only
+change. The newest deployed schema decides a stored table's retention.
+Turning latest-only on loses the history a row had, at that row's next
+write, and cannot be undone; turning it off keeps every version from then
+on (`INV-HIST-25`).
+
+A latest-only node keeps each row's newest accepted version and the
+versions above it: its own unsettled writes, or a relay's. The version it
+just superseded stays until the commit that superseded it has been
+dispatched, because write checks, keyed fanout and a replica's settled
+reads under its pending writes read it; older versions are dropped
+(`INV-HIST-26`). Rows are still deleted by tombstones, which a replica
+needs to drop a copy no read covers (`INV-SYNC-17`).
+
+What reads past versions cannot work on a latest-only table:
+
+- branch views read their frozen bases from history, so `branchBy` is
+  refused when the schema compiles;
+- a text-merging column merges a write with the version its writer saw
+  (`INV-HIST-24`), so it is refused when the schema compiles;
+- `history.<table>` reads, serializable transactions, snapshot references
+  and reads at an explicit seq fail with a typed not-supported error;
+- a write is never maybe conflicting: the versions its writer missed are
+  gone, so §4.6's conflict analysis has nothing to compare. Plain columns
+  still apply per cell in arrival order (`INV-HIST-8`) and counters still
+  sum (`INV-HIST-10`).
+
+A subscription that resumes over a latest-only input that changed since it
+settled reopens fresh rather than reading its prior result through history.
 
 ## Open Questions
 

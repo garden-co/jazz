@@ -4,8 +4,8 @@ use jazz::tools::deployment::{
     DeploymentCatalogue, DeploymentError, DeploymentRequest, prepare_deployment,
 };
 use jazz::tools::{
-    ColumnType, Lens, LensOp, LensTransform, PolicyExpr, Schema, SchemaBuilder, SchemaHash,
-    TableName, TablePolicies, TableSchema, Value,
+    ColumnType, HistoryRetention, Lens, LensOp, LensTransform, PolicyExpr, Schema, SchemaBuilder,
+    SchemaHash, TableName, TablePolicies, TableSchema, Value,
 };
 
 fn schema(columns: &[&str]) -> Schema {
@@ -90,6 +90,35 @@ fn initial_and_permission_only_deployments_replace_embedded_permissions() {
         stored.schemas[0], schema,
         "preparation must not mutate the stored catalogue"
     );
+}
+
+#[test]
+fn retention_only_changes_deploy_without_a_migration_in_both_directions() {
+    let full = schema(&[]);
+    let mut latest = full.clone();
+    latest.get_mut(&TableName::from("notes")).unwrap().history = HistoryRetention::Latest;
+    assert_ne!(SchemaHash::compute(&full), SchemaHash::compute(&latest));
+
+    for (from, to) in [(&full, &latest), (&latest, &full)] {
+        let stored = DeploymentCatalogue {
+            schemas: vec![from.clone()],
+            active_schema_hash: Some(SchemaHash::compute(from)),
+            ..Default::default()
+        };
+        let prepared = prepare_deployment(&stored, request(to, std::slice::from_ref(to), vec![]))
+            .expect("a retention change needs no migration");
+        assert_eq!(
+            prepared.active_schema().tables()[0].history,
+            to[&TableName::from("notes")].history
+        );
+        assert!(
+            prepared
+                .migrations()
+                .iter()
+                .all(|lens| lens.forward.ops.is_empty()),
+            "schemas differing only in retention are joined by an empty lens"
+        );
+    }
 }
 
 #[test]

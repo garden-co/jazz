@@ -97,6 +97,12 @@ impl SchemaHash {
                 );
                 hasher.update(&[0]);
             }
+
+            // Full history is not hashed, so existing schemas keep their
+            // hashes; TypeScript's `structuralSchemaHash` mirrors this.
+            if table_schema.history == super::schema::HistoryRetention::Latest {
+                hasher.update(b"history\0latest\0");
+            }
         }
 
         Self(*hasher.finalize().as_bytes())

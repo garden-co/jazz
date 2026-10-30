@@ -82,6 +82,7 @@ fn metadata_schema(
             composite_indexes: Vec::new(),
             policies: allow_all_policies(),
             branch_by: Vec::new(),
+            history: Default::default(),
         },
     )]);
     if include_reference_target {

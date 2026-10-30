@@ -16,8 +16,8 @@ use jazz_types::records::{
 
 use crate::model::public_api::policy::{CmpOp, PolicyValue};
 use crate::model::public_schema::{
-    ColumnDescriptor, ColumnMergeStrategy, ColumnType, Operation, PolicyExpr, Schema, TableName,
-    TableSchema, Value,
+    ColumnDescriptor, ColumnMergeStrategy, ColumnType, HistoryRetention, Operation, PolicyExpr,
+    Schema, TableName, TableSchema, Value,
 };
 use crate::query::{
     RecursionBound, RelationColumnRef, RelationExpr, RelationJoinKind, RelationPredicate,
@@ -658,6 +658,10 @@ fn convert_table(
         }
     }
     converted.merge_strategies = merge_strategies;
+    converted.history = table.history;
+    if table.history == HistoryRetention::Latest {
+        validate_latest_only(name, table)?;
+    }
     converted.read_policy = convert_optional_policy(
         schema,
         table,
@@ -992,6 +996,34 @@ fn validate_payload_enum_field(
         return Err(err(
             path,
             "payload enum v1 fields must be scalar columns; arrays, rows, and nested enums are not supported",
+        ));
+    }
+    Ok(())
+}
+
+/// A latest-only table keeps no superseded versions (SPEC 4 §4.9), so a
+/// feature that reads them is refused when the schema compiles.
+fn validate_latest_only(
+    name: &TableName,
+    table: &TableSchema,
+) -> Result<(), SchemaConversionError> {
+    if !table.branch_by.is_empty() {
+        return Err(err(
+            format!("$.{}.branchBy", name.as_str()),
+            "branchBy is not supported on latest-only tables yet: branch views read frozen bases \
+             from history",
+        ));
+    }
+    if let Some(column) = table.columns.columns.iter().find(|column| {
+        column
+            .merge_strategy
+            .is_some_and(ColumnMergeStrategy::is_text)
+    }) {
+        return Err(column_err(
+            name,
+            column.name.as_str(),
+            "text merging is not supported on latest-only tables yet: Core merges a write with \
+             the version its writer saw, which a latest-only table does not keep",
         ));
     }
     Ok(())
@@ -3471,6 +3503,65 @@ mod tests {
                 .map(|table| table.branch_by.len())
                 .sum::<usize>(),
             2
+        );
+    }
+
+    #[test]
+    fn latest_only_tables_compile_with_their_retention_and_the_same_version() {
+        let table = |latest: bool| {
+            let table = TableSchemaBuilder::new("presence")
+                .column("cursor", ColumnType::Json { schema: None })
+                .column_with_default("moves", ColumnType::Integer, Value::Integer(0));
+            let table = if latest { table.latest_only() } else { table };
+            SchemaBuilder::new().table(table).build()
+        };
+        let full = convert_public_schema(&table(false)).expect("full history compiles");
+        let latest = convert_public_schema(&table(true)).expect("latest-only compiles");
+
+        assert_eq!(full.tables()[0].history, HistoryRetention::Full);
+        assert_eq!(latest.tables()[0].history, HistoryRetention::Latest);
+        assert_eq!(
+            full.version_id(),
+            latest.version_id(),
+            "retention changes what nodes keep, not how rows are stored"
+        );
+    }
+
+    #[test]
+    fn latest_only_tables_refuse_branches_and_text_merges() {
+        let branched = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("presence")
+                    .column("workspace_id", ColumnType::Uuid)
+                    .branch_by("workspace_id")
+                    .latest_only(),
+            )
+            .build();
+        assert_eq!(
+            convert_public_schema(&branched)
+                .expect_err("a latest-only table cannot branch")
+                .to_string(),
+            "$.presence.branchBy: branchBy is not supported on latest-only tables yet: branch \
+             views read frozen bases from history"
+        );
+
+        let merged = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("presence")
+                    .column("note", ColumnType::Text)
+                    .latest_only(),
+            )
+            .build();
+        let mut merged = merged;
+        let table = merged.get_mut(&TableName::new("presence")).unwrap();
+        table.columns.columns[0].merge_strategy = Some(ColumnMergeStrategy::Markdown);
+        assert_eq!(
+            convert_public_schema(&merged)
+                .expect_err("a latest-only table cannot text-merge")
+                .to_string(),
+            "$.presence.note: text merging is not supported on latest-only tables yet: Core \
+             merges a write with the version its writer saw, which a latest-only table does not \
+             keep"
         );
     }
 

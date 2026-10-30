@@ -36,6 +36,11 @@ type StructuralHashFixture = {
     compositeIndexes: string[][];
     hash: string;
   }>;
+  historyCases: Array<{
+    name: string;
+    history: "latest" | null;
+    hash: string;
+  }>;
 };
 
 const portableColumnTypeTags = [
@@ -101,6 +106,35 @@ describe("structuralSchemaHash", () => {
       };
       expect(structuralSchemaHash(schema), entry.name).toBe(entry.hash);
     }
+  });
+
+  it("matches Rust for history retention, hashing full history as before", () => {
+    const hashes = new Map<string, string>();
+    for (const entry of structuralHashFixture.historyCases) {
+      const schema = schemaWithColumnType({ type: "Text" });
+      if (entry.history) schema.values!.history = entry.history;
+      expect(structuralSchemaHash(schema), entry.name).toBe(entry.hash);
+      hashes.set(entry.name, entry.hash);
+    }
+    expect(hashes.get("full")).toBe(structuralSchemaHash(schemaWithColumnType({ type: "Text" })));
+    expect(hashes.get("latest")).not.toBe(hashes.get("full"));
+
+    const latest = schemaWithColumnType({ type: "Text" });
+    latest.values!.history = "latest";
+    expect(wasmSchemasEqual(latest, schemaWithColumnType({ type: "Text" }))).toBe(false);
+  });
+
+  it("carries a table's latest-only retention into the wasm schema through other modifiers", () => {
+    const presence = s
+      .table({ session: s.string(), cursor: s.json() }, {})
+      .history("latest")
+      .indexOnly(["session"]);
+    const app = s.defineApp({ presence, notes: s.table({ body: s.string() }, {}) });
+    expect(app.wasmSchema.presence!.history).toBe("latest");
+    expect(app.wasmSchema.notes!.history).toBeUndefined();
+    expect(() => s.table({ body: s.string() }, {}).history("30d" as unknown as "latest")).toThrow(
+      /supports only "latest"/,
+    );
   });
 
   it("matches Rust-produced defaults, merge strategies, JSON metadata, and branch bindings", () => {

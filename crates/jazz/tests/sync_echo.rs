@@ -94,6 +94,7 @@ fn open_merging(node: u8, author: AuthorSubject) -> Db {
             composite_indexes: Vec::new(),
             policies: allow_all_policies(),
             branch_by: Vec::new(),
+            history: Default::default(),
         },
     )]));
     let identity = DbIdentity {

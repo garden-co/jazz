@@ -59,6 +59,7 @@ export class DefinedTable<
     public readonly indexedColumns?: readonly (keyof TColumns & string)[],
     public readonly branchColumns?: readonly (keyof TColumns & string)[],
     public readonly compositeIndexes?: readonly (readonly (keyof TColumns & string)[])[],
+    public readonly historyRetention?: "latest",
   ) {
     validateTransformDependencies(columns);
     for (const column of Object.keys(columns)) assertUserTableColumnNameAllowed(column);
@@ -83,6 +84,7 @@ export class DefinedTable<
       normalizedColumns,
       this.branchColumns,
       this.compositeIndexes,
+      this.historyRetention,
     );
   }
 
@@ -103,10 +105,14 @@ export class DefinedTable<
     if ((this.compositeIndexes ?? []).some((existing) => JSON.stringify(existing) === key)) {
       throw new Error("table.compositeIndex(...) declares the same index twice.");
     }
-    return new DefinedTable(this.columns, this.relations, this.indexedColumns, this.branchColumns, [
-      ...(this.compositeIndexes ?? []),
-      [...columns],
-    ]);
+    return new DefinedTable(
+      this.columns,
+      this.relations,
+      this.indexedColumns,
+      this.branchColumns,
+      [...(this.compositeIndexes ?? []), [...columns]],
+      this.historyRetention,
+    );
   }
 
   branchBy<const TBranchColumn extends StoredColumnKeys<TColumns>>(
@@ -139,6 +145,29 @@ export class DefinedTable<
       this.indexedColumns,
       normalizedColumns,
       this.compositeIndexes,
+      this.historyRetention,
+    );
+  }
+
+  /**
+   * Keep only each row's latest version, for state that is overwritten
+   * often, like cursors and presence. Older versions are dropped, so the
+   * table cannot be read through history, snapshots or branches, and it
+   * cannot have text-merging columns.
+   */
+  history(retention: "latest"): DefinedTable<TColumns, TRelations> {
+    if (retention !== "latest") {
+      throw new Error(
+        `table.history(...) supports only "latest", not ${JSON.stringify(retention)}.`,
+      );
+    }
+    return new DefinedTable(
+      this.columns,
+      this.relations,
+      this.indexedColumns,
+      this.branchColumns,
+      this.compositeIndexes,
+      retention,
     );
   }
 }
@@ -1987,6 +2016,21 @@ function tableBranchColumns(
   return undefined;
 }
 
+function tableHistory(
+  definition: TableDefinition | DefinedTable<TableDefinition>,
+): "latest" | undefined {
+  if (typeof definition === "object" && definition !== null) {
+    const maybeDefinedTable = definition as {
+      __jazzTableDefinition?: unknown;
+      historyRetention?: "latest";
+    };
+    if (maybeDefinedTable.__jazzTableDefinition === true) {
+      return maybeDefinedTable.historyRetention;
+    }
+  }
+  return undefined;
+}
+
 function tableRelationships(
   definition: TableDefinition | DefinedTable<TableDefinition>,
 ): Relationships {
@@ -2083,6 +2127,7 @@ export function definitionToSchema<TSchema extends SchemaDefinition>(
       const indexedColumns = tableIndexedColumns(tableDefinition);
       const compositeIndexes = tableCompositeIndexes(tableDefinition);
       const branchColumns = tableBranchColumns(tableDefinition);
+      const history = tableHistory(tableDefinition);
       return {
         name: tableName,
         columns: definitionToColumns(tableDefinition),
@@ -2090,6 +2135,7 @@ export function definitionToSchema<TSchema extends SchemaDefinition>(
         ...(indexedColumns ? { indexedColumns } : {}),
         ...(compositeIndexes ? { compositeIndexes } : {}),
         ...(branchColumns ? { branchBy: branchColumns } : {}),
+        ...(history ? { history } : {}),
       };
     }),
   };

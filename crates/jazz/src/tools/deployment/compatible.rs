@@ -10,6 +10,8 @@ pub fn schemas_are_compatible(left: &Schema, right: &Schema) -> bool {
         let mut schema = structural(schema.clone());
         for table in schema.values_mut() {
             table.indexed_columns = None;
+            // Retention changes what nodes keep, not the rows.
+            table.history = Default::default();
             table
                 .columns
                 .columns

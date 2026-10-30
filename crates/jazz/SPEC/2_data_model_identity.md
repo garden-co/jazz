@@ -189,6 +189,11 @@ therefore a new schema version that goes through ordinary catalogue lineage
 publication (ch. 10), which backfills the new index for existing rows; it is
 never a silent in-place respelling of the stored schema.
 `crates/jazz/tests/composite_indexes.rs` pins a plain and two composite ids.
+The canonical bytes do not include a table's history retention
+(ch. 4 §4.9) either: it changes how much history nodes keep, not how a row is
+stored, so a retention change keeps the `SchemaVersionId`. It does change the
+public structural `SchemaHash`, which covers `history` only when a table is
+latest-only, so every schema that keeps full history keeps its hash.
 The canonical bytes deliberately do **not** include read/write
 policies: policies are runtime/catalogue metadata attached to a storage schema
 version, so publishing permissions for the same tables can refresh authorization

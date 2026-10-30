@@ -246,6 +246,7 @@ export function schemaToWasm(schema: Schema): WasmSchema {
         ? { composite_indexes: table.compositeIndexes.map((columns) => [...columns]) }
         : {}),
       ...(table.branchBy ? { branchBy: [...table.branchBy] } : {}),
+      ...(table.history ? { history: table.history } : {}),
       policies: table.policies ? clonePolicies(table.policies) : undefined,
     };
   }
