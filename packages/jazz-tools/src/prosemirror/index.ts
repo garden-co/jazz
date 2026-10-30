@@ -17,3 +17,4 @@ export {
   textPosition,
 } from "./sync.js";
 export { mapOffset } from "./text-map.js";
+export { captureAnchor, captureRange, resolveAnchor, resolveRange } from "./anchors.js";

@@ -52,6 +52,7 @@ import {
   WriteWaitTimeoutError,
 } from "./client.js";
 import { sameSyncStatus, type SyncStatus } from "./sync-status.js";
+import type { TextAnchors } from "./text-anchors.js";
 import {
   type BrowserForegroundNodeLease,
   type RuntimeSource,
@@ -2651,6 +2652,15 @@ export class Db {
    * accepted or rejected yet. The same object is returned until the status
    * changes, so it can back `useSyncExternalStore` directly.
    */
+  /**
+   * Stateless anchors and ranges into text values, such as cursors,
+   * selections and comments on a text column: captured from one value and
+   * found again in later ones by the text around them.
+   */
+  textAnchors(): TextAnchors {
+    return this.runtimeSource.textAnchors();
+  }
+
   getSyncStatus(): SyncStatus {
     const next = this.connection.syncStatus();
     if (this.syncStatusSnapshot && sameSyncStatus(next, this.syncStatusSnapshot)) {

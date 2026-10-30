@@ -323,7 +323,7 @@ fn check_anchor(case: &AnchorCase) -> Result<Vec<String>, String> {
         (Some(old), None) => {
             let (old, position) =
                 marker_position(old).ok_or_else(|| format!("{}: no marker in old", case.name))?;
-            Anchor::capture(&old, 1, position, side)
+            Anchor::capture(&old, Some(1), position, side)
         }
         (None, Some(authored)) => Anchor {
             version: None,
@@ -344,7 +344,7 @@ fn check_anchor(case: &AnchorCase) -> Result<Vec<String>, String> {
         Some((new, at)) => (new, Some(at)),
         None => (case.new.clone(), None),
     };
-    let found = anchor.resolve(&new, 2);
+    let found = anchor.resolve(&new, Some(2));
     expect_found(
         &mut problems,
         expected.map(|at| (at, at)),
@@ -380,7 +380,7 @@ fn check_range(case: &RangeCase) -> Result<Vec<String>, String> {
         (Some(old), None) => {
             let (old, start, end) =
                 range_markers(old).ok_or_else(|| format!("{}: no ‹…› in old", case.name))?;
-            Range::capture(&old, 1, start, end)
+            Range::capture(&old, Some(1), start, end)
         }
         (None, Some(authored)) => Range {
             version: None,
@@ -401,7 +401,7 @@ fn check_range(case: &RangeCase) -> Result<Vec<String>, String> {
         Some((new, start, end)) => (new, Some((start, end))),
         None => (case.new.clone(), None),
     };
-    let found = range.resolve(&new, 2);
+    let found = range.resolve(&new, Some(2));
     let mut problems = Vec::new();
     expect_found(
         &mut problems,

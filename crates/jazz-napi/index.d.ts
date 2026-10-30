@@ -287,6 +287,12 @@ export declare class Write {
   close(): boolean
 }
 
+/** The anchor at `position` (UTF-16 code units) of `text`. */
+export declare function captureTextAnchor(text: string, version: number | undefined | null, position: number, side: JsonValue): JsonValue
+
+/** The range `start..end` (UTF-16 code units) of `text`. */
+export declare function captureTextRange(text: string, version: number | undefined | null, start: number, end: number): JsonValue
+
 export interface DeleteOptions {
   author?: Uint8Array
   attribution?: Uint8Array
@@ -354,6 +360,12 @@ export declare function mintLocalFirstToken(seedB64: string, audience: string, t
 
 /** Exact build/ABI fingerprint for the generated native artifact. */
 export declare function nativeArtifactFingerprint(): string
+
+/** Where `anchor` lands in `text`: `{ position, confidence, ambiguous }`. */
+export declare function resolveTextAnchor(anchor: JsonValue, text: string, version?: number | undefined | null): JsonValue
+
+/** Where `range` lands in `text`: `{ start, end, confidence, ambiguous }`. */
+export declare function resolveTextRange(range: JsonValue, text: string, version?: number | undefined | null): JsonValue
 
 export interface RestoreOptions {
   author?: Uint8Array

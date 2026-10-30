@@ -23,23 +23,47 @@ const HELD_PAIRS: usize = 16;
 /// A span of a text value, found again in later versions by its text and
 /// the text around it. Like an [`crate::Anchor`], it can be captured from a
 /// value a client holds or authored from the current value alone.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase")
+)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Range {
     /// The `$version` of the value `start` and `end` count in, if known.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
     pub version: Option<u64>,
     /// UTF-16 code units from the value's start, if known.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
     pub start: Option<usize>,
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
     pub end: Option<usize>,
     /// Text right before the range (W3C `prefix`).
+    #[cfg_attr(feature = "serde", serde(default))]
     pub before: String,
     /// The text the range covered (W3C `exact`).
     pub matched: String,
     /// Text right after the range (W3C `suffix`).
+    #[cfg_attr(feature = "serde", serde(default))]
     pub after: String,
 }
 
 /// Where a range lands in a value, how sure the match is, and whether
 /// another place matched about as well.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase")
+)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ResolvedRange {
     pub start: usize,
@@ -51,14 +75,14 @@ pub struct ResolvedRange {
 impl Range {
     /// The range `start..end` (UTF-16 code units, clamped and ordered) of
     /// `text`, the value at `version`.
-    pub fn capture(text: &str, version: u64, start: usize, end: usize) -> Self {
+    pub fn capture(text: &str, version: Option<u64>, start: usize, end: usize) -> Self {
         let units: Vec<u16> = text.encode_utf16().collect();
         let (start, end) = (
             start.min(end).min(units.len()),
             end.max(start).min(units.len()),
         );
         Self {
-            version: Some(version),
+            version,
             start: Some(start),
             end: Some(end),
             before: String::from_utf16_lossy(&units[context_start(&units, start)..start]),
@@ -68,14 +92,14 @@ impl Range {
     }
 
     /// Where this range lands in `text`, the value at `version`.
-    pub fn resolve(&self, text: &str, version: u64) -> ResolvedRange {
+    pub fn resolve(&self, text: &str, version: Option<u64>) -> ResolvedRange {
         let text: Vec<u16> = text.encode_utf16().collect();
         let hint = self.start.map(|start| {
             let start = start.min(text.len());
             (start, self.end.unwrap_or(start).clamp(start, text.len()))
         });
         if let (Some((start, end)), Some(at)) = (hint, self.version)
-            && at == version
+            && Some(at) == version
         {
             return ResolvedRange {
                 start,
@@ -266,9 +290,9 @@ mod tests {
     fn a_range_follows_its_text() {
         let text = "Intro. Bring the red van keys. Outro.";
         let start = text.find("the red").unwrap();
-        let range = Range::capture(text, 1, start, start + "the red van keys".len());
+        let range = Range::capture(text, Some(1), start, start + "the red van keys".len());
         let new = "Intro, rewritten. Bring the red van keys. Outro.";
-        let found = range.resolve(new, 2);
+        let found = range.resolve(new, Some(2));
         let at = new.find("the red").unwrap();
         assert_eq!(
             (found.start, found.end),
@@ -288,7 +312,7 @@ mod tests {
             after: String::new(),
         };
         let text = "Monday: Rehearsal at the studio. Tuesday: the studio is closed.";
-        let found = range.resolve(text, 7);
+        let found = range.resolve(text, Some(7));
         let at = text.find("the studio").unwrap();
         assert_eq!((found.start, found.end), (at, at + 10));
         assert!(!found.ambiguous);
@@ -304,7 +328,10 @@ mod tests {
             matched: "the studio".into(),
             after: String::new(),
         };
-        let found = range.resolve("Rehearsal at the studio. Tuesday: the studio is closed.", 7);
+        let found = range.resolve(
+            "Rehearsal at the studio. Tuesday: the studio is closed.",
+            Some(7),
+        );
         assert!(found.ambiguous, "{found:?}");
     }
 }

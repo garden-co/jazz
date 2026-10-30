@@ -1,5 +1,12 @@
+import { textAnchorsFrom, type TextAnchors } from "../runtime/text-anchors.js";
 import { accountRegistryUrl } from "../accounts/context.js";
-import { NapiDb } from "jazz-napi";
+import {
+  NapiDb,
+  captureTextAnchor,
+  captureTextRange,
+  resolveTextAnchor,
+  resolveTextRange,
+} from "jazz-napi";
 import type { JWK } from "jose";
 import type { WasmSchema } from "../drivers/types.js";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
@@ -110,6 +117,15 @@ interface BackendMutationErrorSink {
 }
 
 class BackendRuntimeSource extends RuntimeSource<DbConfig> {
+  override textAnchors(): TextAnchors {
+    return textAnchorsFrom({
+      captureTextAnchor,
+      captureTextRange,
+      resolveTextAnchor,
+      resolveTextRange,
+    });
+  }
+
   private initializedSchemaJson?: string;
   private runtime?: FlushableRuntime;
   private client?: JazzClient;

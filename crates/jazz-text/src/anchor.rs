@@ -28,6 +28,11 @@ const SEARCH_WHOLE_BELOW: f64 = 0.75;
 const MAX_CANDIDATES: usize = 64;
 
 /// Which text an anchor sticks to when someone types exactly at it.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "lowercase")
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Side {
     /// The text before it: typing at the anchor goes after it (a range's
@@ -44,25 +49,45 @@ pub enum Side {
 /// [`Anchor::capture`] records one from a value a client holds. Anyone who
 /// only sees the current value (a tool, an LLM) can author one too, with no
 /// `version` or `position`: just enough text before and after to say where.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase")
+)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Anchor {
     /// The `$version` of the value `position` counts in, if known.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
     pub version: Option<u64>,
     /// UTF-16 code units from the start of that value, if known: a hint
     /// where to look first.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
     pub position: Option<usize>,
     pub side: Side,
     /// Text right before the position (W3C `prefix`). A captured anchor
     /// keeps up to [`CONTEXT_UNITS`], shorter only at the value's start.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub before: String,
     /// Text right after the position (W3C `suffix`). A captured anchor keeps
     /// up to [`CONTEXT_UNITS`], shorter only at the value's end.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub after: String,
 }
 
 /// Where an anchor lands in a value, and how sure the match is: 1 when its
 /// text around it is found unchanged, falling towards 0 as less of it
 /// matches.
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase")
+)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Resolved {
     pub position: usize,
@@ -81,11 +106,11 @@ const AMBIGUOUS_SHARE: f64 = 0.8;
 impl Anchor {
     /// The anchor at `position` (UTF-16 code units, clamped to the value) in
     /// `text`, the value at `version`.
-    pub fn capture(text: &str, version: u64, position: usize, side: Side) -> Self {
+    pub fn capture(text: &str, version: Option<u64>, position: usize, side: Side) -> Self {
         let units: Vec<u16> = text.encode_utf16().collect();
         let position = position.min(units.len());
         Self {
-            version: Some(version),
+            version,
             position: Some(position),
             side,
             before: String::from_utf16_lossy(&units[context_start(&units, position)..position]),
@@ -94,11 +119,11 @@ impl Anchor {
     }
 
     /// Where this anchor lands in `text`, the value at `version`.
-    pub fn resolve(&self, text: &str, version: u64) -> Resolved {
+    pub fn resolve(&self, text: &str, version: Option<u64>) -> Resolved {
         let text: Vec<u16> = text.encode_utf16().collect();
         let hint = self.position.map(|position| position.min(text.len()));
         if let (Some(hint), Some(at)) = (hint, self.version)
-            && at == version
+            && Some(at) == version
         {
             return Resolved {
                 position: hint,
@@ -514,9 +539,9 @@ mod tests {
 
     #[test]
     fn the_same_version_resolves_to_its_position() {
-        let anchor = Anchor::capture("Hello world", 3, 6, Side::After);
+        let anchor = Anchor::capture("Hello world", Some(3), 6, Side::After);
         assert_eq!(
-            anchor.resolve("Hello world", 3),
+            anchor.resolve("Hello world", Some(3)),
             Resolved {
                 position: 6,
                 confidence: 1.0,
@@ -527,9 +552,9 @@ mod tests {
 
     #[test]
     fn an_insert_before_shifts_the_anchor() {
-        let anchor = Anchor::capture("Load-in 2pm. Doors 8pm.", 1, 13, Side::After);
+        let anchor = Anchor::capture("Load-in 2pm. Doors 8pm.", Some(1), 13, Side::After);
         let text = "Load-in 2pm. Soundcheck 6pm. Doors 8pm.";
-        let found = anchor.resolve(text, 2);
+        let found = anchor.resolve(text, Some(2));
         assert_eq!(found.position, at(text, "Doors"));
         assert!(found.confidence > 0.95, "{found:?}");
     }
@@ -537,22 +562,22 @@ mod tests {
     #[test]
     fn typing_at_the_anchor_follows_its_side() {
         let text = "one two";
-        let after = Anchor::capture(text, 1, 4, Side::After);
-        let before = Anchor::capture(text, 1, 4, Side::Before);
+        let after = Anchor::capture(text, Some(1), 4, Side::After);
+        let before = Anchor::capture(text, Some(1), 4, Side::Before);
         let typed = "one XYZtwo";
-        assert_eq!(after.resolve(typed, 2).position, at(typed, "two"));
-        assert_eq!(before.resolve(typed, 2).position, at(typed, "XYZ"));
+        assert_eq!(after.resolve(typed, Some(2)).position, at(typed, "two"));
+        assert_eq!(before.resolve(typed, Some(2)).position, at(typed, "XYZ"));
     }
 
     #[test]
     fn a_deleted_context_orphans_the_anchor() {
         let anchor = Anchor::capture(
             "Intro. The paragraph somebody will delete entirely soon. Outro.",
-            1,
+            Some(1),
             30,
             Side::After,
         );
-        let found = anchor.resolve("Intro. Outro.", 2);
+        let found = anchor.resolve("Intro. Outro.", Some(2));
         assert!(found.confidence < 0.6, "{found:?}");
     }
 }
