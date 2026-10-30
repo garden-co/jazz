@@ -492,6 +492,9 @@ struct Inner {
     /// image stored there had, and the insert that stores them. A sync
     /// batch stores thousands of images of a few tables.
     image_inserts: RefCell<HashMap<(String, bool), (Vec<String>, String)>>,
+    /// While a replica stores a message's images: their rows' current
+    /// images, read at once (see `Inner::begin_current_batch`).
+    current_batch: RefCell<Option<HashMap<(String, RowUuid, Vec<u8>), Option<sync::Image>>>>,
     ids: Box<dyn RowIdSource>,
     /// The newest commit seq handed out: the authority's seq, or on a
     /// replica its own node's counter.
@@ -1326,6 +1329,7 @@ impl Db {
                 last_stamp: (0, 0),
                 authors: RefCell::new(AuthorCodes::default()),
                 image_inserts: RefCell::default(),
+                current_batch: RefCell::default(),
                 ids: config
                     .id_source
                     .unwrap_or_else(|| Box::new(crate::options::ProductionRowIdSource)),
