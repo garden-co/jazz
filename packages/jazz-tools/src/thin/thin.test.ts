@@ -6,7 +6,7 @@ import type { Db } from "../runtime/db.js";
 import { formatAuthSecret } from "../runtime/auth-secret-codec.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "../testing/index.js";
-import { createAccountManager, createDb } from "./index.js";
+import { createAccountManager, createDb, upgradeToLocalFirst } from "./index.js";
 import { LOCAL_FIRST_ISSUER, mintSelfSignedToken } from "./self-signed-token.js";
 
 const app = s.defineApp({
@@ -137,6 +137,42 @@ describe("thin client", () => {
         { timeout: 10_000 },
       )
       .toEqual(["from the replica", "from thin"]);
+  }, 60_000);
+
+  it("upgrades to local-first with the app's live queries already loaded", async () => {
+    const server = await startServer();
+    const secret = formatAuthSecret(new Uint8Array(32).fill(5));
+    const thin = await thinDb(server, secret);
+    const unsubscribe = thin.subscribe(app.notes, () => undefined);
+    await thin.insert(app.notes, { text: "before the upgrade", done: false }).wait({
+      tier: "global",
+    });
+    thin.insert(app.notes, { text: "while upgrading", done: false });
+
+    const local = await upgradeToLocalFirst(thin, async () =>
+      createLocalFirstDb(await localAccountConfig(server.appId, server.url, secret)),
+    );
+    opened.push(local);
+    unsubscribe();
+
+    // The first answer comes from the local store, without asking the server.
+    const first = await new Promise<string[]>((resolve) => {
+      const stop = local.subscribe(
+        app.notes,
+        (rows) => {
+          stop();
+          resolve(rows.map((row) => row.text).sort());
+        },
+        { tier: "local-first" },
+      );
+    });
+    expect(first).toContain("before the upgrade");
+    // The thin Db finished its writes before it shut down.
+    expect((await local.all(app.notes, { tier: "remote" })).map((row) => row.text).sort()).toEqual([
+      "before the upgrade",
+      "while upgrading",
+    ]);
+    await expect(thin.all(app.notes)).rejects.toThrow(/shutting down or closed/);
   }, 60_000);
 
   it("says plainly what it does not support yet", async () => {

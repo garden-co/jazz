@@ -103,6 +103,8 @@ type OneShot = {
 };
 
 type LiveQuery = {
+  /** The runtime query as the client gave it, for {@link ThinRuntime.liveQueryJsons}. */
+  queryJson: string;
   query: Uint8Array;
   includeDeleted: boolean;
   tier: ThinReadTier;
@@ -122,7 +124,7 @@ type Write = {
 };
 
 export class ThinRuntime implements Runtime {
-  private readonly schema: WasmSchema;
+  readonly schema: WasmSchema;
   private readonly schemaBytes: Uint8Array;
   private readonly WebSocketImpl?: WebSocketConstructor;
   private readonly reconnectDelaysMs: readonly number[];
@@ -357,6 +359,7 @@ export class ThinRuntime implements Runtime {
     assertThinReadOptions(optionsJson);
     const handle = this.nextHandle++;
     this.liveQueries.set(handle, {
+      queryJson,
       query: encodeQueryJson(queryJson, this.schema),
       includeDeleted: queryIncludesDeleted(queryJson),
       tier: thinTier(tier),
@@ -376,6 +379,13 @@ export class ThinRuntime implements Runtime {
     if (live.callback) throw new Error("Subscription has already been activated");
     live.callback = onUpdate;
     if (this.bound) this.openLive(live);
+  }
+
+  /** @internal The runtime queries the app is subscribed to now, for an upgrade to warm. */
+  liveQueryJsons(): string[] {
+    return [...this.liveQueries.values()]
+      .filter((live) => live.callback !== undefined)
+      .map((live) => live.queryJson);
   }
 
   unsubscribe(handle: number): void {

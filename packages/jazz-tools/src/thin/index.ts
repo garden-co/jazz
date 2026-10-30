@@ -20,7 +20,7 @@ import { authSecretSeedForMinting } from "../runtime/auth-secret-codec.js";
 import type { Db } from "../runtime/db.js";
 import { LOCAL_FIRST_ISSUER, mintSelfSignedToken } from "./self-signed-token.js";
 import { ThinRuntimeSource } from "./thin-runtime-source.js";
-import type { ThinRuntimeOptions } from "./thin-runtime.js";
+import { ThinRuntime, type ThinRuntimeOptions } from "./thin-runtime.js";
 
 export { ThinRuntimeSource } from "./thin-runtime-source.js";
 export {
@@ -47,6 +47,31 @@ export async function createDb(config: ThinDbConfig): Promise<Db> {
     { ...dbConfig, driver: { type: "memory" } },
     new ThinRuntimeSource(thin),
   );
+}
+
+/**
+ * Move an app from a thin `Db` to a local-first one, once it has loaded the
+ * full client. `open` creates the local-first `Db` for the same account, for
+ * example after `await import("jazz-tools")`. Every query the app is
+ * subscribed to is read into the new `Db` from the server first, so its live
+ * queries answer from local data straight away; then the thin `Db` waits for
+ * its writes and shuts down. The app swaps the returned `Db` in where it held
+ * the thin one.
+ */
+export async function upgradeToLocalFirst(thin: Db, open: () => Promise<Db>): Promise<Db> {
+  const runtime = thin.currentRuntime();
+  if (runtime !== null && !(runtime instanceof ThinRuntime)) {
+    throw new Error("upgradeToLocalFirst takes a Db created by jazz-tools/thin");
+  }
+  const next = await open();
+  try {
+    if (runtime) await next.prefetchRuntimeQueries(runtime.schema, runtime.liveQueryJsons());
+  } catch (error) {
+    await next.shutdown();
+    throw error;
+  }
+  await thin.shutdown({ waitForSync: true });
+  return next;
 }
 
 /**
