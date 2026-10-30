@@ -250,7 +250,9 @@ pub fn client_migrations_module(source: &str) -> Result<crate::db::Migrations, S
         .split_once("export const migrations: ClientMigrations =")
         .map(|(_, rest)| rest.trim().trim_end_matches(';').trim_end())
         .ok_or("migrations module: no `export const migrations: ClientMigrations =`")?;
-    lowered_client_migrations(Some(json.as_bytes()))
+    lowered_client_migrations(Some(json.as_bytes())).map_err(|error| {
+        format!("{error} (was the module reformatted? regenerate it with `jazz-tools validate`)")
+    })
 }
 
 /// `config` shipping the bundle in `migrations` (JSON, see

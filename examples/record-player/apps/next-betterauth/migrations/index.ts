@@ -2,6 +2,9 @@
 // `jazz-tools validate` and `deploy` rewrite it.
 import type { ClientMigrations } from "jazz-tools";
 
+// JSON, which Rust apps read too: formatters leave it as it is.
+// biome-ignore format: generated JSON
+// prettier-ignore
 export const migrations: ClientMigrations = {
   "schemas": [
     {

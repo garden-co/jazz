@@ -677,8 +677,10 @@ schema version.
   them. Of several lenses into a version, every store, the authority
   included, takes the one from the smallest source version id. A version
   no lens leads into is reached by an empty lens from the smallest
-  compatible version one does (or the store admitted), as deployment
-  connects compatible versions. Along those lenses every store derives the same names, whatever
+  compatible version one does (or the store admitted). Deployment may
+  anchor its empty lens on another member of the compatible group; the
+  names agree either way, since compatible versions share a compatibility
+  id and an empty lens keeps every name. Along those lenses every store derives the same names, whatever
   else it admitted and in whatever order, so a replica stores a version's
   columns where its authority does without asking, and the authority's
   `Catalogue.confirmed` digest only checks it.
