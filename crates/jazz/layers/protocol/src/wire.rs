@@ -46,6 +46,9 @@ pub const FEATURE_AUTHORIZATION_SCOPE_VIEWS: WireFeatures = 1 << 7;
 /// link.  This is a transport-admission capability only: a peer's advertised
 /// role and semantic frames never create the capability.
 pub const FEATURE_SCOPE_ISOLATED_CLIENT_RELAY: WireFeatures = 1 << 9;
+/// The peer is a thin client, or serves thin clients: it exchanges
+/// [`WireFrame::ThinRequest`] and [`WireFrame::ThinResponse`] (SPEC 8.14).
+pub const FEATURE_THIN_RESULTS: WireFeatures = 1 << 10;
 
 /// Bitset of optional protocol features advertised by one peer.
 pub type WireFeatures = u64;
@@ -61,6 +64,12 @@ pub enum WireFrame {
     Channel(WireChannelEnvelope),
     /// Receiver-consumption byte grant. Postcard-v1 enum tag 3 within wire v6.
     ChannelCredit(WireChannelCredit),
+    /// A thin client's request. Postcard-v1 enum tag 4 within wire v6; only
+    /// after both peers negotiated [`FEATURE_THIN_RESULTS`].
+    ThinRequest(crate::thin::ThinRequest),
+    /// The server's answer to a thin request. Postcard-v1 enum tag 5 within
+    /// wire v6; only after both peers negotiated [`FEATURE_THIN_RESULTS`].
+    ThinResponse(crate::thin::ThinResponse),
 }
 
 /// Which independently bounded transport resource this grant releases.
@@ -543,6 +552,11 @@ pub fn validate_frames_for_artifact_corpus(
             WireFrame::Error(_) => {}
             WireFrame::ChannelCredit(_) => {
                 return Err("credit frames require a persistent admitted endpoint".to_owned());
+            }
+            WireFrame::ThinRequest(_) | WireFrame::ThinResponse(_) => {
+                if negotiated_features & FEATURE_THIN_RESULTS == 0 {
+                    return Err("thin frames require the thin results feature".to_owned());
+                }
             }
         }
     }

@@ -10,7 +10,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::runtime::ServerLinkAdmission;
-use crate::runtime::{CommitUnitTrust, ConnectionSessionContext};
+use crate::runtime::{
+    CommitUnitTrust, ConnectionSessionContext, ServerRuntimeHandle, ServerSession,
+};
 use axum::{
     extract::State,
     extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code},
@@ -721,7 +723,12 @@ async fn handle_ws_connection(
         }
     };
 
-    let negotiated = match negotiate_wire(&remote_hello, current_wire_features()) {
+    // Thin clients (SPEC 8.14) are served on the same route: a client that
+    // advertises thin results is answered with results, not sync.
+    let negotiated = match negotiate_wire(
+        &remote_hello,
+        current_wire_features() | jazz::wire::FEATURE_THIN_RESULTS,
+    ) {
         Ok(negotiated) => negotiated,
         Err(error) => {
             send_ws_error(&mut socket, error).await;
@@ -795,17 +802,24 @@ async fn handle_ws_connection(
                 return;
             }
         };
-    let session = match core_server_shell
-        .open_with_session_context(
-            admission.identity,
-            admission.claims,
-            admission.trust,
-            negotiated.features,
-            session_context,
-            link_admission,
-        )
-        .await
-    {
+    let thin = negotiated.features & jazz::wire::FEATURE_THIN_RESULTS != 0;
+    let opened = if thin {
+        core_server_shell
+            .open_thin_session(admission.identity, admission.claims, admission.trust)
+            .await
+    } else {
+        core_server_shell
+            .open_with_session_context(
+                admission.identity,
+                admission.claims,
+                admission.trust,
+                negotiated.features,
+                session_context,
+                link_admission,
+            )
+            .await
+    };
+    let session = match opened {
         Ok(session) => session,
         Err(error) => {
             send_ws_error(
@@ -1003,6 +1017,13 @@ async fn handle_ws_connection(
                             break;
                         }
                     };
+                    if thin {
+                        if let Err(error) = receive_thin_frames(&core_server_shell, session, frames) {
+                            queue_ws_error(&writer_tx, error);
+                            break 'connection;
+                        }
+                        continue;
+                    }
                     if let Err(error) = core_server_shell.receive_wire_frames(session, frames) {
                         queue_ws_error(&writer_tx, WireError::new(WireErrorCode::Backpressure, WireRetry::Later, error));
                         break 'connection;
@@ -1031,6 +1052,32 @@ async fn handle_ws_connection(
         writer.abort();
         let _ = writer.await;
     }
+}
+
+/// Hand a thin client's requests to the runtime. A thin connection carries
+/// nothing else after its `Hello`.
+fn receive_thin_frames(
+    runtime: &ServerRuntimeHandle,
+    session: ServerSession,
+    frames: Vec<Vec<u8>>,
+) -> Result<(), WireError> {
+    for frame in frames {
+        match jazz::wire::decode_frame(&frame) {
+            Ok(WireFrame::ThinRequest(request)) => runtime
+                .receive_thin_request(session, request)
+                .map_err(|error| {
+                WireError::new(WireErrorCode::Internal, WireRetry::Later, error)
+            })?,
+            _ => {
+                return Err(WireError::new(
+                    WireErrorCode::MalformedFrame,
+                    WireRetry::Never,
+                    "a thin connection sends only thin requests",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 // A cancelled socket task must not leave its writer owning the socket or queued catalogue.
@@ -4543,5 +4590,372 @@ mod tests {
             ),
             "idle websocket upgrade must close cleanly under shutdown; observed {outcome:?}"
         );
+    }
+
+    // ---- thin clients (SPEC 8.14) ----------------------------------------
+
+    type TestWs = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    fn private_docs_public_schema() -> Schema {
+        SchemaBuilder::new()
+            .table(
+                PublicTableSchema::builder("docs")
+                    .column("title", ColumnType::Text)
+                    .column("owner", ColumnType::Text)
+                    .policies(public_table_policies().with_select(PolicyExpr::eq_session(
+                        "owner",
+                        vec![
+                            "user".to_owned(),
+                            "identity".to_owned(),
+                            "subject".to_owned(),
+                        ],
+                    ))),
+            )
+            .build()
+    }
+
+    async fn private_docs_state() -> (Arc<ServerState>, Schema) {
+        let source = private_docs_public_schema();
+        let schema = jazz::schema::JazzSchema::new(&source).expect("thin docs schema compiles");
+        let state = ServerBuilder::new(AppId::random())
+            .with_auth_config(AuthConfig {
+                admin_secret: Some("admin-secret".to_owned()),
+                backend_secret: Some("backend-secret".to_owned()),
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory)
+            .with_schema(Schema::new())
+            .with_core_server_shell_schema(schema.clone())
+            .build()
+            .await
+            .expect("build thin test state")
+            .state;
+        (state, source)
+    }
+
+    async fn open_thin_ws(
+        addr: std::net::SocketAddr,
+        state: &Arc<ServerState>,
+        identity: AuthorSubject,
+    ) -> TestWs {
+        open_negotiated_ws_with_prelude_and_features(
+            addr,
+            state,
+            ws_session_prelude(identity),
+            jazz::wire::FEATURE_THIN_RESULTS,
+        )
+        .await
+    }
+
+    async fn send_thin(ws: &mut TestWs, id: u64, op: jazz::thin::ThinOp) {
+        let frame = encode_frame(&WireFrame::ThinRequest(jazz::thin::ThinRequest { id, op }))
+            .expect("encode thin request");
+        let batch = postcard::to_allocvec(&vec![frame]).expect("encode thin batch");
+        ws.send(WsMessage::Binary(batch.into()))
+            .await
+            .expect("send thin request");
+    }
+
+    /// Thin responses until `done` holds for the ones so far.
+    async fn thin_responses_until(
+        ws: &mut TestWs,
+        done: impl Fn(&[jazz::thin::ThinResponse]) -> bool,
+    ) -> Vec<jazz::thin::ThinResponse> {
+        let mut responses = Vec::new();
+        let start = tokio::time::Instant::now();
+        while !done(&responses) {
+            let remaining = WS_PUMP_DEADLINE.saturating_sub(start.elapsed());
+            let message = tokio::time::timeout(remaining, ws.next())
+                .await
+                .unwrap_or_else(|_| panic!("thin responses so far: {responses:?}"))
+                .expect("websocket open")
+                .expect("websocket message");
+            for frame in decode_ws_message(&message) {
+                match frame {
+                    WireFrame::ThinResponse(response) => responses.push(response),
+                    other => panic!("a thin connection received {other:?}"),
+                }
+            }
+        }
+        responses
+    }
+
+    async fn thin_answer(ws: &mut TestWs, id: u64) -> jazz::thin::ThinBody {
+        let responses =
+            thin_responses_until(ws, |responses| responses.iter().any(|r| r.id == id)).await;
+        responses
+            .into_iter()
+            .find(|response| response.id == id)
+            .expect("answer")
+            .body
+    }
+
+    fn doc_cells(title: &str, owner: AuthorSubject) -> Vec<u8> {
+        let (_, owner) = issuer_and_subject(owner);
+        let descriptor = jazz::records::RecordDescriptor::new([
+            ("title", jazz::records::ValueType::String),
+            ("owner", jazz::records::ValueType::String),
+        ]);
+        let record = jazz::records::OwnedRecord::new(
+            descriptor
+                .create(&[
+                    CoreValue::String(title.to_owned()),
+                    CoreValue::String(owner),
+                ])
+                .expect("doc record"),
+            descriptor,
+        );
+        jazz::binding_codec::encode_named_cells(&record).expect("encode doc cells")
+    }
+
+    fn docs_query() -> Vec<u8> {
+        postcard::to_allocvec(&jazz::query::Query::from("docs")).expect("encode docs query")
+    }
+
+    fn titles_of(batches: Vec<jazz::binding_codec::DecodedRowBatch>) -> Vec<String> {
+        let mut titles: Vec<String> = batches
+            .into_iter()
+            .flat_map(|batch| batch.rows)
+            .filter_map(|row| match row.cells.get("title") {
+                Some(CoreValue::String(title)) => Some(title.clone()),
+                _ => None,
+            })
+            .collect();
+        titles.sort();
+        titles
+    }
+
+    async fn bind_thin_schema(ws: &mut TestWs, schema: &Schema) {
+        send_thin(
+            ws,
+            0,
+            jazz::thin::ThinOp::Schema {
+                schema: serde_json::to_vec(schema).expect("encode public schema"),
+            },
+        )
+        .await;
+        assert_eq!(thin_answer(ws, 0).await, jazz::thin::ThinBody::Ok);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_client_reads_results_under_its_own_policies() {
+        use jazz::thin::{ThinBody, ThinOp, ThinReadTier};
+        let (state, schema) = private_docs_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
+
+        let mut alice_ws = open_thin_ws(addr, &state, alice).await;
+        bind_thin_schema(&mut alice_ws, &schema).await;
+        send_thin(
+            &mut alice_ws,
+            1,
+            ThinOp::Insert {
+                table: "docs".to_owned(),
+                row: None,
+                cells: doc_cells("alice private", alice),
+                updated_at_ms: None,
+            },
+        )
+        .await;
+        let ThinBody::Written { seq, .. } = thin_answer(&mut alice_ws, 1).await else {
+            panic!("alice's insert must commit");
+        };
+        assert!(seq > 0);
+
+        send_thin(
+            &mut alice_ws,
+            2,
+            ThinOp::Query {
+                query: docs_query(),
+                include_deleted: false,
+                tier: ThinReadTier::Remote,
+            },
+        )
+        .await;
+        let ThinBody::Rows { rows, relation } = thin_answer(&mut alice_ws, 2).await else {
+            panic!("alice's query must answer rows");
+        };
+        assert!(!relation);
+        assert_eq!(
+            titles_of(jazz::binding_codec::decode_rows(&rows).unwrap()),
+            vec!["alice private".to_owned()]
+        );
+
+        let mut bob_ws = open_thin_ws(addr, &state, bob).await;
+        bind_thin_schema(&mut bob_ws, &schema).await;
+        send_thin(
+            &mut bob_ws,
+            1,
+            ThinOp::Query {
+                query: docs_query(),
+                include_deleted: false,
+                tier: ThinReadTier::Remote,
+            },
+        )
+        .await;
+        let ThinBody::Rows { rows, .. } = thin_answer(&mut bob_ws, 1).await else {
+            panic!("bob's query must answer rows");
+        };
+        assert!(
+            titles_of(jazz::binding_codec::decode_rows(&rows).unwrap()).is_empty(),
+            "bob must not see alice's private doc"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_subscription_receives_results_for_writes_from_other_sessions() {
+        use jazz::thin::{ThinBody, ThinOp, ThinReadTier};
+        let (state, schema) = private_docs_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+
+        let mut reader = open_thin_ws(addr, &state, alice).await;
+        bind_thin_schema(&mut reader, &schema).await;
+        send_thin(
+            &mut reader,
+            7,
+            ThinOp::Subscribe {
+                query: docs_query(),
+                include_deleted: false,
+                tier: ThinReadTier::LocalFirst,
+            },
+        )
+        .await;
+        let opening = thin_responses_until(&mut reader, |responses| {
+            responses
+                .iter()
+                .any(|r| r.id == 7 && matches!(r.body, ThinBody::Event { settled: true, .. }))
+        })
+        .await;
+        for response in &opening {
+            let ThinBody::Event { delta, .. } = &response.body else {
+                panic!("unexpected opening answer {response:?}");
+            };
+            let (added, _) = jazz::binding_codec::decode_subscription_delta_rows(delta).unwrap();
+            assert!(titles_of(added).is_empty());
+        }
+
+        // A second connection for the same user writes; the first one's
+        // live query hears of it.
+        let mut writer = open_thin_ws(addr, &state, alice).await;
+        bind_thin_schema(&mut writer, &schema).await;
+        send_thin(
+            &mut writer,
+            1,
+            ThinOp::Insert {
+                table: "docs".to_owned(),
+                row: Some([0x42; 16]),
+                cells: doc_cells("from elsewhere", alice),
+                updated_at_ms: None,
+            },
+        )
+        .await;
+        assert!(matches!(
+            thin_answer(&mut writer, 1).await,
+            ThinBody::Written { row, .. } if row == [0x42; 16]
+        ));
+
+        let update = thin_responses_until(&mut reader, |responses| {
+            responses.iter().any(|r| match &r.body {
+                ThinBody::Event { delta, .. } => {
+                    let (added, _) =
+                        jazz::binding_codec::decode_subscription_delta_rows(delta).unwrap();
+                    titles_of(added) == vec!["from elsewhere".to_owned()]
+                }
+                _ => false,
+            })
+        })
+        .await;
+        assert!(update.iter().all(|r| r.id == 7));
+
+        send_thin(&mut reader, 8, ThinOp::Unsubscribe { subscription: 7 }).await;
+        let closed =
+            thin_responses_until(&mut reader, |responses| responses.iter().any(|r| r.id == 8))
+                .await;
+        assert!(
+            closed
+                .iter()
+                .any(|r| r.id == 7 && r.body == ThinBody::Closed)
+        );
+        assert!(closed.iter().any(|r| r.id == 8 && r.body == ThinBody::Ok));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_client_must_declare_a_deployed_schema_first() {
+        use jazz::thin::{ThinBody, ThinOp, ThinReadTier};
+        let (state, _) = private_docs_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let mut ws = open_thin_ws(addr, &state, alice).await;
+
+        send_thin(
+            &mut ws,
+            1,
+            ThinOp::Query {
+                query: docs_query(),
+                include_deleted: false,
+                tier: ThinReadTier::Remote,
+            },
+        )
+        .await;
+        assert!(matches!(
+            thin_answer(&mut ws, 1).await,
+            ThinBody::Error { code, .. } if code == "Argument"
+        ));
+
+        send_thin(
+            &mut ws,
+            2,
+            // A schema this server never admitted.
+            ThinOp::Schema {
+                schema: serde_json::to_vec(
+                    &SchemaBuilder::new()
+                        .table(
+                            PublicTableSchema::builder("notes")
+                                .column("body", ColumnType::Text)
+                                .policies(public_table_policies()),
+                        )
+                        .build(),
+                )
+                .expect("encode public schema"),
+            },
+        )
+        .await;
+        assert!(matches!(
+            thin_answer(&mut ws, 2).await,
+            ThinBody::Error { code, .. } if code == "SchemaNotDeployed"
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_connection_refuses_sync_frames() {
+        let (state, _) = private_docs_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let mut ws = open_thin_ws(addr, &state, alice).await;
+        let hello = encode_frame(&WireFrame::Hello(WireHello::current(
+            WirePeerRole::Client,
+            0,
+        )))
+        .expect("encode hello");
+        let batch = postcard::to_allocvec(&vec![hello]).expect("encode batch");
+        ws.send(WsMessage::Binary(batch.into()))
+            .await
+            .expect("send");
+        let message = tokio::time::timeout(WS_PUMP_DEADLINE, ws.next())
+            .await
+            .expect("an answer")
+            .expect("open")
+            .expect("message");
+        assert!(matches!(
+            decode_ws_message(&message).as_slice(),
+            [WireFrame::Error(WireError {
+                code: WireErrorCode::MalformedFrame,
+                ..
+            })]
+        ));
     }
 }

@@ -738,6 +738,45 @@ whose host says it has no server is its sessions' last word: its `Fate` and
 `Settled` carry `by`, its own node, since their `through` counts its
 positions rather than the authority's.
 
+### 8.14 Thin clients
+
+A thin client holds no replica. It negotiates `FEATURE_THIN_RESULTS` in its
+`Hello` on the ordinary `/ws` route, after the same prelude and admission as a
+sync client, and then exchanges only `WireFrame::ThinRequest` and
+`WireFrame::ThinResponse` (postcard tags 4 and 5), outside the ordered
+channels. The server answers a thin connection with no sync session: a thin
+connection that sends any other frame after its `Hello` ends with
+`MalformedFrame`.
+
+- A thin session is served as its admitted identity and claims, exactly as a
+  sync session with that admission is (§8.6): reads see what its policies let
+  it see, and writes are admitted and authorized as `WriteIdentity::Session`.
+  A trusted backend link is served as SYSTEM.
+- The client first declares the schema it was built against
+  (`ThinOp::Schema`, the public schema JSON the bindings open with); the
+  server takes its version id, as a replica opened on that schema would
+  declare it. Every later request is resolved against that admitted version,
+  governed by the current schema's policies, as a sync session's declared
+  version is (§8.9). A version the store has not admitted is refused with
+  `SchemaNotDeployed`; nothing else is served before a version.
+- `Query` answers once with binding-codec row batches (a relation snapshot
+  for a query with array relations). `Subscribe` answers with a stream of
+  binding-codec subscription deltas, the same bytes the WASM and Node
+  bindings hand to JavaScript, until `Unsubscribe` (answered `Closed` on the
+  live query's id, then `Ok`) or an error that ends it.
+- `Insert`, `Update`, `Upsert` and `Delete` commit on the authority and answer
+  `Written` with the row and the server seq of the version they left; the
+  write is globally durable when the answer arrives. A client-chosen row id
+  is honored on insert.
+- While no permissions head is published, an untrusted thin session's
+  requests are answered `NotReady`.
+- A thin session's answers share its connection's egress budget: a live
+  query's events wait on the owner while the budget is spent.
+
+Not supported yet: transactions, branch and snapshot views, large-value
+streaming, and offline writes. A thin client asks for those by upgrading to a
+replica.
+
 ## Open Questions
 
 - 🔶 [#1784](https://github.com/garden-co/jazz/issues/1784) — Relay aggregation of equal reads from several sessions onto one upstream read, and coverage between reads.
