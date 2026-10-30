@@ -45,6 +45,7 @@ use crate::values::CachedRow;
 use crate::values::query_error;
 use crate::values::{STATE_AS_SENT, STATE_DELETED, STATE_NO_CONTENT};
 use rusqlite::OptionalExtension;
+use rusqlite::types::Value as SqlValue;
 use std::cell::Cell as StdCell;
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -518,6 +519,42 @@ fn relay_older(held: Pos, image: Pos) -> bool {
     !image.accepted() && held > image
 }
 
+/// The node whose counter a position counts: `None` for the authority
+/// (later, a shard), else the node that numbered it (a relay's own order).
+pub type Sequencer = Option<[u8; 16]>;
+
+/// A position per sequencer. A watermark, cut or snapshot names one seq for
+/// each sequencer it covers (SPEC 8 §8.2), so it extends to several
+/// sequencers when sharding lands. Every one names a single sequencer today.
+pub type Positions = Vec<(Sequencer, u64)>;
+
+/// `seq` counted at `by`, as [`Positions`].
+pub fn positions(by: Sequencer, seq: u64) -> Positions {
+    vec![(by, seq)]
+}
+
+/// The one position `positions` names (`None` for none). Positions across
+/// more than one sequencer are refused: nothing reads them yet.
+pub fn single_position(positions: &[(Sequencer, u64)]) -> Result<Option<(Sequencer, u64)>, Error> {
+    match positions {
+        [] => Ok(None),
+        [one] => Ok(Some(*one)),
+        _ => Err(Error::new(
+            ErrorCode::Protocol,
+            "positions across more than one sequencer are not supported yet",
+        )),
+    }
+}
+
+/// The one position a message must name.
+pub fn required_position(
+    positions: &[(Sequencer, u64)],
+    what: &str,
+) -> Result<(Sequencer, u64), Error> {
+    single_position(positions)?
+        .ok_or_else(|| Error::new(ErrorCode::Protocol, format!("{what} names no position")))
+}
+
 /// One stored row version: the unit of replication.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Image {
@@ -594,6 +631,27 @@ fn rows_messages(mut images: Vec<Image>, tx_ids: Vec<TxName>, limit: usize) -> V
 /// holds its own clock's, so the authority's time travels in the Fate
 /// ([`Outcome::Accepted`]).
 const STAMPS: [&str; 2] = ["$createdAt", "$updatedAt"];
+
+/// `message` with each occurrence of the name `from` that is a whole name
+/// (not part of a longer one) spelled `to`.
+fn replace_name(message: &str, from: &str, to: &str) -> String {
+    let part = |c: char| c.is_alphanumeric() || c == '_' || c == '~';
+    let mut out = String::with_capacity(message.len());
+    let mut rest = message;
+    while let Some(at) = rest.find(from) {
+        let before = rest[..at].chars().next_back();
+        let after = rest[at + from.len()..].chars().next();
+        out.push_str(&rest[..at]);
+        if before.is_some_and(part) || after.is_some_and(part) {
+            out.push_str(from);
+        } else {
+            out.push_str(to);
+        }
+        rest = &rest[at + from.len()..];
+    }
+    out.push_str(rest);
+    out
+}
 
 /// What a writer and the authority must agree on for a row version the
 /// authority does not ship back (see [`AsWritten`]): everything in an image but
@@ -680,46 +738,59 @@ impl AsWritten {
 /// How the authority decided a commit (see [`SyncMessage::Fate`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Outcome {
-    /// The commit landed at server seq `seq`. `accepted_at` is the time
+    /// The commit landed at `at`, per sequencer. `accepted_at` is the time
     /// (Unix ms) the authority's clock stamped its writes with: the
     /// `$createdAt`/`$updatedAt` of every write without an explicit time.
     /// `None` when the authority no longer knows it (a resend's recorded
     /// fate), which `as_written` is then empty for.
     ///
     /// `as_written`: the rows of the commit the authority did not ship
-    /// because their version at `seq` is likely the writer's own image of
+    /// because their version at `at` is likely the writer's own image of
     /// them: the commit applied unmerged over the very version its writer
     /// built on (a [`WireBase`], or none for an insert of a new row), and
     /// that version is still current (SPEC 8 §8.3). The writer stamps its
     /// image at `accepted_at` where its own clock stamped it and installs
     /// it if its digest matches; otherwise it asks for the row whole.
     Accepted {
-        seq: u64,
+        at: Positions,
         accepted_at: Option<u64>,
         as_written: Vec<AsWritten>,
     },
     /// The commit was refused, for `error`, and landed nowhere. The rows
     /// it wrote shipped back ahead of the fate as they are, and the session
-    /// is complete through server seq `through` with them: a retry's
-    /// snapshot reads at it, so it sees what the commit conflicted with.
-    Refused { through: u64, error: WireError },
+    /// is complete through `through` with them: a retry's snapshot reads
+    /// at it, so it sees what the commit conflicted with.
+    Refused {
+        through: Positions,
+        error: WireError,
+    },
 }
 
 impl Outcome {
     /// An accepted commit that holds no rows back.
-    fn accepted(seq: u64, accepted_at: Option<u64>) -> Self {
+    fn accepted(by: Sequencer, seq: u64, accepted_at: Option<u64>) -> Self {
         Outcome::Accepted {
-            seq,
+            at: positions(by, seq),
             accepted_at,
             as_written: Vec::new(),
         }
     }
 
+    /// Where the commit landed once accepted, or how far the session was
+    /// complete when refused: the outcome's one position.
+    pub fn position(&self) -> Result<(Sequencer, u64), Error> {
+        let (Outcome::Accepted { at: positions, .. }
+        | Outcome::Refused {
+            through: positions, ..
+        }) = self;
+        required_position(positions, "a fate")
+    }
+
     /// The seq the commit landed at, once accepted.
-    pub fn seq(&self) -> Option<u64> {
+    pub fn seq(&self) -> Result<Option<u64>, Error> {
         match self {
-            Outcome::Accepted { seq, .. } => Some(*seq),
-            Outcome::Refused { .. } => None,
+            Outcome::Accepted { .. } => Ok(Some(self.position()?.1)),
+            Outcome::Refused { .. } => Ok(None),
         }
     }
 
@@ -780,14 +851,16 @@ impl From<WireWrite> for WireOp {
 }
 
 impl WireOp {
-    /// The table the op writes, as the sender's schema names it.
+    /// The stored table the op writes.
     pub fn table(&self) -> &str {
         self.write.table()
     }
 }
 
-/// A replicated write. `at`: its explicit provenance timestamp (Unix ms),
-/// if the writer gave one; each write in a commit carries its own.
+/// A replicated write, by stored table and column names (branch selectors
+/// too), whichever schema version wrote it; an insert names every column of
+/// that version. `at`: its explicit provenance timestamp (Unix ms), if the
+/// writer gave one; each write in a commit carries its own.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum WireWrite {
     Insert {
@@ -808,6 +881,10 @@ pub enum WireWrite {
         table: String,
         row: [u8; 16],
         cells: BTreeMap<String, Value>,
+        /// What the columns `cells` leaves out take if the upsert creates
+        /// the row: its writer's version's defaults and the backwards
+        /// defaults of columns its lineage dropped (SPEC 8.9).
+        created: BTreeMap<String, Value>,
         target: WireTarget,
         at: Option<u64>,
     },
@@ -833,7 +910,7 @@ pub enum WireWrite {
 }
 
 impl WireWrite {
-    /// The table the write names, as the sender's schema names it.
+    /// The stored table the write names.
     pub fn table(&self) -> &str {
         match self {
             WireWrite::Insert { table, .. }
@@ -850,6 +927,10 @@ impl WireWrite {
 /// snapshot, with their server versions.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WireRead {
+    /// The schema version whose names `query` uses (the one the reading
+    /// view was in): reads stay in a version, which orders their results
+    /// and decides their lens, while writes travel by stored names.
+    pub version: [u8; 16],
     pub query: Query,
     pub binding: BTreeMap<String, Value>,
     /// The read listed deleted rows too (`includeDeleted`).
@@ -866,11 +947,10 @@ pub enum WireKind {
     /// `own`: the sender's own commits (by local seq) that were unsettled
     /// when the transaction began; its snapshot includes them, and the
     /// authority resolves each to where it settled.
-    /// `by`: the node whose positions `snapshot` counts (`None`: the
-    /// authority's), as the sender's server served them when it pinned it.
+    /// `snapshot`: where it read, per sequencer, as the sender's server
+    /// served it when it pinned it.
     Serializable {
-        snapshot: u64,
-        by: Option<[u8; 16]>,
+        snapshot: Positions,
         reads: Vec<WireRead>,
         own: Vec<u64>,
     },
@@ -1029,21 +1109,19 @@ pub enum SyncMessage {
     ResendWhole {
         rows: Vec<(String, [u8; 16], Vec<u8>, u64)>,
     },
-    /// A read's result is complete through server seq `through`.
+    /// A read's result is complete through `through`, per sequencer (a
+    /// replica with no server numbers its versions at its own node).
     /// `members`: the result's rows, in order: always for a one-shot
     /// read, and for a live one's opening and window changes when it is
     /// limited or its opening could not tell what left it; the replica
     /// drops cached rows `members` leaves out. `global`: the result is the
     /// global authority's (directly, or through relays that settle by
-    /// their upstream), not a relay's own store. `by`: the node whose
-    /// positions `through` counts, when not the authority's (a replica's
-    /// with no server, which numbers its versions at its own node).
+    /// their upstream), not a relay's own store.
     Settled {
         id: u64,
-        through: u64,
+        through: Positions,
         members: Option<Vec<[u8; 16]>>,
         global: bool,
-        by: Option<[u8; 16]>,
     },
     /// `id`: the writer's, at every hop (a relay forwards its sessions'
     /// commits under theirs). `acting`: who the writes are (see
@@ -1102,14 +1180,11 @@ pub enum SyncMessage {
     /// How the authority decided commit `id` ([`Outcome`]). `global`:
     /// the fate is the global authority's (directly, or relayed from it),
     /// not the last word of a replica with no server, which orders its
-    /// sessions' commits but cannot make them `Global`. `by`: as on
-    /// [`SyncMessage::Settled`], the node whose positions the outcome's
-    /// seq counts when not the authority's.
+    /// sessions' commits but cannot make them `Global`.
     Fate {
         id: TxId,
         outcome: Outcome,
         global: bool,
-        by: Option<[u8; 16]>,
     },
     // client → server
     /// A permission preflight: would the session's identity be allowed
@@ -1128,18 +1203,10 @@ pub enum SyncMessage {
         result: PermissionAdvice,
     },
     // client → server
-    /// The schema version the client reads and writes by, sent first on
-    /// every connection and again ahead of commits staged under another
-    /// version. Its queries and writes use that version's table and column
-    /// names, which the server resolves to its stored names; row images
-    /// and evictions travel by stored names either way. A version the
-    /// server has not admitted is named like the server's current schema.
-    Schema {
-        version: [u8; 16],
-    },
     // server → client
     /// Whether the server has admitted the schema version the session
-    /// declared, sent when that changes. Until it is admitted the server
+    /// declared, sent when that changes after the [`SyncMessage::Welcome`]
+    /// told it first. Until it is admitted the server
     /// holds the session's messages (a draft awaiting its lens), so a
     /// read that must be covered by the server fails with the reason
     /// rather than waiting out its budget.
@@ -1159,34 +1226,49 @@ pub enum SyncMessage {
     Stored {
         id: TxId,
     },
-    /// Client → server, after its first `Schema`: the schema versions
-    /// whose stored names this replica keeps, each with
-    /// [`names_digest`] of them. The server answers with the
-    /// [`SyncMessage::Catalogue`] entries it lacks or keeps otherwise.
-    KnownCatalogue {
-        versions: Vec<([u8; 16], [u8; 16])>,
+    /// Client → server, first on every connection: the schema version
+    /// the client reads by (its queries use that version's names), and
+    /// the versions whose stored names this replica keeps, each
+    /// with [`names_digest`] of them. Never held behind an unadmitted
+    /// version. The server answers with one [`SyncMessage::Welcome`].
+    Join {
+        version: [u8; 16],
+        known: Vec<([u8; 16], [u8; 16])>,
     },
     /// Server → client: schema versions this store admitted, in admission
     /// order, with where it stores their tables and columns, and the lens
     /// cells its lenses made. A replica stores rows as its upstream does
     /// (rows travel by stored names, untranslated), so it admits each
     /// version under these names, renaming what it named otherwise while
-    /// it did not know them. Sent ahead of any row after a
-    /// `KnownCatalogue`, and again when the store admits a version or learns
-    /// more of its authority's catalogue.
-    ///
-    /// `namespace`: the authority's (see `Inner::namespace`), once the
-    /// sender knows it; a replica that holds another one is another app's
-    /// and refuses this upstream. `confirmed`: the versions whose names are
-    /// the authority's, each with its names' digest (every version the
-    /// authority admitted; on a relay, those its upstream confirmed). Only
-    /// a confirmed version's tables and columns have an identity.
-    Catalogue {
-        namespace: Option<[u8; 16]>,
-        versions: Vec<CatalogueVersion>,
-        cells: Vec<CatalogueCell>,
-        confirmed: Vec<([u8; 16], [u8; 16])>,
+    /// it did not know them. The first rides in the
+    /// [`SyncMessage::Welcome`]; this one is sent when the store admits a
+    /// version or learns more of its authority's catalogue.
+    Catalogue(CatalogueUpdate),
+    /// Server → client, the answer to a [`SyncMessage::Join`], ahead of
+    /// any row: whether the declared version is admitted (later changes
+    /// follow as [`SyncMessage::SchemaAdmission`]) and the catalogue
+    /// entries the client lacks or keeps otherwise.
+    Welcome {
+        admitted: bool,
+        catalogue: CatalogueUpdate,
     },
+}
+
+/// The catalogue entries a [`SyncMessage::Catalogue`] or
+/// [`SyncMessage::Welcome`] carries.
+///
+/// `namespace`: the authority's (see `Inner::namespace`), once the sender
+/// knows it; a replica that holds another one is another app's and refuses
+/// this upstream. `confirmed`: the versions whose names are the
+/// authority's, each with its names' digest (every version the authority
+/// admitted; on a relay, those its upstream confirmed). Only a confirmed
+/// version's tables and columns have an identity.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CatalogueUpdate {
+    pub namespace: Option<[u8; 16]>,
+    pub versions: Vec<CatalogueVersion>,
+    pub cells: Vec<CatalogueCell>,
+    pub confirmed: Vec<([u8; 16], [u8; 16])>,
 }
 
 /// How long a [`SyncMessage::Read`] lasts.
@@ -1195,14 +1277,15 @@ pub enum ReadSpan {
     /// Kept current until `Unsubscribe`: what changes in the result
     /// ships as it changes, and each settled state is a `Settled`.
     /// `since`: resumed, the replica holding the result as it settled
-    /// through that seq; the opening ships only what changed after it.
-    Live { since: Option<u64> },
-    /// Answered once, at the current state or as of server seq `at`, in
+    /// through those positions; the opening ships only what changed after
+    /// them. Empty: a fresh opening.
+    Live { since: Positions },
+    /// Answered once, at the current state (`at` empty) or as of `at`, in
     /// the read's view, whose window and versions the read observes. A
     /// view frozen at a snapshot reference is resolved by the receiver (a
     /// reopened tab's capture, which its worker settled), which also sends
     /// the tx ids of the commits it names (see [`SyncMessage::Rows`]).
-    Once { at: Option<u64> },
+    Once { at: Positions },
 }
 
 /// One admitted schema version in a [`SyncMessage::Catalogue`].
@@ -1243,11 +1326,11 @@ impl SyncMessage {
             Self::Fate { .. } => "Fate",
             Self::CheckAllowed { .. } => "CheckAllowed",
             Self::CheckAllowedResult { .. } => "CheckAllowedResult",
-            Self::Schema { .. } => "Schema",
             Self::SchemaAdmission { .. } => "SchemaAdmission",
             Self::Stored { .. } => "Stored",
-            Self::KnownCatalogue { .. } => "KnownCatalogue",
-            Self::Catalogue { .. } => "Catalogue",
+            Self::Join { .. } => "Join",
+            Self::Catalogue(_) => "Catalogue",
+            Self::Welcome { .. } => "Welcome",
         }
     }
 }
@@ -1461,10 +1544,10 @@ pub(crate) struct Remote {
     pub(crate) global: Rc<StdCell<bool>>,
     /// Why the server refused this query, once it has.
     pub(crate) refused: Rc<RefCell<Option<Error>>>,
-    /// The server seq this query's result was last settled through, kept
-    /// in `_jazz_watermarks` under `watermark`, so a reopened replica
-    /// resumes from it too.
-    through: Option<u64>,
+    /// Where this query's result was last settled through (the
+    /// sequencer and its seq), kept in `_jazz_watermarks` under
+    /// `watermark`, so a reopened replica resumes from it too.
+    through: Option<(Sequencer, u64)>,
     watermark: [u8; 32],
 }
 
@@ -1520,10 +1603,6 @@ pub(crate) struct Client {
     unsent: Vec<SyncMessage>,
     /// Commits sent but not settled, for resending after a reconnect.
     sent: Vec<SyncMessage>,
-    /// Pending commits written under a schema version other than the
-    /// current one (before an upgrade), by tx: their ops name tables and
-    /// columns as it does, so they upload under it.
-    versions: HashMap<u64, [u8; 16]>,
     node: [u8; 16],
     connection: u64,
     fates: HashMap<u64, Result<(), Error>>,
@@ -1915,11 +1994,6 @@ pub(crate) struct Session {
     backlog_reads: (Option<Rc<Schema>>, HashMap<u64, Option<BTreeSet<String>>>),
     /// The schema version the client declared (`None`: the current one).
     version: Option<crate::ids::SchemaVersionId>,
-    /// The version the client declared first, the one its own store holds
-    /// rows by: a commit sent under another (written through a view of
-    /// another version) names no row as written, since the client holds no
-    /// image of it to compare.
-    home_version: Option<crate::ids::SchemaVersionId>,
     /// Fetches whose upstream answer arrived, or that this relay already
     /// asked its upstream to refresh: served from this store.
     fetched_upstream: BTreeSet<u64>,
@@ -1932,10 +2006,12 @@ pub(crate) struct Session {
     /// The client was told its declared version is not admitted.
     told_unadmitted: bool,
     /// The versions the client keeps names for, with their digests
-    /// (`None` until its `KnownCatalogue`), and whether it is owed a
-    /// `Catalogue`.
+    /// (`None` until its `Join`), and whether it is owed a `Catalogue`.
     known_catalogue: Option<HashMap<[u8; 16], [u8; 16]>>,
     catalogue_owed: bool,
+    /// The client's `Join` is not answered yet: its catalogue and
+    /// admission go out together as a `Welcome`.
+    welcome_owed: bool,
     /// The namespace and confirmations the client was last sent.
     told: Option<(Option<[u8; 16]>, Vec<([u8; 16], [u8; 16])>)>,
     /// On a relay, the upstream subscription each of the client's
@@ -1985,13 +2061,13 @@ impl Session {
             backlog: VecDeque::new(),
             backlog_reads: (None, HashMap::new()),
             version: None,
-            home_version: None,
             fetched_upstream: BTreeSet::new(),
             parked_pulls: Vec::new(),
             deferred_pulls: Vec::new(),
             told_unadmitted: false,
             known_catalogue: None,
             catalogue_owed: false,
+            welcome_owed: false,
             told: None,
             schema: None,
             relayed: BTreeMap::new(),
@@ -2498,10 +2574,11 @@ fn to_wire(op: &StagedOp) -> Result<WireOp, Error> {
             target: wire_target(&opts.target)?,
             at: opts.updated_at_ms,
         },
-        StagedOp::Upsert(table, row, cells, opts) => WireWrite::Upsert {
+        StagedOp::Upsert(table, row, cells, created, opts) => WireWrite::Upsert {
             table: table.clone(),
             row: bytes(row),
             cells: cells.clone(),
+            created: created.clone(),
             target: wire_target(&opts.target)?,
             at: opts.updated_at_ms,
         },
@@ -2595,12 +2672,14 @@ fn from_wire(op: WireOp) -> Result<StagedOp, Error> {
             table,
             row,
             cells,
+            created,
             target,
             at,
         } => StagedOp::Upsert(
             table,
             id(row),
             cells,
+            created,
             UpsertOptions {
                 target: view_target(target),
                 updated_at_ms: at,
@@ -2887,64 +2966,124 @@ impl Inner {
         images: &mut Vec<Image>,
         seqs: &mut BTreeSet<u64>,
     ) -> Result<(), Error> {
+        let versions: Vec<(RowUuid, Pos)> = versions.into_iter().collect();
+        let found = self.version_images(source, &versions)?;
         let mut current = BTreeSet::new();
-        for (row, at) in versions {
-            let rid = row.0.as_bytes().to_vec();
-            let seq = at.seq as i64;
-            let mut found = self.images_where(source, false, ID_AT, &[&rid, &at.n, &seq])?;
-            if found.is_empty() {
-                found = self.images_where(source, true, ID_AT, &[&rid, &at.n, &seq])?;
-            }
-            for image in &found {
+        for version in &versions {
+            for image in &found[version] {
                 seqs.insert(image.seq);
-                current.insert((row, image.key.clone()));
+                current.insert((version.0, image.key.clone()));
             }
-            images.extend(found);
+            images.extend(found[version].iter().cloned());
         }
-        for (row, key) in current {
-            images.extend(self.current_image(source, row, &key)?);
-        }
+        let currents = self.current_images(source, &current)?;
+        images.extend(current.iter().filter_map(|key| currents.get(key).cloned()));
         Ok(())
     }
 
-    /// The images a flat-join occurrence ships for one joined row of stored
-    /// table `table`: its current images, or for a history source the
-    /// version it names and the row's current image.
+    /// [`Self::history_versions`] for each of `versions` on its own: its
+    /// images, then the current images of its row in their branches.
+    fn history_versions_each(
+        &self,
+        source: &str,
+        versions: &[(RowUuid, Pos)],
+        seqs: &mut BTreeSet<u64>,
+    ) -> Result<HashMap<(RowUuid, Pos), Vec<Image>>, Error> {
+        let found = self.version_images(source, versions)?;
+        let keys: BTreeSet<(RowUuid, Vec<u8>)> = found
+            .iter()
+            .flat_map(|((row, _), images)| images.iter().map(|image| (*row, image.key.clone())))
+            .collect();
+        let currents = self.current_images(source, &keys)?;
+        Ok(found
+            .into_iter()
+            .map(|((row, at), mut images)| {
+                let keys: BTreeSet<Vec<u8>> = images
+                    .iter()
+                    .inspect(|image| {
+                        seqs.insert(image.seq);
+                    })
+                    .map(|image| image.key.clone())
+                    .collect();
+                images.extend(
+                    keys.into_iter()
+                        .filter_map(|key| currents.get(&(row, key)).cloned()),
+                );
+                ((row, at), images)
+            })
+            .collect())
+    }
+
+    /// The images flat-join occurrences ship for their joined rows, one
+    /// list per `(stored table, joined row)` of `joined`, in order: a
+    /// joined row's current images, or for a history source the version it
+    /// names and the row's current image.
     fn joined_images(
         &self,
-        table: &str,
-        joined: &crate::values::JoinedRow,
+        joined: &[(&str, &crate::values::JoinedRow)],
         seqs: &mut BTreeSet<u64>,
-    ) -> Result<Vec<Image>, Error> {
-        let id = joined.row.0.as_bytes().to_vec();
-        let Some((tx, node)) = joined.version else {
-            return self.images_where(table, false, "id = ?1", &[&id]);
-        };
-        // A version's seq: as `_jazz_transactions` recorded its upload,
-        // else this authority's own commit (whose tx is its seq).
-        let recorded = self
-            .conn
-            .prepare_cached(
-                "SELECT t.seq FROM _jazz_transactions AS t JOIN _jazz_nodes AS n \
-                 ON n.n = t.n WHERE t.tx = ?1 AND n.node = ?2 AND t.sn = 0 AND t.seq IS NOT NULL",
-            )
-            .and_then(|mut statement| {
-                statement
-                    .query_row(
-                        rusqlite::params![tx as i64, node.as_bytes().to_vec()],
-                        |r| r.get::<_, i64>(0),
-                    )
-                    .optional()
+    ) -> Result<Vec<Vec<Image>>, Error> {
+        // Each pair's version: `None` for its current images, or the
+        // version's position (`None` inside: a version with no images).
+        let mut at = Vec::with_capacity(joined.len());
+        let mut current: BTreeMap<&str, Vec<RowUuid>> = BTreeMap::new();
+        let mut versions: BTreeMap<&str, Vec<(RowUuid, Pos)>> = BTreeMap::new();
+        for (table, joined) in joined {
+            let Some((tx, node)) = joined.version else {
+                current.entry(table).or_default().push(joined.row);
+                at.push(None);
+                continue;
+            };
+            // A version's seq: as `_jazz_transactions` recorded its upload,
+            // else this authority's own commit (whose tx is its seq).
+            let recorded = self
+                .conn
+                .prepare_cached(
+                    "SELECT t.seq FROM _jazz_transactions AS t JOIN _jazz_nodes AS n \
+                     ON n.n = t.n WHERE t.tx = ?1 AND n.node = ?2 AND t.sn = 0 AND t.seq IS NOT NULL",
+                )
+                .and_then(|mut statement| {
+                    statement
+                        .query_row(
+                            rusqlite::params![tx as i64, node.as_bytes().to_vec()],
+                            |r| r.get::<_, i64>(0),
+                        )
+                        .optional()
+                })
+                .map_err(storage)?;
+            let seq = match recorded {
+                Some(seq) => Some(seq as u64),
+                None if node == self.identity.node => Some(tx),
+                None => None,
+            };
+            if let Some(seq) = seq {
+                versions
+                    .entry(table)
+                    .or_default()
+                    .push((joined.row, Pos::at(seq)));
+            }
+            at.push(Some(seq.map(Pos::at)));
+        }
+        let mut current_of = HashMap::new();
+        for (table, rows) in current {
+            current_of.insert(table, self.rows_images(table, rows)?);
+        }
+        let mut versions_of = HashMap::new();
+        for (table, versions) in versions {
+            versions_of.insert(table, self.history_versions_each(table, &versions, seqs)?);
+        }
+        Ok(joined
+            .iter()
+            .zip(at)
+            .map(|((table, joined), at)| match at {
+                None => current_of[table]
+                    .get(&joined.row)
+                    .cloned()
+                    .unwrap_or_default(),
+                Some(None) => Vec::new(),
+                Some(Some(at)) => versions_of[table][&(joined.row, at)].clone(),
             })
-            .map_err(storage)?;
-        let seq = match recorded {
-            Some(seq) => seq as u64,
-            None if node == self.identity.node => tx,
-            None => return Ok(Vec::new()),
-        };
-        let mut images = Vec::new();
-        self.history_versions(table, [(joined.row, Pos::at(seq))], &mut images, seqs)?;
-        Ok(images)
+            .collect())
     }
 
     /// Who committed each of `seqs`, as (seq, node, tx): `_jazz_transactions`
@@ -3301,13 +3440,18 @@ impl Inner {
             format!("SELECT * FROM {} WHERE {filter}", quote(&name))
         };
         let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
-        let names: Vec<String> = statement
-            .column_names()
-            .iter()
-            .map(|s| (*s).to_owned())
-            .collect();
+        // A cached `SELECT *` prepared before its table gained a column
+        // names the old columns until a step re-prepares it: the names are
+        // read from the first row.
+        let mut names: Vec<String> = Vec::new();
         let rows = statement
             .query_map(params, |r| {
+                if names.is_empty() {
+                    let statement = r.as_ref();
+                    names = (0..statement.column_count())
+                        .map(|i| statement.column_name(i).map(str::to_owned))
+                        .collect::<Result<_, _>>()?;
+                }
                 let mut image = Image {
                     table: table.to_owned(),
                     id: [0; 16],
@@ -3781,7 +3925,233 @@ impl Inner {
         Ok(ids)
     }
 
+    /// Every image of each of `rows` in `table` (or its history).
+    fn images_of(
+        &self,
+        table: &str,
+        history: bool,
+        rows: impl IntoIterator<Item = RowUuid>,
+    ) -> Result<Vec<Image>, Error> {
+        self.images_matching(table, history, rows, |row| {
+            vec![SqlValue::Blob(row.0.as_bytes().to_vec())]
+        })
+    }
+
+    /// The images of `table` (or its history) that match one of `keys`, read
+    /// a chunk of keys per statement. Reads of many images all go through
+    /// here: an opening snapshot ships thousands, a later tick a few. A key
+    /// binds to a row id, or to a row id, node code and seq (an [`ID_AT`]
+    /// version, so a row with a long history reads only the versions asked
+    /// for). A chunk binds its keys to the smallest of a few statement sizes
+    /// that fits, the rest repeating its last key, so a lone key is one seek
+    /// and every size stays prepared. The largest size fits the
+    /// connection's bound-variable limit (100 on a Durable Object).
+    fn images_matching<K: Ord>(
+        &self,
+        table: &str,
+        history: bool,
+        keys: impl IntoIterator<Item = K>,
+        bind: impl Fn(&K) -> Vec<SqlValue>,
+    ) -> Result<Vec<Image>, Error> {
+        const SIZES: [usize; 4] = [1, 8, 64, 512];
+        // Each key once: a key in two chunks would match twice.
+        let keys: Vec<Vec<SqlValue>> = keys
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .iter()
+            .map(bind)
+            .collect();
+        let Some(arity) = keys.first().map(Vec::len) else {
+            return Ok(Vec::new());
+        };
+        let variables = self
+            .conn
+            .limit(rusqlite::limits::Limit::SQLITE_LIMIT_VARIABLE_NUMBER)
+            .map_err(storage)?;
+        let largest = (usize::try_from(variables).unwrap_or(0) / arity).clamp(1, SIZES[3]);
+        let sizes: Vec<usize> = SIZES
+            .into_iter()
+            .filter(|size| *size < largest)
+            .chain([largest])
+            .collect();
+        let mut images = Vec::new();
+        for chunk in keys.chunks(largest) {
+            let size = *sizes
+                .iter()
+                .find(|size| **size >= chunk.len())
+                .expect("a chunk fits the largest size");
+            let filter = match (arity, size) {
+                (1, 1) => "id = ?1".to_owned(),
+                (1, _) => {
+                    let placeholders: Vec<String> = (1..=size).map(|i| format!("?{i}")).collect();
+                    format!("id IN ({})", placeholders.join(", "))
+                }
+                (3, _) => {
+                    let terms: Vec<String> = (0..size)
+                        .map(|i| {
+                            let at = 3 * i;
+                            format!(
+                                "(id = ?{} AND +_n = ?{} AND +_seq = ?{})",
+                                at + 1,
+                                at + 2,
+                                at + 3
+                            )
+                        })
+                        .collect();
+                    terms.join(" OR ")
+                }
+                _ => unreachable!("a key binds a row id or a version"),
+            };
+            let last = chunk.last().expect("a chunk is never empty");
+            let params: Vec<&dyn rusqlite::ToSql> = chunk
+                .iter()
+                .chain(std::iter::repeat(last))
+                .take(size)
+                .flatten()
+                .map(|value| value as &dyn rusqlite::ToSql)
+                .collect();
+            images.extend(self.images_where(table, history, &filter, &params)?);
+        }
+        Ok(images)
+    }
+
+    /// The current images of each of `rows` in `table`, by row.
+    fn rows_images(
+        &self,
+        table: &str,
+        rows: impl IntoIterator<Item = RowUuid>,
+    ) -> Result<HashMap<RowUuid, Vec<Image>>, Error> {
+        let mut by_row: HashMap<RowUuid, Vec<Image>> = HashMap::new();
+        for image in self.images_of(table, false, rows)? {
+            by_row
+                .entry(RowUuid::from_bytes(image.id))
+                .or_default()
+                .push(image);
+        }
+        Ok(by_row)
+    }
+
+    /// The images of `table` (or its history) at each of `versions`.
+    fn images_at(
+        &self,
+        table: &str,
+        history: bool,
+        versions: &[(RowUuid, Pos)],
+    ) -> Result<HashMap<(RowUuid, Pos), Vec<Image>>, Error> {
+        let mut found: HashMap<(RowUuid, Pos), Vec<Image>> = versions
+            .iter()
+            .map(|version| (*version, Vec::new()))
+            .collect();
+        // A current table holds a version or two of a row, read whole by
+        // id; a history may hold thousands, so it reads only these.
+        let images = if history {
+            self.images_matching(table, history, versions.iter().copied(), |(row, at)| {
+                vec![
+                    SqlValue::Blob(row.0.as_bytes().to_vec()),
+                    SqlValue::Integer(at.n),
+                    SqlValue::Integer(at.seq as i64),
+                ]
+            })?
+        } else {
+            self.images_of(table, history, versions.iter().map(|(row, _)| *row))?
+        };
+        for image in images {
+            // A read: a node no version names yet is not interned.
+            let Some(n) = self.known_code(image.by)? else {
+                continue;
+            };
+            let at = Pos { n, seq: image.seq };
+            if let Some(images) = found.get_mut(&(RowUuid::from_bytes(image.id), at)) {
+                images.push(image);
+            }
+        }
+        Ok(found)
+    }
+
+    /// The images of each of `versions` of `source`: in the current table,
+    /// else in its history.
+    fn version_images(
+        &self,
+        source: &str,
+        versions: &[(RowUuid, Pos)],
+    ) -> Result<HashMap<(RowUuid, Pos), Vec<Image>>, Error> {
+        let mut found = self.images_at(source, false, versions)?;
+        let missing: Vec<(RowUuid, Pos)> = versions
+            .iter()
+            .filter(|version| found[*version].is_empty())
+            .copied()
+            .collect();
+        if !missing.is_empty() {
+            found.extend(self.images_at(source, true, &missing)?);
+        }
+        Ok(found)
+    }
+
+    /// The current image of each `(row, branch key)` of `keys` that has one.
+    fn current_images(
+        &self,
+        table: &str,
+        keys: &BTreeSet<(RowUuid, Vec<u8>)>,
+    ) -> Result<HashMap<(RowUuid, Vec<u8>), Image>, Error> {
+        let mut found = HashMap::new();
+        for image in self.images_of(table, false, keys.iter().map(|(row, _)| *row))? {
+            let key = (RowUuid::from_bytes(image.id), image.key.clone());
+            if keys.contains(&key) {
+                found.insert(key, image);
+            }
+        }
+        Ok(found)
+    }
+
+    /// Read the current images of `keys` (stored table, row, branch key)
+    /// at once, for the stores that follow: a replica stores a message's
+    /// images one by one, each after reading what it holds. Until
+    /// [`Self::end_current_batch`], [`Self::current_image`] answers from
+    /// these, and a store or drop of one of them forgets it.
+    fn begin_current_batch(
+        &self,
+        keys: impl IntoIterator<Item = (String, RowUuid, Vec<u8>)>,
+    ) -> Result<(), Error> {
+        let mut by_table: BTreeMap<String, BTreeSet<(RowUuid, Vec<u8>)>> = BTreeMap::new();
+        let baselines = self.client.as_ref().map(|client| &client.baselines);
+        for key in keys {
+            // An image over a pending write's baseline replaces the
+            // baseline, not the stored row.
+            if baselines.is_some_and(|baselines| baselines.contains_key(&key)) {
+                continue;
+            }
+            let (table, row, key) = key;
+            by_table.entry(table).or_default().insert((row, key));
+        }
+        let mut batch = HashMap::new();
+        for (table, keys) in by_table {
+            let mut found = self.current_images(&table, &keys)?;
+            for (row, key) in keys {
+                let image = found.remove(&(row, key.clone()));
+                batch.insert((table.clone(), row, key), image);
+            }
+        }
+        *self.current_batch.borrow_mut() = Some(batch);
+        Ok(())
+    }
+
+    fn end_current_batch(&self) {
+        self.current_batch.borrow_mut().take();
+    }
+
+    /// A store or drop of `(table, row, key)`: a batch read of it is stale.
+    fn forget_current(&self, table: &str, row: RowUuid, key: &[u8]) {
+        if let Some(batch) = self.current_batch.borrow_mut().as_mut() {
+            batch.remove(&(table.to_owned(), row, key.to_vec()));
+        }
+    }
+
     fn current_image(&self, table: &str, row: RowUuid, key: &[u8]) -> Result<Option<Image>, Error> {
+        if let Some(batch) = self.current_batch.borrow().as_ref()
+            && let Some(image) = batch.get(&(table.to_owned(), row, key.to_vec()))
+        {
+            return Ok(image.clone());
+        }
         let id = row.0.as_bytes().to_vec();
         Ok(self
             .images_where(table, false, "id = ?1 AND _b = ?2", &[&id, &key])?
@@ -3789,18 +4159,9 @@ impl Inner {
     }
 
     fn put_image(&self, image: &Image, history: bool) -> Result<(), Error> {
-        let name = if history {
-            format!("{}__h", image.table)
-        } else {
-            image.table.clone()
-        };
-        let mut names = vec![
-            "id".to_owned(),
-            "_b".to_owned(),
-            "_n".to_owned(),
-            "_seq".to_owned(),
-            "_st".to_owned(),
-        ];
+        if !history {
+            self.forget_current(&image.table, RowUuid::from_bytes(image.id), &image.key);
+        }
         let mut values = vec![
             Sql::Blob(image.id.to_vec()),
             Sql::Blob(image.key.clone()),
@@ -3811,22 +4172,42 @@ impl Inner {
                     | if image.content { 0 } else { STATE_NO_CONTENT },
             ),
         ];
+        let mut columns = Vec::new();
         for (column, value) in self.stored_cells(image)? {
-            names.push(quote(&column));
+            columns.push(column);
             values.push(value);
         }
-        let placeholders: Vec<String> = (1..=values.len()).map(|i| format!("?{i}")).collect();
-        let verb = if history {
-            "INSERT OR IGNORE"
-        } else {
-            "INSERT"
-        };
-        let sql = format!(
-            "{verb} INTO {} ({}) VALUES ({})",
-            quote(&name),
-            names.join(", "),
-            placeholders.join(", ")
-        );
+        let mut inserts = self.image_inserts.borrow_mut();
+        let (known, sql) = inserts
+            .entry((image.table.clone(), history))
+            .or_insert_with(|| (Vec::new(), String::new()));
+        if sql.is_empty() || *known != columns {
+            let name = if history {
+                format!("{}__h", image.table)
+            } else {
+                image.table.clone()
+            };
+            let names: Vec<String> = ["id", "_b", "_n", "_seq", "_st"]
+                .into_iter()
+                .map(str::to_owned)
+                .chain(columns.iter().map(|column| quote(column)))
+                .collect();
+            let placeholders: Vec<String> = (1..=values.len()).map(|i| format!("?{i}")).collect();
+            let verb = if history {
+                "INSERT OR IGNORE"
+            } else {
+                "INSERT"
+            };
+            *sql = format!(
+                "{verb} INTO {} ({}) VALUES ({})",
+                quote(&name),
+                names.join(", "),
+                placeholders.join(", ")
+            );
+            *known = columns;
+        }
+        let sql = sql.clone();
+        drop(inserts);
         self.exec(&sql, params_from_iter(values.iter()))
             .map_err(storage)?;
         Ok(())
@@ -3839,6 +4220,7 @@ impl Inner {
         if let Some(image) = self.current_image(table, row, key)? {
             self.gone.borrow_mut().push(image);
         }
+        self.forget_current(table, row, key);
         let id = row.0.as_bytes().to_vec();
         self.exec(
             &format!("DELETE FROM {} WHERE id = ?1 AND _b = ?2", quote(table)),
@@ -4079,7 +4461,7 @@ impl Inner {
         let mut out = BTreeSet::new();
         for op in ops {
             let Some(row) = op.row() else { continue };
-            let table = self.schema.stored_table(op.table())?;
+            let table = op.table();
             let sql = format!(
                 "SELECT _b FROM {} WHERE id = ?1 UNION SELECT _b FROM {} WHERE {ID_AT}",
                 quote(table),
@@ -4110,7 +4492,7 @@ impl Inner {
         let mut out = BTreeSet::new();
         for op in ops {
             let Some(row) = op.row() else { continue };
-            let table = self.schema.stored_table(op.table())?;
+            let table = op.table();
             let sql = format!("SELECT _b FROM {} WHERE {ID_AT}", quote(table));
             let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
             let keys: Vec<Vec<u8>> = statement
@@ -4165,8 +4547,9 @@ impl Inner {
 /// `_jazz_pending` keeps its `Commit` with its ops and reads left out,
 /// `_jazz_pending_items` each op (with its bases, access proof and deltas) and
 /// serializable read (by [`PendingPart`]), and `_jazz_pending_rows` the
-/// local rows it wrote, and `_jazz_pending_versions` the schema version
-/// its ops name tables and columns by. Deleting a commit's `_jazz_pending`
+/// local rows it wrote. Ops name tables and columns by stored names, so a
+/// commit is the same whichever schema version wrote it or the store
+/// reopens under. Deleting a commit's `_jazz_pending`
 /// row once it settles deletes the rest with it.
 /// A row's values over the inline limit live in large-value storage, so a
 /// stored op is about the size of the row it writes, however large the
@@ -4186,11 +4569,9 @@ pub(crate) const SYNC_DDL: &str = "\
     CREATE TABLE IF NOT EXISTS _jazz_pending (tx INTEGER PRIMARY KEY, header BLOB NOT NULL);\
     CREATE TABLE IF NOT EXISTS _jazz_pending_items (tx INTEGER NOT NULL, part INTEGER NOT NULL, n INTEGER NOT NULL, item BLOB NOT NULL, PRIMARY KEY (tx, part, n));\
     CREATE TABLE IF NOT EXISTS _jazz_pending_rows (tx INTEGER NOT NULL, n INTEGER NOT NULL, tbl TEXT NOT NULL, id BLOB NOT NULL, key BLOB NOT NULL, PRIMARY KEY (tx, n));\
-    CREATE TABLE IF NOT EXISTS _jazz_pending_versions (tx INTEGER PRIMARY KEY, version BLOB NOT NULL);\
     CREATE TRIGGER IF NOT EXISTS _jazz_pending_forget AFTER DELETE ON _jazz_pending BEGIN \
      DELETE FROM _jazz_pending_items WHERE tx = OLD.tx; \
-     DELETE FROM _jazz_pending_rows WHERE tx = OLD.tx; \
-     DELETE FROM _jazz_pending_versions WHERE tx = OLD.tx; END;\
+     DELETE FROM _jazz_pending_rows WHERE tx = OLD.tx; END;\
     CREATE TABLE IF NOT EXISTS _jazz_meta (k TEXT PRIMARY KEY, v BLOB NOT NULL);\
     CREATE TABLE IF NOT EXISTS _jazz_authors (n INTEGER PRIMARY KEY, account BLOB NOT NULL, issuer TEXT NOT NULL, subject TEXT NOT NULL, UNIQUE (account, issuer, subject));\
     CREATE TABLE IF NOT EXISTS _jazz_nodes (n INTEGER PRIMARY KEY, node BLOB NOT NULL UNIQUE, author INTEGER);\
@@ -4238,12 +4619,13 @@ pub(crate) const WITHHELD_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_withheld
     (tbl TEXT NOT NULL, id BLOB NOT NULL, _b BLOB NOT NULL, PRIMARY KEY (tbl, id, _b)) \
     WITHOUT ROWID";
 
-/// Per remote query, the server seq its result was last settled
-/// through (see `Remote::through`). Created by the first settlement, so
-/// that opening an existing store without one leaves the file
-/// byte-identical.
+/// Per remote query, the positions its result was last settled through
+/// (see `Remote::through`): one row per sequencer, `n` its code as in
+/// `_n` (0 for the authority). Created by the first settlement, so that
+/// opening an existing store without one leaves the file byte-identical.
 const WATERMARKS_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_watermarks \
-    (key BLOB PRIMARY KEY, through INTEGER NOT NULL) WITHOUT ROWID";
+    (key BLOB NOT NULL, n INTEGER NOT NULL, through INTEGER NOT NULL, \
+    PRIMARY KEY (key, n)) WITHOUT ROWID";
 
 /// A remote query's `_jazz_watermarks` key: what it reads, and as whom.
 /// How far it reaches (tier and wait) is not part of it: every tier's
@@ -4406,8 +4788,8 @@ impl Inner {
                 continue;
             }
             let mut named = BTreeSet::new();
+            let table = op.table();
             if let Some(proof) = &op.access_proof
-                && let Ok(table) = self.schema.stored_table(op.table())
                 && let Some(image) = self.held_version(table, row, &proof.key, proof.seq)?
             {
                 named = self.large_roots(table, &image)?;
@@ -4477,13 +4859,7 @@ impl Inner {
         Ok(roots)
     }
 
-    fn persist_pending(
-        &self,
-        tx: u64,
-        commit: &SyncMessage,
-        rows: &[RowKey],
-        version: crate::ids::SchemaVersionId,
-    ) -> Result<(), Error> {
+    fn persist_pending(&self, tx: u64, commit: &SyncMessage, rows: &[RowKey]) -> Result<(), Error> {
         let SyncMessage::Commit {
             id,
             kind,
@@ -4497,13 +4873,11 @@ impl Inner {
             WireKind::Mergeable => (WireKind::Mergeable, &[][..]),
             WireKind::Serializable {
                 snapshot,
-                by,
                 reads,
                 own,
             } => (
                 WireKind::Serializable {
-                    snapshot: *snapshot,
-                    by: *by,
+                    snapshot: snapshot.clone(),
                     reads: Vec::new(),
                     own: own.clone(),
                 },
@@ -4544,39 +4918,30 @@ impl Inner {
             )
             .map_err(storage)?;
         }
-        // Which version's names its ops use (the schema view that wrote
-        // it), should the store reopen under another one before it settles.
-        self.exec(
-            "INSERT OR REPLACE INTO _jazz_pending_versions (tx, version) VALUES (?1, ?2)",
-            rusqlite::params![tx as i64, version.as_bytes().to_vec()],
-        )
-        .map_err(storage)?;
         Ok(())
     }
 
-    /// The seq a remote query's result was last settled through.
-    fn watermark(&self, key: &[u8; 32]) -> Result<Option<u64>, Error> {
-        let exists: bool = self
-            .conn
-            .cached_row(
-                "SELECT count(*) FROM sqlite_master WHERE name = '_jazz_watermarks'",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
-            .map_err(storage)?
-            > 0;
-        if !exists {
+    /// Where a remote query's result was last settled through.
+    fn watermark(&self, key: &[u8; 32]) -> Result<Option<(Sequencer, u64)>, Error> {
+        if !self.has_table("_jazz_watermarks")? {
             return Ok(None);
         }
-        self.conn
-            .cached_row(
-                "SELECT through FROM _jazz_watermarks WHERE key = ?1",
-                [key.as_slice()],
-                |r| r.get::<_, i64>(0),
-            )
-            .optional()
-            .map(|through| through.map(|through| through as u64))
-            .map_err(storage)
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT n, through FROM _jazz_watermarks WHERE key = ?1")
+            .map_err(storage)?;
+        let rows = stmt
+            .query_map([key.as_slice()], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+            })
+            .map_err(storage)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage)?;
+        let mut positions = Vec::with_capacity(rows.len());
+        for (n, through) in rows {
+            positions.push((self.node_of(n)?, through as u64));
+        }
+        single_position(&positions)
     }
 
     /// Forget every remote query's resume point: this store may no longer
@@ -4601,11 +4966,19 @@ impl Inner {
         Ok(())
     }
 
-    fn store_watermark(&self, key: &[u8; 32], through: u64) -> Result<(), Error> {
+    /// Record that a remote query's result settled through `through` at
+    /// sequencer `by`, replacing where it had settled before.
+    fn store_watermark(&self, key: &[u8; 32], by: Sequencer, through: u64) -> Result<(), Error> {
+        let n = self.code_of(by)?;
         self.exec(WATERMARKS_DDL, []).map_err(storage)?;
         self.exec(
-            "INSERT OR REPLACE INTO _jazz_watermarks (key, through) VALUES (?1, ?2)",
-            rusqlite::params![key.as_slice(), through as i64],
+            "DELETE FROM _jazz_watermarks WHERE key = ?1",
+            [key.as_slice()],
+        )
+        .map_err(storage)?;
+        self.exec(
+            "INSERT INTO _jazz_watermarks (key, n, through) VALUES (?1, ?2, ?3)",
+            rusqlite::params![key.as_slice(), n, through as i64],
         )
         .map_err(storage)?;
         Ok(())
@@ -4778,27 +5151,6 @@ impl Inner {
             )
             .map_err(storage)?;
         Ok(count > 0)
-    }
-
-    /// The schema version each pending commit was written under, where
-    /// one was recorded (stores from before have none: the current one).
-    fn pending_versions(&self) -> Result<HashMap<u64, crate::ids::SchemaVersionId>, Error> {
-        let mut statement = self
-            .conn
-            .prepare("SELECT tx, version FROM _jazz_pending_versions")
-            .map_err(storage)?;
-        let rows = statement
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))
-            .map_err(storage)?;
-        let mut versions = HashMap::new();
-        for row in rows {
-            let (tx, version) = row.map_err(storage)?;
-            let version: [u8; 16] = version.try_into().map_err(|_| {
-                crate::format::unsupported("bad schema version in _jazz_pending_versions")
-            })?;
-            versions.insert(tx as u64, crate::ids::SchemaVersionId::from_bytes(version));
-        }
-        Ok(versions)
     }
 
     pub(super) fn persist_meta(&self, key: &str, value: u64) -> Result<(), Error> {
@@ -5239,9 +5591,10 @@ impl Inner {
         Ok(at)
     }
 
-    /// The `Catalogue` session `index` is owed: the admitted versions it
-    /// keeps no names for, or other names for.
-    fn catalogue_for(&mut self, index: usize) -> Result<Option<SyncMessage>, Error> {
+    /// The catalogue session `index` is owed: the admitted versions it
+    /// keeps no names for, or other names for. Its first, after a `Join`,
+    /// is always owed: it rides in the `Welcome`.
+    fn catalogue_for(&mut self, index: usize) -> Result<Option<CatalogueUpdate>, Error> {
         if !std::mem::take(&mut self.sessions[index].catalogue_owed) {
             return Ok(None);
         }
@@ -5329,7 +5682,7 @@ impl Inner {
         known_catalogue.extend(sent);
         let (namespace, confirmed) = told.clone();
         self.sessions[index].told = Some(told);
-        Ok(Some(SyncMessage::Catalogue {
+        Ok(Some(CatalogueUpdate {
             namespace,
             versions,
             cells,
@@ -5579,7 +5932,6 @@ impl Inner {
             .collect::<Result<Vec<_>, _>>()
             .map_err(storage)?;
         drop(statement);
-        let versions = self.pending_versions()?;
         for (tx, header) in pending {
             let commit = self.pending_commit(tx, &header)?;
             let rows = self.pending_rows(tx)?;
@@ -5599,11 +5951,6 @@ impl Inner {
                 .cloned()
                 .map(from_wire)
                 .collect::<Result<Vec<_>, _>>()?;
-            // Written under an earlier version: it uploads under that one,
-            // and replays here by the current names (see `rebase`).
-            if let Some(version) = versions.get(&tx).filter(|v| **v != self.owner_version) {
-                client.versions.insert(tx, *version.as_bytes());
-            }
             if let Some(author) = acting.author().map(AuthorSubject::from_canonical) {
                 let author = author.map_err(|e| {
                     crate::format::unsupported(format_args!("a pending commit's author: {e}"))
@@ -5613,22 +5960,16 @@ impl Inner {
             }
             // Its rows as this store holds them, each at the commit's local
             // seq (the current version, or history under a later pending
-            // write), as it held them when it sent it. One written under an
-            // earlier schema version is not: the authority applied it under
-            // that version's names.
-            let expected = if client.versions.contains_key(&tx) {
-                None
-            } else {
-                let mut over = HashSet::new();
-                for row_key @ (table, row, key) in &rows {
-                    if client.pending.newest(row_key).is_some()
-                        || self.upstream_baseline(table, *row, key)?.is_some()
-                    {
-                        over.insert(row_key.clone());
-                    }
+            // write), as it held them when it sent it.
+            let mut over = HashSet::new();
+            for row_key @ (table, row, key) in &rows {
+                if client.pending.newest(row_key).is_some()
+                    || self.upstream_baseline(table, *row, key)?.is_some()
+                {
+                    over.insert(row_key.clone());
                 }
-                Some(self.expected_rows(tx, &ops, &rows, &over)?)
-            };
+            }
+            let expected = Some(self.expected_rows(tx, &ops, &rows, &over)?);
             client.pending.push(Pending {
                 tx,
                 id,
@@ -5663,14 +6004,6 @@ impl Client {
         self.pending.iter().find(|p| p.id == *id).map(|p| p.tx)
     }
 
-    /// Pending commits recorded under the current version without saying
-    /// so were written under `version`, about to stop being current.
-    pub(crate) fn keep_version(&mut self, version: [u8; 16]) {
-        for tx in self.pending.iter().map(|p| p.tx) {
-            self.versions.entry(tx).or_insert(version);
-        }
-    }
-
     /// Its host says there is no server: it is the last word on its store.
     fn no_server(&self) -> bool {
         let link = self.hint.get();
@@ -5682,7 +6015,6 @@ impl Client {
             node,
             connection: 0,
             sent: Vec::new(),
-            versions: HashMap::new(),
             transport: None,
             hint: Rc::new(StdCell::new(Link {
                 hint: RemoteLinkHint::NoServer,
@@ -5787,7 +6119,11 @@ impl Db {
                 tier: r.reach.tier,
                 wait: r.reach.wait,
                 view: Box::new(r.view.clone()),
-                span: ReadSpan::Live { since: r.through },
+                span: ReadSpan::Live {
+                    since: r
+                        .through
+                        .map_or_else(Vec::new, |(by, seq)| positions(by, seq)),
+                },
             })
             .collect();
         // Commits, their chunk pushes and chunk requests a full queue held
@@ -5798,8 +6134,7 @@ impl Db {
                 SyncMessage::Read {
                     span: ReadSpan::Live { .. },
                     ..
-                } | SyncMessage::Schema { .. }
-                    | SyncMessage::KnownCatalogue { .. }
+                } | SyncMessage::Join { .. }
                     | SyncMessage::ResendWhole { .. }
                     | SyncMessage::Commit { .. }
                     | SyncMessage::PushChunks { .. }
@@ -5811,7 +6146,7 @@ impl Db {
         // holds: the server sends those it stores otherwise, or it has and
         // this store lacks. One only an earlier process admitted is sent
         // again, so this one holds it and can serve its own sessions by it.
-        let versions = inner
+        let known = inner
             .names
             .in_order()
             .into_iter()
@@ -5819,10 +6154,9 @@ impl Db {
             .map(|(version, names)| (*version.as_bytes(), crate::names::names_digest(names)))
             .collect();
         let client = inner.client.as_mut().expect("client");
-        client.outbox.insert(0, SyncMessage::Schema { version });
         client
             .outbox
-            .insert(1, SyncMessage::KnownCatalogue { versions });
+            .insert(0, SyncMessage::Join { version, known });
         // What the old session could not answer, the new one may.
         client.unavailable.clear();
         client.outbox.extend(resubscribe);
@@ -6059,24 +6393,67 @@ impl Db {
     /// transaction the ops join it. It reads and writes the store, so
     /// it runs inside the commit's SQLite transaction: an error leaves the
     /// replica's sync state as it was, and the caller rolls the commit back.
-    /// `version`: the schema version whose names `ops` use (the schema
-    /// view that wrote them), which the commit uploads under.
+    /// `ops` name tables and columns as the schema the write ran under
+    /// (`Inner::schema`: the owner's, or the view's that wrote them); they
+    /// upload by stored names (see [`Inner::stored_op`]), so no schema
+    /// version travels with the commit.
     pub(crate) fn record_upload(
         &self,
         ops: Vec<StagedOp>,
         seq: u64,
         kind: Kind,
         relayed: Option<Relayed>,
-        version: crate::ids::SchemaVersionId,
+    ) -> Result<(), Error> {
+        let ops = {
+            let mut inner = self.inner.borrow_mut();
+            if inner.client.is_none() {
+                return Ok(());
+            }
+            let schema = inner.schema.clone();
+            let ops = ops
+                .into_iter()
+                .map(|op| inner.stored_op(op, &schema))
+                .collect::<Result<Vec<_>, _>>()?;
+            if inner.tx.is_some() {
+                inner.capture.extend(ops);
+                return Ok(());
+            }
+            ops
+        };
+        self.record_stored_upload(ops, seq, kind, relayed)
+    }
+
+    /// [`Db::record_upload`] of ops already named by stored names.
+    pub(crate) fn record_stored_upload(
+        &self,
+        ops: Vec<StagedOp>,
+        seq: u64,
+        kind: Kind,
+        relayed: Option<Relayed>,
     ) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
         if inner.client.is_none() {
             return Ok(());
         }
+        // Its ops are looked up by the names they travel by.
+        let view = inner.stored_view();
+        let active = std::mem::replace(&mut inner.schema, view);
+        drop(inner);
+        let recorded = self.record_upload_under_stored_view(ops, seq, kind, relayed);
+        self.inner.borrow_mut().schema = active;
+        recorded
+    }
+
+    fn record_upload_under_stored_view(
+        &self,
+        ops: Vec<StagedOp>,
+        seq: u64,
+        kind: Kind,
+        relayed: Option<Relayed>,
+    ) -> Result<(), Error> {
+        let mut inner = self.inner.borrow_mut();
         if inner.tx.is_some() {
-            inner
-                .capture
-                .extend(ops.into_iter().map(|op| (version, op)));
+            inner.capture.extend(ops);
             return Ok(());
         }
         // A read-only serializable commit still goes up: the authority
@@ -6193,7 +6570,6 @@ impl Db {
         // does not echo a row it infers is exactly this, and names it
         // `as_written` instead.
         let expected = inner.expected_rows(seq, &ops, &rows, &over)?;
-        let other = version != inner.owner_version;
         let client = inner.client.as_mut().expect("client");
         let added: Vec<RowKey> = baselines.iter().map(|(key, _)| key.clone()).collect();
         client.baselines.extend(baselines);
@@ -6208,8 +6584,7 @@ impl Db {
                         reads,
                         own,
                     } => WireKind::Serializable {
-                        snapshot,
-                        by,
+                        snapshot: positions(by, snapshot),
                         reads,
                         own,
                     },
@@ -6227,23 +6602,13 @@ impl Db {
                     serializable,
                     ops,
                     rows: rows.clone(),
-                    // Under another version's names, this store's images
-                    // are not what the authority applies.
-                    expected: (!other).then_some(expected),
+                    expected: Some(expected),
                 });
-                // Written through a view of another version: it uploads
-                // under that one, whose names its ops use.
-                if other {
-                    client.versions.insert(seq, *version.as_bytes());
-                }
-                let persisted = inner.persist_pending(seq, &commit, &rows, version);
+                let persisted = inner.persist_pending(seq, &commit, &rows);
                 if let Err(error) = persisted {
                     let client = inner.client.as_mut().expect("client");
                     client.unsent.pop();
                     client.pending.pop();
-                    if other {
-                        client.versions.remove(&seq);
-                    }
                     for key in &added {
                         client.baselines.remove(key);
                     }
@@ -6406,7 +6771,9 @@ impl Inner {
             tier: reach.tier,
             wait: reach.wait,
             view: Box::new(view.clone()),
-            span: ReadSpan::Live { since: through },
+            span: ReadSpan::Live {
+                since: through.map_or_else(Vec::new, |(by, seq)| positions(by, seq)),
+            },
         });
         client.remote.insert(
             key.clone(),
@@ -6478,7 +6845,7 @@ impl Db {
     pub(crate) async fn fetch(
         &self,
         prepared: &PreparedQuery,
-        at: Option<u64>,
+        at: Option<Pos>,
         include_deleted: bool,
         reach: RemoteReach,
         deadline: Option<Instant>,
@@ -6513,6 +6880,10 @@ impl Db {
                 return Ok(None);
             }
         }
+        let at = match at {
+            Some(at) => positions(self.inner.borrow().node_of(at.n)?, at.seq),
+            None => Vec::new(),
+        };
         let message = |id: u64| SyncMessage::Read {
             id,
             query: Box::new(remote_query(&prepared.query).into_owned()),
@@ -6521,7 +6892,7 @@ impl Db {
             tier,
             wait: reach.wait,
             view: Box::new(view.clone()),
-            span: ReadSpan::Once { at },
+            span: ReadSpan::Once { at: at.clone() },
         };
         // The request in flight, and the connection it went out on.
         let mut asked: Option<(u64, u64)> = None;
@@ -6586,7 +6957,7 @@ impl Db {
         let Some((through, listed)) = answer else {
             return Ok(None);
         };
-        if at.is_none() {
+        if at.is_empty() {
             self.evict_unanswered(
                 prepared.query.clone(),
                 prepared.binding.clone(),
@@ -7007,29 +7378,42 @@ impl Db {
                             };
                             inner.record_settled(node, tx, Some(at))?;
                         }
-                        for image in images {
-                            let Some(mut image) = inner.stored_image(image) else {
-                                continue;
-                            };
-                            let named = (image.table.clone(), image.id, image.key.clone());
-                            if !inner.receive_deltas(&mut image)? {
-                                inner.ask_whole(named, 0)?;
-                                continue;
-                            }
-                            inner.client.as_mut().expect("client").whole.remove(&named);
-                            if inner.record_vias(&named.0, &image)? {
-                                // A node no version held may be held by
-                                // this one: missing answers are transient.
-                                inner.client.as_mut().expect("client").unavailable.clear();
-                            }
-                            inner.unwithhold(
-                                &image.table,
+                        let images: Vec<Image> = images
+                            .into_iter()
+                            .filter_map(|image| inner.stored_image(image))
+                            .collect();
+                        inner.begin_current_batch(images.iter().map(|image| {
+                            (
+                                image.table.clone(),
                                 RowUuid::from_bytes(image.id),
-                                &image.key,
-                            )?;
-                            let overlaid = inner.receive_image(image)?;
-                            rebase |= overlaid;
-                        }
+                                image.key.clone(),
+                            )
+                        }))?;
+                        let received = (|| {
+                            for mut image in images {
+                                let named = (image.table.clone(), image.id, image.key.clone());
+                                if !inner.receive_deltas(&mut image)? {
+                                    inner.ask_whole(named, 0)?;
+                                    continue;
+                                }
+                                inner.client.as_mut().expect("client").whole.remove(&named);
+                                if inner.record_vias(&named.0, &image)? {
+                                    // A node no version held may be held by
+                                    // this one: missing answers are transient.
+                                    inner.client.as_mut().expect("client").unavailable.clear();
+                                }
+                                inner.unwithhold(
+                                    &image.table,
+                                    RowUuid::from_bytes(image.id),
+                                    &image.key,
+                                )?;
+                                let overlaid = inner.receive_image(image)?;
+                                rebase |= overlaid;
+                            }
+                            Ok::<_, Error>(())
+                        })();
+                        inner.end_current_batch();
+                        received?;
                     }
                     SyncMessage::AccessLost {
                         table,
@@ -7059,12 +7443,21 @@ impl Db {
                         let client = inner.client.as_mut().expect("client");
                         client.whole.remove(&(table, id, key));
                     }
-                    SyncMessage::Catalogue {
+                    // The answer to this client's `Join`: the catalogue
+                    // applies first, as rows that follow are stored by it.
+                    SyncMessage::Welcome {
+                        admitted,
+                        catalogue,
+                    } => {
+                        queue.push_front(SyncMessage::SchemaAdmission { admitted });
+                        queue.push_front(SyncMessage::Catalogue(catalogue));
+                    }
+                    SyncMessage::Catalogue(CatalogueUpdate {
                         namespace,
                         versions,
                         cells,
                         confirmed,
-                    } => {
+                    }) => {
                         match inner.mirror_catalogue(namespace, versions, cells, &confirmed) {
                             // Versions it took rebuilt the store's
                             // schema: its pending commits replay on top.
@@ -7099,8 +7492,8 @@ impl Db {
                         through,
                         members,
                         global,
-                        by,
                     } => {
+                        let (by, through) = required_position(&through, "a settlement")?;
                         let at = inner.learn_known(through, by)?;
                         let client = inner.client.as_mut().expect("client");
                         // A one-shot read's answer, at the position its
@@ -7121,7 +7514,7 @@ impl Db {
                         // not hold the result as of `through`.
                         let resumable = client.whole.is_empty();
                         if resumable {
-                            remote.through = Some(through);
+                            remote.through = Some((by, through));
                             client.forgotten = false;
                         }
                         let watermark = remote.watermark;
@@ -7138,7 +7531,7 @@ impl Db {
                         }
                         // In the tick's savepoint, with the rows it settles.
                         if resumable {
-                            inner.store_watermark(&watermark, through)?;
+                            inner.store_watermark(&watermark, by, through)?;
                         }
                     }
                     SyncMessage::CheckAllowedResult { id, result } => {
@@ -7176,8 +7569,8 @@ impl Db {
                         id,
                         outcome,
                         global,
-                        by,
                     } => {
+                        let (by, through) = outcome.position()?;
                         let client = inner.client.as_mut().expect("client");
                         // Not a commit this store uploads: nothing to settle.
                         let Some(tx) = client.local_tx(&id) else {
@@ -7192,7 +7585,6 @@ impl Db {
                                     id,
                                     outcome,
                                     global,
-                                    by,
                                 },
                                 awaited: None,
                             });
@@ -7200,13 +7592,13 @@ impl Db {
                         }
                         let accepted_at = match &outcome {
                             Outcome::Accepted {
-                                seq,
                                 accepted_at,
                                 as_written,
+                                ..
                             } => {
                                 let (images, whole, mismatched) = inner.as_written_images(
                                     tx,
-                                    *seq,
+                                    through,
                                     by,
                                     *accepted_at,
                                     as_written,
@@ -7218,7 +7610,7 @@ impl Db {
                                 if !whole.is_empty() && !arrived {
                                     inner.as_written_mismatches += mismatched;
                                     for row in &whole {
-                                        inner.ask_whole(row.clone(), *seq)?;
+                                        inner.ask_whole(row.clone(), through)?;
                                     }
                                     let client = inner.client.as_mut().expect("client");
                                     client.deferred.push_front(DeferredFate {
@@ -7226,7 +7618,6 @@ impl Db {
                                             id,
                                             outcome,
                                             global,
-                                            by,
                                         },
                                         awaited: Some(whole.into_iter().collect()),
                                     });
@@ -7236,22 +7627,26 @@ impl Db {
                                 if let Some(pending) = client.pending.get_mut(tx) {
                                     pending.expected = None;
                                 }
-                                for image in images {
-                                    inner.receive_image(image)?;
-                                }
+                                inner.begin_current_batch(images.iter().map(|image| {
+                                    let row = RowUuid::from_bytes(image.id);
+                                    (image.table.clone(), row, image.key.clone())
+                                }))?;
+                                let received = images
+                                    .into_iter()
+                                    .try_for_each(|image| inner.receive_image(image).map(drop));
+                                inner.end_current_batch();
+                                received?;
                                 *accepted_at
                             }
                             _ => None,
                         };
                         let result = outcome.result();
-                        let accepted = outcome.seq().is_some();
-                        let (Outcome::Accepted { seq: through, .. }
-                        | Outcome::Refused { through, .. }) = &outcome;
+                        let accepted = matches!(outcome, Outcome::Accepted { .. });
                         // A relay's own last word is at its own position.
                         let landed = if global || by.is_some() {
-                            inner.learn_known(*through, by)?
+                            inner.learn_known(through, by)?
                         } else {
-                            Pos::at(*through)
+                            Pos::at(through)
                         };
                         let client = inner.client.as_mut().expect("client");
                         // From the pending commit, not what was sent: a
@@ -7340,7 +7735,7 @@ impl Db {
                                 }
                                 let outcome = match &fate {
                                     Ok(()) if accepted => {
-                                        Outcome::accepted(landed.seq, accepted_at)
+                                        Outcome::accepted(by, landed.seq, accepted_at)
                                     }
                                     Ok(()) => {
                                         return Err(unsupported(format!(
@@ -7348,7 +7743,7 @@ impl Db {
                                         )));
                                     }
                                     Err(error) => Outcome::Refused {
-                                        through: known,
+                                        through: positions(by, known),
                                         error: wire_error(error),
                                     },
                                 };
@@ -7356,7 +7751,6 @@ impl Db {
                                     id: session_id,
                                     outcome,
                                     global,
-                                    by,
                                 });
                             }
                         }
@@ -7426,7 +7820,6 @@ impl Db {
                 None => break,
             }
         }
-        let current = *inner.owner_version.as_bytes();
         let waiting = commits.split_off(pushes.len());
         let trusted = inner.identity.author == AuthorSubject::SYSTEM;
         let client = inner.client.as_mut().expect("client");
@@ -7448,7 +7841,7 @@ impl Db {
                         client.refused.push(SyncMessage::Fate {
                             id: *id,
                             outcome: Outcome::Refused {
-                                through: client.known,
+                                through: positions(None, client.known),
                                 error: WireError::Rejected {
                                     reason: None,
                                     message: format!(
@@ -7458,7 +7851,6 @@ impl Db {
                                 },
                             },
                             global: false,
-                            by: None,
                         });
                     }
                     _ => kept.push((commit, push)),
@@ -7471,30 +7863,19 @@ impl Db {
                 client.sent.push(commit.clone());
             }
         }
-        // A commit is sent under the version it was written under: the
-        // server reads its ops by that version's names. An authority keeps
-        // admitting every version it published (a server replays its
-        // catalogue on start); a commit under a version it never deployed
-        // is refused (INV-SYNC-52).
-        let mut declared = current;
+        // A commit names tables and columns by stored names, whichever
+        // version wrote it, so no version travels with it. One naming
+        // what the server does not hold was written under a version it
+        // never deployed, and is refused (INV-SYNC-52).
         for (commit, (hashes, batches)) in commits.into_iter().zip(pushes) {
             if let SyncMessage::Commit { id, .. } = &commit
                 && let Some(tx) = client.local_tx(id)
+                && !hashes.is_empty()
             {
-                if !hashes.is_empty() {
-                    client.pushed.insert(tx, hashes);
-                }
-                let version = client.versions.get(&tx).copied().unwrap_or(current);
-                if version != declared {
-                    out.push(SyncMessage::Schema { version });
-                    declared = version;
-                }
+                client.pushed.insert(tx, hashes);
             }
             out.extend(batches);
             out.push(commit);
-        }
-        if declared != current {
-            out.push(SyncMessage::Schema { version: current });
         }
         out.extend(reads);
         // A full outbound queue keeps the rest, in order, for the flush its
@@ -7540,33 +7921,10 @@ impl Db {
             .iter()
             .map(|p| (p.tx, p.ops.clone()))
             .collect();
-        // Settled and refused commits no longer name a version.
-        client
-            .versions
-            .retain(|tx, _| pending.iter().any(|(pending, _)| pending == tx));
-        let versions = client.versions.clone();
         let keep: BTreeSet<(String, RowUuid, Vec<u8>)> = client
             .pending
             .iter()
             .flat_map(|p| p.rows.iter().cloned())
-            .collect();
-        // A commit written under another version replays under it while
-        // this store holds that version (a schema view): what
-        // it wrote that the current version lacks stays visible through
-        // the view. One written before an upgrade replays by the names the
-        // current version gives what it wrote.
-        let pending: Vec<(u64, Option<Rc<Schema>>, Vec<StagedOp>)> = pending
-            .into_iter()
-            .map(|(tx, ops)| match versions.get(&tx) {
-                Some(version) => {
-                    let version = crate::ids::SchemaVersionId::from_bytes(*version);
-                    match inner.governed(version) {
-                        Some(schema) => (tx, Some(schema), ops),
-                        None => (tx, None, inner.by_current_names(version, ops)),
-                    }
-                }
-                None => (tx, None, ops),
-            })
             .collect();
         for ((table, row, key), image) in &baseline {
             match image {
@@ -7578,10 +7936,14 @@ impl Db {
                 None => inner.drop_row(table, *row, key, Pos::default())?,
             }
         }
-        let active = inner.schema.clone();
-        let replayed = pending.into_iter().try_for_each(|(tx, schema, ops)| {
+        // Pending ops name tables and columns by stored names, whichever
+        // version wrote them: they replay under the stored view, so what a
+        // view wrote that the current version lacks stays visible through
+        // that view, and nothing is renamed across an upgrade.
+        let view = inner.stored_view();
+        let active = std::mem::replace(&mut inner.schema, view);
+        let replayed = pending.into_iter().try_for_each(|(tx, ops)| {
             begin_savepoint(&inner.conn, "replay")?;
-            inner.schema = schema.unwrap_or_else(|| inner.owner.clone());
             inner.merging = true;
             let replayed = ops.iter().try_for_each(|op| inner.apply(op, tx).map(drop));
             inner.merging = false;
@@ -7754,9 +8116,10 @@ impl Inner {
                         binding,
                         include_deleted,
                         view,
-                        span: ReadSpan::Once { at: None },
+                        span: ReadSpan::Once { at },
                         ..
                     } = &fetch.ask
+                        && at.is_empty()
                     {
                         answers.push((
                             (**query).clone(),
@@ -7804,6 +8167,53 @@ impl Inner {
             .is_some_and(|version| !self.deployed(version))
     }
 
+    /// Whether this store holds every stored table and column `ops`
+    /// name: otherwise they were written under a version it has not
+    /// deployed.
+    fn holds_names(&self, ops: &[WireOp]) -> bool {
+        let view = self.stored_view();
+        ops.iter().all(|op| {
+            let Ok(table) = view.table(op.table()) else {
+                return false;
+            };
+            let cells = match &op.write {
+                WireWrite::Insert { cells, .. }
+                | WireWrite::Update { cells, .. }
+                | WireWrite::Upsert { cells, .. }
+                | WireWrite::Restore {
+                    cells: Some(cells), ..
+                } => Some(cells),
+                _ => None,
+            };
+            let created = match &op.write {
+                WireWrite::Upsert { created, .. } => Some(created),
+                _ => None,
+            };
+            cells
+                .into_iter()
+                .chain(created)
+                .flat_map(|cells| cells.keys())
+                .all(|name| name.starts_with('$') || table.has_column(name))
+        })
+    }
+
+    /// `message` (about a replicated write, which names tables and
+    /// columns by stored names) with each stored name the current schema
+    /// gives another name spelled by that name, so it reads as the app's.
+    pub(crate) fn by_current_names(&self, message: &str) -> String {
+        let mut message = message.to_owned();
+        for table in self.owner.tables.values() {
+            let names = std::iter::once((&table.stored, &table.name))
+                .chain(table.columns.iter().map(|c| (&c.stored, &c.name)));
+            for (stored, name) in names {
+                if stored != name && message.contains(stored.as_str()) {
+                    message = replace_name(&message, stored, name);
+                }
+            }
+        }
+        message
+    }
+
     /// Whether this store admitted schema `version`.
     fn deployed(&self, version: crate::ids::SchemaVersionId) -> bool {
         version == self.owner_version || self.admitted.iter().any(|(id, _)| *id == version)
@@ -7829,13 +8239,9 @@ impl Inner {
         if !self.knows_deployed() {
             return;
         }
-        let mut version = self.sessions[index].version;
+        let version = self.sessions[index].version;
         let mut refused = Vec::new();
         held.retain(|message| match message {
-            SyncMessage::Schema { version: declared } => {
-                version = Some(crate::ids::SchemaVersionId::from_bytes(*declared));
-                true
-            }
             SyncMessage::Commit { id, .. } if version.is_some_and(|v| !self.deployed(v)) => {
                 refused.push(*id);
                 false
@@ -7855,11 +8261,10 @@ impl Inner {
         self.sessions[index].outbox.push(SyncMessage::Fate {
             id,
             outcome: Outcome::Refused {
-                through,
+                through: positions(by, through),
                 error: wire_error(&schema_version_not_deployed()),
             },
             global: true,
-            by,
         });
     }
 
@@ -8316,7 +8721,7 @@ impl Db {
         let mut barrier = HeldWrites::default();
         while let Some(message) = inbound.pop_front() {
             if !held.is_empty() && !self.overtakes(index, &barrier, &message) {
-                self.note_held(index, &mut barrier, &message);
+                self.note_held(&mut barrier, &message);
                 held.push_back(message);
                 continue;
             }
@@ -8353,16 +8758,14 @@ impl Db {
             // that way. Once it knows every version the authority
             // deployed, its commits do not wait: they are refused
             // (INV-SYNC-52).
+            // So does a commit naming stored tables or columns it does not
+            // hold yet: a version it has not admitted wrote it.
             let refuses = matches!(message, SyncMessage::Commit { .. })
                 && self.inner.borrow().knows_deployed();
-            if !refuses
-                && !matches!(
-                    message,
-                    SyncMessage::Schema { .. } | SyncMessage::KnownCatalogue { .. }
-                )
-            {
+            let unheld = matches!(&message, SyncMessage::Commit { ops, .. } if !self.inner.borrow().holds_names(ops));
+            if !refuses && !matches!(message, SyncMessage::Join { .. }) {
                 let mut inner = self.inner.borrow_mut();
-                if inner.session_unadmitted(index) {
+                if inner.session_unadmitted(index) || unheld {
                     inbound.push_front(message);
                     held.extend(inbound);
                     // The commits it holds that way are refused now: a
@@ -8410,7 +8813,7 @@ impl Db {
                         .fetched_upstream
                         .insert(id);
                     let fetch = fetch.expect("a fetch");
-                    self.note_held(index, &mut barrier, &fetch);
+                    self.note_held(&mut barrier, &fetch);
                     held.push_back(fetch);
                 }
                 (Err(error), Some(id)) => {
@@ -8429,10 +8832,11 @@ impl Db {
         if !held.is_empty() {
             inner.sessions[index].backlog = held;
         }
-        // Tell the client when its declared version's admission changes.
+        // Tell the client when its declared version's admission changes:
+        // the `Welcome` it is still owed tells it first.
         let unadmitted = inner.session_unadmitted(index);
         let session = &mut inner.sessions[index];
-        if session.open && session.told_unadmitted != unadmitted {
+        if session.open && !session.welcome_owed && session.told_unadmitted != unadmitted {
             session.told_unadmitted = unadmitted;
             session.outbox.push(SyncMessage::SchemaAdmission {
                 admitted: !unadmitted,
@@ -8466,7 +8870,7 @@ impl Db {
     }
 
     /// Record what a message held for session `index` may change.
-    fn note_held(&self, index: usize, barrier: &mut HeldWrites, message: &SyncMessage) {
+    fn note_held(&self, barrier: &mut HeldWrites, message: &SyncMessage) {
         match message {
             SyncMessage::PushChunks { .. } | SyncMessage::ChunkRequests { .. } => {}
             SyncMessage::Read { id, .. } => {
@@ -8475,12 +8879,7 @@ impl Db {
             SyncMessage::Unsubscribe { .. } | SyncMessage::CheckAllowed { .. } => {}
             SyncMessage::Commit { ops, .. } => {
                 barrier.commits = true;
-                let schema = {
-                    let mut inner = self.inner.borrow_mut();
-                    inner
-                        .session_schema(index)
-                        .unwrap_or_else(|| inner.owner.clone())
-                };
+                let schema = self.inner.borrow().stored_view();
                 for op in ops {
                     let stored = schema.stored_table(op.table()).map(str::to_owned);
                     match (&mut barrier.tables, stored) {
@@ -8814,6 +9213,101 @@ impl Db {
                 // resumes from: not shipped, but watched again, and their
                 // supporting rows followed (and shipped where they changed).
                 let mut held = Vec::new();
+                // Unchanged for a resumed client: a version it held as of
+                // `since` that was in the result then. A row whose
+                // membership inputs changed may have entered the result
+                // without changing: its seq alone cannot say, so the result
+                // as of `since` does. Only the opening snapshot is judged
+                // so: a row a later commit in this tick added joined after
+                // that judgement.
+                let held_as_of = |row: &SubscriptionOutputRow, reset: bool| {
+                    resume.as_ref().is_some_and(|resume| {
+                        reset
+                            && row.seq <= Pos::at(resume.since)
+                            && resume
+                                .prior
+                                .as_ref()
+                                .is_none_or(|prior| prior.contains(&row.id))
+                    })
+                };
+                // Every image this subscription's events ship or touch, read
+                // a chunk of rows per statement: an opening snapshot ships
+                // every row of its result.
+                let mut current: BTreeMap<String, Vec<(RowUuid, Pos)>> = BTreeMap::new();
+                let mut versions: BTreeMap<String, Vec<(RowUuid, Pos)>> = BTreeMap::new();
+                let mut joined_rows = Vec::new();
+                let mut leaving: BTreeMap<&str, Vec<RowUuid>> = BTreeMap::new();
+                for event in &events {
+                    let SubscriptionEvent::Delta {
+                        added,
+                        updated,
+                        removed,
+                        reset,
+                        ..
+                    } = event
+                    else {
+                        continue;
+                    };
+                    for row in added.iter().chain(updated.iter()) {
+                        joined_rows.extend(
+                            joined_tables
+                                .iter()
+                                .map(String::as_str)
+                                .zip(row.joined_rows()),
+                        );
+                        let history = history_source_table(&row.table);
+                        if (history.is_none() && held_as_of(row, *reset) && support.is_none())
+                            || cache.contains_key(&(row.table.to_string(), row.id, row.seq))
+                        {
+                            continue;
+                        }
+                        let wanted = if history.is_some() {
+                            &mut versions
+                        } else {
+                            &mut current
+                        };
+                        wanted
+                            .entry(row.table.to_string())
+                            .or_default()
+                            .push((row.id, row.seq));
+                    }
+                    for gone in removed {
+                        let table = names.stored_table(
+                            history_source_table(&gone.table).unwrap_or(&gone.table),
+                        )?;
+                        leaving.entry(table).or_default().push(gone.row_uuid);
+                        for (table, joined) in joined_tables.iter().zip(&gone.joined) {
+                            leaving.entry(table).or_default().push(joined.row);
+                        }
+                    }
+                }
+                for (table, versions) in current {
+                    let stored = names.stored_table(&table)?;
+                    for ((row, at), found) in inner.images_at(stored, false, &versions)? {
+                        cache.insert((table.clone(), row, at), found);
+                    }
+                }
+                // A history row's version and its row's current images; its
+                // seq goes to `history_seqs` once found, and again each time
+                // the row ships from the cache.
+                let mut fresh = HashSet::new();
+                for (table, versions) in versions {
+                    let stored =
+                        names.stored_table(history_source_table(&table).unwrap_or(&table))?;
+                    for ((row, at), found) in
+                        inner.history_versions_each(stored, &versions, &mut history_seqs)?
+                    {
+                        fresh.insert((table.clone(), row, at));
+                        cache.insert((table.clone(), row, at), found);
+                    }
+                }
+                let mut joined_images = inner
+                    .joined_images(&joined_rows, &mut history_seqs)?
+                    .into_iter();
+                let mut leaving_images = HashMap::new();
+                for (table, rows) in leaving {
+                    leaving_images.insert(table, inner.rows_images(table, rows)?);
+                }
                 for event in events {
                     let SubscriptionEvent::Delta {
                         added,
@@ -8826,30 +9320,15 @@ impl Db {
                         continue;
                     };
                     for row in added.iter().chain(updated.iter()) {
-                        for (table, joined) in joined_tables.iter().zip(row.joined_rows()) {
-                            images.extend(inner.joined_images(table, joined, &mut history_seqs)?);
+                        for _ in row.joined_rows().iter().take(joined_tables.len()) {
+                            images.extend(joined_images.next().unwrap_or_default());
                         }
                         // A history row is a version of its source table.
                         let history = history_source_table(&row.table);
                         let table = names
                             .stored_table(history.unwrap_or(&row.table))?
                             .to_owned();
-                        // Unchanged for a resumed client: a version it held as
-                        // of `since` that was in the result then. A row whose
-                        // membership inputs changed may have entered the
-                        // result without changing: its seq alone cannot say,
-                        // so the result as of `since` does. Only the opening
-                        // snapshot is judged so: a row a later commit in
-                        // this tick added joined after that judgement.
-                        let unchanged = resume.as_ref().is_some_and(|resume| {
-                            reset
-                                && history.is_none()
-                                && row.seq <= Pos::at(resume.since)
-                                && resume
-                                    .prior
-                                    .as_ref()
-                                    .is_none_or(|prior| prior.contains(&row.id))
-                        });
+                        let unchanged = history.is_none() && held_as_of(row, reset);
                         let id_key = wk((
                             table.clone(),
                             "id".to_owned(),
@@ -8860,29 +9339,8 @@ impl Db {
                             continue;
                         }
                         let key = (row.table.to_string(), row.id, row.seq);
-                        if history.is_some() {
-                            if !cache.contains_key(&key) {
-                                let mut found = Vec::new();
-                                inner.history_versions(
-                                    &table,
-                                    [(row.id, row.seq)],
-                                    &mut found,
-                                    &mut history_seqs,
-                                )?;
-                                cache.insert(key.clone(), found);
-                            } else {
-                                history_seqs.insert(row.seq.seq);
-                            }
-                        } else if !cache.contains_key(&key) {
-                            let id = row.id.0.as_bytes().to_vec();
-                            let seq = row.seq.seq as i64;
-                            let found = inner.images_where(
-                                &table,
-                                false,
-                                ID_AT,
-                                &[&id, &row.seq.n, &seq],
-                            )?;
-                            cache.insert(key.clone(), found);
+                        if history.is_some() && !fresh.remove(&key) {
+                            history_seqs.insert(row.seq.seq);
                         }
                         if unchanged {
                             held.extend(cache[&key].iter().cloned());
@@ -8902,22 +9360,18 @@ impl Db {
                             wk((
                                 table.to_owned(),
                                 "id".to_owned(),
-                                watch_key(&Sql::Blob(rid.clone())),
+                                watch_key(&Sql::Blob(rid)),
                             )),
                         );
-                        for image in inner.images_where(table, false, "id = ?1", &[&rid])? {
-                            touched.insert((image.table.clone(), gone.row_uuid, image.key.clone()));
-                        }
+                        let mut touch = |table: &str, row: RowUuid| {
+                            for image in leaving_images[table].get(&row).into_iter().flatten() {
+                                touched.insert((image.table.clone(), row, image.key.clone()));
+                            }
+                        };
+                        touch(table, gone.row_uuid);
                         // A joined row may have left for its permissions.
                         for (table, joined) in joined_tables.iter().zip(&gone.joined) {
-                            let id = joined.row.0.as_bytes().to_vec();
-                            for image in inner.images_where(table, false, "id = ?1", &[&id])? {
-                                touched.insert((
-                                    image.table.clone(),
-                                    joined.row,
-                                    image.key.clone(),
-                                ));
-                            }
+                            touch(table, joined.row);
                         }
                     }
                 }
@@ -8942,10 +9396,13 @@ impl Db {
                     let group = group.borrow();
                     let table = group.root().to_owned();
                     let now: HashSet<RowUuid> = group.rows.iter().map(|row| row.id).collect();
-                    for row in prior.iter().filter(|row| !now.contains(row)) {
-                        let rid = row.0.as_bytes().to_vec();
-                        for image in inner.images_where(&table, false, "id = ?1", &[&rid])? {
-                            touched.insert((table.clone(), *row, image.key));
+                    let gone = inner.rows_images(
+                        &table,
+                        prior.iter().filter(|row| !now.contains(row)).copied(),
+                    )?;
+                    for (row, images) in gone {
+                        for image in images {
+                            touched.insert((table.clone(), row, image.key));
                         }
                     }
                 }
@@ -8992,10 +9449,9 @@ impl Db {
                 if answered {
                     settled.push(SyncMessage::Settled {
                         id,
-                        through,
+                        through: positions(by, through),
                         members: window,
                         global,
-                        by,
                     });
                     // The settled opening listed the result.
                     if let Some((.., opened)) = inner.sessions[index].subs.get_mut(&id) {
@@ -9123,9 +9579,19 @@ impl Db {
                 .retain(|(table, row, _)| watch.contains(&id_watch(table, *row.0.as_bytes())));
             let mut out = Vec::new();
             // Rows travel by stored names: the versions they are stored by
-            // reach the client first.
+            // reach the client first, in the `Welcome` it is owed.
             if let Some(catalogue) = inner.catalogue_for(index)? {
-                out.push(catalogue);
+                let unadmitted = inner.session_unadmitted(index);
+                let session = &mut inner.sessions[index];
+                out.push(if std::mem::take(&mut session.welcome_owed) {
+                    session.told_unadmitted = unadmitted;
+                    SyncMessage::Welcome {
+                        admitted: !unadmitted,
+                        catalogue,
+                    }
+                } else {
+                    SyncMessage::Catalogue(catalogue)
+                });
             }
             let tx_ids = if history_seqs.is_empty() {
                 Vec::new()
@@ -9399,6 +9865,16 @@ impl Db {
         Ok(())
     }
 
+    /// A handle on this store under its stored view, which replicated
+    /// writes apply under.
+    fn stored_db(&self) -> Db {
+        let view = self.inner.borrow().stored_view();
+        Db {
+            inner: self.inner.clone(),
+            view: Some(view),
+        }
+    }
+
     fn session_db(&self, index: usize) -> Db {
         let view = self.inner.borrow_mut().session_schema(index);
         Db {
@@ -9463,17 +9939,10 @@ impl Db {
             None => prepared,
         };
         let policy = self.inner.borrow().session_policy(index);
-        // Queries, writes and held rows name tables and columns as the
-        // client's schema version does.
+        // Queries and held rows name tables and columns as the client's
+        // schema version does; commits by stored names (see below).
         let db = self.session_db(index);
         match message {
-            SyncMessage::Schema { version } => {
-                let mut inner = self.inner.borrow_mut();
-                let session = &mut inner.sessions[index];
-                session.version = Some(crate::ids::SchemaVersionId::from_bytes(version));
-                session.home_version = session.home_version.or(session.version);
-                session.schema = None;
-            }
             SyncMessage::Read {
                 id,
                 query,
@@ -9484,6 +9953,9 @@ impl Db {
                 view,
                 span: ReadSpan::Live { since },
             } => {
+                // Refused before the read is set up, so a refused read
+                // holds nothing open.
+                let since = single_position(&since)?;
                 let local = tier == ReadTier::LocalOnly;
                 let prepared = with_claims(db.prepare_query_bound(&query, binding)?);
                 let windowed = crate::db::is_windowed(&query);
@@ -9579,6 +10051,13 @@ impl Db {
                 inner.sessions[index]
                     .subs
                     .insert(id, (queue, group, windowed, false));
+                // A resume point at another sequencer than the one this
+                // store serves at (it gained or lost a server since) opens
+                // fresh.
+                let since = match since {
+                    Some((by, seq)) if by == inner.served_by() => Some(seq),
+                    _ => None,
+                };
                 if let Some(since) = since {
                     let claims = inner.sessions[index].claims.is_some();
                     let resume = inner.resume_from(
@@ -9622,11 +10101,17 @@ impl Db {
                     session.touched.insert(row);
                 }
             }
-            SyncMessage::KnownCatalogue { versions } => {
+            // Declares the version the client reads by, and owes the
+            // `Welcome` with the catalogue the client lacks.
+            SyncMessage::Join { version, known } => {
                 let mut inner = self.inner.borrow_mut();
                 let session = &mut inner.sessions[index];
-                session.known_catalogue = Some(versions.into_iter().collect());
+                session.version = Some(crate::ids::SchemaVersionId::from_bytes(version));
+                session.schema = None;
+                session.known_catalogue = Some(known.into_iter().collect());
                 session.catalogue_owed = true;
+                session.told = None;
+                session.welcome_owed = true;
             }
             SyncMessage::Unsubscribe { id } => {
                 let mut inner = self.inner.borrow_mut();
@@ -9703,6 +10188,20 @@ impl Db {
                 view,
                 span: ReadSpan::Once { at },
             } => {
+                // The position the read is as of, counted at this store:
+                // refused before anything is asked or served.
+                let pinned = match single_position(&at)? {
+                    Some((by, seq)) => Some(Pos {
+                        n: self.inner.borrow().known_code(by)?.ok_or_else(|| {
+                            Error::new(
+                                ErrorCode::Protocol,
+                                "a read as of a sequencer this store does not know",
+                            )
+                        })?,
+                        seq,
+                    }),
+                    None => None,
+                };
                 // A relay asks its upstream first for a Remote read, then
                 // serves it from its store once the answer's rows are in
                 // it; the read waits for that answer while the link is down
@@ -9742,7 +10241,7 @@ impl Db {
                         tier: ReadTier::Remote,
                         wait: None,
                         view: view.clone(),
-                        span: ReadSpan::Once { at },
+                        span: ReadSpan::Once { at: at.clone() },
                     });
                 }
                 if let Some(strict) = relay {
@@ -9760,7 +10259,7 @@ impl Db {
                         tier: ReadTier::Remote,
                         wait: None,
                         view: view.clone(),
-                        span: ReadSpan::Once { at },
+                        span: ReadSpan::Once { at: at.clone() },
                     };
                     client.outbox.push(ask.clone());
                     client.relayed_fetches.push(RelayedFetch {
@@ -9824,7 +10323,7 @@ impl Db {
                     }
                 };
                 let read = ReadSpec {
-                    cut: viewed.cut.or(at.map(|at| Cut::at(Pos::at(at)))),
+                    cut: viewed.cut.or(pinned.map(Cut::at)),
                     include_deleted,
                     settled_only: strict,
                     view: viewed.view,
@@ -9847,24 +10346,30 @@ impl Db {
                             .map(str::to_owned)
                     })
                     .collect::<Result<Vec<_>, Error>>()?;
-                for row in &rows {
-                    for (table, joined) in joined_tables.iter().zip(row.joined_rows()) {
-                        images.extend(inner.joined_images(table, joined, &mut seqs)?);
-                    }
-                }
+                let joined: Vec<_> = rows
+                    .iter()
+                    .flat_map(|row| {
+                        joined_tables
+                            .iter()
+                            .map(String::as_str)
+                            .zip(row.joined_rows())
+                    })
+                    .collect();
+                images.extend(
+                    inner
+                        .joined_images(&joined, &mut seqs)?
+                        .into_iter()
+                        .flatten(),
+                );
                 if history.is_some() {
                     let versions = rows.iter().map(|row| (row.id, row.seq));
                     inner.history_versions(&table, versions, &mut images, &mut seqs)?;
                 } else {
-                    for row in &rows {
-                        let rid = row.id.0.as_bytes().to_vec();
-                        let seq = row.seq.seq as i64;
-                        let at = [&rid as &dyn rusqlite::ToSql, &row.seq.n, &seq];
-                        let mut found = inner.images_where(&table, false, ID_AT, &at)?;
-                        if found.is_empty() {
-                            found = inner.images_where(&table, true, ID_AT, &at)?;
-                        }
-                        images.extend(found);
+                    let versions: Vec<(RowUuid, Pos)> =
+                        rows.iter().map(|row| (row.id, row.seq)).collect();
+                    let found = inner.version_images(&table, &versions)?;
+                    for version in &versions {
+                        images.extend(found[version].iter().cloned());
                     }
                 }
                 // A fetched row stays current for the rest of the session,
@@ -9875,7 +10380,7 @@ impl Db {
                 let mut extra = Vec::new();
                 let mut watch = std::mem::take(&mut inner.sessions[index].watch);
                 let mut held = std::mem::take(&mut inner.sessions[index].held);
-                if policy.is_some() && at.is_none() && history.is_none() {
+                if policy.is_some() && pinned.is_none() && history.is_none() {
                     for image in images.iter().filter(|image| image.table == table) {
                         let row = RowUuid::from_bytes(image.id);
                         held.keep(SESSION_OWNER, &table, row, &image.key, true);
@@ -9931,8 +10436,11 @@ impl Db {
                 session.held = held;
                 let mut tx_ids = inner.tx_ids(&seqs)?;
                 tx_ids.extend(named);
-                let through = at.unwrap_or(inner.served_through());
-                let by = inner.served_by();
+                let through = if at.is_empty() {
+                    positions(inner.served_by(), inner.served_through())
+                } else {
+                    at
+                };
                 let authority = inner.client.is_none();
                 let session = &mut inner.sessions[index];
                 session.outbox.extend(hidden);
@@ -9946,7 +10454,6 @@ impl Db {
                     // A strict read at a relay is served once its upstream
                     // answered, from the settled rows alone.
                     global: authority || strict,
-                    by,
                 });
             }
             SyncMessage::Commit {
@@ -9968,7 +10475,7 @@ impl Db {
                     inner.sessions[index].outbox.push(SyncMessage::Fate {
                         id,
                         outcome: Outcome::Refused {
-                            through,
+                            through: positions(by, through),
                             error: WireError::Rejected {
                                 reason: None,
                                 message: "commit names a node another identity writes as"
@@ -9976,17 +10483,24 @@ impl Db {
                             },
                         },
                         global: true,
-                        by,
                     });
                     return Ok(());
                 }
+                // Its ops name tables and columns by stored names,
+                // whichever version wrote them: they apply under the stored
+                // view, and one naming what this store does not hold was
+                // written under a version it has not deployed.
+                let db = self.stored_db();
                 // A resend after a reconnect gets the recorded fate.
                 let known = self.inner.borrow().applied_fate(node, tx)?;
                 let resent = known.is_some();
                 // A commit written under a version this server has not
                 // deployed is refused at once, loudly: the app that wrote
                 // it was released ahead of its schema (INV-SYNC-52).
-                if known.is_none() && self.inner.borrow().session_unadmitted(index) {
+                if known.is_none()
+                    && (self.inner.borrow().session_unadmitted(index)
+                        || !self.inner.borrow().holds_names(&ops))
+                {
                     self.inner.borrow_mut().refuse_undeployed_commit(index, id);
                     return Ok(());
                 }
@@ -10044,8 +10558,14 @@ impl Db {
                             return Err(error);
                         }
                         Err((error, rows)) => {
-                            let result = Err(wire_error(&error));
                             let inner = self.inner.borrow();
+                            // Read back by the names the current schema
+                            // gives what the commit named by stored ones.
+                            let error = Error {
+                                message: inner.by_current_names(&error.message),
+                                ..error
+                            };
+                            let result = Err(wire_error(&error));
                             inner.record_fate(node, tx, &result)?;
                             inner.record_settled(node, tx, None)?;
                             (result, rows, Vec::new())
@@ -10108,7 +10628,7 @@ impl Db {
                     // current, and the writer checks each by its digest.
                     // A replica's last word ships its versions instead.
                     let session = &mut inner.sessions[index];
-                    if result.is_ok() && global && session.version == session.home_version {
+                    if result.is_ok() && global {
                         for Echoable { row: row_key, op } in echoable {
                             let (table, row, key) = row_key;
                             session.echoes.push(Echo {
@@ -10122,14 +10642,16 @@ impl Db {
                         }
                     }
                     let outcome = match result {
-                        Ok(()) => Outcome::accepted(through, accepted_at),
-                        Err(error) => Outcome::Refused { through, error },
+                        Ok(()) => Outcome::accepted(by, through, accepted_at),
+                        Err(error) => Outcome::Refused {
+                            through: positions(by, through),
+                            error,
+                        },
                     };
                     inner.sessions[index].outbox.push(SyncMessage::Fate {
                         id,
                         outcome,
                         global,
-                        by,
                     });
                 }
             }
@@ -10489,14 +11011,16 @@ impl Db {
         let upload = match std::mem::replace(&mut kind, WireKind::Mergeable) {
             WireKind::Serializable {
                 snapshot,
-                by,
                 reads,
                 own,
-            } if forward => self
-                .inner
-                .borrow()
-                .relayed_serializable(snapshot, by, reads, own)
-                .map_err(|e| (e, Vec::new()))?,
+            } if forward => {
+                let (by, snapshot) = required_position(&snapshot, "a serializable commit")
+                    .map_err(|e| (e, Vec::new()))?;
+                self.inner
+                    .borrow()
+                    .relayed_serializable(snapshot, by, reads, own)
+                    .map_err(|e| (e, Vec::new()))?
+            }
             unchanged => {
                 kind = unchanged;
                 Kind::Mergeable
@@ -10504,11 +11028,12 @@ impl Db {
         };
         if let WireKind::Serializable {
             snapshot,
-            by,
             reads,
             own,
         } = &kind
         {
+            let (by, snapshot) = required_position(snapshot, "a serializable commit")
+                .map_err(|e| (e, Vec::new()))?;
             let inner = self.inner();
             // The sender's own commits its snapshot included, by local seq
             // and where each settled here (earlier on this connection, so
@@ -10530,10 +11055,10 @@ impl Db {
             // name holds them all).
             let base = Pos {
                 n: inner
-                    .known_code(*by)
+                    .known_code(by)
                     .map_err(|e| (e, Vec::new()))?
                     .unwrap_or(i64::MAX),
-                seq: *snapshot,
+                seq: snapshot,
             };
             let in_snapshot = |at: Pos| at <= base || settled.values().any(|s| *s == at);
             for op in &ops {
@@ -10550,13 +11075,19 @@ impl Db {
                 }
             }
             for read in reads {
+                // A read is evaluated in the version it was made in.
+                let Some(schema) =
+                    inner.governed(crate::ids::SchemaVersionId::from_bytes(read.version))
+                else {
+                    return Err((schema_version_not_deployed(), mentioned(&inner)));
+                };
                 let prepared = PreparedQuery {
                     query: read.query.clone(),
                     binding: read.binding.clone(),
                     shape: Shape([0; 16]),
                     binding_id: Binding([0; 16]),
                     request_claims: None,
-                    schema: self.view.clone(),
+                    schema: Some(schema),
                 };
                 let spec = ReadSpec {
                     include_deleted: read.include_deleted,
@@ -10691,12 +11222,11 @@ impl Db {
         // The authority keeps what each version was built on (INV-HIST-21);
         // a relay passes the bases on instead.
         let finished = if relay {
-            self.record_upload(
+            self.record_stored_upload(
                 ops.clone(),
                 seq,
                 upload,
                 Some(Relayed { origin: id, bases }),
-                self.write_version(),
             )
         } else {
             Ok(())
@@ -11139,6 +11669,22 @@ impl Db {
 mod tests {
     use super::*;
     use crate::ids::NodeUuid;
+
+    #[test]
+    fn replace_name_rewrites_only_whole_names() {
+        assert_eq!(
+            replace_name("todos, todos_old and (todos)", "todos", "tasks"),
+            "tasks, todos_old and (tasks)"
+        );
+        assert_eq!(
+            replace_name("title~ab12cd`", "title~ab12cd", "name"),
+            "name`"
+        );
+        assert_eq!(
+            replace_name("xtitle~ab12cd", "title~ab12cd", "name"),
+            "xtitle~ab12cd"
+        );
+    }
 
     /// A pending `Commit` header in the layout before `acting` (separate
     /// `author` and `session`), with its lists empty as `persist_pending`

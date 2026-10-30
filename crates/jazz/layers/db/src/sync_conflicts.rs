@@ -177,9 +177,10 @@ impl Inner {
     pub(super) fn row_ops(&self, ops: &[StagedOp]) -> RowOps {
         let mut by_row = RowOps::new();
         for (index, op) in ops.iter().enumerate() {
-            if let (Some(row), Ok(table)) = (op.row(), self.schema.stored_table(op.table())) {
+            // Replicated ops name their tables by stored names.
+            if let Some(row) = op.row() {
                 by_row
-                    .entry((table.to_owned(), row))
+                    .entry((op.table().to_owned(), row))
                     .or_default()
                     .push(index);
             }
@@ -238,7 +239,7 @@ impl Inner {
             };
             match op {
                 StagedOp::Insert(..) | StagedOp::Move(..) => return Ok(None),
-                StagedOp::Update(_, _, cells, _) | StagedOp::Upsert(_, _, cells, _) => {
+                StagedOp::Update(_, _, cells, _) | StagedOp::Upsert(_, _, cells, _, _) => {
                     authored.extend(stored(cells));
                 }
                 StagedOp::Delete(..) => {

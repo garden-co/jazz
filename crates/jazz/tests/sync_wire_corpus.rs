@@ -69,11 +69,11 @@ const VARIANTS: [&str; 19] = [
     "Fate",
     "CheckAllowed",
     "CheckAllowedResult",
-    "Schema",
     "SchemaAdmission",
     "Stored",
-    "KnownCatalogue",
+    "Join",
     "Catalogue",
+    "Welcome",
 ];
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -395,9 +395,11 @@ fn shape(message: &SyncMessage) -> Option<&'static str> {
             ..
         } => Some(SHAPES[0]),
         SyncMessage::Rows { tx_ids, .. } if !tx_ids.is_empty() => Some(SHAPES[1]),
-        SyncMessage::Catalogue {
-            versions, cells, ..
-        } if !versions.is_empty() && !cells.is_empty() => Some(SHAPES[2]),
+        SyncMessage::Catalogue(catalogue)
+            if !catalogue.versions.is_empty() && !catalogue.cells.is_empty() =>
+        {
+            Some(SHAPES[2])
+        }
         SyncMessage::Commit {
             acting: Acting::Attributed { author },
             ..
@@ -434,13 +436,13 @@ fn shape(message: &SyncMessage) -> Option<&'static str> {
         },
         SyncMessage::AccessLost { hidden: true, .. } => Some(SHAPES[8]),
         SyncMessage::Commit {
-            kind: WireKind::Serializable { by: None, .. },
+            kind: WireKind::Serializable { snapshot, .. },
             ..
-        } => Some(SHAPES[9]),
-        SyncMessage::Commit {
-            kind: WireKind::Serializable { by: Some(_), .. },
-            ..
-        } => Some(SHAPES[10]),
+        } => match snapshot.as_slice() {
+            [(None, _)] => Some(SHAPES[9]),
+            [(Some(_), _)] => Some(SHAPES[10]),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -601,8 +603,8 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     .unwrap();
     block_on(server.update("notes", shared, note(1, large(2)), UpdateOptions::default())).unwrap();
 
-    // Schema, SchemaAdmission, Read (live), Rows, Settled, ChunkRequests,
-    // Chunks: a client subscribes and pulls the large value it reads.
+    // Join, Welcome, Read (live), Rows, Settled, ChunkRequests, Chunks: a
+    // client subscribes and pulls the large value it reads.
     let alice = open(0x51, user(1), false);
     connect(&alice, &server, user(1), &recorded);
     let notes = alice.prepare_query(&Query::from("notes")).unwrap();
@@ -785,8 +787,8 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     connect(&alice, &server, user(1), &recorded);
     pump(&[&alice, &server, &alice]);
 
-    // SchemaAdmission: a client on a schema version the server has not
-    // admitted is told so.
+    // A Welcome tells a client on a schema version the server has not
+    // admitted so.
     let bob = open(0x52, user(2), true);
     connect(&bob, &server, user(2), &recorded);
     pump(&[&bob, &server, &bob]);
@@ -847,15 +849,41 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
         }],
     )
     .unwrap();
-    block_on(server.activate_schema_with_lenses(copied, &[lens])).unwrap();
+    block_on(server.activate_schema_with_lenses(copied.clone(), &[lens])).unwrap();
     pump(&[&alice, &server, &alice]);
+
+    // Schema: alice writes through a view of the version she just
+    // mirrored, so her commit uploads under it, between switches.
+    let view = block_on(alice.register_schema_view(copied)).unwrap();
+    let mut copied_note = note(1, vec![8]);
+    copied_note.insert("first_owner".to_owned(), subject(1));
+    block_on(view.insert("notes", copied_note, InsertOptions::default())).unwrap();
+    pump(&[&alice, &server, &alice]);
+
+    // SchemaAdmission: the server admits the draft bob declared.
+    let draft = schema(true);
+    let adds_title = MigrationLens::new(
+        schema(false).version_id(),
+        draft.version_id(),
+        vec![TableLens {
+            source_table: "notes".into(),
+            target_table: "notes".into(),
+            ops: vec![LensOp::AddColumn {
+                column: "title".into(),
+                default: Value::String(String::new()),
+            }],
+        }],
+    )
+    .unwrap();
+    block_on(server.admit_schema_with_lenses(draft, &[adds_title])).unwrap();
+    pump(&[&bob, &server, &bob]);
 
     // Refused: a subscription the server cannot serve. No replica sends
     // one (it prepares queries against the same schema), so a raw session
-    // does, on the schema version alice announced.
-    let schema = postcard::from_bytes::<SyncMessage>(&recorded.borrow()["Schema"].1).unwrap();
+    // does, joining on the schema version alice announced.
+    let join = postcard::from_bytes::<SyncMessage>(&recorded.borrow()["Join"].1).unwrap();
     let inbound = Rc::new(RefCell::new(VecDeque::from([
-        schema,
+        join,
         SyncMessage::Read {
             id: 1,
             query: Box::new(Query::from("missing")),
@@ -864,7 +892,7 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
             tier: ReadTier::LocalFirst,
             wait: None,
             view: Box::new(ReadViewSourceSpec::Current),
-            span: ReadSpan::Live { since: None },
+            span: ReadSpan::Live { since: Vec::new() },
         },
     ])));
     server

@@ -471,6 +471,10 @@ struct Inner {
     /// The stored tables: the union of every admitted schema, keyed and
     /// named by stored names.
     physical: Schema,
+    /// The current schema named by stored names, which replicated writes
+    /// apply under ([`Schema::stored_view`]), keyed by the owner it was
+    /// built from and how many stored columns there were.
+    stored_view: RefCell<Option<(*const Schema, usize, Rc<Schema>)>>,
     /// Admitted structural schemas with their version ids (hashing a
     /// whole schema is too slow to repeat per session per tick).
     admitted: Vec<(crate::ids::SchemaVersionId, JazzSchema)>,
@@ -480,6 +484,8 @@ struct Inner {
     /// Open transaction batches, by id.
     batches: HashMap<OpenTransactionId, Batch>,
     identity: DbIdentity,
+    /// The node SYSTEM provenance names ([`crate::options::DbConfig::system_node`]).
+    system_node: crate::ids::NodeUuid,
     /// Provenance for the write being applied (set by `apply_as`).
     writer: Option<Stamp>,
     /// The commit seq and time of the last local stamp: writes of one commit
@@ -488,6 +494,13 @@ struct Inner {
     last_stamp: (u64, i64),
     /// Interned author codes (see [`Inner::author_code`]), cached both ways.
     authors: RefCell<AuthorCodes>,
+    /// By stored table and whether into its history: the columns the last
+    /// image stored there had, and the insert that stores them. A sync
+    /// batch stores thousands of images of a few tables.
+    image_inserts: RefCell<HashMap<(String, bool), (Vec<String>, String)>>,
+    /// While a replica stores a message's images: their rows' current
+    /// images, read at once (see `Inner::begin_current_batch`).
+    current_batch: RefCell<Option<HashMap<(String, RowUuid, Vec<u8>), Option<sync::Image>>>>,
     ids: Box<dyn RowIdSource>,
     /// The newest commit seq handed out: the authority's seq, or on a
     /// replica its own node's counter.
@@ -536,9 +549,8 @@ struct Inner {
     accepted: u64,
     /// Rows written since the last server tick (only while serving).
     since_tick: Vec<(String, RowUuid, Vec<u8>)>,
-    /// Ops of the open local transaction, for upload, each with the
-    /// schema version whose names it uses.
-    pub(crate) capture: Vec<(crate::ids::SchemaVersionId, StagedOp)>,
+    /// Ops of the open local transaction, for upload, by stored names.
+    pub(crate) capture: Vec<StagedOp>,
     /// Images a replica dropped since the last dispatch (evictions and
     /// rebases), for keyed invalidation.
     gone: RefCell<Vec<sync::Image>>,
@@ -648,6 +660,11 @@ fn who(identity: WriteIdentity) -> Who {
 pub(crate) struct AuthorCodes {
     codes: HashMap<AuthorKey, i64>,
     parts: HashMap<i64, AuthorKey>,
+    /// Codes found or interned inside an open transaction, with the
+    /// connection's rollback count then: one holds until a rollback, which
+    /// may have undone it. A sync batch interns a code per new author and
+    /// then finds it for every row that author wrote.
+    uncommitted: HashMap<AuthorKey, (i64, u64)>,
 }
 
 /// Who wrote a row version, and when (Unix ms).
@@ -727,6 +744,7 @@ fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> 
         jazz: jazz.clone(),
         version: jazz.version_id(),
         policies_from: None,
+        stored_names: false,
     })
 }
 
@@ -1216,8 +1234,13 @@ impl Db {
         }))
         .map_err(storage)?;
         let rolled_back = chunks.clone();
-        conn.rollback_hook(Some(move || rolled_back.unpin()))
-            .map_err(storage)?;
+        // SQLite's own rollbacks (after a full disk, say) count too.
+        let rollback_key = crate::values::rollback_key(&conn);
+        conn.rollback_hook(Some(move || {
+            rolled_back.unpin();
+            crate::values::note_rollback(rollback_key);
+        }))
+        .map_err(storage)?;
         let fresh: i64 = conn
             // Durable Object SQLite keeps its own `_cf_*` tables in the file.
             .query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '\\_jazz\\_%' ESCAPE '\\' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\'", [], |r| r.get(0))
@@ -1231,6 +1254,7 @@ impl Db {
                 jazz: config.schema.clone(),
                 version: config.schema.version_id(),
                 policies_from: None,
+                stored_names: false,
             };
             physical.union(&schema)?;
             physical
@@ -1298,6 +1322,7 @@ impl Db {
                 owner_version: owner.jazz.version_id(),
                 owner,
                 physical,
+                stored_view: RefCell::new(None),
                 admitted: {
                     let version = config.schema.version_id();
                     admitted.retain(|(id, _)| *id != version);
@@ -1307,10 +1332,13 @@ impl Db {
                 names,
                 views: BTreeMap::new(),
                 batches: HashMap::new(),
+                system_node: config.system_node.unwrap_or(config.identity.node),
                 identity: config.identity,
                 writer: None,
                 last_stamp: (0, 0),
                 authors: RefCell::new(AuthorCodes::default()),
+                image_inserts: RefCell::default(),
+                current_batch: RefCell::default(),
                 ids: config
                     .id_source
                     .unwrap_or_else(|| Box::new(crate::options::ProductionRowIdSource)),
@@ -1509,16 +1537,6 @@ impl Db {
         })
     }
 
-    /// The schema version this handle writes under: its view's, else the
-    /// owner's. A replica uploads each commit under the version that
-    /// wrote it.
-    pub(crate) fn write_version(&self) -> crate::ids::SchemaVersionId {
-        match &self.view {
-            Some(view) => view.version,
-            None => self.inner.borrow().owner_version,
-        }
-    }
-
     /// The shared state, set up to run under this handle's schema.
     fn inner(&self) -> std::cell::RefMut<'_, Inner> {
         let mut inner = self.inner.borrow_mut();
@@ -1712,6 +1730,19 @@ impl Db {
     #[doc(hidden)]
     pub fn fail_next_ticks_for_test(&self, codes: impl IntoIterator<Item = ErrorCode>) {
         self.inner().failing_ticks.extend(codes);
+    }
+
+    /// Where the current schema stores `table`'s `column`: (stored table,
+    /// stored column), the names a hand-built replicated write uses.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn stored_column_for_test(&self, table: &str, column: &str) -> (String, String) {
+        let inner = self.inner();
+        let table = inner
+            .owner
+            .table(table)
+            .expect("a table of the current schema");
+        (table.stored.clone(), table.stored_name(column).to_owned())
     }
 
     /// Diagnostics: stored large-value nodes, and roots referenced by cells.
@@ -2190,7 +2221,7 @@ impl Db {
         opts: UpsertOptions,
     ) -> Result<WriteHandle, Error> {
         let who = who(opts.identity);
-        let op = StagedOp::Upsert(table.to_owned(), row, cells, opts);
+        let op = StagedOp::Upsert(table.to_owned(), row, cells, BTreeMap::new(), opts);
         self.fetching_with(op, |op| self.write_op(op, who)).await
     }
 
@@ -2244,15 +2275,7 @@ impl Db {
             // The upload record joins the write's SQLite transaction: if it
             // fails, `with_upload` rolls both back, and nobody has been told.
             if let Err(error) = committed
-                .then(|| {
-                    self.record_upload(
-                        vec![op],
-                        handle.seq.seq,
-                        sync::Kind::Mergeable,
-                        None,
-                        self.write_version(),
-                    )
-                })
+                .then(|| self.record_upload(vec![op], handle.seq.seq, sync::Kind::Mergeable, None))
                 .transpose()
             {
                 let mut inner = self.inner();
@@ -2390,17 +2413,7 @@ impl Db {
         let value = result?;
         let (seq, _) = changed.expect("committed");
         // The upload record joins the transaction's SQLite savepoint.
-        let recorded = self
-            .upload_version(captured.iter().map(|(version, _)| *version))
-            .and_then(|version| {
-                self.record_upload(
-                    captured.into_iter().map(|(_, op)| op).collect(),
-                    seq,
-                    sync::Kind::Mergeable,
-                    None,
-                    version,
-                )
-            });
+        let recorded = self.record_stored_upload(captured, seq, sync::Kind::Mergeable, None);
         if let Err(error) = recorded {
             let mut inner = self.inner();
             inner.seq = prior;
@@ -2640,12 +2653,6 @@ impl Db {
             }
             inner.write_admission(&target, cells, make_current)?;
             if make_current {
-                // Pending commits written under the version current until
-                // now keep uploading under it (INV-SYNC-52).
-                let previous = *inner.owner_version.as_bytes();
-                if let Some(client) = inner.client.as_mut() {
-                    client.keep_version(previous);
-                }
                 inner.owner_version = target.jazz.version_id();
                 inner.owner = Rc::new(target);
                 // Read policies that changed may read differently from
@@ -2846,63 +2853,6 @@ impl Inner {
         }
         let conn = &self.conn;
         self.names.record_lens_cells(conn, cells)
-    }
-
-    /// `ops`, which name tables and columns as admitted `version` does,
-    /// named as the current schema does instead: by where each is stored.
-    /// What the current schema does not name (a table or column it
-    /// dropped) is left out, as is a write to a table it lacks; the
-    /// commit itself still uploads under `version`, whole.
-    pub(crate) fn by_current_names(
-        &self,
-        version: crate::ids::SchemaVersionId,
-        ops: Vec<StagedOp>,
-    ) -> Vec<StagedOp> {
-        let Some(from) = self.names.get(&version) else {
-            return ops;
-        };
-        let rename = |table: &str| -> Option<(String, BTreeMap<String, String>)> {
-            let (stored, columns) = from.tables.get(table)?;
-            let current = self.owner.by_stored(stored)?;
-            let columns = columns
-                .iter()
-                .filter_map(|(column, stored)| {
-                    let now = current.by_stored(stored)?;
-                    Some((column.clone(), now.name.clone()))
-                })
-                .collect();
-            Some((current.name.clone(), columns))
-        };
-        let cells = |columns: &BTreeMap<String, String>, cells: BTreeMap<String, Value>| {
-            cells
-                .into_iter()
-                .filter_map(|(column, value)| {
-                    if column.starts_with('$') {
-                        return Some((column, value));
-                    }
-                    columns.get(&column).map(|now| (now.clone(), value))
-                })
-                .collect()
-        };
-        ops.into_iter()
-            .filter_map(|op| {
-                let (table, columns) = rename(op.table())?;
-                Some(match op {
-                    StagedOp::Insert(_, c, o) => StagedOp::Insert(table, cells(&columns, c), o),
-                    StagedOp::Update(_, r, c, o) => {
-                        StagedOp::Update(table, r, cells(&columns, c), o)
-                    }
-                    StagedOp::Upsert(_, r, c, o) => {
-                        StagedOp::Upsert(table, r, cells(&columns, c), o)
-                    }
-                    StagedOp::Delete(_, r, o) => StagedOp::Delete(table, r, o),
-                    StagedOp::Restore(_, r, c, o) => {
-                        StagedOp::Restore(table, r, c.map(|c| cells(&columns, c)), o)
-                    }
-                    StagedOp::Move(_, from, to, r) => StagedOp::Move(table, from, to, r),
-                })
-            })
-            .collect()
     }
 
     /// An upstream image as this store keeps it: `None` for a table it
@@ -3247,6 +3197,140 @@ impl Inner {
             Some(names) => Schema::stored_as(schema, names, self.names.tags()),
             None => Schema::new(schema, self.names.tags()),
         }
+    }
+
+    /// The current schema named by stored names: the schema replicated
+    /// writes travel and apply by (see [`Schema::stored_view`]).
+    pub(crate) fn stored_view(&self) -> Rc<Schema> {
+        let columns = self
+            .physical
+            .tables
+            .values()
+            .map(|table| table.columns.len() + 1)
+            .sum();
+        let owner = Rc::as_ptr(&self.owner);
+        let mut cached = self.stored_view.borrow_mut();
+        if let Some((built, count, view)) = &*cached
+            && *built == owner
+            && *count == columns
+        {
+            return view.clone();
+        }
+        let view = Rc::new(Schema::stored_view(&self.owner, &self.physical));
+        *cached = Some((owner, columns, view.clone()));
+        view
+    }
+
+    /// `op`, written through `schema`, as it travels: by the stored names
+    /// of its table and cells. An insert carries every column `schema`
+    /// declares (its default, or null), so its receiver, which applies it
+    /// under [`Inner::stored_view`], fills only what that version lacks.
+    pub(crate) fn stored_op(&self, op: StagedOp, schema: &Schema) -> Result<StagedOp, Error> {
+        if schema.stored_names {
+            return Ok(op);
+        }
+        let table = schema.table(op.table())?;
+        let stored = |cells: BTreeMap<String, Value>| -> BTreeMap<String, Value> {
+            cells
+                .into_iter()
+                .map(|(name, value)| (table.stored_name(&name).to_owned(), value))
+                .collect()
+        };
+        let name = table.stored.clone();
+        // The columns this version's lineage dropped, with their backwards
+        // defaults: a receiver cannot tell which lenses a writer descends
+        // from, so the writer names them (SPEC 8.9).
+        let version = if std::ptr::eq(schema, &*self.owner) {
+            self.owner_version
+        } else {
+            schema.jazz.version_id()
+        };
+        let mut dropped = BTreeMap::new();
+        if self.names.has_lens_cells() {
+            let physical = self.physical.tables.get(&table.stored);
+            for (column, default) in self.names.lens_cells(&version, table).1 {
+                let Some(stored) = physical.and_then(|physical| physical.column(&column)) else {
+                    continue;
+                };
+                let value = crate::values::column_from_sql(stored, default.as_ref(), &self.chunks)?
+                    .unwrap_or(Value::Nullable(None));
+                dropped.insert(column, value);
+            }
+        }
+        // What a write that creates its row gives the columns it leaves out:
+        // its version's defaults (branch columns stay as given: the target,
+        // or else the column's immutable default, keys the row,
+        // INV-BVIEW-19) and the dropped columns' backwards defaults.
+        let created = |cells: &BTreeMap<String, Value>| -> BTreeMap<String, Value> {
+            let mut created = BTreeMap::new();
+            for column in &table.columns {
+                if cells.contains_key(&column.name) || table.branch_by.contains(&column.name) {
+                    continue;
+                }
+                let value = match &column.default {
+                    Some(default) => default.clone(),
+                    None if column.nullable() => Value::Nullable(None),
+                    None => continue,
+                };
+                created.insert(column.stored.clone(), value);
+            }
+            created.extend(dropped.clone());
+            created
+        };
+        // Branch selectors name branch columns too.
+        let selector = |selector: BranchSelector| BranchSelector {
+            values: selector
+                .values
+                .into_iter()
+                .map(|(name, value)| (table.stored_name(&name).to_owned(), value))
+                .collect(),
+        };
+        let exact = |target: ExactWriteTarget| match target {
+            ExactWriteTarget::Root => ExactWriteTarget::Root,
+            ExactWriteTarget::Branch(branch) => ExactWriteTarget::Branch(selector(branch)),
+        };
+        let view = |target: WriteTarget| match target {
+            WriteTarget::Root => WriteTarget::Root,
+            WriteTarget::BranchView { head, base } => WriteTarget::BranchView {
+                head: selector(head),
+                base: base.map(|base| match base {
+                    BranchViewBase::Current(base) => BranchViewBase::Current(selector(base)),
+                    BranchViewBase::Snapshot { branch, snapshot } => BranchViewBase::Snapshot {
+                        branch: selector(branch),
+                        snapshot,
+                    },
+                }),
+            },
+        };
+        Ok(match op {
+            StagedOp::Insert(_, cells, mut opts) => {
+                opts.target = exact(opts.target);
+                let created = created(&cells);
+                let mut cells = stored(cells);
+                cells.extend(created);
+                StagedOp::Insert(name, cells, opts)
+            }
+            StagedOp::Update(_, row, cells, mut opts) => {
+                opts.target = view(opts.target);
+                StagedOp::Update(name, row, stored(cells), opts)
+            }
+            StagedOp::Upsert(_, row, cells, mut extra, mut opts) => {
+                opts.target = view(opts.target);
+                extra.extend(created(&cells));
+                StagedOp::Upsert(name, row, stored(cells), extra, opts)
+            }
+            StagedOp::Delete(_, row, mut opts) => {
+                opts.target = view(opts.target);
+                StagedOp::Delete(name, row, opts)
+            }
+            StagedOp::Restore(_, row, cells, mut opts) => {
+                opts.target = exact(opts.target);
+                StagedOp::Restore(name, row, cells.map(stored), opts)
+            }
+            StagedOp::Move(_, from, to, row) => {
+                StagedOp::Move(name, selector(from), selector(to), row)
+            }
+        })
     }
 
     /// The lens cells the lenses into `target` make on this store: a copy
@@ -4443,7 +4527,7 @@ impl Inner {
     /// system writes to the node that made them).
     pub(crate) fn stamp_author(&self) -> AuthorSubject {
         match self.identity.author {
-            AuthorSubject::SYSTEM => AuthorSubject::system_at(self.identity.node),
+            AuthorSubject::SYSTEM => AuthorSubject::system_at(self.system_node),
             author => author,
         }
     }
@@ -4452,8 +4536,16 @@ impl Inner {
     /// this small integer instead of repeating them in every version;
     /// codes are local to this database and resolved back at egress.
     pub(crate) fn author_code(&self, key: &AuthorKey) -> Result<i64, Error> {
-        if let Some(code) = self.authors.borrow().codes.get(key) {
-            return Ok(*code);
+        {
+            let authors = self.authors.borrow();
+            if let Some(code) = authors.codes.get(key) {
+                return Ok(*code);
+            }
+            if let Some((code, rollbacks)) = authors.uncommitted.get(key)
+                && *rollbacks == crate::values::rollbacks(&self.conn)
+            {
+                return Ok(*code);
+            }
         }
         let (account, issuer, subject) = key;
         let account = account.as_bytes().to_vec();
@@ -4481,14 +4573,19 @@ impl Inner {
         Ok(code)
     }
 
-    /// Cache an author's code, but only once it is committed: one interned
-    /// inside a savepoint (a transaction overlay, a batch that may fail) is
-    /// undone by its rollback, and its code may then go to another author.
+    /// Cache an author's code. One interned inside a savepoint (a
+    /// transaction overlay, a batch that may fail) is undone by its
+    /// rollback, and its code may then go to another author: until it is
+    /// committed it holds only while no rollback happened.
     fn remember_author(&self, key: &AuthorKey, code: i64) {
+        let mut authors = self.authors.borrow_mut();
         if self.conn.is_autocommit() {
-            let mut authors = self.authors.borrow_mut();
+            authors.uncommitted.remove(key);
             authors.codes.insert(key.clone(), code);
             authors.parts.insert(code, key.clone());
+        } else {
+            let rollbacks = crate::values::rollbacks(&self.conn);
+            authors.uncommitted.insert(key.clone(), (code, rollbacks));
         }
     }
 
@@ -4831,7 +4928,7 @@ impl Inner {
         let (table_name, cells) = match op {
             StagedOp::Insert(t, c, _)
             | StagedOp::Update(t, _, c, _)
-            | StagedOp::Upsert(t, _, c, _) => (t.clone(), c),
+            | StagedOp::Upsert(t, _, c, _, _) => (t.clone(), c),
             StagedOp::Restore(t, _, Some(c), _) => (t.clone(), c),
             _ => return Ok(edits),
         };
@@ -4868,7 +4965,7 @@ impl Inner {
     pub(crate) fn counter_deltas(&self, op: &mut StagedOp) -> Result<(), Error> {
         let (table_name, row, cells, target) = match op {
             StagedOp::Update(t, r, c, o) => (t.clone(), *r, c, &o.target),
-            StagedOp::Upsert(t, r, c, o) => (t.clone(), *r, c, &o.target),
+            StagedOp::Upsert(t, r, c, _, o) => (t.clone(), *r, c, &o.target),
             _ => return Ok(()),
         };
         let schema = self.schema.clone();
@@ -5359,6 +5456,17 @@ impl Inner {
                 }
             }
         }
+        // A replicated insert from a version without a branch column keys
+        // its row by that column's immutable default (INV-BVIEW-19).
+        if schema.stored_names {
+            for column in &table.branch_by {
+                if !cells.contains_key(column)
+                    && let Some(default) = table.column(column).and_then(|c| c.default.clone())
+                {
+                    cells.insert(column.clone(), default);
+                }
+            }
+        }
         let key = table.row_branch_key(&cells);
         let row = row_id.unwrap_or_else(|| self.ids.next_row_id());
         let cells = self.merged_cells(table, row, None, None, cells)?;
@@ -5370,15 +5478,20 @@ impl Inner {
         }
         // Most stores have no lens cells; the owner's version is cached
         // (hashing a schema per insert would dominate a large batch's replay).
-        let (copies, dropped) = if self.names.has_lens_cells() {
+        let (copies, dropped) = if !self.names.has_lens_cells() {
+            Default::default()
+        } else if schema.stored_names {
+            let copies = self
+                .names
+                .stored_copies(&table.stored, |column| cells.contains_key(column));
+            (copies, Vec::new())
+        } else {
             let version = if Rc::ptr_eq(&schema, &self.owner) {
                 self.owner_version
             } else {
                 schema.jazz.version_id()
             };
             self.names.lens_cells(&version, table)
-        } else {
-            Default::default()
         };
         let mut names = vec![
             "id".to_owned(),
@@ -5395,6 +5508,19 @@ impl Inner {
         for column in &table.columns {
             let given = match (cells.get(&column.name), &column.default) {
                 (Some(value), _) => Some((value, source)),
+                // A replicated insert names every column its writer's
+                // version declares, and the backwards defaults of columns
+                // its lineage dropped: one it leaves out, a later version
+                // added, so the stored column's own default or a copy fills
+                // it. Only a required column nothing fills is refused.
+                (None, default)
+                    if schema.stored_names
+                        && (default.is_some()
+                            || column.nullable()
+                            || copies.iter().any(|(_, copy)| *copy == column.stored)) =>
+                {
+                    continue;
+                }
                 (None, Some(default)) => Some((default, Cells::Authored)),
                 (None, None) if column.nullable() => None,
                 (None, None) => {
@@ -5535,17 +5661,21 @@ impl Inner {
         Ok(())
     }
 
+    /// An update, or with `created` an upsert, which gives the columns
+    /// `cells` leaves out `created`'s values if it creates the row.
     #[allow(clippy::too_many_arguments)]
     fn patch(
         &mut self,
         table_name: &str,
         row: RowUuid,
         cells: BTreeMap<String, Value>,
+        created: Option<BTreeMap<String, Value>>,
         target: &Target,
         who: Who,
         seq: u64,
-        upsert: bool,
     ) -> Result<WriteHandle, Error> {
+        let upsert = created.is_some();
+        let created = created.unwrap_or_default();
         let verb = if upsert { "UPSERT" } else { "UPDATE" };
         let schema = self.schema.clone();
         let table = schema.table(table_name)?;
@@ -5569,6 +5699,9 @@ impl Inner {
             Located::Absent { cells: branch, .. } if upsert => {
                 let mut cells = cells;
                 cells.extend(branch);
+                for (column, value) in created {
+                    cells.entry(column).or_insert(value);
+                }
                 return self.insert(
                     table_name,
                     cells,
@@ -5613,6 +5746,9 @@ impl Inner {
                     // Every column is written, as by an insert: nothing
                     // of the deleted version carries over.
                     reinserted = true;
+                    for (column, value) in created {
+                        cells.entry(column).or_insert(value);
+                    }
                     for column in &table.columns {
                         // Branch columns are the row's key and stay.
                         if cells.contains_key(&column.name)
@@ -5695,19 +5831,24 @@ impl Inner {
         who: Who,
         seq: u64,
     ) -> Result<WriteHandle, Error> {
-        self.patch(table, row, cells, target, who, seq, false)
+        self.patch(table, row, cells, None, target, who, seq)
     }
 
+    /// Upsert `cells` into `row`; if it creates the row, `created` fills
+    /// the columns `cells` leaves out (a replicated upsert's writer's
+    /// defaults, see `stored_op`).
+    #[allow(clippy::too_many_arguments)]
     fn upsert(
         &mut self,
         table: &str,
         row: RowUuid,
         cells: BTreeMap<String, Value>,
+        created: BTreeMap<String, Value>,
         target: &Target,
         who: Who,
         seq: u64,
     ) -> Result<WriteHandle, Error> {
-        self.patch(table, row, cells, target, who, seq, true)
+        self.patch(table, row, cells, Some(created), target, who, seq)
     }
 
     fn delete(
@@ -6096,7 +6237,16 @@ pub struct MergeableTxHandle<'a> {
 pub(crate) enum StagedOp {
     Insert(String, BTreeMap<String, Value>, InsertOptions),
     Update(String, RowUuid, BTreeMap<String, Value>, UpdateOptions),
-    Upsert(String, RowUuid, BTreeMap<String, Value>, UpsertOptions),
+    /// The fourth field is what the upsert gives the columns it leaves
+    /// out if it creates the row, by stored names: a replicated upsert's
+    /// writer's defaults (see `Inner::stored_op`); empty on a local one.
+    Upsert(
+        String,
+        RowUuid,
+        BTreeMap<String, Value>,
+        BTreeMap<String, Value>,
+        UpsertOptions,
+    ),
     Delete(String, RowUuid, DeleteOptions),
     Restore(
         String,
@@ -6252,9 +6402,13 @@ impl MergeableTxHandle<'_> {
         opts: UpsertOptions,
     ) -> Result<(), Error> {
         self.db.inner().require_mutation_admission()?;
-        self.ops
-            .borrow_mut()
-            .push(StagedOp::Upsert(table.to_owned(), row, cells, opts));
+        self.ops.borrow_mut().push(StagedOp::Upsert(
+            table.to_owned(),
+            row,
+            cells,
+            BTreeMap::new(),
+            opts,
+        ));
         Ok(())
     }
 
@@ -6332,7 +6486,7 @@ impl MergeableTxHandle<'_> {
                             )
                             .await
                             .map(drop)?,
-                        StagedOp::Upsert(t, r, c, o) => db
+                        StagedOp::Upsert(t, r, c, _, o) => db
                             .upsert(
                                 &t,
                                 r,
@@ -6398,29 +6552,6 @@ impl SchemaViewId {
 
 fn schema_error(message: impl Into<String>) -> Error {
     Error::new(ErrorCode::Schema, message)
-}
-
-impl Db {
-    /// The schema version a transaction's commit uploads under: the one
-    /// every write in it (each with its `versions` entry) names its tables
-    /// and columns by. A replica cannot upload one commit under several, so
-    /// a transaction written through views of different versions is
-    /// refused there; elsewhere nothing uploads.
-    fn upload_version(
-        &self,
-        versions: impl IntoIterator<Item = crate::ids::SchemaVersionId>,
-    ) -> Result<crate::ids::SchemaVersionId, Error> {
-        let mut versions = versions.into_iter();
-        let Some(first) = versions.next() else {
-            return Ok(self.write_version());
-        };
-        if self.is_client() && versions.any(|version| version != first) {
-            return Err(unsupported(
-                "a transaction writing through schema views of different versions on a replica",
-            ));
-        }
-        Ok(first)
-    }
 }
 
 /// The changes a schema view may make over the owner's schema without an
@@ -6875,9 +7006,9 @@ impl Inner {
                 let target = Target::of(&o.target, self)?;
                 self.update(&t, r, c, &target, who, seq)
             }
-            StagedOp::Upsert(t, r, c, o) => {
+            StagedOp::Upsert(t, r, c, created, o) => {
                 let target = Target::of(&o.target, self)?;
-                self.upsert(&t, r, c, &target, who, seq)
+                self.upsert(&t, r, c, created, &target, who, seq)
             }
             StagedOp::Delete(t, r, o) => {
                 let target = Target::of(&o.target, self)?;
@@ -7156,6 +7287,12 @@ impl Db {
                     .iter()
                     .map(|read| {
                         Ok(sync::WireRead {
+                            version: *read
+                                .prepared
+                                .schema
+                                .as_ref()
+                                .map_or(inner.owner_version, |schema| schema.version)
+                                .as_bytes(),
                             query: read.prepared.query.clone(),
                             binding: read.prepared.binding.clone(),
                             include_deleted: read.include_deleted,
@@ -7240,17 +7377,13 @@ impl Db {
         };
         // `commit_ops` holds the upload record and the commit in one SQLite
         // transaction and rolls both back on an error.
-        let recorded = self
-            .upload_version(ops.iter().map(|(schema, _)| schema.version))
-            .and_then(|version| {
-                self.record_upload(
-                    ops.iter().map(|(_, op)| op.clone()).collect(),
-                    seq,
-                    kind,
-                    None,
-                    version,
-                )
-            });
+        // Each op travels by stored names, so one transaction may write
+        // through views of several versions.
+        let recorded = ops
+            .iter()
+            .map(|(schema, op)| self.inner().stored_op(op.clone(), schema))
+            .collect::<Result<Vec<_>, _>>()
+            .and_then(|ops| self.record_stored_upload(ops, seq, kind, None));
         if let Err(error) = recorded {
             let mut inner = self.inner();
             inner.seq = prior;
@@ -7610,8 +7743,14 @@ impl TxRef<'_> {
         cells: BTreeMap<String, Value>,
         opts: UpsertOptions,
     ) -> Result<WriteHandle, Error> {
-        self.stage(StagedOp::Upsert(table.to_owned(), row, cells, opts))
-            .await?;
+        self.stage(StagedOp::Upsert(
+            table.to_owned(),
+            row,
+            cells,
+            BTreeMap::new(),
+            opts,
+        ))
+        .await?;
         Ok(WriteHandle {
             row,
             seq: Pos::default(),
@@ -7749,7 +7888,7 @@ impl TxRef<'_> {
             && self.db.is_client()
             && tier != ReadTier::LocalOnly
         {
-            let at = pinned.then_some(snapshot.seq);
+            let at = pinned.then_some(snapshot);
             self.db.remote_shape(&prepared.query)?;
             let through = self
                 .db

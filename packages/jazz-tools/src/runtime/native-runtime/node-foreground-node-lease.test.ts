@@ -14,6 +14,7 @@ import {
   type NodeForegroundNodeLeaseOptions,
 } from "./node-foreground-node-lease.js";
 import { createBrowserAuthSessionKey } from "../browser-worker-config.js";
+import { isRandomNodeUuid } from "../runtime-entropy.js";
 
 const roots: string[] = [];
 let restoreCwd: (() => void) | undefined;
@@ -122,6 +123,7 @@ describe("Node foreground node leases", () => {
     const options = await isolatedOptions();
     const first = await acquireNodeForegroundNodeLease(options);
     const node = first.node;
+    expect(isRandomNodeUuid(node)).toBe(true);
     await first.returnWithHighWater(123456n);
 
     const reopened = await acquireNodeForegroundNodeLease(options);
