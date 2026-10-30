@@ -496,7 +496,7 @@ struct Inner {
     seq: u64,
     /// The wall clock (Unix ms) [`Inner::next_seq`] reads; `None` counts
     /// positions up from the newest instead (see [`DbConfig::clock`]).
-    clock: Option<Box<dyn Fn() -> u64>>,
+    pub(crate) clock: Option<Box<dyn Fn() -> u64>>,
     /// Positions held for commits that land later at a position fixed
     /// elsewhere (a cross-shard commit's part, at the timestamp all its
     /// parts share): position → the commit's (node, tx). What this store
@@ -506,9 +506,6 @@ struct Inner {
     /// Commits to land at a fixed position when they arrive: (node, tx) →
     /// position.
     pub(crate) fixed: HashMap<([u8; 16], u64), u64>,
-    /// Settle every live subscription again next tick: a hold was released,
-    /// so what this store serves as settled moved without a write to them.
-    pub(crate) resettle: bool,
     /// A replica's own node code (`_n` of its unsettled versions, see
     /// [`sync::RELAY`]); 0 until it becomes one.
     pub(crate) me: i64,
@@ -1263,7 +1260,6 @@ impl Db {
                 clock: config.clock,
                 holds: BTreeMap::new(),
                 fixed: HashMap::new(),
-                resettle: false,
                 me: 0,
                 claims: HashMap::new(),
                 fan: fanout::Fanout::default(),
@@ -1362,13 +1358,6 @@ impl Db {
         Ok(())
     }
 
-    /// Settle every live subscription again at the next tick, at the
-    /// position this store serves as settled: a quiet shard closing at a
-    /// position it observed (on request, or on a heartbeat).
-    pub fn settle_subscriptions(&self) {
-        self.inner.borrow_mut().resettle = true;
-    }
-
     /// The lowest position held for a commit still to land, if any: a read
     /// or a validation as of a position at or above it waits for it.
     pub fn lowest_hold(&self) -> Option<u64> {
@@ -1381,7 +1370,6 @@ impl Db {
         let mut inner = self.inner.borrow_mut();
         inner.holds.retain(|_, key| *key != (node, tx));
         inner.fixed.remove(&(node, tx));
-        inner.resettle = true;
     }
 
     /// Every SQLite store holds complete history; this one is also the

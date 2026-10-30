@@ -1183,6 +1183,21 @@ pub enum SyncMessage {
         cells: Vec<CatalogueCell>,
         confirmed: Vec<([u8; 16], [u8; 16])>,
     },
+    /// Client → server, to a store numbering commits by a hybrid clock:
+    /// settle this session through at least `at`. The store observes `at`
+    /// (as far as its clock allows, see `HLC_MAX_OFFSET_MS`) and answers
+    /// `Closed` as what it serves as settled moves, until that reaches
+    /// `at`. A cross-shard gateway closes quiet shards so a client's cut
+    /// over them can move.
+    Close {
+        at: u64,
+    },
+    /// Server → client: nothing this session is sent later lands at or
+    /// below `through`, on any read. One message for the whole session; a
+    /// cross-shard gateway's cut, not something a client keeps.
+    Closed {
+        through: u64,
+    },
 }
 
 /// How long a [`SyncMessage::Read`] lasts.
@@ -1244,6 +1259,8 @@ impl SyncMessage {
             Self::Stored { .. } => "Stored",
             Self::KnownCatalogue { .. } => "KnownCatalogue",
             Self::Catalogue { .. } => "Catalogue",
+            Self::Close { .. } => "Close",
+            Self::Closed { .. } => "Closed",
         }
     }
 }
@@ -1846,6 +1863,10 @@ impl SettledBy {
 type RemoteRead = (Query, BTreeMap<String, Value>, bool, ReadViewSourceSpec);
 
 pub(crate) struct Session {
+    /// The position a `Close` asked this session be settled through, until
+    /// it is; and the last `Closed` it was sent.
+    closing: Option<u64>,
+    closed: u64,
     transport: Box<dyn Transport>,
     identity: AuthorSubject,
     /// This connection's own claims. Two sessions of one identity may hold
@@ -1994,6 +2015,8 @@ impl Session {
             schema: None,
             relayed: BTreeMap::new(),
             first_load: BTreeMap::new(),
+            closing: None,
+            closed: 0,
         }
     }
 
@@ -7376,6 +7399,8 @@ impl Db {
                             }
                         }
                     }
+                    // A gateway's cut; a client settles by its reads.
+                    SyncMessage::Closed { .. } => {}
                     other => return Err(unsupported(format!("client received {other:?}"))),
                 }
             }
@@ -8591,7 +8616,6 @@ impl Db {
         let mut inner = self.inner.borrow_mut();
         let through = inner.served_through();
         let by = inner.served_by();
-        let resettle = std::mem::take(&mut inner.resettle);
         let mut cache: HashMap<(String, RowUuid, Pos), Vec<Image>> = HashMap::new();
         // Rows written since the last tick, with the watch keys they match.
         let written = std::mem::take(&mut inner.since_tick);
@@ -8701,8 +8725,7 @@ impl Db {
                     }
                 }
             }
-            if !resettle
-                && recheck.is_empty()
+            if recheck.is_empty()
                 && masking.is_empty()
                 && inner.sessions[index].idle()
                 && !inner.sessions[index].catalogue_owed
@@ -8767,12 +8790,12 @@ impl Db {
             }
             let mut evictions = Vec::new();
             let mut settled = Vec::new();
-            let subs: Vec<(u64, fanout::Queue, Weak<RefCell<fanout::Group>>, bool, bool)> = inner
+            let subs: Vec<(u64, fanout::Queue, Weak<RefCell<fanout::Group>>, bool)> = inner
                 .sessions[index]
                 .subs
                 .iter_mut()
                 .map(|(id, (q, g, windowed, opened))| {
-                    (*id, q.clone(), g.clone(), *windowed || !*opened, *opened)
+                    (*id, q.clone(), g.clone(), *windowed || !*opened)
                 })
                 .collect();
             let mut images = Vec::new();
@@ -8781,41 +8804,9 @@ impl Db {
             // Branch views opening (or reset) this tick: the head rows that
             // mask base rows they match ship with them.
             let mut opening_masks = Vec::new();
-            // A store settling again tells each session once: one opened
-            // read, unwindowed if it has one, settles through the new
-            // position (its link then is), the rest as they change.
-            let mut ping = resettle
-                .then(|| {
-                    subs.iter()
-                        .filter(|sub| sub.4)
-                        .min_by_key(|sub| sub.3)
-                        .map(|sub| sub.0)
-                })
-                .flatten();
-            for (id, queue, group, list, opened) in subs {
+            for (id, queue, group, list) in subs {
                 let events: Vec<SubscriptionEvent> = queue.borrow_mut().drain(..).collect();
                 if events.is_empty() {
-                    // A released hold moved what this store serves as
-                    // settled: an unchanged result is settled through it.
-                    if opened && ping == Some(id) {
-                        ping = None;
-                        // A window lists its rows on every settle.
-                        let members = list.then(|| group.upgrade()).flatten().map(|group| {
-                            group
-                                .borrow()
-                                .rows
-                                .iter()
-                                .map(|row| *row.id.0.as_bytes())
-                                .collect()
-                        });
-                        settled.push(SyncMessage::Settled {
-                            id,
-                            through,
-                            members,
-                            global: true,
-                            by,
-                        });
-                    }
                     continue;
                 }
                 if events
@@ -9390,6 +9381,22 @@ impl Db {
                 }
             }
         }
+        // Sessions that asked to be closed hear it after this tick's rows,
+        // whenever what this store serves as settled moved for them.
+        for session in inner.sessions.iter_mut() {
+            let Some(at) = session.closing else { continue };
+            if !session.open {
+                session.closing = None;
+                continue;
+            }
+            if through > session.closed {
+                session.closed = through;
+                let _ = session.transport.send(SyncMessage::Closed { through });
+            }
+            if through >= at {
+                session.closing = None;
+            }
+        }
         Ok(())
     }
 
@@ -9669,6 +9676,16 @@ impl Db {
                     session.asked_whole.insert(row.clone());
                     session.touched.insert(row);
                 }
+            }
+            SyncMessage::Close { at } => {
+                let mut inner = self.inner.borrow_mut();
+                // A store counting commits up closes where it is.
+                if let Some(clock) = &inner.clock {
+                    let reach = crate::db::hlc(clock() + crate::db::HLC_MAX_OFFSET_MS);
+                    let _ = inner.observe(at.min(reach));
+                }
+                let session = &mut inner.sessions[index];
+                session.closing = Some(session.closing.map_or(at, |was| was.max(at)));
             }
             SyncMessage::KnownCatalogue { versions } => {
                 let mut inner = self.inner.borrow_mut();
@@ -10046,11 +10063,7 @@ impl Db {
                 if resent {
                     let mut inner = self.inner.borrow_mut();
                     inner.fixed.remove(&(node, tx));
-                    let before = inner.holds.len();
                     inner.holds.retain(|_, key| *key != (node, tx));
-                    if inner.holds.len() != before {
-                        inner.resettle = true;
-                    }
                 }
                 // A commit written under a version this server has not
                 // deployed is refused at once, loudly: the app that wrote
@@ -10786,11 +10799,7 @@ impl Db {
                 return Err((error, Vec::new()));
             }
             inner.seq = inner.seq.max(seq);
-            let before = inner.holds.len();
             inner.holds.retain(|_, key| *key != origin);
-            if inner.holds.len() != before {
-                inner.resettle = true;
-            }
             (seq, mark, prior)
         };
         // The relay's own upload record and the rows the sender hears about
