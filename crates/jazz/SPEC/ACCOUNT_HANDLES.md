@@ -225,7 +225,7 @@ as the shared handle; optional ws/wss transport URLs normalize to HTTP(S) only
 for comparison. The exact acting principal and active transport are excluded
 from the filename. Linked principals share the durable account root only after
 the prior live identity closes. Same-principal contexts share the relay while
-owning independent foreground node leases and shutdown lifetimes.
+each drawing its own foreground node and owning its own shutdown lifetime.
 
 The shared TypeScript JWT decoder supplies local advisory provider claims to
 native admission and same-identity refresh. Rust uses the common JavaScript

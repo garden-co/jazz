@@ -410,21 +410,18 @@ fn drive<T>(pump: &impl Fn(), future: impl std::future::Future<Output = T>) -> T
     panic!("did not complete");
 }
 
-/// Becoming a non-durable client hands out no seq: a session that writes
-/// nothing leaves its node's high water where it found it, and its first
-/// write lands just above it.
+/// Becoming a non-durable client hands out no seq: a fresh tab's node
+/// counts its transactions from 1.
 #[test]
-fn a_tabs_high_water_moves_only_when_it_writes() {
-    let floor = 2;
+fn a_fresh_tabs_first_write_is_its_nodes_first_transaction() {
     let tab = open(WORKER + 1, author(WORKER));
-    tab.seed_seq_floor(floor);
     tab.set_non_durable_client();
     tab.set_remote_link_hint(RemoteLinkHint::Live);
-    assert_eq!(tab.seq_high_water(), floor);
+    assert_eq!(tab.seq_high_water(), 0);
     let tx = block_on(tab.insert("notes", body("first"), Default::default()))
         .unwrap()
         .mergeable_tx_id();
-    assert_eq!(tx, floor + 1);
+    assert_eq!(tx, 1);
     assert_eq!(tab.seq_high_water(), tx);
 }
 

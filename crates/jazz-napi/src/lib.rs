@@ -1949,29 +1949,6 @@ impl NapiDb {
         self.connect_upstream()
     }
 
-    /// The newest transaction time this database handed out under its node
-    /// (a `TxTime` is the commit seq). A leased node's next holder seeds it
-    /// through `seedForegroundTxTimeHighWater`.
-    #[napi(js_name = "foregroundTxTimeHighWater")]
-    pub fn foreground_tx_time_high_water(&self) -> js::Result<BigInt> {
-        Ok(BigInt::from(self.binding()?.db.seq_high_water()))
-    }
-
-    /// Continue after a previous holder of this node: no transaction time at
-    /// or below `high_water` is reused.
-    #[napi(js_name = "seedForegroundTxTimeHighWater")]
-    pub fn seed_foreground_tx_time_high_water(&self, high_water: BigInt) -> js::Result<()> {
-        let (negative, value, lossless) = high_water.get_u64();
-        if negative || !lossless {
-            return Err(napi::Error::from_reason(
-                "foreground transaction time high water must be an unsigned 64-bit integer",
-            )
-            .into());
-        }
-        self.binding()?.db.seed_seq_floor(value);
-        Ok(())
-    }
-
     /// Capture a snapshot reference, as its persisted string's bytes.
     #[napi(js_name = "captureSnapshot")]
     pub fn capture_snapshot(&self) -> js::Result<Either<Uint8Array, PendingNativeRead>> {

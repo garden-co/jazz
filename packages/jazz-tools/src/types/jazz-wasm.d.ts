@@ -249,10 +249,6 @@ declare module "jazz-wasm" {
     setNonDurableClient(): void;
     /** How many local commits still wait for the server's verdict. */
     pendingUploadCount(): number;
-    /** @internal Foreground node-lease handoff only. */
-    foregroundTxTimeHighWater(): Promise<bigint>;
-    /** @internal Foreground node-lease bootstrap only. */
-    seedForegroundTxTimeHighWater(highWater: bigint): void;
     /** Exact wire features compiled into this WASM artifact. */
     wireFeatures(): number;
     createUpstreamLink(seed: number): UpstreamLink;

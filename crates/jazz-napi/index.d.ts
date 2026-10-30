@@ -163,17 +163,6 @@ export declare class NapiDb {
    * this is otherwise [`Self::connect_upstream`].
    */
   connectUpstreamWithSession(protocolVersion: number, features: number, remoteNode: Buffer, remoteEpoch: bigint, localNode: Buffer, localEpoch: bigint): Transport
-  /**
-   * The newest transaction time this database handed out under its node
-   * (a `TxTime` is the commit seq). A leased node's next holder seeds it
-   * through `seedForegroundTxTimeHighWater`.
-   */
-  foregroundTxTimeHighWater(): bigint
-  /**
-   * Continue after a previous holder of this node: no transaction time at
-   * or below `high_water` is reused.
-   */
-  seedForegroundTxTimeHighWater(highWater: bigint): void
   /** Capture a snapshot reference, as its persisted string's bytes. */
   captureSnapshot(): Uint8Array | PendingNativeRead
   /**

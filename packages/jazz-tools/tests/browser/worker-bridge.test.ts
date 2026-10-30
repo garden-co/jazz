@@ -96,7 +96,6 @@ describe("foreground lease terminal policy with real IndexedDB and WASM", () => 
         true,
         { backendMode: true },
       );
-      runtime.seedForegroundTxTimeHighWater(allocation.confirmedTxTime);
       let committed!: () => void;
       let failed!: (error: unknown) => void;
       const terminalCommitted = new Promise<void>((resolve, reject) => {
@@ -190,7 +189,6 @@ describe("foreground lease terminal policy with real IndexedDB and WASM", () => 
     });
     let write: Promise<unknown> | undefined;
     try {
-      const initialHighWater = await runtime.foregroundTxTimeHighWater();
       const oldBatch = createOpenTransactionId();
       runtime.beginTransaction("mergeable", oldBatch);
       write = runtime.streamingMutation(
@@ -210,17 +208,17 @@ describe("foreground lease terminal policy with real IndexedDB and WASM", () => 
         "real native streaming write did not start",
       );
       let captured = false;
-      const handoff = runtime.quiesceForegroundTxTimeHighWater().then((value) => {
+      const handoff = runtime.quiesceForeground().then(() => {
         captured = true;
-        return value;
       });
       await Promise.resolve();
       expect(captured).toBe(false);
       expect(fixture.post).not.toHaveBeenCalled();
       releaseSource();
       await write;
-      const highWater = await handoff;
-      expect(highWater).toBeGreaterThan(initialHighWater);
+      await handoff;
+      // The pool keeps whatever floor a return names.
+      const highWater = lease.confirmedTxTime + 1n;
       expect(() => runtime.commitTransaction(oldBatch)).toThrow("native runtime is closed");
       expect(() => runtime.beginTransaction("mergeable", createOpenTransactionId())).toThrow(
         "native runtime is closed",
@@ -253,7 +251,6 @@ describe("foreground lease terminal policy with real IndexedDB and WASM", () => 
         await vi.waitFor(() => expect(fixture.close).toHaveBeenCalledOnce());
         await expect(lease.returnWithHighWater(highWater + 1n)).rejects.toBe(failure);
         await expect(lease.retire()).rejects.toBe(failure);
-        expect(await runtime.foregroundTxTimeHighWater()).toBe(highWater);
         await reopened.returnForegroundNodeLease(successor.leaseId, highWater);
       } finally {
         reopened.close();
@@ -268,7 +265,7 @@ describe("foreground lease terminal policy with real IndexedDB and WASM", () => 
   it("durably retires a quiesced foreground abandoned before any terminal request", async () => {
     const fixture = await storeBackedLease();
     try {
-      await fixture.runtime.quiesceForegroundTxTimeHighWater();
+      await fixture.runtime.quiesceForeground();
       const failure = new BrowserWorkerUnresponsiveError("worker stopped before lease finish");
       fixture.lease.abandonAfterWorkerFailure(failure);
       await expect(fixture.lease.retire()).rejects.toBe(failure);

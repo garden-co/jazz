@@ -582,66 +582,29 @@ fn a_relay_file_from_before_sqlite_is_refused_untouched() {
 }
 
 #[test]
-fn a_clean_handoff_reuses_the_node_above_its_high_water() {
+fn every_foreground_open_draws_a_fresh_node() {
     let directory = tempfile::tempdir().unwrap();
     let fixture = Fixture::new();
-    let capability = fixture.admit(&directory.path().join("handoff.sqlite"), "alice", 0xc1);
+    let capability = fixture.admit(&directory.path().join("fresh.sqlite"), "alice", 0xc1);
     let first = fixture.open(&capability);
     let node = fixture.metadata_node(first);
-    let first_tx = fixture.insert_todo(first, [0xd1; 16], "first lease holder");
+    fixture.insert_todo(first, [0xd1; 16], "first foreground");
     fixture.close(first);
 
+    // Its counter starts over, so it names its transactions by a node of
+    // its own: both writes land.
     let second = fixture.open(&capability);
-    assert_eq!(
-        fixture.metadata_node(second),
-        node,
-        "the clean lease is reused"
-    );
-    let second_tx = fixture.insert_todo(second, [0xd2; 16], "second lease holder");
-    assert_ne!(
-        first_tx, second_tx,
-        "the reused node mints fresh transactions"
+    assert_ne!(fixture.metadata_node(second), node, "a fresh node");
+    fixture.insert_todo(second, [0xd2; 16], "second foreground");
+    fixture.wait_for_row(
+        second,
+        (RowUuid::from_bytes([0xd1; 16]), "first foreground"),
     );
     fixture.wait_for_row(
         second,
-        (RowUuid::from_bytes([0xd1; 16]), "first lease holder"),
-    );
-    fixture.wait_for_row(
-        second,
-        (RowUuid::from_bytes([0xd2; 16]), "second lease holder"),
-    );
-
-    // A foreground whose runtime disappears without a clean close has an
-    // uncertain high water: its node is retired, never reissued.
-    let runtime = unsafe { jazz_native_relay_host_retain(fixture.host, 2) };
-    let mut held = 0;
-    assert_eq!(
-        unsafe {
-            jazz_native_relay_host_lease_open_attached_foreground(
-                runtime,
-                capability.as_ptr(),
-                capability.len(),
-                &mut held,
-            )
-        },
-        JazzNativeRelayStatus::Ok
+        (RowUuid::from_bytes([0xd2; 16]), "second foreground"),
     );
     fixture.close(second);
-    assert_eq!(
-        unsafe { jazz_native_relay_host_lease_invalidate_foreground_runtime(runtime) },
-        JazzNativeRelayStatus::Ok
-    );
-    unsafe { jazz_native_relay_host_lease_free(runtime) };
-    let third = fixture.open(&capability);
-    assert_eq!(
-        fixture.metadata_node(third),
-        node,
-        "the clean node is reused"
-    );
-    let fourth = fixture.open(&capability);
-    assert_ne!(fixture.metadata_node(fourth), node);
-    fixture.close(third);
-    fixture.close(fourth);
 }
 
 struct WakeRecorder {

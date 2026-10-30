@@ -282,9 +282,6 @@ type NativeDb = {
   admitLocalFirstSession?(token: string, appId: string, claimedAuthor: string): void;
   setSessionClaims?(claims: Record<string, unknown> | undefined | null): void | Promise<void>;
   setIdentityClaims?(author: Uint8Array, claims: Record<string, unknown> | undefined | null): void;
-  /** Native bindings answer synchronously; the browser binding resolves on the event loop. */
-  foregroundTxTimeHighWater?(): bigint | Promise<bigint>;
-  seedForegroundTxTimeHighWater?(highWater: bigint): void;
   subscribe?(
     query: Uint8Array,
     opts: unknown,
@@ -948,17 +945,17 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverPumpAgain = false;
   private serverConnectionGeneration = 0;
   private closed = false;
-  // A foreground lease handoff closes mutation admission before it snapshots
-  // the native HLC, but physical native disposal still happens through the
-  // ordinary client shutdown path.
+  // A foreground lease handoff closes mutation admission and drains started
+  // work, but physical native disposal still happens through the ordinary
+  // client shutdown path.
   private foregroundLeaseQuiesced = false;
   // A concurrent ordinary close must not dispose native state between a lease
-  // handoff's mutation drain and its HLC readout.
-  private foregroundLeaseCapture: Promise<bigint> | null = null;
+  // handoff's mutation drain and its end.
+  private foregroundLeaseCapture: Promise<void> | null = null;
   // While that drain runs, already-started native futures may hold the node
   // lock until a core tick completes their host continuation (cold storage,
   // admission deadlines). Mutation admission stays closed, but core progress
-  // must continue, or the HLC readout waits behind them forever.
+  // must continue, or the drain waits behind them forever.
   private foregroundLeaseDraining = false;
   private physicalCloseStarted = false;
   private nextSubscriptionId = 1;
@@ -1222,25 +1219,16 @@ export class NativeRuntimeAdapter implements Runtime {
     this.nonDurableClient = true;
   }
 
-  /** @internal Return the native HLC high-water for a foreground lease handoff. */
-  foregroundTxTimeHighWater(): bigint | Promise<bigint> {
-    if (this !== this.ownerRuntime) return this.ownerRuntime.foregroundTxTimeHighWater();
-    if (!this.db.foregroundTxTimeHighWater) {
-      throw new Error("Native runtime does not expose foreground transaction high-water");
-    }
-    return this.db.foregroundTxTimeHighWater();
-  }
-
   /**
-   * Close mutation admission, drain already-started native work, then return
-   * the final HLC high-water. No synchronous or async write can mint after
-   * this resolves. The ordinary `close()` call remains responsible for final
-   * native disposal after the lease owner has durably recorded this value.
+   * Close mutation admission and drain already-started native work. No
+   * synchronous or async write can mint after this resolves. The ordinary
+   * `close()` call remains responsible for final native disposal after the
+   * lease owner has handed its lease back.
    * @internal
    */
-  quiesceForegroundTxTimeHighWater(): Promise<bigint> {
+  quiesceForeground(): Promise<void> {
     if (this !== this.ownerRuntime) {
-      return this.ownerRuntime.quiesceForegroundTxTimeHighWater();
+      return this.ownerRuntime.quiesceForeground();
     }
     if (this.foregroundLeaseCapture) return this.foregroundLeaseCapture;
     if (this.closed) throw new Error("Native runtime is already closed");
@@ -1248,7 +1236,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.clearCoreDeadline();
     this.foregroundLeaseQuiesced = true;
     this.foregroundLeaseDraining = true;
-    const capture = this.captureForegroundTxTimeHighWater().finally(() => {
+    const capture = this.drainForeground().finally(() => {
       this.foregroundLeaseDraining = false;
       this.clearCoreDeadline();
     });
@@ -1261,22 +1249,10 @@ export class NativeRuntimeAdapter implements Runtime {
     return !this.closed || this.foregroundLeaseDraining;
   }
 
-  private async captureForegroundTxTimeHighWater(): Promise<bigint> {
+  private async drainForeground(): Promise<void> {
     await Promise.all(this.pendingStreamingMutations);
     await Promise.all(this.pendingLocalSettlements);
     await this.coreOperation?.completion.catch(() => undefined);
-    return await this.foregroundTxTimeHighWater();
-  }
-
-  /** @internal Seed a foreground lease high-water before the first local write. */
-  seedForegroundTxTimeHighWater(highWater: bigint): void {
-    if (this !== this.ownerRuntime) {
-      return this.ownerRuntime.seedForegroundTxTimeHighWater(highWater);
-    }
-    if (!this.db.seedForegroundTxTimeHighWater) {
-      throw new Error("Native runtime does not expose foreground transaction high-water seeding");
-    }
-    this.db.seedForegroundTxTimeHighWater(highWater);
   }
 
   /** Configure Jazz-owned upload rate and unpublished-tree expiry policy. */

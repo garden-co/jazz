@@ -93,12 +93,6 @@ type ResolvedBackendContextConfig = BackendContextConfig & {
   allowLocalFirstAuth: boolean;
 };
 
-/** @internal A memory handle retains its node clock across failed-transition reopen. */
-export interface BackendNodeClock {
-  initialHighWater?: bigint;
-  closed(highWater: bigint): void;
-}
-
 type FlushableRuntime = Runtime & { flush?: () => void };
 
 /** Pre-listener mutation errors a backend context retains for its first listener. */
@@ -145,7 +139,6 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
     private readonly config: ResolvedBackendContextConfig,
     private readonly nodeIdentityScope: string,
     private readonly nodeIdentity?: Uint8Array,
-    private readonly nodeClock?: BackendNodeClock,
   ) {
     super();
     this.nativeConnection = {
@@ -221,11 +214,6 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
       },
     );
 
-    if (this.nodeClock?.initialHighWater !== undefined) {
-      if (!(this.runtime instanceof NativeRuntimeAdapter))
-        throw new Error("Backend node clock requires the native runtime");
-      this.runtime.seedForegroundTxTimeHighWater(this.nodeClock.initialHighWater);
-    }
     this.client = JazzClient.connectWithRuntime(
       this.runtime,
       {
@@ -318,12 +306,7 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
     this.rejectReconnectWaiters(this.shutdownError());
     const client = this.client;
     const shutdown = this.enqueueTransportTransition(async () => {
-      const highWater =
-        this.nodeClock && this.runtime instanceof NativeRuntimeAdapter
-          ? await this.runtime.quiesceForegroundTxTimeHighWater()
-          : (this.nodeClock?.initialHighWater ?? 0n);
       await client?.shutdown();
-      this.nodeClock?.closed(highWater);
       this.client = undefined;
       this.runtime = undefined;
       this.initializedSchemaJson = undefined;
@@ -577,11 +560,7 @@ export class JazzContext {
   private readonly nodeIdentityScope: string;
   private readonly coreSource: BackendRuntimeSource;
 
-  constructor(
-    config: BackendContextConfig,
-    nodeIdentity?: Uint8Array,
-    nodeClock?: BackendNodeClock,
-  ) {
+  constructor(config: BackendContextConfig, nodeIdentity?: Uint8Array) {
     assertValidBackendConfig(config);
     this.config = {
       ...config,
@@ -592,12 +571,7 @@ export class JazzContext {
       config.driver.type === "persistent"
         ? config.driver.dataPath
         : `memory:${Date.now()}:${Math.random()}`;
-    this.coreSource = new BackendRuntimeSource(
-      this.config,
-      this.nodeIdentityScope,
-      nodeIdentity,
-      nodeClock,
-    );
+    this.coreSource = new BackendRuntimeSource(this.config, this.nodeIdentityScope, nodeIdentity);
   }
 
   private resolveSchema(source?: BackendSchemaInput): WasmSchema {

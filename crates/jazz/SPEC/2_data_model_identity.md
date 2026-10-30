@@ -74,44 +74,13 @@ before minting and retains it across reopen so recovery and at-least-once
 delivery can recognize its own transactions.
 
 A foreground runtime is a separate live transaction issuer, even when it is
-paired with a durable relay. Its host gives it an exclusive foreground-node
-lease before its first write. The lease starts with either a new CSPRNG node and
-zero high-water or a node returned by a prior _clean_ handoff together with the
-exact HLC high-water reported by that runtime's native core. The runtime must
-seed its HLC at or above that high-water, and the high-water includes every
-minted transaction, including one later rolled back or never submitted. On
-clean shutdown the host first closes mutation admission and drains any
-already-started synchronous, asynchronous, and streaming write work; only then
-may it capture the native/Wasm high-water. It atomically persists
-`max(previous durable floor, captured high-water)` while the lease is still
-active before making the node reusable. A failed readout, failed persistence,
-crash, forced shutdown, or lost peer is an uncertain termination: the node is
-retired permanently. High-waters are canonical packed-HLC `u64`s; hosts reject
-out-of-range receipts rather than allowing a persisted value to poison a later
-native open. There is no lease expiry, central transaction minting, fencing
-generation, or range allocation in this model. The
-`AuthorSubject` records stable account ownership and the exact acting principal.
-Its whole-structure in-memory intern is never durable or portable. Persisted
-system authors use the nil account UUID, `urn:jazz:system`, and originating node
-UUID subject. Only the separate trusted `AuthorSubject::SYSTEM` capability
-bypasses policies (ch. 7, `INV-DATA-3`); decoding provenance cannot create it.
-
-Hosts mediate this contract rather than making a relay mint transaction ids.
-The browser's durable SharedWorker owns the foreground-lease pool for its
-physical IndexedDB replica and gives each attached tab a separate lease over a
-dedicated port. A persistent Node foreground owner keeps its pool under the
-current working directory, namespaced by app, environment, and auth scope;
-serializable state as a per-node O_EXCL active claim plus a separate durable
-per-node reusable high-water receipt. A claimant creates its active claim
-before reading a reusable receipt; it never deletes or reclaims an unknown
-active claim. A clean handoff fsyncs the replacement receipt, fsyncs its
-directory, removes only its own active claim, and fsyncs that directory again.
-Thus a crash before claim removal permanently quarantines that node; even a
-random allocation collision with a reusable receipt must inherit that receipt's
-floor. Explicit memory-mode runtimes deliberately
-create no filesystem lease state and receive a fresh in-memory node instead.
-Those are host adapters for the same lease contract, not alternate TxId
-formats or durability semantics.
+paired with a durable relay. It holds only its live optimistic writes and
+counts its transactions from 1, so every open draws a fresh CSPRNG node: no
+transaction id is ever reused, and nothing is handed off on close. There is
+no node lease, central transaction minting, fencing generation, or range
+allocation in this model. The browser's durable SharedWorker still hands each
+attached tab a lease over a dedicated port, as its admission to the physical
+IndexedDB replica; the tab does not use the node it carries.
 
 Storage may use compact local aliases without changing the wire identity model.
 Each node interns `NodeUuid` and `SchemaVersionId` to local `u64` aliases

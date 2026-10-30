@@ -154,9 +154,9 @@ describe("BrowserConnectionManager automatic worker recovery", () => {
     vi.useFakeTimers();
     const fixture = await leasedManagerFixture();
     const admission = deferred();
-    const quiesce = vi.fn(async () => 42n);
+    const quiesce = vi.fn(async () => undefined);
     const runtime = Object.assign(Object.create(NativeRuntimeAdapter.prototype), {
-      quiesceForegroundTxTimeHighWater: quiesce,
+      quiesceForeground: quiesce,
     }) as NativeRuntimeAdapter;
     Object.defineProperty(fixture.lease, "workerRealmId", { value: "predecessor" });
     fixture.connection.getWorkerRealmId = () => "successor";

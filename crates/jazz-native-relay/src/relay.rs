@@ -55,7 +55,6 @@ use jazz::wire::{TransportError, WireTransport};
 use jazz_native_transport::NativeWebSocketConnector;
 use thiserror::Error;
 
-use crate::node_lease::ForegroundNodeLease;
 use crate::{
     FOREGROUND_WAKE_IMMEDIATE, ForegroundDbCommandRequest, ForegroundDbCommandResponse,
     ForegroundMutationKind, ForegroundPermissionAdvice, ForegroundPermissionAdviceAction,
@@ -366,25 +365,23 @@ impl NativeRelay {
         identity: DbIdentity,
         claims: BTreeMap<String, Value>,
     ) -> Result<NativeRelayClient, RelayError> {
-        let id = self.run(move |worker| worker.attach(identity, claims, 0))?;
+        let id = self.run(move |worker| worker.attach(identity, claims))?;
         Ok(NativeRelayClient {
             relay: self.clone(),
             id,
         })
     }
 
-    /// Attach a foreground on a leased node, continuing after the lease's
-    /// previous holder.
+    /// Attach a foreground on a node of its own, drawn fresh for this open.
     pub(crate) fn attach_foreground_client(
         &self,
         identity: DbIdentity,
         claims: BTreeMap<String, Value>,
-        lease: ForegroundNodeLease,
     ) -> Result<NativeRelayClient, RelayError> {
         if identity.author != self.inner.identity.author {
             return Err(RelayError::ScopeConfigurationMismatch);
         }
-        let id = self.run(move |worker| worker.attach(identity, claims, lease.high_water))?;
+        let id = self.run(move |worker| worker.attach(identity, claims))?;
         Ok(NativeRelayClient {
             relay: self.clone(),
             id,
@@ -532,14 +529,6 @@ impl NativeRelayClient {
             client.wake = wake.map(|wake| (foreground, wake));
             Ok(())
         })
-    }
-
-    /// The highest commit seq this foreground's database handed out; the
-    /// lease's next holder starts above it.
-    pub(crate) fn minted_high_water(&self) -> Result<u64, RelayError> {
-        let id = self.id;
-        self.relay
-            .run(move |worker| Ok(worker.client(id)?.binding.db.seq_high_water()))
     }
 
     /// Run an operation against this UI peer's database on the owner thread.
@@ -958,7 +947,6 @@ impl RelayWorker {
         &mut self,
         identity: DbIdentity,
         claims: BTreeMap<String, Value>,
-        high_water: u64,
     ) -> Result<u64, RelayError> {
         // A relay serves its own identity's sessions only: it uploads what
         // they write as itself.
@@ -968,11 +956,6 @@ impl RelayWorker {
             .map_err(|error| RelayError::Host(error.into()))?;
         let db = block_on(Db::open(DbConfig::new(self.schema.clone(), identity)))
             .map_err(|error| RelayError::Host(error.into()))?;
-        // Continue after the node's previous holder: its transaction ids
-        // were (seq, node), and the relay deduplicates by them.
-        if high_water > 0 {
-            db.seed_seq_floor(high_water);
-        }
         db.set_identity_claims(identity.author, claims.clone());
         let binding = Binding::new(db, identity, false);
         binding.set_non_durable_client();

@@ -13,9 +13,6 @@
   ],
   "type": "module",
   "main": "dist/index.js",
-  "browser": {
-    "./dist/runtime/native-runtime/node-foreground-node-lease.js": "./dist/runtime/native-runtime/node-foreground-node-lease.browser.js"
-  },
   "types": "dist/index.d.ts",
   "react-native": {
     "./dist/runtime/platform-url.js": "./dist/runtime/platform-url.native.js",

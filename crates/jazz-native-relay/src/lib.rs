@@ -17,7 +17,6 @@ pub use account_session::{
     jazz_native_relay_host_lease_refresh_account_session,
     jazz_native_relay_host_lease_release_account_session,
 };
-mod node_lease;
 mod relay;
 pub use relay::*;
 
@@ -37,7 +36,6 @@ use jazz::tools::AppId;
 use jazz::tools::native_transport_connector::NativeTransportConnector;
 use jazz::tools::websocket_prelude_auth::AuthConfig;
 use jazz_native_transport::NativeWebSocketConnector;
-use node_lease::{ForegroundNodeLease, ForegroundNodeLeasePool};
 
 /// The current native-relay ABI version. (The name is kept for the exported
 /// `jazz-rn` constant.) Breaking command/response changes bump the value:
@@ -801,9 +799,6 @@ pub struct NativeRelayHost {
     /// this separate from the general command handles makes it impossible for
     /// JSI to turn a guessed number into a relay/client pairing.
     foregrounds: BTreeMap<u64, OpenedForeground>,
-    /// Native-relay-owned foreground node leases, partitioned by durable
-    /// relay scope. A foreground never chooses or retains this state itself.
-    foreground_node_leases: BTreeMap<RelayScope, ForegroundNodeLeasePool>,
     next_handle: u64,
     /// Deterministic transport seam for host-level socket lifecycle tests.
     /// Production always uses [`NativeWebSocketConnector`].
@@ -920,7 +915,8 @@ struct OpenedForeground {
     remote_link_hint: Option<RemoteLinkHint>,
     runtime_token: u64,
     wake: Option<Arc<ForegroundWakeState>>,
-    lease: ForegroundNodeLease,
+    /// The node this foreground's transactions are named by.
+    node: NodeUuid,
 }
 
 #[derive(Clone, Copy)]
@@ -929,14 +925,6 @@ struct ForegroundWakeRegistration {
     context: usize,
 }
 
-/// The only two legitimate endings for a foreground lease. A clean explicit
-/// close may return a node after reading its owner-local commit seq; every forced
-/// teardown is uncertain and therefore permanently retires it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ForegroundTeardown {
-    CleanHandoff,
-    Retire,
-}
 impl ForegroundWakeRegistration {
     fn cancelled(self, foreground: u64) {
         unsafe {
@@ -1012,7 +1000,6 @@ impl Default for NativeRelayHost {
             relays: BTreeMap::new(),
             clients: BTreeMap::new(),
             foregrounds: BTreeMap::new(),
-            foreground_node_leases: BTreeMap::new(),
             next_handle: 1,
             #[cfg(test)]
             socket_connector: None,
@@ -1041,59 +1028,13 @@ impl NativeRelayHost {
         }
     }
 
-    fn acquire_foreground_lease(
-        &mut self,
-        scope: &RelayScope,
-    ) -> Result<ForegroundNodeLease, JazzNativeRelayStatus> {
-        let pool = self
-            .foreground_node_leases
-            .entry(scope.clone())
-            .or_default();
-        if let Some(lease) = pool.acquire_reusable() {
-            return Ok(lease);
-        }
-        loop {
-            let mut bytes = [0_u8; 16];
-            getrandom::fill(&mut bytes)
-                .map_err(|error| relay_status(RelayError::Entropy(error.to_string())))?;
-            match pool.acquire_fresh(NodeUuid::from_bytes(bytes)) {
-                Ok(lease) => return Ok(lease),
-                // CSPRNG collision against a live, reusable, or retired node
-                // is vanishingly unlikely, but never turn one into a lease
-                // alias or a spurious lifecycle failure.
-                Err(node_lease::ForegroundNodeLeaseError::DuplicateNode) => {}
-                Err(node_lease::ForegroundNodeLeaseError::InactiveLease) => {
-                    return Err(JazzNativeRelayStatus::LifecycleFailure);
-                }
-            }
-        }
-    }
-
-    fn clean_foreground_lease(
-        &mut self,
-        scope: &RelayScope,
-        lease: ForegroundNodeLease,
-        high_water: u64,
-    ) -> Result<(), JazzNativeRelayStatus> {
-        // This host is the relay's single serialized lifecycle owner. Updating
-        // the pool immediately after native-core readout is its atomic durable
-        // handoff boundary; a future durable pool backend must perform the
-        // exact same transition transactionally before exposing the reuse.
-        self.foreground_node_leases
-            .get_mut(scope)
-            .ok_or(JazzNativeRelayStatus::LifecycleFailure)?
-            .clean_handoff(ForegroundNodeLease {
-                high_water,
-                ..lease
-            })
-            .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)
-    }
-
-    fn retire_foreground_lease(&mut self, scope: &RelayScope, lease: ForegroundNodeLease) {
-        let Some(pool) = self.foreground_node_leases.get_mut(scope) else {
-            return;
-        };
-        let _ = pool.retire(lease);
+    /// A fresh node for a foreground being opened: its transaction ids are
+    /// its own, so no earlier runtime's can be reused.
+    fn fresh_foreground_node() -> Result<NodeUuid, JazzNativeRelayStatus> {
+        let mut bytes = [0_u8; 16];
+        getrandom::fill(&mut bytes)
+            .map_err(|error| relay_status(RelayError::Entropy(error.to_string())))?;
+        Ok(NodeUuid::from_bytes(bytes))
     }
 
     /// Ensure the single native-owned upstream worker for this admitted
@@ -1509,15 +1450,8 @@ impl NativeRelayHost {
         let client_handle = self
             .allocate()
             .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
-        let lease = self.acquire_foreground_lease(&scope)?;
-        let client = match relay.attach_foreground_client(
-            DbIdentity {
-                node: lease.node,
-                author,
-            },
-            claims,
-            lease,
-        ) {
+        let node = Self::fresh_foreground_node()?;
+        let client = match relay.attach_foreground_client(DbIdentity { node, author }, claims) {
             Ok(client) => client,
             Err(error) => {
                 // The relay alias was not yet observable to the caller. Undo
@@ -1526,11 +1460,6 @@ impl NativeRelayHost {
                 let final_alias = !self.relays.values().any(|opened| opened.scope == scope);
                 if final_alias && !self.private_scope_workers.contains_key(&scope) {
                     let _ = self.registry.close(&scope);
-                }
-                // No foreground runtime observed this lease, so it is a known
-                // zero-high-water failure rather than an uncertain handoff.
-                if self.clean_foreground_lease(&scope, lease, 0).is_err() {
-                    self.retire_foreground_lease(&scope, lease);
                 }
                 return Err(relay_status(error));
             }
@@ -1547,10 +1476,6 @@ impl NativeRelayHost {
                 if final_alias && !self.private_scope_workers.contains_key(&scope) {
                     let _ = self.registry.close(&scope);
                 }
-                // A client existed briefly. Its close failure means the
-                // runtime may have minted after attachment, so conservatively
-                // retire rather than returning the zero-water lease.
-                self.retire_foreground_lease(&scope, lease);
                 return Err(JazzNativeRelayStatus::LifecycleFailure);
             }
         };
@@ -1563,7 +1488,7 @@ impl NativeRelayHost {
                 remote_link_hint: None,
                 runtime_token,
                 wake: None,
-                lease,
+                node,
             },
         );
         Ok(foreground)
@@ -1681,7 +1606,7 @@ impl NativeRelayHost {
             .ok_or(JazzNativeRelayStatus::InvalidHandle)
     }
 
-    /// Retire or cleanly hand off exactly one foreground alias.
+    /// Tear down exactly one foreground alias.
     ///
     /// Removing the public handle is deliberately the first step. It prevents
     /// a concurrent/later native call from beginning more work while this
@@ -1692,7 +1617,6 @@ impl NativeRelayHost {
     fn teardown_foreground(
         &mut self,
         foreground_handle: u64,
-        teardown: ForegroundTeardown,
     ) -> Result<bool, JazzNativeRelayStatus> {
         let Some(foreground) = self.foregrounds.remove(&foreground_handle) else {
             return Ok(false);
@@ -1723,17 +1647,6 @@ impl NativeRelayHost {
             wake.cancelled(foreground_handle);
         }
 
-        // Read out the runtime-owned commit seq only for an explicit clean close.
-        // Revocation and platform invalidation have no supported clean
-        // handoff, even if this synchronous teardown happens to succeed.
-        let high_water = match teardown {
-            ForegroundTeardown::CleanHandoff => client
-                .as_ref()
-                .ok_or(JazzNativeRelayStatus::LifecycleFailure)
-                .and_then(|client| client.minted_high_water().map_err(relay_status)),
-            ForegroundTeardown::Retire => Ok(0),
-        };
-
         // `NativeRelayClient::close` removes the owner-local client. Dropping
         // it aborts pending foreground futures/subscriptions and its explicit
         // transaction drain abandons every mutable transaction handle.
@@ -1763,38 +1676,14 @@ impl NativeRelayHost {
         let owner_closed = matches!(client_closed, Ok(Some(())));
         let relay_closed = relay_closed.is_ok();
         let wake_cleared = wake_cleared.is_ok();
-        match teardown {
-            ForegroundTeardown::CleanHandoff
-                if wake_cleared && owner_closed && relay_closed && high_water.is_ok() =>
-            {
-                if self
-                    .clean_foreground_lease(
-                        &foreground.scope,
-                        foreground.lease,
-                        high_water.expect("clean handoff already checked high water"),
-                    )
-                    .is_err()
-                {
-                    self.retire_foreground_lease(&foreground.scope, foreground.lease);
-                    return Err(JazzNativeRelayStatus::LifecycleFailure);
-                }
-            }
-            ForegroundTeardown::Retire => {
-                self.retire_foreground_lease(&foreground.scope, foreground.lease);
-                if !wake_cleared || !owner_closed || !relay_closed {
-                    return Err(JazzNativeRelayStatus::LifecycleFailure);
-                }
-            }
-            ForegroundTeardown::CleanHandoff => {
-                self.retire_foreground_lease(&foreground.scope, foreground.lease);
-                return Err(JazzNativeRelayStatus::LifecycleFailure);
-            }
+        if !wake_cleared || !owner_closed || !relay_closed {
+            return Err(JazzNativeRelayStatus::LifecycleFailure);
         }
         Ok(true)
     }
 
     fn close_foreground(&mut self, foreground_handle: u64) -> Result<bool, JazzNativeRelayStatus> {
-        self.teardown_foreground(foreground_handle, ForegroundTeardown::CleanHandoff)
+        self.teardown_foreground(foreground_handle)
     }
 
     /// Platform runtime invalidation is an uncertain shutdown. It must retire
@@ -1815,10 +1704,7 @@ impl NativeRelayHost {
             .collect::<Vec<_>>();
         let mut failed = false;
         for handle in foregrounds {
-            if self
-                .teardown_foreground(handle, ForegroundTeardown::Retire)
-                .is_err()
-            {
+            if self.teardown_foreground(handle).is_err() {
                 failed = true;
             }
         }
@@ -2131,10 +2017,7 @@ impl NativeRelayHost {
             .collect::<Vec<_>>();
         let mut failed = false;
         for foreground in foregrounds {
-            if self
-                .teardown_foreground(foreground, ForegroundTeardown::Retire)
-                .is_err()
-            {
+            if self.teardown_foreground(foreground).is_err() {
                 failed = true;
             }
         }
@@ -2875,7 +2758,7 @@ impl NativeRelayHost {
                 let author = admitted.config.identity.author;
                 let (issuer, user_id) = author.principal_parts();
                 Response::NativeSessionMetadata {
-                    node: *opened.lease.node.0.as_bytes(),
+                    node: *opened.node.as_bytes(),
                     registry_authority: opened.scope.app_namespace.clone(),
                     account_id: author.account_id().map(|account| *account.0.as_bytes()),
                     issuer,

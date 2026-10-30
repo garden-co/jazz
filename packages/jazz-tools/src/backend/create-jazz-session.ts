@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { admitBackendSecret } from "./admission.js";
 import type { BackendRequestOptions } from "./request-auth.js";
 import { NapiDb, mintLocalFirstToken } from "jazz-napi";
@@ -174,7 +174,6 @@ export async function createJazzSession(
     );
   }
   const registry = accountRegistryUrl(config.serverUrl, config.appId);
-  const memoryClocks = new WeakMap<AccountHandle, bigint | undefined>();
   const accounts = await prepareAccountManager({
     appId: config.appId,
     registry,
@@ -233,27 +232,17 @@ export async function createJazzSession(
           },
         });
       }
-      const memoryClock =
+      // A memory store starts its counter over on every open, so it draws a
+      // node of its own: transaction ids are `seq@node`. A persistent one
+      // keeps its counter, and its node with it.
+      const node =
         config.driver.type === "memory"
-          ? {
-              initialHighWater: memoryClocks.get(account),
-              closed(highWater: bigint) {
-                memoryClocks.set(account, highWater);
-              },
-            }
-          : undefined;
-      if (memoryClock) {
-        if (memoryClocks.has(account) && memoryClock.initialHighWater === undefined) {
-          throw new Error("Backend memory node cannot reopen without its completed clock handoff");
-        }
-        // A failed/partial close must never reuse a stale earlier high-water.
-        memoryClocks.set(account, undefined);
-      }
+          ? new Uint8Array(randomBytes(16))
+          : uuidBytes(backend.nodeId);
       // The class remains internal; only a validated opaque account can reach it.
       const context = new JazzContext(
         { ...config, backendSecret: backend.backendSecret } as BackendContextConfig,
-        uuidBytes(backend.nodeId),
-        memoryClock,
+        node,
       );
       let db: Db;
       let client: SharedJazzClient;
