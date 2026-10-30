@@ -28,7 +28,7 @@ The model is small:
 - **Coherence is per subscription.** The server keeps a row current for a
   session only while one of its live reads covers it. A cached row no live read
   covers is a cold copy; it becomes current again once a read covers it. A live
-  read resumes from the seq it last settled through, and its opening ships only
+  read resumes from the position it last settled through, and its opening ships only
   what changed after that.
 
 Invariant digest (the registry, `crates/invariant-registry.jsonl`, is the
@@ -111,6 +111,15 @@ not supported yet, so such a store keeps them and refuses every upstream,
 failing its remote reads (live and one-shot `Remote` ones) with why, across
 reopens (`INV-SYNC-51`).
 
+Positions travel as per-sequencer lists: a `through`, a `since`, a
+serializable snapshot, a one-shot read's `at` and an accepted fate's `at` are
+each a list of `(sequencer, seq)` pairs, the sequencer `None` for the global
+authority and a node id for a replica that numbers its own positions (a relay
+with no server, §8.13). Each list holds at most one pair today; a list with
+more is refused as not supported yet, and an empty `since` or `at` means none.
+The list form leaves room for several sequencers (SPEC 15) without a wire
+change.
+
 Messages, with their postcard variant tags:
 
 | Tag | Message              | Direction       | Purpose                                                          |
@@ -118,7 +127,7 @@ Messages, with their postcard variant tags:
 | 0   | `Read`               | client → server | A read, live or once (§8.4)                                      |
 | 1   | `Unsubscribe`        | client → server | End a live read (§8.5)                                           |
 | 2   | `ResendWhole`        | client → server | Rows whose shipped deltas did not apply: ship them whole (§8.12) |
-| 3   | `Settled`            | server → client | A read is complete through a seq (§8.4)                          |
+| 3   | `Settled`            | server → client | A read is complete through positions (§8.4)                      |
 | 4   | `Commit`             | client → server | One transaction's writes (§8.2)                                  |
 | 5   | `ChunkRequests`      | client → server | Pull large-value nodes (§8.12)                                   |
 | 6   | `PushChunks`         | client → server | Large-value nodes ahead of a commit (§8.12)                      |
@@ -219,7 +228,7 @@ carries what its writer knew of the row it writes:
 The commit's other fields:
 
 - `kind`: `Mergeable`, or `Serializable { snapshot, reads, own }`: the
-  snapshot seq, each read with the rows and server versions it returned, and
+  snapshot's positions, each read with the rows and server versions it returned, and
   the writer's own commits that were unsettled when the transaction began. The
   authority re-runs each read under the writer's identity and applies the
   writes only if every result and written row is unchanged since the snapshot.
@@ -288,8 +297,8 @@ read-your-writes end to end.
 
 `Fate { id, outcome, global }` answers a commit, by its id. The `outcome` is one of:
 
-- `Accepted { seq, accepted_at, as_written }`: the commit landed at server seq
-  `seq`, which the replica records as where it settled; applying a fate never
+- `Accepted { at, accepted_at, as_written }`: the commit landed at position
+  `at`, which the replica records as where it settled; applying a fate never
   moves its settled seq backward (`INV-SYNC-5`). `accepted_at` is the time
   (Unix ms) the authority's clock stamped the commit's writes with: the
   `$createdAt`/`$updatedAt` of every write without an explicit time. It is
@@ -306,7 +315,7 @@ read-your-writes end to end.
   `error` is `Conflict`, `Rejected { reason, message }` (a `Reason` by
   stable name; an unknown name arrives as a rejection without a reason) or
   `Other`. The rows the commit wrote shipped back ahead of the fate as they
-  are, and the session is complete through server seq `through` with them: a
+  are, and the session is complete through position `through` with them: a
   retry's snapshot reads at it, so a serializable retry sees what the commit
   conflicted with.
 
@@ -414,8 +423,8 @@ for one query's result:
   or the base row as it is now, or their evictions.
 - `span: Live { since }` keeps it current until `Unsubscribe` (§8.5);
   `since` resumes it (§8.11).
-- `span: Once { at }` answers it once, at the current state or as of
-  server seq `at`.
+- `span: Once { at }` answers it once, at the current state (`at` empty) or
+  as of position `at`.
 - `tier` says how far the read reaches past a relay: `LocalOnly` is served
   from the relay's store, `LocalFirst` from it too while the relay asks its
   upstream, `Remote` once its upstream answered. An authority's store is the
@@ -679,11 +688,13 @@ type are never read as another's.
 
 ### 8.11 Resuming live reads from `since`
 
-A replica persists, per live read, the server seq its result last settled
-through, in `_jazz_watermarks` keyed by a digest of the query, binding,
+A replica persists, per live read, the positions its result last settled
+through, in `_jazz_watermarks` (one row per sequencer, by its node code as in
+`_n`) keyed by a digest of the query, binding,
 `include_deleted` flag, the view it asked for and reader identity (not the tier or wait, and not the
 schema version: the key is over stored names). On reconnect or reopen, it
-sends `Read { span: Live { since } }` with that seq.
+sends `Read { span: Live { since } }` with those positions. A `since` at
+another sequencer than the one the store serves at opens fresh.
 
 The authority opens a resumed read one of three ways:
 
@@ -758,8 +769,8 @@ its own writes at its own node, so the two never collide in the session's
 store (`INV-SYNC-50`). A relay stores a session's commit as its own pending
 commit, answers `Stored`, and relays the authority's `Fate` (§8.3). A relay
 whose host says it has no server is its sessions' last word: its `Fate` and
-`Settled` carry `by`, its own node, since their `through` counts its
-positions rather than the authority's.
+`Settled` positions name its own node as their sequencer, since they count
+its positions rather than the authority's.
 
 ## Open Questions
 

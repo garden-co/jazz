@@ -818,3 +818,61 @@ fn an_offline_worker_keeps_a_view_write_pending() {
     assert_eq!(ids(&core), vec![2]);
     assert_eq!(tag(&core, 2), some("t"));
 }
+
+/// v1 with `title` defaulting to "untitled": a version that changes only
+/// a default, adding no stored column.
+fn v1_defaulted() -> JazzSchema {
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column_with_default(
+                        "title",
+                        ColumnType::Text,
+                        jazz::tools::Value::Text("untitled".into()),
+                    )
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    )
+}
+
+/// SPEC 8.9: a write through a view of a version the server lacks, from a
+/// session on a deployed one, that names only stored columns the server
+/// holds says all it means by them: the server validates it under its
+/// current schema and applies it, its writer's default included.
+#[test]
+fn a_view_write_naming_only_stored_columns_the_server_holds_applies() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = authority_at(v1(), &dir.path().join("server.sqlite"));
+    let client = open_at(v1(), 1, &dir.path().join("client.sqlite"));
+    let _link = link(&client, &server);
+    pump(&server, &[&client]);
+    let to_defaulted = MigrationLens::new(
+        v1().version_id(),
+        v1_defaulted().version_id(),
+        vec![TableLens {
+            source_table: "notes".into(),
+            target_table: "notes".into(),
+            ops: vec![],
+        }],
+    )
+    .unwrap();
+    block_on(client.admit_schema_with_lenses(v1_defaulted(), &[to_defaulted])).unwrap();
+    let defaulted = block_on(client.register_schema_view(v1_defaulted())).unwrap();
+    let tx = insert(&defaulted, 2, &[]);
+    fate(&server, &client, tx).expect("applied under the server's current schema");
+    assert_eq!(ids(&server), vec![2]);
+    let prepared = server.prepare_query(&Query::from("notes")).unwrap();
+    let titles: Vec<_> = block_on(server.all(&prepared, ReadOpts::default()))
+        .unwrap()
+        .iter()
+        .flat_map(|row| {
+            row.cells()
+                .filter(|(name, _)| *name == "title")
+                .filter_map(|(_, value)| value.cloned())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(titles, vec![Value::String("untitled".into())]);
+}
