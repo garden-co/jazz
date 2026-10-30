@@ -1,0 +1,32 @@
+[package]
+name = "jazz-db"
+version = "0.1.0"
+edition = "2024"
+description = "Jazz's database: the thread-affine Db facade over SQLite."
+
+[features]
+default = []
+# Test helpers shared with the crates above this one.
+testing = ["jazz-types/testing", "jazz-model/testing", "jazz-protocol/testing"]
+# Log every statement to the file named by JAZZ_SQL_TRACE, for checking the
+# SQL against restricted SQLite hosts (Durable Objects).
+sql-trace = []
+# Run on SQLite with Cloudflare Durable Objects' limits (bound parameters,
+# statement length, expression depth, ...), to find SQL that would fail
+# there. See `durable_object_limits.rs`.
+durable-object-limits = ["rusqlite/limits"]
+
+[dependencies]
+jazz-types.workspace = true
+jazz-model.workspace = true
+jazz-protocol.workspace = true
+rusqlite = { version = "0.40", features = ["bundled", "functions", "hooks", "limits"] }
+uuid = { version = "1.18.1", features = ["serde", "v4", "v5", "v7"] }
+web-time = "1.1"
+blake3 = "1"
+bytes = "1"
+serde_bytes = "0.11"
+serde_json = "1.0.145"
+futures = "0.3"
+serde = { version = "1.0.228", features = ["derive"] }
+postcard = { version = "1.1.3", features = ["alloc"] }

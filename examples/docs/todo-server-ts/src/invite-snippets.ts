@@ -3,22 +3,34 @@ import type { JazzClient } from "jazz-tools/backend";
 
 // #region invite-schema
 const schema = {
-  chats: s.table({}),
-  chatMembers: s.table({
-    chatId: s.ref("chats"),
-    user_id: s.uuid(),
-    inviteId: s.string().optional(),
-  }),
-  chatInvites: s.table({
-    chatId: s.ref("chats"),
-    code: s.string(),
-    singleUse: s.boolean(),
-  }),
+  chats: s.table(
+    {},
+    {
+      members: s.reverse("chatMembers", "chat"),
+      invites: s.reverse("chatInvites", "chat"),
+    },
+  ),
+  chatMembers: s.table(
+    {
+      chatId: s.uuid(),
+      user_id: s.uuid(),
+      inviteId: s.string().optional(),
+    },
+    { chat: s.rel("chats", "chatId") },
+  ),
+  chatInvites: s.table(
+    {
+      chatId: s.uuid(),
+      code: s.string(),
+      singleUse: s.boolean(),
+    },
+    { chat: s.rel("chats", "chatId") },
+  ),
 };
 // #endregion invite-schema
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema);
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
 
 // #region invite-permissions
 s.definePermissions(app, ({ policy, allOf, anyOf, session }) => {
@@ -77,7 +89,7 @@ export async function POST(req: Request): Promise<Response> {
 
   // Preserve the verified caller as author while using backend permissions.
   const backendDb = await client.withAttributionForRequest(req);
-  const result = await backendDb.exclusiveTransaction(async (tx) => {
+  const result = await backendDb.serializableTransaction(async (tx) => {
     // Checking membership first keeps re-opening a successfully redeemed link idempotent,
     // even after a single-use invite has been consumed.
     const existing = await tx.one(app.chatMembers.where({ chatId, user_id: user }));
@@ -91,7 +103,7 @@ export async function POST(req: Request): Promise<Response> {
     return "joined" as const;
   });
 
-  // Exclusive transactions settle at the authority, so wait() takes no tier.
+  // Serializable transactions settle at the authority, so wait() takes no tier.
   await result.wait();
   if (result.value === "invalid") return new Response("invalid invite", { status: 400 });
 

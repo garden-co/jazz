@@ -10,8 +10,8 @@ A native host owns one **process-local relay** per explicit `{ app namespace,
 storage namespace, auth scope }`. The relay contains a durable ordinary client
 `Db` over a portable ordered-KV backend (SQLite in the first native host). Each
 UI runtime gets a separate, in-memory ordinary client `Db`; it attaches to the
-relay through the normal peer protocol. The relay may itself attach to an
-upstream server through that same protocol.
+relay through the normal peer protocol. The relay may itself attach to Core
+through that same protocol; it never attaches to another relay (ch. 9 §9.5).
 
 This chapter defines the host boundary only. Chapters 3–8, 13, and 16 continue
 to own transactions, permissions, sync, client API, and subscriptions.
@@ -78,20 +78,30 @@ connection to the same SQLite store. The worker stays alive across a clean
 foreground handoff. Explicit foreground disconnect synchronously cancels and
 joins that worker before publishing offline state; reconnect restarts it using
 the retained native admission. Trusted scope revocation and host teardown
-stop the worker and retire the admission. A bearer session requires HTTPS/WSS for a remote Edge; plaintext is
+stop the worker and retire the admission. A bearer session requires HTTPS/WSS for remote Core; plaintext is
 accepted only for `localhost`, IP loopback, or the documented Android emulator
-host aliases (`10.0.2.2` and `10.0.3.2`). Typed network-unavailability I/O failures and
+host aliases (`10.0.2.2` and `10.0.3.2`). Typed network-unavailability I/O
+failures, including `BrokenPipe`, explicitly tagged hostname-resolution
+failures, TLS `UnexpectedEof` when a peer closes without `close_notify`, and
 handshake timeouts leave local relay work available while the worker retries.
-An I/O wrapper alone is insufficient: rustls certificate/protocol failures
+HTTP 408, 425, 429, 500, 502, 503, and 504 responses before authenticated wire
+admission are likewise retryable; other statuses, including authorization
+denials and unsupported server capabilities, remain terminal.
+
+A disallowed remote plaintext endpoint returns
+`JAZZ_NATIVE_RELAY_REMOTE_PLAINTEXT_ENDPOINT`. React Native maps that status to
+a fixed diagnostic that contains no endpoint URL, bearer, or claims.
+An I/O wrapper alone is insufficient: rustls certificate and other TLS protocol failures
 arrive as `InvalidData` I/O errors and remain terminal, as do unknown I/O kinds.
 A structured pre-Hello `NotReady`/`Later` response is likewise retryable,
-matching browser admission. Authentication denial, invalid protocol, TLS, and
-unclassified connection failures remain terminal; diagnostic text never selects
-this category. A retryable failure cannot clear a previous terminal denial.
-A failed bridge, owner pump, or established transport is also recorded as a
-scope terminal error and surfaced to
-foreground ticks until a later authenticated reconnect clears it; it may never
-silently degrade into an indefinitely pending foreground operation.
+matching browser admission. Authentication denial, malformed wire/WebSocket
+protocol, TLS certificate or protocol failures other than the reconnectable
+EOF, and unclassified connection failures remain terminal; diagnostic text
+never selects this category. A retryable failure cannot clear a previous
+terminal denial. A failed bridge, owner pump, or established transport is
+also recorded as a scope terminal error and surfaced to foreground ticks until
+a later authenticated reconnect clears it; it may never silently degrade into
+an indefinitely pending foreground operation.
 
 Opening a foreground returns its in-memory client handle synchronously. If
 the persistent owner is busy, the host retains normal subscriber admission as
@@ -207,7 +217,12 @@ embedded Rust library.
 
 The first public ABI is V1. It includes host-generated opaque admission
 capabilities and trusted revocation; no earlier implementation number or
-compatibility path is part of the released contract.
+compatibility path is part of the released contract. ABI 2 (alpha.58) adds
+coded operation errors (response 25) as answers to existing commands, and
+ABI 3 (alpha.60) adds their optional reason name; see §19.6 ("Coded operation
+errors"). ABI 4 (alpha.60) ends each subscription delta with its updated rows'
+splices (`updated_splices`, SPEC 18). The exported constant keeps its `NATIVE_RELAY_ABI_V1` name and carries
+the current version.
 
 The ABI stays coarse and binary:
 
@@ -464,7 +479,7 @@ The command bytes are pinned by
 relational reads carry one canonical `Query`; relational syntax is nested in
 `Query.relation` and is normalized while core prepares the read.
 
-Response 24 is MutationCommitted:
+Response 23 is MutationCommitted:
 tx_id 16 raw bytes followed by row_id 16 raw bytes. Direct writes use the core's
 queued admission and return its reserved write identity before suspended owner
 work completes. Synchronous LocalCurrentRow and WriteState report an explicit
@@ -586,11 +601,11 @@ that acknowledgement while already executing on the core owner thread would
 deadlock. Repeated close or unsubscribe reports `false`.
 
 ABI V1 also includes a deliberately narrow write family: `BeginTransaction` with
-the ordinary `mergeable` or `exclusive` core semantics, full-cell
+the ordinary `mergeable` or `serializable` core semantics, full-cell
 `Insert`/`Update`/`Upsert`/`Delete`, `CommitTransaction`, and
 `RollbackTransaction`. `WaitForCoreTransaction` accepts only that foreground's
 previously committed public `txId` and becomes a pending operation until the
-ordinary foreground/relay/Edge/Core fate path reaches Core durability. It lets
+ordinary foreground/local-relay/Core fate path reaches Core durability. It lets
 a host prove authoritative admission without reading relay SQLite; callers
 continue bounded ticks and `Poll` while it waits. Cell payloads are the established postcard
 `(RecordDescriptor, encoded-record)` envelope already used by NAPI/WASM; the
@@ -599,10 +614,32 @@ The host creates an opaque transaction handle, binds it to exactly one
 foreground, caps the number of open handles, and abandons all still-open
 handles when that foreground closes or its capability is revoked. A successful
 commit returns the normal public 16-byte `txId`, never the mutable handle.
-Schema, permission, and transaction errors remain ordinary
-`OperationError` responses so the eventual shared adapter keeps their existing
-error attribution; malformed bytes and lifecycle failures still fail closed at
-the C boundary.
+Schema, permission, and transaction errors remain ordinary operation-error
+responses so the eventual shared adapter keeps their existing error
+attribution; malformed bytes and lifecycle failures still fail closed at the C
+boundary.
+
+**Coded operation errors.** Response 25, `CodedOperationError`, is introduced
+by ABI 2. Since ABI 3 its layout is a code string, an optional reason name
+(postcard `Option<String>`), then a reason string. A failure caused by a core
+`jazz::db::Error` uses it, with the code set to the stable
+`ErrorCode::as_str` spelling (for example `not_observed`), the reason name set
+to the error's `Reason::as_str` when it has one (for example
+`authorization_denied`), and the reason set to the core error's unchanged
+display text (`"NotObserved: …"`). Every other failure keeps response 8,
+`OperationError`, with only a reason. The TypeScript decoder presents both as
+one `operationError` response with an optional `code` and `reasonName`, and
+the shared adapter throws it as an `Error` whose `code` and `reason` are those
+strings. Both shapes, with and without a reason name, are pinned by the Rust
+codec corpus in `jazz-napi`'s `rn_test_bridge` and its TypeScript mirror
+`tests/react-native/codec-contract.test.ts`. Because this response answers
+existing commands, introducing it bumped the relay ABI to 2 and adding the
+reason name bumped it to 3: a JavaScript bundle and a native build from
+different ABIs refuse to open with the "new native development/release build
+required" error, so no decoder meets a layout it does not know. A
+JavaScript-only OTA update onto an older native build therefore needs a new
+native build. The C header's `JAZZ_NATIVE_RELAY_ABI_VERSION` names the same
+version, and the C and C++ ABI probes compare the artifact against it.
 
 This slice intentionally delegates every mutation to the existing core
 transaction APIs with their default options. It therefore does not invent
@@ -639,7 +676,7 @@ this does not promise bounded completion of a never-ready storage operation.
 
 **Permission advice.** Command 38 appends `PermissionAdvice { action }`, with
 action ordinals Insert=0 (table, encoded cells), Read=1 (table, 16-byte row id),
-Update=2 (table, row id, encoded patch), and Delete=3 (table, row id). Response 25
+Update=2 (table, row id, encoded patch), and Delete=3 (table, row id). Response 24
 appends the advice enum Allowed=0, Denied=1, Unknown=2. Strings and byte vectors
 use the existing V1 postcard framing. Pending responses use the existing
 foreground-owned operation handle and poll/cancel/close lifecycle.

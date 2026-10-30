@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
 rust_protocol_version="$(
-  sed -n 's/^pub const WIRE_PROTOCOL_VERSION: u16 = \([0-9][0-9]*\);$/\1/p' crates/jazz/src/wire.rs
+  sed -n 's/^pub const WIRE_PROTOCOL_VERSION: u16 = \([0-9][0-9]*\);$/\1/p' crates/jazz/layers/protocol/src/wire.rs
 )"
 ts_protocol_version="$(
   sed -n 's/^export const WIRE_PROTOCOL_VERSION = \([0-9][0-9]*\);$/\1/p' \

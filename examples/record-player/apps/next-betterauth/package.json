@@ -5,18 +5,23 @@
   "type": "module",
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "jazz-tools validate && next build",
     "start": "next start",
     "test": "pnpm test:unit && pnpm test:provider && pnpm test:selection",
     "test:unit": "vitest run --config vitest.config.unit.ts",
     "test:topology": "node ../../../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.browser.ts",
     "test:browser": "pnpm test:topology",
     "test:provider": "vitest run --config vitest.config.provider.ts",
-    "test:selection": "node --test tests/test-selection.test.mjs"
+    "test:selection": "node --test tests/test-selection.test.mjs",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@astryxdesign/core": "0.6.3",
+    "@garden-co/design": "github:garden-co/design#fe96522c2484b894380fab7f0217b76ee4bda3a2",
     "better-auth": "1.7.1",
+    "jazz-napi": "workspace:*",
     "jazz-tools": "workspace:*",
+    "lucide-react": "^0.563.0",
     "next": "catalog:default",
     "react": "19.2.4",
     "react-dom": "19.2.4"

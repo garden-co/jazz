@@ -1,3 +1,4 @@
+import { AuxiliaryReceiveDeadline } from "./auxiliary-receive-deadline.js";
 import type { Transport } from "./native-runtime-adapter.js";
 
 // Keep auxiliary chunk traffic below a bounded structured-clone allocation.
@@ -27,6 +28,7 @@ export interface PeerTransportRuntime {
 }
 
 export class BrowserWorkerTransportPump {
+  private readonly receiveDeadline: AuxiliaryReceiveDeadline;
   private scheduled = false;
   private running = false;
   private runAgain = false;
@@ -49,6 +51,10 @@ export class BrowserWorkerTransportPump {
     private readonly onError: (error: unknown) => void,
     private readonly onAuxiliaryTrace?: (entries: AuxiliaryRelayTrace[]) => void,
   ) {
+    this.receiveDeadline = new AuxiliaryReceiveDeadline(transport, (error) => {
+      this.close();
+      this.onError(error);
+    });
     // The evaluator notifies every peer after a pass. This pump drains its
     // transport immediately after the pass it requested, so that notification
     // must not recursively request another identical pass.
@@ -106,6 +112,7 @@ export class BrowserWorkerTransportPump {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.receiveDeadline.close();
     this.removeWorkListener();
     this.transport.clearOutboundScheduler?.();
     this.transport.setAuxiliaryTraceEnabled?.(false);
@@ -181,6 +188,8 @@ export class BrowserWorkerTransportPump {
       const routed = this.transport.routeAuxiliaryWireFrame
         ? await this.transport.routeAuxiliaryWireFrame(frame)
         : frame;
+      this.receiveDeadline.refresh();
+      if (this.closed) return;
       if (routed != null) canonical.push(normalizeTransportFrame(routed));
     }
     if (this.closed) return;

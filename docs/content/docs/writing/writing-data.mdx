@@ -63,10 +63,15 @@ Every framework provides a hook to access the database handle. In plain TypeScri
 
 Mutations are methods on the database handle. All three take a table as their first argument.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-crud-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts">
+      ../examples/docs/todo-effect/src/docs-snippets.ts#writing-crud-effect
     </include>
   </Tab>
   <Tab value="Rust">
@@ -82,9 +87,18 @@ Use `upsert(...)` when your app already knows the row ID and wants to create tha
 not exist, or update it if it does. Like `insert`, `update`, and `delete`, it applies locally first
 and returns a `MutationResult<void>` that can be awaited for durability.
 
-<include cwd lang="ts">
-  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-upsert-ts
-</include>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-upsert-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts">
+      ../examples/docs/todo-effect/src/docs-snippets.ts#writing-upsert-effect
+    </include>
+  </Tab>
+</Tabs>
 
 ### Restore a deleted row
 
@@ -93,9 +107,18 @@ Trying to insert, update or delete an already deleted row will fail. Use `restor
 Deleted rows are omitted from queries by default. Add `includeDeleted()` when you need to find a
 row before restoring it.
 
-<include cwd lang="ts">
-  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-restore-ts
-</include>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-restore-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts">
+      ../examples/docs/todo-effect/src/docs-snippets.ts#writing-restore-effect
+    </include>
+  </Tab>
+</Tabs>
 
 ### Partial updates and nullable fields
 
@@ -104,10 +127,15 @@ Omitted fields are left unchanged; explicitly passing `undefined` also leaves a 
 To clear a nullable column in TypeScript, pass `null`.
 Required fields cannot be set to `null`.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-nullable-update-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts">
+      ../examples/docs/todo-effect/src/docs-snippets.ts#writing-nullable-update-effect
     </include>
   </Tab>
   <Tab value="Rust">
@@ -174,28 +202,75 @@ with the value your application last read. `update(..., { applyDiffs })` is for
 existing rows only; inserts and full replacement continue to use the ordinary
 mutation methods.
 
+`applyDiffs` also works inside a transaction. Coordinates are relative to the
+value the transaction sees, including its own earlier writes, so an append
+after an append in the same transaction lands after both, and every diff
+commits together with the transaction's other writes:
+
+```ts
+await db.transaction(async (tx) => {
+  tx.update(
+    app.documents,
+    documentId,
+    { editedAt: new Date() },
+    {
+      applyDiffs: {
+        text: {
+          within: { from: length, to: length }, // an empty page at the end
+          splices: [{ at: 0, delete: 0, insert: nextTokens }],
+        },
+      },
+    },
+  );
+});
+```
+
+Only the pages a diff touches are rewritten, so streaming many small appends
+into a long value stays cheap however long it grows.
+
 ## Write durability tiers
 
-For ordinary mutations and mergeable transactions, the tier passed to `wait({ tier })` controls how
-far the mutation must propagate before the promise resolves: locally on the client (`local`), the
-nearest edge server (`edge`), or the global core (`global`).
+For ordinary mutations and mergeable transactions, `wait({ tier })` controls which
+confirmation the caller waits for:
 
-| Tier     | Resolves when                       |
-| -------- | ----------------------------------- |
-| `local`  | Persisted to local durable storage  |
-| `edge`   | Acknowledged by nearest sync server |
-| `global` | Propagated to global core           |
+| Tier     | Resolves when                           |
+| -------- | --------------------------------------- |
+| `local`  | Saved by the local persistence driver   |
+| `global` | Authorized and durably accepted by Core |
 
 <WriteTierDiagram />
 
-Offline, only `local` can resolve. `edge` and `global` waits stay pending until the device
-reconnects and the queued write either propagates upstream or is rejected. Choosing a higher tier
-changes when the promise settles; it does not delay the initial local mutation.
+Offline, only `local` can resolve. A `global` wait stays pending until the device
+reconnects and Core accepts or rejects the queued write, however long the outage
+lasts. Both choices apply the initial mutation locally and upload it when connected.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+A `global` wait fails early only when the client stops trying to reach Core: a
+protocol error, a closed client, or a credential the server refuses that nothing
+renews. Only an account context's refresh cycle and a local-first token the Db
+mints itself count as renewing a credential, so their waits outlast an expired
+token. With a static token or a backend secret, a refused credential ends the
+wait. To bound how long you wait, pass `timeoutMs`. The wait then rejects with
+a `WriteWaitTimeoutError` (`code: "timeout"`), but the write stays queued and may
+still be accepted, so do not retry it:
+
+```ts
+try {
+  await db.insert(app.todos, { title: "Buy milk" }).wait({ tier: "global", timeoutMs: 5_000 });
+} catch (error) {
+  if (error instanceof WriteWaitTimeoutError) showPendingBadge();
+  else throw error;
+}
+```
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-durability-tier-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts">
+      ../examples/docs/todo-effect/src/docs-snippets.ts#writing-durability-tier-effect
     </include>
   </Tab>
   <Tab value="Rust">
@@ -209,6 +284,63 @@ See [Durability Tiers](/docs/reference/durability-tiers) for the full reference,
 
 Need to clear local data during development? See [Auth Lifecycle](/docs/auth/lifecycle#storage-reset).
 
+## Showing sync status
+
+To show whether the user's changes have reached the server, read the Db's sync status. It combines
+the upstream connection with the number of transactions the server has not accepted or rejected yet:
+
+```ts
+const status = db.getSyncStatus();
+// {
+//   link: { state: "offline", reason: "network", retrying: true },
+//   pendingUploads: 3,
+//   synced: false,
+// }
+
+const unsubscribe = db.onSyncStatusChange((status) => renderBadge(status));
+```
+
+`link.state` is one of:
+
+| State        | Meaning                                                                                                                                                                                                                                                                          |
+| ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `local-only` | No server is configured, so nothing is uploaded                                                                                                                                                                                                                                  |
+| `connecting` | Connecting for the first time, or reconnecting after a short drop                                                                                                                                                                                                                |
+| `connected`  | Connected to the server                                                                                                                                                                                                                                                          |
+| `offline`    | Not connected. `reason` says why: `disconnected` after `db.disconnect()`, `network` when the server has been unreachable for a while (the client keeps retrying), `auth` when the server refused the credential, or `stopped` after a failure that only `db.reconnect()` retries |
+
+A brief drop shows as `connecting`, not `offline`, so a status badge doesn't flicker. `synced` is
+`true` when nothing waits for upload and the link is `connected` (or `local-only`).
+
+In Node and React Native, `pendingUploads` includes transactions recovered from local storage after a
+restart. In the browser, each tab counts only the transactions it committed itself. Transactions
+recovered after a reload, or written by another tab, are uploaded by the shared worker and are not
+counted, and `db.waitForSync()` does not wait for them.
+
+The framework bindings expose the same object: `useSyncStatus()` in React, React Native and Solid
+(an accessor), `useSyncStatus()` in Vue (a ref), and `syncStatus()` in Svelte (a store, read as
+`$status`). The Effect layer has a `syncStatus` stream.
+
+```tsx
+function SyncBadge() {
+  const { link, pendingUploads, synced } = useSyncStatus();
+  if (synced) return <span>Saved</span>;
+  if (link.state === "offline") return <span>Offline, {pendingUploads} changes waiting</span>;
+  return <span>Saving…</span>;
+}
+```
+
+To wait until everything written so far has reached the server, for example before letting the user
+sign out, use `db.waitForSync()`. Like a `global` write wait, it lasts through outages and
+reconnects, and fails only if the server rejects one of those writes or the client stops trying.
+Pass `timeoutMs` to bound it; it then rejects with a `WriteWaitTimeoutError` and the writes stay
+queued. In the browser it waits only for the current tab's own writes, as described above, so a
+write recovered after a reload or made in another tab may still be waiting when it resolves:
+
+```ts
+await db.waitForSync({ timeoutMs: 10_000 });
+```
+
 ## Handling mutation errors
 
 A mutation can fail when you call it or while you wait:
@@ -218,25 +350,54 @@ A mutation can fail when you call it or while you wait:
 - If a server later rejects the mutation, an active `wait(...)` call rejects with
   `PersistedWriteRejectedError`.
 
-<include cwd lang="ts">
-  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-mutation-errors-ts
-</include>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-mutation-errors-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts">
+      ../examples/docs/todo-effect/src/docs-snippets.ts#writing-mutation-errors-effect
+    </include>
+  </Tab>
+</Tabs>
 
 Use `db.onMutationError(...)` as a fallback for rejected mutations without an active `wait(...)`.
 This includes mutations you did not wait for and mutations whose wait finished before a later
 rejection arrived.
 
-<include cwd lang="ts">
-  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-mutation-error-listener-ts
-</include>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-mutation-error-listener-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts">
+      ../examples/docs/todo-effect/src/docs-snippets.ts#writing-mutation-error-listener-effect
+    </include>
+  </Tab>
+</Tabs>
 
 `onMutationError` returns an unsubscribe function. Without a listener, Jazz logs the rejection and
 keeps it so that a listener registered later can receive it.
 
+On a server, every `Db` from one `createJazzContext` (`db()`, `asBackend()`, `forRequest()`,
+`forSession()`) shares one runtime, so `onMutationError` is context-wide. A listener sees rejections
+of writes made through any of them, for every session, so a per-request handler must match events
+against its own transaction IDs. Rejections that arrive before any listener exists, such as writes
+that were still in flight when the process stopped and are settled on restart, go to whichever `Db`
+registers a listener first. Jazz keeps up to 256 of them and reports how many it dropped beyond
+that. A dropped or shut-down `Db` releases its listeners. `context.db()` returns a new `Db` on each
+call, so keep a reference to the `Db` you register on, for example a long-lived
+`const db = context.db()`. A listener on a `Db` you don't keep stops firing once that `Db` is
+garbage-collected.
+
 ## Transactions
 
 Use a transaction when several reads and writes must share one commit. Use a mergeable transaction
-for normal local-first work. Use an exclusive transaction only when the authority must check the
+for normal local-first work. Use a serializable transaction only when the authority must check the
 whole operation against one stable view of the data.
 
 See [Transactions](/docs/writing/transactions) for examples, error handling and the differences

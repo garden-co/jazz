@@ -1,14 +1,15 @@
 //! Account control endpoints: JWTs authenticate requests, not custom intent claims.
 use crate::server::ServerState;
+use crate::server::account_store::RegistryError;
 use axum::{
     Json,
     extract::State,
     http::{HeaderMap, StatusCode},
 };
-use jazz::account_registry::storage::RegistryError;
 use jazz::account_registry::{
     AccountCommand, AccountCommandResult, AccountId, Assignment, Principal,
 };
+use jazz::tools::transport_error::{UnauthenticatedCode, UnauthenticatedResponse};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -30,86 +31,6 @@ pub(super) async fn admit_backend(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Edges preserve end-user bearer proof; they never substitute service authority.
-pub(super) async fn forward_if_edge(
-    State(state): State<Arc<ServerState>>,
-    request: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
-    use axum::response::IntoResponse;
-    if state.accounts.is_some() {
-        return next.run(request).await;
-    }
-    match forward_account_request(&state, request).await {
-        Ok(response) => response,
-        Err(failure) => failure.into_response(),
-    }
-}
-
-async fn forward_account_request(
-    state: &ServerState,
-    request: axum::extract::Request,
-) -> Result<axum::response::Response, Failure> {
-    let base = state.upstream_http_url.as_deref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "account_registry_unavailable",
-    ))?;
-    let authorization = request
-        .headers()
-        .get("authorization")
-        .filter(|_| !request.headers().contains_key("x-jazz-session"))
-        .cloned()
-        .ok_or((StatusCode::UNAUTHORIZED, "account_bearer_required"))?;
-    let path = request.uri().path();
-    let operation = [
-        "links/request",
-        "links/accept",
-        "found-local-first",
-        "register",
-        "login-or-register",
-        "login",
-        "revoke",
-    ]
-    .into_iter()
-    .find(|operation| path.ends_with(&format!("/{operation}")))
-    .ok_or((StatusCode::NOT_FOUND, "unknown_account_operation"))?;
-    let url = format!(
-        "{}/apps/{}/accounts/{operation}",
-        base.trim_end_matches('/'),
-        state.app_id
-    );
-    let body = axum::body::to_bytes(request.into_body(), 64 * 1024)
-        .await
-        .map_err(|_| (StatusCode::PAYLOAD_TOO_LARGE, "account_request_too_large"))?;
-    let mut upstream = state
-        .http_client
-        .post(url)
-        .header("authorization", authorization)
-        .header("content-type", "application/json")
-        .timeout(std::time::Duration::from_secs(10))
-        .body(body)
-        .send()
-        .await
-        .map_err(|_| (StatusCode::BAD_GATEWAY, "account_registry_unavailable"))?;
-    let status = upstream.status();
-    let mut bytes = Vec::new();
-    while let Some(chunk) = upstream
-        .chunk()
-        .await
-        .map_err(|_| (StatusCode::BAD_GATEWAY, "account_registry_unavailable"))?
-    {
-        if bytes.len().saturating_add(chunk.len()) > 64 * 1024 {
-            return Err((StatusCode::BAD_GATEWAY, "invalid_account_response"));
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    axum::response::Response::builder()
-        .status(status)
-        .header("content-type", "application/json")
-        .body(axum::body::Body::from(bytes))
-        .map_err(|_| (StatusCode::BAD_GATEWAY, "invalid_account_response"))
-}
-
 async fn authenticate(state: &ServerState, headers: &HeaderMap) -> Result<Principal, Failure> {
     // Explicit bearer auth only: ambient cookies cannot authorize an account
     // mutation, and backend impersonation is not proof of the user's intent.
@@ -126,7 +47,13 @@ async fn authenticate(state: &ServerState, headers: &HeaderMap) -> Result<Princi
         state.jwt_verifier.as_deref(),
     )
     .await
-    .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid account credential"))?
+    .map_err(|error| match error.code {
+        UnauthenticatedCode::Unavailable => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "JWKS authentication service unavailable",
+        ),
+        _ => (StatusCode::UNAUTHORIZED, "invalid account credential"),
+    })?
     .ok_or((StatusCode::UNAUTHORIZED, "missing account credential"))?;
     if session.issuer == jazz::tools::identity::ANONYMOUS_ISSUER {
         return Err((
@@ -174,17 +101,15 @@ pub(super) struct AccountResponse {
     generation: u64,
 }
 
-/// Read-only service lookup. An edge must authenticate the user independently;
+/// Read-only administrative lookup;
 /// service authority can resolve an assignment but cannot create or link one.
-pub(super) async fn resolve_for_edge(
+pub(super) async fn resolve_for_admin(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
     Json(request): Json<RequestLink>,
 ) -> Result<Json<AccountResponse>, Failure> {
     crate::middleware::auth::validate_admin_secret(
-        headers
-            .get("x-jazz-admin-secret")
-            .and_then(|value| value.to_str().ok()),
+        super::http::admin_secret_header(&headers),
         &state.auth_config,
     )?;
     let assignment = owner(&state)?
@@ -199,12 +124,14 @@ pub(super) async fn resolve_for_edge(
 pub(super) enum AdmissionError {
     Denied(String),
     Unavailable,
+    AuthenticationUnavailable(String),
 }
 impl std::fmt::Display for AdmissionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Denied(message) => f.write_str(message),
             Self::Unavailable => f.write_str("account registry unavailable"),
+            Self::AuthenticationUnavailable(message) => f.write_str(message),
         }
     }
 }
@@ -216,6 +143,17 @@ impl From<String> for AdmissionError {
 impl From<&str> for AdmissionError {
     fn from(message: &str) -> Self {
         Self::Denied(message.into())
+    }
+}
+impl From<UnauthenticatedResponse> for AdmissionError {
+    fn from(error: UnauthenticatedResponse) -> Self {
+        match error.code {
+            UnauthenticatedCode::Unavailable => Self::AuthenticationUnavailable(error.message),
+            _ => Self::Denied(
+                serde_json::to_string(&error)
+                    .unwrap_or_else(|_| "authentication failed".to_owned()),
+            ),
+        }
     }
 }
 impl From<RegistryError> for AdmissionError {
@@ -236,45 +174,11 @@ impl AdmissionError {
             Self::Denied(message) => {
                 WireError::new(WireErrorCode::AuthFailed, WireRetry::Never, message)
             }
+            Self::AuthenticationUnavailable(message) => {
+                WireError::new(WireErrorCode::NotReady, WireRetry::Later, message)
+            }
         }
     }
-}
-
-async fn read_upstream_assignment(
-    request: reqwest::RequestBuilder,
-    principal: &Principal,
-) -> Result<AccountId, AdmissionError> {
-    let mut response = request
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await
-        .map_err(|_| AdmissionError::Unavailable)?;
-    if response.status().is_server_error()
-        || response.status() == StatusCode::TOO_MANY_REQUESTS
-        || response.status() == StatusCode::REQUEST_TIMEOUT
-    {
-        return Err(AdmissionError::Unavailable);
-    }
-    if !response.status().is_success() {
-        return Err("account identity not admitted by core".into());
-    }
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|_| AdmissionError::Unavailable)?
-    {
-        if bytes.len().saturating_add(chunk.len()) > 64 * 1024 {
-            return Err("invalid account registry response".into());
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    let assignment: AccountResponse =
-        serde_json::from_slice(&bytes).map_err(|_| "invalid account registry response")?;
-    if assignment.identity != *principal {
-        return Err("account registry returned another identity".into());
-    }
-    Ok(AccountId(assignment.account))
 }
 
 pub(super) async fn resolve_assignment(
@@ -288,33 +192,14 @@ pub(super) async fn resolve_assignment(
             .map(|value| value.account)
             .map_err(AdmissionError::from);
     }
-    let base = state
-        .upstream_http_url
-        .as_deref()
-        .ok_or(AdmissionError::Unavailable)?;
-    let secret = state
-        .auth_config
-        .admin_secret
-        .as_deref()
-        .ok_or("edge registry authority unavailable")?;
-    let request = state
-        .http_client
-        .post(format!(
-            "{}/apps/{}/admin/accounts/resolve",
-            base.trim_end_matches('/'),
-            state.app_id,
-        ))
-        .header("x-jazz-admin-secret", secret)
-        .json(&serde_json::json!({ "identity": principal }));
-    read_upstream_assignment(request, &principal).await
+    Err(AdmissionError::Unavailable)
 }
 
 /// Offline local founding becomes durable on the first authenticated connection.
-/// An edge forwards the actual founder's proof, never its own service secret.
 pub(super) async fn admit_local_founder(
     state: &ServerState,
     principal: &Principal,
-    headers: &HeaderMap,
+    _headers: &HeaderMap,
 ) -> Result<(), AdmissionError> {
     if let Some(registry) = &state.accounts {
         registry
@@ -326,26 +211,7 @@ pub(super) async fn admit_local_founder(
             .map_err(AdmissionError::from)?;
         return Ok(());
     }
-    let base = state
-        .upstream_http_url
-        .as_deref()
-        .ok_or(AdmissionError::Unavailable)?;
-    let proof = headers
-        .get("authorization")
-        .ok_or("local founding requires bearer proof")?;
-    if headers.contains_key("x-jazz-session") {
-        return Err("local founding requires the founder's own proof".into());
-    }
-    let request = state
-        .http_client
-        .post(format!(
-            "{}/apps/{}/accounts/found-local-first",
-            base.trim_end_matches('/'),
-            state.app_id,
-        ))
-        .header("authorization", proof);
-    read_upstream_assignment(request, principal).await?;
-    Ok(())
+    Err(AdmissionError::Unavailable)
 }
 fn response(identity: Principal, assignment: Assignment) -> Json<AccountResponse> {
     Json(AccountResponse {
@@ -512,18 +378,12 @@ mod tests {
     use crate::server::testing::{JazzServer, TestJwtIssuer};
 
     /// Concurrent first-device requests and a lost-response retry must resolve
-    /// one immutable assignment, including when routed through an edge.
+    /// one immutable assignment at Core.
     #[tokio::test]
     async fn login_or_register_is_atomic_and_revocation_is_permanent() {
         let core = JazzServer::start().await.expect("start test server");
-        let edge = JazzServer::builder()
-            .with_app_id(core.app_id())
-            .with_upstream_url(core.base_url())
-            .start()
-            .await
-            .expect("start test server");
         let client = reqwest::Client::new();
-        let base = format!("{}/apps/{}/accounts", edge.base_url(), edge.app_id());
+        let base = format!("{}/apps/{}/accounts", core.base_url(), core.app_id());
         let token = TestJwtIssuer::jwt_for_user("new-account");
         let url = format!("{base}/login-or-register");
         let mut requests = Vec::new();
@@ -577,23 +437,16 @@ mod tests {
                 .unwrap();
             assert_eq!(denied.status(), StatusCode::FORBIDDEN);
         }
-        edge.shutdown().await;
         core.shutdown().await;
     }
 
-    /// Exercise public HTTP enrollment through an actual edge/core topology.
+    /// Exercise public HTTP enrollment through Core.
     /// Service lookup is deliberately read-only and rejects user credentials.
     #[tokio::test]
-    async fn edge_forwards_identity_proof_and_core_resolves_revocation() {
+    async fn core_resolves_linked_identity_and_revocation() {
         let core = JazzServer::start().await.expect("start test server");
-        let edge = JazzServer::builder()
-            .with_app_id(core.app_id())
-            .with_upstream_url(core.base_url())
-            .start()
-            .await
-            .expect("start test server");
         let client = reqwest::Client::new();
-        let base = format!("{}/apps/{}/accounts", edge.base_url(), edge.app_id());
+        let base = format!("{}/apps/{}/accounts", core.base_url(), core.app_id());
         let alice = TestJwtIssuer::jwt_for_user("alice");
         let bob = TestJwtIssuer::jwt_for_user("bob");
         let identity = serde_json::json!({"issuer": "urn:jazz:test", "subject": "bob"});
@@ -670,7 +523,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(login.status(), StatusCode::FORBIDDEN);
-        edge.shutdown().await;
         core.shutdown().await;
     }
 

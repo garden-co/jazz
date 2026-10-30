@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { PersistedWriteRejectedError } from "jazz-tools";
+import { PersistedWriteRejectedError, schema as s, type WasmSchema } from "jazz-tools";
 import { Link, MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TableDataGrid } from "./TableDataGrid";
@@ -84,7 +84,7 @@ function renderRoutedGrid() {
   );
 }
 
-const mockWasmSchema = {
+const mockWasmSchema: WasmSchema = {
   todos: {
     columns: [
       { name: "title", column_type: { type: "Text" }, nullable: false },
@@ -113,6 +113,19 @@ const mockWasmSchema = {
     ],
   },
 };
+
+const bigintArrayApp = s.defineApp(
+  {
+    todos: s.table(
+      {
+        ranks: s.array(s.bigint()),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
+let currentWasmSchema: WasmSchema = mockWasmSchema;
 const initialMockTodoColumns = [...mockWasmSchema.todos.columns];
 
 vi.mock("jazz-tools/react", () => ({
@@ -124,7 +137,7 @@ vi.mock("jazz-tools/react", () => ({
 
 vi.mock("../../contexts/devtools-context.js", () => ({
   useDevtoolsContext: () => ({
-    wasmSchema: mockWasmSchema,
+    wasmSchema: currentWasmSchema,
     runtime: "overlay",
   }),
 }));
@@ -145,6 +158,7 @@ describe("TableDataGrid", () => {
 
   beforeEach(() => {
     localStorage.clear();
+    currentWasmSchema = mockWasmSchema;
     mockWasmSchema.todos.columns = [...initialMockTodoColumns];
 
     currentTable = "todos";
@@ -495,6 +509,35 @@ describe("TableDataGrid", () => {
       });
     });
   });
+  it("renders Array<BigInt> values exactly and animates a changed cell", () => {
+    vi.useFakeTimers();
+    currentWasmSchema = bigintArrayApp.wasmSchema;
+    currentRows = currentRows.map((row, index) => ({
+      ...row,
+      ranks: index === 0 ? [9007199254740993n] : row.ranks,
+    }));
+
+    const { rerender } = renderGrid();
+
+    expect(screen.getByText("[9007199254740993]")).not.toBeNull();
+
+    currentRows = currentRows.map((row, index) => ({
+      ...row,
+      ranks: index === 0 ? [-9223372036854775808n] : row.ranks,
+    }));
+    rerender(renderGridUi());
+
+    const changedCell = getContainingCell(screen.getByText("[-9223372036854775808]"));
+    expect(changedCell?.dataset.cellChangeState).toBe("updated");
+
+    act(() => {
+      vi.advanceTimersByTime(1_300);
+    });
+
+    expect(
+      getContainingCell(screen.getByText("[-9223372036854775808]"))?.dataset.cellChangeState,
+    ).toBeUndefined();
+  });
 
   it("edits text cells in place and saves from the banner", async () => {
     renderGrid();
@@ -828,6 +871,31 @@ describe("TableDataGrid", () => {
     expect(document.querySelector(".rdg-cell-frozen")).toBeNull();
   });
 
+  it("bounds binary cell text and tooltips to a hex preview", () => {
+    const bytes = new Uint8Array(300_877).fill(255);
+    bytes.set([0, 1, 10, 16]);
+    currentRows = [
+      { ...currentRows[0], blob: bytes },
+      { ...currentRows[1], blob: new Uint8Array() },
+    ];
+    const { rerender } = renderGrid();
+    const preview = `${bytes.length.toLocaleString()} bytes · 00 01 0a 10 ${"ff ".repeat(11)}ff …`;
+    expect(screen.getByText(preview).getAttribute("title")).toBe(preview);
+    expect(screen.getByText("0 bytes").getAttribute("title")).toBe("0 bytes");
+
+    // The preview stays the same, but an edit beyond its prefix is still a change.
+    const changed = bytes.slice();
+    changed[changed.length - 1] = 0;
+    currentRows = [{ ...currentRows[0], blob: changed }, currentRows[1]!];
+    rerender(renderGridUi());
+    expect(getContainingCell(screen.getByText(preview))?.dataset.cellChangeState).toBe("updated");
+  });
+
+  it("shows short binary values completely", () => {
+    renderGrid();
+    expect(screen.getByText("2 bytes · 01 02").getAttribute("title")).toBe("2 bytes · 01 02");
+  });
+
   it("marks changed cells so live updates can pulse", () => {
     vi.useFakeTimers();
     const { rerender } = renderGrid();
@@ -1143,6 +1211,25 @@ describe("TableDataGrid", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
+  it("leaves an untouched nullable Boolean without a default null when inserting", async () => {
+    mockWasmSchema.todos.columns = initialMockTodoColumns.map((column) =>
+      column.name === "maybe_done"
+        ? { name: "maybe_done", column_type: { type: "Boolean" }, nullable: true }
+        : column,
+    );
+    renderGrid();
+    fireEvent.click(screen.getByRole("button", { name: "Insert row" }));
+    const stagedCells = getCellsInRowContaining("staged");
+    expect(within(stagedCells[3] as HTMLElement).getByText("<null>")).not.toBeNull();
+    fireEvent.doubleClick(stagedCells[1] as HTMLElement);
+    fireEvent.change(screen.getByLabelText("Edit title"), { target: { value: "new todo" } });
+    fireEvent.blur(screen.getByLabelText("Edit title"));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(mockInsert).toHaveBeenCalledTimes(1));
+    expect(mockInsert.mock.calls[0]?.[1]).not.toHaveProperty("maybe_done");
+    expect(mockInsert.mock.calls[0]?.[1]).toEqual({ title: "new todo", done: false });
+  });
+
   it("appends a staged insert row and inserts it from the banner", async () => {
     renderGrid();
 
@@ -1162,11 +1249,11 @@ describe("TableDataGrid", () => {
     const unsetTitle = within(stagedCells[1] as HTMLElement).getByText("<null>");
     expect(unsetTitle.tagName).toBe("I");
     expect(unsetTitle.getAttribute("data-cell-value-state")).toBe("unset");
-    // regular <null>, omitted so the database applies its default
+    // Default-backed <null> values are rendered as ordinary cells.
     const defaultNull = within(stagedCells[3] as HTMLElement).getByText("<null>");
     expect(defaultNull.tagName).toBe("DIV");
     expect(defaultNull.getAttribute("data-cell-value-state")).toBeNull();
-    // regular <null>, included in the insert
+    // regular <null>, nullable field is left untouched until edited
     const nullableNull = within(stagedCells[4] as HTMLElement).getByText("<null>");
     expect(nullableNull.tagName).toBe("DIV");
     expect(nullableNull.getAttribute("data-cell-value-state")).toBeNull();
@@ -1196,8 +1283,6 @@ describe("TableDataGrid", () => {
         {
           title: "new todo",
           done: true,
-          meta: null,
-          owner_id: null,
         },
         {
           id: expect.stringMatching(
@@ -1312,8 +1397,6 @@ describe("TableDataGrid", () => {
         {
           title: "",
           done: false,
-          meta: null,
-          owner_id: null,
         },
         { id: expect.any(String) },
       );
@@ -1362,8 +1445,6 @@ describe("TableDataGrid", () => {
         {
           title: "first todo",
           done: true,
-          meta: null,
-          owner_id: null,
         },
         { id: expect.any(String) },
       );
@@ -1373,8 +1454,6 @@ describe("TableDataGrid", () => {
         {
           title: "second todo",
           done: false,
-          meta: null,
-          owner_id: null,
         },
         { id: expect.any(String) },
       );

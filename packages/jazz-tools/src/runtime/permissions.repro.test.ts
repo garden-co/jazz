@@ -10,68 +10,126 @@ import { localFirstAccountId } from "../accounts/local-first.js";
 import { deploy } from "../dev/catalogue.js";
 import { startLocalJazzServer } from "../testing/index.js";
 
-const reproApp = s.defineApp({
-  teams: s.table({
-    name: s.string(),
-    route_key: s.string(),
-    corporation_id: s.string(),
-    kind: s.string(),
-    identity_key: s.uuid().optional(),
-    system_owned: s.boolean(),
-    archived: s.boolean(),
-  }),
-  user_team_edges: s.table({
-    user_id: s.uuid(),
-    team: s.ref("teams"),
-    administrator: s.boolean(),
-  }),
-  team_team_edges: s.table({
-    child_team: s.ref("teams"),
-    parent_team: s.ref("teams"),
-    administrator: s.boolean(),
-  }),
-  team_access_edges: s.table({
-    target_team: s.ref("teams"),
-    team: s.ref("teams"),
-    grant_role: s.string(),
-    administrator: s.boolean(),
-  }),
-});
+const reproApp = s.defineApp(
+  {
+    teams: s.table(
+      {
+        name: s.string(),
+        route_key: s.string(),
+        corporation_id: s.string(),
+        kind: s.string(),
+        identity_key: s.uuid().optional(),
+        system_owned: s.boolean(),
+        archived: s.boolean(),
+      },
+      {
+        user_team_edgesViaTeam: s.reverse("user_team_edges", "teamRelation"),
+        team_team_edgesViaChild_team: s.reverse("team_team_edges", "child_teamRelation"),
+        team_team_edgesViaParent_team: s.reverse("team_team_edges", "parent_teamRelation"),
+        team_access_edgesViaTarget_team: s.reverse("team_access_edges", "target_teamRelation"),
+        team_access_edgesViaTeam: s.reverse("team_access_edges", "teamRelation"),
+      },
+    ),
+    user_team_edges: s.table(
+      {
+        user_id: s.uuid(),
+        team: s.uuid(),
+        administrator: s.boolean(),
+      },
+      { teamRelation: s.rel("teams", "team") },
+    ),
+    team_team_edges: s.table(
+      {
+        child_team: s.uuid(),
+        parent_team: s.uuid(),
+        administrator: s.boolean(),
+      },
+      {
+        child_teamRelation: s.rel("teams", "child_team"),
+        parent_teamRelation: s.rel("teams", "parent_team"),
+      },
+    ),
+    team_access_edges: s.table(
+      {
+        target_team: s.uuid(),
+        team: s.uuid(),
+        grant_role: s.string(),
+        administrator: s.boolean(),
+      },
+      { target_teamRelation: s.rel("teams", "target_team"), teamRelation: s.rel("teams", "team") },
+    ),
+  },
+  { migrations: "none" },
+);
 
-const doubleRefReproApp = s.defineApp({
-  teams: s.table({
-    name: s.string(),
-  }),
-  team_entry: s.table({
-    team_id: s.ref("teams"),
-    target_id: s.ref("teams"),
-    user_id: s.uuid(),
-    administrator: s.boolean(),
-  }),
-  dropdowns: s.table({
-    name: s.string(),
-  }),
-  dropdowns_access_edges: s.table({
-    resource_id: s.ref("dropdowns"),
-    team_id: s.ref("teams"),
-    grant_role: s.string(),
-    administrator: s.boolean(),
-  }),
-});
+const doubleRefReproApp = s.defineApp(
+  {
+    teams: s.table(
+      {
+        name: s.string(),
+      },
+      {
+        team_entryViaTeam: s.reverse("team_entry", "teamRelation"),
+        team_entryViaTarget: s.reverse("team_entry", "target"),
+        dropdowns_access_edgesViaTeam: s.reverse("dropdowns_access_edges", "teamRelation"),
+      },
+    ),
+    team_entry: s.table(
+      {
+        team_id: s.uuid(),
+        target_id: s.uuid(),
+        user_id: s.uuid(),
+        administrator: s.boolean(),
+      },
+      { teamRelation: s.rel("teams", "team_id"), target: s.rel("teams", "target_id") },
+    ),
+    dropdowns: s.table(
+      {
+        name: s.string(),
+      },
+      { dropdowns_access_edgesViaResource: s.reverse("dropdowns_access_edges", "resource") },
+    ),
+    dropdowns_access_edges: s.table(
+      {
+        resource_id: s.uuid(),
+        team_id: s.uuid(),
+        grant_role: s.string(),
+        administrator: s.boolean(),
+      },
+      { resource: s.rel("dropdowns", "resource_id"), teamRelation: s.rel("teams", "team_id") },
+    ),
+  },
+  { migrations: "none" },
+);
 
-const relatedWriteApp = s.defineApp({
-  playlists: s.table({ name: s.string() }),
-  invitations: s.table({
-    playlist_id: s.ref("playlists"),
-    subject: s.uuid(),
-    role: s.enum("listener", "editor"),
-    status: s.enum("pending", "accepted", "revoked"),
-  }),
-  playlist_entries: s.table({
-    playlist_id: s.ref("playlists"),
-    position: s.int(),
-  }),
-});
+const relatedWriteApp = s.defineApp(
+  {
+    playlists: s.table(
+      { name: s.string() },
+      {
+        invitationsViaPlaylist: s.reverse("invitations", "playlist"),
+        playlist_entriesViaPlaylist: s.reverse("playlist_entries", "playlist"),
+      },
+    ),
+    invitations: s.table(
+      {
+        playlist_id: s.uuid(),
+        subject: s.uuid(),
+        role: s.enum("listener", "editor"),
+        status: s.enum("pending", "accepted", "revoked"),
+      },
+      { playlist: s.rel("playlists", "playlist_id") },
+    ),
+    playlist_entries: s.table(
+      {
+        playlist_id: s.uuid(),
+        position: s.int(),
+      },
+      { playlist: s.rel("playlists", "playlist_id") },
+    ),
+  },
+  { migrations: "none" },
+);
 
 const relatedWritePermissions = s.definePermissions(
   relatedWriteApp,
@@ -96,9 +154,9 @@ const relatedWritePermissions = s.definePermissions(
     policy.playlists.allowInsert.always();
     policy.playlists.allowUpdate.where({ $createdBy: session.user });
     policy.invitations.allowInsert.always();
-    policy.playlist_entries.allowRead.where(allowedTo.read("playlist_id"));
+    policy.playlist_entries.allowRead.where(allowedTo.read("playlist"));
     policy.playlist_entries.allowInsert.where((entry) =>
-      anyOf([allowedTo.update("playlist_id"), hasEditorInvitation(entry.playlist_id)]),
+      anyOf([allowedTo.update("playlist"), hasEditorInvitation(entry.playlist_id)]),
     );
   },
 );
@@ -212,7 +270,6 @@ async function createReproContext(defineCasePermissions: ReproPermissions): Prom
     permissions,
     driver: { type: "persistent", dataPath },
     env: "test",
-    tier: "edge",
   });
   onTestFinished(async () => {
     context.flush();
@@ -226,7 +283,6 @@ async function createReproContext(defineCasePermissions: ReproPermissions): Prom
 
 async function createServerBackedReproContext(
   defineCasePermissions: ReproPermissions,
-  tier: "local" | "edge" | "global" = "edge",
 ): Promise<JazzContext> {
   const appId = randomUUID();
   const backendSecret = `permissions-repro-backend-${appId}`;
@@ -254,7 +310,6 @@ async function createServerBackedReproContext(
     serverUrl: server.url,
     backendSecret,
     env: "test",
-    tier,
   });
 
   onTestFinished(async () => {
@@ -267,7 +322,7 @@ async function createServerBackedReproContext(
 }
 
 describe("runtime permission repros for recursive gather and qualified predicates", () => {
-  it("keeps reader child inserts denied while editor child inserts settle at Edge", async () => {
+  it("keeps reader child inserts denied while editor child inserts settle at Global", async () => {
     const appId = randomUUID();
     const backendSecret = `related-write-repro-backend-${appId}`;
     const adminSecret = `related-write-repro-admin-${appId}`;
@@ -291,12 +346,11 @@ describe("runtime permission repros for recursive gather and qualified predicate
         serverUrl: server.url,
         backendSecret,
         env: "test",
-        tier: "edge",
       });
       const backend = context.asBackend(relatedWriteApp);
       const playlist = await backend
         .insert(relatedWriteApp.playlists, { name: "access" })
-        .wait({ tier: "edge" });
+        .wait({ tier: "global" });
       await backend
         .insert(relatedWriteApp.invitations, {
           playlist_id: playlist.id,
@@ -304,7 +358,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
           role: "listener",
           status: "accepted",
         })
-        .wait({ tier: "edge" });
+        .wait({ tier: "global" });
       await backend
         .insert(relatedWriteApp.invitations, {
           playlist_id: playlist.id,
@@ -312,7 +366,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
           role: "editor",
           status: "accepted",
         })
-        .wait({ tier: "edge" });
+        .wait({ tier: "global" });
 
       const reader = context.forSession(
         {
@@ -337,19 +391,19 @@ describe("runtime permission repros for recursive gather and qualified predicate
       await expect(
         reader
           .insert(relatedWriteApp.playlist_entries, { playlist_id: playlist.id, position: 1 })
-          .wait({ tier: "edge" }),
+          .wait({ tier: "global" }),
       ).rejects.toThrow(/AuthorizationDenied|Write rejected/);
       await expect(
         reader
           .insert(relatedWriteApp.playlist_entries, { playlist_id: playlist.id, position: 2 })
-          .wait({ tier: "edge" }),
+          .wait({ tier: "global" }),
       ).rejects.toThrow(/AuthorizationDenied|Write rejected/);
       expect(await reader.all(relatedWriteApp.playlist_entries.where({}))).toEqual([]);
       expect(await backend.all(relatedWriteApp.playlist_entries.where({}))).toEqual([]);
       await expect(
         editor
           .insert(relatedWriteApp.playlist_entries, { playlist_id: playlist.id, position: 3 })
-          .wait({ tier: "edge" }),
+          .wait({ tier: "global" }),
       ).resolves.toMatchObject({ position: 3 });
     } finally {
       await context?.shutdown();
@@ -358,7 +412,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
     }
   }, 30_000);
 
-  it('keeps `allowedTo.read("target_team")` readable for team access rows', async () => {
+  it('keeps `allowedTo.read("target_teamRelation")` readable for team access rows', async () => {
     const context = await createServerBackedReproContext(
       ({ policy, allowedTo, anyOf, session }) => {
         const anyGrantRoleValues = ["viewer", "editor", "manager"];
@@ -389,10 +443,11 @@ describe("runtime permission repros for recursive gather and qualified predicate
               }),
             ]),
           ),
-          policy.team_access_edges.allowRead.where(allowedTo.read("target_team", { maxDepth: 32 })),
+          policy.team_access_edges.allowRead.where(
+            allowedTo.read("target_teamRelation", { maxDepth: 32 }),
+          ),
         ];
       },
-      "edge",
     );
 
     const db = context.asBackend(reproApp);
@@ -406,7 +461,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
         system_owned: false,
         archived: false,
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
     await db
       .insert(reproApp.team_access_edges, {
         target_team: bobTeam.id,
@@ -414,7 +469,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
         grant_role: "viewer",
         administrator: false,
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
     await db
       .insert(reproApp.team_access_edges, {
         target_team: bobTeam.id,
@@ -422,7 +477,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
         grant_role: "manager",
         administrator: true,
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
 
     const bobDb = context.forSession(
       {
@@ -457,7 +512,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
               child_team: current,
               administrator: false,
             })
-            .hopTo("parent_team"),
+            .hopTo("parent_teamRelation"),
         maxDepth: 8,
       });
 
@@ -475,9 +530,12 @@ describe("runtime permission repros for recursive gather and qualified predicate
           allOf([
             { route_key: "relation-direct" },
             policy.exists(
-              policy.user_team_edges.where({ user_id: session.user.account }).hopTo("team").where({
-                id: team.id,
-              }),
+              policy.user_team_edges
+                .where({ user_id: session.user.account })
+                .hopTo("teamRelation")
+                .where({
+                  id: team.id,
+                }),
             ),
           ]),
         ),
@@ -570,7 +628,6 @@ describe("runtime permission repros for recursive gather and qualified predicate
       permissions,
       driver: { type: "persistent", dataPath },
       env: "test",
-      tier: "edge",
     });
     onTestFinished(async () => {
       context.flush();
@@ -675,10 +732,11 @@ describe("runtime permission repros for recursive gather and qualified predicate
               }),
             ]),
           ),
-          policy.team_access_edges.allowRead.where(allowedTo.read("target_team", { maxDepth: 32 })),
+          policy.team_access_edges.allowRead.where(
+            allowedTo.read("target_teamRelation", { maxDepth: 32 }),
+          ),
         ];
       },
-      "local",
     );
 
     const db = context.asBackend(reproApp);

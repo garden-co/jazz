@@ -3,6 +3,9 @@ import { app } from "./schema.js";
 
 // #region permissions-basic-expo
 export default s.definePermissions(app, ({ policy, allOf, session }) => [
+  policy.projects.allowRead.always(),
+  policy.projects.allowInsert.always(),
+
   // Each user only sees their own rows.
   policy.todos.allowRead.where({ owner_id: session.user.account }),
   // New rows must belong to the current user.

@@ -1,15 +1,14 @@
 import { accountRegistryUrl } from "../accounts/context.js";
 import { requestAccountRegistry } from "../accounts/registry-client.js";
-import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, test, vi } from "vitest";
 import { betterAuth, type BetterAuthOptions, type DBAdapter } from "better-auth";
 import { createJazzContext, type JazzContext } from "../backend/create-jazz-context.js";
 import {
   startLocalJazzServer,
   startTestJwtIssuer,
+  deploy as deployFixture,
   type LocalJazzServerHandle,
 } from "../testing/index.js";
-import { deploy as deployProject } from "../dev/catalogue-project.js";
 import {
   app as fixtureApp,
   permissions as fixturePermissions,
@@ -76,11 +75,12 @@ describe("jazzAdapter", () => {
       jwtIssuer: jwtIssuer.issuer,
       jwtAudience: jwtIssuer.audience,
     });
-    await deployProject({
+    await deployFixture({
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
-      schemaDir: join(import.meta.dirname, "fixtures"),
+      schema: fixtureApp,
+      permissions: fixturePermissions,
     });
     const context = createJazzContext({
       appId: server.appId,
@@ -115,7 +115,7 @@ describe("jazzAdapter", () => {
         headers: { authorization: `Bearer ${token}` },
       });
 
-      await expect(sessionDb.all(fixtureApp.better_auth_user, { tier: "edge" })).resolves.toEqual(
+      await expect(sessionDb.all(fixtureApp.better_auth_user, { tier: "remote" })).resolves.toEqual(
         [],
       );
       await expect(
@@ -127,7 +127,7 @@ describe("jazzAdapter", () => {
             createdAt: new Date(),
             updatedAt: new Date(),
           })
-          .wait({ tier: "edge" }),
+          .wait({ tier: "global" }),
       ).rejects.toThrow(/AuthorizationDenied|Write rejected by server authorization/);
     } finally {
       await context.shutdown();
@@ -143,11 +143,12 @@ describe("jazzAdapter", () => {
       jwtIssuer: jwtIssuer.issuer,
       jwtAudience: jwtIssuer.audience,
     });
-    await deployProject({
+    await deployFixture({
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
-      schemaDir: join(import.meta.dirname, "fixtures"),
+      schema: fixtureApp,
+      permissions: fixturePermissions,
     });
     const context = createJazzContext({
       appId: server.appId,
@@ -230,19 +231,19 @@ describe("jazzAdapter", () => {
       const sessionDb = await context.forRequest({
         headers: { authorization: `Bearer ${token}` },
       });
-      await expect(sessionDb.all(fixtureApp.better_auth_user, { tier: "edge" })).resolves.toEqual(
+      await expect(sessionDb.all(fixtureApp.better_auth_user, { tier: "remote" })).resolves.toEqual(
         [],
       );
       await expect(
-        sessionDb.all(fixtureApp.better_auth_session, { tier: "edge" }),
+        sessionDb.all(fixtureApp.better_auth_session, { tier: "remote" }),
       ).resolves.toEqual([]);
       await expect(
-        sessionDb.all(fixtureApp.better_auth_account, { tier: "edge" }),
+        sessionDb.all(fixtureApp.better_auth_account, { tier: "remote" }),
       ).resolves.toEqual([]);
       await expect(
-        sessionDb.all(fixtureApp.better_auth_verification, { tier: "edge" }),
+        sessionDb.all(fixtureApp.better_auth_verification, { tier: "remote" }),
       ).resolves.toEqual([]);
-      await expect(sessionDb.all(fixtureApp.better_auth_jwks, { tier: "edge" })).resolves.toEqual(
+      await expect(sessionDb.all(fixtureApp.better_auth_jwks, { tier: "remote" })).resolves.toEqual(
         [],
       );
 
@@ -255,20 +256,20 @@ describe("jazzAdapter", () => {
             createdAt: new Date(),
             updatedAt: new Date(),
           })
-          .wait({ tier: "edge" }),
+          .wait({ tier: "global" }),
       ).rejects.toThrow(/AuthorizationDenied|Write rejected by server authorization/);
       await expect(
         Promise.resolve().then(() =>
           sessionDb
             .update(fixtureApp.better_auth_session, session.id, { userAgent: "changed" })
-            .wait({ tier: "edge" }),
+            .wait({ tier: "global" }),
         ),
       ).rejects.toThrow(
         /AuthorizationDenied|Write rejected by server authorization|read policy denied/,
       );
       await expect(
         Promise.resolve().then(() =>
-          sessionDb.delete(fixtureApp.better_auth_account, account.id).wait({ tier: "edge" }),
+          sessionDb.delete(fixtureApp.better_auth_account, account.id).wait({ tier: "global" }),
         ),
       ).rejects.toThrow(
         /AuthorizationDenied|Write rejected by server authorization|read policy denied/,
@@ -290,11 +291,12 @@ describe("jazzAdapter", () => {
         backendSecret: "backend-secret-for-adapter-methods",
       });
 
-      await deployProject({
+      await deployFixture({
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
-        schemaDir: join(import.meta.dirname, "fixtures"),
+        schema: fixtureApp,
+        permissions: fixturePermissions,
       });
 
       context = createJazzContext({
@@ -365,30 +367,97 @@ describe("jazzAdapter", () => {
       expect(JSON.parse(query._build())).toMatchObject({ limit: 2, offset: 3 });
     });
 
-    it("backend access can insert and read despite deny-all client policies", async () => {
-      const created = await adapter.create({
+    it("backend access can insert, read, update, and delete despite deny-all client policies", async () => {
+      const alpha = await adapter.create<any>({
         model: "user",
         data: {
-          name: "Alice",
-          email: "alice@example.com",
+          name: "Alpha",
+          email: "alpha@example.com",
           emailVerified: false,
           image: null,
         },
       });
+      expect(alpha.id).toEqual(expect.any(String));
+      expect(alpha.name).toBe("Alpha");
+      await expect(
+        adapter.findOne<any>({
+          model: "user",
+          where: [{ field: "id", operator: "eq", value: alpha.id, connector: "AND" }],
+        }),
+      ).resolves.toMatchObject({
+        id: alpha.id,
+        email: "alpha@example.com",
+        name: "Alpha",
+      });
 
-      expect(created.id).toEqual(expect.any(String));
-      expect(created.name).toBe("Alice");
-
-      const found = await adapter.findOne({
+      const beta = await adapter.create<any>({
         model: "user",
-        where: [{ field: "id", operator: "eq", value: created.id, connector: "AND" }],
+        data: {
+          name: "Beta",
+          email: "beta@example.com",
+          emailVerified: false,
+          image: null,
+        },
+      });
+      await adapter.create<any>({
+        model: "user",
+        data: {
+          name: "Gamma",
+          email: "gamma@example.com",
+          emailVerified: true,
+          image: null,
+        },
       });
 
-      expect(found).toMatchObject({
-        id: created.id,
-        email: "alice@example.com",
-        name: "Alice",
+      const updated = await adapter.update<any>({
+        model: "user",
+        where: [{ field: "email", operator: "eq", value: "beta@example.com", connector: "AND" }],
+        update: { name: "Beta Prime" },
       });
+
+      expect(updated).toMatchObject({
+        id: beta.id,
+        name: "Beta Prime",
+      });
+
+      await expect(
+        adapter.updateMany({
+          model: "user",
+          where: [{ field: "image", operator: "eq", value: null, connector: "AND" }],
+          update: { emailVerified: true },
+        }),
+      ).resolves.toBe(3);
+
+      await adapter.delete({
+        model: "user",
+        where: [{ field: "email", operator: "eq", value: "alpha@example.com", connector: "AND" }],
+      });
+
+      await expect(
+        adapter.findOne<any>({
+          model: "user",
+          where: [{ field: "id", operator: "eq", value: alpha.id, connector: "AND" }],
+        }),
+      ).resolves.toBeNull();
+
+      await expect(
+        adapter.deleteMany({
+          model: "user",
+          where: [
+            { field: "email", operator: "eq", value: "missing@example.com", connector: "AND" },
+            { field: "name", operator: "contains", value: "mm", connector: "OR" },
+          ],
+        }),
+      ).resolves.toBe(1);
+
+      const remaining = await adapter.findMany<any>({
+        model: "user",
+        limit: 100,
+        offset: 0,
+        sortBy: { field: "id", direction: "asc" },
+      });
+
+      expect(remaining.map((row) => row.id)).toEqual([beta.id]);
     });
 
     it("supports findMany, count, select, sort, limit, and offset on Jazz ids", async () => {
@@ -491,86 +560,6 @@ describe("jazzAdapter", () => {
       );
     });
 
-    it("backend access can update and delete despite deny-all client policies", async () => {
-      const alpha = await adapter.create<any>({
-        model: "user",
-        data: {
-          name: "Alpha",
-          email: "alpha@example.com",
-          emailVerified: false,
-          image: null,
-        },
-      });
-      const beta = await adapter.create<any>({
-        model: "user",
-        data: {
-          name: "Beta",
-          email: "beta@example.com",
-          emailVerified: false,
-          image: null,
-        },
-      });
-      await adapter.create<any>({
-        model: "user",
-        data: {
-          name: "Gamma",
-          email: "gamma@example.com",
-          emailVerified: true,
-          image: null,
-        },
-      });
-
-      const updated = await adapter.update<any>({
-        model: "user",
-        where: [{ field: "email", operator: "eq", value: "beta@example.com", connector: "AND" }],
-        update: { name: "Beta Prime" },
-      });
-
-      expect(updated).toMatchObject({
-        id: beta.id,
-        name: "Beta Prime",
-      });
-
-      await expect(
-        adapter.updateMany({
-          model: "user",
-          where: [{ field: "image", operator: "eq", value: null, connector: "AND" }],
-          update: { emailVerified: true },
-        }),
-      ).resolves.toBe(3);
-
-      await adapter.delete({
-        model: "user",
-        where: [{ field: "email", operator: "eq", value: "alpha@example.com", connector: "AND" }],
-      });
-
-      await expect(
-        adapter.findOne<any>({
-          model: "user",
-          where: [{ field: "id", operator: "eq", value: alpha.id, connector: "AND" }],
-        }),
-      ).resolves.toBeNull();
-
-      await expect(
-        adapter.deleteMany({
-          model: "user",
-          where: [
-            { field: "email", operator: "eq", value: "missing@example.com", connector: "AND" },
-            { field: "name", operator: "contains", value: "mm", connector: "OR" },
-          ],
-        }),
-      ).resolves.toBe(1);
-
-      const remaining = await adapter.findMany<any>({
-        model: "user",
-        limit: 100,
-        offset: 0,
-        sortBy: { field: "id", direction: "asc" },
-      });
-
-      expect(remaining.map((row) => row.id)).toEqual([beta.id]);
-    });
-
     it("consumes at most one matching row and returns the deleted row", async () => {
       const first = await adapter.create({
         model: "verification",
@@ -668,6 +657,132 @@ describe("jazzAdapter", () => {
           increment: { remainingUses: -1 },
         }),
       ).resolves.toBeNull();
+    });
+
+    it("projects custom stored fields through findOne and findMany", async () => {
+      const atomicAdapter = jazzAdapter({
+        db: () => context.asBackend(wasmSchemaExample),
+        schema: wasmSchemaExample,
+      })(atomicAdapterOptions);
+      const low = await atomicAdapter.create<AtomicUser>({
+        model: "user",
+        data: {
+          name: "mapped-low",
+          email: "mapped-low@example.com",
+          emailVerified: false,
+          image: null,
+          loginCount: 2,
+          remainingUses: 1,
+          transitionStatus: "open",
+        },
+      });
+      const high = await atomicAdapter.create<AtomicUser>({
+        model: "user",
+        data: {
+          name: "mapped-high",
+          email: "mapped-high@example.com",
+          emailVerified: false,
+          image: null,
+          loginCount: 8,
+          remainingUses: 1,
+          transitionStatus: "open",
+        },
+      });
+      await expect(
+        atomicAdapter.findOne({
+          model: "user",
+          where: [{ field: "id", operator: "eq", value: low.id, connector: "AND" }],
+          select: ["id", "name", "loginCount"],
+        }),
+      ).resolves.toMatchObject({
+        id: low.id,
+        name: "mapped-low",
+        loginCount: 2,
+      });
+
+      const selected = await atomicAdapter.findMany<any>({
+        model: "user",
+        where: [
+          {
+            field: "id",
+            operator: "in",
+            value: [low.id, high.id],
+            connector: "AND",
+          },
+        ],
+        select: ["id", "name", "loginCount"],
+      });
+      expect(
+        selected
+          .map(({ id, name, loginCount }) => ({ id, name, loginCount }))
+          .sort((left, right) => left.id.localeCompare(right.id)),
+      ).toEqual(
+        [
+          { id: low.id, name: "mapped-low", loginCount: 2 },
+          { id: high.id, name: "mapped-high", loginCount: 8 },
+        ].sort((left, right) => left.id.localeCompare(right.id)),
+      );
+    });
+
+    it("sorts custom stored fields descending in supported and fallback findMany paths", async () => {
+      const atomicAdapter = jazzAdapter({
+        db: () => context.asBackend(wasmSchemaExample),
+        schema: wasmSchemaExample,
+      })(atomicAdapterOptions);
+      const low = await atomicAdapter.create<AtomicUser>({
+        model: "user",
+        data: {
+          name: "mapped-sort-low",
+          email: "mapped-sort-low@example.com",
+          emailVerified: false,
+          image: null,
+          loginCount: 2,
+          remainingUses: 1,
+          transitionStatus: "open",
+        },
+      });
+      const high = await atomicAdapter.create<AtomicUser>({
+        model: "user",
+        data: {
+          name: "mapped-sort-high",
+          email: "mapped-sort-high@example.com",
+          emailVerified: false,
+          image: null,
+          loginCount: 8,
+          remainingUses: 1,
+          transitionStatus: "open",
+        },
+      });
+
+      const supportedRows = await atomicAdapter.findMany<any>({
+        model: "user",
+        where: [
+          {
+            field: "id",
+            operator: "in",
+            value: [low.id, high.id],
+            connector: "AND",
+          },
+        ],
+        select: ["id", "name", "loginCount"],
+        sortBy: { field: "loginCount", direction: "desc" },
+      });
+      expect(supportedRows.map((row) => row.id)).toEqual([high.id, low.id]);
+
+      const fallbackRows = await atomicAdapter.findMany<any>({
+        model: "user",
+        where: [
+          {
+            field: "name",
+            operator: "starts_with",
+            value: "mapped-sort-",
+            connector: "AND",
+          },
+        ],
+        select: ["id", "name", "loginCount"],
+        sortBy: { field: "loginCount", direction: "desc" },
+      });
+      expect(fallbackRows.map((row) => row.id)).toEqual([high.id, low.id]);
     });
 
     it("supports client-side-only where operators", async () => {
@@ -1021,7 +1136,9 @@ describe("jazzAdapter", () => {
         overwrite: true,
       });
       expect(generated.code).toContain('import { schema as s } from "jazz-tools";');
-      expect(generated.code).toContain("export const app: s.App<AppSchema> = s.defineApp(schema);");
+      expect(generated.code).toContain(
+        'export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });',
+      );
       expect(generated.code).toContain(
         "export const permissions = s.definePermissions(app, ({ policy }) => {",
       );
@@ -1045,11 +1162,12 @@ describe("jazzAdapter", () => {
         backendSecret: "backend-secret-for-common-user-flows",
       });
 
-      await deployProject({
+      await deployFixture({
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
-        schemaDir: join(import.meta.dirname, "fixtures"),
+        schema: fixtureApp,
+        permissions: fixturePermissions,
       });
 
       context = createJazzContext({
@@ -1416,11 +1534,12 @@ describe("jazzAdapter", () => {
         backendSecret: "backend-secret-for-better-auth-usage",
       });
 
-      await deployProject({
+      await deployFixture({
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
-        schemaDir: join(import.meta.dirname, "fixtures"),
+        schema: fixtureApp,
+        permissions: fixturePermissions,
       });
 
       context = createJazzContext({
@@ -1496,11 +1615,12 @@ describe("jazzAdapter", () => {
         backendSecret: "backend-secret-for-integration-tests",
       });
 
-      await deployProject({
+      await deployFixture({
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
-        schemaDir: join(import.meta.dirname, "fixtures"),
+        schema: fixtureApp,
+        permissions: fixturePermissions,
       });
 
       context = createJazzContext({
@@ -1562,11 +1682,12 @@ describe("jazzAdapter", () => {
     });
 
     test("creates and reads records through the sync server", async () => {
-      await deployProject({
+      await deployFixture({
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
-        schemaDir: join(import.meta.dirname, "fixtures"),
+        schema: fixtureApp,
+        permissions: fixturePermissions,
       });
 
       const ctx1 = createJazzContext({
@@ -1638,11 +1759,12 @@ describe("jazzAdapter", () => {
       "admits exactly one concurrent composite account identity across two backends",
       { timeout: 30_000 },
       async () => {
-        await deployProject({
+        await deployFixture({
           serverUrl: server.url,
           appId: server.appId,
           adminSecret: server.adminSecret,
-          schemaDir: join(import.meta.dirname, "fixtures"),
+          schema: fixtureApp,
+          permissions: fixturePermissions,
         });
         const ctx1 = createJazzContext({
           appId: server.appId,

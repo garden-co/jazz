@@ -22,8 +22,8 @@ to the shared state; they do not implement independent authentication flows.
   existing active assignment. The explicit login-or-register operation resolves
   an active assignment or creates the first assignment in one serialized owner
   request. It never reactivates or reassigns a revoked principal. Concurrent
-  requests and retries converge on the same assignment; a storage failure
-  requires authoritative recovery rather than speculative success.
+  requests and retries converge on the same assignment; after a storage
+  failure the next lookup reads committed state rather than assuming success.
 - Local-first founding is deterministic from the application namespace and
   verified founding key identity. It is usable offline; arbitrary external
   assignment cannot be accepted offline.
@@ -38,8 +38,9 @@ to the shared state; they do not implement independent authentication flows.
 - A successful response follows durable commit. Storage errors cannot publish
   speculative admission in memory. Authority restart preserves assignments,
   revocations, and replay outcomes.
-- Edge nodes cannot independently accept registry mutations. Routing must
-  preserve the application's single authoritative decision order.
+- Relays (browser workers, native relays, trusted backends) cannot
+  independently accept registry mutations. Routing must preserve the
+  application's single authoritative decision order in Core.
 - Provider JWT claims never supply an authoritative account ID. Existing JWT
   verification supplies a principal; the registry supplies its account.
 
@@ -165,13 +166,12 @@ subscription tick must recheck admission; idle sessions observe registry changes
 and close. Trusted backend/admin service connections use their separate
 authority and are not public account sessions.
 
-Edges authenticate the original JWT before resolving admission against the core.
-A service-authenticated registry lookup is read-only: it cannot register, found,
-link, or revoke an identity. Local-first founding forwarded by an edge requires
-the founder's original bearer proof. Edges recheck admission for each operation
-and delivery, fail closed if the core is unavailable, and poll idle sessions
-once per second until a registry watch protocol replaces that polling. Public
-account mutation forwarding never substitutes an edge service credential.
+The server edge that used to authenticate the original JWT and resolve
+admission against the core was removed (#3235); sessions are admitted by Core
+itself, as described above. A service-authenticated registry lookup is
+read-only: it cannot register, found, link, or revoke an identity, and public
+account mutations are never forwarded under a relay or backend service
+credential.
 
 ## Context lifecycle and linking
 
@@ -262,22 +262,26 @@ Application/schema, driver and server URL are configured once. Admission sends
 `POST /apps/{app}/backend/admit` with `X-Jazz-Backend-Secret`; the configured server's existing
 backend-secret validation must succeed before the host issues an opaque handle.
 A reachable server is required, including for memory-driver initialization.
-An edge validates the same service credential used by its backend transport;
-identity registration and linking still resolve through the core registry.
+Core validates that service credential on the backend transport; identity
+registration and linking resolve through the core registry.
 Browser and React Native hosts reject backend selection through their absent
 backend admission adapter.
 
 Backend handles use the nil SYSTEM account UUID and exact identity
-`{ issuer: "urn:jazz:system", subject: originatingNodeUUID }`. Native runtime
-construction uses that same node UUID. Backend credential material lives in a
+`{ issuer: "urn:jazz:system", subject: backendNodeUUID }`, and SYSTEM
+provenance on rows the backend writes names that same UUID. A persistent
+backend's runtime also writes transactions as that node. A memory backend's
+counter starts over on every open, so the handle pools one random version-4
+node of its own: its transaction ids name that node while its provenance keeps
+the backend's. Backend credential material lives in a
 private WeakMap; it never enters snapshots or persisted account preferences.
 Graceful backend shutdown fences all request scopes and waits for every
 transaction originating on its node, regardless of the credited user. Trusted
 backend reopen recovers those same pending uploads. Ordinary user barriers
 remain author-scoped. Reopening an in-memory backend handle after a failed
-transition seeds the retained node-clock high-water before accepting new writes;
-an incomplete clock handoff prevents reuse. This receipt is process-local and
-adds no durable encoding.
+transition reuses its pooled node and seeds that node's retained clock
+high-water before accepting new writes; an incomplete clock handoff prevents
+reuse. This receipt is process-local and adds no durable encoding.
 
 Copied handles and SYSTEM identity objects confer no authority. Ordinary JWT
 registration, login, linking, and token extraction cannot mint or use backend
@@ -316,7 +320,7 @@ this is neither row storage nor a server wire format. The key is
 Defaults are `dev` and `default`; the registry already includes the canonical
 application UUID, so app-name/UUID aliases share the same selection.
 
-Each read/transform/write runs synchronously under a native exclusive `flock`
+Each read/transform/write runs synchronously under a native serializable `flock`
 on `account-selection-v1.lock` in the platform-owned application storage root.
 JavaScript cannot supply this path. The lock spans separate runtimes/processes,
 rejects same-thread recursion, and releases on normal return, exception, or
@@ -326,46 +330,28 @@ biometric-prompt options. Older native builds without the lock fail preparation.
 Persistence errors remain observable and prevent a new handle from supplying
 credentials until retention succeeds; roots are never truncated to fit storage.
 
-## Account registry record journal (v1)
+## Account registry state
 
-The registry has its own application root, separate from ordinary row storage.
-Its `default` column family is accessed through Groove `RecordStore`. Keys are
-ASCII `account-command:v1:` followed by the big-endian eight-byte revision,
-starting at zero without gaps. Recovery scans the entire `account-command:`
-prefix and rejects other versions, malformed keys, and invalid commands.
+A server keeps each application's registry as its current state, in two host
+tables of the application's store file: `_jazz_host_account_identities` (one
+row per assigned principal: exact issuer and subject, account, admission flag,
+management flag, admission generation) and `_jazz_host_account_links` (one
+row per pending or accepted link approval, keyed by its nonce). The columns
+and encodings are in `dev/proofs/server-host-tables.md`. There is no command
+journal and no replay: opening the registry reads nothing.
 
-The `jazz.account-journal.v1` profile versions the root-local journal
-key and closed descriptor contract, not a new value codec. It uses canonical Groove
-records exclusively. Its one field, `command`, is an Enum named
-`jazz.account-command.v1` with fixed registry identity 1 in this isolated root.
-Declaration-order cases and ordered payload fields are:
-
-- Register: principal Record, account Uuid.
-- RequestLink: approver Record, candidate Record, nonce Uuid, now U64, expires_at U64.
-- AcceptLink: candidate Record, nonce Uuid, now U64.
-- Revoke: approver Record, target Record.
-- FoundLocalFirst: principal Record, app Uuid.
-
-Every principal Record has issuer String then subject String, preserving exact
-UTF-8, with each nonempty component limited to 16 KiB. Groove supplies enum
-framing, record offsets, strings, UUIDs, and integers; no account-specific byte
-tags or serializer defaults define their encoding. The command and descriptor
-bytes are pinned in `src/account_registry/command-v1.corpus` (five command lines,
-then the canonical descriptor). Roots must match the journal profile exactly;
-unknown profiles are rejected before replay. As in ordinary Groove records,
-a terminal String consumes its record remainder:
-appending valid UTF-8 can change that principal component rather than represent
-trailing garbage. Invalid UTF-8, invalid offsets, unknown enum cases, and
-invalid principal components are rejected. No private length framing is added.
-
-Conditional append remains atomic through the backend primitive, followed by a
-durability barrier before publishing state. Recovery also flushes before serving.
-A competing append or ambiguous read/write/flush error poisons the owner until
-recovery; login checks absence of the next revision before admitting cached state.
-Assignments, nonce consumption, and revocation retain the existing state-machine
-semantics. For example, a loser at revision zero cannot overwrite registration;
-a stale reader after revocation fails unavailable instead of admitting its old
-assignment. Reopening replays only the ordered committed commands.
+The decisions are `account_registry::apply` over an `AccountState`. A server
+runs each command's reads, decision and writes in one savepoint on the store's
+only writer connection, durable (`synchronous = FULL`) before the result is
+acknowledged; a refused command writes nothing. A login reads committed state
+by primary key and caches nothing, so a stale owner cannot admit from old
+state: after a revocation commits, every later lookup refuses. A write whose
+durable flush reports a failure has an unknown outcome until the next read;
+the owner announces it so live sockets re-check. Assignments, nonce
+consumption and revocation keep the state-machine semantics above: an
+assignment is permanent, revocation is never undone, and a link request
+deletes approvals that expired unaccepted (accepting one afterwards finds no
+intent).
 
 ## Shared client session lifecycle
 

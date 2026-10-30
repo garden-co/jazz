@@ -1,3 +1,5 @@
+import { isRecord } from "./util.js";
+
 const INTERNAL_REQUIRE_INCLUDES_KEY = "__jazz_requireIncludes";
 
 export interface BuiltCondition {
@@ -10,6 +12,9 @@ export interface BuiltRelation {
   table?: string;
   conditions?: BuiltCondition[];
   hops?: string[];
+  orderBy?: Array<[string, "asc" | "desc"]>;
+  limit?: number;
+  offset?: number;
   gather?: BuiltGather;
   union?: {
     inputs: BuiltUnionArm[];
@@ -87,10 +92,6 @@ type BuiltQueryShape = {
   union?: unknown;
 };
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function normalizeConditions(value: unknown): BuiltCondition[] {
   if (!Array.isArray(value)) {
     return [];
@@ -98,7 +99,7 @@ function normalizeConditions(value: unknown): BuiltCondition[] {
 
   return value.filter(
     (condition): condition is BuiltCondition =>
-      isPlainObject(condition) &&
+      isRecord(condition) &&
       typeof condition.column === "string" &&
       typeof condition.op === "string",
   );
@@ -131,10 +132,10 @@ function isNonNegativeSafeInteger(value: unknown): value is number {
 }
 
 function normalizePartialSelect(value: unknown): Record<string, LargeValueSelectDescriptor> {
-  if (!isPlainObject(value)) return {};
+  if (!isRecord(value)) return {};
   const result: Record<string, LargeValueSelectDescriptor> = {};
   for (const [column, descriptor] of Object.entries(value)) {
-    if (!column || !isPlainObject(descriptor)) {
+    if (!column || !isRecord(descriptor)) {
       throw new Error(`Invalid large-value selection for column "${column}".`);
     }
     const keys = Object.keys(descriptor);
@@ -160,10 +161,9 @@ function normalizePartialSelect(value: unknown): Record<string, LargeValueSelect
 }
 
 function normalizeGather(value: unknown): BuiltGather | undefined {
-  const maxDepth =
-    isPlainObject(value) && typeof value.max_depth === "number" ? value.max_depth : NaN;
+  const maxDepth = isRecord(value) && typeof value.max_depth === "number" ? value.max_depth : NaN;
   if (
-    !isPlainObject(value) ||
+    !isRecord(value) ||
     !Number.isInteger(maxDepth) ||
     maxDepth < 0 ||
     typeof value.step_table !== "string" ||
@@ -173,7 +173,7 @@ function normalizeGather(value: unknown): BuiltGather | undefined {
   }
 
   return {
-    ...(isPlainObject(value) && value.seed ? { seed: normalizeBuiltRelation(value.seed) } : {}),
+    ...(isRecord(value) && value.seed ? { seed: normalizeBuiltRelation(value.seed) } : {}),
     max_depth: maxDepth,
     step_table: value.step_table,
     step_current_column: value.step_current_column,
@@ -185,7 +185,7 @@ function normalizeGather(value: unknown): BuiltGather | undefined {
 }
 
 function normalizeBuiltRelation(value: unknown): BuiltRelation {
-  if (!isPlainObject(value)) {
+  if (!isRecord(value)) {
     return {};
   }
 
@@ -196,12 +196,15 @@ function normalizeBuiltRelation(value: unknown): BuiltRelation {
       ? value.hops.filter((hop): hop is string => typeof hop === "string")
       : [],
     gather: normalizeGather(value.gather),
+    ...(Array.isArray(value.orderBy) ? { orderBy: normalizeOrderBy(value.orderBy) } : {}),
+    ...(typeof value.limit === "number" ? { limit: value.limit } : {}),
+    ...(typeof value.offset === "number" ? { offset: value.offset } : {}),
   };
 
-  if (isPlainObject(value.union) && Array.isArray(value.union.inputs)) {
+  if (isRecord(value.union) && Array.isArray(value.union.inputs)) {
     normalized.union = {
       inputs: value.union.inputs.flatMap((input) => {
-        if (!isPlainObject(input) || typeof input.label !== "string") return [];
+        if (!isRecord(input) || typeof input.label !== "string") return [];
         return [{ label: input.label, input: normalizeBuiltRelation(input.input) }];
       }),
     };
@@ -241,7 +244,7 @@ function normalizeIncludeEntry(raw: unknown): NormalizedIncludeEntry | null {
     return createEmptyIncludeEntry();
   }
 
-  if (!isPlainObject(raw)) {
+  if (!isRecord(raw)) {
     return null;
   }
 
@@ -269,7 +272,7 @@ function normalizeIncludeEntry(raw: unknown): NormalizedIncludeEntry | null {
       includes: normalizeIncludeEntries(raw.includes),
       requireIncludes: raw[INTERNAL_REQUIRE_INCLUDES_KEY] === true,
       select: normalizeSelect(raw.select),
-      partialSelect: normalizePartialSelect(raw.select),
+      partialSelect: normalizePartialSelect(raw.partialSelect ?? raw.select),
       orderBy: normalizeOrderBy(raw.orderBy),
       limit: typeof raw.limit === "number" ? raw.limit : undefined,
       offset: typeof raw.offset === "number" ? raw.offset : undefined,
@@ -287,7 +290,7 @@ function normalizeIncludeEntry(raw: unknown): NormalizedIncludeEntry | null {
 }
 
 export function normalizeIncludeEntries(raw: unknown): NormalizedIncludeSpec {
-  if (!isPlainObject(raw)) {
+  if (!isRecord(raw)) {
     return {};
   }
 
@@ -306,12 +309,12 @@ export function normalizeIncludeEntries(raw: unknown): NormalizedIncludeSpec {
 }
 
 export function normalizeBuiltQuery(raw: unknown): NormalizedBuiltQuery {
-  const value = isPlainObject(raw) ? raw : {};
+  const value = isRecord(raw) ? raw : {};
   if (typeof value.table !== "string" || value.table.length === 0) {
     throw new Error("QueryBuilder._build() must include a non-empty table.");
   }
 
-  const partialSelect = normalizePartialSelect(value.select);
+  const partialSelect = normalizePartialSelect(value.partialSelect ?? value.select);
   return {
     table: value.table,
     conditions: normalizeConditions(value.conditions),
@@ -332,11 +335,11 @@ export function normalizeBuiltQuery(raw: unknown): NormalizedBuiltQuery {
       ? value.hops.filter((hop): hop is string => typeof hop === "string")
       : [],
     gather: normalizeGather(value.gather),
-    ...(isPlainObject(value.union) && Array.isArray(value.union.inputs)
+    ...(isRecord(value.union) && Array.isArray(value.union.inputs)
       ? {
           union: {
             inputs: value.union.inputs.flatMap((input) => {
-              if (!isPlainObject(input) || typeof input.label !== "string") return [];
+              if (!isRecord(input) || typeof input.label !== "string") return [];
               return [{ label: input.label, input: normalizeBuiltRelation(input.input) }];
             }),
           },

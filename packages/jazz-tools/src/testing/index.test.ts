@@ -1,3 +1,4 @@
+import { computeSchemaHash } from "../schema-hash.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -11,19 +12,23 @@ import {
   type LocalJazzServerHandle,
   startLocalJazzServer,
 } from "./index.js";
+import { LOCAL_FIRST_JWT_ISSUER } from "../runtime/client-session.js";
 import { settlePolicySeed, settlePolicySeedForSessionReads } from "./policy-test-app.js";
 
 const tempRoots: string[] = [];
 const localServers = new Set<LocalJazzServerHandle>();
 const testSchema = {
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-    ownerId: s.uuid().optional(),
-  }),
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+      ownerId: s.uuid().optional(),
+    },
+    {},
+  ),
 };
 type TestSchema = s.Schema<typeof testSchema>;
-const testApp: s.App<TestSchema> = s.defineApp(testSchema);
+const testApp: s.App<TestSchema> = s.defineApp(testSchema, { migrations: "none" });
 const testPermissions = definePermissions(testApp, ({ policy, session }) => {
   policy.todos.allowRead.where(
     anyOf([{ ownerId: session.user.account }, { ownerId: { isNull: true } }]),
@@ -202,7 +207,7 @@ describe("startLocalJazzServer", () => {
     }
   }, 15_000);
 
-  it("accepts a schema publish via /admin/schemas when admin secret matches", async () => {
+  it("accepts a deployment via /admin/deploy when admin secret matches", async () => {
     const port = await getAvailablePort();
     const adminSecret = "admin-secret-for-ts-schema-sync";
 
@@ -213,22 +218,32 @@ describe("startLocalJazzServer", () => {
     });
 
     try {
-      const response = await fetch(`${server.url}/apps/${server.appId}/admin/schemas`, {
+      const response = await fetch(`${server.url}/apps/${server.appId}/admin/deploy`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
           "X-Jazz-Admin-Secret": adminSecret,
         },
-        body: JSON.stringify({ schema: { tables: testApp.wasmSchema } }),
+        body: JSON.stringify({
+          targetSchemaHash: await computeSchemaHash(testApp.wasmSchema),
+          schemas: [
+            {
+              hash: await computeSchemaHash(testApp.wasmSchema),
+              schema: { tables: testApp.wasmSchema },
+            },
+          ],
+          migrations: [],
+          permissions: testPermissions,
+        }),
       });
 
-      expect(response.status).toBe(201);
+      expect(response.status).toBe(200);
     } finally {
       await stopTrackedLocalJazzServer(server);
     }
   });
 
-  it("rejects a schema publish via /admin/schemas when admin secret doesn't match", async () => {
+  it("rejects a deployment via /admin/deploy when admin secret doesn't match", async () => {
     const port = await getAvailablePort();
     const adminSecret = "admin-secret";
 
@@ -239,13 +254,23 @@ describe("startLocalJazzServer", () => {
     });
 
     try {
-      const response = await fetch(`${server.url}/apps/${server.appId}/admin/schemas`, {
+      const response = await fetch(`${server.url}/apps/${server.appId}/admin/deploy`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
           "X-Jazz-Admin-Secret": "wrong-admin-secret",
         },
-        body: JSON.stringify({ schema: { tables: testApp.wasmSchema } }),
+        body: JSON.stringify({
+          targetSchemaHash: await computeSchemaHash(testApp.wasmSchema),
+          schemas: [
+            {
+              hash: await computeSchemaHash(testApp.wasmSchema),
+              schema: { tables: testApp.wasmSchema },
+            },
+          ],
+          migrations: [],
+          permissions: testPermissions,
+        }),
       });
 
       expect(response.status).toBe(401);
@@ -328,10 +353,10 @@ describe("createPolicyTestApp", () => {
   });
 
   it("waits for authority acceptance before a session-scoped seed is returned", async () => {
-    const calls: Array<"local" | "edge"> = [];
+    const calls: Array<"local" | "global"> = [];
     const write = {
       value: { id: "seeded" },
-      wait: vi.fn(async ({ tier }: { tier: "local" | "edge" }) => {
+      wait: vi.fn(async ({ tier }: { tier: "local" | "global" }) => {
         calls.push(tier);
         return { id: tier === "local" ? "locally-settled" : "authority-settled" };
       }),
@@ -340,7 +365,7 @@ describe("createPolicyTestApp", () => {
     await expect(settlePolicySeedForSessionReads(write)).resolves.toEqual({
       id: "authority-settled",
     });
-    expect(calls).toEqual(["local", "edge"]);
+    expect(calls).toEqual(["local", "global"]);
   });
 
   it("creates a test app from an app definition and compiled permissions", async () => {
@@ -379,6 +404,21 @@ describe("createPolicyTestApp", () => {
     }
   }, 10_000);
 
+  it("rejects a seed callback that returns the inserted row instead of the write", async () => {
+    const policyTestApp = await createPolicyTestApp(testApp, testPermissions, expect);
+
+    try {
+      await expect(
+        policyTestApp.seed(
+          // @ts-expect-error: returning `.value` is the mistake the runtime check catches.
+          (db) => db.insert(testApp.todos, { title: "unwrapped", done: false }).value,
+        ),
+      ).rejects.toThrow(/must return the write result itself/);
+    } finally {
+      await policyTestApp.shutdown();
+    }
+  }, 10_000);
+
   it("limits backend SYSTEM bootstrap to the configured authority credential", async () => {
     const noCredential = await createPolicyTestApp(testApp, testPermissions, expect, {
       clientBackendSecret: null,
@@ -404,6 +444,215 @@ describe("createPolicyTestApp", () => {
       ).rejects.toThrow(/authorization|credential|backend|rejected/i);
     } finally {
       await wrongCredential.shutdown();
+    }
+  }, 10_000);
+
+  it("runs policies as a local-first guest session without an explicit issuer", async () => {
+    const guestSchema = {
+      products: s.table({ title: s.string() }, {}),
+      staffNotes: s.table({ body: s.string() }, {}),
+      carts: s.table({ item: s.string(), ownerId: s.uuid() }, {}),
+    };
+    const guestApp: s.App<s.Schema<typeof guestSchema>> = s.defineApp(guestSchema, {
+      migrations: "none",
+    });
+    const guestPermissions = definePermissions(guestApp, ({ policy, session, allOf }) => {
+      policy.products.allowRead.where(
+        session.where({ authMode: { in: ["local-first", "external"] } }),
+      );
+      policy.products.allowInsert.where(session.where({ authMode: "external" }));
+      policy.staffNotes.allowRead.where(session.where({ authMode: "external" }));
+      policy.carts.allowRead.where({ ownerId: session.user.account });
+      policy.carts.allowInsert.where(
+        allOf([{ ownerId: session.user.account }, session.where({ authMode: "local-first" })]),
+      );
+    });
+    const policyTestApp = await createPolicyTestApp(guestApp, guestPermissions, expect);
+
+    try {
+      const product = await policyTestApp.seed((db) =>
+        db.insert(guestApp.products, { title: "Visible to guests" }),
+      );
+      const note = await policyTestApp.seed((db) =>
+        db.insert(guestApp.staffNotes, { body: "Staff only" }),
+      );
+
+      const guestSession = {
+        user_id: "guest-device",
+        claims: {},
+        authMode: "local-first",
+      } as const;
+      const guest = policyTestApp.as(guestSession);
+      const guestAccount = policyTestApp.accountFor(guestSession);
+      const otherAccount = policyTestApp.accountFor({ ...guestSession, user_id: "other-device" });
+      expect(otherAccount).not.toBe(guestAccount);
+
+      await expect(guest.all(guestApp.products.where({ id: product.id }))).resolves.toEqual([
+        expect.objectContaining({ id: product.id }),
+      ]);
+      await expect(guest.all(guestApp.staffNotes.where({ id: note.id }))).resolves.toEqual([]);
+
+      const cart = await guest
+        .insert(guestApp.carts, { item: "Tea", ownerId: guestAccount })
+        .wait({ tier: "global" });
+      await expect(guest.all(guestApp.carts.where({ id: cart.id }))).resolves.toEqual([
+        expect.objectContaining({ id: cart.id, ownerId: guestAccount }),
+      ]);
+
+      await guest.expectDenied((db) => db.insert(guestApp.products, { title: "Guest product" }));
+      await guest.expectDenied((db) =>
+        db.insert(guestApp.carts, { item: "Someone else's", ownerId: otherAccount }),
+      );
+    } finally {
+      await policyTestApp.shutdown();
+    }
+  }, 20_000);
+
+  it("keeps an explicit external issuer as a trusted forSession actor", async () => {
+    const actorSchema = {
+      carts: s.table({ item: s.string(), ownerId: s.uuid() }, {}),
+    };
+    const actorApp: s.App<s.Schema<typeof actorSchema>> = s.defineApp(actorSchema, {
+      migrations: "none",
+    });
+    const actorPermissions = definePermissions(actorApp, ({ policy, session }) => {
+      policy.carts.allowRead.where({ ownerId: session.user.account });
+      policy.carts.allowInsert.where({ ownerId: session.user.account });
+    });
+    const policyTestApp = await createPolicyTestApp(actorApp, actorPermissions, expect);
+
+    try {
+      // The pre-existing forSession semantics: the session is the external
+      // issuer's principal acting for the given account. Only an omitted or
+      // reserved issuer makes a self-signed local-first guest.
+      const account = "00000000-0000-4000-8000-000000000002";
+      const actorSession = {
+        issuer: "https://identity.policy-test.example",
+        user_id: "member",
+        account_id: account,
+        claims: {},
+        authMode: "local-first",
+      } as const;
+      expect(policyTestApp.accountFor(actorSession)).toBe(account);
+
+      const actor = policyTestApp.as(actorSession);
+      const cart = await actor
+        .insert(actorApp.carts, { item: "Tea", ownerId: account })
+        .wait({ tier: "global" });
+      await expect(actor.all(actorApp.carts.where({ id: cart.id }))).resolves.toEqual([
+        expect.objectContaining({ id: cart.id, ownerId: account }),
+      ]);
+    } finally {
+      await policyTestApp.shutdown();
+    }
+  }, 20_000);
+
+  it("rejects an explicit account for a self-signed local-first guest", async () => {
+    const policyTestApp = await createPolicyTestApp(testApp, testPermissions, expect);
+
+    try {
+      expect(() =>
+        policyTestApp.as({
+          user_id: "guest-device",
+          account_id: "00000000-0000-4000-8000-000000000002",
+          claims: {},
+          authMode: "local-first",
+        }),
+      ).toThrow(/founding account derived from their key/);
+    } finally {
+      await policyTestApp.shutdown();
+    }
+  }, 10_000);
+
+  it("treats the reserved local-first issuer as a self-signed guest", async () => {
+    const policyTestApp = await createPolicyTestApp(testApp, testPermissions, expect);
+
+    try {
+      const withIssuer = policyTestApp.sessionFor({
+        issuer: LOCAL_FIRST_JWT_ISSUER,
+        user_id: "guest-device",
+        claims: {},
+        authMode: "local-first",
+      });
+      const withoutIssuer = policyTestApp.sessionFor({
+        user_id: "guest-device",
+        claims: {},
+        authMode: "local-first",
+      });
+      expect(withIssuer).toMatchObject({
+        issuer: LOCAL_FIRST_JWT_ISSUER,
+        authMode: "local-first",
+        user_id: withoutIssuer.user_id,
+        account_id: withoutIssuer.account_id,
+      });
+      expect(withIssuer.user_id).not.toBe("guest-device");
+
+      expect(() =>
+        policyTestApp.as({
+          issuer: LOCAL_FIRST_JWT_ISSUER,
+          user_id: "guest-device",
+          account_id: "00000000-0000-4000-8000-000000000002",
+          claims: {},
+          authMode: "local-first",
+        }),
+      ).toThrow(/founding account derived from their key/);
+    } finally {
+      await policyTestApp.shutdown();
+    }
+  }, 10_000);
+
+  it("rejects custom claims for a self-signed local-first guest", async () => {
+    const policyTestApp = await createPolicyTestApp(testApp, testPermissions, expect);
+
+    try {
+      expect(() =>
+        policyTestApp.as({
+          user_id: "guest-device",
+          claims: { join_code: "invite-123" },
+          authMode: "local-first",
+        }),
+      ).toThrow(/local-first guests cannot carry custom claims/);
+    } finally {
+      await policyTestApp.shutdown();
+    }
+  }, 10_000);
+
+  it("admits concurrent upserts of one row from the same session in order", async () => {
+    // Every session write installs that session's claims before it is
+    // admitted. The first upsert stays suspended on the owner, so the second
+    // write's claims must queue behind it instead of re-entering it.
+    const upsertPermissions = definePermissions(testApp, ({ policy, session }) => {
+      policy.todos.allowRead.where({ ownerId: session.user.account });
+      policy.todos.allowInsert.where({ ownerId: session.user.account });
+      policy.todos.allowUpdate.where({ ownerId: session.user.account });
+    });
+    const policyTestApp = await createPolicyTestApp(testApp, upsertPermissions, expect);
+
+    try {
+      const ownerId = "00000000-0000-4000-8000-000000000001";
+      const alice = policyTestApp.as({
+        issuer: "https://policy-test.example",
+        user_id: "alice",
+        account_id: ownerId,
+        claims: {},
+        authMode: "external",
+      });
+      const id = "00000000-0000-4000-8000-0000000000a1";
+
+      await Promise.all([
+        alice.upsert(testApp.todos, id, { title: "first", done: false, ownerId }).wait({
+          tier: "global",
+        }),
+        alice.upsert(testApp.todos, id, { title: "second", done: false, ownerId }).wait({
+          tier: "global",
+        }),
+      ]);
+
+      await expect(alice.all(testApp.todos.where({ id }))).resolves.toEqual([
+        expect.objectContaining({ id, title: "second" }),
+      ]);
+    } finally {
+      await policyTestApp.shutdown();
     }
   }, 10_000);
 
@@ -448,4 +697,94 @@ describe("createPolicyTestApp", () => {
       await policyTestApp.shutdown();
     }
   }, 10_000);
+});
+
+describe("policies that correlate optional and required columns", () => {
+  // `exists.where` equalities between an optional column and a required column
+  // of the same type used to be rejected when the server converted the policy
+  // (OperandTypeMismatch), although the TypeScript DSL accepted them.
+  const inviteSchema = {
+    shows: s.table({ name: s.string() }, {}),
+    invites: s.table(
+      { showId: s.uuid(), code: s.string(), parentId: s.uuid().optional() },
+      { show: s.rel("shows", "showId"), parent: s.rel("shows", "parentId") },
+    ),
+    members: s.table(
+      {
+        showId: s.uuid(),
+        parentId: s.uuid(),
+        account: s.uuid(),
+        inviteCode: s.string().optional(),
+      },
+      { show: s.rel("shows", "showId"), parent: s.rel("shows", "parentId") },
+    ),
+  };
+  type InviteSchema = s.Schema<typeof inviteSchema>;
+  const inviteApp: s.App<InviteSchema> = s.defineApp(inviteSchema, { migrations: "none" });
+  const invitePermissions = definePermissions(inviteApp, ({ policy, session }) => {
+    policy.shows.allowRead.always();
+    policy.members.allowRead.where({ account: session.user.account });
+    policy.members.allowInsert.where((member) =>
+      policy.invites.exists.where({
+        showId: member.showId,
+        // Optional text compared with required text.
+        code: member.inviteCode,
+        // Required reference compared with an optional reference.
+        parentId: member.parentId,
+      }),
+    );
+  });
+
+  it("publishes the policy and enforces the correlation", async () => {
+    const policyTestApp = await createPolicyTestApp(inviteApp, invitePermissions, expect);
+    try {
+      const show = await policyTestApp.seed((db) => db.insert(inviteApp.shows, { name: "Gig" }));
+      await policyTestApp.seed((db) =>
+        db.insert(inviteApp.invites, { showId: show.id, code: "current", parentId: show.id }),
+      );
+      const account = "00000000-0000-4000-8000-000000000003";
+      const carol = policyTestApp.as({
+        issuer: "https://policy-test.example",
+        user_id: "carol",
+        account_id: account,
+        claims: {},
+        authMode: "external",
+      });
+
+      await carol.expectDenied((db) =>
+        db.insert(inviteApp.members, {
+          showId: show.id,
+          parentId: show.id,
+          account,
+          inviteCode: "guessed",
+        }),
+      );
+      await carol.expectDenied((db) =>
+        db.insert(inviteApp.members, { showId: show.id, parentId: show.id, account }),
+      );
+      // An invite whose optional parentId is NULL must not match a member whose
+      // parentId is set, even though every other correlated column matches.
+      await policyTestApp.seed((db) =>
+        db.insert(inviteApp.invites, { showId: show.id, code: "orphan", parentId: null }),
+      );
+      await carol.expectDenied((db) =>
+        db.insert(inviteApp.members, {
+          showId: show.id,
+          parentId: show.id,
+          account,
+          inviteCode: "orphan",
+        }),
+      );
+      await carol
+        .insert(inviteApp.members, {
+          showId: show.id,
+          parentId: show.id,
+          account,
+          inviteCode: "current",
+        })
+        .wait({ tier: "global" });
+    } finally {
+      await policyTestApp.shutdown();
+    }
+  }, 20_000);
 });

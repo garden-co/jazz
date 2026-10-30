@@ -1,3 +1,4 @@
+import { allowAll } from "../testing/allow-all.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -5,23 +6,22 @@ import { join } from "node:path";
 import { WebSocket } from "undici";
 import type { RuntimeSubscriptionDelta, WasmSchema } from "../../drivers/types.js";
 import { deploy } from "../../dev/catalogue.js";
-import { fetchSchemaHashes, fetchStoredWasmSchema } from "../schema-fetch.js";
+import { fetchSchemaHashes, fetchStoredWasmSchema } from "../../dev/catalogue-api.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "../../testing/index.js";
 import { JazzClient } from "../client.js";
 import { createWasmRuntime, hasJazzWasmBuild } from "../testing/wasm-runtime-test-utils.js";
-import { encodeSchema } from "./native-runtime-adapter.js";
 
 const maybeIt = hasJazzWasmBuild() ? it : it.skip;
 const previousWebSocket = globalThis.WebSocket;
 
-const schema = {
+const schema: WasmSchema = {
   todos: {
     columns: [
       { name: "title", column_type: { type: "Text" }, nullable: false },
       { name: "done", column_type: { type: "Boolean" }, nullable: false },
     ],
   },
-} satisfies WasmSchema;
+};
 
 function normalizeTestDelta(delta: RuntimeSubscriptionDelta, _testSchema: WasmSchema) {
   return [
@@ -55,23 +55,11 @@ function resultId(sourceId: string, occurrenceKey: Uint8Array): string {
   return `result:${Array.from(occurrenceKey, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
-const writableTodoSchema = {
-  todos: {
-    ...schema.todos,
-    policies: {
-      select: { using: { type: "True" } },
-      insert: { with_check: { type: "True" } },
-      update: { using: { type: "True" }, with_check: { type: "True" } },
-      delete: { using: { type: "True" } },
-    },
-  },
-} satisfies WasmSchema;
-
-const arraySchema = {
+const arraySchema: WasmSchema = {
   arrays: {
     columns: [{ name: "data", column_type: { type: "Bytea" }, nullable: false }],
   },
-} satisfies WasmSchema;
+};
 
 describe("NativeRuntimeAdapter server convergence", () => {
   let server: LocalJazzServerHandle | null = null;
@@ -96,7 +84,8 @@ describe("NativeRuntimeAdapter server convergence", () => {
       appId,
       inMemory: true,
       adminSecret: "native-runtime-convergence-admin",
-      schema: encodeSchema(schema),
+      schema,
+      permissions: allowAll(schema),
     });
 
     const clientA = await createClient({ appId, serverUrl: server.url, peer: "alice" });
@@ -117,7 +106,7 @@ describe("NativeRuntimeAdapter server convergence", () => {
             }
           }
         },
-        { tier: "local" },
+        { tier: "local-first" },
       );
     });
 
@@ -126,14 +115,17 @@ describe("NativeRuntimeAdapter server convergence", () => {
       done: { type: "Boolean", value: false },
     });
 
-    await waitForPromise(inserted.wait({ tier: "edge" }), "client A insert did not settle at edge");
+    await waitForPromise(
+      inserted.wait({ tier: "global" }),
+      "client A insert did not settle globally",
+    );
     await waitForPromise(
       observedBySubscription,
       "client B subscription did not observe the native runtime insert",
     );
 
     const convergedRows = await waitFor(async () => {
-      const rows = await clientB.query(JSON.stringify({ table: "todos" }), { tier: "local" });
+      const rows = await clientB.query(JSON.stringify({ table: "todos" }), { tier: "local-first" });
       return rows.find((row) => row.id === inserted.value.id);
     });
 
@@ -161,7 +153,8 @@ describe("NativeRuntimeAdapter server convergence", () => {
         appId,
         dataDir,
         adminSecret,
-        schema: encodeSchema(schema),
+        schema,
+        permissions: allowAll(schema),
       });
       const published = await publishSchema(server);
 
@@ -178,20 +171,25 @@ describe("NativeRuntimeAdapter server convergence", () => {
         done: { type: "Boolean", value: false },
       });
       await waitForPromise(
-        immediateInsert.wait({ tier: "edge" }),
-        "writer insert did not settle at edge after dynamic schema publish",
+        immediateInsert.wait({ tier: "global" }),
+        "writer insert did not settle globally after dynamic schema publish",
       );
 
       await immediateWriter.shutdown();
       clients.splice(clients.indexOf(immediateWriter), 1);
 
-      const wrongSecretResponse = await fetch(`${server.url}/apps/${appId}/admin/schemas`, {
+      const wrongSecretResponse = await fetch(`${server.url}/apps/${appId}/admin/deploy`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
           "X-Jazz-Admin-Secret": "not-the-admin-secret",
         },
-        body: JSON.stringify({ schema: { tables: schema } }),
+        body: JSON.stringify({
+          targetSchemaHash: published.hash,
+          schemas: [],
+          migrations: [],
+          permissions: allowAll(schema),
+        }),
       });
       expect(wrongSecretResponse.status).toBe(401);
 
@@ -225,8 +223,8 @@ describe("NativeRuntimeAdapter server convergence", () => {
         done: { type: "Boolean", value: true },
       });
       await waitForPromise(
-        inserted.wait({ tier: "edge" }),
-        "writer insert did not settle at edge before restart",
+        inserted.wait({ tier: "global" }),
+        "writer insert did not settle globally before restart",
       );
 
       await writer.shutdown();
@@ -258,7 +256,7 @@ describe("NativeRuntimeAdapter server convergence", () => {
               }
             }
           },
-          { tier: "local" },
+          { tier: "local-first" },
         );
       });
       await waitForPromise(
@@ -267,7 +265,9 @@ describe("NativeRuntimeAdapter server convergence", () => {
       );
 
       const persistedRow = await waitFor(async () => {
-        const rows = await reader.query(JSON.stringify({ table: "todos" }), { tier: "local" });
+        const rows = await reader.query(JSON.stringify({ table: "todos" }), {
+          tier: "local-first",
+        });
         return rows.find((row) => row.id === inserted.value.id);
       });
 
@@ -290,7 +290,8 @@ describe("NativeRuntimeAdapter server convergence", () => {
       appId,
       inMemory: true,
       adminSecret: "native-runtime-bytea-convergence-admin",
-      schema: encodeSchema(arraySchema),
+      schema: arraySchema,
+      permissions: allowAll(arraySchema),
     });
 
     const writer = await createClient({
@@ -305,7 +306,7 @@ describe("NativeRuntimeAdapter server convergence", () => {
     const inserted = writer.insert("arrays", {
       data: { type: "Bytea", value: Uint8Array.from([1, 2, 3, 4]) },
     });
-    await waitForPromise(inserted.wait({ tier: "edge" }), "BYTEA insert did not settle at edge");
+    await waitForPromise(inserted.wait({ tier: "global" }), "BYTEA insert did not settle globally");
     await writer.shutdown();
     clients.splice(clients.indexOf(writer), 1);
 
@@ -331,7 +332,7 @@ describe("NativeRuntimeAdapter server convergence", () => {
             }
           }
         },
-        { tier: "local" },
+        { tier: "local-first" },
       );
     });
 
@@ -352,7 +353,8 @@ describe("NativeRuntimeAdapter server convergence", () => {
         appId,
         inMemory: true,
         adminSecret: "native-runtime-restore-convergence-admin",
-        schema: encodeSchema(writableTodoSchema),
+        schema,
+        permissions: allowAll(schema),
       });
 
       const writer = await createClient({
@@ -368,14 +370,14 @@ describe("NativeRuntimeAdapter server convergence", () => {
         done: { type: "Boolean", value: false },
       });
       await waitForPromise(
-        inserted.wait({ tier: "edge" }),
-        "writer insert did not settle at edge before delete",
+        inserted.wait({ tier: "global" }),
+        "writer insert did not settle globally before delete",
       );
 
       const deleted = writer.delete("todos", inserted.value.id);
       await waitForPromise(
-        deleted.wait({ tier: "edge" }),
-        "writer delete did not settle at edge before restore",
+        deleted.wait({ tier: "global" }),
+        "writer delete did not settle globally before restore",
       );
 
       const restored = writer.restore("todos", inserted.value.id, {
@@ -383,8 +385,8 @@ describe("NativeRuntimeAdapter server convergence", () => {
         done: { type: "Boolean", value: true },
       });
       await waitForPromise(
-        restored.wait({ tier: "edge" }),
-        "writer restore did not settle at edge",
+        restored.wait({ tier: "global" }),
+        "writer restore did not settle globally",
       );
 
       await writer.shutdown();
@@ -415,7 +417,7 @@ describe("NativeRuntimeAdapter server convergence", () => {
               }
             }
           },
-          { tier: "local" },
+          { tier: "local-first" },
         );
       });
 
@@ -427,7 +429,9 @@ describe("NativeRuntimeAdapter server convergence", () => {
       ).resolves.toBe("websocket restored row");
 
       const restoredRow = await waitFor(async () => {
-        const rows = await reader.query(JSON.stringify({ table: "todos" }), { tier: "local" });
+        const rows = await reader.query(JSON.stringify({ table: "todos" }), {
+          tier: "local-first",
+        });
         return rows.find((row) => row.id === inserted.value.id);
       });
 
@@ -449,6 +453,7 @@ async function publishSchema(server: LocalJazzServerHandle): Promise<{ hash: str
     serverUrl: server.url,
     adminSecret: server.adminSecret,
     schema,
+    permissions: allowAll(schema),
   });
 
   return { hash: result.schema.hash };

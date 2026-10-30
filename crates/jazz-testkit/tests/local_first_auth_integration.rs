@@ -19,6 +19,7 @@ use jazz::tools::{
 use jazz_server::JazzServer;
 use jazz_server::middleware::auth::TestClock;
 
+use jazz::tools::test_support::{disconnect_client, reconnect_client};
 use support::{has_row, wait_for_rows};
 
 const TOKEN_TTL_SECS: u64 = 3600;
@@ -38,12 +39,14 @@ fn bob_seed() -> [u8; 32] {
 }
 
 fn test_schema() -> Schema {
+    use jazz::tools::test_support::AllowAll;
     SchemaBuilder::new()
         .table(
             TableSchema::builder("todos")
                 .column("title", ColumnType::Text)
                 .column("completed", ColumnType::Boolean),
         )
+        .allow_all()
         .build()
 }
 
@@ -74,11 +77,7 @@ fn local_first_context(
     ctx.backend_secret = None;
     ctx.admin_secret = None;
     ctx.storage = storage;
-    if storage == ClientStorage::Persistent {
-        ctx.storage_factory = Some(std::sync::Arc::new(
-            jazz_storage_rocksdb::RocksDbStorageFactory,
-        ));
-    }
+    if storage == ClientStorage::Persistent {}
     ctx
 }
 
@@ -269,7 +268,7 @@ async fn persistent_seed_reconnects_as_same_principal_impl() {
         .insert("todos", todo_values("remember this", false))
         .expect("create todo");
 
-    // Let the row settle at EdgeServer so we can verify the server recognized
+    // Let the row settle at GlobalServer so we can verify the server recognized
     // our principal on the first connect.
     wait_for_rows(
         &first,
@@ -287,20 +286,24 @@ async fn persistent_seed_reconnects_as_same_principal_impl() {
 
     // Local state survived: row is visible immediately from local storage.
     let local_rows = reconnected
-        .query(jazz::query::Query::from("todos"), None)
+        .query(
+            jazz::query::Query::from("todos"),
+            jazz::tools::ReadTier::LocalFirst,
+        )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("local query after reconnect");
     assert!(
         has_row(&local_rows, todo_id, &expected_values),
         "reconnected client should see its own persisted row locally"
     );
 
-    // Server still recognizes the same principal: an EdgeServer query
+    // Server still recognizes the same principal: an GlobalServer query
     // (which requires successful server auth) succeeds and returns the row.
     wait_for_rows(
         &reconnected,
         jazz::query::Query::from("todos"),
-        "reconnected client re-authenticates with same principal and reads from edge",
+        "reconnected client re-authenticates with same principal and reads from server",
         |rows| has_row(&rows, todo_id, &expected_values).then_some(()),
     )
     .await;
@@ -368,7 +371,7 @@ async fn local_first_writes_carry_derived_principal_as_created_by_impl() {
 /// result. Alice's Ed25519-authenticated write keeps its author and millisecond
 /// timestamps even when the other three provenance fields are not projected.
 ///
-/// alice --insert--> edge --single-field query result--> alice
+/// alice --insert--> server --single-field query result--> alice
 #[tokio::test]
 async fn remote_single_provenance_fields_match_complete_provenance() {
     tokio::task::LocalSet::new()
@@ -392,12 +395,12 @@ async fn remote_single_provenance_fields_match_complete_provenance() {
             let (row_id, _, tx) = alice
                 .insert("todos", todo_values("independent provenance fields", false))
                 .expect("insert Alice's todo");
-            support::wait_for_edge_txs(&alice, &[tx.expect("insert transaction")]).await;
+            support::wait_for_global_txs(&alice, &[tx.expect("insert transaction")]).await;
 
             let columns = ["$createdBy", "$createdAt", "$updatedBy", "$updatedAt"];
             let complete = tokio::time::timeout(
                 Duration::from_secs(10),
-                alice.query_with_read_tier(
+                alice.query(
                     jazz::query::Query::from("todos").select(columns),
                     jazz::tools::ReadTier::Remote,
                 ),
@@ -405,6 +408,7 @@ async fn remote_single_provenance_fields_match_complete_provenance() {
             .await
             .expect("complete provenance arrives")
             .expect("complete provenance query");
+            let complete = jazz::tools::test_support::ordinary_rows(complete);
             assert_eq!(complete.len(), 1);
             assert_eq!(complete[0].0, row_id);
             assert_eq!(complete[0].1[0], author.clone());
@@ -415,7 +419,7 @@ async fn remote_single_provenance_fields_match_complete_provenance() {
             for (index, column) in columns.iter().enumerate() {
                 let selected = tokio::time::timeout(
                     Duration::from_secs(10),
-                    alice.query_with_read_tier(
+                    alice.query(
                         jazz::query::Query::from("todos").select([*column]),
                         jazz::tools::ReadTier::Remote,
                     ),
@@ -423,6 +427,7 @@ async fn remote_single_provenance_fields_match_complete_provenance() {
                 .await
                 .expect("single provenance field arrives")
                 .expect("single provenance field query");
+                let selected = jazz::tools::test_support::ordinary_rows(selected);
                 assert_eq!(
                     selected,
                     vec![(row_id, vec![complete[0].1[index].clone()])],
@@ -564,14 +569,14 @@ async fn expired_token_reconnect_flushes_queued_writes_impl() {
         .await
         .expect("connect with short-lived token");
 
-    // Pre-expiry write: confirm the session is healthy and reaches the edge.
+    // Pre-expiry write: confirm the session is healthy and reaches the server.
     let (pre_id, pre_values, _) = client
         .insert("todos", todo_values("pre-expiry", false))
         .expect("pre-expiry create");
     wait_for_rows(
         &client,
         jazz::query::Query::from("todos"),
-        "pre-expiry todo settles at edge server",
+        "pre-expiry todo settles at Core",
         |rows| has_row(&rows, pre_id, &pre_values).then_some(()),
     )
     .await;
@@ -618,5 +623,62 @@ async fn expired_token_reconnect_flushes_queued_writes_impl() {
     .await;
 
     reconnected.shutdown().await.expect("shutdown reconnected");
+    server.shutdown().await;
+}
+
+/// Alice's app refreshes her bearer token right after connecting, in the same
+/// turn, before the client's background link task has run. When her short
+/// token later expires and the link reconnects, the server must see the
+/// refreshed token, not the one she connected with.
+#[tokio::test]
+async fn token_refreshed_right_after_connect_is_used_on_reconnect() {
+    tokio::task::LocalSet::new()
+        .run_until(token_refreshed_right_after_connect_is_used_on_reconnect_impl())
+        .await
+}
+
+async fn token_refreshed_right_after_connect_is_used_on_reconnect_impl() {
+    let auth_clock = TestClock::new(1_700_000_000);
+    let server = JazzServer::builder()
+        .with_schema(test_schema())
+        .with_auth_clock(auth_clock.clone())
+        .start()
+        .await
+        .expect("start test server");
+    let audience = server.app_id().to_string();
+    let seed = alice_seed();
+    let mint = |ttl| {
+        identity::mint_jazz_self_signed_token_at(
+            &seed,
+            identity::LOCAL_FIRST_ISSUER,
+            &audience,
+            ttl,
+            auth_clock.now_seconds(),
+        )
+        .expect("mint token")
+    };
+
+    let mut ctx = local_first_context(&server, test_schema(), &seed, ClientStorage::Memory);
+    ctx.jwt_token = Some(mint(5));
+    let client = jazz_testkit::connect(ctx).await.expect("connect");
+    client
+        .update_auth_token(mint(TOKEN_TTL_SECS))
+        .expect("refresh token");
+
+    // The token Alice connected with has expired; only the refreshed one
+    // can be admitted.
+    auth_clock.advance(Duration::from_secs(6));
+    assert!(disconnect_client(&client), "detach the live transport");
+    let reconnected = tokio::time::timeout(Duration::from_secs(10), reconnect_client(&client))
+        .await
+        .expect("reconnect does not stall on a refused token")
+        .expect("reconnect with the refreshed token");
+    assert!(reconnected);
+    assert_eq!(
+        client.upstream_status().map(|status| status.phase),
+        Some(jazz::link::LinkPhase::Live)
+    );
+
+    client.shutdown().await.expect("shutdown");
     server.shutdown().await;
 }

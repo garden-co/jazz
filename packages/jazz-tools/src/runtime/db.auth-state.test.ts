@@ -109,7 +109,7 @@ function transportSnapshot(db: TestDb, runtimeClient: AuthTestRuntimeClient) {
   const hasCookie = config.cookieSession !== undefined;
   return {
     mode: hasJwt ? "bearer" : "cookie",
-    exclusive: { hasJwt, hasCookie },
+    serializable: { hasJwt, hasCookie },
     claimVersion: hasJwt ? jwtClaimVersion(config.jwtToken) : config.cookieSession?.claims.version,
     forwarded: {
       bearer: runtimeClient.updateAuthToken.mock.calls.length,
@@ -275,6 +275,149 @@ describe("Db auth state", () => {
       refreshedToken,
       expect.objectContaining({ issuer: LOCAL_FIRST_JWT_ISSUER, user_id: "alice" }),
     );
+  });
+
+  function makeLocalFirstDb() {
+    const initialToken = makeJwt({ iss: LOCAL_FIRST_JWT_ISSUER, sub: "alice", version: 0 });
+    const initialSession = internalSessionFromVerifiedReservedJwtPayload(
+      { iss: LOCAL_FIRST_JWT_ISSUER, sub: "alice" },
+      "local-first",
+    )!;
+    let version = 0;
+    const runtimeClient = {
+      updateTrustedAuthToken: vi.fn(),
+      onMutationError: vi.fn(),
+    };
+    const runtimeSource = new (class extends TestRuntimeSource {
+      override mintLocalFirstToken = vi.fn(() =>
+        makeJwt({ iss: LOCAL_FIRST_JWT_ISSUER, sub: "alice", version: ++version }),
+      );
+    })(runtimeClient as any);
+    const db = new (class extends Db {
+      constructor() {
+        super(
+          withTrustedSession({ appId: "test-app", jwtToken: initialToken }, initialSession),
+          runtimeSource,
+        );
+      }
+
+      ownRefresh(owned: boolean): void {
+        this.initLocalFirstAuth("alice-secret", 3600, owned);
+      }
+
+      refreshForTest(): void {
+        (this as unknown as { refreshLocalFirstToken(): void }).refreshLocalFirstToken();
+      }
+
+      failAuth(reason: "expired" | "invalid"): void {
+        this.markUnauthenticated(reason);
+      }
+
+      touchClient(): void {
+        this.getClient({ auth_state_touch: { columns: [] } });
+      }
+    })();
+    db.touchClient();
+    return { db, runtimeClient, runtimeSource };
+  }
+
+  it("keeps the trusted local-first identity across repeated refreshes", () => {
+    const { db, runtimeClient } = makeLocalFirstDb();
+    db.ownRefresh(false);
+
+    for (let refresh = 1; refresh <= 3; refresh++) {
+      db.refreshForTest();
+      expect(getDbInternalSession(db)).toMatchObject({
+        issuer: LOCAL_FIRST_JWT_ISSUER,
+        user_id: "alice",
+      });
+      expect(jwtClaimVersion(db.getConfig().jwtToken)).toBe(refresh);
+    }
+    expect(runtimeClient.updateTrustedAuthToken).toHaveBeenCalledTimes(3);
+  });
+
+  it("remints a self-minted local-first token when the server reports it expired", () => {
+    vi.useFakeTimers();
+    try {
+      const { db, runtimeClient } = makeLocalFirstDb();
+      db.ownRefresh(true);
+
+      db.failAuth("expired");
+
+      expect(db.getAuthState().error).toBeUndefined();
+      expect(jwtClaimVersion(db.getConfig().jwtToken)).toBe(1);
+      expect(runtimeClient.updateTrustedAuthToken).toHaveBeenCalledOnce();
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("renews an expired owned token even when an auth observer throws", () => {
+    vi.useFakeTimers();
+    try {
+      const { db, runtimeClient } = makeLocalFirstDb();
+      db.ownRefresh(true);
+      const failure = new Error("observer failed");
+      const stop = db.onAuthChanged((state) => {
+        if (state.error === "expired") throw failure;
+      });
+      try {
+        expect(() => db.failAuth("expired")).toThrow(failure);
+        expect(runtimeClient.updateTrustedAuthToken).toHaveBeenCalledOnce();
+        expect(jwtClaimVersion(db.getConfig().jwtToken)).toBe(1);
+        expect(db.getAuthState().error).toBeUndefined();
+      } finally {
+        stop();
+      }
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("spaces out remints a skewed server keeps rejecting until a token lives to its refresh", () => {
+    vi.useFakeTimers();
+    try {
+      const { db, runtimeSource } = makeLocalFirstDb();
+      db.ownRefresh(true);
+      const mints = () => runtimeSource.mintLocalFirstToken.mock.calls.length;
+
+      db.failAuth("expired");
+      expect(mints()).toBe(1);
+      db.failAuth("expired");
+      expect(mints()).toBe(1);
+      vi.advanceTimersByTime(999);
+      expect(mints()).toBe(1);
+      vi.advanceTimersByTime(1);
+      expect(mints()).toBe(2);
+      db.failAuth("expired");
+      vi.advanceTimersByTime(1_999);
+      expect(mints()).toBe(2);
+      vi.advanceTimersByTime(1);
+      expect(mints()).toBe(3);
+
+      // The token survives to its scheduled refresh, so the next expiry is
+      // renewed at once again.
+      vi.advanceTimersByTime(3600 * 800);
+      expect(mints()).toBe(4);
+      db.failAuth("expired");
+      expect(mints()).toBe(5);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it("leaves expiry to the caller when it supplied the local-first token", () => {
+    const { db, runtimeSource } = makeLocalFirstDb();
+    db.ownRefresh(false);
+
+    db.failAuth("expired");
+    db.failAuth("invalid");
+
+    expect(db.getAuthState().error).toBe("invalid");
+    expect(runtimeSource.mintLocalFirstToken).not.toHaveBeenCalled();
   });
 
   it("returns the initial cookie auth state", () => {
@@ -564,25 +707,25 @@ describe("Db auth state", () => {
     expect(snapshots).toEqual([
       {
         mode: "bearer",
-        exclusive: { hasJwt: true, hasCookie: false },
+        serializable: { hasJwt: true, hasCookie: false },
         claimVersion: "A",
         forwarded: { bearer: 0, cookie: 0 },
       },
       {
         mode: "cookie",
-        exclusive: { hasJwt: false, hasCookie: true },
+        serializable: { hasJwt: false, hasCookie: true },
         claimVersion: "B",
         forwarded: { bearer: 0, cookie: 1 },
       },
       {
         mode: "bearer",
-        exclusive: { hasJwt: true, hasCookie: false },
+        serializable: { hasJwt: true, hasCookie: false },
         claimVersion: "C",
         forwarded: { bearer: 1, cookie: 1 },
       },
       {
         mode: "cookie",
-        exclusive: { hasJwt: false, hasCookie: true },
+        serializable: { hasJwt: false, hasCookie: true },
         claimVersion: "D",
         forwarded: { bearer: 1, cookie: 2 },
       },
@@ -641,6 +784,34 @@ describe("Db auth state", () => {
     expect(db.getAuthState().session?.claims.version).toBe("C");
   });
 
+  it("publishes the coherent snapshot to later observers before rethrowing an observer failure", () => {
+    const { db, runtimeClient } = makeDbWithJwt(makeJwt({ sub: "alice", version: "A" }));
+    db.touchClient();
+    const observerError = new Error("synthetic auth observer failure");
+    const stopThrowing = db.onAuthChanged((state) => {
+      if (state.session?.claims.version === "B") throw observerError;
+    });
+    const snapshots: AuthPublicationSnapshot[] = [];
+    const stopRecording = db.onAuthChanged((state) => {
+      snapshots.push(authPublicationSnapshot(db, runtimeClient, state));
+    });
+    snapshots.length = 0;
+
+    expect(() => db.updateCookieSession(makeCookieSession("B"))).toThrow(observerError);
+    expect(snapshots).toEqual([
+      {
+        publicState: { authMode: "external", version: "B" },
+        config: { bearerVersion: undefined, cookieVersion: "B" },
+        internal: { authMode: "external", userId: "alice", version: "B" },
+        transport: { bearerVersion: undefined, cookieVersion: "B" },
+      },
+    ]);
+    db.updateCookieSession(makeCookieSession("B"));
+    expect(snapshots).toHaveLength(1);
+    stopRecording();
+    stopThrowing();
+  });
+
   it("rejects stale principals and live clears without changing the accepted snapshot", () => {
     const { db, runtimeClient } = makeDbWithJwt(makeJwt({ sub: "alice", version: "A" }));
     db.touchClient();
@@ -692,7 +863,7 @@ describe("Db auth state", () => {
     expect(db.getAuthState()).toBe(beforeState);
     expect(transportSnapshot(db, runtimeClient)).toMatchObject({
       mode: beforeTransport.mode,
-      exclusive: beforeTransport.exclusive,
+      serializable: beforeTransport.serializable,
       claimVersion: beforeTransport.claimVersion,
     });
     expect(getDbInternalSession(db)).toBe(beforeInternalSession);
@@ -704,7 +875,7 @@ describe("Db auth state", () => {
     expect(db.getAuthState().session?.claims.version).toBe("C");
     expect(transportSnapshot(db, runtimeClient)).toEqual({
       mode: "cookie",
-      exclusive: { hasJwt: false, hasCookie: true },
+      serializable: { hasJwt: false, hasCookie: true },
       claimVersion: "C",
       forwarded: { bearer: 0, cookie: 2 },
     });

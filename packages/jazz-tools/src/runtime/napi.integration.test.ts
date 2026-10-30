@@ -15,7 +15,6 @@ import { translateQuery } from "./query-adapter.js";
 import { loadCompiledSchema, type LoadedSchemaProject } from "../schema-loader.js";
 import { deploy as deployProject } from "../dev/catalogue-project.js";
 import { deploy, startLocalJazzServer, startTestJwtIssuer } from "../testing/index.js";
-import { encodeSchema as encodeNativeSchema } from "./native-runtime/schema-codec.js";
 import {
   createPersistentNapiNativeRuntimeAdapter,
   loadNapiModule,
@@ -125,12 +124,18 @@ const TEST_SCHEMA: WasmSchema = {
   },
 };
 
-const publicUnionApp = s.defineApp({
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-  }),
-});
+const publicUnionApp = s.defineApp(
+  {
+    todos: s.table(
+      {
+        title: s.string(),
+        done: s.boolean(),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 
 const publicUnionPermissions = s.definePermissions(publicUnionApp, ({ policy }) => {
   policy.todos.allowRead.where({ done: false });
@@ -139,12 +144,18 @@ const publicUnionPermissions = s.definePermissions(publicUnionApp, ({ policy }) 
   policy.todos.allowDelete.always();
 });
 
-const publicUnionBigIntApp = s.defineApp({
-  metrics: s.table({
-    label: s.string(),
-    value: s.bigint(),
-  }),
-});
+const publicUnionBigIntApp = s.defineApp(
+  {
+    metrics: s.table(
+      {
+        label: s.string(),
+        value: s.bigint(),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 
 const TIMESTAMP_SCHEMA: WasmSchema = {
   projects: {
@@ -313,7 +324,7 @@ async function waitForQueryRows<T>(
   query: QueryBuilder<T>,
   predicate: (rows: T[]) => boolean,
   timeoutMs = 20_000,
-  queryOptions: { tier?: "local" | "edge" | "global" } = { tier: "edge" },
+  queryOptions: { tier?: "local-first" | "remote" } = { tier: "remote" },
 ): Promise<T[]> {
   const deadline = Date.now() + timeoutMs;
   let lastRows: T[] = [];
@@ -356,18 +367,27 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
   }
 }
 
-async function loadPolicyGraphPerfWasmSchema(): Promise<WasmSchema> {
+async function loadPolicyGraphPerfSchema(field: "mergedSchema" | "wasmSchema" = "mergedSchema") {
   const source = JSON.parse(
     await readFile(new URL("schema-source.json", POLICY_GRAPH_PERF_FIXTURE_DIR), "utf8"),
-  ) as { mergedSchema: WasmSchema };
-  return source.mergedSchema;
-}
-
-async function loadPolicyGraphPerfAppSchema(): Promise<WasmSchema> {
-  const source = JSON.parse(
-    await readFile(new URL("schema-source.json", POLICY_GRAPH_PERF_FIXTURE_DIR), "utf8"),
-  ) as { wasmSchema: WasmSchema };
-  return source.wasmSchema;
+  ) as Record<
+    typeof field,
+    Record<
+      string,
+      Omit<WasmSchema[string], "policies"> & {
+        policies?: import("../permissions/index.js").CompiledPermissions[string];
+      }
+    >
+  >;
+  const schema = Object.fromEntries(
+    Object.entries(source[field]).map(([name, { policies: _, ...table }]) => [name, table]),
+  );
+  const permissions = Object.fromEntries(
+    Object.entries(source[field]).flatMap(([name, table]) =>
+      table.policies ? [[name, table.policies]] : [],
+    ),
+  );
+  return { schema, permissions };
 }
 
 async function createPolicyGraphPerfSchemaDir(options?: {
@@ -433,8 +453,8 @@ async function cleanupTempRuntimeData(data: TempRuntimeData | null): Promise<voi
 }
 
 describe("NAPI integration", () => {
-  it("releases a persistent RocksDB lock after closing an upstream transport", async () => {
-    const { wasmSchema } = await loadTodoServerProject();
+  it("releases the persistent store's lock after closing an upstream transport", async () => {
+    const { wasmSchema, permissions } = await loadTodoServerProject();
     const runtimeData = await createTempRuntimeData("jazz-napi-transport-close-reopen-");
     const previousWebSocket = globalThis.WebSocket;
     class OpenWebSocket {
@@ -451,19 +471,29 @@ describe("NAPI integration", () => {
     let first: TestRuntimeWithTransport | null = null;
     let second: TestRuntimeWithTransport | null = null;
     try {
-      first = (await createPersistentNapiNativeRuntimeAdapter(wasmSchema, runtimeData.dataPath, {
-        appId: randomUUID(),
-        env: "test",
-      })) as TestRuntimeWithTransport;
+      first = (await createPersistentNapiNativeRuntimeAdapter(
+        wasmSchema,
+        permissions!,
+        runtimeData.dataPath,
+        {
+          appId: randomUUID(),
+          env: "test",
+        },
+      )) as TestRuntimeWithTransport;
 
       first.connect("ws://127.0.0.1/jazz/ws", "{}");
       await first.close?.();
       first = null;
 
-      second = (await createPersistentNapiNativeRuntimeAdapter(wasmSchema, runtimeData.dataPath, {
-        appId: randomUUID(),
-        env: "test",
-      })) as TestRuntimeWithTransport;
+      second = (await createPersistentNapiNativeRuntimeAdapter(
+        wasmSchema,
+        permissions!,
+        runtimeData.dataPath,
+        {
+          appId: randomUUID(),
+          env: "test",
+        },
+      )) as TestRuntimeWithTransport;
       expect(second).toBeDefined();
     } finally {
       await first?.close?.();
@@ -504,11 +534,11 @@ describe("NAPI integration", () => {
         .orderBy("title")
         .limit(2);
 
-      await expect(db.all(arrayUnion, { tier: "local" })).resolves.toMatchObject([
+      await expect(db.all(arrayUnion, { tier: "local-first" })).resolves.toMatchObject([
         { id: alpha.id, title: "alpha" },
         { id: alpha.id, title: "alpha" },
       ]);
-      await expect(db.all(namedUnion, { tier: "local" })).resolves.toMatchObject([
+      await expect(db.all(namedUnion, { tier: "local-first" })).resolves.toMatchObject([
         { id: alpha.id, title: "alpha" },
         { id: alpha.id, title: "alpha" },
       ]);
@@ -517,7 +547,7 @@ describe("NAPI integration", () => {
         .union({ first: repeatedNamedArm, second: repeatedNamedArm })
         .orderBy("title")
         .limit(2);
-      await expect(db.all(namedDuplicateUnion, { tier: "local" })).resolves.toMatchObject([
+      await expect(db.all(namedDuplicateUnion, { tier: "local-first" })).resolves.toMatchObject([
         { id: alpha.id, title: "alpha" },
         { id: alpha.id, title: "alpha" },
       ]);
@@ -526,21 +556,21 @@ describe("NAPI integration", () => {
         .orderBy("title")
         .offset(1)
         .limit(2);
-      await expect(db.all(offsetAcrossDuplicateBoundary, { tier: "local" })).resolves.toMatchObject(
-        [{ id: alpha.id, title: "alpha" }, { title: "beta" }],
-      );
+      await expect(
+        db.all(offsetAcrossDuplicateBoundary, { tier: "local-first" }),
+      ).resolves.toMatchObject([{ id: alpha.id, title: "alpha" }, { title: "beta" }]);
 
       const limitOneUpdates: string[][] = [];
       const stopLimitOne = db.subscribe(
         publicUnionApp.union(arms).orderBy("title").limit(1),
         (rows) => limitOneUpdates.push(rows.map((row) => row.title)),
-        { tier: "local" },
+        { tier: "local-first" },
       );
       const updates: string[][] = [];
       const unsubscribe = db.subscribe(
         arrayUnion,
         (rows) => updates.push(rows.map((row) => row.title)),
-        { tier: "local" },
+        { tier: "local-first" },
       );
       try {
         await vi.waitFor(() => expect(updates.at(-1)).toEqual(["alpha", "alpha"]));
@@ -599,7 +629,7 @@ describe("NAPI integration", () => {
         publicUnionApp.todos.where({}),
         publicUnionApp.todos.where({ done: { in: [false, true] } }),
       ]);
-      await expect(reader.all(query, { tier: "local" })).resolves.toMatchObject([
+      await expect(reader.all(query, { tier: "local-first" })).resolves.toMatchObject([
         { title: "visible", done: false },
         { title: "visible", done: false },
       ]);
@@ -641,7 +671,7 @@ describe("NAPI integration", () => {
           negative: publicUnionBigIntApp.metrics.where({ value: negative }),
         })
         .orderBy("label");
-      await expect(db.all(query, { tier: "local" })).resolves.toMatchObject([
+      await expect(db.all(query, { tier: "local-first" })).resolves.toMatchObject([
         { label: "negative", value: negative },
         { label: "positive", value: positive },
       ]);
@@ -654,7 +684,7 @@ describe("NAPI integration", () => {
   it("supports oversized indexed persistent mutations from JS callers", async () => {
     const dataDir = await createTempDir("jazz-napi-large-index-");
     const dataPath = join(dataDir, "jazz.db");
-    const runtime = (await createPersistentNapiNativeRuntimeAdapter(TEST_SCHEMA, dataPath, {
+    const runtime = (await createPersistentNapiNativeRuntimeAdapter(TEST_SCHEMA, {}, dataPath, {
       appId: `napi-large-index-${randomUUID()}`,
       env: "test",
     })) as unknown as {
@@ -743,7 +773,7 @@ describe("NAPI integration", () => {
         appId,
         adminSecret,
         schema: todoServerProject.wasmSchema,
-        permissions: todoServerProject.permissions,
+        permissions: todoServerProject.permissions!,
       });
       const todoServerSchema = todoServerProject.wasmSchema;
       const policyTodosTable = makePolicyTodosTable(todoServerSchema);
@@ -788,7 +818,7 @@ describe("NAPI integration", () => {
             description: "created via asBackend",
             owner_id: "00000000-0000-4000-8000-000000000003",
           })
-          .wait({ tier: "edge" }),
+          .wait({ tier: "global" }),
         10_000,
         "backend insert timed out",
       );
@@ -801,7 +831,7 @@ describe("NAPI integration", () => {
             description: "created via forSession",
             owner_id: aliceAuthor.account,
           })
-          .wait({ tier: "edge" }),
+          .wait({ tier: "global" }),
         10_000,
         "session insert timed out",
       );
@@ -811,7 +841,7 @@ describe("NAPI integration", () => {
           const backendRow = await withTimeout(
             backendDb.one(
               makePolicyTodoProvenanceByIdQuery(todoServerSchema, backendCreatedTodo.id),
-              { tier: "edge" },
+              { tier: "remote" },
             ),
             10_000,
             "backend provenance read timed out",
@@ -822,7 +852,7 @@ describe("NAPI integration", () => {
           });
           const sessionRow = await withTimeout(
             backendDb.one(makePolicyTodoProvenanceByIdQuery(todoServerSchema, createdTodo.id), {
-              tier: "edge",
+              tier: "remote",
             }),
             10_000,
             "session provenance read timed out",
@@ -837,7 +867,7 @@ describe("NAPI integration", () => {
           expect(
             await withTimeout(
               backendDb.one(makePolicyTodoByIdQuery(todoServerSchema, createdTodo.id), {
-                tier: "edge",
+                tier: "remote",
               }),
               10_000,
               "backend session read timed out",
@@ -860,11 +890,11 @@ describe("NAPI integration", () => {
             description: "",
             owner_id: "00000000-0000-4000-8000-000000000002",
           })
-          .wait({ tier: "edge" }),
+          .wait({ tier: "global" }),
       ).rejects.toThrow(/AuthorizationDenied|Write rejected by server authorization/);
 
       await withTimeout(
-        aliceDb.update(policyTodosTable, createdTodo.id, { done: true }).wait({ tier: "edge" }),
+        aliceDb.update(policyTodosTable, createdTodo.id, { done: true }).wait({ tier: "global" }),
         10_000,
         "session update timed out",
       );
@@ -874,7 +904,7 @@ describe("NAPI integration", () => {
           expect(
             await withTimeout(
               backendDb.one(makePolicyTodoByIdQuery(todoServerSchema, createdTodo.id), {
-                tier: "edge",
+                tier: "remote",
               }),
               10_000,
               "backend session update read timed out",
@@ -888,7 +918,7 @@ describe("NAPI integration", () => {
       );
 
       await withTimeout(
-        aliceDb.delete(policyTodosTable, createdTodo.id).wait({ tier: "edge" }),
+        aliceDb.delete(policyTodosTable, createdTodo.id).wait({ tier: "global" }),
         10_000,
         "session delete timed out",
       );
@@ -898,7 +928,7 @@ describe("NAPI integration", () => {
           expect(
             await withTimeout(
               backendDb.one(makePolicyTodoByIdQuery(todoServerSchema, createdTodo.id), {
-                tier: "edge",
+                tier: "remote",
               }),
               10_000,
               "backend session delete read timed out",
@@ -955,7 +985,6 @@ describe("NAPI integration", () => {
         backendSecret,
         adminSecret,
         env: "test",
-        tier: "global",
       });
       await settleAsyncSyncWork();
 
@@ -992,13 +1021,14 @@ describe("NAPI integration", () => {
     const appId = randomUUID();
     const backendSecret = "napi-policy_graph-global-wait-secret";
     const adminSecret = "napi-policy_graph-global-wait-admin-secret";
-    const policyGraphSchemaForServer = await loadPolicyGraphPerfWasmSchema();
+    const { schema: policyGraphSchemaForServer, permissions } = await loadPolicyGraphPerfSchema();
     let runtimeData: TempRuntimeData | null = null;
     const server = await startLocalJazzServer({
       appId,
       backendSecret,
       adminSecret,
-      schema: encodeNativeSchema(policyGraphSchemaForServer),
+      schema: policyGraphSchemaForServer,
+      permissions,
     });
     let context: {
       asBackend(): Db;
@@ -1017,13 +1047,12 @@ describe("NAPI integration", () => {
       context = createJazzContext({
         appId,
         app: { wasmSchema: policyGraphSchema },
-        permissions: {},
+        permissions,
         driver: { type: "persistent", dataPath: runtimeData.dataPath },
         serverUrl: server.url,
         backendSecret,
         adminSecret,
         env: "test",
-        tier: "global",
       });
       await settleAsyncSyncWork();
 
@@ -1059,7 +1088,7 @@ describe("NAPI integration", () => {
     const appId = randomUUID();
     const backendSecret = "napi-policy_graph-global-wait-deploy-secret";
     const adminSecret = "napi-policy_graph-global-wait-deploy-admin-secret";
-    const policyGraphSchema = await loadPolicyGraphPerfWasmSchema();
+    const { schema: policyGraphSchema, permissions } = await loadPolicyGraphPerfSchema();
     const schemaDir = await createPolicyGraphPerfSchemaDir();
     let runtimeData: TempRuntimeData | null = null;
     const server = await startLocalJazzServer({
@@ -1092,13 +1121,12 @@ describe("NAPI integration", () => {
       context = createJazzContext({
         appId,
         app: { wasmSchema: policyGraphSchema },
-        permissions: {},
+        permissions,
         driver: { type: "persistent", dataPath: runtimeData.dataPath },
         serverUrl: server.url,
         backendSecret,
         adminSecret,
         env: "test",
-        tier: "global",
       });
       await settleAsyncSyncWork();
 
@@ -1135,7 +1163,8 @@ describe("NAPI integration", () => {
     const appId = randomUUID();
     const backendSecret = "napi-policy_graph-holder-subscription-secret";
     const adminSecret = "napi-policy_graph-holder-subscription-admin-secret";
-    const policyGraphSchema = await loadPolicyGraphPerfAppSchema();
+    const { schema: policyGraphSchema, permissions } =
+      await loadPolicyGraphPerfSchema("wasmSchema");
     const memberId = "00000000-0000-4000-8000-000000000001";
     const corporationId = randomUUID();
     const templateId = randomUUID();
@@ -1144,7 +1173,8 @@ describe("NAPI integration", () => {
       appId,
       backendSecret,
       adminSecret,
-      schema: encodeNativeSchema(policyGraphSchema),
+      schema: policyGraphSchema,
+      permissions,
       jwksUrl: jwtIssuer.jwksUrl,
       jwtIssuer: jwtIssuer.issuer,
       jwtAudience: jwtIssuer.audience,
@@ -1162,7 +1192,7 @@ describe("NAPI integration", () => {
       context = createJazzContext({
         appId,
         app: { wasmSchema: policyGraphSchema },
-        permissions: {},
+        permissions,
         driver: { type: "memory" },
         serverUrl: server.url,
         backendSecret,
@@ -1171,7 +1201,6 @@ describe("NAPI integration", () => {
         jwtIssuer: jwtIssuer.issuer,
         jwtAudience: jwtIssuer.audience,
         env: "test",
-        tier: "global",
       });
       await settleAsyncSyncWork();
 
@@ -1288,7 +1317,7 @@ describe("NAPI integration", () => {
         templateTable.where({}),
         (rows) => rows.some((row) => row.id === templateId),
         10_000,
-        { tier: "global" },
+        { tier: "remote" },
       );
       expect(visibleTemplates).toEqual([expect.objectContaining({ id: templateId })]);
 
@@ -1297,7 +1326,7 @@ describe("NAPI integration", () => {
         teamAccessEdgesTable.where({}),
         (rows) => rows.some((row) => row.c456 === corporationId),
         10_000,
-        { tier: "global" },
+        { tier: "remote" },
       );
       expect(visibleEdges).toEqual([expect.objectContaining({ c456: corporationId })]);
       expect(consoleError.mock.calls).toEqual([]);
@@ -1360,7 +1389,7 @@ describe("NAPI integration", () => {
     const backendSecret = "napi-policy_graph-chain-secret";
     const adminSecret = "napi-policy_graph-chain-admin-secret";
     const dataDir = await createTempDir("jazz-napi-policy_graph-chain-server-");
-    const policyGraphSchema = await loadPolicyGraphPerfWasmSchema();
+    const { schema: policyGraphSchema, permissions } = await loadPolicyGraphPerfSchema();
     const memberId = "00000000-0000-4000-8000-000000000001";
     const corporationId = randomUUID();
     const schemaDir = await createPolicyGraphPerfSchemaDir();
@@ -1394,7 +1423,7 @@ describe("NAPI integration", () => {
       context = createJazzContext({
         appId,
         app: { wasmSchema: policyGraphSchema },
-        permissions: {},
+        permissions,
         driver: { type: "memory" },
         serverUrl: server.url,
         backendSecret,
@@ -1403,7 +1432,6 @@ describe("NAPI integration", () => {
         jwtIssuer: jwtIssuer.issuer,
         jwtAudience: jwtIssuer.audience,
         env: "test",
-        tier: "global",
       });
       await settleAsyncSyncWork();
 
@@ -1493,7 +1521,7 @@ describe("NAPI integration", () => {
       context = createJazzContext({
         appId,
         app: { wasmSchema: policyGraphSchema },
-        permissions: {},
+        permissions,
         driver: { type: "memory" },
         serverUrl: server.url,
         backendSecret,
@@ -1502,7 +1530,6 @@ describe("NAPI integration", () => {
         jwtIssuer: jwtIssuer.issuer,
         jwtAudience: jwtIssuer.audience,
         env: "test",
-        tier: "global",
       });
       await settleAsyncSyncWork();
 
@@ -1512,7 +1539,7 @@ describe("NAPI integration", () => {
         teamTable.where({}),
         (rows) => rows.some((row) => row.id === corporationId),
         10_000,
-        { tier: "global" },
+        { tier: "remote" },
       );
       expect(teamRows).toEqual(
         expect.arrayContaining([expect.objectContaining({ id: corporationId })]),
@@ -1523,7 +1550,7 @@ describe("NAPI integration", () => {
         teamAccessEdgesTable.where({}),
         (rows) => rows.some((row) => row.c456 === corporationId),
         10_000,
-        { tier: "global" },
+        { tier: "remote" },
       );
       expect(edgeRows).toEqual([expect.objectContaining({ c456: corporationId })]);
       expect(consoleError.mock.calls).toEqual([]);
@@ -1562,29 +1589,29 @@ describe("NAPI integration", () => {
           const schema = {
             team: s.table({
               identity_key: s.string(),
-            }),
+            }, { "team_entryViaTeam": s.reverse("team_entry", "team"), "team_entryViaTarget": s.reverse("team_entry", "target"), "dropdowns_access_edgesViaTeam": s.reverse("dropdowns_access_edges", "team") }),
             team_entry: s.table({
-              team_id: s.ref("team"),
-              target_id: s.ref("team"),
+              team_id: s.uuid(),
+              target_id: s.uuid(),
               administrator: s.boolean(),
-            }),
+            }, { "team": s.rel("team", "team_id"), "target": s.rel("team", "target_id") }),
             dropdowns: s.table({
               name: s.string(),
-            }),
+            }, { "dropdowns_access_edgesViaResource": s.reverse("dropdowns_access_edges", "resource"), "dropdown_entryViaDropdowns": s.reverse("dropdown_entry", "dropdowns") }),
             dropdowns_access_edges: s.table({
-              resource_id: s.ref("dropdowns"),
-              team_id: s.ref("team"),
+              resource_id: s.uuid(),
+              team_id: s.uuid(),
               grant_role: s.string(),
               administrator: s.boolean(),
-            }),
+            }, { "resource": s.rel("dropdowns", "resource_id"), "team": s.rel("team", "team_id") }),
             dropdown_entry: s.table({
-              dropdowns_id: s.ref("dropdowns"),
+              dropdowns_id: s.uuid(),
               label: s.string(),
-            }),
+            }, { "dropdowns": s.rel("dropdowns", "dropdowns_id") }),
           };
 
           type AppSchema = s.Schema<typeof schema>;
-          export const app: s.App<AppSchema> = s.defineApp(schema);
+          export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
         `,
       );
       await writeFile(
@@ -1633,12 +1660,12 @@ describe("NAPI integration", () => {
             policy.dropdowns_access_edges.allowUpdate.where({});
             policy.dropdowns_access_edges.allowDelete.where({});
 
-            policy.dropdown_entry.allowRead.where(allowedTo.read("dropdowns_id"));
-            policy.dropdown_entry.allowInsert.where(allowedTo.update("dropdowns_id"));
+            policy.dropdown_entry.allowRead.where(allowedTo.read("dropdowns"));
+            policy.dropdown_entry.allowInsert.where(allowedTo.update("dropdowns"));
             policy.dropdown_entry.allowUpdate
-              .whereOld(allowedTo.update("dropdowns_id"))
-              .whereNew(allowedTo.update("dropdowns_id"));
-            policy.dropdown_entry.allowDelete.where(allowedTo.update("dropdowns_id"));
+              .whereOld(allowedTo.update("dropdowns"))
+              .whereNew(allowedTo.update("dropdowns"));
+            policy.dropdown_entry.allowDelete.where(allowedTo.update("dropdowns"));
           });
         `,
       );
@@ -1680,7 +1707,7 @@ describe("NAPI integration", () => {
         appId,
         adminSecret,
         schema: todoServerProject.wasmSchema,
-        permissions: todoServerProject.permissions,
+        permissions: todoServerProject.permissions!,
       });
       const todoServerSchema = todoServerProject.wasmSchema;
       const policyTodosTable = makePolicyTodosTable(todoServerSchema);
@@ -1716,7 +1743,7 @@ describe("NAPI integration", () => {
           description: "server-original",
           owner_id: aliceAuthor.account,
         })
-        .wait({ tier: "edge" });
+        .wait({ tier: "global" });
 
       const nullUpdate = aliceDb.update(policyTodosTable, createdTodo.id, {
         description: null,
@@ -1726,7 +1753,7 @@ describe("NAPI integration", () => {
       const rowAfterUpdate = await aliceDb.one(
         makePolicyTodoByIdQuery(todoServerSchema, createdTodo.id),
         {
-          tier: "local",
+          tier: "local-first",
         },
       );
       expect(rowAfterUpdate).not.toBeNull();
@@ -1741,7 +1768,7 @@ describe("NAPI integration", () => {
     }
   }, 60_000);
 
-  it("syncs edge create/update/delete flows between real backend NAPI contexts", async () => {
+  it("syncs global create/update/delete flows between real backend NAPI contexts", async () => {
     const appId = randomUUID();
     const backendSecret = "napi-e2e-backend-secret";
     const adminSecret = "napi-e2e-admin-secret";
@@ -1769,6 +1796,7 @@ describe("NAPI integration", () => {
         appId,
         adminSecret,
         schema: TEST_SCHEMA,
+        permissions: {},
       });
 
       writerRuntimeData = await createTempRuntimeData("jazz-napi-sync-writer-");
@@ -1800,7 +1828,7 @@ describe("NAPI integration", () => {
 
       const createdRow = await writer
         .insert(simpleTodosTable, { title: "napi-shared-item", done: false })
-        .wait({ tier: "edge" });
+        .wait({ tier: "global" });
       const rowId = createdRow.id;
 
       const rowsAfterCreate = await waitForQueryRows(reader, allTodosQuery, (rows) =>
@@ -1813,7 +1841,7 @@ describe("NAPI integration", () => {
         done: false,
       });
 
-      await writer.update(simpleTodosTable, rowId, { done: true }).wait({ tier: "edge" });
+      await writer.update(simpleTodosTable, rowId, { done: true }).wait({ tier: "global" });
 
       const rowsAfterUpdate = await waitForQueryRows(reader, allTodosQuery, (rows) => {
         const row = rows.find((entry) => entry.id === rowId);
@@ -1822,7 +1850,7 @@ describe("NAPI integration", () => {
       const updatedRow = rowsAfterUpdate.find((row) => row.id === rowId);
       expect(updatedRow?.done).toBe(true);
 
-      await writer.delete(simpleTodosTable, rowId).wait({ tier: "edge" });
+      await writer.delete(simpleTodosTable, rowId).wait({ tier: "global" });
       await settleAsyncSyncWork();
       await waitForQueryRows(
         writer,
@@ -1896,7 +1924,7 @@ describe("NAPI integration", () => {
         allTodosQuery,
         (rows) => rows.some((row) => row.id === rowId),
         10_000,
-        { tier: "local" },
+        { tier: "local-first" },
       );
 
       await writerContext.shutdown();
@@ -1916,7 +1944,7 @@ describe("NAPI integration", () => {
         allTodosQuery,
         (rows) => rows.some((row) => row.id === rowId),
         10_000,
-        { tier: "local" },
+        { tier: "local-first" },
       );
 
       const reopenedRow = reopenedRows.find((row) => row.id === rowId);
@@ -2004,7 +2032,7 @@ describe("NAPI integration", () => {
       expect(Array.from(created.data)).toEqual([1, 2, 3]);
 
       const reloaded = await context.db().one(byteChunksTable.where({ id: created.id }), {
-        tier: "local",
+        tier: "local-first",
       });
 
       expect(reloaded).not.toBeNull();
@@ -2033,7 +2061,7 @@ describe("NAPI integration", () => {
     try {
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
 
-      seedRuntime = (await createPersistentNapiNativeRuntimeAdapter(BYTEA_SCHEMA, dataPath, {
+      seedRuntime = (await createPersistentNapiNativeRuntimeAdapter(BYTEA_SCHEMA, {}, dataPath, {
         appId,
         env: "dev",
       })) as unknown as {
@@ -2061,7 +2089,7 @@ describe("NAPI integration", () => {
       });
 
       const reloaded = await context.db().one(byteChunksTable.where({ id: created.id }), {
-        tier: "local",
+        tier: "local-first",
       });
 
       expect(reloaded).not.toBeNull();

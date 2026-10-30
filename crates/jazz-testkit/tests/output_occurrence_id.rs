@@ -13,6 +13,7 @@ use jazz_server::JazzServer;
 use support::TestingClient;
 
 fn todos_schema() -> Schema {
+    use jazz::tools::test_support::AllowAll;
     SchemaBuilder::new()
         .table(
             TableSchema::builder("todos")
@@ -20,6 +21,7 @@ fn todos_schema() -> Schema {
                 .column("bucket", ColumnType::Text)
                 .column("done", ColumnType::Boolean),
         )
+        .allow_all()
         .build()
 }
 
@@ -107,7 +109,7 @@ async fn forwarded_flat_join_reset_keeps_contributor_facts_visible_to_one_shot_r
                     row_input!("title" => "root", "bucket" => "shared", "done" => false),
                 )
                 .expect("insert root");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &client,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -118,7 +120,7 @@ async fn forwarded_flat_join_reset_keeps_contributor_facts_visible_to_one_shot_r
                     row_input!("title" => "first", "bucket" => "shared", "done" => true),
                 )
                 .expect("insert first joined source");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &client,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -150,7 +152,7 @@ async fn forwarded_flat_join_reset_keeps_contributor_facts_visible_to_one_shot_r
                 .expect("joined source settles locally");
             let joined_occurrence = key_for_joined_title(
                 &client
-                    .query_results_with_read_tier(query, ReadTier::LocalFirst)
+                    .query(query, ReadTier::LocalFirst)
                     .await
                     .expect("one-shot flat join remains complete"),
                 "second",
@@ -197,7 +199,7 @@ async fn forwarded_flat_join_reconciles_joined_source_deletion() {
                     row_input!("title" => "root", "bucket" => "shared", "done" => false),
                 )
                 .expect("insert root");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &client,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -208,7 +210,7 @@ async fn forwarded_flat_join_reconciles_joined_source_deletion() {
                     row_input!("title" => "joined", "bucket" => "shared", "done" => true),
                 )
                 .expect("insert joined source");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &client,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -216,7 +218,7 @@ async fn forwarded_flat_join_reconciles_joined_source_deletion() {
 
             let query = joined_todos(&[("joined", "root.bucket", "joined.bucket")]);
             let initial = client
-                .query_results_with_read_tier(query.clone(), ReadTier::LocalFirst)
+                .query(query.clone(), ReadTier::LocalFirst)
                 .await
                 .expect("query initial joined results");
             let joined_occurrence = key_for_joined_title(&initial, "joined");
@@ -227,8 +229,10 @@ async fn forwarded_flat_join_reconciles_joined_source_deletion() {
                 "initial reset includes joined-source occurrence"
             );
 
-            let tx = client.delete(joined).expect("delete joined source");
-            support::wait_for_edge_txs(
+            let tx = client
+                .delete("todos", joined)
+                .expect("delete joined source");
+            support::wait_for_global_txs(
                 &client,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -243,7 +247,7 @@ async fn forwarded_flat_join_reconciles_joined_source_deletion() {
             );
             assert!(
                 client
-                    .query_results_with_read_tier(query, ReadTier::LocalFirst)
+                    .query(query, ReadTier::LocalFirst)
                     .await
                     .expect("query after joined-source deletion")
                     .iter()
@@ -276,7 +280,7 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                     row_input!("title" => "draft", "bucket" => "shared", "done" => false),
                 )
                 .expect("insert todo");
-            support::wait_for_edge_txs(&client, &[tx.expect("ordinary mutation commits immediately")]).await;
+            support::wait_for_global_txs(&client, &[tx.expect("ordinary mutation commits immediately")]).await;
 
             let joined_query = joined_todos(&[("joined", "root.bucket", "joined.bucket")]);
             let mut joined_stream = client
@@ -285,7 +289,7 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                 .expect("joined maintained output is supported");
             let joined_reset = next_delta(&mut joined_stream).await;
             let initial_results = client
-                .query_results(joined_query.clone(), Some(DurabilityTier::Local))
+                .query(joined_query.clone(), jazz::tools::ReadTier::LocalFirst)
                 .await
                 .expect("one-shot joined output is supported");
             let self_key = key_for_joined_title(&initial_results, "draft");
@@ -298,7 +302,7 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
             );
             let encoded = serde_json::to_vec(&self_key).expect("serialize result key");
             let wire: Vec<u8> = serde_json::from_slice(&encoded).expect("inspect opaque key bytes");
-            assert_eq!(wire.first(), Some(&1), "result key wire format is versioned");
+            assert_eq!(wire.first(), Some(&2), "result key encoding is versioned");
             assert_eq!(
                 serde_json::from_slice::<ResultKey>(&encoded).expect("deserialize result key"),
                 self_key,
@@ -310,21 +314,23 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                 serde_json::from_value::<ResultKey>(serde_json::json!(unsupported)).is_err(),
                 "unknown ResultKey wire versions fail closed"
             );
-            let tx = client.begin_transaction().expect("begin joined read-your-writes tx");
+            let tx = client.begin_transaction().expect("begin serializable tx");
             tx.insert(
                 "todos",
                 row_input!("title" => "staged", "bucket" => "shared", "done" => true),
             )
             .expect("stage joined-side insert");
-            let staged_results = tx
-                .query_results(joined_query.clone(), Some(DurabilityTier::Local))
+            let Err(error) = tx
+                .query(joined_query.clone(), jazz::tools::ReadTier::LocalFirst)
                 .await
-                .expect("joined query reads its staged write");
-            assert_eq!(
-                key_for_joined_title(&staged_results, "staged")
-                    .row_id(),
-                None,
-                "a joined transaction result cannot collapse to a source row id"
+            else {
+                panic!("serializable transactions reject flat join reads");
+            };
+            assert!(
+                error.to_string().contains(
+                    "Reading a flat join of `todos` with `todos` is not supported in serializable transactions yet"
+                ),
+                "unexpected error: {error}"
             );
             tx.rollback().expect("roll back staged joined-side insert");
 
@@ -344,7 +350,7 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
             let first_added = next_delta_with_added(&mut joined_stream).await;
             let first_key = key_for_joined_title(
                 &client
-                    .query_results(joined_query.clone(), Some(DurabilityTier::Local))
+                    .query(joined_query.clone(), jazz::tools::ReadTier::LocalFirst)
                     .await
                     .expect("query joined results after first fan-out"),
                 "first",
@@ -363,10 +369,10 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                     row_input!("title" => "second", "bucket" => "shared", "done" => true),
                 )
                 .expect("insert second matching join row");
-            support::wait_for_edge_txs(&client, &[tx.expect("ordinary mutation commits immediately")]).await;
+            support::wait_for_global_txs(&client, &[tx.expect("ordinary mutation commits immediately")]).await;
             let fan_out = next_delta_with_added(&mut joined_stream).await;
             let current_results = client
-                .query_results(joined_query.clone(), Some(DurabilityTier::Local))
+                .query(joined_query.clone(), jazz::tools::ReadTier::LocalFirst)
                 .await
                 .expect("query joined results after second fan-out");
             let second_key = key_for_joined_title(&current_results, "second");
@@ -383,7 +389,7 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                 ("second_hop", "first_hop.bucket", "second_hop.bucket"),
             ]);
             let two_hop_results = client
-                .query_results(two_hop_query.clone(), Some(DurabilityTier::Local))
+                .query(two_hop_query.clone(), jazz::tools::ReadTier::LocalFirst)
                 .await
                 .expect("two-hop one-shot join");
             let ordered = two_hop_results
@@ -431,11 +437,12 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
             );
             let tx = client
                 .update(
+                    "todos",
                     root,
                     vec![("title".to_owned(), Value::Text("revised".to_owned()))],
                 )
                 .expect("replace root source content");
-            support::wait_for_edge_txs(&client, &[tx.expect("ordinary mutation commits immediately")]).await;
+            support::wait_for_global_txs(&client, &[tx.expect("ordinary mutation commits immediately")]).await;
             let replacement = next_delta_with_updated(&mut joined_stream).await;
             let two_hop_root_replacement = next_delta_with_updated(&mut two_hop_stream).await;
             assert!(
@@ -455,11 +462,12 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
 
             let tx = client
                 .update(
+                    "todos",
                     second,
                     vec![("title".to_owned(), Value::Text("second revised".to_owned()))],
                 )
                 .expect("replace joined source content");
-            support::wait_for_edge_txs(&client, &[tx.expect("ordinary mutation commits immediately")]).await;
+            support::wait_for_global_txs(&client, &[tx.expect("ordinary mutation commits immediately")]).await;
             let joined_replacement = next_delta_with_updated(&mut joined_stream).await;
             let two_hop_joined_replacement = next_delta_with_updated(&mut two_hop_stream).await;
             assert!(
@@ -478,7 +486,7 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
             );
             assert_eq!(
                 client
-                    .query_results(joined_query.clone(), Some(DurabilityTier::Local))
+                    .query(joined_query.clone(), jazz::tools::ReadTier::LocalFirst)
                     .await
                     .expect("query after joined-side replacement")
                     .into_iter()
@@ -487,8 +495,8 @@ async fn flat_join_output_occurrence_identity_addresses_additions_removals_and_r
                 Some(Value::Text("second revised".to_owned()))
             );
 
-            let tx = client.delete(first).expect("remove first joined row");
-            support::wait_for_edge_txs(&client, &[tx.expect("ordinary mutation commits immediately")]).await;
+            let tx = client.delete("todos", first).expect("remove first joined row");
+            support::wait_for_global_txs(&client, &[tx.expect("ordinary mutation commits immediately")]).await;
             let removal = next_delta_with_removed(&mut joined_stream).await;
             let two_hop_removal = next_delta_with_removed(&mut two_hop_stream).await;
             assert!(
@@ -564,7 +572,7 @@ async fn flat_join_payload_netting_drops_add_then_remove_in_one_transaction() {
                     row_input!("title" => "root", "bucket" => "shared", "done" => false),
                 )
                 .expect("insert root");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &client,
                 &[tx.expect("ordinary mutation commits immediately")],
             )
@@ -584,7 +592,7 @@ async fn flat_join_payload_netting_drops_add_then_remove_in_one_transaction() {
                     row_input!("title" => "transient", "bucket" => "shared", "done" => true),
                 )
                 .expect("stage matching joined row");
-            tx.delete(transient)
+            tx.delete("todos", transient)
                 .expect("stage removal of that same joined occurrence");
             let net_tx = tx.commit().expect("commit add-then-remove tx");
 
@@ -594,7 +602,7 @@ async fn flat_join_payload_netting_drops_add_then_remove_in_one_transaction() {
                     row_input!("title" => "durable", "bucket" => "shared", "done" => true),
                 )
                 .expect("insert durable matching joined row");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &client,
                 &[
                     net_tx,
@@ -604,9 +612,9 @@ async fn flat_join_payload_netting_drops_add_then_remove_in_one_transaction() {
             .await;
             let delta = next_delta_with_added(&mut stream).await;
             let results = client
-                .query_results(
+                .query(
                     joined_todos(&[("joined", "root.bucket", "joined.bucket")]),
-                    Some(DurabilityTier::Local),
+                    jazz::tools::ReadTier::LocalFirst,
                 )
                 .await
                 .expect("query joined results after netting");

@@ -16,6 +16,7 @@ import {
   expectedManifest,
   manifestPath,
   nativeArtifactFingerprint,
+  pathBatches,
   verifyManifest,
   verifyPublishedNapiManifest,
   workspaceDependencyInputs,
@@ -30,12 +31,10 @@ function fixture(parent = tmpdir()) {
     "crates/jazz-wasm/pkg",
     "crates/jazz-wasm/src",
     "crates/jazz/src",
-    "crates/groove/src",
     "crates/wasm-tracing/src",
     "crates/jazz-napi/src",
     "crates/jazz-server/src",
     "crates/jazz-native-transport/src",
-    "crates/jazz-storage-rocksdb/src",
     "crates/jazz-otel/src",
     "crates/jazz-compression/src",
     "crates/benchmark-guard/src",
@@ -54,26 +53,18 @@ function fixture(parent = tmpdir()) {
     writeFileSync(join(root, path), content);
   const dependencies = {
     "jazz-wasm": ["jazz", "wasm-tracing", "idb-tree"],
-    "jazz-napi": [
-      "jazz",
-      "jazz-server",
-      "jazz-native-transport",
-      "jazz-storage-rocksdb",
-      "jazz-otel",
-    ],
-    jazz: ["groove", "jazz-compression", "benchmark-guard"],
+    "jazz-napi": ["jazz", "jazz-server", "jazz-native-transport", "jazz-otel"],
+    jazz: ["jazz-compression", "benchmark-guard"],
   };
   for (const name of [
     "jazz-napi",
     "jazz-server",
     "jazz-native-transport",
-    "jazz-storage-rocksdb",
     "jazz-otel",
     "jazz-compression",
     "benchmark-guard",
     "idb-tree",
     "jazz",
-    "groove",
     "wasm-tracing",
   ]) {
     const manifest = join(root, `crates/${name}/Cargo.toml`);
@@ -250,6 +241,7 @@ test("native fingerprints include authoritative artifact tools but not receipt o
       "stage-napi-loader.mjs",
       "stage-native-fingerprints.mjs",
       "stage-napi-manifests.mjs",
+      "wasm-names.mjs",
       "provenance.test.mjs",
       "correctness-artifact-producer.mjs",
     ])
@@ -267,6 +259,10 @@ test("native fingerprints include authoritative artifact tools but not receipt o
       "// changed producer receipt helper\n",
     );
     assert.equal(nativeArtifactFingerprint(root, "napi", "release"), before);
+
+    const wasmBefore = nativeArtifactFingerprint(root, "wasm", "release");
+    writeFileSync(join(artifacts, "wasm-names.mjs"), "// changed WASM post-processor\n");
+    assert.notEqual(nativeArtifactFingerprint(root, "wasm", "release"), wasmBefore);
 
     writeFileSync(join(artifacts, "build.mjs"), "// changed authoritative builder\n");
     assert.notEqual(nativeArtifactFingerprint(root, "napi", "release"), before);
@@ -445,7 +441,6 @@ test("NAPI provenance covers every reachable local Cargo dependency", () => {
   for (const crate of [
     "jazz-server",
     "jazz-native-transport",
-    "jazz-storage-rocksdb",
     "jazz-otel",
     "jazz-compression",
     "benchmark-guard",
@@ -658,6 +653,7 @@ test("assembled NAPI packages carry only matching manifests and reject stale or 
   const root = fixture();
   const platforms = {
     "linux-x64-gnu": "x86_64-unknown-linux-gnu",
+    "linux-arm64-gnu": "aarch64-unknown-linux-gnu",
     "darwin-x64": "x86_64-apple-darwin",
     "darwin-arm64": "aarch64-apple-darwin",
     "win32-x64-msvc": "x86_64-pc-windows-msvc",
@@ -681,6 +677,22 @@ test("assembled NAPI packages carry only matching manifests and reject stale or 
     );
   }
   stageNapiManifests(root);
+  for (const [platform, target] of Object.entries(platforms)) {
+    const directory = join(root, "crates/jazz-napi/npm", platform);
+    const filename = `jazz-napi.${platform}.manifest.json`;
+    const receipt = JSON.parse(readFileSync(join(directory, filename), "utf8"));
+    assert.equal(
+      verifyPublishedNapiManifest(receipt, target, join(directory, `jazz-napi.${platform}.node`)),
+      null,
+    );
+    assert.deepEqual(
+      JSON.parse(readFileSync(join(root, "crates/jazz-napi/provenance", filename), "utf8")),
+      receipt,
+    );
+    assert.ok(
+      JSON.parse(readFileSync(join(directory, "package.json"), "utf8")).files.includes(filename),
+    );
+  }
   const node = join(root, "crates/jazz-napi/npm/linux-x64-gnu/jazz-napi.linux-x64-gnu.node");
   const manifest = JSON.parse(
     readFileSync(
@@ -783,4 +795,52 @@ test("RN test bridge recipe changes NAPI provenance and fingerprint only", () =>
     else process.env.JAZZ_RN_TEST_BRIDGE = previous;
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("excluded vendored path dependencies remain source-bound", () => {
+  const root = fixture();
+  try {
+    const vendor = "vendor/codec";
+    const workspaceManifest = join(root, "Cargo.toml");
+    writeFileSync(
+      workspaceManifest,
+      readFileSync(workspaceManifest, "utf8").replace(
+        "[workspace]",
+        '[workspace]\nexclude = ["vendor/codec"]',
+      ),
+    );
+    mkdirSync(join(root, vendor, "src"), { recursive: true });
+    writeFileSync(
+      join(root, vendor, "Cargo.toml"),
+      '[package]\nname = "fixture-codec"\nversion = "0.1.0"\nedition = "2021"\n[workspace]\n',
+    );
+    writeFileSync(join(root, vendor, "src/lib.rs"), "pub fn codec() {}\n");
+    const manifest = join(root, "crates/jazz-compression/Cargo.toml");
+    writeFileSync(
+      manifest,
+      readFileSync(manifest, "utf8").replace(
+        "[dependencies]",
+        '[dependencies]\nfixture-codec = { path = "../../vendor/codec" }',
+      ),
+    );
+    assert.ok(workspaceDependencyInputs(root, "crates/jazz-wasm/Cargo.toml").includes(vendor));
+    const before = nativeArtifactFingerprint(root, "wasm", "release");
+    writeFileSync(join(root, vendor, "src/lib.rs"), "pub fn changed_codec() {}\n");
+    assert.notEqual(nativeArtifactFingerprint(root, "wasm", "release"), before);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("dirty-input path batches keep every path, in order, under the argument budget", () => {
+  const paths = Array.from(
+    { length: 800 },
+    (_, i) => `crates/jazz/layers/engine/src/module_${i}.rs`,
+  );
+  const batches = pathBatches(paths);
+  assert.ok(batches.length > 1);
+  assert.deepEqual(batches.flat(), paths);
+  for (const batch of batches) assert.ok(batch.reduce((n, p) => n + p.length + 1, 0) <= 8000);
+  assert.deepEqual(pathBatches(["a-very-long-path"], 4), [["a-very-long-path"]]);
+  assert.deepEqual(pathBatches([]), []);
 });

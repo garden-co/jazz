@@ -33,23 +33,66 @@ Transactions use `.wait(...)` and report errors in the same way as individual mu
 Read choices control which data a query uses and when its **first result** is delivered.
 They are intentionally separate from write durability.
 
-New applications should use the product read choices `"local-first"`,
-`"remote"`, and `"remote-if-possible"`:
+New applications should use the two product read choices `"local-first"` and `"remote"`:
 
 - `"local-first"` uses cached local knowledge and shows pending local writes immediately, while still syncing.
 - `"remote"` uses the server's current query scope, without pending local writes. It waits while offline.
-- `"remote-if-possible"` prioritizes remote data, but falls back to local data if the app explicitly calls `db.disconnect()` (a timeout, connection error, or slow response never triggers that fallback).
-  Online, pending edits/deletes to in-scope rows and matching new inserts appear before server approval. Editing an existing out-of-scope row does not bring it into the result; cached related rows are not pulled in automatically.
 
-A one-shot keeps its initial choice. A `"remote-if-possible"` subscription follows
-confirmed disconnect/reconnect transitions in both directions, waiting for a fresh
-remote scope on reconnect. Losing remote access does not erase cached data:
-local-first and offline fallback may still show it. An actual synced deletion,
-however, hides the row from local reads too.
+Without a `tier`, browser clients read `"local-first"`. Other clients read `"remote"` when they have a
+server, and `"local-first"` when they don't.
 
-The older read values `"local"`, `"edge"`, and `"global"` remain accepted
-with their existing semantics during migration. They are legacy read controls only;
-write durability and `wait({ tier })` continue to use those values.
+Remote reads and your own writes:
+
+- A one-shot remote read (`db.all`, `db.one`) is answered after your earlier writes have been uploaded,
+  so it sees them.
+- A remote subscription shows pending writes only once the server confirms them.
+- Neither holds across a reconnect yet: writes still being re-sent after a reconnect may be missing
+  from a remote read ([#3863](https://github.com/garden-co/jazz/issues/3863)).
+
+### Waiting for the server (`firstLoadRemoteWaitMs`)
+
+A local-first read accepts an optional `firstLoadRemoteWaitMs` that bounds how long
+its first result may wait for the server. The default, `0`, is plain `"local-first"`. It applies to
+`"local-first"` and the browser default; TypeScript rejects it with `"remote"` (JavaScript callers have it ignored). In Rust, use
+`client.query_local_first(query, timeout)` and `client.subscribe_local_first(query, timeout)`.
+
+Only the initial load waits: a one-shot read, or a subscription's first callback. While the client
+looks online (its connection is live, or its connection attempt started less than five seconds
+ago), the first result waits up to `firstLoadRemoteWaitMs` for the server's answer and then shows that
+server-confirmed result, together with the client's own pending writes. If the server has not
+answered by then, the local result is shown. The read waits even when local data exists, but never
+longer than the timeout.
+
+It never waits on a server it cannot reach. The first result is local, and immediate, when no
+server is configured, after `db.disconnect()`, while the connection is down or retrying, or when the
+connection attempt fails. If the connection drops during the wait, the local result is delivered at
+that moment. After the first result, a subscription behaves exactly like `"local-first"`: local
+writes show immediately and remote rows appear as they sync.
+
+Queries with an `offset` are the exception. A partly synced local cache would apply the offset to
+the wrong rows, so while waiting an offset window reads the server's page. If the timeout passes
+first, it shows the cached page; a subscription then switches to the server's page when it
+arrives, so rows can shift at that moment.
+
+### Removed read tiers
+
+Reads accept only `"local-first"` and `"remote"`; any other name throws.
+
+- `"local-first-unless-empty"` (`ReadTier.LocalFirstUnlessEmpty`) was removed. It showed a
+  non-empty cache at once and made only an **empty** local result wait for the server, without a
+  time limit once connected. Use `"local-first"` plus a `firstLoadRemoteWaitMs` of, for example, a
+  few seconds. The new option also waits when the cache has data, but is always bounded by the
+  timeout.
+- The read names `"local"` and `"global"` (and the `"core"` alias) were removed. Use
+  `"local-first"` for `"local"` and `"remote"` for `"global"`. A one-shot `"remote"` read still sees
+  your earlier writes, but a `"remote"` subscription shows your pending writes only once the server
+  confirms them, where the old `"global"` subscription showed them at once.
+- `"remote-if-possible"` and `"edge"` were removed in alpha.57.
+
+Losing remote access does not erase cached data: local-first reads may still show it. An actual
+synced deletion, however, hides the row from local reads too.
+
+Write durability is separate and unchanged: it uses `wait({ tier: "local" | "global" })`.
 
 These options apply to:
 
@@ -68,7 +111,7 @@ storage driver or a JavaScript-side SQLite path.
 
 <Tabs
   groupId="jazz-framework"
-  items={["React", "Vue", "Svelte", "Solid", "TypeScript", "Rust"]}
+  items={["React", "Vue", "Svelte", "Solid", "TypeScript", "Effect", "Rust"]}
   persist
   updateAnchor
 >
@@ -97,6 +140,11 @@ storage driver or a JavaScript-side SQLite path.
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-durability-tier-ts
     </include>
   </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts" meta='title="app.ts"'>
+      ../examples/docs/todo-effect/src/docs-snippets.ts#reading-durability-tier-effect
+    </include>
+  </Tab>
   <Tab value="Rust">
     <include cwd lang="rs" meta='title="main.rs"'>
       ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-durability-tier-rust
@@ -106,11 +154,8 @@ storage driver or a JavaScript-side SQLite path.
 
 For most queries and subscriptions, omitting a tier is the right choice: Jazz delivers results from local storage immediately and streams in remote updates as they arrive. Reserve explicit tiers for cases where eventual consistency is not acceptable.
 
-<Callout type="warn">
-  The read tier gates the **first** delivery of a subscription only. After the initial snapshot
-  arrives at the requested tier, subsequent updates are delivered as they reach the local node,
-  regardless of which tier they've propagated to. For example, a subscription with `tier: "global"`
-  guarantees a globally-consistent initial snapshot, but later incremental updates from other
-  clients may arrive through edge tiers before being globally available **even if the durability of
-  the write is set to 'global'**.
+<Callout type="info" title="Reads and write confirmation are different">
+  Strict remote subscriptions use Core-authorized state for later updates as well as their initial
+  result. Local-first subscriptions may display pending changes before Core accepts them. Waiting
+  for a write does not change the read choice of a separate subscription.
 </Callout>

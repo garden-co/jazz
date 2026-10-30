@@ -1,10 +1,9 @@
-mod common;
+use crate::common;
 
-use jazz::db::{Db, DbConfig, DbIdentity, ExclusiveTxOps, MergeableTxOps, SeededRowIdSource};
-use jazz::groove::records::Value;
-use jazz::groove::storage::TestStorage;
+use jazz::db::{Db, DbConfig, DbIdentity, SeededRowIdSource};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, col, gt, lit};
+use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{
     ColumnDescriptor, ColumnMergeStrategy, ColumnType, ObjectId, OpenTransactionId, PolicyExpr,
@@ -80,6 +79,7 @@ fn metadata_schema(
             columns: RowDescriptor::new(vec![column]),
             indexed_columns: indexed_columns
                 .map(|columns| columns.into_iter().map(Into::into).collect()),
+            composite_indexes: Vec::new(),
             policies: allow_all_policies(),
             branch_by: Vec::new(),
         },
@@ -128,13 +128,10 @@ fn empty_schema() -> JazzSchema {
     compile_schema(&SchemaBuilder::new().build())
 }
 
-async fn open_owner(schema: JazzSchema) -> Db<TestStorage> {
-    let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+async fn open_owner(schema: JazzSchema) -> Db {
     Db::open(
         DbConfig::new(
             schema,
-            TestStorage::new(&refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x31; 16]),
                 author: AuthorSubject::for_test_bytes([0xa1; 16]),
@@ -165,7 +162,7 @@ fn registered_schema_views_share_one_open_batch() {
         let batch = OpenTransactionId::new();
         owner.begin_mergeable(batch).await.unwrap();
         old_view
-            .mergeable_tx_ref(batch)
+            .tx_ref(batch)
             .insert(
                 "items",
                 Default::default(),
@@ -177,7 +174,7 @@ fn registered_schema_views_share_one_open_batch() {
             .await
             .unwrap();
         new_view
-            .mergeable_tx_ref(batch)
+            .tx_ref(batch)
             .insert(
                 "items",
                 Default::default(),
@@ -194,11 +191,11 @@ fn registered_schema_views_share_one_open_batch() {
         let rows = owner.read(&query).unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(
-            rows[0].cell(&schema("old-default").tables[0], "label"),
+            rows[0].cell("label"),
             Some(Value::String("old-default".to_owned()))
         );
         assert_eq!(
-            rows[1].cell(&schema("new-default").tables[0], "label"),
+            rows[1].cell("label"),
             Some(Value::String("new-default".to_owned()))
         );
     });
@@ -281,6 +278,60 @@ fn automatic_schema_view_admission_rejects_non_lens_metadata_changes() {
         assert!(error.message.contains("index metadata conflicts"));
     });
 }
+/// A UUID reference must name a declared table, but schema admission does not
+/// require a referenced row to exist yet.
+#[test]
+fn public_schema_rejects_uuid_reference_to_absent_table() {
+    let schema = SchemaBuilder::new()
+        .table(TableSchemaBuilder::new("roots").fk_column("target_id", "targets"))
+        .build();
+
+    let error = JazzSchema::new(&schema)
+        .expect_err("a UUID reference to an absent table must fail schema admission");
+    let diagnostic = error.to_string();
+    assert!(
+        diagnostic.contains("roots") && diagnostic.contains("target_id"),
+        "diagnostic must identify the source table and column: {diagnostic}"
+    );
+    assert!(
+        diagnostic.contains("targets"),
+        "diagnostic must identify the absent referenced table: {diagnostic}"
+    );
+}
+
+/// A declared reference is only valid on UUID-shaped source columns; the
+/// conversion diagnostic must identify the particular malformed source.
+#[test]
+fn public_schema_rejects_references_on_non_uuid_columns() {
+    for (column_name, column_type) in [
+        ("text_target", ColumnType::Text),
+        ("integer_target", ColumnType::Integer),
+    ] {
+        let mut schema = SchemaBuilder::new()
+            .table(TableSchemaBuilder::new("roots"))
+            .table(TableSchemaBuilder::new("targets"))
+            .build();
+        schema
+            .get_mut(&TableName::new("roots"))
+            .expect("roots table is declared")
+            .columns
+            .columns
+            .push(ColumnDescriptor::new(column_name, column_type).references("targets"));
+
+        let error = JazzSchema::new(&schema)
+            .expect_err("non-UUID reference metadata must fail schema admission");
+        let diagnostic = error.to_string();
+        assert!(
+            diagnostic.contains("roots") && diagnostic.contains(column_name),
+            "diagnostic must identify the malformed source column {column_name:?}: {diagnostic}"
+        );
+        assert!(
+            diagnostic.to_ascii_lowercase().contains("reference")
+                || diagnostic.to_ascii_lowercase().contains("uuid"),
+            "diagnostic must identify the UUID/reference mismatch: {diagnostic}"
+        );
+    }
+}
 
 /// A runtime owner may exist before any typed application schema is known;
 /// registering the first typed view must still permit local-first staging.
@@ -291,7 +342,7 @@ fn empty_owner_accepts_first_typed_schema_view() {
         let batch = OpenTransactionId::new();
         owner.begin_mergeable(batch).await.unwrap();
         let view = owner.register_schema_view(schema("first")).await.unwrap();
-        view.mergeable_tx_ref(batch)
+        view.tx_ref(batch)
             .insert(
                 "items",
                 Default::default(),
@@ -303,11 +354,7 @@ fn empty_owner_accepts_first_typed_schema_view() {
             .await
             .unwrap();
         let prepared = view.prepare_query(&view.table("items")).unwrap();
-        let rows = view
-            .mergeable_tx_ref(batch)
-            .all_prepared(&prepared)
-            .await
-            .unwrap();
+        let rows = view.tx_ref(batch).all_prepared(&prepared).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].row_uuid(), RowUuid::from_bytes([3; 16]));
         owner.commit_mergeable_handle(batch).await.unwrap();
@@ -324,7 +371,7 @@ fn one_batch_accepts_writes_from_structurally_distinct_views() {
         owner.begin_mergeable(batch).await.unwrap();
         let first = owner.register_schema_view(schema("same")).await.unwrap();
         first
-            .mergeable_tx_ref(batch)
+            .tx_ref(batch)
             .insert(
                 "items",
                 Default::default(),
@@ -340,7 +387,7 @@ fn one_batch_accepts_writes_from_structurally_distinct_views() {
             .await
             .unwrap();
         second
-            .mergeable_tx_ref(batch)
+            .tx_ref(batch)
             .insert(
                 "items",
                 Default::default(),
@@ -353,11 +400,7 @@ fn one_batch_accepts_writes_from_structurally_distinct_views() {
             .unwrap();
 
         let prepared = second.prepare_query(&second.table("items")).unwrap();
-        let rows = second
-            .mergeable_tx_ref(batch)
-            .all_prepared(&prepared)
-            .await
-            .unwrap();
+        let rows = second.tx_ref(batch).all_prepared(&prepared).await.unwrap();
         assert_eq!(rows.len(), 2);
         owner.commit_mergeable_handle(batch).await.unwrap();
     });
@@ -374,7 +417,7 @@ fn typed_view_reads_and_updates_preexisting_snapshot_rows() {
 
         let seed = OpenTransactionId::new();
         owner.begin_mergeable(seed).await.unwrap();
-        view.mergeable_tx_ref(seed)
+        view.tx_ref(seed)
             .insert(
                 "items",
                 Default::default(),
@@ -389,7 +432,7 @@ fn typed_view_reads_and_updates_preexisting_snapshot_rows() {
 
         let batch = OpenTransactionId::new();
         owner.begin_mergeable(batch).await.unwrap();
-        let tx = view.mergeable_tx_ref(batch);
+        let tx = view.tx_ref(batch);
         assert_eq!(
             tx.read("items", row).await.unwrap().unwrap()["label"],
             Value::String("initial".to_owned())
@@ -433,7 +476,7 @@ fn ordinary_view_write_does_not_enter_open_owner_snapshot() {
     futures::executor::block_on(async {
         let owner = open_owner(empty_schema()).await;
         let batch = OpenTransactionId::new();
-        owner.begin_exclusive(batch).await.unwrap();
+        owner.begin_serializable(batch).await.unwrap();
         let view = owner.register_schema_view(schema("direct")).await.unwrap();
         let row = RowUuid::from_bytes([7; 16]);
         view.insert(
@@ -449,21 +492,21 @@ fn ordinary_view_write_does_not_enter_open_owner_snapshot() {
 
         let prepared = view.prepare_query(&view.table("items")).unwrap();
         assert!(
-            view.exclusive_tx_ref(batch)
+            view.tx_ref(batch)
                 .all_prepared(&prepared)
                 .await
                 .unwrap()
                 .is_empty()
         );
-        owner.abandon_exclusive_handle(batch).unwrap();
+        owner.abandon_transaction_handle(batch).unwrap();
         assert_eq!(view.read(&prepared).unwrap().len(), 1);
     });
 }
 
-/// Local-only runtimes enforce the same exclusive parent invariant before a
+/// Local-only runtimes enforce the same serializable parent invariant before a
 /// commit can resolve at Local durability; no remote authority is required.
 #[test]
-fn exclusive_view_commit_rejects_concurrent_local_row_change() {
+fn serializable_view_commit_rejects_concurrent_local_row_change() {
     futures::executor::block_on(async {
         let owner = open_owner(empty_schema()).await;
         let view = owner.register_schema_view(schema("base")).await.unwrap();
@@ -480,8 +523,8 @@ fn exclusive_view_commit_rejects_concurrent_local_row_change() {
         .unwrap();
 
         let batch = OpenTransactionId::new();
-        owner.begin_exclusive(batch).await.unwrap();
-        let tx = view.exclusive_tx_ref(batch);
+        owner.begin_serializable(batch).await.unwrap();
+        let tx = view.tx_ref(batch);
         assert!(tx.read("items", row).await.unwrap().is_some());
         view.update(
             "items",
@@ -500,7 +543,7 @@ fn exclusive_view_commit_rejects_concurrent_local_row_change() {
         .await
         .unwrap();
 
-        let error = owner.commit_exclusive_handle(batch).await.unwrap_err();
+        let error = owner.commit_serializable_handle(batch).await.unwrap_err();
         assert_eq!(
             error.to_string(),
             "(transaction_conflict): row visible parent changed since transaction write was staged"

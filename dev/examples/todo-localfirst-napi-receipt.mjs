@@ -11,19 +11,32 @@ const serverUrl = process.env.JAZZ_TODO_SERVER_URL ?? "http://127.0.0.1:4200";
 const adminSecret = process.env.JAZZ_TODO_ADMIN_SECRET ?? "todo-localfirst-admin";
 const backendSecret = process.env.JAZZ_TODO_BACKEND_SECRET ?? adminSecret;
 
-const app = s.defineApp({
-  projects: s.table({
-    name: s.string(),
-  }),
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-    description: s.string().optional(),
-    owner_id: s.uuid(),
-    parentId: s.ref("todos").optional(),
-    projectId: s.ref("projects").optional(),
-  }),
-});
+const app = s.defineApp(
+  {
+    projects: s.table(
+      {
+        name: s.string(),
+      },
+      { todosViaProject: s.reverse("todos", "project") },
+    ),
+    todos: s.table(
+      {
+        title: s.string(),
+        done: s.boolean(),
+        description: s.string().optional(),
+        owner_id: s.uuid(),
+        parentId: s.uuid().optional(),
+        projectId: s.uuid().optional(),
+      },
+      {
+        parent: s.rel("todos", "parentId"),
+        todosViaParent: s.reverse("todos", "parent"),
+        project: s.rel("projects", "projectId"),
+      },
+    ),
+  },
+  { migrations: "none" },
+);
 
 const permissions = s.definePermissions(app, ({ policy, session }) => {
   policy.todos.allowRead.where({});
@@ -101,22 +114,22 @@ try {
       description: "created through jazz-napi",
       owner_id: account.id,
     })
-    .wait({ tier: "edge" });
+    .wait({ tier: "global" });
 
   await waitFor(
-    async () => backend.one(app.todos.where({ id: inserted.id }), { tier: "edge" }),
+    async () => backend.one(app.todos.where({ id: inserted.id }), { tier: "remote" }),
     "backend read after insert",
   );
 
-  await db.update(app.todos, inserted.id, { done: true }).wait({ tier: "edge" });
+  await db.update(app.todos, inserted.id, { done: true }).wait({ tier: "global" });
   await waitFor(async () => {
-    const row = await backend.one(app.todos.where({ id: inserted.id }), { tier: "edge" });
+    const row = await backend.one(app.todos.where({ id: inserted.id }), { tier: "remote" });
     return row?.done === true ? row : null;
   }, "backend read after update");
 
-  await db.delete(app.todos, inserted.id).wait({ tier: "edge" });
+  await db.delete(app.todos, inserted.id).wait({ tier: "global" });
   await waitFor(async () => {
-    const row = await backend.one(app.todos.where({ id: inserted.id }), { tier: "edge" });
+    const row = await backend.one(app.todos.where({ id: inserted.id }), { tier: "remote" });
     return row === null ? true : null;
   }, "backend read after delete");
 

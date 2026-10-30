@@ -59,14 +59,22 @@ republishes the schema on change — no restart needed.
 
 ```ts
 const schema = {
-  todos: s.table({ title: s.string(), done: s.boolean() }),
-  projects: s.table({ name: s.string() }),
+  todos: s.table({ title: s.string(), done: s.boolean() }, {}),
+  projects: s.table({ name: s.string() }, {}),
 };
 ```
 
 Row ownership is enforced by `permissions.ts` via the `$createdBy` predicate,
 so you don't need an explicit `ownerId` column. Jazz records the creating
 session on every row and the permission policy scopes reads/writes to it.
+
+## Local development
+
+During `pnpm dev`, `withJazz` serves the development inspector and the SDK's
+`JazzSessionProvider` automatically attaches it to the app. Click the Jazz toggle
+in the bottom-right corner (or press `Alt+Shift+J`), then select `todos` in
+Data Explorer to inspect the app's local rows. The inspector is
+development-only and does not appear in production builds.
 
 ## Environment variables
 

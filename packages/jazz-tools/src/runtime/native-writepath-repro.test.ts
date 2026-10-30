@@ -7,18 +7,24 @@ import { schema as s } from "../index.js";
 import { startLocalJazzServer } from "../testing/index.js";
 
 const importSchema = {
-  parents: s.table({
-    label: s.string(),
-    ordinal: s.int(),
-  }),
-  children: s.table({
-    parent: s.ref("parents"),
-    label: s.string(),
-    ordinal: s.int(),
-  }),
+  parents: s.table(
+    {
+      label: s.string(),
+      ordinal: s.int(),
+    },
+    { childrenViaParent: s.reverse("children", "parentRelation") },
+  ),
+  children: s.table(
+    {
+      parent: s.uuid(),
+      label: s.string(),
+      ordinal: s.int(),
+    },
+    { parentRelation: s.rel("parents", "parent") },
+  ),
 };
 
-const importApp = s.defineApp(importSchema);
+const importApp = s.defineApp(importSchema, { migrations: "none" });
 const txCount = Number(process.env.JAZZ_WRITEPATH_TXS ?? "100");
 
 function rowId(index: number): string {
@@ -34,7 +40,6 @@ describe("native write path", () => {
       permissions: {},
       driver: { type: "persistent", dataPath: dir },
       adminSecret: "backend-authority-admin",
-      tier: "local",
     });
 
     try {
@@ -61,7 +66,6 @@ describe("native write path", () => {
       permissions: {},
       driver: { type: "persistent", dataPath: dir },
       adminSecret: "writepath-repro-admin",
-      tier: "local",
     });
     const db = context.asBackend();
     const parentWrite = db.insert(importApp.parents, {
@@ -122,7 +126,6 @@ describe("native write path", () => {
       adminSecret: server.adminSecret,
       backendSecret: server.backendSecret,
       env: "test",
-      tier: "local",
     });
     const db = context.asBackend();
     const parentWrite = db.insert(importApp.parents, {

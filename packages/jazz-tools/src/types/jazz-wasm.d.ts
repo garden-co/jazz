@@ -1,7 +1,11 @@
 declare module "jazz-wasm" {
   export default function init(input?: unknown): Promise<void>;
   export function initSync(input?: unknown): void;
+  export function validateSchema(schema: Uint8Array): void;
   export function nativeArtifactFingerprint(): string;
+  export function setJsonSchemaValidator(
+    compile: (schemaJson: string) => (instanceJson: string) => string | undefined,
+  ): void;
   export function setTraceEntryCollectionEnabled(enabled: boolean): void;
   export function drainTraceEntries(): unknown[];
   export function subscribeTraceEntries(callback: () => void): () => void;
@@ -28,6 +32,12 @@ declare module "jazz-wasm" {
   };
   export class PendingNativeRead {
     poll(): Uint8Array | null;
+    cancel(): void;
+  }
+  /** The core's upstream link machine, stepped with JSON documents. */
+  export class UpstreamLink {
+    constructor(seed: number);
+    handle(nowMs: number, input: string): string;
   }
   export class WasmPermissionAdviceRequest {
     readonly promise: Promise<"allowed" | "denied" | "unknown">;
@@ -54,6 +64,8 @@ declare module "jazz-wasm" {
     recvWireFrames(): Uint8Array[];
     routeAuxiliaryWireFrame(frame: Uint8Array): Promise<Uint8Array | undefined>;
     recvAuxiliaryWireFrames(maxFrames?: number, maxBytes?: number): Uint8Array[];
+    auxiliaryReceiveTimeoutMs(): number | undefined;
+    expireAuxiliaryReceive(): void;
     auxiliaryOutboundReady(): Promise<void>;
     tick(): Promise<number>;
     updateAuthenticatedClaims(claims: Record<string, unknown>): Promise<void>;
@@ -94,12 +106,16 @@ declare module "jazz-wasm" {
       appId: string,
       claimedAuthor: string,
     ): WasmDb;
-    /** Host-only relay open; `storageOwner` is supplied by broker ownership admission. */
+    /**
+     * Host-only relay open; `database` is the physical database name admitted by broker
+     * ownership admission. `pageStore` may carry `{ backend?: "indexeddb" | "opfs", path?: string }`
+     * to pick the SQLite VFS (IndexedDB, with the file named after `database`, by default).
+     */
     static openBrowser(
       pageStore: unknown,
       schema: Uint8Array,
       config: Uint8Array,
-      storageOwner: string,
+      database: string,
     ): Promise<WasmDb>;
     static openBrowserWithSelfSignedProof(
       pageStore: unknown,
@@ -108,7 +124,7 @@ declare module "jazz-wasm" {
       token: string,
       appId: string,
       claimedAuthor: string,
-      storageOwner: string,
+      database: string,
     ): Promise<WasmDb>;
     setLargeValueStagingPolicy(
       incomingBytesPerWindow: number,
@@ -128,9 +144,13 @@ declare module "jazz-wasm" {
       head?: unknown,
       base?: unknown,
     ): StreamingMutation;
-    static destroyBrowserStorage(namespace: string): Promise<void>;
+    /** Delete a durable browser store; no database may have it open. */
+    static destroyBrowserStorage(storage: unknown, database: string): Promise<void>;
+    /** Resolves once every commit so far is in the browser store's backing storage. */
+    flush(): Promise<void>;
 
-    registerSchema(schema: Uint8Array): WasmDb;
+    registerSchema(schema: Uint8Array, migrations?: Uint8Array): WasmDb;
+    captureSnapshot(): Uint8Array | PendingNativeRead;
     beginTransaction(
       openTransactionId: string,
       kind: string,
@@ -179,6 +199,14 @@ declare module "jazz-wasm" {
       descriptors: unknown,
       updatedAtMs?: number | null,
     ): WasmWrite;
+    updateLargeValuesInTransaction(
+      openTransactionId: string,
+      table: string,
+      rowId: Uint8Array,
+      patch: Uint8Array,
+      descriptors: unknown,
+      updatedAtMs?: number | null,
+    ): void;
     requestUpdatePermissionAdvice(
       table: string,
       rowId: Uint8Array,
@@ -219,12 +247,15 @@ declare module "jazz-wasm" {
     onMutationError(callback: (event: any) => void): void;
     tick(): Promise<void>;
     setNonDurableClient(): void;
+    /** How many local commits still wait for the server's verdict. */
+    pendingUploadCount(): number;
     /** @internal Foreground node-lease handoff only. */
-    foregroundTxTimeHighWater(): bigint;
+    foregroundTxTimeHighWater(): Promise<bigint>;
     /** @internal Foreground node-lease bootstrap only. */
     seedForegroundTxTimeHighWater(highWater: bigint): void;
     /** Exact wire features compiled into this WASM artifact. */
     wireFeatures(): number;
+    createUpstreamLink(seed: number): UpstreamLink;
     close(): Promise<boolean>;
     setSessionClaims(claims: Record<string, unknown> | null): void | Promise<void>;
     connectUpstream(): Promise<WasmTransport>;

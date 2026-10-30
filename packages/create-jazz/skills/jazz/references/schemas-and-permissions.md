@@ -11,8 +11,14 @@ schema lineage and migration conventions; do not create a migration format of yo
 - [Shared access recipe](https://jazz.tools/docs/recipes/access-control/shared-access)
 - [Group permissions recipe](https://jazz.tools/docs/recipes/access-control/group-permissions)
 
-Check the generated public types before choosing relation names or policy-builder syntax. A
-permission policy is the enforcement boundary; UI checks are not a substitute.
+Declare every table with `s.table(columns, relations)`, including `{}` when it has no relations.
+Store IDs with `s.uuid()` and name forward relations explicitly, for example
+`author: s.rel("users", "authorId")`. Declare inverse traversals explicitly with
+`authoredPosts: s.reverse("posts", "author")`; the second argument names the forward relation.
+There is no suffix-based inference, automatic inverse, or relation code generation.
+
+Check the schema's declared relation names and public types before choosing query or policy-builder
+syntax. A permission policy is the enforcement boundary; UI checks are not a substitute.
 
 Do not declare `createdAt`, `createdBy`, `updatedAt`, or `updatedBy` to duplicate Jazz provenance.
 Jazz supplies `$createdAt`, `$createdBy`, `$updatedAt`, and `$updatedBy` for queries, ordering, and

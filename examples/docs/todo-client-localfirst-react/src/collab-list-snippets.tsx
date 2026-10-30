@@ -3,23 +3,35 @@ import { useAll, useDb } from "jazz-tools/react";
 
 // #region collab-schema
 const schema = {
-  projects: s.table({
-    name: s.string(),
-  }),
-  tasks: s.table({
-    title: s.string(),
-    done: s.boolean(),
-    assignee_id: s.uuid().optional(),
-    projectId: s.ref("projects"),
-  }),
-  projectMembers: s.table({
-    projectId: s.ref("projects"),
-    user_id: s.uuid(),
-  }),
+  projects: s.table(
+    {
+      name: s.string(),
+    },
+    {
+      tasks: s.reverse("tasks", "project"),
+      members: s.reverse("projectMembers", "project"),
+    },
+  ),
+  tasks: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+      assignee_id: s.uuid().optional(),
+      projectId: s.uuid(),
+    },
+    { project: s.rel("projects", "projectId") },
+  ),
+  projectMembers: s.table(
+    {
+      projectId: s.uuid(),
+      user_id: s.uuid(),
+    },
+    { project: s.rel("projects", "projectId") },
+  ),
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema);
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
 // #endregion collab-schema
 
 // #region collab-permissions
@@ -38,9 +50,9 @@ s.definePermissions(app, ({ policy, anyOf, allowedTo, session }) => {
   policy.projects.allowUpdate.where({ "$createdBy.account": session.user.account });
 
   // Tasks: inherit from project
-  policy.tasks.allowRead.where(allowedTo.read("projectId"));
-  policy.tasks.allowInsert.where(allowedTo.read("projectId"));
-  policy.tasks.allowUpdate.where(allowedTo.read("projectId"));
+  policy.tasks.allowRead.where(allowedTo.read("project"));
+  policy.tasks.allowInsert.where(allowedTo.read("project"));
+  policy.tasks.allowUpdate.where(allowedTo.read("project"));
 
   // Members: only the creator can manage
   policy.projectMembers.allowInsert.where((member) =>

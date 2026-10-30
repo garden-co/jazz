@@ -8,15 +8,19 @@ Jazz is a local-first relational database with row-level permissions, real-time 
 
 ```ts
 import { schema as s } from "jazz-tools";
+import { migrations } from "./migrations";
 
 // Define your schema
 const schema = {
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-  }),
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+    },
+    {},
+  ),
 };
-const app = s.defineApp(schema);
+const app = s.defineApp(schema, { migrations });
 
 // Write — instant, works offline
 db.insert(app.todos, { title: "Ship it", done: false });

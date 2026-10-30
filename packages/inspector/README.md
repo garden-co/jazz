@@ -51,3 +51,84 @@ pnpm build:embedded
 
 The Jazz Vite and SvelteKit development integrations serve the embedded inspector as an in-app
 overlay by default. Set their `inspector` option to `false` to disable it.
+
+## Testing the embedded Inspector
+
+After producing the native correctness artifacts, `pnpm test:typescript-consumers`
+builds the embedded Inspector before starting either TypeScript test lane. Both
+lanes share those assets with `JAZZ_TEST_SEALED_INSPECTOR_DIST=1`: browser tests
+consume the prepared build, and Vite rejects embedded rebuilds before they can
+delete files another test is serving. Missing prepared assets stop both lanes.
+
+Outside that sealed run, `pnpm --filter inspector test:browser` builds the embedded
+Inspector before running Playwright. Native correctness-artifact admission still
+applies to both paths.
+
+## Staging a release on Vercel
+
+The package-build workflow builds the web app against its already verified Jazz
+Tools/WASM artifacts, then uploads `inspector-prebuilt`. Its receipt binds every
+output file (including Vercel routing) to the actual checked-out Git HEAD, not
+`GITHUB_SHA` (which can identify a synthetic PR merge in preview workflows). It avoids another
+native compilation on Vercel.
+
+A real publish of `publish-jazz-tools-alpha.yml` does this end to end after npm
+publication. It stages `inspector-prebuilt` from the tested release-preview run
+when the publisher reused that run's artifacts, otherwise from its own build of
+the same SHA, and hands the staged deployment URL straight to the promotion job.
+Vercel's Git integration never builds `release`, so nothing waits on it. An
+earlier **Check Inspector Vercel access** job, which also runs in candidate
+dry-runs, reads the project with the Inspector token and names the secret to fix
+if it can't. An Inspector failure never marks npm publication as failed.
+
+The access check also runs in the release preview, so a Vercel API error there
+turns "Release preview (alpha)" red and the publisher then rebuilds instead of
+reusing that preview's artifacts.
+
+If the publisher's Inspector jobs fail, first use **Re-run failed jobs** on that
+publisher run. That is the only route when the publisher used its own build: the
+artifact lives in a run that is now red, and manual staging admits only
+successful producer runs. When the publisher reused a preview run's artifacts,
+you can also run the same two workflows yourself. Run **Stage Inspector
+production** with the successful package-build run ID,
+deployment SHA, and branch. The workflow checks the artifact run's repository and
+success, proves its source tree equals the deployment SHA's tree, and checks the
+deployment branch still points to that SHA using an explicit `refs/heads` lookup
+(tags and raw commit aliases cannot substitute for the requested branch). Thus a release merge can reuse a
+verified preview artifact only when the entire source tree (including package
+versions) is identical. It verifies every downloaded output hash, then deploys with `--prebuilt
+--prod --skip-domain`. This does not assign production domains. Run **Promote
+inspector production** with that same SHA and branch after staging acceptance,
+passing the staged deployment URL from the staging log (or leaving it empty to
+resolve it by branch and SHA); it promotes those exact bytes without rebuilding.
+If verification times out, the error names what the production target and each
+domain alias still point at. Do not use a
+preview-to-production source redeploy, which can change install/build settings.
+The prebuilt artifact requires no Git checkout or Vercel-side install step.
+
+Only these successful, same-repository producer callers are admitted:
+
+- `preview-build.yml` on `pull_request` (its explicit checkout is the PR head).
+- `preview-jazz-tools-alpha-release.yml` on `push` or `workflow_dispatch` from
+  `changeset-release/*`.
+- `publish-jazz-tools-alpha.yml` on `push` or `workflow_dispatch` from `release`.
+
+Arbitrary workflows and manual publisher dry-runs on other branches are excluded
+from production staging even if they upload an artifact with the same name.
+The receipt SHA must match the admitted run's head SHA. Release merge reuse still
+requires equality of the entire source tree.
+
+For a local recovery from the downloaded artifact, first run
+`node dev/scripts/inspector-prebuilt.mjs verify DIRECTORY SOURCE_SHA`. Only use an
+artifact from the trusted successful workflow run for that SHA; the receipt is an
+integrity check, not a signature. Keep the output intact and use the same prebuilt
+staging flags and `githubCommitSha` / `githubCommitRef` metadata as the workflow.
+Preserve the artifact source SHA separately in `releaseSourceSha`. The Vercel
+project root is `packages/inspector`: copy the verified `.vercel/output` to
+`packages/inspector/.vercel/output` as well before invoking the CLI from the
+staging root. Both output locations are required by the CLI/project-root checks.
+
+The three `VERCEL_INSPECTOR_*` GitHub secrets must identify one project and team
+and a token with access to both deployment lookup and deployment/promotion. A 403
+requires repairing this configuration; local CLI access does not establish that
+the GitHub token works. Never remove the exact-SHA promotion check to recover.

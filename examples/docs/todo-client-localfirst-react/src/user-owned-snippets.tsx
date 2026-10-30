@@ -3,14 +3,17 @@ import { useAll, useDb, useSession } from "jazz-tools/react";
 
 // #region owned-schema
 const schema = {
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-  }),
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+    },
+    {},
+  ),
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema);
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
 // #endregion owned-schema
 
 // #region owned-permissions
@@ -53,15 +56,20 @@ export function AddTodo() {
 
 // #region owned-schema-explicit
 const schemaExplicit = {
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-    owner_id: s.uuid(),
-  }),
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+      owner_id: s.uuid(),
+    },
+    {},
+  ),
 };
 
 type ExplicitAppSchema = s.Schema<typeof schemaExplicit>;
-export const explicitApp: s.App<ExplicitAppSchema> = s.defineApp(schemaExplicit);
+export const explicitApp: s.App<ExplicitAppSchema> = s.defineApp(schemaExplicit, {
+  migrations: "none",
+});
 // #endregion owned-schema-explicit
 
 // #region owned-permissions-explicit

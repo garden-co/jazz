@@ -20,7 +20,7 @@ export function useMyProfile(): Profile | null {
   const [optimisticProfile, setOptimisticProfile] = useState<Profile | null>(null);
   const [confirmedProfileId, setConfirmedProfileId] = useState<string | null>(null);
   const sharedWriteOptions = useMemo(
-    () => (db.getConfig().serverUrl ? { tier: "edge" as const } : undefined),
+    () => (db.getConfig().serverUrl ? { tier: "global" as const } : undefined),
     [db],
   );
 

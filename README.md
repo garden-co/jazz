@@ -26,7 +26,7 @@ Or follow one of the setup guides:
 
 ## Architecture specs
 
-The authoritative architecture contracts live with the crates: [`crates/jazz/SPEC/`](crates/jazz/SPEC/) (data model, transactions, authorization, sync, queries, lowering, API) and [`crates/groove/SPEC/`](crates/groove/SPEC/) (storage model, operators, incremental maintenance). Each chapter is structured as Overview (read this) / Details / Open Questions.
+The authoritative architecture contracts live with the crates: [`crates/jazz/SPEC/`](crates/jazz/SPEC/) (data model, transactions, authorization, sync, queries, storage, API). Each chapter is structured as Overview (read this) / Details / Open Questions.
 
 ## Prerequisites
 
@@ -58,7 +58,7 @@ The homepage and documentation are a self-contained Next.js application under
 `docs/`. Build them with `pnpm build:vercel-docs`; they do not need a Rust or
 React Native bootstrap.
 
-Server builds compile RocksDB from source on first build (cached afterwards by `sccache`); this requires a C/C++ toolchain and `libclang` (`xcode-select --install` on macOS; `libclang-dev`/`clang-devel` on Linux).
+Native builds compile the bundled SQLite from source on first build (cached afterwards by `sccache`); this requires a C compiler (`xcode-select --install` on macOS; `build-essential` on Linux).
 
 ## Package versioning
 
@@ -119,6 +119,4 @@ with prerelease mode active.
 
 # License
 
-Jazz is MIT licensed. The webfont files bundled with the homepage under
-`docs/public/fonts/` are expressly excluded from the repo MIT license and
-remain subject to their own upstream license terms.
+Jazz is MIT licensed.

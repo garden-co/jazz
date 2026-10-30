@@ -1,5 +1,6 @@
 #include "foreground-runtime.h"
 #include "account-store-lock.h"
+#include "foreground-tick-diagnostic.h"
 
 #include <algorithm>
 #include <array>
@@ -345,10 +346,38 @@ class VectorMutableBuffer final : public facebook::jsi::MutableBuffer {
     case JAZZ_NATIVE_RELAY_BACKPRESSURE:
       throw JSError(runtime, std::string("Jazz native foreground runtime is busy during ") +
                                 operation + "; retry after the next scheduled tick");
+    case JAZZ_NATIVE_RELAY_REMOTE_PLAINTEXT_ENDPOINT:
+      throw JSError(runtime,
+                    "Remote HTTP sessions require HTTPS; local development endpoints "
+                    "remain supported.");
+    case JAZZ_NATIVE_RELAY_UNSUPPORTED_STORAGE_CODECS: {
+      // Thrown as an Error carrying the stable code every platform uses, so
+      // the app can detect the refusal, delete the store and resync.
+      auto error = runtime.global()
+                       .getPropertyAsFunction(runtime, "Error")
+                       .callAsConstructor(
+                           runtime,
+                           facebook::jsi::String::createFromUtf8(
+                               runtime,
+                               std::string("Unsupported storage format: the local Jazz store was "
+                                           "written by an older version and cannot be opened "
+                                           "during ") +
+                                   operation + "; delete it and resync from Core"))
+                       .asObject(runtime);
+      error.setProperty(runtime, "code", "unsupported_storage_codecs");
+      throw JSError(runtime, Value(runtime, error));
+    }
     default:
       throw JSError(runtime, std::string("Jazz native foreground runtime failed during ") +
                                 operation);
   }
+}
+
+[[noreturn]] void throwTickStatus(Runtime &runtime, jazz_native_relay_status status) {
+  if (const char *message = foregroundTickFailureMessage(status)) {
+    throw JSError(runtime, message);
+  }
+  throwStatus(runtime, status, "tick");
 }
 
 std::array<uint8_t, 32> copyAdmittedCapability(Runtime &runtime,
@@ -480,6 +509,9 @@ class ForegroundHandle final : public HostObject,
 
   Value get(Runtime &runtime, const PropNameID &name) override {
     const auto property = name.utf8(runtime);
+    if (property == "supportsSnapshotCapture") {
+      return Value(jazz_native_relay_supports_snapshot_capture());
+    }
     if (property == "isClosed") {
       return Function::createFromHostFunction(
           runtime, PropNameID::forAscii(runtime, "isClosed"), 0,
@@ -514,7 +546,7 @@ class ForegroundHandle final : public HostObject,
                 self->lease_->nativeLease(), self->handle_);
             lease_lock.unlock();
             if (status != JAZZ_NATIVE_RELAY_OK) {
-              throwStatus(runtime, status, "tick");
+              throwTickStatus(runtime, status);
             }
             return Value::undefined();
           });
@@ -603,7 +635,8 @@ class ForegroundHandle final : public HostObject,
 
   std::vector<PropNameID> getPropertyNames(Runtime &runtime) override {
     std::vector<PropNameID> names;
-    names.reserve(6);
+    names.reserve(7);
+    names.emplace_back(PropNameID::forAscii(runtime, "supportsSnapshotCapture"));
     names.emplace_back(PropNameID::forAscii(runtime, "tick"));
     names.emplace_back(PropNameID::forAscii(runtime, "isClosed"));
     names.emplace_back(PropNameID::forAscii(runtime, "close"));

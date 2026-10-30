@@ -40,6 +40,57 @@ const tick = async () => {
   for (let i = 0; i < 12; i++) await Promise.resolve();
 };
 describe("Jazz session lifecycle", () => {
+  it("does not open an unsaved selection and retries its failed synchronous persistence hook", async () => {
+    const selected = handle("selected");
+    const failure = new Error("cannot queue selection");
+    let fail = true;
+    const durable = deferred();
+    const selectionChanged = vi.fn(() => {
+      if (fail) throw failure;
+    });
+    const settle = vi.fn((retry: boolean) => (retry ? durable.promise : Promise.resolve()));
+    const accounts = new AccountManager<JWTAuth>(
+      {
+        createLocalFirst: () => selected,
+        registerJWT: async () => selected,
+        loginJWT: async () => selected,
+        loginOrRegisterJWT: async () => selected,
+        linkJWT: async () => selected,
+      },
+      undefined,
+      { selectionChanged, settle },
+    );
+    const openClient = vi.fn(async () => ({ shutdown: async () => {} }));
+    const session = await createJazzSessionOwner({ accounts, openClient });
+    settle.mockClear();
+
+    await expect(session.createLocalFirst()).rejects.toBe(failure);
+    expect(session.getSnapshot()).toMatchObject({
+      status: "error",
+      account: selected,
+      error: failure,
+    });
+    expect(accounts.getSnapshot().error).toBe(failure);
+    expect(openClient).not.toHaveBeenCalled();
+    await expect(session.retry()).rejects.toBe(failure);
+    expect(selectionChanged).toHaveBeenCalledTimes(2);
+    expect(settle).not.toHaveBeenCalled();
+    expect(openClient).not.toHaveBeenCalled();
+
+    fail = false;
+    const retry = session.retry();
+    await tick();
+    expect(selectionChanged).toHaveBeenNthCalledWith(3, selected);
+    expect(settle).toHaveBeenCalledExactlyOnceWith(true);
+    expect(openClient).not.toHaveBeenCalled();
+    durable.resolve();
+    await retry;
+    expect(openClient).toHaveBeenCalledExactlyOnceWith(selected);
+    expect(session.getSnapshot()).toMatchObject({ status: "ready", account: selected });
+    expect(accounts.getSnapshot().error).toBeUndefined();
+    await session.close();
+  });
+
   it("login-or-register waits for shutdown and uses the shared selection lifecycle", async () => {
     const { session, clients, enrollment, next } = await setup();
     const pending = deferred();
@@ -166,7 +217,7 @@ describe("Jazz session lifecycle", () => {
     await rejected;
     await close;
     expect(late.shutdown).toHaveBeenCalledOnce();
-    expect(session.getSnapshot()).toEqual({ status: "closed" });
+    expect(session.getSnapshot()).toEqual({ status: "closed", needsLogin: false });
     await expect(session.retry()).rejects.toThrow("closed");
   });
   it("release unblocks close while transition awaits detach", async () => {

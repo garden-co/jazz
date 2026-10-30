@@ -29,19 +29,23 @@ fn todo_query() -> jazz::query::Query {
 }
 
 async fn all_todos(client: &JazzClient) -> Vec<(ObjectId, Vec<Value>)> {
-    client.query(todo_query(), None).await.expect("query todos")
+    client
+        .query(todo_query(), jazz::tools::ReadTier::LocalFirst)
+        .await
+        .map(jazz::tools::test_support::ordinary_rows)
+        .expect("query todos")
 }
 
 async fn wait_for_todos(
     client: &JazzClient,
-    durability_tier: Option<DurabilityTier>,
+    read_tier: jazz::tools::ReadTier,
     description: &str,
     predicate: impl Fn(&[(ObjectId, Vec<Value>)]) -> bool,
 ) -> Vec<(ObjectId, Vec<Value>)> {
     wait_for_query(
         client,
         todo_query(),
-        durability_tier,
+        read_tier,
         Duration::from_secs(25),
         description,
         |rows| predicate(&rows).then_some(rows),
@@ -49,11 +53,11 @@ async fn wait_for_todos(
     .await
 }
 
-async fn wait_for_edge_ready(client: &JazzClient) {
+async fn wait_for_remote_ready(client: &JazzClient) {
     let _ = wait_for_todos(
         client,
-        Some(DurabilityTier::EdgeServer),
-        "EdgeServer query readiness",
+        jazz::tools::ReadTier::Remote,
+        "GlobalServer query readiness",
         |_| true,
     )
     .await;
@@ -63,7 +67,7 @@ async fn connect_user(server: &JazzServer, schema: Schema, user_id: &str) -> Jaz
     let client = jazz_testkit::connect(server.make_client_context_for_user(schema, user_id))
         .await
         .expect("connect user");
-    wait_for_edge_ready(&client).await;
+    wait_for_remote_ready(&client).await;
     client
 }
 
@@ -101,7 +105,7 @@ async fn insert_visible_todo(client: &JazzClient, title: &str, completed: bool) 
             row_input!("title" => title, "completed" => completed),
         )
         .expect("insert visible todo");
-    support::wait_for_edge_txs(
+    support::wait_for_global_txs(
         client,
         &[transaction_id.expect("ordinary mutation commits immediately")],
     )
@@ -235,6 +239,7 @@ async fn committed_transaction_rejects_later_handle_operations() {
             "update",
             closed_handle
                 .update(
+                    "todos",
                     todo_id,
                     vec![("title".to_string(), Value::Text("too late".to_string()))],
                 )
@@ -244,15 +249,16 @@ async fn committed_transaction_rejects_later_handle_operations() {
         (
             "delete",
             closed_handle
-                .delete(todo_id)
+                .delete("todos", todo_id)
                 .expect_err("committed transaction handle should reject deletes")
                 .to_string(),
         ),
         (
             "query",
             closed_handle
-                .query(todo_query(), None)
+                .query(todo_query(), jazz::tools::ReadTier::LocalFirst)
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .expect_err("committed transaction handle should reject queries")
                 .to_string(),
         ),
@@ -316,6 +322,7 @@ async fn rolled_back_transaction_rejects_later_handle_operations() {
             "update",
             closed_handle
                 .update(
+                    "todos",
                     todo_id,
                     vec![("title".to_string(), Value::Text("too late".to_string()))],
                 )
@@ -325,15 +332,16 @@ async fn rolled_back_transaction_rejects_later_handle_operations() {
         (
             "delete",
             closed_handle
-                .delete(todo_id)
+                .delete("todos", todo_id)
                 .expect_err("rolled-back transaction handle should reject deletes")
                 .to_string(),
         ),
         (
             "query",
             closed_handle
-                .query(todo_query(), None)
+                .query(todo_query(), jazz::tools::ReadTier::LocalFirst)
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .expect_err("rolled-back transaction handle should reject queries")
                 .to_string(),
         ),
@@ -372,19 +380,20 @@ async fn transaction_insert_is_visible_only_after_commit_settles() {
         "ordinary local reads should ignore an open transaction"
     );
     assert!(
-        bob.query(todo_query(), Some(DurabilityTier::EdgeServer))
+        bob.query(todo_query(), jazz::tools::ReadTier::Remote)
             .await
-            .expect("bob edge query before commit")
+            .map(jazz::tools::test_support::ordinary_rows)
+            .expect("bob remote query before commit")
             .is_empty(),
-        "peer edge reads should not see an uncommitted transaction"
+        "a peer's remote reads should not see an uncommitted transaction"
     );
 
     let committed_tx_id = tx.commit().expect("commit transaction");
-    support::wait_for_edge_txs(&alice, &[committed_tx_id]).await;
+    support::wait_for_global_txs(&alice, &[committed_tx_id]).await;
 
     let rows = wait_for_todos(
         &bob,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         "bob sees committed transaction",
         |rows| {
             rows.iter()
@@ -406,6 +415,41 @@ async fn transaction_insert_is_visible_only_after_commit_settles() {
 // Client inserts one staged transactional row.
 // The transaction updates that same row again before sealing.
 // The latest accepted row should reflect the update.
+// Todo row visible on main.
+// A transaction-scoped upsert of that row id overwrites it; explicit-id
+// inserts in serializable transactions are create-only, so upsert must not be
+// staged as one.
+local_tokio_test! {
+async fn transaction_upsert_overwrites_existing_row() {
+    let client = JazzClient::test_client(todo_schema()).await;
+    let (todo_id, _, _) = client
+        .insert(
+            "todos",
+            row_input!("title" => "original", "completed" => false),
+        )
+        .expect("insert todo on main");
+    let transaction_id = client
+        .begin_transaction()
+        .expect("begin transaction through client API")
+        .transaction_id();
+    let tx = client.with_write_context(WriteContext::default().with_transaction_id(transaction_id));
+
+    tx.upsert(
+        "todos",
+        *todo_id.uuid(),
+        row_input!("title" => "upserted", "completed" => true),
+    )
+    .expect("transaction upsert of an existing row");
+    client
+        .commit_transaction(transaction_id)
+        .expect("commit transaction");
+
+    let rows = all_todos(&client).await;
+    assert_eq!(rows.len(), 1);
+    assert!(has_todo(&rows, todo_id, "upserted", true), "{rows:?}");
+}
+}
+
 local_tokio_test! {
 async fn transaction_update_can_modify_row_inserted_earlier_in_same_transaction() {
     let schema = todo_schema();
@@ -426,6 +470,7 @@ async fn transaction_update_can_modify_row_inserted_earlier_in_same_transaction(
     assert_eq!(insert_tx_id, None);
     assert_eq!(
         tx.update(
+            "todos",
             todo_id,
             vec![("title".to_string(), Value::Text("final".to_string()))],
         )
@@ -441,7 +486,7 @@ async fn transaction_update_can_modify_row_inserted_earlier_in_same_transaction(
 
     let rows = wait_for_todos(
         &client,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         "client sees updated insert from transaction",
         |rows| has_todo(rows, todo_id, "final", false),
     )
@@ -474,6 +519,7 @@ async fn multiple_updates_to_same_row_in_transaction_compose() {
         .expect("begin transaction through client API");
     assert_eq!(
         tx.update(
+            "todos",
             todo_id,
             vec![("title".to_string(), Value::Text("renamed".to_string()))],
         )
@@ -482,6 +528,7 @@ async fn multiple_updates_to_same_row_in_transaction_compose() {
     );
     assert_eq!(
         tx.update(
+            "todos",
             todo_id,
             vec![("completed".to_string(), Value::Boolean(true))]
         )
@@ -490,8 +537,9 @@ async fn multiple_updates_to_same_row_in_transaction_compose() {
     );
     let tx_rows = tx
         .client()
-        .query(todo_query(), None)
+        .query(todo_query(), jazz::tools::ReadTier::LocalFirst)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("transaction-scoped query");
     assert!(has_todo(&tx_rows, todo_id, "renamed", true));
 
@@ -499,7 +547,7 @@ async fn multiple_updates_to_same_row_in_transaction_compose() {
 
     let rows = wait_for_todos(
         &client,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         "client sees composed transaction update",
         |rows| has_todo(rows, todo_id, "renamed", true),
     )
@@ -545,7 +593,7 @@ async fn multiple_writes_in_one_transaction_settle_atomically() {
 
     let rows = wait_for_todos(
         &client,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         "client sees both rows from one transaction",
         |rows| {
             rows.iter()
@@ -580,7 +628,7 @@ async fn transaction_staged_before_receiving_concurrent_commit_is_rejected() {
     let todo_id = insert_visible_todo(&alice, "shared", false).await;
     wait_for_todos(
         &bob,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         "bob sees shared row",
         |rows| has_todo(rows, todo_id, "shared", false),
     )
@@ -590,12 +638,14 @@ async fn transaction_staged_before_receiving_concurrent_commit_is_rejected() {
     let bob_tx = bob.begin_transaction().expect("begin bob transaction");
     let alice_staged = alice_tx
         .update(
+            "todos",
             todo_id,
             vec![("title".to_string(), Value::Text("alice".to_string()))],
         )
         .expect("alice stages update");
     let bob_staged = bob_tx
         .update(
+            "todos",
             todo_id,
             vec![("title".to_string(), Value::Text("bob".to_string()))],
         )
@@ -604,10 +654,10 @@ async fn transaction_staged_before_receiving_concurrent_commit_is_rejected() {
     assert!(alice_staged.is_none(), "transaction update remains staged");
     assert!(bob_staged.is_none(), "transaction update remains staged");
     let alice_tx_id = alice_tx.commit().expect("commit alice transaction");
-    support::wait_for_edge_txs(&alice, &[alice_tx_id]).await;
+    support::wait_for_global_txs(&alice, &[alice_tx_id]).await;
     wait_for_todos(
         &bob,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         "bob learns alice transaction before committing his staged transaction",
         |rows| has_todo(rows, todo_id, "alice", false),
     )
@@ -624,7 +674,7 @@ async fn transaction_staged_before_receiving_concurrent_commit_is_rejected() {
 
     let rows = wait_for_todos(
         &bob,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         "bob still sees alice value after rejection",
         |rows| has_todo(rows, todo_id, "alice", false),
     )
@@ -646,7 +696,7 @@ async fn transaction_staged_after_receiving_concurrent_commit_is_accepted() {
     let todo_id = insert_visible_todo(&alice, "shared", false).await;
     wait_for_todos(
         &bob,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         "bob sees shared row",
         |rows| has_todo(rows, todo_id, "shared", false),
     )
@@ -655,16 +705,17 @@ async fn transaction_staged_after_receiving_concurrent_commit_is_accepted() {
     let alice_tx = alice.begin_transaction().expect("begin alice transaction");
     let alice_staged = alice_tx
         .update(
+            "todos",
             todo_id,
             vec![("title".to_string(), Value::Text("alice".to_string()))],
         )
         .expect("alice stages update");
     assert!(alice_staged.is_none(), "transaction update remains staged");
     let alice_tx_id = alice_tx.commit().expect("commit alice transaction");
-    support::wait_for_edge_txs(&alice, &[alice_tx_id]).await;
+    support::wait_for_global_txs(&alice, &[alice_tx_id]).await;
     wait_for_todos(
         &bob,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         "bob learns alice transaction before staging",
         |rows| has_todo(rows, todo_id, "alice", false),
     )
@@ -673,17 +724,18 @@ async fn transaction_staged_after_receiving_concurrent_commit_is_accepted() {
     let bob_tx = bob.begin_transaction().expect("begin bob transaction");
     let bob_staged = bob_tx
         .update(
+            "todos",
             todo_id,
             vec![("title".to_string(), Value::Text("bob".to_string()))],
         )
         .expect("bob stages update from latest visible row");
     assert!(bob_staged.is_none(), "transaction update remains staged");
     let bob_tx_id = bob_tx.commit().expect("commit bob transaction");
-    support::wait_for_edge_txs(&bob, &[bob_tx_id]).await;
+    support::wait_for_global_txs(&bob, &[bob_tx_id]).await;
 
     let rows = wait_for_todos(
         &alice,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         "alice sees bob transaction after acceptance",
         |rows| has_todo(rows, todo_id, "bob", false),
     )
@@ -768,7 +820,7 @@ async fn global_wait_after_over_one_mib_websocket_import_settles() {
         .expect("queue one logical import message");
 
     let target_tx = client
-        .update(target_id, vec![("completed".to_owned(), Value::Boolean(true))])
+        .update("todos", target_id, vec![("completed".to_owned(), Value::Boolean(true))])
         .expect("update target row after import");
 
     client

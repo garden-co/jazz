@@ -28,38 +28,45 @@ function operatorsForColumn(
   nullable: boolean,
   references?: string,
 ): WhereOperator[] {
+  const operators: WhereOperator[] = [];
   if (references) {
-    return nullable ? ["eq", "ne", "in", "notIn", "isNull"] : ["eq", "ne", "in", "notIn"];
+    operators.push("eq", "ne", "in", "notIn");
+  } else {
+    switch (columnType.type) {
+      case "Text":
+        operators.push("eq", "ne", "contains", "in", "notIn");
+        break;
+      case "Boolean":
+        operators.push("eq", "ne", "in", "notIn");
+        break;
+      case "Integer":
+      case "BigInt":
+      case "Double":
+      case "Timestamp":
+        operators.push("eq", "ne", "gt", "gte", "lt", "lte", "in", "notIn");
+        break;
+      case "Uuid":
+      case "Bytea":
+      case "Json":
+      case "Enum":
+        operators.push("eq", "ne", "in", "notIn");
+        break;
+      case "EnumPayload":
+        // Payload enums deliberately use their dedicated `match` operator rather
+        // than pretending that a whole discriminated record is comparable.
+        break;
+      case "Array":
+        operators.push("eq", "contains", "in", "notIn");
+        break;
+      case "Row":
+        break;
+    }
   }
 
-  switch (columnType.type) {
-    case "Text":
-      return ["eq", "ne", "contains", "in", "notIn"];
-    case "Boolean":
-      return ["eq", "ne", "in", "notIn"];
-    case "Integer":
-    case "BigInt":
-    case "Double":
-      return ["eq", "ne", "gt", "gte", "lt", "lte", "in", "notIn"];
-    case "Timestamp":
-      return ["eq", "ne", "gt", "gte", "lt", "lte", "in", "notIn"];
-    case "Uuid":
-      return ["eq", "ne", "in", "notIn"];
-    case "Bytea":
-      return ["eq", "ne", "in", "notIn"];
-    case "Json":
-      return ["eq", "ne", "in", "notIn"];
-    case "Enum":
-      return ["eq", "ne", "in", "notIn"];
-    case "EnumPayload":
-      // Payload enums deliberately use their dedicated `match` operator rather
-      // than pretending that a whole discriminated record is comparable.
-      return [];
-    case "Array":
-      return ["eq", "contains", "in", "notIn"];
-    case "Row":
-      return [];
+  if (nullable && operators.length > 0) {
+    operators.push("isNull");
   }
+  return operators;
 }
 
 export function getSupportedWhereOperatorsForColumn(column: WhereOperatorColumn): WhereOperator[] {

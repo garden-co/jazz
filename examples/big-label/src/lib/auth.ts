@@ -23,6 +23,7 @@ export const auth = betterAuth({
       jwks: { keyPairConfig: { alg: "ES256" } },
       jwt: {
         issuer: jazzIssuer,
+        audience: jazzIssuer,
         expirationTime: "15m",
         getSubject: ({ user }: { user: { id: string } }) => user.id,
       },

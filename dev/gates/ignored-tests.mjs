@@ -2,6 +2,7 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { RUST_CI_FEATURES } from "./local-ci-equivalent.mjs";
 
 const root = path.resolve(import.meta.dirname, "../..");
 const fail = (message) => {
@@ -50,8 +51,11 @@ function compiledRustIgnores() {
       "--lib",
       "--bins",
       "--tests",
+      // Use the exact workspace Rust test selection. In CI this runs after the
+      // workspace Nextest partition, so the listing reuses its test binaries
+      // instead of compiling a second feature set of the whole workspace.
       "--features",
-      "test",
+      RUST_CI_FEATURES,
       "--message-format",
       "json",
     ],

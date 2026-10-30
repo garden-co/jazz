@@ -15,8 +15,7 @@ duplicate domain/IDs, cited Rust/TypeScript tests, and covered-without-test
 mistakes. The JSONL itself is the complete invariant data source; it carries
 no migration shadow registry or historical receipt.
 It reports `now` + `untested` as visible documented debt without failing.
-Groove-owned IDs live in
-[`../../groove/SPEC/INVARIANTS.md`](../../groove/SPEC/INVARIANTS.md).
+Every record is in the `jazz` domain.
 
 `Status` is a closed planning vocabulary validated by the gate. `Coverage` is
 deliberately free-form human receipt text, not an enum: only `✓` has a machine
@@ -32,6 +31,39 @@ Jazz chapter and therefore have no record yet. A record is created only when a
 chapter cites the invariant; this avoids treating deliberate numbering gaps as
 dangling references.
 
+The IDs `INV-SYNC-18` and `INV-SYNC-22` are retired with server-edge admission.
+They must not be reused for unrelated behavior.
+
+The removed server-edge acceptance and topology contracts `INV-EDGE-8` and
+`INV-EDGE-12` are retired; their identifiers must not be reused. Core now
+authorizes every ordinary client write as specified in chapter 9.
+
+Retired with the version DAG when linear Core-sequenced history replaced it:
+`INV-HIST-5` (Core mints merge versions over concurrent heads), `INV-HIST-7`
+(a merge version's time follows its heads), `INV-HIST-16` (divergent merge
+versions re-fold their raw head sets) and `INV-HIST-19` (the durable
+merge-head helper). Their IDs must not be reused. Core now merges every
+accepted write into the row's post-image as it sequences it, so there are no
+merge heads, merge versions or merge-head rows; the surviving user-visible
+guarantees are `INV-HIST-8`, `INV-HIST-10`, `INV-HIST-15` and `INV-EDGE-16`
+(ch. 4 §4.3).
+
+These ids must not be reused either: `INV-ARR-*`, `INV-INC-*`,
+`INV-LARGE-*`, `INV-MV-*`, `INV-OK-*`, `INV-REC-*`, `INV-SHAPE-*`,
+`INV-STORAGE-*`, `INV-TICK-*`, and every `INV-QUERY` id below `INV-QUERY-39`
+that has no record. Their
+guarantees are covered by `INV-QUERY-39` (recursive set semantics; was
+`INV-REC-3`, `INV-REC-6`, `INV-REC-17`), `INV-QUERY-40` (one-shot reads; was
+`INV-OK-3`, `INV-TICK-19`), `INV-QUERY-41` (result-only deliveries; was
+`INV-TICK-3`, `INV-QUERY-28`), `INV-PERF-9` (incremental cost; was
+`INV-INC-1`, `INV-INC-2`), `INV-CONTENT-1` (large values), `INV-LOWER-13`
+(ordering) and `INV-LENS-23` (storage format).
+
 ## Open Questions
 
 None.
+
+Retired with removal of server-edge admission: `INV-EDGE-4`, `INV-EDGE-5`,
+`INV-EDGE-9`, `INV-EDGE-10`, `INV-EDGE-17`, and `INV-EDGE-18`. Their IDs must
+not be reused. Core authorizes writes directly; there are no edge permission
+subscriptions, stale-scope acceptance, or deferred edge-fate gates.

@@ -12,7 +12,7 @@ Use `where(...)` to filter rows. Pass the columns you want to match on&hairsp;â€
 
 <WhereOperatorsTable />
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-filters-ts
@@ -20,6 +20,16 @@ Use `where(...)` to filter rows. Pass the columns you want to match on&hairsp;â€
 
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-where-operators-ts
+    </include>
+
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts">
+      ../examples/docs/todo-effect/src/docs-snippets.ts#reading-filters-effect
+    </include>
+
+    <include cwd lang="ts">
+      ../examples/docs/todo-effect/src/docs-snippets.ts#reading-where-operators-effect
     </include>
 
   </Tab>
@@ -39,10 +49,15 @@ Sort results with `orderBy(...)`. Pass a column name and optionally `"asc"` or `
   queries.
 </Callout>
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-sorting-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts">
+      ../examples/docs/todo-effect/src/docs-snippets.ts#reading-sorting-effect
     </include>
   </Tab>
   <Tab value="Rust">
@@ -52,16 +67,28 @@ Sort results with `orderBy(...)`. Pass a column name and optionally `"asc"` or `
   </Tab>
 </Tabs>
 
+### Sorting by an enum
+
+An `s.enum(...)` column sorts its variants in the order your schema declares them, not
+alphabetically. Reordering the variants, or adding one in the middle, changes the sort order
+from that schema version on. Clients still on an older schema version sort by their own
+declaration order. `min`, `max` and range filters such as `gt` follow the same order.
+
 ## Pagination
 
 `limit(n)` caps the number of rows returned; `offset(n)` skips that many rows. Combine them with a
 deterministic order. If the first sort column is not unique, add `orderBy("id")` as the final
 tie-breaker so page boundaries are stable.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-pagination-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts">
+      ../examples/docs/todo-effect/src/docs-snippets.ts#reading-pagination-effect
     </include>
   </Tab>
   <Tab value="Rust">
@@ -70,3 +97,23 @@ tie-breaker so page boundaries are stable.
     </include>
   </Tab>
 </Tabs>
+
+## Values over 64 KB
+
+A `string`, `bytes` or `json` value over 64 KB is stored in chunks, and filters and sorting
+never read those chunks. Shorter values filter and sort as described above. A value over
+64 KB is compared by identity instead of by content:
+
+- A filter literal over 64 KB in `eq`, `ne` or `in` is rejected with a "not supported yet"
+  error, and a literal of 64 KB or less never equals such a value.
+- Comparing two columns, joining on them, or grouping by them only treats two such values
+  as equal when they are the same stored value. Two equal values written separately, or
+  one edited in place, may compare as different.
+- Range comparisons (`gt`, `gte`, `lt`, `lte`, where a query or policy offers them) and
+  `contains` never match it.
+- In ascending order it sorts before every shorter value, after rows where the column is
+  null. It sorts in no meaningful order relative to other values over 64 KB.
+
+Reading the value, in whole or [in part](/docs/reading/includes-and-relations#partial-large-values),
+always returns its full content. If you need content equality, search, or ordering on long
+values, let us know: these are limits we plan to lift when someone needs them.

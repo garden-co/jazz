@@ -128,11 +128,14 @@ export function makeDeferred<T>(snapshot?: {
   return deferred;
 }
 
-interface QueryDefinition<T extends { id: string }> {
-  query: QueryBuilder<T>;
-  options?: QueryOptions;
-  snapshot?: T[];
-}
+type QuerySlot<T extends { id: string }> =
+  | {
+      phase: "registered";
+      query: QueryBuilder<T>;
+      options?: QueryOptions;
+      seed?: UseAllStatefulfilledData<T>;
+    }
+  | { phase: "live"; entry: InternalCacheEntry<T> };
 
 interface InternalCacheEntry<T extends { id: string }> {
   key: string;
@@ -184,11 +187,10 @@ export class SubscriptionsOrchestrator {
     );
   }
   private readonly cleanupDelayMs = 30_000;
-  private readonly entries = new Map<string, InternalCacheEntry<any>>();
-  private readonly queryDefinitions = new Map<string, QueryDefinition<any>>();
-  // Memoised fulfilled states for seeded keys read via peekState before their
-  // entry exists; keeps the snapshot identity stable for useSyncExternalStore.
-  private readonly seededStates = new Map<string, UseAllState<any>>();
+  // A key owns either its registration (including an identity-stable SSR seed)
+  // or its live entry. Teardown retires all state for that key together.
+  private readonly slots = new Map<string, QuerySlot<any>>();
+  // Only tracks changes that invalidate cached results; Db owns read identity.
   private session?: Session | null;
 
   constructor(
@@ -208,18 +210,16 @@ export class SubscriptionsOrchestrator {
 
     this.session = session;
 
-    for (const entry of this.entries.values()) {
-      this.resubscribeEntry(entry);
+    for (const slot of this.slots.values()) {
+      if (slot.phase === "live") this.resubscribeEntry(slot.entry);
     }
   }
 
   async shutdown(): Promise<void> {
-    for (const entry of this.entries.values()) {
-      this.destroyEntry(entry);
+    for (const slot of this.slots.values()) {
+      if (slot.phase === "live") this.destroyEntry(slot.entry);
     }
-    this.entries.clear();
-    this.queryDefinitions.clear();
-    this.seededStates.clear();
+    this.slots.clear();
   }
 
   /**
@@ -231,6 +231,14 @@ export class SubscriptionsOrchestrator {
     return `${this.config.appId}:${serializeQueryOptions(this.prepareQueryOptions(options))}:${query._build()}`;
   }
 
+  /**
+   * Register a query and optionally hydrate its initial result. A seed is
+   * immediately visible to readers and settles a pending entry's promise, but
+   * registration does not notify existing subscription listeners. This method
+   * also runs during Suspense render; invoking listeners here would re-enter
+   * mounted consumers during another component's render. Source deltas continue
+   * to drive listener notifications.
+   */
   makeQueryKey<T extends { id: string }>(
     query: QueryBuilder<T>,
     options?: QueryOptions,
@@ -238,18 +246,19 @@ export class SubscriptionsOrchestrator {
   ): string {
     const preparedOptions = this.prepareQueryOptions(options);
     const key = `${this.config.appId}:${serializeQueryOptions(preparedOptions)}:${query._build()}`;
-    this.queryDefinitions.set(key, {
-      query,
-      options: preparedOptions,
-      snapshot: snapshot ? [...snapshot] : undefined,
-    });
-    // A re-seed invalidates any memoised pre-entry snapshot state.
-    this.seededStates.delete(key);
-
-    const existing = this.entries.get(key) as InternalCacheEntry<T> | undefined;
-    if (existing && existing.state.status === "pending" && snapshot) {
-      existing.state = { status: "fulfilled", data: snapshot, error: null };
-      existing.resolvefulfilled(snapshot);
+    const slot = this.slots.get(key) as QuerySlot<T> | undefined;
+    if (slot?.phase === "live") {
+      if (slot.entry.state.status === "pending" && snapshot) {
+        slot.entry.state = { status: "fulfilled", data: snapshot, error: null };
+        slot.entry.resolvefulfilled(snapshot);
+      }
+    } else {
+      this.slots.set(key, {
+        phase: "registered",
+        query,
+        options: preparedOptions,
+        seed: snapshot ? { status: "fulfilled", data: [...snapshot], error: null } : undefined,
+      });
     }
 
     return key;
@@ -271,46 +280,24 @@ export class SubscriptionsOrchestrator {
    * `useSyncExternalStore` (`getSnapshot`/`getServerSnapshot`).
    */
   peekState<T extends { id: string }>(key: string): UseAllState<T> {
-    const existing = this.entries.get(key);
-    if (existing) {
-      return existing.state as UseAllState<T>;
-    }
-
-    const cachedSeed = this.seededStates.get(key);
-    if (cachedSeed) {
-      return cachedSeed as UseAllState<T>;
-    }
-
-    const queryDef = this.queryDefinitions.get(key);
-    if (queryDef?.snapshot !== undefined) {
-      const seeded: UseAllState<T> = {
-        status: "fulfilled",
-        data: queryDef.snapshot as T[],
-        error: null,
-      };
-      this.seededStates.set(key, seeded);
-      return seeded;
-    }
-
-    return SHARED_PENDING as UseAllState<T>;
+    const slot = this.slots.get(key);
+    return (
+      slot?.phase === "live" ? slot.entry.state : (slot?.seed ?? SHARED_PENDING)
+    ) as UseAllState<T>;
   }
 
   private ensureEntryForKey<T extends { id: string }>(key: string): InternalCacheEntry<T> {
-    const existing = this.entries.get(key);
-    if (existing) {
-      return existing as InternalCacheEntry<T>;
+    const slot = this.slots.get(key) as QuerySlot<T> | undefined;
+    if (slot?.phase === "live") {
+      return slot.entry;
     }
-
-    const queryDef = this.queryDefinitions.get(key);
-    if (!queryDef) {
+    if (!slot) {
       throw new Error(`Unknown query key "${key}". Call makeQueryKey(query, options) first.`);
     }
 
-    const hasSnapshot = queryDef.snapshot !== undefined;
-
     const deferred = makeDeferred<T[]>({
-      status: hasSnapshot ? "fulfilled" : "pending",
-      value: hasSnapshot ? queryDef.snapshot : undefined,
+      status: slot.seed ? "fulfilled" : "pending",
+      value: slot.seed?.data,
     });
     // Callback-based consumers (non-suspense React, Svelte, Vue) never await
     // this promise, so a subscription failure would surface as an unhandled
@@ -318,14 +305,17 @@ export class SubscriptionsOrchestrator {
     // own via `use()`.
     deferred.catch(() => {});
 
-    const initialState: UseAllState<T> = hasSnapshot
-      ? { status: "fulfilled", data: queryDef.snapshot as T[], error: null }
-      : { status: "pending", data: undefined, promise: deferred, error: null };
+    const initialState: UseAllState<T> = slot.seed ?? {
+      status: "pending",
+      data: undefined,
+      promise: deferred,
+      error: null,
+    };
 
     const entry = {
       key,
-      query: queryDef.query,
-      options: queryDef.options,
+      query: slot.query,
+      options: slot.options,
       generation: 0,
       state: initialState,
       promise: deferred,
@@ -371,12 +361,16 @@ export class SubscriptionsOrchestrator {
 
     this.subscribeEntry(entry);
 
-    this.entries.set(key, entry);
+    // Live entries are traversed in activation order, which can differ from
+    // registration order. Preserve that order for session changes and shutdown.
+    this.slots.delete(key);
+    this.slots.set(key, { phase: "live", entry });
     return entry;
   }
 
   private scheduleCleanup(entry: InternalCacheEntry<any>): void {
-    this.cancelCleanup(entry);
+    // Updates do not renew ownership: preserve the first unused deadline.
+    if (entry.listeners.size > 0 || entry.cleanupTimeoutId !== null) return;
     entry.cleanupTimeoutId = setTimeout(() => {
       if (entry.listeners.size === 0) {
         this.destroyEntry(entry);
@@ -398,12 +392,10 @@ export class SubscriptionsOrchestrator {
     entry.unsubscribe = undefined;
     entry.listeners.clear();
     this.cancelCleanup(entry);
-    this.entries.delete(entry.key);
-    this.queryDefinitions.delete(entry.key);
-    // Drop the memoised pre-entry snapshot too: leaving it behind would make a
-    // later `peekState` return stale `fulfilled` data for a key whose definition
-    // no longer exists (and which `getCacheEntry` would now reject as unknown).
-    this.seededStates.delete(entry.key);
+    const slot = this.slots.get(entry.key);
+    if (slot?.phase === "live" && slot.entry === entry) {
+      this.slots.delete(entry.key);
+    }
   }
 
   private subscribeEntry<T extends { id: string }>(entry: InternalCacheEntry<T>): void {
@@ -461,7 +453,6 @@ export class SubscriptionsOrchestrator {
           onError: reject,
         },
         entry.options,
-        this.session ?? undefined,
       );
       entry.unsubscribe = subscription;
       if (subscription.ready) {
@@ -532,6 +523,51 @@ function serializeQueryOptions(options?: QueryOptions): string {
   // The Inspector capability is deliberately non-enumerable, so it cannot be
   // forwarded as an application option. Retain it in cache identity: otherwise
   // an overlay query could share a full-propagation entry with the host app.
-  const serialized = JSON.stringify(options ?? {});
+  const hasBranch =
+    options !== undefined && Object.prototype.propertyIsEnumerable.call(options, "branch");
+  const hasBase =
+    options !== undefined && Object.prototype.propertyIsEnumerable.call(options, "base");
+  const branch = hasBranch ? options?.branch : undefined;
+  const base = hasBase ? options?.base : undefined;
+  const serializedOptions =
+    branch === undefined && base === undefined
+      ? (options ?? {})
+      : {
+          ...options,
+          ...(branch === undefined ? {} : { branch: encodeBranchSelector(branch) }),
+          ...(base === undefined ? {} : { base: encodeBranchBase(base) }),
+        };
+  const serialized = JSON.stringify(serializedOptions);
   return isInspectorLocalQueryOptions(options) ? `inspector-local:${serialized}` : serialized;
+}
+
+function isFrozenBranchBase(
+  base: NonNullable<QueryOptions["base"]>,
+): base is Extract<NonNullable<QueryOptions["base"]>, readonly unknown[]> {
+  return Array.isArray(base);
+}
+
+function encodeBranchBase(base: NonNullable<QueryOptions["base"]>): unknown {
+  if (isFrozenBranchBase(base)) return [encodeBranchSelector(base[0]), base[1]];
+  return encodeBranchSelector(base);
+}
+
+/**
+ * Encode only branch selectors for cache identity. Branch values are the one
+ * query-option shape whose scalar types have distinct runtime meanings but
+ * cannot be represented by JSON.stringify (notably bigint). Qualified fields
+ * are represented as sorted entries so insertion order does not affect a key.
+ */
+function encodeBranchSelector(selector: NonNullable<QueryOptions["branch"]>): unknown {
+  if (typeof selector === "string") return ["string", selector];
+  if (typeof selector === "number") return ["number", selector];
+  if (typeof selector === "bigint") return ["bigint", selector.toString()];
+
+  const qualified = selector as Record<string, NonNullable<QueryOptions["branch"]>>;
+  return [
+    "qualified",
+    ...Object.keys(qualified)
+      .sort()
+      .map((name) => [name, encodeBranchSelector(qualified[name])]),
+  ];
 }

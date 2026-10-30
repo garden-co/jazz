@@ -71,7 +71,13 @@ test("signin with existing account shows todos", async ({ page }) => {
   await waitForTodoApp(page);
   await addTodo(page, todo);
 
-  await page.goto("/");
+  await page.getByRole("button", { name: "Sign out", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Sign in", exact: true })).toBeVisible({
+    timeout: TIMEOUT,
+  });
+  await waitForTodoApp(page);
+  await expect(page.getByText(todo, { exact: true })).toHaveCount(0, { timeout: TIMEOUT });
+  await signIn(page, email, password);
   await waitForTodoApp(page);
   await expect(page.getByText(todo, { exact: true })).toHaveCount(1, { timeout: TIMEOUT });
 });

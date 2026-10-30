@@ -1,9 +1,14 @@
 import { createRequire } from "node:module";
 import { onTestFinished } from "vitest";
+import {
+  mergePermissionsIntoWasmSchema,
+  type CompiledPermissionsMap,
+} from "../../schema-permissions.js";
 import type { WasmSchema } from "../../drivers/types.js";
 import type { Runtime } from "../client.js";
 import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
 import { testAuthorBytes } from "./account-fixtures.js";
+import { deterministicBytes } from "../deterministic-bytes.js";
 
 type NapiModule = typeof import("jazz-napi");
 export type TestNapiNativeRuntimeAdapter = Runtime & { close?: () => void };
@@ -29,6 +34,14 @@ function formatNapiLoadError(error: unknown): Error {
   );
 }
 
+/**
+ * The core's upstream link machine, for runtime fixtures that fake the
+ * database but must reconnect exactly as a real runtime does.
+ */
+export function createUpstreamLink(seed: number): InstanceType<NapiModule["UpstreamLink"]> {
+  return new (require("jazz-napi") as NapiModule).UpstreamLink(seed);
+}
+
 export function hasJazzNapiBuild(): boolean {
   try {
     require("jazz-napi");
@@ -52,8 +65,33 @@ export async function loadNapiModule(): Promise<NapiModule> {
   return napiModulePromise;
 }
 
+type NativeRuntimeArgs = ConstructorParameters<typeof NativeRuntimeAdapter>;
+
+/** Construct the native representation inside the fixture boundary. */
+export function createNapiRuntimeFixture(
+  Runtime: NativeRuntimeArgs[0],
+  schema: WasmSchema,
+  permissions: CompiledPermissionsMap,
+  node: Uint8Array,
+  author: Uint8Array,
+  sourceId: number,
+  historyComplete: boolean,
+  options?: NativeRuntimeArgs[6],
+): NativeRuntimeAdapter {
+  return new NativeRuntimeAdapter(
+    Runtime,
+    mergePermissionsIntoWasmSchema(schema, permissions),
+    node,
+    author,
+    sourceId,
+    historyComplete,
+    options,
+  );
+}
+
 export async function createNapiNativeRuntimeAdapter(
   schema: WasmSchema,
+  permissions: CompiledPermissionsMap,
   opts?: {
     appId?: string;
     env?: string;
@@ -64,12 +102,13 @@ export async function createNapiNativeRuntimeAdapter(
   const appId = opts?.appId ?? "test-app";
   const env = opts?.env ?? "test";
   const peerId = opts?.peerId ?? "default";
-  const runtime = new NativeRuntimeAdapter(
+  const runtime = createNapiRuntimeFixture(
     {
       openMemory: (schemaBytes, configBytes) =>
         NapiDb.openMemory(schemaBytes, configBytes) as never,
     },
     schema,
+    permissions,
     deterministicBytes(`${appId}:${env}:${peerId}:node`),
     testAuthorBytes(`${appId}:${env}:${peerId}:author`),
     1,
@@ -82,6 +121,7 @@ export async function createNapiNativeRuntimeAdapter(
 
 export async function createPersistentNapiNativeRuntimeAdapter(
   schema: WasmSchema,
+  permissions: CompiledPermissionsMap,
   dataPath: string,
   opts?: {
     appId?: string;
@@ -93,7 +133,7 @@ export async function createPersistentNapiNativeRuntimeAdapter(
   const appId = opts?.appId ?? "test-app";
   const env = opts?.env ?? "test";
   const peerId = opts?.peerId ?? "default";
-  const runtime = new NativeRuntimeAdapter(
+  const runtime = createNapiRuntimeFixture(
     {
       openMemory: (schemaBytes, configBytes) =>
         NapiDb.openMemory(schemaBytes, configBytes) as never,
@@ -101,6 +141,7 @@ export async function createPersistentNapiNativeRuntimeAdapter(
         NapiDb.openPersistent(path, schemaBytes, configBytes) as never,
     },
     schema,
+    permissions,
     deterministicBytes(`${appId}:${env}:${peerId}:node`),
     testAuthorBytes(`${appId}:${env}:${peerId}:author`),
     1,
@@ -110,18 +151,4 @@ export async function createPersistentNapiNativeRuntimeAdapter(
   registerRuntimeCleanup(runtime);
 
   return runtime;
-}
-
-function deterministicBytes(seed: string): Uint8Array {
-  let hash = 0x811c9dc5;
-  const bytes = new Uint8Array(16);
-  const view = new DataView(bytes.buffer);
-  for (let round = 0; round < 4; round += 1) {
-    for (let i = 0; i < seed.length; i += 1) {
-      hash ^= seed.charCodeAt(i) + round;
-      hash = Math.imul(hash, 0x01000193);
-    }
-    view.setUint32(round * 4, hash >>> 0, true);
-  }
-  return bytes;
 }

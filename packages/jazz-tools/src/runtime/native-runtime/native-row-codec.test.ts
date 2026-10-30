@@ -6,12 +6,11 @@ import { PostcardReader, PostcardWriter } from "./native-codec.js";
 import { encodeCellsForPatch, encodeCellsForRow } from "./native-runtime-adapter.js";
 import {
   createRecord,
+  createRecordValueDecoder,
   decodeNativeTerminalRow,
-  decodeNativeTerminalRowWithDescriptor,
   decodeNativeRowValues,
   decodeRecordValue,
   encodeNativeRowValues,
-  assertTerminalRootDescriptorCompatible,
   fieldIndex,
   nativeRowDescriptorPublicName,
   readDescriptor,
@@ -35,62 +34,6 @@ type NativeRowCodecCase = {
 };
 
 describe("native row codec", () => {
-  it("decodes structured authors without inventing entity keys and rejects swapped identity fields", () => {
-    const rootId = "00000000-0000-4000-8000-000000000001";
-    const accountId = "00000000-0000-4000-8000-000000000002";
-    const columns: ColumnDescriptor[] = [
-      { name: "$createdBy", column_type: authorColumnType(), nullable: false },
-    ];
-    const identity = [
-      { name: "issuer", valueType: { tag: 8 } },
-      { name: "subject", valueType: { tag: 8 } },
-    ];
-    const author = [
-      { name: "account", valueType: { tag: 11 } },
-      { name: "identity", valueType: { tag: 16, record: identity } },
-    ];
-    const descriptor = [
-      { name: "__jazz_terminal_row_key", valueType: { tag: 11 } },
-      { name: "$createdBy", valueType: { tag: 16, record: author } },
-    ];
-    const encodeText = (value: string) => Uint8Array.from([2, ...new TextEncoder().encode(value)]);
-    const identityBytes = createRecord(identity, [
-      encodeText("https://issuer.example"),
-      encodeText("alice"),
-    ]);
-    for (const accountBytes of [uuidBytes(accountId)]) {
-      const bytes = createRecord(descriptor, [
-        uuidBytes(rootId),
-        createRecord(author, [accountBytes, identityBytes]),
-      ]);
-      const decoded = decodeNativeTerminalRowWithDescriptor(rootId, descriptor, columns, bytes);
-      expect(decoded.values[0]).toMatchObject({
-        type: "Row",
-        value: {
-          values: [
-            { type: "Uuid", value: accountId },
-            {
-              type: "Row",
-              value: {
-                values: [
-                  { type: "Text", value: "https://issuer.example" },
-                  { type: "Text", value: "alice" },
-                ],
-              },
-            },
-          ],
-        },
-      });
-      const value = decoded.values[0];
-      expect(value.type === "Row" && value.value.id).toBeUndefined();
-    }
-    const nullableAuthor: DescriptorField[] = structuredClone(descriptor);
-    nullableAuthor[1]!.valueType.record![0]!.valueType = { tag: 15, inner: { tag: 11 } };
-    expect(() => assertTerminalRootDescriptorCompatible(nullableAuthor, columns)).toThrow();
-    const swapped = structuredClone(descriptor);
-    swapped[1]!.valueType.record![1]!.valueType.record!.reverse();
-    expect(() => assertTerminalRootDescriptorCompatible(swapped, columns)).toThrow();
-  });
   it("resolves publication names from typed roles without exposing hidden metadata", () => {
     const text = { tag: 8 } as const;
 
@@ -146,85 +89,6 @@ describe("native row codec", () => {
     );
   });
 
-  it("accepts nested terminal descriptors with producer fields beyond the root output", () => {
-    const columns: ColumnDescriptor[] = [
-      { name: "title", column_type: { type: "Text" }, nullable: false },
-    ];
-    const descriptor = [
-      { name: "__jazz_terminal_row_key", valueType: { tag: 11 } },
-      { name: "title", valueType: { tag: 8 } },
-      {
-        name: "members",
-        valueType: { tag: 14, inner: { tag: 16, record: [] } },
-      },
-    ];
-
-    expect(() => assertTerminalRootDescriptorCompatible(descriptor, columns)).not.toThrow();
-  });
-
-  it("rejects terminal descriptors that omit, reorder, rename, or change required root fields", () => {
-    const columns: ColumnDescriptor[] = [
-      { name: "title", column_type: { type: "Text" }, nullable: false },
-      { name: "body", column_type: { type: "Text" }, nullable: false },
-    ];
-    const missingRootField = [{ name: "__jazz_terminal_row_key", valueType: { tag: 11 } }];
-    const wrongRootType = [
-      { name: "__jazz_terminal_row_key", valueType: { tag: 11 } },
-      { name: "title", valueType: { tag: 4 } },
-      { name: "members", valueType: { tag: 14, inner: { tag: 16, record: [] } } },
-    ];
-    const reorderedSameTypeFields = [
-      { name: "__jazz_terminal_row_key", valueType: { tag: 11 } },
-      { name: "body", valueType: { tag: 8 } },
-      { name: "title", valueType: { tag: 8 } },
-    ];
-    const wrongKeyName = [
-      { name: "not_the_terminal_key", valueType: { tag: 11 } },
-      { name: "title", valueType: { tag: 8 } },
-      { name: "body", valueType: { tag: 8 } },
-    ];
-
-    expect(() => assertTerminalRootDescriptorCompatible(missingRootField, columns)).toThrow(
-      "terminal root descriptor does not match the public projection",
-    );
-    expect(() => assertTerminalRootDescriptorCompatible(wrongRootType, columns)).toThrow(
-      "terminal root descriptor does not match the public projection",
-    );
-    expect(() => assertTerminalRootDescriptorCompatible(reorderedSameTypeFields, columns)).toThrow(
-      "terminal root descriptor does not match the public projection",
-    );
-    expect(() => assertTerminalRootDescriptorCompatible(wrongKeyName, columns)).toThrow(
-      "terminal root descriptor does not match the public projection",
-    );
-  });
-
-  it("accepts only the canonical CurrentRow carrier layout", () => {
-    const columns: ColumnDescriptor[] = [
-      { name: "title", column_type: { type: "Text" }, nullable: false },
-      { name: "done", column_type: { type: "Boolean" }, nullable: false },
-    ];
-    const currentRow = [
-      { name: "row_uuid", valueType: { tag: 11 } },
-      { name: "_app_title", valueType: { tag: 15, inner: { tag: 8 } } },
-      { name: "_app_done", valueType: { tag: 15, inner: { tag: 7 } } },
-      { name: "$createdBy", valueType: { tag: 8 } },
-    ];
-    const nullableLogicalNames = [
-      { name: "__jazz_terminal_row_key", valueType: { tag: 11 } },
-      { name: "title", valueType: { tag: 15, inner: { tag: 8 } } },
-      { name: "done", valueType: { tag: 15, inner: { tag: 7 } } },
-    ];
-    const reorderedCarriers = [currentRow[0]!, currentRow[2]!, currentRow[1]!];
-
-    expect(() => assertTerminalRootDescriptorCompatible(currentRow, columns)).not.toThrow();
-    expect(() => assertTerminalRootDescriptorCompatible(nullableLogicalNames, columns)).toThrow(
-      "terminal root descriptor does not match the public projection",
-    );
-    expect(() => assertTerminalRootDescriptorCompatible(reorderedCarriers, columns)).toThrow(
-      "terminal root descriptor does not match the public projection",
-    );
-  });
-
   it("does not infer _app_ aliases when resolving raw record field positions", () => {
     const descriptor = [
       { name: "_app_title", valueType: { tag: 8 } },
@@ -235,56 +99,6 @@ describe("native row codec", () => {
     expect(fieldIndex(descriptor, "title")).toBe(1);
     expect(() => fieldIndex([{ name: "_app_title", valueType: { tag: 8 } }], "title")).toThrow(
       "missing title field",
-    );
-  });
-
-  it("requires payload enum terminal descriptors to preserve their declared case layouts", () => {
-    const columns: ColumnDescriptor[] = [
-      {
-        name: "event",
-        column_type: {
-          type: "EnumPayload",
-          cases: [
-            {
-              name: "message",
-              fields: [
-                { name: "text", column_type: { type: "Text" }, nullable: false },
-                { name: "level", column_type: { type: "Integer" }, nullable: true },
-              ],
-            },
-          ],
-        },
-        nullable: false,
-      },
-    ];
-    const descriptor = [
-      { name: "__jazz_terminal_row_key", valueType: { tag: 11 } },
-      {
-        name: "event",
-        valueType: {
-          tag: 17,
-          enumSchema: {
-            registryId: 37,
-            name: "physical_event",
-            cases: [
-              {
-                name: "message",
-                payload: [
-                  { name: "text", valueType: { tag: 8 } },
-                  { name: "level", valueType: { tag: 15, inner: { tag: 4 } } },
-                ],
-              },
-            ],
-          },
-        },
-      },
-    ];
-    const wrongFieldType = structuredClone(descriptor);
-    wrongFieldType[1]!.valueType.enumSchema!.cases![0]!.payload[1]!.valueType = { tag: 8 };
-
-    expect(() => assertTerminalRootDescriptorCompatible(descriptor, columns)).not.toThrow();
-    expect(() => assertTerminalRootDescriptorCompatible(wrongFieldType, columns)).toThrow(
-      "terminal root descriptor does not match the public projection",
     );
   });
 
@@ -351,7 +165,7 @@ describe("native row codec", () => {
     const cells = encodeCellsForRow({ columns }, values);
     expect(cells).toEqual(writer.finish());
     expect(bytesToHex(cells)).toMatchInlineSnapshot(
-      `"06010661637469766507010663686f6963650801066c6162656c730e0801066e65737465640901046e6f74650f0801067370617273650f04480001070000001c0000002c00000047000000027075626c6973686564020000000c000000026f6e650274776f010000000000004000800000000000000106000000026368696c6400"`,
+      `"06010661637469766507010663686f6963650801066c6162656c730e0801066e65737465640901046e6f74650f0801067370617273650f04480001070000001c0000002c00000047000000007075626c6973686564020000000c000000006f6e650074776f010000000000004000800000000000000106000000006368696c6400"`,
     );
   });
 
@@ -515,7 +329,7 @@ describe("native row codec", () => {
     expect(reader.u64()).toBe(42);
   });
 
-  it("round-trips every Groove ValueType fixture, including depth-three nesting", () => {
+  it("round-trips every ValueType fixture, including depth-three nesting", () => {
     const fixture = nativeRowCodecFixture();
     const testCase = fixture.cases.find(
       (candidate) => candidate.name === "all_value_types_depth_three",
@@ -693,6 +507,47 @@ describe("native row codec", () => {
     expect(decodeNativeRowValues(columns, sparseAbsence)).toEqual([{ type: "Null" }]);
   });
 
+  it("decodes packed row values positionally and field by field", () => {
+    const columns: ColumnDescriptor[] = [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      { name: "count", column_type: { type: "Integer" }, nullable: false },
+      { name: "score", column_type: { type: "Double" }, nullable: true },
+      { name: "missing", column_type: { type: "Integer" }, nullable: true },
+      { name: "owner", column_type: { type: "Uuid" }, nullable: false },
+      { name: "tags", column_type: { type: "Array", element: { type: "Text" } }, nullable: false },
+      { name: "done", column_type: { type: "Boolean" }, nullable: false },
+      { name: "note", column_type: { type: "Text" }, nullable: true },
+    ];
+    const values: Value[] = [
+      { type: "Text", value: "hello" },
+      { type: "Integer", value: -7 },
+      { type: "Double", value: 2.5 },
+      { type: "Null" },
+      { type: "Uuid", value: "0123abcd-ef01-4234-9567-89abcdef0123" },
+      {
+        type: "Array",
+        value: [
+          { type: "Text", value: "a" },
+          { type: "Text", value: "bc" },
+        ],
+      },
+      { type: "Boolean", value: true },
+      { type: "Text", value: "" },
+    ];
+    const raw = encodeNativeRowValues(columns, values);
+
+    expect(decodeNativeRowValues(columns, raw)).toEqual(values);
+
+    const descriptor = columns.map((column) => ({
+      name: column.name,
+      valueType: storageColumnValueType(column),
+    }));
+    const decodeField = createRecordValueDecoder(descriptor);
+    columns.forEach((_, index) => {
+      expect(decodeField(raw, index)).toEqual(decodeRecordValue(descriptor, raw, index));
+    });
+  });
+
   it("decodes terminal arrays as physical nested records rather than packed row envelopes", () => {
     const rootId = "00000000-0000-4000-8000-000000000001";
     const firstChildId = "00000000-0000-4000-8000-000000000002";
@@ -711,7 +566,7 @@ describe("native row codec", () => {
       },
     ];
     const childRecord = (id: string, name: string) =>
-      Uint8Array.from([...uuidBytes(id), 2, ...new TextEncoder().encode(name)]);
+      Uint8Array.from([...uuidBytes(id), 0, ...new TextEncoder().encode(name)]);
     const first = childRecord(firstChildId, "first");
     const second = childRecord(secondChildId, "second");
     const childArray = Uint8Array.from([

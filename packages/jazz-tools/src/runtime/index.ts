@@ -5,6 +5,8 @@ export {
   type TransactionFate,
   type PermissionAdvice,
   PersistedWriteRejectedError,
+  WriteWaitTimeoutError,
+  type WriteWaitOptions,
   type DurabilityTier,
   ReadTier,
   type Row,
@@ -14,18 +16,31 @@ export {
   type StreamingValueSource,
   WriteHandle,
   WriteResult,
-  ExclusiveWriteHandle,
-  ExclusiveWriteResult,
+  SerializableWriteHandle,
+  SerializableWriteResult,
 } from "./client.js";
 export { loadWasmModule, type WasmModule } from "./wasm-loader.js";
+export {
+  UnsupportedStorageCodecsError,
+  isUnsupportedStorageCodecsError,
+} from "./unsupported-storage-codecs-error.js";
 export { createDb } from "./default-create-db.js";
+export {
+  type SnapshotRef,
+  parseSnapshotRef,
+  serializeSnapshotRef,
+  SnapshotRefFormatError,
+  UnsupportedSnapshotError,
+} from "./snapshot-ref.js";
 export type { PublicSession, RuntimeSourcesConfig } from "./context.js";
+export type { ValueSplices } from "./subscription-manager.js";
 /** Encode the opaque logical identity exposed as `session.user` by bindings. */
 export { canonicalAuthorSubject as userIdentity } from "./author-id.js";
 export {
   Db,
   type ActiveQuerySubscriptionTrace,
   type DbSubscriptionCallbacks,
+  type DbSubscriptionUpdate,
   type LogoutOptions,
   Transaction,
   type TransactionKind,
@@ -45,20 +60,18 @@ export {
   type TableProxy,
 } from "./db.js";
 export type { AccountDbConfig as DbConfig } from "../accounts/context.js";
+export type { ClientMigrations } from "./client-migrations.js";
 export type { AuthFailureReason, AuthState } from "./auth-state.js";
+export type { LinkStatus, SyncStatus } from "./sync-status.js";
 export {
   fetchStoredPermissions,
   fetchSchemaHashes,
   fetchStoredWasmSchema,
-  publishStoredPermissions,
-  publishStoredSchema,
-  type PublishStoredSchemaOptions,
-  type PublishStoredPermissionsOptions,
   type FetchStoredPermissionsOptions,
   type FetchStoredWasmSchemaOptions,
   type StoredSchemaHash,
   type StoredPermissionsResponse,
-} from "./schema-fetch.js";
+} from "../dev/catalogue-api.js";
 export {
   fetchServerSubscriptions,
   type FetchServerSubscriptionsOptions,

@@ -1,29 +1,32 @@
+import { schema as s } from "./schema-namespace.js";
+import { migration as m } from "./migration-namespace.js";
 import { describe, expect, it } from "vitest";
 import type { StandardJSONSchemaV1 } from "@standard-schema/spec";
-import { col, getCollectedSchema, resetCollectedState, table } from "./dsl.js";
+import { getCollectedSchema, resetCollectedState, table } from "./dsl.js";
 import { schemaToWasm } from "./codegen/schema-reader.js";
+import { resolveSchemaSource } from "./schema-source.js";
 import { structuralSchemaHash } from "./dev/schema-utils.js";
 import { defineApp, defineSchema, defineTable } from "./typed-app.js";
 import type { AddOp } from "./schema.js";
 
 describe("enum DSL invariants", () => {
   it("rejects empty variant list", () => {
-    expect(() => (col.enum as (...args: unknown[]) => unknown)()).toThrow(
+    expect(() => (s.enum as (...args: unknown[]) => unknown)()).toThrow(
       "Enum columns require at least one variant.",
     );
   });
 
   it("rejects empty variant strings", () => {
-    expect(() => col.enum("todo", "")).toThrow("Enum variants cannot be empty strings.");
+    expect(() => s.enum("todo", "")).toThrow("Enum variants cannot be empty strings.");
   });
 
   it("rejects duplicate variants", () => {
-    expect(() => col.enum("todo", "todo")).toThrow("Enum variants must be unique.");
+    expect(() => s.enum("todo", "todo")).toThrow("Enum variants must be unique.");
   });
 
   it("rejects more scalar variants than the native tag space supports", () => {
     const variants = Array.from({ length: 257 }, (_, index) => `variant-${index}`);
-    expect(() => (col.enum as (...values: string[]) => unknown)(...variants)).toThrow(
+    expect(() => (s.enum as (...values: string[]) => unknown)(...variants)).toThrow(
       "at most 256 variants",
     );
   });
@@ -31,7 +34,7 @@ describe("enum DSL invariants", () => {
   it("preserves scalar enum declaration order in both schema data and identity", () => {
     const wasmSchemaFor = (variants: [string, ...string[]]) => {
       resetCollectedState();
-      table("tasks", { status: col.enum(...variants) });
+      table("tasks", { status: s.enum(...variants) });
       return schemaToWasm(getCollectedSchema());
     };
 
@@ -47,9 +50,9 @@ describe("enum DSL invariants", () => {
   });
 
   it("builds scalar payload enum cases and rejects unsupported payload shapes", () => {
-    const event = col.enum({
-      message: { text: col.string(), level: col.int().optional() },
-      closed: { code: col.int() },
+    const event = s.enum({
+      message: { text: s.string(), level: s.int().optional() },
+      closed: { code: s.int() },
     });
     expect(event._sqlType).toEqual({
       kind: "ENUM",
@@ -61,34 +64,33 @@ describe("enum DSL invariants", () => {
             { name: "level", sqlType: "INTEGER", nullable: true },
           ],
         },
-        { name: "closed", fields: [{ name: "code", sqlType: "INTEGER", nullable: false }] },
+        {
+          name: "closed",
+          fields: [{ name: "code", sqlType: "INTEGER", nullable: false }],
+        },
       ],
     });
-    expect(() => col.enum({ bad: { type: col.string() } })).toThrow("reserved");
-    expect(() => col.enum({ bad: { tags: col.array(col.string()) } })).toThrow(
-      "must be scalar columns",
-    );
-    expect(() => col.enum({ bad: { authorId: col.ref("users") } })).toThrow(
-      "cannot use references",
-    );
+    expect(() => s.enum({ bad: { type: s.string() } })).toThrow("reserved");
+    expect(() => s.enum({ bad: { tags: s.array(s.string()) } })).toThrow("must be scalar columns");
+    expect(() => s.enum({ linked: { authorId: s.uuid() } })).not.toThrow();
   });
 
   describe("add enum", () => {
     it("rejects duplicate variants in add enum migration", () => {
-      expect(() => col.add.enum("todo", "todo", { default: "todo" })).toThrow(
+      expect(() => m.add.enum("todo", "todo", { default: "todo" })).toThrow(
         "Enum variants must be unique.",
       );
     });
 
     it("rejects empty variants in drop enum migration", () => {
-      expect(() => col.drop.enum("todo", "", { backwardsDefault: "todo" })).toThrow(
+      expect(() => m.drop.enum("todo", "", { backwardsDefault: "todo" })).toThrow(
         "Enum variants cannot be empty strings.",
       );
     });
 
     it("preserves enum add default's nullability in the returned op type", () => {
-      const requiredStatus = col.add.enum("todo", "done", { default: "todo" });
-      const optionalStatus = col.add.enum("todo", "done", { default: null });
+      const requiredStatus = m.add.enum("todo", "done", { default: "todo" });
+      const optionalStatus = m.add.enum("todo", "done", { default: null });
 
       const requiredOp: AddOp<{ kind: "ENUM"; variants: ["todo", "done"] }, "todo" | "done"> =
         requiredStatus;
@@ -104,16 +106,16 @@ describe("enum DSL invariants", () => {
       const _invalidRequiredOp: AddOp<
         { kind: "ENUM"; variants: ["todo", "done"] },
         "todo" | "done"
-      > = col.add.enum("todo", "done", { default: null });
+      > = m.add.enum("todo", "done", { default: null });
     });
   });
 });
 
 describe("bytes DSL API", () => {
   it("supports bytes as the primary BYTEA builder name", () => {
-    expect(col.bytes()._sqlType).toBe("BYTEA");
-    expect(col.add.bytes({ default: new Uint8Array([0]) }).sqlType).toBe("BYTEA");
-    expect(col.drop.bytes({ backwardsDefault: new Uint8Array([0]) }).sqlType).toBe("BYTEA");
+    expect(s.bytes()._sqlType).toBe("BYTEA");
+    expect(m.add.bytes({ default: new Uint8Array([0]) }).sqlType).toBe("BYTEA");
+    expect(m.drop.bytes({ backwardsDefault: new Uint8Array([0]) }).sqlType).toBe("BYTEA");
   });
 });
 
@@ -132,7 +134,7 @@ describe("json DSL API", () => {
     } satisfies StandardJSONSchemaV1<string, number>;
 
     table("tasks", {
-      estimate: col.json(taskEstimateSchema),
+      estimate: s.json(taskEstimateSchema),
     });
 
     expect(getCollectedSchema().tables[0]?.columns[0]).toEqual({
@@ -147,12 +149,12 @@ describe("schema default DSL", () => {
   it("stores schema defaults on built columns", () => {
     resetCollectedState();
     table("todos", {
-      done: col.boolean().default(false),
-      status: col.enum("todo", "done").default("todo"),
-      metadata: col.json().default({ archived: false }),
-      ownerId: col.ref("users").default("00000000-0000-0000-0000-000000000001"),
-      tags: col.array(col.string()).default(["work", "personal"]),
-      archivedAt: col.timestamp().optional().default(null),
+      done: s.boolean().default(false),
+      status: s.enum("todo", "done").default("todo"),
+      metadata: s.json().default({ archived: false }),
+      ownerId: s.uuid().default("00000000-0000-0000-0000-000000000001"),
+      tags: s.array(s.string()).default(["work", "personal"]),
+      archivedAt: s.timestamp().optional().default(null),
     });
 
     const columns = getCollectedSchema().tables[0]?.columns;
@@ -175,7 +177,6 @@ describe("schema default DSL", () => {
         sqlType: "UUID",
         nullable: false,
         default: "00000000-0000-0000-0000-000000000001",
-        references: "users",
       },
       {
         name: "tags",
@@ -183,14 +184,19 @@ describe("schema default DSL", () => {
         nullable: false,
         default: ["work", "personal"],
       },
-      { name: "archivedAt", sqlType: "TIMESTAMP", nullable: true, default: null },
+      {
+        name: "archivedAt",
+        sqlType: "TIMESTAMP",
+        nullable: true,
+        default: null,
+      },
     ]);
   });
 
   it("preserves optional() chaining when default is already set", () => {
     resetCollectedState();
     table("todos", {
-      archivedAt: col.timestamp().default(0).optional(),
+      archivedAt: s.timestamp().default(0).optional(),
     });
 
     expect(getCollectedSchema().tables[0]?.columns[0]).toEqual({
@@ -202,22 +208,22 @@ describe("schema default DSL", () => {
   });
 
   it("types schema defaults by column and nullability", () => {
-    col.boolean().default(false);
-    col.timestamp().optional().default(null);
-    col.enum("todo", "done").default("todo");
-    col.ref("users").default("00000000-0000-0000-0000-000000000001");
-    col.array(col.int()).default([1, 2, 3]);
+    s.boolean().default(false);
+    s.timestamp().optional().default(null);
+    s.enum("todo", "done").default("todo");
+    s.uuid().default("00000000-0000-0000-0000-000000000001");
+    s.array(s.int()).default([1, 2, 3]);
 
     // @ts-expect-error non-nullable defaults cannot be null
-    col.boolean().default(null);
+    s.boolean().default(null);
     // @ts-expect-error integer defaults must be numbers
-    col.int().default("1");
+    s.int().default("1");
     // @ts-expect-error enum defaults must be one of the declared variants
-    col.enum("todo", "done").default("archived");
+    s.enum("todo", "done").default("archived");
     // @ts-expect-error ref defaults must be strings
-    col.ref("users").default(123);
+    s.uuid().default(123);
     // @ts-expect-error array defaults must match the element type
-    col.array(col.int()).default(["1"]);
+    s.array(s.int()).default(["1"]);
   });
 });
 
@@ -225,9 +231,9 @@ describe("column merge strategy DSL", () => {
   it("stores counter merge strategy on integer and bigint columns and exports them to wasm schema", () => {
     resetCollectedState();
     table("counters", {
-      integerValue: col.int().merge("counter"),
-      bigintValue: col.bigint().merge("counter"),
-      label: col.string(),
+      integerValue: s.int().merge("counter"),
+      bigintValue: s.bigint().merge("counter"),
+      label: s.string(),
     });
 
     const schema = getCollectedSchema();
@@ -279,7 +285,7 @@ describe("column merge strategy DSL", () => {
   it("normalizes explicit lww away", () => {
     resetCollectedState();
     table("todos", {
-      title: col.string().merge("lww"),
+      title: s.string().merge("lww"),
     });
 
     const schema = getCollectedSchema();
@@ -305,10 +311,10 @@ describe("column merge strategy DSL", () => {
 
   it("rejects counter merge strategy on non-integer columns", () => {
     const invalidDeclarations = [
-      () => col.timestamp().merge("counter" as never),
-      () => col.string().merge("counter" as never),
-      () => col.float().merge("counter" as never),
-      () => col.array(col.int()).merge("counter" as never),
+      () => s.timestamp().merge("counter" as never),
+      () => s.string().merge("counter" as never),
+      () => s.float().merge("counter" as never),
+      () => s.array(s.int()).merge("counter" as never),
     ];
 
     for (const declareColumn of invalidDeclarations) {
@@ -320,53 +326,95 @@ describe("column merge strategy DSL", () => {
 
   it("rejects counter merge strategy on nullable integer columns in either chaining order", () => {
     expect(() =>
-      col
+      s
         .int()
         .optional()
         .merge("counter" as never),
     ).toThrow(
       "Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns.",
     );
-    expect(() => col.int().merge("counter").optional()).toThrow(
+    expect(() => s.int().merge("counter").optional()).toThrow(
       "Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns.",
     );
     expect(() =>
-      col
+      s
         .bigint()
         .optional()
         .merge("counter" as never),
     ).toThrow(
       "Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns.",
     );
-    expect(() => col.bigint().merge("counter").optional()).toThrow(
+    expect(() => s.bigint().merge("counter").optional()).toThrow(
       "Counter merge strategy is only supported on non-nullable INTEGER or BIGINT columns.",
     );
   });
 
+  it("stores text merge strategies on string columns, optional or not", () => {
+    resetCollectedState();
+    table("docs", {
+      body: s.string().merge("text"),
+      notes: s.string().merge("markdown"),
+      page: s.string().merge("html"),
+      summary: s.string().optional().merge("text"),
+      caption: s.string().merge("markdown").optional(),
+    });
+
+    const schema = getCollectedSchema();
+    expect(schema.tables[0]?.columns).toEqual([
+      { name: "body", sqlType: "TEXT", nullable: false, mergeStrategy: "text" },
+      {
+        name: "notes",
+        sqlType: "TEXT",
+        nullable: false,
+        mergeStrategy: "markdown",
+      },
+      { name: "page", sqlType: "TEXT", nullable: false, mergeStrategy: "html" },
+      { name: "summary", sqlType: "TEXT", nullable: true, mergeStrategy: "text" },
+      { name: "caption", sqlType: "TEXT", nullable: true, mergeStrategy: "markdown" },
+    ]);
+    expect(() => s.int().merge("text" as never)).toThrow(
+      "text merge strategy is only supported on TEXT columns.",
+    );
+    expect(() =>
+      s
+        .int()
+        .optional()
+        .merge("markdown" as never),
+    ).toThrow("markdown merge strategy is only supported on TEXT columns.");
+
+    if (false) {
+      s.string().optional().merge("html");
+      // @ts-expect-error integer columns cannot text-merge
+      s.int().merge("html");
+      // @ts-expect-error optional integer columns cannot text-merge
+      s.int().optional().merge("text");
+    }
+  });
+
   it("types counter merge strategy by column and nullability", () => {
     if (false) {
-      col.int().merge("counter");
-      col.bigint().merge("counter");
+      s.int().merge("counter");
+      s.bigint().merge("counter");
 
       // @ts-expect-error nullable integer columns cannot use counter
-      col.int().optional().merge("counter");
+      s.int().optional().merge("counter");
       // @ts-expect-error nullable bigint columns cannot use counter
-      col.bigint().optional().merge("counter");
+      s.bigint().optional().merge("counter");
       // @ts-expect-error timestamp columns cannot use counter
-      col.timestamp().merge("counter");
+      s.timestamp().merge("counter");
       // @ts-expect-error text columns cannot use counter
-      col.string().merge("counter");
+      s.string().merge("counter");
       // @ts-expect-error double columns cannot use counter
-      col.float().merge("counter");
+      s.float().merge("counter");
       // @ts-expect-error array columns cannot use counter
-      col.array(col.int()).merge("counter");
+      s.array(s.int()).merge("counter");
     }
   });
 
   it("stores g-set merge strategy on array columns and exports it to wasm schema", () => {
     resetCollectedState();
     table("docs", {
-      tags: col.array(col.string()).merge("g-set"),
+      tags: s.array(s.string()).merge("g-set"),
     });
 
     const schema = getCollectedSchema();
@@ -394,60 +442,20 @@ describe("column merge strategy DSL", () => {
   });
 
   it("rejects g-set merge strategy on non-array columns", () => {
-    expect(() => col.string().merge("g-set" as never)).toThrow(
+    expect(() => s.string().merge("g-set" as never)).toThrow(
       "g-set merge strategy is only supported on non-nullable ARRAY columns.",
     );
   });
 
   it("rejects g-set merge strategy on nullable array columns in either chaining order", () => {
     expect(() =>
-      col
-        .array(col.string())
+      s
+        .array(s.string())
         .optional()
         .merge("g-set" as never),
     ).toThrow("g-set merge strategy is only supported on non-nullable ARRAY columns.");
-    expect(() => col.array(col.string()).merge("g-set").optional()).toThrow(
+    expect(() => s.array(s.string()).merge("g-set").optional()).toThrow(
       "g-set merge strategy is only supported on non-nullable ARRAY columns.",
-    );
-  });
-});
-
-describe("ref DSL", () => {
-  it("stores references on ref columns", () => {
-    resetCollectedState();
-    table("todos", {
-      imageId: col.ref("images"),
-    });
-    const schema = getCollectedSchema();
-    expect(schema.tables[0]?.columns[0]).toMatchObject({
-      name: "imageId",
-      references: "images",
-    });
-  });
-
-  it("stores references on array(ref(...)) columns", () => {
-    resetCollectedState();
-    table("bundles", {
-      itemIds: col.array(col.ref("bundle_items")),
-    });
-    const schema = getCollectedSchema();
-    expect(schema.tables[0]?.columns[0]).toMatchObject({
-      name: "itemIds",
-      references: "bundle_items",
-    });
-  });
-
-  it("rejects scalar reference columns not ending in Id or _id", () => {
-    resetCollectedState();
-    expect(() => table("todos", { image: col.ref("images") })).toThrow(
-      "Invalid reference key 'image'. Rename it to 'image_id' or 'imageId'.",
-    );
-  });
-
-  it("rejects array(ref(...)) columns not ending in Ids or _ids", () => {
-    resetCollectedState();
-    expect(() => table("todos", { images: col.array(col.ref("images")) })).toThrow(
-      "Invalid array reference key 'images'. Rename it to 'images_ids' or 'imagesIds'.",
     );
   });
 });
@@ -457,29 +465,85 @@ describe("reserved magic-column namespace", () => {
     resetCollectedState();
     expect(() =>
       table("todos", {
-        $canRead: col.boolean(),
+        $canRead: s.boolean(),
       }),
     ).toThrow(/reserved for magic columns/i);
   });
 });
 
 describe("reserved table id", () => {
-  it.each([col.uuid(), col.string(), col.int(), col.uuid().optional()])(
+  it.each([s.uuid(), s.string(), s.int(), s.uuid().optional()])(
     "rejects explicit id columns in each table authoring API",
     (id) => {
       resetCollectedState();
       // @ts-expect-error Exercise the runtime guard for untyped callers.
       expect(() => table("items", { id })).toThrow(/id.*reserved.*UUID row ID/);
       // @ts-expect-error Exercise the runtime guard for untyped callers.
-      expect(() => defineTable({ id })).toThrow(/id.*reserved.*UUID row ID/);
+      expect(() => defineTable({ id }, {})).toThrow(/id.*reserved.*UUID row ID/);
       // @ts-expect-error Exercise the runtime guard for untyped callers.
       expect(() => defineSchema({ items: { id } })).toThrow(/id.*reserved.*UUID row ID/);
       // @ts-expect-error Exercise the runtime guard for untyped callers.
-      expect(() => defineApp({ items: { id } })).toThrow(/id.*reserved.*UUID row ID/);
+      expect(() => defineApp({ items: { id } }, { migrations: "none" })).toThrow(
+        /id.*reserved.*UUID row ID/,
+      );
     },
   );
 
   it("allows id inside an enum payload", () => {
-    expect(() => defineTable({ payload: col.enum({ item: { id: col.string() } }) })).not.toThrow();
+    expect(() => defineTable({ payload: s.enum({ item: { id: s.string() } }) }, {})).not.toThrow();
+  });
+});
+
+describe("reserved table names", () => {
+  const objectPrototypeOwnNames = Object.getOwnPropertyNames(Object.prototype);
+  const fixedControlNames = ["union", "exists", "_schema", "wasmSchema", "schemaAst"];
+
+  it.each([...objectPrototypeOwnNames, ...fixedControlNames])(
+    "rejects reserved table name %s during schema compilation",
+    (tableName) => {
+      resetCollectedState();
+      table(tableName, { value: s.string() });
+
+      expect(() => schemaToWasm(getCollectedSchema())).toThrow(/reserved/i);
+    },
+  );
+
+  it.each(["_schema", "wasmSchema"])(
+    "rejects schema-source table discriminator %s",
+    (tableName) => {
+      expect(() =>
+        resolveSchemaSource({
+          [tableName]: { columns: [] },
+        } as never),
+      ).toThrow(/reserved/i);
+    },
+  );
+
+  it("keeps ordinary, prototype, and hyphenated table names usable", () => {
+    const app = defineApp(
+      {
+        normal: defineTable({ value: s.string() }, {}),
+        prototype: defineTable({ value: s.string() }, {}),
+        "hyphenated-name": defineTable({ value: s.string() }, {}),
+      },
+      { migrations: "none" },
+    );
+
+    expect(Object.keys(app.wasmSchema).sort()).toEqual(["hyphenated-name", "normal", "prototype"]);
+    expect(JSON.parse(app.normal._build()).table).toBe("normal");
+    expect(JSON.parse(app.prototype._build()).table).toBe("prototype");
+    expect(JSON.parse(app["hyphenated-name"]._build()).table).toBe("hyphenated-name");
+  });
+});
+
+describe("schema table-name uniqueness", () => {
+  it("rejects duplicate legacy table declarations during schema lowering", () => {
+    resetCollectedState();
+    table("tasks", { title: s.string() });
+    table("tasks", { completed: s.boolean() });
+
+    expect(() => schemaToWasm(getCollectedSchema())).toThrow(
+      'Duplicate table name "tasks" in schema.',
+    );
   });
 });

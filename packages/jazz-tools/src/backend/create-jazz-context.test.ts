@@ -1,9 +1,12 @@
 import { accountRegistryUrl } from "../accounts/context.js";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WasmSchema } from "../drivers/types.js";
 import type { CompiledPermissions } from "../permissions/index.js";
 import type { AppContext, Session } from "../runtime/context.js";
-import { createJazzContext } from "./create-jazz-context.js";
+import { SYSTEM_READ_SESSION } from "../runtime/system-identity.js";
+import { setFlagsFromString } from "node:v8";
+import { runInNewContext } from "node:vm";
+import { MAX_PENDING_MUTATION_ERROR_EVENTS, createJazzContext } from "./create-jazz-context.js";
 
 const mocks = vi.hoisted(() => {
   const resolveRequestSession = vi.fn();
@@ -17,6 +20,7 @@ const mocks = vi.hoisted(() => {
     asBackend: ReturnType<typeof vi.fn>;
     connectTransport: ReturnType<typeof vi.fn>;
     shutdown: ReturnType<typeof vi.fn>;
+    onMutationError: ReturnType<typeof vi.fn>;
   }> = [];
   const connectWithRuntime = vi.fn((_runtime: unknown, _context: AppContext) => {
     const client = {
@@ -25,6 +29,7 @@ const mocks = vi.hoisted(() => {
       }),
       connectTransport: vi.fn(),
       shutdown: vi.fn(async () => undefined),
+      onMutationError: vi.fn(),
     };
     clients.push(client);
     return client;
@@ -223,6 +228,8 @@ describe("backend/create-jazz-context", () => {
     });
   });
 
+  afterEach(() => vi.unstubAllEnvs());
+
   it("rejects unassigned requests before opening a runtime", async () => {
     const context = createJazzContext({
       appId: "server-app",
@@ -269,52 +276,13 @@ describe("backend/create-jazz-context", () => {
         persistentPath: "/tmp/jazz.db",
         readAuthorizationHost: "trusted-serving",
         backendMode: true,
+        systemNode: expect.any(Uint8Array),
+        slowQueryLog: { appId: "server-app", thresholdMs: undefined },
       },
     );
-  });
-
-  it("BC-U01a: respects an explicit default durability tier over the node tier", () => {
-    const context = createJazzContext({
-      appId: "server-app",
-      app: { wasmSchema: SCHEMA_A },
-      permissions: {},
-      driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
-      tier: "local",
-      defaultDurabilityTier: "edge",
-    });
-
-    context.db();
-
-    expect(mocks.connectWithRuntime).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({
-        tier: "local",
-        defaultDurabilityTier: "edge",
-      }),
-      expect.anything(),
-    );
-  });
-
-  it("BC-U01aa: defaults a connected backend context to its node tier", () => {
-    const context = createJazzContext({
-      appId: "server-app",
-      app: { wasmSchema: SCHEMA_A },
-      permissions: {},
-      driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
-      serverUrl: "http://localhost:1625",
-      tier: "global",
-    });
-
-    context.db();
-
-    expect(mocks.connectWithRuntime).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({
-        tier: "global",
-        defaultDurabilityTier: "global",
-      }),
-      expect.anything(),
-    );
+    // A persistent store keeps its counter, so it writes as its SYSTEM node.
+    const [, , node, , , , options] = mocks.nativeRuntimeCtor.mock.calls[0]!;
+    expect(node).toEqual(options.systemNode);
   });
 
   it("BC-U01b: rejects configuring both jwksUrl and jwtPublicKey", () => {
@@ -367,10 +335,16 @@ describe("backend/create-jazz-context", () => {
     // An un-attributed backend read deliberately passes no logical session:
     // it is trusted serving, not a public request impersonating SYSTEM. A
     // request keeps its external session and therefore remains policy-scoped.
-    expect((backendDb as any).getRuntimeOperationContext()).toBeNull();
-    expect((requestDb as any).getRuntimeOperationContext()).toMatchObject({
-      session,
-      readSession: undefined,
+    expect((backendDb as any).getAccessContext()).toBeNull();
+    expect((requestDb as any).getAccessContext()).toMatchObject({
+      writeSession: session,
+      readSession: session,
+    });
+    // Attributed Dbs keep the user's session for provenance only; reads, in
+    // and out of transactions, use backend authority.
+    expect((attributedSessionDb as any).getAccessContext()).toMatchObject({
+      writeSession: session,
+      readSession: SYSTEM_READ_SESSION,
     });
 
     for (const scopedDb of [
@@ -458,6 +432,46 @@ describe("backend/create-jazz-context", () => {
     );
     expect(mocks.clients[0]!.asBackend).not.toHaveBeenCalled();
   });
+
+  it.each([
+    { nodeEnv: undefined, allowLocalFirstAuth: undefined, expected: true },
+    { nodeEnv: "development", allowLocalFirstAuth: undefined, expected: true },
+    { nodeEnv: "test", allowLocalFirstAuth: undefined, expected: true },
+    { nodeEnv: "production", allowLocalFirstAuth: undefined, expected: false },
+    { nodeEnv: "PrOdUcTiOn", allowLocalFirstAuth: undefined, expected: false },
+    { nodeEnv: "development", allowLocalFirstAuth: true, expected: true },
+    { nodeEnv: "development", allowLocalFirstAuth: false, expected: false },
+    { nodeEnv: "production", allowLocalFirstAuth: true, expected: true },
+    { nodeEnv: "production", allowLocalFirstAuth: false, expected: false },
+  ])(
+    "forwards allowLocalFirstAuth=$expected when NODE_ENV=$nodeEnv and override=$allowLocalFirstAuth",
+    async ({ nodeEnv, allowLocalFirstAuth, expected }) => {
+      vi.stubEnv("NODE_ENV", nodeEnv);
+      const context = createJazzContext({
+        appId: "server-app",
+        serverUrl: "http://localhost:1625",
+        backendSecret: "secret",
+        app: { wasmSchema: SCHEMA_A },
+        permissions: {},
+        driver: { type: "memory" },
+        allowLocalFirstAuth,
+      });
+      const req = { headers: { authorization: "Bearer token" } };
+
+      await context.forRequest(req);
+      await context.withAttributionForRequest(req);
+
+      expect(mocks.resolveRequestSession).toHaveBeenCalledTimes(2);
+      for (const [request, config] of mocks.resolveRequestSession.mock.calls) {
+        expect(request).toBe(req);
+        expect(config).toMatchObject({
+          appId: "server-app",
+          accountRegistry: accountRegistryUrl("http://localhost:1625", "server-app"),
+          allowLocalFirstAuth: expected,
+        });
+      }
+    },
+  );
 
   it("BC-U03b: forwards backend request auth config into request session resolution", async () => {
     const context = createJazzContext({
@@ -715,8 +729,164 @@ describe("backend/create-jazz-context", () => {
       expect.any(Uint8Array),
       1,
       true,
-      { readAuthorizationHost: "trusted-serving", backendMode: true },
+      {
+        readAuthorizationHost: "trusted-serving",
+        backendMode: true,
+        systemNode: expect.any(Uint8Array),
+        slowQueryLog: { appId: "server-app", thresholdMs: undefined },
+      },
     );
+    // A memory store starts its counter over, so it draws a node of its own
+    // while its SYSTEM provenance keeps the stable one.
+    const [, , node, , , , options] = mocks.nativeRuntimeCtor.mock.calls[0]!;
+    expect(node).not.toEqual(options.systemNode);
+  });
+
+  it("BC-U10: routes runtime mutation errors to every backend Db, including ones settled before a listener", () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const context = createJazzContext({
+        appId: "server-app",
+        app: { wasmSchema: SCHEMA_A },
+        permissions: {},
+        driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
+      });
+      const worker = context.asBackend();
+      const other = context.db();
+      expect(mocks.clients).toHaveLength(1);
+      expect(mocks.clients[0]!.onMutationError).toHaveBeenCalledTimes(1);
+      const emit = mocks.clients[0]!.onMutationError.mock.calls[0]![0] as (event: unknown) => void;
+      const event = (transactionId: string) => ({
+        code: "serialization_conflict",
+        reason: "Serializable transaction conflicted with another write",
+        transaction: {
+          transactionId,
+          kind: "serializable",
+          sealed: true,
+          latestSettlement: {
+            kind: "rejected",
+            transactionId,
+            code: "serialization_conflict",
+            reason: "Serializable transaction conflicted with another write",
+          },
+        },
+      });
+
+      // A persisted in-flight write settled during startup replay, before the
+      // application attached its listener.
+      const replayed = event("00000000000070008000000000000001");
+      emit(replayed);
+
+      const workerListener = vi.fn();
+      worker.onMutationError(workerListener);
+      expect(workerListener).toHaveBeenCalledWith(replayed);
+
+      const otherListener = vi.fn();
+      const unsubscribe = other.onMutationError(otherListener);
+      const live = event("00000000000070008000000000000002");
+      emit(live);
+      expect(workerListener).toHaveBeenLastCalledWith(live);
+      expect(otherListener).toHaveBeenCalledTimes(1);
+      expect(otherListener).toHaveBeenCalledWith(live);
+
+      unsubscribe();
+      emit(event("00000000000070008000000000000003"));
+      expect(workerListener).toHaveBeenCalledTimes(3);
+      expect(otherListener).toHaveBeenCalledTimes(1);
+      // Only the rejection that arrived with no listener is reported unhandled.
+      expect(consoleError).toHaveBeenCalledTimes(1);
+      expect(consoleError).toHaveBeenCalledWith("Unhandled Jazz mutation error", replayed);
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  function mutationErrorEvent(transactionId: string) {
+    return {
+      code: "serialization_conflict",
+      reason: "Serializable transaction conflicted with another write",
+      transaction: {
+        transactionId,
+        kind: "serializable",
+        sealed: true,
+        latestSettlement: {
+          kind: "rejected",
+          transactionId,
+          code: "serialization_conflict",
+          reason: "Serializable transaction conflicted with another write",
+        },
+      },
+    };
+  }
+
+  it("BC-U11: a dropped per-request Db does not keep its mutation-error listener alive", async () => {
+    setFlagsFromString("--expose-gc");
+    const gc = runInNewContext("gc") as () => void;
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const context = createJazzContext({
+        appId: "server-app",
+        app: { wasmSchema: SCHEMA_A },
+        permissions: {},
+        driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
+      });
+      const retained = context.db();
+      const retainedListener = vi.fn();
+      retained.onMutationError(retainedListener);
+      const emit = mocks.clients[0]!.onMutationError.mock.calls[0]![0] as (event: unknown) => void;
+
+      const droppedListener = vi.fn();
+      (() => {
+        const perRequest = context.forSession({
+          issuer: "https://issuer.example",
+          user_id: "u1",
+          claims: {},
+          authMode: "external",
+        });
+        perRequest.onMutationError(droppedListener);
+      })();
+      for (let round = 0; round < 5; round += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        gc();
+      }
+
+      emit(mutationErrorEvent("00000000000070008000000000000011"));
+      expect(retainedListener).toHaveBeenCalledTimes(1);
+      expect(droppedListener).not.toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("BC-U12: bounds the pre-listener buffer and reports how many rejections were dropped", () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const context = createJazzContext({
+        appId: "server-app",
+        app: { wasmSchema: SCHEMA_A },
+        permissions: {},
+        driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
+      });
+      const db = context.db();
+      const emit = mocks.clients[0]!.onMutationError.mock.calls[0]![0] as (event: unknown) => void;
+      const overflow = 3;
+      const total = MAX_PENDING_MUTATION_ERROR_EVENTS + overflow;
+      for (let index = 0; index < total; index += 1) {
+        emit(mutationErrorEvent(index.toString(16).padStart(32, "0")));
+      }
+      // Every rejection is still logged as unhandled when it arrives.
+      expect(consoleError).toHaveBeenCalledTimes(total);
+
+      const listener = vi.fn();
+      db.onMutationError(listener);
+      expect(listener).toHaveBeenCalledTimes(MAX_PENDING_MUTATION_ERROR_EVENTS);
+      expect(listener.mock.calls[0]![0]).toEqual(mutationErrorEvent("0".padStart(32, "0")));
+      expect(consoleError).toHaveBeenLastCalledWith(
+        expect.stringContaining(`dropped ${overflow} unhandled mutation error(s)`),
+      );
+    } finally {
+      consoleError.mockRestore();
+    }
   });
 
   it("BC-U09: rejects memory driver without serverUrl", () => {

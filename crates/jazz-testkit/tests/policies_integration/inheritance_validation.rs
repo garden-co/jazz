@@ -1,7 +1,6 @@
 use super::*;
-use jazz::tools::DurabilityTier;
 use jazz_server::JazzServer;
-use jazz_testkit::{connect_ready_client, connect_ready_user, wait_for_edge_txs};
+use jazz_testkit::{connect_ready_client, connect_ready_user, wait_for_global_txs};
 
 /// Verifies that recursive inherited access fails closed when row data forms a
 /// cycle and no reachable ancestor grants the session access.
@@ -46,7 +45,7 @@ async fn rebac_recursive_inherits_cycle_does_not_overgrant_inner() {
             crate::row_input!("owner_id" => super::CAROL_ID, "name" => "B", "parent_id" => a),
         )
         .expect("insert folder B");
-    wait_for_edge_txs(
+    wait_for_global_txs(
         &admin,
         &[
             a_tx.expect("folder A insert should commit immediately"),
@@ -57,14 +56,19 @@ async fn rebac_recursive_inherits_cycle_does_not_overgrant_inner() {
 
     // Close the cycle: A.parent_id = B
     let cycle_tx = admin
-        .update(a, vec![("parent_id".to_string(), Value::Uuid(b))])
+        .update(
+            "folders",
+            a,
+            vec![("parent_id".to_string(), Value::Uuid(b))],
+        )
         .expect("close folder cycle")
         .expect("cycle update should commit immediately");
-    wait_for_edge_txs(&admin, &[cycle_tx]).await;
+    wait_for_global_txs(&admin, &[cycle_tx]).await;
 
     let result_ids: HashSet<_> = alice
-        .query(Query::from("folders"), Some(DurabilityTier::EdgeServer))
+        .query(Query::from("folders"), jazz::tools::ReadTier::Remote)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query folders as alice")
         .into_iter()
         .map(|(id, _)| id)

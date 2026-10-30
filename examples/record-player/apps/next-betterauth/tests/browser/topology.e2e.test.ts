@@ -25,13 +25,18 @@ import {
   PLAYLIST_WINDOW_LIMIT,
   PLAYLIST_WINDOW_OFFSET,
 } from "../../src/record-player.js";
+import { DEMO_LIBRARY } from "../../src/demo-audio.js";
+import { seedDemoLibrary } from "../../src/upload.js";
 
 const ctx = new TestCleanup();
 afterEach(async () => ctx.cleanup());
 
-const acknowledgementApp = s.defineApp({
-  receipts: s.table({ label: s.string() }),
-});
+const acknowledgementApp = s.defineApp(
+  {
+    receipts: s.table({ label: s.string() }, {}),
+  },
+  { migrations: "none" },
+);
 const acknowledgementPermissions = s.definePermissions(acknowledgementApp, ({ policy }) => {
   policy.receipts.allowRead.always();
   policy.receipts.allowInsert.always();
@@ -40,9 +45,12 @@ const acknowledgementPermissions = s.definePermissions(acknowledgementApp, ({ po
 // Keep this intentionally separate from RecordPlayer's relational policies:
 // it is the smallest external-JWT receipt for a row routed to a recipient by
 // an application-owned canonical session user rather than by `$createdBy`.
-const recipientApp = s.defineApp({
-  invitations: s.table({ subject: s.uuid(), label: s.string() }),
-});
+const recipientApp = s.defineApp(
+  {
+    invitations: s.table({ subject: s.uuid(), label: s.string() }, {}),
+  },
+  { migrations: "none" },
+);
 const recipientPermissions = s.definePermissions(recipientApp, ({ policy, session, anyOf }) => {
   policy.invitations.allowRead.where(
     anyOf([{ subject: session.user.account }, { label: "unmatched control branch" }]),
@@ -52,44 +60,77 @@ const recipientPermissions = s.definePermissions(recipientApp, ({ policy, sessio
 
 // This adds exactly the branch which distinguishes RecordPlayer from the
 // scalar control: a correlated owner path through a referenced playlist.
-const relationalRecipientApp = s.defineApp({
-  ...betterAuthSchema,
-  albums: s
-    .table({
-      title: s.string(),
-      artist: s.string(),
-      cover_locator: s.string().optional(),
-    })
-    .indexOnly(["title"]),
-  tracks: s
-    .table({
-      album_id: s.ref("albums"),
-      title: s.string(),
-      ordinal: s.int(),
-      duration_ms: s.int(),
-      audio_bytes: s.bytes().optional(),
-    })
-    .indexOnly(["album_id", "ordinal"]),
-  playlists: s.table({ name: s.string() }),
-  playlist_entries: s
-    .table({
-      playlist_id: s.ref("playlists"),
-      track_id: s.ref("tracks"),
-      position: s.float(),
-    })
-    .indexOnly(["playlist_id", "position"]),
-  invitations: s.table({
-    playlist_id: s.ref("playlists"),
-    subject: s.uuid(),
-    role: s.enum("listener", "editor"),
-    status: s.enum("pending", "accepted", "revoked"),
-  }),
-  playback_positions: s.table({
-    playlist_id: s.ref("playlists"),
-    track_id: s.ref("tracks"),
-    position_ms: s.int(),
-  }),
-});
+const relationalRecipientApp = s.defineApp(
+  {
+    ...betterAuthSchema,
+    albums: s
+      .table(
+        {
+          title: s.string(),
+          artist: s.string(),
+          cover_locator: s.string().optional(),
+          cover_image: s.bytes().optional(),
+          cover_mime: s.string().optional(),
+        },
+        { tracksViaAlbum: s.reverse("tracks", "album") },
+      )
+      .indexOnly(["title"]),
+    tracks: s
+      .table(
+        {
+          album_id: s.uuid(),
+          title: s.string(),
+          ordinal: s.int(),
+          duration_ms: s.int(),
+          audio_bytes: s.bytes().optional(),
+          audio_mime: s.string().optional(),
+          audio_byte_length: s.int().optional(),
+        },
+        {
+          album: s.rel("albums", "album_id"),
+          playlist_entriesViaTrack: s.reverse("playlist_entries", "track"),
+          playback_positionsViaTrack: s.reverse("playback_positions", "track"),
+        },
+      )
+      .indexOnly(["album_id", "ordinal"]),
+    playlists: s.table(
+      { name: s.string() },
+      {
+        playlist_entriesViaPlaylist: s.reverse("playlist_entries", "playlist"),
+        invitationsViaPlaylist: s.reverse("invitations", "playlist"),
+        playback_positionsViaPlaylist: s.reverse("playback_positions", "playlist"),
+      },
+    ),
+    playlist_entries: s
+      .table(
+        {
+          playlist_id: s.uuid(),
+          track_id: s.uuid(),
+          position: s.float(),
+        },
+        { playlist: s.rel("playlists", "playlist_id"), track: s.rel("tracks", "track_id") },
+      )
+      .indexOnly(["playlist_id", "position"]),
+    invitations: s.table(
+      {
+        playlist_id: s.uuid(),
+        subject: s.uuid(),
+        role: s.enum("listener", "editor"),
+        status: s.enum("pending", "accepted", "revoked"),
+      },
+      { playlist: s.rel("playlists", "playlist_id") },
+    ),
+    playback_positions: s.table(
+      {
+        playlist_id: s.uuid(),
+        track_id: s.uuid(),
+        position_ms: s.int(),
+      },
+      { playlist: s.rel("playlists", "playlist_id"), track: s.rel("tracks", "track_id") },
+    ),
+  },
+  { migrations: "none" },
+);
 const relationalRecipientPermissions = {
   ...betterAuthPermissions,
   ...s.definePermissions(relationalRecipientApp, ({ policy, session, allOf, anyOf, allowedTo }) => {
@@ -118,9 +159,9 @@ const relationalRecipientPermissions = {
     policy.playlists.allowRead.where((playlist) => canReadPlaylist(playlist.id));
     policy.playlists.allowInsert.always();
     policy.playlists.allowUpdate.where({ "$createdBy.account": session.user.account });
-    policy.playlist_entries.allowRead.where(allowedTo.read("playlist_id"));
+    policy.playlist_entries.allowRead.where(allowedTo.read("playlist"));
     policy.playlist_entries.allowInsert.where((entry) =>
-      anyOf([allowedTo.update("playlist_id"), hasEditorInvitation(entry.playlist_id)]),
+      anyOf([allowedTo.update("playlist"), hasEditorInvitation(entry.playlist_id)]),
     );
     policy.playlist_entries.allowUpdate.where((entry) => canEditPlaylist(entry.playlist_id));
     policy.playlist_entries.allowDelete.where((entry) => canEditPlaylist(entry.playlist_id));
@@ -216,7 +257,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
       .insert(app.playlists, {
         name: "recipient settlement receipt",
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
     const invitation = await owner
       .insert(app.invitations, {
         playlist_id: playlist.id,
@@ -224,7 +265,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
         role: "editor",
         status: "pending",
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
     const secondInvitation = await owner
       .insert(app.invitations, {
         playlist_id: playlist.id,
@@ -232,7 +273,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
         role: "listener",
         status: "pending",
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
     await Promise.all([
       waitForQuery(
         recipient,
@@ -240,7 +281,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
         (rows) => rows[0]?.id === invitation.id && rows[0]?.status === "pending",
         "RecordPlayer recipient observes pending invitation",
         15_000,
-        "edge",
+        "remote",
       ),
       waitForQuery(
         secondRecipient,
@@ -248,7 +289,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
         (rows) => rows[0]?.id === secondInvitation.id && rows[0]?.status === "pending",
         "second RecordPlayer recipient observes pending invitation",
         15_000,
-        "edge",
+        "remote",
       ),
     ]);
   });
@@ -273,7 +314,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
       .insert(app.playlists, {
         name: "acceptance settlement receipt",
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
     const invitation = await owner
       .insert(app.invitations, {
         playlist_id: playlist.id,
@@ -281,19 +322,19 @@ describe("RecordPlayer authenticated playlist topology", () => {
         role: "editor",
         status: "pending",
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
     await waitForQuery(
       recipient,
       app.invitations.where({ subject: recipientAuthor }),
       (rows) => rows[0]?.id === invitation.id && rows[0]?.status === "pending",
       "recipient observes pending invitation before accepting it",
       15_000,
-      "edge",
+      "remote",
     );
     const acceptance = recipient.update(app.invitations, invitation.id, { status: "accepted" });
     await expect(acceptance.txId).resolves.toEqual(expect.any(String));
     await withTimeout(
-      acceptance.wait({ tier: "edge" }),
+      acceptance.wait({ tier: "global" }),
       10_000,
       "recipient pending-to-accepted transition did not settle at edge",
     );
@@ -323,7 +364,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
     try {
       expect(
         await withTimeout(
-          write.wait({ tier: "edge" }),
+          write.wait({ tier: "global" }),
           10_000,
           `playlist did not settle at edge: ${JSON.stringify(errors)}`,
         ),
@@ -354,7 +395,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
     );
     try {
       const settled = await withTimeout(
-        write.wait({ tier: "edge" }),
+        write.wait({ tier: "global" }),
         10_000,
         `one-table edge settlement mutationErrors=${JSON.stringify(errors)}`,
       );
@@ -387,7 +428,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
         subject: recipientAuthor,
         label: "recipient routing receipt",
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
 
     await expect(
       waitForQuery(
@@ -396,7 +437,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
         (rows) => rows.length === 1 && rows[0]?.id === invite.id,
         "external-JWT scalar recipient receives invitation",
         15_000,
-        "edge",
+        "remote",
       ),
     ).resolves.toEqual([
       {
@@ -430,7 +471,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
       .insert(relationalRecipientApp.playlists, {
         name: "recipient relation receipt",
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
     const invite = await owner
       .insert(relationalRecipientApp.invitations, {
         playlist_id: playlist.id,
@@ -438,7 +479,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
         role: "listener",
         status: "pending",
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
     const secondInvite = await owner
       .insert(relationalRecipientApp.invitations, {
         playlist_id: playlist.id,
@@ -446,12 +487,12 @@ describe("RecordPlayer authenticated playlist topology", () => {
         role: "listener",
         status: "pending",
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
 
     const receipt = await runTopologyScenario(
       {
         id: "record-player.relational-recipient-control",
-        topology: ["browser", "edge", "core"],
+        topology: ["browser", "core"],
         seed: 1,
         phaseTimeoutMs: 25_000,
         faultTimeoutMs: 15_000,
@@ -471,7 +512,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                     (rows) => rows.length === 1 && rows[0]?.id === invite.id,
                     "external-JWT recipient receives scalar grant with correlated owner branch",
                     15_000,
-                    "edge",
+                    "remote",
                   ),
                   waitForQuery(
                     secondRecipient,
@@ -481,7 +522,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                     (rows) => rows.length === 1 && rows[0]?.id === secondInvite.id,
                     "second external-JWT recipient receives scalar grant with correlated owner branch",
                     15_000,
-                    "edge",
+                    "remote",
                   ),
                 ]),
               ).resolves.toHaveLength(2);
@@ -498,7 +539,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
     const receipt = await runTopologyScenario(
       {
         id: "record-player.relational-recipient-full-phase-control",
-        topology: ["browser", "edge", "core"],
+        topology: ["browser", "core"],
         seed: 2,
         phaseTimeoutMs: 25_000,
         faultTimeoutMs: 15_000,
@@ -547,7 +588,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
               let playlist: { id: string };
               try {
                 playlist = await withTimeout(
-                  playlistWrite.wait({ tier: "edge" }),
+                  playlistWrite.wait({ tier: "global" }),
                   10_000,
                   `relational playlist did not settle at edge: ${JSON.stringify(mutationErrors)}`,
                 );
@@ -562,7 +603,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   role: "listener",
                   status: "pending",
                 })
-                .wait({ tier: "edge" });
+                .wait({ tier: "global" });
               await waitForQuery(
                 recipient,
                 relationalRecipientApp.invitations.where({
@@ -571,7 +612,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 (rows) => rows.length === 1 && rows[0]?.id === invite.id,
                 "full-phase external-JWT recipient receives scalar grant",
                 15_000,
-                "edge",
+                "remote",
               );
             },
           },
@@ -581,6 +622,129 @@ describe("RecordPlayer authenticated playlist topology", () => {
     );
     expect(receipt.status).toBe("passed");
   }, 30_000);
+
+  // #2288: under the former policy, an owner's old row passed the owner branch
+  // while the new row passed the recipient-accepted branch, so the owner of one
+  // playlist could transfer an invitation onto somebody else's playlist and
+  // accept it for themselves.
+  it("rejects an owner transferring an invitation onto another owner's playlist", async () => {
+    const server = await getJazzServerInfo(uniqueDbName("record-player-invitation-transfer"));
+    await deploy({
+      appId: server.appId,
+      serverUrl: server.serverUrl,
+      adminSecret: server.adminSecret,
+      schema: app,
+      permissions,
+    });
+    const [ownerAToken, ownerBToken, recipientToken] = await Promise.all([
+      getJazzServerJwtForUser("record-player-transfer-owner-a", undefined, server.appId),
+      getJazzServerJwtForUser("record-player-transfer-owner-b", undefined, server.appId),
+      getJazzServerJwtForUser("record-player-transfer-recipient", undefined, server.appId),
+    ]);
+    const ownerAAuthor = await accountIdFor(server, ownerAToken);
+    const recipientAuthor = await accountIdFor(server, recipientToken);
+    const ownerA = await openClient(server, "transfer-owner-a", ownerAToken);
+    const ownerB = await openClient(server, "transfer-owner-b", ownerBToken);
+    const recipient = await openClient(server, "transfer-recipient", recipientToken);
+
+    const playlistA = await ownerA
+      .insert(app.playlists, { name: "owner A playlist" })
+      .wait({ tier: "global" });
+    const playlistB = await ownerB
+      .insert(app.playlists, { name: "owner B playlist" })
+      .wait({ tier: "global" });
+    const inviteOnA = await ownerA
+      .insert(app.invitations, {
+        playlist_id: playlistA.id,
+        subject: recipientAuthor,
+        role: "listener",
+        status: "pending",
+      })
+      .wait({ tier: "global" });
+    const album = await ownerA
+      .insert(app.albums, { title: "Transfer", artist: "Jazz" })
+      .wait({ tier: "global" });
+    const track = await ownerA
+      .insert(app.tracks, { album_id: album.id, title: "Boundary", ordinal: 0, duration_ms: 1 })
+      .wait({ tier: "global" });
+
+    await expect(
+      ownerA
+        .update(app.invitations, inviteOnA.id, {
+          playlist_id: playlistB.id,
+          subject: ownerAAuthor,
+          role: "editor",
+          status: "accepted",
+        })
+        .wait({ tier: "global" }),
+    ).rejects.toThrow(/AuthorizationDenied|Write rejected/);
+    await expect(
+      ownerA
+        .update(app.invitations, inviteOnA.id, { playlist_id: playlistB.id })
+        .wait({ tier: "global" }),
+    ).rejects.toThrow(/AuthorizationDenied|Write rejected/);
+    await expect(
+      waitForQuery(
+        ownerA,
+        app.invitations.where({ id: inviteOnA.id }),
+        (rows) => rows.length === 1 && rows[0]?.playlist_id === playlistA.id,
+        "rejected invitation transfers roll back",
+        15_000,
+        "remote",
+      ),
+    ).resolves.toEqual([inviteOnA]);
+    await expect(
+      ownerA
+        .insert(app.playlist_entries, {
+          playlist_id: playlistB.id,
+          track_id: track.id,
+          position: 1,
+        })
+        .wait({ tier: "global" }),
+    ).rejects.toThrow(/AuthorizationDenied|Write rejected/);
+    await expect(
+      ownerB.all(app.invitations.where({ playlist_id: playlistB.id }), { tier: "remote" }),
+    ).resolves.toEqual([]);
+
+    // Positive controls: the owner still manages invitations on their own
+    // playlist, and the recipient still accepts their own pending invitation.
+    await ownerA
+      .insert(app.playlist_entries, { playlist_id: playlistA.id, track_id: track.id, position: 1 })
+      .wait({ tier: "global" });
+    await ownerA.update(app.invitations, inviteOnA.id, { role: "editor" }).wait({ tier: "global" });
+    await waitForQuery(
+      recipient,
+      app.invitations.where({ subject: recipientAuthor }),
+      (rows) => rows[0]?.id === inviteOnA.id && rows[0]?.role === "editor",
+      "recipient observes owner-managed pending invitation",
+      15_000,
+      "remote",
+    );
+    await recipient
+      .update(app.invitations, inviteOnA.id, { status: "accepted" })
+      .wait({ tier: "global" });
+    await recipient
+      .insert(app.playlist_entries, { playlist_id: playlistA.id, track_id: track.id, position: 2 })
+      .wait({ tier: "global" });
+    await expect(
+      waitForQuery(
+        ownerA,
+        app.invitations.where({ id: inviteOnA.id }),
+        (rows) => rows[0]?.status === "accepted",
+        "owner observes recipient acceptance",
+        15_000,
+        "remote",
+      ),
+    ).resolves.toEqual([
+      {
+        id: inviteOnA.id,
+        playlist_id: playlistA.id,
+        subject: recipientAuthor,
+        role: "editor",
+        status: "accepted",
+      },
+    ]);
+  }, 60_000);
 
   it("rejects forged acceptance and converges two offline playlist editors exactly", async () => {
     let server: Awaited<ReturnType<typeof getJazzServerInfo>>;
@@ -612,7 +776,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
     const receipt = await runTopologyScenario(
       {
         id: "record-player.playlist-auth-reconnect",
-        topology: ["browser", "edge", "core"],
+        topology: ["browser", "core"],
         seed: Number.isSafeInteger(seed) ? seed : 41,
         phaseTimeoutMs: 25_000,
         faultTimeoutMs: 15_000,
@@ -683,7 +847,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 id: playlistWrite.value.id,
               });
               try {
-                const edgeSettlement = playlistWrite.wait({ tier: "edge" });
+                const edgeSettlement = playlistWrite.wait({ tier: "global" });
                 void edgeSettlement.then(
                   () =>
                     console.info("[record-player-topology] playlist edge settlement resolved", {
@@ -718,7 +882,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
               console.info("[record-player-topology] editor invitation transaction", {
                 transactionId: await editorInviteWrite.txId,
               });
-              editorInvite = await editorInviteWrite.wait({ tier: "edge" });
+              editorInvite = await editorInviteWrite.wait({ tier: "global" });
               console.info("[record-player-topology] editor invitation edge settlement");
               console.info("[record-player-topology] create listener invitation");
               const listenerInviteWrite = owner.insert(app.invitations, {
@@ -730,7 +894,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
               console.info("[record-player-topology] listener invitation transaction", {
                 transactionId: await listenerInviteWrite.txId,
               });
-              listenerInvite = await listenerInviteWrite.wait({ tier: "edge" });
+              listenerInvite = await listenerInviteWrite.wait({ tier: "global" });
               console.info("[record-player-topology] listener invitation edge settlement");
               // Edge settlement acknowledges the owner's write; it does not
               // imply either recipient has received the row yet. A recipient
@@ -744,7 +908,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   (rows) => rows[0]?.id === editorInvite.id && rows[0]?.status === "pending",
                   "editor observes pending invitation",
                   15_000,
-                  "edge",
+                  "remote",
                 ),
                 waitForQuery(
                   listener,
@@ -752,7 +916,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   (rows) => rows[0]?.id === listenerInvite.id && rows[0]?.status === "pending",
                   "listener observes pending invitation",
                   15_000,
-                  "edge",
+                  "remote",
                 ),
               ]);
               console.info("[record-player-topology] recipient invitations observed");
@@ -787,8 +951,8 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 });
               });
               try {
-                const editorAcceptanceSettlement = editorAcceptance.wait({ tier: "edge" });
-                const listenerAcceptanceSettlement = listenerAcceptance.wait({ tier: "edge" });
+                const editorAcceptanceSettlement = editorAcceptance.wait({ tier: "global" });
+                const listenerAcceptanceSettlement = listenerAcceptance.wait({ tier: "global" });
                 void editorAcceptanceSettlement.then(
                   () =>
                     console.info("[record-player-topology] editor acceptance settled", {
@@ -824,7 +988,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
               console.info("[record-player-topology] create streamed track album");
               const streamedTrackAlbum = await owner
                 .insert(app.albums, { title: "A streamed record", artist: "Jazz" })
-                .wait({ tier: "edge" });
+                .wait({ tier: "global" });
               streamedTrackAlbumId = streamedTrackAlbum.id;
               // The stream is consumed and committed locally while its peer is
               // deliberately disconnected. Reconnecting may retry transport,
@@ -844,15 +1008,15 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 "offline streamed audio track did not settle locally",
               );
               await expect(
-                listener.all(app.tracks.where({ id: streamedTrack.value.id }), { tier: "edge" }),
+                listener.all(app.tracks.where({ id: streamedTrack.value.id }), { tier: "remote" }),
               ).resolves.toEqual([]);
               await delay(100);
               await expect(
-                listener.all(app.tracks.where({ id: streamedTrack.value.id }), { tier: "edge" }),
+                listener.all(app.tracks.where({ id: streamedTrack.value.id }), { tier: "remote" }),
               ).resolves.toEqual([]);
               await owner.reconnect();
               await withTimeout(
-                streamedTrack.wait({ tier: "edge" }),
+                streamedTrack.wait({ tier: "global" }),
                 15_000,
                 "streamed audio track did not settle at edge",
               );
@@ -870,7 +1034,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                       ordinal,
                       duration_ms: ordinal + 2,
                     })
-                    .wait({ tier: "edge" });
+                    .wait({ tier: "global" });
                   return {
                     id: track.id,
                     albumId: streamedTrackAlbumId,
@@ -909,11 +1073,11 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 ),
               ).rejects.toThrow("record-player injected audio source failure");
               await expect(
-                owner.all(app.tracks.where({ id: failedTrackId }), { tier: "local" }),
+                owner.all(app.tracks.where({ id: failedTrackId }), { tier: "local-first" }),
               ).resolves.toEqual([]);
               await delay(100);
               await expect(
-                owner.all(app.tracks.where({ id: failedTrackId }), { tier: "local" }),
+                owner.all(app.tracks.where({ id: failedTrackId }), { tier: "local-first" }),
               ).resolves.toEqual([]);
 
               // Advance both peers through a later accepted edge mutation.
@@ -923,24 +1087,24 @@ describe("RecordPlayer authenticated playlist topology", () => {
               await owner.reconnect();
               const failureBarrier = await owner
                 .insert(app.albums, { title: "Failed-stream barrier", artist: "Jazz" })
-                .wait({ tier: "edge" });
+                .wait({ tier: "global" });
               await waitForQuery(
                 listener,
                 app.albums.where({ id: failureBarrier.id }),
                 (rows) => rows[0]?.id === failureBarrier.id,
                 "listener advances beyond failed streamed mutation",
                 15_000,
-                "edge",
+                "remote",
               );
               for (const db of [owner, listener]) {
                 await expect(
-                  db.all(app.tracks.where({ id: failedTrackId }), { tier: "edge" }),
+                  db.all(app.tracks.where({ id: failedTrackId }), { tier: "remote" }),
                 ).resolves.toEqual([]);
               }
               await delay(100);
               for (const db of [owner, listener]) {
                 await expect(
-                  db.all(app.tracks.where({ id: failedTrackId }), { tier: "edge" }),
+                  db.all(app.tracks.where({ id: failedTrackId }), { tier: "remote" }),
                 ).resolves.toEqual([]);
               }
             },
@@ -975,7 +1139,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   });
                   return { album, entries };
                 })
-              ).wait({ tier: "edge" });
+              ).wait({ tier: "global" });
               windowEntries.push(
                 ...windowRows.entries.map(({ entry, position, track }) => ({
                   id: entry.id,
@@ -993,7 +1157,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 (rows) => rows.length >= 2,
                 "listener catalogue visibility",
                 15_000,
-                "edge",
+                "remote",
               );
               expect(catalogue.map((row) => row.title)).toEqual(
                 catalogue.map((row) => row.title).sort(),
@@ -1020,7 +1184,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                     expectedRenderedWindow.map((entry) => entry.position).join(","),
                 "listener rendered playlist window",
                 15_000,
-                "edge",
+                "remote",
               );
               expect(visibleWindow.map((row) => row.track_id)).toEqual(
                 expectedRenderedWindow.map((entry) => entry.trackId),
@@ -1040,7 +1204,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   !Object.hasOwn(rows[0], "audio_bytes"),
                 "streamed track metadata without audio materialization",
                 15_000,
-                "edge",
+                "remote",
               );
               expect(Object.hasOwn(projectedTrack[0]!, "audio_bytes")).toBe(false);
               expect("audio_bytes" in projectedTrack[0]!).toBe(false);
@@ -1060,7 +1224,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   rows[0].audio_bytes.at(-1) === streamedAudioPayload.at(-1),
                 "listener receives intact streamed audio after owner reconnect",
                 15_000,
-                "edge",
+                "remote",
               );
               expect(playbackTrack[0]!.audio_bytes).toEqual(streamedAudioPayload);
 
@@ -1077,7 +1241,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 (rows) => rows.length === ALBUM_TRACK_LIMIT + 1,
                 "listener receives the complete streamed-album metadata set",
                 15_000,
-                "edge",
+                "remote",
               );
 
               // Exercise the app's actual persistence boundary after the
@@ -1111,7 +1275,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                     role: "editor",
                     status: "accepted",
                   })
-                  .wait({ tier: "edge" }),
+                  .wait({ tier: "global" }),
               ).rejects.toThrow(/AuthorizationDenied|Write rejected/);
               await expect(
                 listener
@@ -1119,20 +1283,20 @@ describe("RecordPlayer authenticated playlist topology", () => {
                     playlist_id: "00000000-0000-0000-0000-000000000000",
                     status: "accepted",
                   })
-                  .wait({ tier: "edge" }),
+                  .wait({ tier: "global" }),
               ).rejects.toThrow(/AuthorizationDenied|Write rejected/);
               const track = await owner
                 .insert(app.tracks, {
                   album_id: (
                     await owner
                       .insert(app.albums, { title: "Receipt", artist: "Jazz" })
-                      .wait({ tier: "edge" })
+                      .wait({ tier: "global" })
                   ).id,
                   title: "Boundary",
                   ordinal: 0,
                   duration_ms: 1,
                 })
-                .wait({ tier: "edge" });
+                .wait({ tier: "global" });
               await expect(
                 listener
                   .insert(app.playlist_entries, {
@@ -1140,7 +1304,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                     track_id: track.id,
                     position: 1,
                   })
-                  .wait({ tier: "edge" }),
+                  .wait({ tier: "global" }),
               ).rejects.toThrow(/AuthorizationDenied|Write rejected/);
               await waitForQuery(
                 editor,
@@ -1148,7 +1312,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 (rows) => rows[0]?.role === "editor" && rows[0]?.playlist_id === playlist.id,
                 "rejected acceptance rolls back",
                 15_000,
-                "edge",
+                "remote",
               );
             },
             faultsAfter: [
@@ -1223,7 +1387,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   expected,
                   "owner exact convergence",
                   20_000,
-                  "edge",
+                  "remote",
                 ),
                 waitForQuery(
                   editor,
@@ -1233,7 +1397,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   expected,
                   "editor exact convergence",
                   20_000,
-                  "edge",
+                  "remote",
                 ),
               ]);
               // This production schema keeps permissions separate from row
@@ -1248,10 +1412,10 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 (rows) => rows[0]?.id === belowWindowEntryId,
                 "authorized editor reads exact child through edge coverage",
                 15_000,
-                "edge",
+                "remote",
               );
               expect(authorizedExactChild.map((row) => row.id)).toEqual([belowWindowEntryId]);
-              await owner.delete(app.invitations, editorInvite.id).wait({ tier: "edge" });
+              await owner.delete(app.invitations, editorInvite.id).wait({ tier: "global" });
               await Promise.all([
                 waitForQuery(
                   editor,
@@ -1263,7 +1427,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   (rows) => rows.length === 0,
                   "revoked editor loses rendered playlist window",
                   15_000,
-                  "edge",
+                  "remote",
                 ),
                 waitForQuery(
                   editor,
@@ -1271,7 +1435,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   (rows) => rows.length === 0,
                   "revoked editor loses a child below the rendered window",
                   15_000,
-                  "edge",
+                  "remote",
                 ),
                 waitForQuery(
                   editor,
@@ -1279,7 +1443,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   (rows) => rows.length === 0,
                   "revoked editor loses the playlist root",
                   15_000,
-                  "edge",
+                  "remote",
                 ),
                 waitForQuery(
                   editor,
@@ -1287,24 +1451,21 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   (rows) => rows.length === 0,
                   "revoked editor loses the revoked invitation",
                   15_000,
-                  "edge",
+                  "remote",
                 ),
               ]);
-              // The invitation was actually deleted, not merely withdrawn
-              // from this reader's scope. Its admitted deletion suppresses
-              // local reads too. The undeleted playlist and child instead
-              // remain cached despite losing their remote authorization.
+              // Losing read access evicts the rows: the deleted invitation,
+              // and the undeleted playlist and child, are gone from local
+              // reads too (INV-SYNC-14).
               await expect(
                 editor.all(app.invitations.where({ id: editorInvite.id })),
               ).resolves.toEqual([]);
-              expect(
-                (await editor.all(app.playlists.where({ id: playlist.id }))).map((row) => row.id),
-              ).toEqual([playlist.id]);
-              expect(
-                (await editor.all(app.playlist_entries.where({ id: belowWindowEntryId }))).map(
-                  (row) => row.id,
-                ),
-              ).toEqual([belowWindowEntryId]);
+              await expect(editor.all(app.playlists.where({ id: playlist.id }))).resolves.toEqual(
+                [],
+              );
+              await expect(
+                editor.all(app.playlist_entries.where({ id: belowWindowEntryId })),
+              ).resolves.toEqual([]);
               await expect(
                 editor
                   .insert(app.playlist_entries, {
@@ -1312,7 +1473,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                     track_id: "00000000-0000-0000-0000-000000000000",
                     position: 3,
                   })
-                  .wait({ tier: "edge" }),
+                  .wait({ tier: "global" }),
               ).rejects.toThrow(/AuthorizationDenied|Write rejected/);
             },
           },
@@ -1335,7 +1496,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   (rows) => rows.length === 0,
                   "persistent reopen retains playlist-entry revocation",
                   15_000,
-                  "edge",
+                  "remote",
                 ),
                 waitForQuery(
                   editor,
@@ -1343,7 +1504,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   (rows) => rows.length === 0,
                   "persistent reopen retains below-window child revocation",
                   15_000,
-                  "edge",
+                  "remote",
                 ),
                 waitForQuery(
                   editor,
@@ -1351,7 +1512,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   (rows) => rows.length === 0,
                   "persistent reopen retains root-row revocation",
                   15_000,
-                  "edge",
+                  "remote",
                 ),
                 waitForQuery(
                   editor,
@@ -1359,7 +1520,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   (rows) => rows.length === 0,
                   "persistent reopen retains invitation revocation",
                   15_000,
-                  "edge",
+                  "remote",
                 ),
               ]);
             },
@@ -1409,6 +1570,138 @@ async function registerAccount(server: { appId: string; serverUrl: string }, tok
     return accounts.loginJWT(auth);
   }
 }
+
+// #3840: after the demo library streamed in, a page reload often hung on
+// "Connecting RecordPlayer…" for both the uploader and a listener, and a
+// listener that was already open sometimes stopped receiving updates.
+describe("RecordPlayer after a streamed upload", () => {
+  it("keeps an open listener live and reopens both clients", async () => {
+    const server = await getJazzServerInfo(uniqueDbName("record-player-streamed-reload"));
+    await deploy({
+      appId: server.appId,
+      serverUrl: server.serverUrl,
+      adminSecret: server.adminSecret,
+      schema: app,
+      permissions,
+    });
+    const [uploaderToken, listenerToken] = await Promise.all([
+      getJazzServerJwtForUser("record-player-reload-uploader", undefined, server.appId),
+      getJazzServerJwtForUser("record-player-reload-listener", undefined, server.appId),
+    ]);
+    const uploaderDbName = uniqueDbName("record-player-reload-uploader");
+    const listenerDbName = uniqueDbName("record-player-reload-listener");
+    const uploader = await openClient(server, "reload-uploader", uploaderToken, uploaderDbName);
+    const listener = await openClient(server, "reload-listener", listenerToken, listenerDbName);
+
+    // The listener's page shows the shelf and track lists, which never select
+    // audio bytes, while the uploader streams the demo library in.
+    const trackCount = DEMO_LIBRARY.reduce((sum, album) => sum + album.tracks.length, 0);
+    const shelf = app.albums.orderBy("title", "asc").limit(200).select("title", "artist");
+    const trackList = app.tracks.select(
+      "album_id",
+      "title",
+      "ordinal",
+      "duration_ms",
+      "audio_mime",
+      "audio_byte_length",
+    );
+    let listenerAlbums: string[] = [];
+    let listenerTracks: string[] = [];
+    ctx.trackSubscription(
+      listener.subscribe(shelf, (rows) => {
+        listenerAlbums = rows.map((row) => row.title);
+      }),
+    );
+    ctx.trackSubscription(
+      listener.subscribe(trackList, (rows) => {
+        listenerTracks = rows.map((row) => row.title);
+      }),
+    );
+
+    await withTimeout(
+      seedDemoLibrary(new JazzRecordPlayerStore(uploader), () => {}),
+      60_000,
+      "the uploader did not finish streaming the demo library",
+    );
+    const lastTrack = DEMO_LIBRARY.at(-1)!.tracks.at(-1)!.title;
+    await waitForListener(
+      () => listenerTracks.length === trackCount,
+      "the open listener did not receive every streamed track",
+      () => `saw ${listenerTracks.length} of ${trackCount} tracks`,
+    );
+    expect(listenerTracks).toContain(lastTrack);
+
+    // A small write after the upload must still reach the open listener.
+    uploader.insert(app.albums, { title: "Written after the upload", artist: "Jazz" });
+    await waitForListener(
+      () => listenerAlbums.includes("Written after the upload"),
+      "the open listener stopped receiving updates after the upload",
+      () => `saw albums ${JSON.stringify(listenerAlbums)}`,
+    );
+
+    // A reload opens a new page over the same persistent storage while the
+    // old page's runtime may still be alive, then the old page goes away.
+    for (const [label, token, dbName, previous] of [
+      ["uploader", uploaderToken, uploaderDbName, uploader],
+      ["listener", listenerToken, listenerDbName, listener],
+    ] as const) {
+      const reloaded = await withTimeout(
+        openClient(server, `reload-${label}-reloaded`, token, dbName),
+        20_000,
+        `the ${label} did not reopen next to its open page`,
+      );
+      await expectReopenedLibrary(reloaded, label, trackCount);
+      ctx.untrack(previous);
+      await withTimeout(previous.shutdown(), 20_000, `the ${label}'s old page did not shut down`);
+      ctx.untrack(reloaded);
+      await withTimeout(reloaded.shutdown(), 20_000, `the ${label}'s reload did not shut down`);
+
+      // And once more with nothing else open over the storage.
+      const reopened = await withTimeout(
+        openClient(server, `reload-${label}-reopened`, token, dbName),
+        20_000,
+        `the ${label} did not reopen its storage`,
+      );
+      await expectReopenedLibrary(reopened, label, trackCount);
+    }
+  }, 180_000);
+
+  async function waitForListener(
+    done: () => boolean,
+    message: string,
+    detail: () => string,
+  ): Promise<void> {
+    const deadline = Date.now() + 30_000;
+    while (!done()) {
+      if (Date.now() > deadline) throw new Error(`${message}: ${detail()}`);
+      await delay(50);
+    }
+  }
+
+  async function expectReopenedLibrary(db: Db, label: string, trackCount: number): Promise<void> {
+    const trackList = app.tracks.select("title", "audio_byte_length");
+    const local = await withTimeout(
+      db.all(trackList, { tier: "local-first" }),
+      20_000,
+      `the reopened ${label} did not answer a local read`,
+    );
+    expect(local).toHaveLength(trackCount);
+    await waitForQuery(
+      db,
+      trackList,
+      (rows) => rows.length === trackCount,
+      `the reopened ${label} did not read the library at edge`,
+      20_000,
+      "remote",
+    );
+    const albums = await withTimeout(
+      db.all(app.albums.select("title"), { tier: "remote" }),
+      20_000,
+      `the reopened ${label} did not read albums at edge`,
+    );
+    expect(albums.map((row) => row.title)).toContain("Written after the upload");
+  }
+});
 
 function audioStream(chunks: readonly Uint8Array[]): ReadableStream<Uint8Array> {
   let next = 0;

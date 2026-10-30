@@ -13,7 +13,6 @@ console_error_panic_hook = { version = "0.1", optional = true }
 ed25519-dalek = "2"
 futures-util = "0.3.31"
 futures-channel = "0.3.31"
-idb-tree = { path = "../idb-tree" }
 jazz = { path = "../jazz", default-features = false }
 js-sys = "0.3.82"
 postcard = { version = "1.1.3", features = ["alloc"] }
@@ -32,6 +31,8 @@ web-time = "1.1"
 getrandom = { version = "0.3", features = ["wasm_js"] }
 getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
 talc = "5.0.4"
+sqlite-wasm-rs = { version = "0.5", default-features = false }
+sqlite-wasm-vfs = "0.2"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
@@ -49,6 +50,8 @@ web-sys = { version = "0.3", features = [
 [features]
 default = ["console_error_panic_hook", "transport-compression-ruzstd"]
 bench-probes = []
+# Browser store comparison probes (IndexedDB vs OPFS); never in release builds.
+browser-bench = []
 transport-compression-lz4 = ["jazz/transport-compression-lz4"]
 transport-compression-zstd = ["jazz/transport-compression-zstd"]
 transport-compression-ruzstd = ["jazz/transport-compression-ruzstd"]
@@ -64,5 +67,11 @@ wasm-opt = ["-O", "-g"]
 # and it preserves the wasm `name` section so function names appear in profilers.
 # wasm-pack only recognizes the profile names `dev`/`profiling`/`release`; any other
 # name is silently ignored and wasm-pack falls back to its built-in defaults.
+# `--low-memory-unused` lets wasm-opt fold `ptr + constant` into load/store
+# offsets. The two forms differ only when `ptr + constant` wraps past 4 GiB into
+# the first 1 KiB, which no valid Rust access does: that address range is the
+# bottom of the shadow stack, reached only by a stack overflow, which then traps
+# instead of silently corrupting memory. It cuts gzip by 2.75% and measured
+# neutral-to-faster in the fresh-Chromium read/write benchmarks.
 [package.metadata.wasm-pack.profile.release]
-wasm-opt = ["-O", "-g"]
+wasm-opt = ["-O", "-g", "--low-memory-unused"]

@@ -8,6 +8,7 @@ The caller remains responsible for shutting the client down.
 	import { getSubscriptionStore } from '../subscription-store-internal.js';
 	import { initJazzContext } from './context.svelte.js';
 	import type { JazzClient } from './create-jazz-client.js';
+	import { toError } from '../runtime/util.js';
 
 	interface Props {
 		client: JazzClient | Promise<JazzClient>;
@@ -56,7 +57,7 @@ The caller remains responsible for shutting the client down.
 			})
 			.catch((reason) => {
 				if (!cancelled) {
-					error = reason instanceof Error ? reason : new Error(String(reason));
+					error = toError(reason);
 				}
 			});
 

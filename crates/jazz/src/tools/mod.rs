@@ -1,21 +1,21 @@
+// The data-model and identity modules below moved out of `tools` so the
+// lower layers no longer reach up into the public API module; they stay
+// reachable at their old `tools::` paths.
 #[doc(hidden)]
-pub mod admin_catalogue_row_format;
-pub mod app_id;
-pub mod identity;
-pub mod metadata;
+pub use crate::model::admin_catalogue_row_format;
+pub(crate) use crate::model::public_api;
+#[doc(hidden)]
+pub use crate::model::public_schema_convert;
+pub use crate::model::{metadata, policy_claims, public_schema, transaction};
+pub use crate::{app_id, identity};
+#[doc(hidden)]
+pub mod deployment;
 /// Target-shell factory boundary for native peer transports.
 pub mod native_transport_connector;
-mod object;
-pub mod policy_claims;
-pub(crate) mod public_api;
-pub mod public_schema;
-#[doc(hidden)]
-pub mod public_schema_convert;
 pub mod schema_lens;
 pub mod sync;
-#[cfg(feature = "testing")]
+#[cfg(any(test, feature = "testing"))]
 pub mod test_support;
-pub mod transaction;
 
 pub mod transport_error;
 pub mod websocket_prelude_auth;
@@ -26,8 +26,6 @@ mod client;
 
 #[cfg(feature = "runtime")]
 use std::path::PathBuf;
-#[cfg(feature = "runtime")]
-use std::sync::Arc;
 
 #[cfg(feature = "runtime")]
 use thiserror::Error;
@@ -46,8 +44,7 @@ pub use transaction::OpenTransactionId;
 #[cfg(feature = "runtime")]
 pub use client::{JazzClient, JazzTransaction};
 
-pub(crate) use object::OutputOccurrenceId;
-pub use object::{BranchName, ObjectId, ResultKey};
+pub use crate::object::{BranchName, ObjectId, ResultKey};
 #[cfg(feature = "runtime")]
 pub use sync::ClientId;
 #[cfg(feature = "runtime")]
@@ -69,8 +66,6 @@ pub struct AppContext {
     pub data_dir: PathBuf,
     /// Local storage backend.
     pub storage: ClientStorage,
-    /// Target-shell factory for persistent local storage.
-    pub storage_factory: Option<Arc<dyn crate::groove::storage::StorageFactory>>,
 
     // Authentication fields
     /// Registry-resolved account metadata for this low-level native client.
@@ -86,23 +81,30 @@ pub struct AppContext {
     /// Admin secret for privileged sync over WebSocket and `/admin/*` HTTP.
     /// On `/ws`, a valid admin secret authenticates this client as the backend.
     pub admin_secret: Option<String>,
+    /// The app's schema versions and the lenses between them, as
+    /// `jazz-tools validate` and `deploy` write them to `migrations/index.ts`
+    /// beside schema.ts (load it with
+    /// [`deployment::published::client_migrations_module`]): the store
+    /// reaches `schema` along them, so it stores each version as the server
+    /// does (SPEC 10.7).
+    pub migrations: crate::db::Migrations,
 }
 
 #[cfg(feature = "testing")]
 impl AppContext {
     pub fn test(schema: Schema) -> AppContext {
         AppContext {
-            app_id: crate::tools::AppId::random(),
+            app_id: crate::app_id::AppId::random(),
             client_id: None,
             schema,
             server_url: String::new(),
             data_dir: std::env::temp_dir(),
             storage: crate::tools::ClientStorage::Memory,
-            storage_factory: None,
             account_id: None,
             jwt_token: None,
             backend_secret: None,
             admin_secret: None,
+            migrations: Default::default(),
         }
     }
 }
@@ -111,7 +113,7 @@ impl AppContext {
 #[cfg(feature = "runtime")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ClientStorage {
-    /// Persist client state to disk under `AppContext::data_dir`.
+    /// Persist client state to `jazz.sqlite` under `AppContext::data_dir`.
     #[default]
     Persistent,
     /// Keep all client state in memory for the lifetime of the process only.
@@ -139,6 +141,12 @@ pub enum JazzError {
 
     #[error("Storage error: {0}")]
     Storage(String),
+
+    /// The data directory holds a store from before the SQLite engine.
+    /// It is left untouched; delete it and resync from Core. Writes in it
+    /// that never reached Core are lost.
+    #[error("Unsupported storage format: {0}")]
+    UnsupportedStorage(String),
 
     #[error("Schema error: {0}")]
     Schema(String),

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { DynamicCodeBlock } from "fumadocs-ui/components/dynamic-codeblock";
+import { Code } from "@/components/docs/mdx-client";
 import {
   getStoredApp,
   onAppGenerated,
@@ -21,5 +21,5 @@ export function CloudConfig() {
   const appId = app?.appId ?? "<your-app-id>";
   const code = `{\n  appId: "${appId}",\n  serverUrl: "https://v2.sync.jazz.tools/",\n}`;
 
-  return <DynamicCodeBlock lang="ts" code={code} />;
+  return <Code language="ts" code={code} />;
 }

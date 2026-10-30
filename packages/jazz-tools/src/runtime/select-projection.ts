@@ -1,3 +1,4 @@
+import { resolveQueryTable } from "./history-relation.js";
 import type { WasmSchema } from "../drivers/types.js";
 
 export const HIDDEN_INCLUDE_COLUMN_PREFIX = "__jazz_include_";
@@ -11,7 +12,7 @@ export function resolveSelectedColumns(
   schema: WasmSchema,
   projection: readonly string[] | undefined,
 ): string[] {
-  const table = schema[tableName];
+  const table = resolveQueryTable(schema, tableName);
   if (!table) {
     throw new Error(`Unknown table "${tableName}" in schema`);
   }
@@ -44,7 +45,8 @@ export function resolveSelectedColumns(
 
   // if no wildcard, return all explicitly selected columns
   if (!selection.hasWildcard) {
-    return [...selection.explicitColumnsInSchema, ...selection.explicitColumnsNotInSchema];
+    const columns = [...selection.explicitColumnsInSchema, ...selection.explicitColumnsNotInSchema];
+    return columns.length === 0 && projection.includes("id") ? ["id"] : columns;
   }
 
   if (selection.explicitColumnsNotInSchema.size === 0) {

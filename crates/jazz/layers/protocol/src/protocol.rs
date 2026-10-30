@@ -1,0 +1,6597 @@
+//! Simulation-first wire vocabulary for sync messages, commit payloads, view
+//! updates, catalogue messages, and migration lens publication. This module owns
+//! serializable shapes that cross replica or facade boundaries; transaction
+//! semantics are in [`crate::tx`] and query AST semantics in [`crate::query`].
+//! Storage and sync live in `jazz-db`.
+
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet};
+#[cfg(any(test, feature = "testing"))]
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+
+#[cfg(test)]
+use jazz_types::records::ValueType;
+use jazz_types::records::{OwnedRecord, RecordDescriptor, Value};
+
+use crate::ids::{AuthorSubject, MigrationLensId, NodeUuid, RowAuthor, RowUuid, SchemaVersionId};
+use crate::object::{ObjectId, OutputOccurrenceId};
+use crate::query::{BindingId, Query, RelationQuery, ShapeId};
+use crate::schema::{JazzSchema, TableSchema};
+use crate::time::GlobalTime;
+use crate::time::TxTime;
+use crate::tx::{DeletionEvent, DurabilityTier, Fate, Transaction, TxId};
+
+/// Uninhabited payload preserving retired postcard discriminants.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum ReservedWireMessage {}
+
+/// Messages exchanged between Jazz nodes.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub enum SyncMessage {
+    /// Trusted backend assertion of process-local auth claims for a write subject.
+    SessionClaims {
+        /// Identity these claims describe.
+        identity: AuthorSubject,
+        /// Claims used by policy evaluation for this identity.
+        claims: BTreeMap<String, Value>,
+    },
+    /// Upstream commit unit awaiting authority fate.
+    CommitUnit {
+        /// Transaction payload.
+        tx: Transaction,
+        /// Row versions in the commit.
+        versions: Vec<VersionRecord>,
+    },
+    /// Downstream fate update for a transaction.
+    FateUpdate {
+        /// Transaction being updated.
+        tx_id: TxId,
+        /// New fate.
+        fate: Fate,
+        /// Assigned global timestamp, when accepted.
+        global_time: Option<crate::time::GlobalTime>,
+        /// Sender's observed durability tier, when it chooses to make a claim.
+        durability: Option<DurabilityTier>,
+    },
+    /// Register a query shape.
+    RegisterShape {
+        /// Content-addressed shape id.
+        shape_id: ShapeId,
+        /// Versioned AST payload.
+        ast: ShapeAst,
+        /// Registration options.
+        opts: RegisterShapeOptions,
+    },
+    /// Attach a usage-site subscription to a registered query shape.
+    Subscribe(Subscribe),
+    /// Reject one usage-site subscription without closing the peer connection.
+    SubscribeRejected {
+        /// Usage-site subscription that was not accepted.
+        subscription: SubscriptionKey,
+        /// Stable rejection class plus diagnostic detail.
+        reason: SubscribeRejectReason,
+    },
+    /// Detach a usage-site subscription.
+    Unsubscribe {
+        /// Usage-site subscription to detach.
+        subscription: SubscriptionKey,
+    },
+    /// Publish an immutable schema-version payload.
+    PublishSchema {
+        /// Authenticated catalogue admin.
+        author: AuthorSubject,
+        /// Schema payload.
+        schema: Box<SchemaVersion>,
+    },
+    /// Retired schema-and-lineage publication tag: a store derives
+    /// physical names from its own catalogue (see `jazz::names`).
+    #[doc(hidden)]
+    RetiredSchemaLineagePublication(ReservedWireMessage),
+    /// Publish an immutable migration lens payload.
+    PublishLens {
+        /// Authenticated catalogue admin.
+        author: AuthorSubject,
+        /// Lens payload.
+        lens: MigrationLens,
+    },
+    /// Catalogue-lane acknowledgement.
+    CatalogueAck(CatalogueAck),
+    /// Downstream current-row view update.
+    ViewUpdate(ViewUpdatePayload),
+    /// Retired row-version repair request tag. Rows are identified by
+    /// `(row, row_seq)` and resent whole, so there is no per-version fetch.
+    #[doc(hidden)]
+    Reserved14(ReservedWireMessage),
+    /// Retired row-version repair response tag.
+    #[doc(hidden)]
+    Reserved15(ReservedWireMessage),
+    /// Retired catalogue snapshot tag: `SyncMessage::Catalogue` carries
+    /// an upstream's versions with the names it stores them by.
+    #[doc(hidden)]
+    RetiredCatalogueSnapshot(ReservedWireMessage),
+    /// Minimal request for an authority-owned authorization support scope.
+    ///
+    /// The caller supplies only an opaque correlation id and the hypothetical
+    /// action.  In particular it cannot select a shape, binding, scope key, or
+    /// authenticated subject.
+    AuthorizationScopeIntent {
+        /// Opaque request correlation chosen by the client.
+        request_id: PermissionAdviceRequestId,
+        /// Candidate operation; all support scope details are authority-derived.
+        action: PermissionAdviceAction,
+        /// Immutable session snapshot delegated by a host-admitted backend or
+        /// scope-isolated relay. Ordinary links must leave this absent.
+        delegated_session: Option<DelegatedSessionBinding>,
+    },
+    /// One authority-selected support clause for an authorization intent.
+    /// `view` is an ordinary `ViewUpdate`, wrapped only to carry its opaque
+    /// request and server-chosen scope metadata.
+    AuthorizationScopeView {
+        /// Opaque request correlation from the matching intent.
+        request_id: PermissionAdviceRequestId,
+        /// Authority-derived scope identity.
+        key: AuthorizationSupportScopeKey,
+        /// Zero-based authority clause ordinal.
+        clause_index: u16,
+        /// Total number of authority clauses in this hydration.
+        clause_count: u16,
+        /// Ordinary settlement-bearing `ViewUpdate` payload.
+        ///
+        /// This deliberately is not a `SyncMessage`: an authority scope view
+        /// has exactly one wrapper around a view update, never another scope
+        /// wrapper.
+        view: ViewUpdatePayload,
+    },
+    /// Aggregate proof for every clause sent in an authority scope view set.
+    AuthorizationScopeAggregateReceipt {
+        /// Opaque request correlation from the matching intent.
+        request_id: PermissionAdviceRequestId,
+        /// Aggregate authority proof after every clause view.
+        receipt: AuthorizationScopeReceipt,
+    },
+    /// The admitted authority cannot currently hydrate an intent.  This is a
+    /// conservative terminal result: clients resolve the corresponding advice
+    /// as `Unknown` and park normal authority work.
+    AuthorizationScopeUnavailable {
+        /// Opaque request correlation from the matching intent.
+        request_id: PermissionAdviceRequestId,
+    },
+    /// Decision for an action with no policy-support clauses.  It deliberately
+    /// carries no support rows, shape identifiers, or binding identifiers.
+    AuthorizationScopeDecision {
+        /// Opaque request correlation from the matching intent.
+        request_id: PermissionAdviceRequestId,
+        /// Final authority result for the zero-support action.
+        advice: PermissionAdvice,
+    },
+    /// Bounded known-row revalidation in the current default view.
+    CurrentRowsRequest(CurrentRowsRequest),
+    /// Core-backed current-row evidence, scoped to one admitted request.
+    CurrentRowsReceipt(CurrentRowsReceipt),
+    /// Retire a request on this connection; never cancels another connection.
+    CurrentRowsCancel {
+        /// Nonce allocated on this connection.
+        request_id: PermissionAdviceRequestId,
+    },
+    /// A non-final part of one `ViewUpdate` whose encoding exceeds the routed
+    /// per-message payload limit. The sender splits the update into bounded
+    /// parts on one delivery stream: every part but the last is a
+    /// `ViewUpdatePart`, and the last is an ordinary `ViewUpdate`. The
+    /// receiving transport buffers the parts and yields only the reassembled
+    /// update, so no receiver ever observes a partial update. Every part names
+    /// the same subscription, `settled_through`, supporting-set transition kind
+    /// and revisions; only the final part's `peer_payload_inventory` counts.
+    ViewUpdatePart(ViewUpdatePayload),
+    /// Retired tag of the fate authority's "retry later" answer to a write
+    /// whose pending predecessor it had not decided. Writes of one node reach
+    /// the authority in their authored order, so it never waits for one; the
+    /// tag stays reserved and is never reused.
+    #[doc(hidden)]
+    Reserved29(ReservedWireMessage),
+    /// Read-your-writes barrier on the requests channel (SPEC 8 §8.2.1).
+    /// The receiver holds this and every later request from this link until
+    /// it has answered the first `writes_through` commit units this link sent
+    /// it, each with its first `FateUpdate`. Writes and requests travel on
+    /// independently credited channels, so without it a read can overtake an
+    /// earlier write from the same writer.
+    ReadBarrier {
+        /// Commit units the sender put on this link before this barrier.
+        writes_through: u64,
+    },
+}
+
+/// Maximum known rows in one current-availability request.
+pub const MAX_CURRENT_ROWS: usize = 64;
+
+/// Exact current-default-view coordinate. Local physical aliases never cross this wire.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct CurrentRowCoordinate {
+    /// Exact current schema identity.
+    pub schema: SchemaVersionId,
+    /// Logical table in that schema.
+    pub table: String,
+    /// Permanent physical lineage, never a node-local alias.
+    pub physical_table: crate::ids::GlobalPhysicalTableId,
+    /// Known physical row UUID.
+    pub row: RowUuid,
+}
+
+/// Caller supplies known coordinates, never an enumeration query or policy predicate.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct CurrentRowsRequest {
+    /// Opaque correlation restricted to this live connection.
+    pub request_id: PermissionAdviceRequestId,
+    /// Exact request coordinates in request order.
+    pub rows: Vec<CurrentRowCoordinate>,
+    /// Immutable host-admitted delegated binding, absent on ordinary clients.
+    pub delegated_session: Option<DelegatedSessionBinding>,
+}
+
+/// No unavailable outcome distinguishes missing, deleted, and denied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum CurrentRowOutcome {
+    /// Authorized current content, including an authorized deletion preimage.
+    Readable,
+    /// No authorized current representation; no cause is disclosed.
+    CurrentUnavailable,
+    /// No definitive current evidence is available.
+    Unknown,
+}
+
+/// Core evaluation evidence. The authenticated local relay may forward this after
+/// validating its selected upstream nonce/epoch; this is not a signature chain.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct CurrentRowsReceipt {
+    /// Opaque correlation restricted to this live connection.
+    pub request_id: PermissionAdviceRequestId,
+    /// Exact request coordinates in request order.
+    pub rows: Vec<CurrentRowCoordinate>,
+    /// One outcome for every coordinate, with identical ordering.
+    pub outcomes: Vec<CurrentRowOutcome>,
+    /// Exact admitted policy snapshot.
+    pub context: PolicyBindingKey,
+    /// Core mint identity validated by the forwarding owner.
+    pub core: NodeUuid,
+    /// Core connection epoch; old epochs cannot discharge new requests.
+    pub core_epoch: u64,
+    /// Core claims revision captured during evaluation.
+    pub claims_revision: u64,
+    /// Core catalogue/policy epoch captured during evaluation.
+    pub policy_epoch: u64,
+    /// Complete authoritative history cut reflected by evaluation.
+    pub settled_through: GlobalTime,
+    /// Monotonic evaluation sequence in this Core connection epoch; independent of cut.
+    pub authorization_progress: u64,
+    /// Authorized requested rows only. No unavailable outcome has a version witness.
+    pub version_carriers: Vec<VersionCarrier>,
+}
+
+/// Shared payload for ordinary and authorization-scope view updates.
+///
+/// [`SyncMessage::ViewUpdate`] carries it directly, while
+/// [`SyncMessage::AuthorizationScopeView`] adds scope metadata around the same
+/// payload. Keeping the payload separate from `SyncMessage` makes recursive
+/// authorization-scope wrappers impossible to construct and decode.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct ViewUpdatePayload {
+    /// Target subscription whose supporting input set this update changes.
+    pub subscription: SubscriptionKey,
+    /// Authority cut through which this view has settled.
+    pub settled_through: GlobalTime,
+    /// Compact carriers for versions referenced by this update.
+    pub version_carriers: Vec<VersionCarrier>,
+    /// Per-peer payload coverage and authorization progress.
+    pub peer_payload_inventory: PeerPayloadInventory,
+    /// Atomic physical supporting-set snapshot or exact-predecessor successor.
+    /// Native bodies for additions must be available before installation.
+    pub supporting_rows: SupportingRowsUpdate,
+}
+
+/// Wire v2 supporting-set transition. Revisions are opaque 16-byte identities,
+/// scoped to the admitted subscription/authority, never history timestamps.
+/// Postcard discriminants are pinned: Snapshot = 0, Delta = 1; field order is
+/// declaration order. There is no v1 complete-manifest compatibility decoder.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum SupportingRowsUpdate {
+    /// Initial or recovery complete set; supersedes pending predecessors.
+    Snapshot {
+        /// Fresh opaque revision, not an authorization token.
+        revision: [u8; 16],
+        /// Complete exact physical supporting versions.
+        rows: Vec<SupportingRow>,
+    },
+    /// Atomic change against one exact retained predecessor.
+    Delta {
+        /// Revision that must already be installed or queued in this usage.
+        predecessor: [u8; 16],
+        /// Successor revision. An empty confirmation may repeat its predecessor.
+        revision: [u8; 16],
+        /// Physical memberships entering the supporting set.
+        adds: Vec<SupportingRow>,
+        /// Physical memberships leaving this set, not globally deleted bytes.
+        removes: Vec<SupportingRow>,
+    },
+    /// Watermark catch-up against the receiver's declared revision: only rows
+    /// whose `row_seq` moved past the declared watermark. The receiver
+    /// replaces or removes its entries at these coordinates.
+    CatchUp {
+        /// Revision the receiver declared together with its watermark.
+        predecessor: [u8; 16],
+        /// Successor revision.
+        revision: [u8; 16],
+        /// Rows that changed after the watermark and are in the set now.
+        changed: Vec<SupportingRow>,
+        /// Rows that changed after the watermark and left the set; their
+        /// version is the row's current image (for example its deletion).
+        left: Vec<SupportingRow>,
+    },
+}
+
+impl SupportingRowsUpdate {
+    /// Construct a complete initial/recovery snapshot with a fresh revision.
+    pub fn snapshot(rows: Vec<SupportingRow>) -> Self {
+        Self::Snapshot {
+            revision: *uuid::Uuid::new_v4().as_bytes(),
+            rows,
+        }
+    }
+
+    /// Exact successor identity.
+    pub fn revision(&self) -> [u8; 16] {
+        match self {
+            Self::Snapshot { revision, .. }
+            | Self::Delta { revision, .. }
+            | Self::CatchUp { revision, .. } => *revision,
+        }
+    }
+
+    /// Native bodies needed by this message: all snapshot rows or delta adds.
+    pub fn added_rows(&self) -> &[SupportingRow] {
+        match self {
+            Self::Snapshot { rows, .. } => rows,
+            Self::Delta { adds, .. } => adds,
+            Self::CatchUp { changed, .. } => changed,
+        }
+    }
+
+    /// Physical memberships removed by this message.
+    pub fn removed_rows(&self) -> &[SupportingRow] {
+        match self {
+            Self::Snapshot { .. } => &[],
+            Self::Delta { removes, .. } => removes,
+            Self::CatchUp { left, .. } => left,
+        }
+    }
+
+    /// Whether this update establishes an independent complete predecessor.
+    /// A catch-up does too: with the declared revision it names the complete
+    /// set at its revision.
+    pub fn is_snapshot(&self) -> bool {
+        matches!(self, Self::Snapshot { .. } | Self::CatchUp { .. })
+    }
+
+    /// Mutably access rows whose bodies this message supplies or references.
+    pub fn added_rows_mut(&mut self) -> &mut Vec<SupportingRow> {
+        match self {
+            Self::Snapshot { rows, .. } => rows,
+            Self::Delta { adds, .. } => adds,
+            Self::CatchUp { changed, .. } => changed,
+        }
+    }
+}
+
+impl ViewUpdatePayload {
+    /// Extracts the shared payload from an ordinary view-update message.
+    pub fn from_view_update(message: SyncMessage) -> Option<Self> {
+        match message {
+            SyncMessage::ViewUpdate(payload) => Some(payload),
+            _ => None,
+        }
+    }
+
+    /// Wraps this payload in an ordinary view-update message.
+    pub fn into_view_update(self) -> SyncMessage {
+        SyncMessage::ViewUpdate(self)
+    }
+}
+
+/// Bounded batch of exact immutable-chunk requests on one peer link.
+/// Opaque identity for one permission-advice exchange.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub struct PermissionAdviceRequestId(pub [u8; 16]);
+
+/// Hypothetical operation sent to a trusted serving authority.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub enum PermissionAdviceAction {
+    /// Insert a candidate row.
+    Insert {
+        /// Table name.
+        table: String,
+        /// Candidate cells after client-side value encoding.
+        cells: BTreeMap<String, Value>,
+    },
+    /// Read one current row.
+    Read {
+        /// Table name.
+        table: String,
+        /// Row id.
+        row: RowUuid,
+    },
+    /// Update one current row.
+    Update {
+        /// Table name.
+        table: String,
+        /// Row id.
+        row: RowUuid,
+        /// Candidate patch. It is carried for forward-compatible exact
+        /// update-check evaluation and is never echoed in the response.
+        patch: BTreeMap<String, Value>,
+    },
+    /// Delete one current row.
+    Delete {
+        /// Table name.
+        table: String,
+        /// Row id.
+        row: RowUuid,
+    },
+}
+
+/// The policy operation proven by an authorization-scope receipt.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize,
+)]
+pub enum AuthorizationScopeOperation {
+    /// Read-policy evaluation.
+    Read,
+    /// Insert-check evaluation.
+    Insert,
+    /// Update-using and update-check evaluation.
+    Update,
+    /// Delete-using evaluation.
+    Delete,
+}
+
+/// Stable, action-specific identity for one authority-hydrated policy scope.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct AuthorizationSupportScopeKey {
+    /// Compiled policy support shape, including the selected operation clause.
+    pub support_shape_digest: [u8; 32],
+    /// Authenticated subject, never caller-supplied on a serving link.
+    pub subject: AuthorSubject,
+    /// Canonical digest of authenticated claims.
+    pub claims_digest: [u8; 32],
+    /// Compiled policy shape and selected policy epoch.
+    pub policy_digest: [u8; 32],
+}
+
+/// Ephemeral candidate-specific key used only for final evaluation.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct AuthorizationOperationKey {
+    /// Exact operation to evaluate.
+    pub operation: AuthorizationScopeOperation,
+    /// Protected table.
+    pub table: String,
+    /// Target row when applicable.
+    pub row: Option<RowUuid>,
+    /// Canonical candidate/patch digest when applicable.
+    pub candidate_digest: [u8; 32],
+}
+
+/// Authority-issued receipt proving one scope was hydrated through its stated cut.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct AuthorizationScopeReceipt {
+    /// Scope covered by this receipt.
+    pub key: AuthorizationSupportScopeKey,
+    /// Authenticated authority identity that issued this receipt.
+    pub authority: [u8; 16],
+    /// Authenticated subscriber link to which this proof is restricted.
+    pub link: AuthorSubject,
+    /// Authority-local connection/process epoch.
+    pub authority_epoch: u64,
+    /// Authenticated-claims revision paired with this proof.
+    pub claims_revision: u64,
+    /// Policy/schema epoch used to compile the scope.
+    pub policy_epoch: u64,
+    /// Complete authoritative history cut reflected by the support view. Like
+    /// other `settled_through` cursors, this is durable history evidence; the
+    /// separately scoped authority epoch supplies connection liveness.
+    pub settled_through: GlobalTime,
+    /// Authority authorization generation paired with that cut.
+    pub authorization_progress: u64,
+}
+
+/// Advisory result of a permission preflight.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum PermissionAdvice {
+    /// A trusted serving authority determined that the operation is allowed.
+    Allowed,
+    /// A trusted serving authority determined that the operation is denied.
+    Denied,
+    /// No trusted serving authority produced a final decision.
+    Unknown,
+}
+
+impl SyncMessage {
+    /// Complete uploaded versions in an ordinary commit unit.
+    /// Shared by chunk staging and upload validation.
+    pub fn uploaded_versions(&self) -> impl Iterator<Item = &VersionRecord> {
+        match self {
+            Self::CommitUnit { versions, .. } => versions.as_slice(),
+            _ => &[],
+        }
+        .iter()
+    }
+
+    /// Optional wire capabilities required to serialize this semantic message.
+    ///
+    /// Kept on the semantic type so every codec caller uses one exhaustive
+    /// classification rather than accidentally sending a future enum variant
+    /// to an older peer.
+    pub fn required_wire_features(&self) -> crate::wire::WireFeatures {
+        match self {
+            Self::AuthorizationScopeIntent { .. }
+            | Self::AuthorizationScopeView { .. }
+            | Self::AuthorizationScopeAggregateReceipt { .. }
+            | Self::AuthorizationScopeUnavailable { .. }
+            | Self::AuthorizationScopeDecision { .. } => {
+                crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS
+            }
+            _ => crate::wire::FEATURE_NONE,
+        }
+    }
+
+    /// Validate any packed view-update carrier runs in this message.
+    pub fn validate_version_carriers(&self) -> Result<(), VersionBundleRunError> {
+        match self {
+            Self::CommitUnit { versions, .. } => validate_version_records(versions),
+            Self::CurrentRowsReceipt(receipt) => {
+                validate_version_carrier_runs(&receipt.version_carriers)?;
+                for carrier in &receipt.version_carriers {
+                    for bundle in carrier.bundle_refs()? {
+                        validate_version_records(bundle.versions)?;
+                    }
+                }
+                Ok(())
+            }
+            _ => self.carried_view_update().map_or(Ok(()), |view| {
+                validate_version_carrier_runs(&view.version_carriers)?;
+                for carrier in &view.version_carriers {
+                    for bundle in carrier.bundle_refs()? {
+                        validate_version_records(bundle.versions)?;
+                    }
+                }
+                Ok(())
+            }),
+        }
+    }
+
+    /// Validate peer-wire facts whose meaning must be fixed before a receiver
+    /// attaches them to a compiled maintained program.
+    pub fn validate_wire_contract(&self) -> Result<(), WireContractError> {
+        self.validate_version_carriers()
+            .map_err(WireContractError::VersionCarrier)?;
+        let Some(view) = self.carried_view_update() else {
+            return Ok(());
+        };
+        if view.supporting_rows.revision() == [0; 16]
+            || matches!(&view.supporting_rows, SupportingRowsUpdate::Delta { predecessor, revision, adds, removes }
+                if *predecessor == [0; 16] || (predecessor == revision && (!adds.is_empty() || !removes.is_empty())))
+            || matches!(&view.supporting_rows, SupportingRowsUpdate::CatchUp { predecessor, revision, .. }
+                if *predecessor == [0; 16] || predecessor == revision)
+        {
+            return Err(WireContractError::InvalidSupportingRevision);
+        }
+        let mut identities = std::collections::BTreeSet::new();
+        for row in view
+            .supporting_rows
+            .added_rows()
+            .iter()
+            .chain(view.supporting_rows.removed_rows())
+        {
+            if !row.is_wire_valid() {
+                return Err(WireContractError::InvalidSupportingRow);
+            }
+            if !identities.insert(row) {
+                return Err(WireContractError::DuplicateSupportingRow);
+            }
+        }
+        Ok(())
+    }
+
+    fn carried_view_update(&self) -> Option<&ViewUpdatePayload> {
+        match self {
+            Self::ViewUpdate(view)
+            | Self::ViewUpdatePart(view)
+            | Self::AuthorizationScopeView { view, .. } => Some(view),
+            _ => None,
+        }
+    }
+}
+
+/// A semantic value violates the frozen peer-wire contract.
+#[derive(Debug)]
+pub enum WireContractError {
+    /// A transition has a nil revision or a nonempty self-successor.
+    InvalidSupportingRevision,
+    /// A version carrier is structurally malformed.
+    VersionCarrier(VersionBundleRunError),
+    /// A supporting native row reference is malformed.
+    InvalidSupportingRow,
+    /// A snapshot repeats the same exact physical row version.
+    DuplicateSupportingRow,
+}
+
+impl std::fmt::Display for WireContractError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidSupportingRevision => {
+                write!(f, "supporting transition revision is invalid")
+            }
+            Self::VersionCarrier(error) => error.fmt(f),
+            Self::InvalidSupportingRow => write!(f, "supporting row reference is invalid"),
+            Self::DuplicateSupportingRow => write!(
+                f,
+                "supporting snapshot duplicates an exact physical row version"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for WireContractError {}
+
+fn validate_version_carrier_runs(
+    version_carriers: &[VersionCarrier],
+) -> Result<(), VersionBundleRunError> {
+    for carrier in version_carriers {
+        if let VersionCarrier::Run(run) = carrier {
+            run.validate()?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(any(test, feature = "testing"))]
+thread_local! {
+    #[doc(hidden)]
+    pub static RECEIPT_VALIDATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[doc(hidden)]
+pub fn validate_version_records(versions: &[VersionRecord]) -> Result<(), VersionBundleRunError> {
+    for version in versions {
+        version.validate_receipt()?;
+    }
+    Ok(())
+}
+
+/// Exact row-version identity used by known-state repair requests.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct RowVersionRef {
+    /// Table containing the row.
+    pub table: jazz_types::Intern<String>,
+    /// Stable row id.
+    pub row_uuid: RowUuid,
+    /// Transaction HLC time.
+    pub tx_time: TxTime,
+    /// Transaction node id in wire form.
+    pub tx_node_id: NodeUuid,
+}
+
+impl RowVersionRef {
+    /// Construct an exact row-version reference.
+    pub fn new(table: impl Into<String>, row_uuid: RowUuid, tx_id: TxId) -> Self {
+        Self {
+            table: jazz_types::Intern::new(table.into()),
+            row_uuid,
+            tx_time: tx_id.time,
+            tx_node_id: tx_id.node,
+        }
+    }
+
+    /// Transaction id addressed by this row-version reference.
+    pub fn tx_id(&self) -> TxId {
+        TxId::new(self.tx_time, self.tx_node_id)
+    }
+}
+
+/// Payload coverage that the sender believes the peer already has.
+///
+/// This inventory is peer-scoped, not subscription-scoped. Today it can only
+/// reference full transaction payloads; future tiers can add row-version and
+/// view-complete coverage without overloading tx-level knowledge.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct PeerPayloadInventory {
+    /// Transactions whose full version payload has already been shipped to the
+    /// peer and can be referenced by tx id. Partial mergeable or view-scoped
+    /// serializable coverage must remain explicit `VersionBundle` payloads until
+    /// the wire protocol grows finer-grained inventory refs.
+    pub complete_tx_payloads: Vec<TxId>,
+    /// Server-stamped authorization generation for the binding view carried by
+    /// this update. It qualifies a subsequent fast known-state declaration.
+    pub authorization_progress: Option<u64>,
+    /// Authority explicitly published a fail-closed opening snapshot while
+    /// authorization coverage is unavailable. This snapshot is observable but
+    /// remains pending until a later authoritative reset.
+    #[serde(default)]
+    pub opening_pending: bool,
+}
+
+/// One immutable row-version payload carried by a committed transaction.
+///
+/// The outer message retains table, schema UUID, branch and authored-column
+/// identity. The row uses the explicit `JVRR` v3 envelope: a reference into
+/// the enclosing message's descriptor table (defining the persisted schema
+/// descriptor inline on its first use) plus canonical record bytes, never
+/// runtime `OwnedRecord` serde. A Core union image's `UnionExtraCells` travel
+/// in the same envelope, flagged by its head (SPEC 16). The receiver
+/// validates each descriptor against the declared schema before translating
+/// columns into its node-local physical catalogue.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct VersionRecord {
+    table: jazz_types::Intern<String>,
+    schema_version: SchemaVersionId,
+    /// Exact branch coordinate of this version's branch-local row.
+    #[serde(default)]
+    branch_key: BranchKey,
+    /// The row, and the union cells of a Core image (`UnionExtraCells`),
+    /// in one `JVRR` v3 blob.
+    #[serde(with = "version_record_wire_row")]
+    row: WireRow,
+    /// `None` denotes a legacy or lens-translated payload whose authored
+    /// presence is unavailable; consumers must conservatively treat every
+    /// present payload cell as authored.
+    authored_columns: Option<BTreeSet<String>>,
+    /// The image this version's writer made it over (SPEC ch. 4 §4.6): the
+    /// settled seq the writer's image rested on and the writer's own pending
+    /// predecessor to this row, each optional. Both absent for an insert or a
+    /// blind update.
+    base: RowBase,
+    /// Sign bits of this patch's counter ops: bit `i` (least significant
+    /// first) is set when the op of the authored table's `i`-th counter
+    /// column, in schema order, is negative. Empty when no op is negative,
+    /// and always empty on a settled image; no trailing zero byte. With the
+    /// op cell's low bits it carries the exact delta of any single write.
+    /// See SPEC ch. 4, "Counter ops".
+    counter_signs: Vec<u8>,
+}
+
+/// A version's row record and its union cells.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WireRow {
+    record: OwnedRecord,
+    /// Sorted by `(schema_version, table)`, at most one entry each.
+    extras: Vec<UnionExtraCells>,
+}
+
+/// Cells of a Core row image for columns of the table's lineage that the
+/// image's own schema version does not map (SPEC ch. 4 §4.6, "Across schema
+/// versions"; SPEC ch. 10 §10.3, "Union row cases"): a column an older
+/// writer edited after a newer schema dropped it. One entry per schema
+/// version that maps such columns: `record` holds the cells in that schema's
+/// authored spelling, one nullable `_app_<column>` field per column, in the
+/// schema's column order, so a receiver validates and converts them exactly
+/// as it does an authored row of that schema.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnionExtraCells {
+    schema_version: SchemaVersionId,
+    table: jazz_types::Intern<String>,
+    record: OwnedRecord,
+}
+
+impl UnionExtraCells {
+    /// Cells of `schema_version`'s `table` named by `record`'s fields.
+    pub fn new(
+        schema_version: SchemaVersionId,
+        table: impl Into<String>,
+        record: OwnedRecord,
+    ) -> Self {
+        Self {
+            schema_version,
+            table: jazz_types::Intern::new(table.into()),
+            record,
+        }
+    }
+
+    /// The schema version whose columns these are.
+    pub fn schema_version(&self) -> SchemaVersionId {
+        self.schema_version
+    }
+
+    /// That schema version's name for the table.
+    pub fn table(&self) -> &str {
+        self.table.as_str()
+    }
+
+    /// One nullable `_app_<column>` field per column.
+    pub fn record(&self) -> &OwnedRecord {
+        &self.record
+    }
+
+    fn sort_key(&self) -> (SchemaVersionId, &str) {
+        (self.schema_version, self.table())
+    }
+}
+
+/// The row image a version's writer made it over (SPEC ch. 4 §4.6).
+///
+/// `seq` is the seq of the settled image of the row the writer's node held;
+/// `pending` is the writer's own previous pending write to the row whose
+/// patch that image included. An insert and a blind update (a write to a row
+/// the writer's node holds no image of) carry neither.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Deserialize,
+    serde::Serialize,
+)]
+pub struct RowBase {
+    /// Seq of the settled image the writer's image rested on.
+    pub seq: Option<GlobalTime>,
+    /// The writer's own pending predecessor to this row.
+    pub pending: Option<TxId>,
+}
+
+impl RowBase {
+    /// Whether the version has no base (an insert or a blind update).
+    pub fn is_empty(&self) -> bool {
+        self.seq.is_none() && self.pending.is_none()
+    }
+}
+
+pub(crate) use version_record_wire_row::with_message_descriptor_table;
+
+/// Explicit immutable-version row encoding. Outer sync framing owns lengths
+/// and resource bounds; this record role owns its discriminator and schema.
+mod version_record_wire_row {
+    use super::*;
+
+    // Version 3 (alpha.60). The persisted descriptor is defined once per
+    // sync message and referenced by later rows (#3380), and a Core union
+    // image carries its union cells (`UnionExtraCells`) in the same blob:
+    //
+    //   blob  = "JVRR\x03" use(row) [union] row-bytes
+    //   use   = head [u32 descriptor length, descriptor]
+    //   union = count entry{count}
+    //   entry = schema version (16 bytes) | u32 table length | table (UTF-8)
+    //           | use(cells) | u32 cell-bytes length | cell bytes
+    //
+    // `head` and `count` are canonical (shortest) unsigned LEB128 and `u32`
+    // lengths are little-endian. `head` is `reference << 1 | union`:
+    //
+    // - `reference == 0` defines the next descriptor-table entry inline (the
+    //   descriptor length and bytes follow); `reference == k > 0` reuses
+    //   table entry `k - 1`, defined earlier in the message;
+    // - `union` is set only in the row's own `use` and only when union cells
+    //   follow; then `count >= 1` and the entries are in strictly ascending
+    //   `(schema version, table)` order (admission checks the order).
+    //
+    // Every row without union cells is `"JVRR\x03" use row-bytes` with the
+    // low head bit clear. The row's canonical bytes consume the remainder. A
+    // blob encoded outside a message (no table in scope) defines every
+    // descriptor inline. Version 2 (every row repeats its descriptor) and
+    // version 1 (the DAG row with `parents`) are rejected rather than
+    // reinterpreted.
+    const MAGIC: &[u8; 5] = b"JVRR\x03";
+    /// Largest descriptor-table reference (`u32` table index plus one).
+    const MAX_REFERENCE: u64 = u32::MAX as u64 + 1;
+    /// Largest `head` (a maximal reference with the union bit set).
+    const MAX_HEAD: u64 = (MAX_REFERENCE << 1) | 1;
+
+    // Descriptor identity includes immutable names, layouts, nested types and
+    // enum registry/case schemas. Row bytes are produced by the encoder;
+    // untrusted receipt admission is separate from this representation codec.
+    //
+    // A message defines each descriptor once in its table, and rows encoded
+    // outside a message define theirs inline, so a miss costs a full
+    // descriptor encode or canonical decode per definition. Retain enough
+    // distinct descriptors (tables x schema versions x nested shapes) that a
+    // multi-table stream does not evict itself; lookups are hashed so the
+    // larger bound does not turn each hit into a linear scan.
+    const MAX_DESCRIPTOR_PROOFS: usize = 256;
+    /// Largest single descriptor worth retaining.
+    const MAX_DESCRIPTOR_PROOF_BYTES: usize = 64 * 1024;
+    /// Total encoded descriptor bytes retained per thread.
+    const MAX_DESCRIPTOR_PROOF_CACHE_BYTES: usize = 1024 * 1024;
+
+    #[derive(Clone)]
+    struct DescriptorProof {
+        source: RecordDescriptor,
+        canonical: RecordDescriptor,
+        encoded: std::sync::Arc<[u8]>,
+    }
+
+    /// Bounded FIFO of descriptor proofs with hashed lookup by source
+    /// descriptor (encode) and by encoded bytes (decode). Index entries point
+    /// at the newest proof for their key and are dropped with that proof.
+    #[derive(Default)]
+    struct DescriptorProofCache {
+        entries: std::collections::VecDeque<(u64, DescriptorProof)>,
+        by_source: rustc_hash::FxHashMap<RecordDescriptor, u64>,
+        by_encoded: rustc_hash::FxHashMap<std::sync::Arc<[u8]>, u64>,
+        next_id: u64,
+        bytes: usize,
+    }
+
+    impl DescriptorProofCache {
+        fn get(&self, id: u64) -> Option<&DescriptorProof> {
+            let front = self.entries.front()?.0;
+            let index = usize::try_from(id.checked_sub(front)?).ok()?;
+            self.entries.get(index).map(|(_, proof)| proof)
+        }
+
+        fn by_source(&self, descriptor: &RecordDescriptor) -> Option<DescriptorProof> {
+            self.get(*self.by_source.get(descriptor)?).cloned()
+        }
+
+        fn by_encoded(&self, encoded: &[u8]) -> Option<DescriptorProof> {
+            // Consecutive rows usually share a descriptor: compare the newest
+            // proof before hashing the whole encoding.
+            if let Some((_, newest)) = self.entries.back()
+                && newest.encoded.as_ref() == encoded
+            {
+                return Some(newest.clone());
+            }
+            self.get(*self.by_encoded.get(encoded)?).cloned()
+        }
+
+        fn remember(&mut self, proof: DescriptorProof) {
+            // This is a retention limit, never an input acceptance limit.
+            if proof.encoded.len() > MAX_DESCRIPTOR_PROOF_BYTES {
+                return;
+            }
+            while self.entries.len() >= MAX_DESCRIPTOR_PROOFS
+                || self.bytes + proof.encoded.len() > MAX_DESCRIPTOR_PROOF_CACHE_BYTES
+            {
+                let (id, evicted) = self.entries.pop_front().expect("nonempty bounded cache");
+                self.bytes -= evicted.encoded.len();
+                if self.by_source.get(&evicted.source) == Some(&id) {
+                    self.by_source.remove(&evicted.source);
+                }
+                if self.by_encoded.get(evicted.encoded.as_ref()) == Some(&id) {
+                    self.by_encoded.remove(evicted.encoded.as_ref());
+                }
+            }
+            let id = self.next_id;
+            self.next_id += 1;
+            self.bytes += proof.encoded.len();
+            self.by_source.insert(proof.source, id);
+            self.by_encoded.insert(proof.encoded.clone(), id);
+            self.entries.push_back((id, proof));
+        }
+    }
+
+    thread_local! {
+        static DESCRIPTOR_PROOFS: std::cell::RefCell<DescriptorProofCache> =
+            std::cell::RefCell::new(DescriptorProofCache::default());
+    }
+
+    /// Dictionary codes are node-local, so a row carrying them never crosses
+    /// the wire: egress resolves it first (`Dictionaries::resolve_record`).
+    fn refuse_dictionary_codes(
+        descriptor: &RecordDescriptor,
+    ) -> Result<(), jazz_types::records::Error> {
+        for field in descriptor.fields() {
+            // Codes nested in arrays, records or enums are refused too.
+            if field.value_type.contains_interned() {
+                let dictionary = match &field.value_type {
+                    jazz_types::records::ValueType::Nullable(inner) => inner.as_interned(),
+                    other => other.as_interned(),
+                }
+                .map_or_else(
+                    || format!("nested in {}", field.name.as_deref().unwrap_or("field")),
+                    |(name, _)| name.to_owned(),
+                );
+                return Err(jazz_types::records::Error::InternedTypeNotEncodable { dictionary });
+            }
+        }
+        Ok(())
+    }
+
+    fn descriptor_for_encode(
+        descriptor: &RecordDescriptor,
+    ) -> Result<DescriptorProof, jazz_types::records::Error> {
+        if let Some(proof) = DESCRIPTOR_PROOFS.with(|cache| cache.borrow().by_source(descriptor)) {
+            return Ok(proof);
+        }
+        refuse_dictionary_codes(descriptor)?;
+        let encoded = jazz_types::records::encode_persisted_record_descriptor(descriptor)?;
+        let canonical = jazz_types::records::decode_persisted_record_descriptor(&encoded)?;
+        let proof = DescriptorProof {
+            source: *descriptor,
+            canonical,
+            encoded: encoded.into(),
+        };
+        DESCRIPTOR_PROOFS.with(|cache| cache.borrow_mut().remember(proof.clone()));
+        Ok(proof)
+    }
+
+    fn descriptor_for_decode(
+        encoded: &[u8],
+    ) -> Result<DescriptorProof, jazz_types::records::Error> {
+        if let Some(proof) = DESCRIPTOR_PROOFS.with(|cache| cache.borrow().by_encoded(encoded)) {
+            return Ok(proof);
+        }
+        let canonical = jazz_types::records::decode_persisted_record_descriptor(encoded)?;
+        let proof = DescriptorProof {
+            source: canonical,
+            canonical,
+            encoded: encoded.into(),
+        };
+        DESCRIPTOR_PROOFS.with(|cache| cache.borrow_mut().remember(proof.clone()));
+        Ok(proof)
+    }
+
+    /// Descriptors defined so far by the sync message being encoded, keyed by
+    /// their exact persisted bytes: two execution descriptors that differ only
+    /// in identities the grammar drops share one entry.
+    #[derive(Default)]
+    struct EncodeTable {
+        by_encoded: rustc_hash::FxHashMap<std::sync::Arc<[u8]>, u32>,
+    }
+
+    /// Descriptors defined so far by the sync message being decoded, in
+    /// definition order. `defined` rejects a second inline definition of the
+    /// same bytes, which the encoder never emits.
+    #[derive(Default)]
+    struct DecodeTable {
+        entries: Vec<RecordDescriptor>,
+        defined: rustc_hash::FxHashSet<std::sync::Arc<[u8]>>,
+    }
+
+    thread_local! {
+        static ENCODE_TABLE: std::cell::RefCell<Option<EncodeTable>> =
+            const { std::cell::RefCell::new(None) };
+        static DECODE_TABLE: std::cell::RefCell<Option<DecodeTable>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// Run `f` with a fresh, empty descriptor table for one sync message.
+    ///
+    /// Every encode, size measurement and decode of one message must run in
+    /// exactly one such scope, so the encoder's first-use order and the
+    /// decoder's definition order are the same traversal. Scopes nest: the
+    /// previous tables are restored on exit, including on unwind.
+    pub(crate) fn with_message_descriptor_table<R>(f: impl FnOnce() -> R) -> R {
+        struct Restore {
+            encode: Option<EncodeTable>,
+            decode: Option<DecodeTable>,
+        }
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                ENCODE_TABLE.with(|table| *table.borrow_mut() = self.encode.take());
+                DECODE_TABLE.with(|table| *table.borrow_mut() = self.decode.take());
+            }
+        }
+        let _restore = Restore {
+            encode: ENCODE_TABLE.with(|table| table.replace(Some(EncodeTable::default()))),
+            decode: DECODE_TABLE.with(|table| table.replace(Some(DecodeTable::default()))),
+        };
+        f()
+    }
+
+    fn push_leb128(bytes: &mut Vec<u8>, mut value: u64) {
+        loop {
+            let byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value == 0 {
+                bytes.push(byte);
+                return;
+            }
+            bytes.push(byte | 0x80);
+        }
+    }
+
+    /// Read one canonical (shortest) unsigned LEB128 value no larger than
+    /// `max`, returning it and the remaining bytes.
+    fn take_leb128(bytes: &[u8], max: u64) -> Option<(u64, &[u8])> {
+        let mut value = 0u64;
+        for (index, &byte) in bytes.iter().enumerate().take(5) {
+            value |= u64::from(byte & 0x7f) << (7 * index);
+            if byte & 0x80 == 0 {
+                // A zero final continuation byte is an overlong spelling.
+                if index > 0 && byte == 0 {
+                    return None;
+                }
+                return (value <= max).then(|| (value, &bytes[index + 1..]));
+            }
+        }
+        None
+    }
+
+    /// Append `descriptor`'s `use`: a table reference when this message
+    /// already defined it, else an inline definition (SPEC 16).
+    fn put_use(
+        bytes: &mut Vec<u8>,
+        descriptor: &RecordDescriptor,
+        union: bool,
+    ) -> Result<(), jazz_types::records::Error> {
+        let proof = descriptor_for_encode(descriptor)?;
+        let encoded = &proof.encoded;
+        let reference = ENCODE_TABLE.with(|table| {
+            let mut table = table.borrow_mut();
+            let table = table.as_mut()?;
+            if let Some(index) = table.by_encoded.get(encoded) {
+                return Some(u64::from(*index) + 1);
+            }
+            let index = u32::try_from(table.by_encoded.len()).ok()?;
+            table.by_encoded.insert(encoded.clone(), index);
+            None
+        });
+        let reference = reference.unwrap_or(0);
+        push_leb128(bytes, (reference << 1) | u64::from(union));
+        if reference == 0 {
+            put_len(bytes, encoded.len())?;
+            bytes.extend_from_slice(encoded);
+        }
+        Ok(())
+    }
+
+    /// Read one `use`: its descriptor, its union bit, and the bytes after it.
+    fn take_use(
+        body: &[u8],
+    ) -> Result<(RecordDescriptor, bool, &[u8]), jazz_types::records::Error> {
+        let invalid = || jazz_types::records::Error::NonCanonicalRecord;
+        let (head, body) = take_leb128(body, MAX_HEAD).ok_or_else(invalid)?;
+        let (reference, union) = (head >> 1, head & 1 == 1);
+        if reference > 0 {
+            let index = usize::try_from(reference - 1).map_err(|_| invalid())?;
+            let descriptor = DECODE_TABLE
+                .with(|table| table.borrow().as_ref()?.entries.get(index).copied())
+                .ok_or_else(invalid)?;
+            return Ok((descriptor, union, body));
+        }
+        let (length, body) = take_len(body)?;
+        let encoded = body.get(..length).ok_or_else(invalid)?;
+        let proof = descriptor_for_decode(encoded)?;
+        let defined = DECODE_TABLE.with(|table| {
+            let mut table = table.borrow_mut();
+            let Some(table) = table.as_mut() else {
+                return true;
+            };
+            if !table.defined.insert(proof.encoded.clone()) {
+                return false;
+            }
+            table.entries.push(proof.canonical);
+            true
+        });
+        if !defined {
+            return Err(invalid());
+        }
+        Ok((proof.canonical, union, &body[length..]))
+    }
+
+    fn put_len(bytes: &mut Vec<u8>, length: usize) -> Result<(), jazz_types::records::Error> {
+        let length =
+            u32::try_from(length).map_err(|_| jazz_types::records::Error::LengthOverflow)?;
+        bytes.extend_from_slice(&length.to_le_bytes());
+        Ok(())
+    }
+
+    fn take_len(body: &[u8]) -> Result<(usize, &[u8]), jazz_types::records::Error> {
+        let (length, body) = body
+            .split_first_chunk::<4>()
+            .ok_or(jazz_types::records::Error::NonCanonicalRecord)?;
+        Ok((u32::from_le_bytes(*length) as usize, body))
+    }
+
+    fn take(body: &[u8], length: usize) -> Result<(&[u8], &[u8]), jazz_types::records::Error> {
+        body.split_at_checked(length)
+            .ok_or(jazz_types::records::Error::NonCanonicalRecord)
+    }
+
+    fn encode_parts(
+        record: &OwnedRecord,
+        extras: &[UnionExtraCells],
+    ) -> Result<Vec<u8>, jazz_types::records::Error> {
+        let mut bytes = Vec::with_capacity(MAGIC.len() + 5 + 4 + record.raw().len());
+        bytes.extend_from_slice(MAGIC);
+        put_use(&mut bytes, record.descriptor(), !extras.is_empty())?;
+        if !extras.is_empty() {
+            push_leb128(&mut bytes, extras.len() as u64);
+            for extra in extras {
+                bytes.extend_from_slice(extra.schema_version.0.as_bytes());
+                put_len(&mut bytes, extra.table.len())?;
+                bytes.extend_from_slice(extra.table.as_bytes());
+                put_use(&mut bytes, extra.record.descriptor(), false)?;
+                put_len(&mut bytes, extra.record.raw().len())?;
+                bytes.extend_from_slice(extra.record.raw());
+            }
+        }
+        bytes.extend_from_slice(record.raw());
+        Ok(bytes)
+    }
+
+    /// A row and its union cells, if any, in one blob.
+    pub(super) fn encode_row(row: &WireRow) -> Result<Vec<u8>, jazz_types::records::Error> {
+        encode_parts(&row.record, &row.extras)
+    }
+
+    pub(super) fn decode_row(bytes: &[u8]) -> Result<WireRow, jazz_types::records::Error> {
+        let invalid = || jazz_types::records::Error::NonCanonicalRecord;
+        let body = bytes.strip_prefix(MAGIC).ok_or_else(invalid)?;
+        let (descriptor, union, mut body) = take_use(body)?;
+        let mut extras = Vec::new();
+        if union {
+            let (count, rest) = take_leb128(body, MAX_REFERENCE).ok_or_else(invalid)?;
+            if count == 0 {
+                return Err(invalid());
+            }
+            body = rest;
+            for _ in 0..count {
+                let (schema_version, rest) = body.split_first_chunk::<16>().ok_or_else(invalid)?;
+                let (length, rest) = take_len(rest)?;
+                let (table, rest) = take(rest, length)?;
+                let table = std::str::from_utf8(table).map_err(|_| invalid())?;
+                let (cells, nested_union, rest) = take_use(rest)?;
+                if nested_union {
+                    return Err(invalid());
+                }
+                let (length, rest) = take_len(rest)?;
+                let (raw, rest) = take(rest, length)?;
+                extras.push(UnionExtraCells::new(
+                    SchemaVersionId(uuid::Uuid::from_bytes(*schema_version)),
+                    table,
+                    OwnedRecord::new(raw.to_vec(), cells),
+                ));
+                body = rest;
+            }
+        }
+        Ok(WireRow {
+            record: OwnedRecord::new(body.to_vec(), descriptor),
+            extras,
+        })
+    }
+
+    pub(super) fn serialize<S: serde::Serializer>(
+        row: &WireRow,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let bytes = encode_row(row).map_err(serde::ser::Error::custom)?;
+        // Postcard's byte blob and u8 sequence have the same canonical
+        // varint length + raw bytes contract. Extend the output in bulk.
+        serializer.serialize_bytes(&bytes)
+    }
+
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<WireRow, D::Error> {
+        struct RowVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for RowVisitor {
+            type Value = WireRow;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a JVRR v3 row byte blob")
+            }
+
+            fn visit_bytes<E: serde::de::Error>(self, bytes: &[u8]) -> Result<Self::Value, E> {
+                // Decode from the deserializer's slice; only the resulting
+                // owned record needs a payload copy. Admission remains separate.
+                decode_row(bytes).map_err(E::custom)
+            }
+
+            fn visit_borrowed_bytes<E: serde::de::Error>(
+                self,
+                bytes: &'de [u8],
+            ) -> Result<Self::Value, E> {
+                self.visit_bytes(bytes)
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut sequence: A,
+            ) -> Result<Self::Value, A::Error> {
+                // Human-readable formats such as JSON still represent bytes
+                // as arrays. Never reserve from an untrusted size hint.
+                let mut bytes = Vec::new();
+                while let Some(byte) = sequence.next_element::<u8>()? {
+                    bytes.push(byte);
+                }
+                self.visit_bytes(&bytes)
+            }
+        }
+
+        deserializer.deserialize_bytes(RowVisitor)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use jazz_types::records::{DescriptorField, FieldIdentity};
+
+        /// A row without union cells.
+        fn encode(record: &OwnedRecord) -> Result<Vec<u8>, jazz_types::records::Error> {
+            encode_parts(record, &[])
+        }
+
+        /// A row that must carry no union cells.
+        fn decode(bytes: &[u8]) -> Result<OwnedRecord, jazz_types::records::Error> {
+            let row = decode_row(bytes)?;
+            if !row.extras.is_empty() {
+                return Err(jazz_types::records::Error::NonCanonicalRecord);
+            }
+            Ok(row.record)
+        }
+
+        #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+        struct WireRow(#[serde(with = "record_only")] OwnedRecord);
+
+        /// The envelope of a row without union cells.
+        mod record_only {
+            use super::*;
+
+            pub(super) fn serialize<S: serde::Serializer>(
+                record: &OwnedRecord,
+                serializer: S,
+            ) -> Result<S::Ok, S::Error> {
+                super::super::serialize(
+                    &super::super::super::WireRow {
+                        record: record.clone(),
+                        extras: Vec::new(),
+                    },
+                    serializer,
+                )
+            }
+
+            pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+                deserializer: D,
+            ) -> Result<OwnedRecord, D::Error> {
+                let row = super::super::deserialize(deserializer)?;
+                if !row.extras.is_empty() {
+                    return Err(serde::de::Error::custom("unexpected union cells"));
+                }
+                Ok(row.record)
+            }
+        }
+
+        // Pin the outer Postcard byte-blob contract independently of its
+        // serializer implementation, including both varint length boundaries.
+        #[test]
+        fn row_bulk_bytes_preserve_sequence_wire_contract() {
+            let descriptor = RecordDescriptor::new([("value", ValueType::U64)]);
+            let record = OwnedRecord::new(descriptor.create(&[Value::U64(7)]).unwrap(), descriptor);
+            let envelope = encode(&record).unwrap();
+            for length in [envelope.len(), 127, 128, 16383, 16384] {
+                let mut bytes = envelope.clone();
+                bytes.resize(length, 0);
+                // This codec preserves row bytes, even when receipt admission
+                // would reject their contents. Do not weaken that boundary.
+                let row = WireRow(decode(&bytes).unwrap());
+                let mut expected = Vec::new();
+                let mut remaining = length;
+                while remaining >= 128 {
+                    expected.push((remaining as u8 & 0x7f) | 0x80);
+                    remaining >>= 7;
+                }
+                expected.push(remaining as u8);
+                expected.extend_from_slice(&bytes);
+                assert_eq!(postcard::to_allocvec(&row).unwrap(), expected);
+                assert_eq!(postcard::to_allocvec(&bytes).unwrap(), expected);
+                assert_eq!(postcard::from_bytes::<WireRow>(&expected).unwrap(), row);
+                assert_eq!(postcard::from_bytes::<Vec<u8>>(&expected).unwrap(), bytes);
+
+                // A following field must retain its boundary in both directions.
+                let old = postcard::to_allocvec(&(bytes.clone(), 999u64)).unwrap();
+                assert_eq!(postcard::to_allocvec(&(&row, 999u64)).unwrap(), old);
+                assert_eq!(
+                    postcard::from_bytes::<(WireRow, u64)>(&old).unwrap(),
+                    (row, 999)
+                );
+
+                let json = serde_json::to_string(&bytes).unwrap();
+                let json_row: WireRow = serde_json::from_str(&json).unwrap();
+                assert_eq!(serde_json::to_string(&json_row).unwrap(), json);
+                assert_eq!(encode(&json_row.0).unwrap(), bytes);
+            }
+        }
+
+        fn union_row() -> super::super::WireRow {
+            let descriptor = RecordDescriptor::new([("value", ValueType::U64)]);
+            let record = OwnedRecord::new(descriptor.create(&[Value::U64(7)]).unwrap(), descriptor);
+            let cells = RecordDescriptor::new([(
+                "_app_legacy",
+                ValueType::Nullable(Box::new(ValueType::String)),
+            )]);
+            let extra = OwnedRecord::new(
+                cells
+                    .create(&[Value::Nullable(Some(Box::new(Value::String("x".into()))))])
+                    .unwrap(),
+                cells,
+            );
+            super::super::WireRow {
+                record,
+                extras: vec![super::super::UnionExtraCells::new(
+                    SchemaVersionId(uuid::Uuid::from_u128(1)),
+                    "todos",
+                    extra,
+                )],
+            }
+        }
+
+        // One grammar for both kinds of row. A row without union cells has
+        // the head's union bit clear and is exactly `encode`'s bytes; a Core
+        // union image sets it and carries its entries between the row's
+        // descriptor and its row bytes. Every truncation before the row
+        // bytes is rejected, and `decode` refuses union cells.
+        #[test]
+        fn union_cells_share_the_v3_envelope_and_round_trip() {
+            let row = union_row();
+            let plain = encode_row(&super::super::WireRow {
+                record: row.record.clone(),
+                extras: Vec::new(),
+            })
+            .unwrap();
+            assert_eq!(plain, encode(&row.record).unwrap());
+            assert_eq!(&plain[..6], b"JVRR\x03\x00");
+
+            let bytes = encode_row(&row).unwrap();
+            assert_eq!(&bytes[..6], b"JVRR\x03\x01", "inline definition, union bit");
+            assert_eq!(decode_row(&bytes).unwrap(), row);
+            assert!(decode(&bytes).is_err());
+            let row_bytes = bytes.len() - row.record.raw().len();
+            assert_eq!(&bytes[row_bytes..], row.record.raw());
+            for end in MAGIC.len()..row_bytes {
+                assert!(decode_row(&bytes[..end]).is_err(), "truncated at {end}");
+            }
+
+            // Union cells with no entry, and an entry whose own descriptor
+            // claims union cells, are not the encoder's spelling.
+            let descriptor_end = plain.len() - row.record.raw().len();
+            let mut empty = bytes[..descriptor_end].to_vec();
+            empty.push(0);
+            empty.extend_from_slice(row.record.raw());
+            assert!(decode_row(&empty).is_err());
+            let cells_head = descriptor_end + 1 + 16 + 4 + "todos".len();
+            assert_eq!(bytes[cells_head], 0);
+            let mut nested = bytes.clone();
+            nested[cells_head] = 1;
+            assert!(decode_row(&nested).is_err());
+
+            // Inside one message the second image references both the row's
+            // and the cells' descriptors defined by the first.
+            let rows =
+                with_message_descriptor_table(|| [&row, &row].map(|row| encode_row(row).unwrap()));
+            let cells = &row.extras[0];
+            assert_eq!(
+                rows[1],
+                [
+                    b"JVRR\x03\x03\x01".as_slice(),
+                    cells.schema_version().0.as_bytes(),
+                    &5u32.to_le_bytes(),
+                    b"todos",
+                    &[4],
+                    &(cells.record().raw().len() as u32).to_le_bytes(),
+                    cells.record().raw(),
+                    row.record.raw(),
+                ]
+                .concat()
+            );
+            let decoded = with_message_descriptor_table(|| {
+                rows.iter()
+                    .map(|bytes| decode_row(bytes).unwrap())
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!(decoded, [row.clone(), row]);
+        }
+
+        #[test]
+        fn row_bulk_bytes_reject_truncated_and_invalid_envelopes() {
+            for bytes in [
+                vec![],
+                b"JVRR\x01".to_vec(),
+                b"JVRR\x02".to_vec(),
+                b"JVRR\x03".to_vec(),
+                b"JVRR\x04\x00".to_vec(),
+                b"JVRR\x03\x00\xff\xff\xff\xff".to_vec(),
+                // A table reference outside any message scope.
+                b"JVRR\x03\x02".to_vec(),
+            ] {
+                let wire = postcard::to_allocvec(&bytes).unwrap();
+                assert!(postcard::from_bytes::<WireRow>(&wire).is_err());
+                assert!(
+                    serde_json::from_str::<WireRow>(&serde_json::to_string(&bytes).unwrap())
+                        .is_err()
+                );
+            }
+            let descriptor = RecordDescriptor::new([("value", ValueType::U64)]);
+            let record = OwnedRecord::new(descriptor.create(&[Value::U64(7)]).unwrap(), descriptor);
+            let wire = postcard::to_allocvec(&WireRow(record)).unwrap();
+            for end in 0..wire.len() {
+                assert!(postcard::from_bytes::<WireRow>(&wire[..end]).is_err());
+            }
+            assert!(serde_json::from_str::<WireRow>("[256]").is_err());
+        }
+
+        /// Actors: a node replicating one of its global-current rows.
+        ///
+        /// A Jazz row holds its author columns as `authors` dictionary codes,
+        /// which are node-local: JVRR refuses to frame a row that still
+        /// carries them, and the row the node resolves at egress, with full
+        /// `RowAuthor` values under plain `RowAuthor` types, round-trips as
+        /// plain values.
+        /// White-box: the JVRR envelope is below every public API.
+        #[test]
+        fn rows_with_interned_author_columns_cross_jvrr_as_plain_values() {
+            let table = crate::schema::TableSchema::new(
+                "todos",
+                [crate::schema::ColumnSchema::new("title", ValueType::String)],
+            )
+            .global_current_storage_table();
+            let stored = table.record_schema();
+            assert!(stored.contains_interned(), "author columns are interned");
+            let stored_row = OwnedRecord::new(Vec::new(), stored);
+            assert!(matches!(
+                encode(&stored_row),
+                Err(jazz_types::records::Error::InternedTypeNotEncodable { dictionary })
+                    if dictionary == crate::schema::AUTHORS_DICTIONARY
+            ));
+
+            let logical = stored.logical();
+            assert!(!logical.contains_interned());
+            let alice = crate::ids::RowAuthor::from_persisted_subject(
+                crate::ids::AuthorSubject::for_test_bytes([0xa1; 16]),
+            )
+            .unwrap()
+            .to_value();
+            let bob = crate::ids::RowAuthor::from_persisted_subject(
+                crate::ids::AuthorSubject::for_test_bytes([0xb2; 16]),
+            )
+            .unwrap()
+            .to_value();
+            let values = logical
+                .fields()
+                .iter()
+                .map(|field| match field.name.as_deref() {
+                    Some("created_by") => alice.clone(),
+                    Some("updated_by") => bob.clone(),
+                    _ => match &field.value_type {
+                        ValueType::Bytes => Value::Bytes(vec![1]),
+                        ValueType::Uuid => Value::Uuid(uuid::Uuid::from_bytes([7; 16])),
+                        ValueType::U64 => Value::U64(9),
+                        ValueType::Nullable(_) => Value::Nullable(None),
+                        other => panic!("unexpected global-current field type {other:?}"),
+                    },
+                })
+                .collect::<Vec<_>>();
+            let row = OwnedRecord::new(logical.create(&values).unwrap(), logical);
+            let decoded = decode(&encode(&row).unwrap()).unwrap();
+            assert!(!decoded.descriptor().contains_interned());
+            let created_by = logical.field_index("created_by").unwrap();
+            let updated_by = logical.field_index("updated_by").unwrap();
+            assert_eq!(decoded.borrowed().get_idx(created_by).unwrap(), alice);
+            assert_eq!(decoded.borrowed().get_idx(updated_by).unwrap(), bob);
+            assert_eq!(decoded.raw(), row.raw());
+        }
+
+        // These internal tests exercise the exact untrusted byte boundary and
+        // proof reuse, which ordinary client queries cannot observe directly.
+        #[test]
+        fn descriptor_proof_cache_preserves_rejection_on_miss_and_hit() {
+            let descriptor = RecordDescriptor::new([("value", ValueType::U64)]);
+            let raw = descriptor.create(&[Value::U64(7)]).unwrap();
+            let record = OwnedRecord::new(raw.clone(), descriptor);
+            let encoded = encode(&record).unwrap();
+            let descriptor_len = u32::from_le_bytes(encoded[6..10].try_into().unwrap()) as usize;
+            let mut malformed_descriptor = encoded.clone();
+            malformed_descriptor.insert(10 + descriptor_len, 0);
+            malformed_descriptor[6..10]
+                .copy_from_slice(&((descriptor_len + 1) as u32).to_le_bytes());
+            let mut malformed_row = encoded.clone();
+            malformed_row.push(0);
+            let mut malformed_raw = raw;
+            malformed_raw.push(0);
+            for warm in [false, true] {
+                DESCRIPTOR_PROOFS
+                    .with(|cache| *cache.borrow_mut() = DescriptorProofCache::default());
+                if warm {
+                    assert_eq!(decode(&encoded).unwrap(), record);
+                    let first = descriptor_for_encode(&descriptor).unwrap();
+                    let second = descriptor_for_decode(&first.encoded).unwrap();
+                    assert!(std::sync::Arc::ptr_eq(&first.encoded, &second.encoded));
+                }
+                assert!(decode(&malformed_descriptor).is_err());
+                DESCRIPTOR_PROOFS
+                    .with(|cache| assert_eq!(cache.borrow().entries.len(), usize::from(warm)));
+                // The row codec preserves bytes; explicit receipt admission
+                // owns untrusted row validation, not descriptor cache hits.
+                assert_eq!(decode(&malformed_row).unwrap().raw(), malformed_raw);
+                assert_eq!(
+                    encode(&OwnedRecord::new(malformed_raw.clone(), descriptor)).unwrap(),
+                    malformed_row
+                );
+                assert_eq!(encode(&record).unwrap(), encoded);
+            }
+        }
+
+        #[test]
+        fn descriptor_proof_cache_keys_include_inline_enum_identity() {
+            use jazz_types::records::{EnumCase, EnumSchema};
+            let payload = RecordDescriptor::new([("value", ValueType::U64)]);
+            let first = EnumSchema::new("choice", [EnumCase::new("one", payload)])
+                .unwrap()
+                .with_registry_id(1);
+            let mut second = first.clone();
+            second.registry_id = 2;
+            let mut third = first.clone();
+            third.cases[0].name = "other".to_owned();
+            let mut encoded = Vec::new();
+            for schema in [first, second, third] {
+                let descriptor =
+                    RecordDescriptor::new([("choice", ValueType::Enum(Box::new(schema)))]);
+                let proof = descriptor_for_encode(&descriptor).unwrap();
+                assert_eq!(
+                    proof.encoded.as_ref(),
+                    jazz_types::records::encode_persisted_record_descriptor(&descriptor).unwrap()
+                );
+                encoded.push(proof.encoded);
+            }
+            assert_ne!(encoded[0], encoded[1]);
+            assert_ne!(encoded[0], encoded[2]);
+        }
+
+        #[test]
+        fn descriptor_proof_cache_limits_retention_not_valid_input() {
+            DESCRIPTOR_PROOFS.with(|cache| *cache.borrow_mut() = DescriptorProofCache::default());
+            let descriptor =
+                RecordDescriptor::new([("x".repeat(MAX_DESCRIPTOR_PROOF_BYTES), ValueType::U64)]);
+            let record = OwnedRecord::new(descriptor.create(&[Value::U64(7)]).unwrap(), descriptor);
+            let encoded = encode(&record).unwrap();
+            assert_eq!(decode(&encoded).unwrap(), record);
+            DESCRIPTOR_PROOFS.with(|cache| assert!(cache.borrow().entries.is_empty()));
+            for index in 0..MAX_DESCRIPTOR_PROOFS + 1 {
+                let descriptor =
+                    RecordDescriptor::new([(format!("field_{index}"), ValueType::U64)]);
+                descriptor_for_encode(&descriptor).unwrap();
+            }
+            DESCRIPTOR_PROOFS.with(|cache| {
+                let cache = cache.borrow();
+                assert_eq!(cache.entries.len(), MAX_DESCRIPTOR_PROOFS);
+                assert!(cache.bytes <= MAX_DESCRIPTOR_PROOF_CACHE_BYTES);
+            });
+        }
+
+        // Large descriptors hit the total byte bound long before the entry
+        // bound. Eviction must keep both indexes pointing at retained entries,
+        // and evicted descriptors must still encode to the same bytes.
+        #[test]
+        fn descriptor_proof_cache_byte_bound_eviction_keeps_indexes_consistent() {
+            DESCRIPTOR_PROOFS.with(|cache| *cache.borrow_mut() = DescriptorProofCache::default());
+            let big = (0..40)
+                .map(|index| {
+                    RecordDescriptor::new([(
+                        format!("{index:04}{}", "y".repeat(60 * 1024)),
+                        ValueType::U64,
+                    )])
+                })
+                .collect::<Vec<_>>();
+            let encoded = big
+                .iter()
+                .map(|descriptor| descriptor_for_encode(descriptor).unwrap().encoded)
+                .collect::<Vec<_>>();
+            DESCRIPTOR_PROOFS.with(|cache| {
+                let cache = cache.borrow();
+                assert!(cache.bytes <= MAX_DESCRIPTOR_PROOF_CACHE_BYTES);
+                assert!(cache.entries.len() < big.len());
+                assert_eq!(cache.by_source.len(), cache.entries.len());
+                assert_eq!(cache.by_encoded.len(), cache.entries.len());
+                for (id, proof) in &cache.entries {
+                    assert_eq!(cache.by_source.get(&proof.source), Some(id));
+                    assert_eq!(cache.by_encoded.get(proof.encoded.as_ref()), Some(id));
+                }
+            });
+            for (descriptor, bytes) in big.iter().zip(&encoded) {
+                assert_eq!(
+                    descriptor_for_encode(descriptor).unwrap().encoded.as_ref(),
+                    bytes.as_ref()
+                );
+                assert_eq!(
+                    descriptor_for_decode(bytes).unwrap().canonical,
+                    descriptor_for_encode(descriptor).unwrap().canonical
+                );
+            }
+        }
+
+        // A view update interleaves rows from many tables and schema
+        // versions. The retained set must cover them all, or every row pays a
+        // full descriptor decode (#3380 measured ~24 us per miss vs ~44 ns per hit).
+        #[test]
+        fn descriptor_proof_cache_retains_an_interleaved_multi_table_stream() {
+            DESCRIPTOR_PROOFS.with(|cache| *cache.borrow_mut() = DescriptorProofCache::default());
+            let rows = (0..64)
+                .map(|table| {
+                    let descriptor = RecordDescriptor::new([
+                        (format!("table_{table}_id"), ValueType::Uuid),
+                        (format!("table_{table}_title"), ValueType::String),
+                    ]);
+                    let raw = descriptor
+                        .create(&[Value::Uuid(uuid::Uuid::nil()), Value::String("t".into())])
+                        .unwrap();
+                    encode(&OwnedRecord::new(raw, descriptor)).unwrap()
+                })
+                .collect::<Vec<_>>();
+            DESCRIPTOR_PROOFS.with(|cache| *cache.borrow_mut() = DescriptorProofCache::default());
+            for row in &rows {
+                decode(row).unwrap();
+            }
+            let retained = DESCRIPTOR_PROOFS.with(|cache| cache.borrow().entries.len());
+            for row in rows.iter().chain(rows.iter()) {
+                decode(row).unwrap();
+            }
+            DESCRIPTOR_PROOFS.with(|cache| {
+                let cache = cache.borrow();
+                assert_eq!(retained, rows.len());
+                assert_eq!(
+                    cache.entries.len(),
+                    retained,
+                    "a warm stream must not re-decode"
+                );
+                assert_eq!(cache.by_encoded.len(), retained);
+            });
+        }
+
+        fn u64_record(name: &str, value: u64) -> OwnedRecord {
+            let descriptor = RecordDescriptor::new([(name, ValueType::U64)]);
+            OwnedRecord::new(descriptor.create(&[Value::U64(value)]).unwrap(), descriptor)
+        }
+
+        // Pinned `JVRR` v3 bytes (#3380): inside one message scope the first
+        // row defines its descriptor and every later row with the same
+        // descriptor names it by table reference (head `reference << 1`, the
+        // union bit clear). A different descriptor defines the next entry.
+        // Outside a scope every row defines inline.
+        #[test]
+        fn message_descriptor_table_defines_once_and_references_after() {
+            let first = u64_record("value", 7);
+            let second = u64_record("value", 8);
+            let other = u64_record("other", 9);
+            let descriptor_bytes =
+                jazz_types::records::encode_persisted_record_descriptor(first.descriptor())
+                    .unwrap();
+            let define = |record: &OwnedRecord, descriptor: &[u8]| {
+                [
+                    b"JVRR\x03\x00".as_slice(),
+                    &(descriptor.len() as u32).to_le_bytes(),
+                    descriptor,
+                    record.raw(),
+                ]
+                .concat()
+            };
+            let reference = |index: u8, record: &OwnedRecord| {
+                [b"JVRR\x03".as_slice(), &[index << 1], record.raw()].concat()
+            };
+            let other_bytes =
+                jazz_types::records::encode_persisted_record_descriptor(other.descriptor())
+                    .unwrap();
+
+            let rows = with_message_descriptor_table(|| {
+                [&first, &second, &other, &first, &other].map(|record| encode(record).unwrap())
+            });
+            assert_eq!(rows[0], define(&first, &descriptor_bytes));
+            assert_eq!(rows[1], reference(1, &second));
+            assert_eq!(rows[2], define(&other, &other_bytes));
+            assert_eq!(rows[3], reference(1, &first));
+            assert_eq!(rows[4], reference(2, &other));
+            assert_eq!(
+                rows[1],
+                [b"JVRR\x03\x02".as_slice(), &8u64.to_le_bytes()].concat()
+            );
+
+            let decoded = with_message_descriptor_table(|| {
+                rows.iter()
+                    .map(|row| decode(row).unwrap())
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!(
+                decoded,
+                [
+                    first.clone(),
+                    second.clone(),
+                    other.clone(),
+                    first.clone(),
+                    other
+                ]
+            );
+
+            // Outside a message, rows stand alone.
+            assert_eq!(encode(&second).unwrap(), define(&second, &descriptor_bytes));
+            assert!(decode(&rows[1]).is_err());
+        }
+
+        // The decoder admits exactly the encoder's spelling: a reference must
+        // name an entry already defined in this message, a descriptor is
+        // defined at most once, and references are shortest LEB128.
+        #[test]
+        fn message_descriptor_table_rejects_non_canonical_references() {
+            let record = u64_record("value", 7);
+            let defined = encode(&record).unwrap();
+            let decode_all = |rows: &[Vec<u8>]| {
+                with_message_descriptor_table(|| {
+                    rows.iter()
+                        .map(|row| decode(row))
+                        .collect::<Result<Vec<_>, _>>()
+                })
+            };
+            let with_reference =
+                |reference: &[u8]| [b"JVRR\x03".as_slice(), reference, record.raw()].concat();
+            assert!(decode_all(&[defined.clone(), with_reference(&[2])]).is_ok());
+            // Forward reference, unknown entry, duplicate definition.
+            assert!(decode_all(&[with_reference(&[2]), defined.clone()]).is_err());
+            assert!(decode_all(&[defined.clone(), with_reference(&[4])]).is_err());
+            assert!(decode_all(&[defined.clone(), defined.clone()]).is_err());
+            // The union bit on a row without union cells: its row bytes do
+            // not parse as union entries.
+            assert!(decode_all(&[defined.clone(), with_reference(&[3])]).is_err());
+            // Overlong and out-of-range references.
+            assert!(decode_all(&[defined.clone(), with_reference(&[0x82, 0x00])]).is_err());
+            assert!(decode_all(&[defined.clone(), with_reference(&[0x80, 0x00])]).is_err());
+            assert!(
+                decode_all(&[
+                    defined.clone(),
+                    with_reference(&[0xff, 0xff, 0xff, 0xff, 0x7f])
+                ])
+                .is_err()
+            );
+            // Each message starts with an empty table, and nested scopes
+            // restore the outer table.
+            assert!(decode_all(std::slice::from_ref(&defined)).is_ok());
+            assert!(decode_all(&[with_reference(&[2])]).is_err());
+            with_message_descriptor_table(|| {
+                decode(&defined).unwrap();
+                assert!(decode_all(&[with_reference(&[2])]).is_err());
+                decode(&with_reference(&[2])).unwrap();
+            });
+        }
+
+        #[test]
+        fn leb128_references_round_trip_at_boundaries() {
+            for value in [0, 1, 127, 128, 16383, 16384, MAX_REFERENCE, MAX_HEAD] {
+                let mut bytes = Vec::new();
+                push_leb128(&mut bytes, value);
+                assert_eq!(
+                    take_leb128(&bytes, MAX_HEAD),
+                    Some((value, &[][..])),
+                    "{value}"
+                );
+            }
+            let mut bytes = Vec::new();
+            push_leb128(&mut bytes, MAX_HEAD + 1);
+            assert_eq!(take_leb128(&bytes, MAX_HEAD), None);
+        }
+
+        #[test]
+        fn immutable_version_row_codec_preserves_schema_and_excludes_execution_bindings() {
+            let descriptor = RecordDescriptor::new([
+                ("row_uuid", ValueType::Uuid),
+                ("_app_title", ValueType::String),
+                (
+                    "_app_nested",
+                    ValueType::Record(Box::new(RecordDescriptor::new([(
+                        "literal_name",
+                        ValueType::U64,
+                    )]))),
+                ),
+            ]);
+            let nested = RecordDescriptor::new([("literal_name", ValueType::U64)]);
+            let raw = descriptor
+                .create(&[
+                    Value::Uuid(uuid::Uuid::from_bytes([7; 16])),
+                    Value::String("same application cell".to_owned()),
+                    Value::Record(OwnedRecord::new(
+                        nested.create(&[Value::U64(42)]).unwrap(),
+                        nested,
+                    )),
+                ])
+                .unwrap();
+            let original = OwnedRecord::new(raw.clone(), descriptor);
+            let encoded = encode(&original).unwrap();
+            assert_eq!(
+                blake3::hash(&encoded).to_hex().as_str(),
+                "18d2325b449fa54152ec1f34c699ebdcfab7650b1ad9204087e3550ee979391d"
+            );
+            assert_eq!(&encoded[..6], b"JVRR\x03\x00");
+            assert_eq!(decode(&encoded).unwrap(), original);
+
+            let mut fields = descriptor.fields().to_vec();
+            fields[1].identity = Some(FieldIdentity::Slot(999));
+            let mut nested_fields = nested.fields().to_vec();
+            nested_fields[0].identity = Some(FieldIdentity::NamedSlot {
+                name: "runtime alias".to_owned(),
+                slot: 77,
+            });
+            fields[2].value_type =
+                ValueType::Record(Box::new(RecordDescriptor::new_with_fields(nested_fields)));
+            let rebound = OwnedRecord::new(
+                raw.clone(),
+                RecordDescriptor::new_with_fields(fields.clone()),
+            );
+            assert_eq!(encode(&rebound).unwrap(), encoded);
+
+            fields[1] = DescriptorField::new("_app_other_title", ValueType::String);
+            let other_schema = OwnedRecord::new(raw, RecordDescriptor::new_with_fields(fields));
+            assert_ne!(
+                encode(&other_schema).unwrap(),
+                encoded,
+                "logical field identity remains authoritative"
+            );
+            // Version 1 (the DAG row with `parents`) and version 2 (a
+            // descriptor in every row) are retired; 4 is unknown.
+            for version in [1, 2, 4] {
+                let mut other_version = encoded.clone();
+                other_version[4] = version;
+                assert!(decode(&other_version).is_err());
+            }
+            let mut trailing = encoded.clone();
+            trailing.push(0);
+            assert_eq!(
+                decode(&trailing).unwrap().raw(),
+                &trailing[10 + u32::from_le_bytes(trailing[6..10].try_into().unwrap()) as usize..]
+            );
+            assert!(decode(&encoded[..9]).is_err());
+            assert!(decode(&postcard::to_allocvec(&original).unwrap()).is_err());
+        }
+    }
+}
+
+impl VersionRecord {
+    /// Validate the complete immutable receipt without using infallible accessors.
+    ///
+    /// This is the shared inbound/outbound codec boundary. `OwnedRecord`
+    /// deliberately permits deferred decoding, so callers must pass through
+    /// here before treating a deserialized record as trusted.
+    pub fn validate_receipt(&self) -> Result<(), VersionBundleRunError> {
+        #[cfg(any(test, feature = "testing"))]
+        RECEIPT_VALIDATIONS.with(|count| count.set(count.get() + 1));
+        let malformed = || VersionBundleRunError::MalformedVersionRecord {
+            table: self.table().to_owned(),
+        };
+        let is_user_cell_field = |field: &jazz_types::records::DescriptorField| {
+            field
+                .name
+                .as_deref()
+                .is_some_and(|name| name.starts_with(crate::schema::APP_COLUMN_PREFIX))
+        };
+        let fields = self.row.record.descriptor().fields();
+        let fixed_names = [
+            "row_uuid",
+            "created_by",
+            "created_at",
+            "updated_by",
+            "updated_at",
+            "_deletion",
+        ];
+        if fields.len() < fixed_names.len()
+            || fields
+                .iter()
+                .zip(fixed_names)
+                .any(|(field, expected)| field.name.as_deref() != Some(expected))
+            || fields[WireRowRecord::USER_CELLS..]
+                .iter()
+                .any(|field| !is_user_cell_field(field))
+        {
+            return Err(malformed());
+        }
+        let borrowed = self.row.record.borrowed();
+        let row_uuid = RowUuid(
+            borrowed
+                .get_uuid(WireRowRecord::FIELD_ROW_UUID_IDX)
+                .map_err(|_| malformed())?,
+        );
+        for index in [
+            WireRowRecord::FIELD_CREATED_BY_IDX,
+            WireRowRecord::FIELD_UPDATED_BY_IDX,
+        ] {
+            RowAuthor::from_record(borrowed.get_record(index).map_err(|_| malformed())?)
+                .map_err(|_| malformed())?;
+        }
+        borrowed
+            .get_u64(WireRowRecord::FIELD_CREATED_AT_IDX)
+            .map_err(|_| malformed())?;
+        borrowed
+            .get_u64(WireRowRecord::FIELD_UPDATED_AT_IDX)
+            .map_err(|_| malformed())?;
+        deletion_from_value(
+            borrowed
+                .get_idx(WireRowRecord::FIELD__DELETION_IDX)
+                .map_err(|_| malformed())?,
+        )
+        .map_err(|_| malformed())?;
+        let typed = WireRowRecord::new(self.row.record.clone());
+        for index in 0..fields.len() - WireRowRecord::USER_CELLS {
+            typed.cell(index).map_err(|_| malformed())?;
+        }
+
+        // Decode every descriptor field, then reproduce the record. Besides
+        // validating user cells, equality proves that no trailing or alternate
+        // spelling survived deferred `OwnedRecord` construction.
+        let values = (0..fields.len())
+            .map(|index| borrowed.get_idx(index).map_err(|_| malformed()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let canonical = self
+            .row
+            .record
+            .descriptor()
+            .create(&values)
+            .map_err(|_| malformed())?;
+        if canonical.as_slice() != self.row.record.raw() {
+            return Err(malformed());
+        }
+        // Union cells: canonical `(schema, table)` order, and each record a
+        // non-empty canonical row of nullable user cells.
+        for (index, extra) in self.row.extras.iter().enumerate() {
+            if index > 0 && self.row.extras[index - 1].sort_key() >= extra.sort_key() {
+                return Err(malformed());
+            }
+            let fields = extra.record.descriptor().fields();
+            if fields.is_empty()
+                || fields.iter().any(|field| {
+                    !is_user_cell_field(field)
+                        || !matches!(
+                            field.value_type,
+                            jazz_types::records::ValueType::Nullable(_)
+                        )
+                })
+            {
+                return Err(malformed());
+            }
+            let borrowed = extra.record.borrowed();
+            let values = (0..fields.len())
+                .map(|index| borrowed.get_idx(index).map_err(|_| malformed()))
+                .collect::<Result<Vec<_>, _>>()?;
+            let canonical = extra
+                .record
+                .descriptor()
+                .create(&values)
+                .map_err(|_| malformed())?;
+            if canonical.as_slice() != extra.record.raw() {
+                return Err(malformed());
+            }
+        }
+        let _ = row_uuid;
+        Ok(())
+    }
+
+    /// Construct a wire version record from encoded bytes and the table schema.
+    pub fn new(
+        table: impl Into<String>,
+        schema_version: SchemaVersionId,
+        record: OwnedRecord,
+    ) -> Self {
+        Self {
+            table: jazz_types::Intern::new(table.into()),
+            schema_version,
+            branch_key: BranchKey::default(),
+            row: WireRow {
+                record,
+                extras: Vec::new(),
+            },
+            authored_columns: None,
+            base: RowBase::default(),
+            counter_signs: Vec::new(),
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn with_branch_key(mut self, branch_key: BranchKey) -> Self {
+        self.branch_key = branch_key;
+        self
+    }
+
+    /// Exact branch coordinate of this version.
+    pub fn branch_key(&self) -> &BranchKey {
+        &self.branch_key
+    }
+
+    #[doc(hidden)]
+    pub fn with_authored_columns(mut self, authored_columns: Option<BTreeSet<String>>) -> Self {
+        self.authored_columns = authored_columns;
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn authored_columns(&self) -> Option<&BTreeSet<String>> {
+        self.authored_columns.as_ref()
+    }
+
+    #[doc(hidden)]
+    pub fn with_base(mut self, base: RowBase) -> Self {
+        self.base = base;
+        self
+    }
+
+    /// The image this version's writer made it over (see the `base` field).
+    pub fn base(&self) -> RowBase {
+        self.base
+    }
+
+    /// The union cells of a Core image (see `UnionExtraCells`); empty for
+    /// every other version.
+    pub fn extra_cells(&self) -> &[UnionExtraCells] {
+        &self.row.extras
+    }
+
+    #[doc(hidden)]
+    pub fn with_extra_cells(mut self, mut extras: Vec<UnionExtraCells>) -> Self {
+        extras.sort_by(|left, right| left.sort_key().cmp(&right.sort_key()));
+        self.row.extras = extras;
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn with_counter_signs(mut self, counter_signs: Vec<u8>) -> Self {
+        self.counter_signs = counter_signs;
+        self
+    }
+
+    /// Counter-op sign carrier (see the `counter_signs` field).
+    #[doc(hidden)]
+    pub fn counter_signs(&self) -> &[u8] {
+        &self.counter_signs
+    }
+
+    /// Encode a wire record directly from typed row payload parts.
+    pub fn encode(
+        table: &TableSchema,
+        schema_version: SchemaVersionId,
+        row_uuid: RowUuid,
+        created_by: AuthorSubject,
+        created_at_ms: u64,
+        updated_by: AuthorSubject,
+        updated_at_ms: u64,
+        cells_by_position: &[Option<Value>],
+        deletion: Option<DeletionEvent>,
+    ) -> Result<Self, jazz_types::records::Error> {
+        // This path is for data birth only; stored rows project to wire bytes without decoding.
+        let descriptor = table.wire_record_descriptor();
+        let values = [
+            Value::Uuid(row_uuid.0),
+            RowAuthor::from_persisted_subject(created_by)
+                .map_err(|_| jazz_types::records::Error::NonCanonicalRecord)?
+                .to_value(),
+            Value::U64(created_at_ms),
+            RowAuthor::from_persisted_subject(updated_by)
+                .map_err(|_| jazz_types::records::Error::NonCanonicalRecord)?
+                .to_value(),
+            Value::U64(updated_at_ms),
+            Value::Nullable(deletion.map(|deletion| {
+                Box::new(Value::EnumTag(match deletion {
+                    DeletionEvent::Deleted => 0,
+                    DeletionEvent::Restored => 1,
+                }))
+            })),
+        ]
+        .into_iter()
+        .chain(table.columns.iter().enumerate().map(|(idx, _column)| {
+            Value::Nullable(
+                cells_by_position
+                    .get(idx)
+                    .and_then(Clone::clone)
+                    .map(Box::new),
+            )
+        }))
+        .collect::<Vec<_>>();
+        let raw = descriptor.create(&values)?;
+        Ok(Self::new(
+            table.name.clone(),
+            schema_version,
+            OwnedRecord::new(raw, descriptor),
+        ))
+    }
+
+    /// Encode a wire record from cells keyed by application column name.
+    pub fn from_cells<V: Into<Value> + Clone>(
+        table: &TableSchema,
+        schema_version: SchemaVersionId,
+        row_uuid: RowUuid,
+        created_by: AuthorSubject,
+        created_at_ms: u64,
+        updated_by: AuthorSubject,
+        updated_at_ms: u64,
+        cells: &BTreeMap<String, V>,
+        deletion: Option<DeletionEvent>,
+    ) -> Result<Self, jazz_types::records::Error> {
+        let positional = table
+            .columns
+            .iter()
+            .map(|column| cells.get(&column.name).cloned().map(Into::into))
+            .collect::<Vec<_>>();
+        Self::encode(
+            table,
+            schema_version,
+            row_uuid,
+            created_by,
+            created_at_ms,
+            updated_by,
+            updated_at_ms,
+            &positional,
+            deletion,
+        )
+    }
+
+    /// Table containing the row.
+    pub fn table(&self) -> &str {
+        self.table.as_str()
+    }
+
+    /// Schema version used to encode this row payload.
+    pub fn schema_version(&self) -> SchemaVersionId {
+        self.schema_version
+    }
+
+    /// Encoded wire record.
+    pub fn record(&self) -> &OwnedRecord {
+        &self.row.record
+    }
+
+    /// Stable row identity.
+    pub fn row_uuid(&self) -> RowUuid {
+        RowUuid(
+            self.row
+                .record
+                .borrowed()
+                .get_uuid(WireRowRecord::FIELD_ROW_UUID_IDX)
+                .expect("valid wire row uuid"),
+        )
+    }
+
+    /// Whether this version authors a deletion of its row. Deletion is a cell
+    /// of the row image that later content writes carry forward, so only a
+    /// version that authored `_deletion` (or legacy payloads without an
+    /// authored set) performs the delete.
+    #[doc(hidden)]
+    pub fn deletes_row(&self) -> bool {
+        self.deletion() == Some(DeletionEvent::Deleted)
+            && self
+                .authored_columns
+                .as_ref()
+                .is_none_or(|columns| columns.contains("_deletion"))
+    }
+
+    /// Deletion state stamped into this row image, if the row was ever
+    /// deleted or restored.
+    pub fn deletion(&self) -> Option<DeletionEvent> {
+        deletion_from_value(
+            self.row
+                .record
+                .borrowed()
+                .get_idx(WireRowRecord::FIELD__DELETION_IDX)
+                .expect("valid wire deletion"),
+        )
+        .expect("valid wire deletion")
+    }
+
+    /// Original author for this logical row.
+    pub fn created_by(&self) -> AuthorSubject {
+        RowAuthor::from_record(
+            self.row
+                .record
+                .borrowed()
+                .get_record(WireRowRecord::FIELD_CREATED_BY_IDX)
+                .expect("valid wire created_by"),
+        )
+        .expect("canonical wire created_by")
+        .as_author_subject()
+    }
+
+    /// Original creation timestamp for this logical row in Unix milliseconds.
+    pub fn created_at_ms(&self) -> u64 {
+        self.row
+            .record
+            .borrowed()
+            .get_u64(WireRowRecord::FIELD_CREATED_AT_IDX)
+            .expect("valid wire created_at_ms")
+    }
+
+    /// Author of this row version.
+    pub fn updated_by(&self) -> AuthorSubject {
+        RowAuthor::from_record(
+            self.row
+                .record
+                .borrowed()
+                .get_record(WireRowRecord::FIELD_UPDATED_BY_IDX)
+                .expect("valid wire updated_by"),
+        )
+        .expect("canonical wire updated_by")
+        .as_author_subject()
+    }
+
+    /// Update timestamp for this row version in Unix milliseconds.
+    pub fn updated_at_ms(&self) -> u64 {
+        self.row
+            .record
+            .borrowed()
+            .get_u64(WireRowRecord::FIELD_UPDATED_AT_IDX)
+            .expect("valid wire updated_at_ms")
+    }
+
+    /// Cell value by application-schema column position.
+    pub fn cell_at(&self, column_position: usize) -> Option<Value> {
+        self.row
+            .record
+            .borrowed()
+            .get_idx(WireRowRecord::USER_CELLS + column_position)
+            .expect("valid wire cell")
+            .nullable_value()
+            .expect("valid nullable wire cell")
+    }
+
+    /// Cell value by application-schema column position, treating columns not
+    /// present in the wire payload as absent.
+    pub fn optional_cell_at(&self, column_position: usize) -> Option<Value> {
+        let field = WireRowRecord::USER_CELLS + column_position;
+        if field >= self.row.record.descriptor().fields().len() {
+            return None;
+        }
+        self.row
+            .record
+            .borrowed()
+            .get_idx(field)
+            .ok()?
+            .nullable_value()
+            .ok()
+            .flatten()
+    }
+
+    #[doc(hidden)]
+    pub fn application_cell_count(&self) -> usize {
+        self.row
+            .record
+            .descriptor()
+            .fields()
+            .len()
+            .saturating_sub(WireRowRecord::USER_CELLS)
+    }
+}
+
+trait NullableValue {
+    fn nullable_value(self) -> Result<Option<Value>, &'static str>;
+}
+
+impl NullableValue for Value {
+    fn nullable_value(self) -> Result<Option<Value>, &'static str> {
+        match self {
+            Value::Nullable(None) => Ok(None),
+            Value::Nullable(Some(value)) => Ok(Some(*value)),
+            _ => Err("nullable value expected"),
+        }
+    }
+}
+
+impl PartialOrd for VersionRecord {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for VersionRecord {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.table()
+            .cmp(other.table())
+            .then_with(|| self.schema_version.cmp(&other.schema_version))
+            .then_with(|| self.branch_key.cmp(&other.branch_key))
+            .then_with(|| self.row.record.raw().cmp(other.row.record.raw()))
+            .then_with(|| {
+                self.row
+                    .extras
+                    .iter()
+                    .map(|extra| (extra.sort_key(), extra.record.raw()))
+                    .cmp(
+                        other
+                            .row
+                            .extras
+                            .iter()
+                            .map(|extra| (extra.sort_key(), extra.record.raw())),
+                    )
+            })
+            .then_with(|| self.authored_columns.cmp(&other.authored_columns))
+            .then_with(|| self.base.cmp(&other.base))
+            .then_with(|| self.counter_signs.cmp(&other.counter_signs))
+    }
+}
+
+jazz_types::define_record! {
+    struct WireRowRecord {
+        0 => row_uuid: RowUuid,
+        1 => created_by: RowAuthor,
+        2 => created_at: u64,
+        3 => updated_by: RowAuthor,
+        4 => updated_at: u64,
+        5 => _deletion: Option<Value>,
+        .. user_cells,
+    }
+}
+
+fn deletion_from_value(value: Value) -> Result<Option<DeletionEvent>, &'static str> {
+    match value {
+        Value::Nullable(None) => Ok(None),
+        Value::Nullable(Some(value)) => match *value {
+            Value::EnumTag(0) => Ok(Some(DeletionEvent::Deleted)),
+            Value::EnumTag(1) => Ok(Some(DeletionEvent::Restored)),
+            _ => Err("deletion"),
+        },
+        _ => Err("deletion"),
+    }
+}
+
+/// Transaction plus row-version payload and the upstream state observed with it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum VersionBundleScope {
+    /// The bundle carries every write authored by the transaction.
+    CompleteTransaction,
+    /// The bundle carries only the writes admitted by one selected view.
+    ///
+    /// For this scope `Transaction::n_total_writes` is deliberately redacted to
+    /// the number of versions in this bundle. It is not the authored transaction
+    /// cardinality and MUST NOT establish complete-payload coverage.
+    #[default]
+    ViewScoped,
+}
+
+/// Transaction plus row-version payload and the upstream state observed with it.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct VersionBundle {
+    /// Transaction payload for the versions.
+    pub tx: Transaction,
+    /// Row versions carried by the transaction.
+    pub versions: Vec<VersionRecord>,
+    /// Whether the payload is complete or selected for one view.
+    pub scope: VersionBundleScope,
+    /// Fate known when the bundle was shipped.
+    pub fate: Fate,
+    /// Global timestamp known when shipped.
+    pub global_time: Option<GlobalTime>,
+    /// Durability known when shipped.
+    pub durability: DurabilityTier,
+}
+
+/// Borrowed view of one version-bundle carrier body.
+#[derive(Clone, Copy, Debug)]
+pub struct VersionBundleRef<'a> {
+    /// Transaction payload for the versions.
+    pub tx: &'a Transaction,
+    /// Row versions carried by the transaction.
+    pub versions: &'a [VersionRecord],
+    /// Whether the payload is complete or selected for one view.
+    pub scope: VersionBundleScope,
+    /// Fate known when the bundle was shipped.
+    pub fate: &'a Fate,
+    /// Global timestamp known when shipped.
+    pub global_time: Option<GlobalTime>,
+    /// Durability known when shipped.
+    pub durability: DurabilityTier,
+}
+
+impl<'a> VersionBundleRef<'a> {
+    /// Materialize this borrowed view into an owned bundle.
+    pub fn to_owned_bundle(self) -> VersionBundle {
+        VersionBundle {
+            tx: self.tx.clone(),
+            versions: self.versions.to_vec(),
+            scope: self.scope,
+            fate: self.fate.clone(),
+            global_time: self.global_time,
+            durability: self.durability,
+        }
+    }
+}
+
+impl VersionBundle {
+    /// Borrow this singleton bundle as a carrier body.
+    pub fn as_ref(&self) -> VersionBundleRef<'_> {
+        VersionBundleRef {
+            tx: &self.tx,
+            versions: &self.versions,
+            scope: self.scope,
+            fate: &self.fate,
+            global_time: self.global_time,
+            durability: self.durability,
+        }
+    }
+}
+
+/// One row-version carrier in a view-update stream.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub enum VersionCarrier {
+    /// Existing singleton carrier. This is semantically a run of length 1.
+    Bundle(VersionBundle),
+    /// Packed run of adjacent row-version bodies with shared defaults.
+    Run(VersionBundleRun),
+}
+
+impl VersionCarrier {
+    /// Expand this carrier to the singleton bundle form used by L1 apply paths.
+    pub fn expand(&self) -> Result<Vec<VersionBundle>, VersionBundleRunError> {
+        match self {
+            Self::Bundle(bundle) => Ok(vec![bundle.clone()]),
+            Self::Run(run) => run.expand(),
+        }
+    }
+
+    /// Borrow this carrier as one or more bundle bodies without expanding.
+    pub fn bundle_refs(&self) -> Result<Vec<VersionBundleRef<'_>>, VersionBundleRunError> {
+        match self {
+            Self::Bundle(bundle) => Ok(vec![bundle.as_ref()]),
+            Self::Run(run) => run.bundle_refs(),
+        }
+    }
+}
+
+/// Shared header plus row-version bodies for adjacent view-update carriers.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct VersionBundleRun {
+    /// Shared/default metadata for the run.
+    pub header: VersionBundleRunHeader,
+    /// Packed row-version bodies. Each body expands to one `VersionBundle`.
+    pub bodies: Vec<VersionBundleRunBody>,
+    /// Per-body metadata overrides for rows that deviate from the header.
+    pub overrides: Vec<VersionBundleRunOverride>,
+}
+
+impl VersionBundleRun {
+    /// Build one run from adjacent singleton bundles.
+    pub fn from_adjacent_singletons(
+        bundles: &[VersionBundle],
+    ) -> Result<Self, VersionBundleRunError> {
+        Self::from_adjacent_singleton_bundles(bundles.to_vec())
+    }
+
+    /// Like [`Self::from_adjacent_singletons`], but moves the bundles' versions into the run
+    /// instead of cloning them.
+    pub fn from_adjacent_singleton_bundles(
+        bundles: Vec<VersionBundle>,
+    ) -> Result<Self, VersionBundleRunError> {
+        let Some(first) = bundles.first() else {
+            return Err(VersionBundleRunError::EmptyRun);
+        };
+        let table = common_run_table(&bundles);
+        let overrides = bundles
+            .iter()
+            .enumerate()
+            .filter_map(|(index, bundle)| {
+                let override_ = VersionBundleRunOverride {
+                    body_index: index as u32,
+                    tx: (bundle.tx != first.tx).then(|| bundle.tx.clone()),
+                    scope: (bundle.scope != first.scope).then_some(bundle.scope),
+                    fate: (bundle.fate != first.fate).then(|| bundle.fate.clone()),
+                    global_time: (bundle.global_time != first.global_time)
+                        .then_some(bundle.global_time),
+                    durability: (bundle.durability != first.durability)
+                        .then_some(bundle.durability),
+                };
+                override_.has_overrides().then_some(override_)
+            })
+            .collect::<Vec<_>>();
+        let header = VersionBundleRunHeader {
+            table,
+            tx: first.tx.clone(),
+            scope: first.scope,
+            body_count: bundles.len() as u32,
+            fate: first.fate.clone(),
+            global_time: first.global_time,
+            durability: first.durability,
+        };
+        let bodies = bundles
+            .into_iter()
+            .map(|bundle| VersionBundleRunBody {
+                versions: bundle.versions,
+            })
+            .collect::<Vec<_>>();
+        let run = Self {
+            header,
+            bodies,
+            overrides,
+        };
+        run.validate()?;
+        Ok(run)
+    }
+
+    /// Validate metadata that cannot be enforced by postcard shape decoding.
+    pub fn validate(&self) -> Result<(), VersionBundleRunError> {
+        let declared = self.header.body_count as usize;
+        let actual = self.bodies.len();
+        if declared == 0 {
+            return Err(VersionBundleRunError::EmptyRun);
+        }
+        if declared != actual {
+            return Err(VersionBundleRunError::BodyCountMismatch { declared, actual });
+        }
+
+        let mut seen = BTreeSet::new();
+        for override_ in &self.overrides {
+            let index = override_.body_index as usize;
+            if index >= declared {
+                return Err(VersionBundleRunError::OverrideIndexOutOfRange {
+                    index,
+                    body_count: declared,
+                });
+            }
+            if !seen.insert(index) {
+                return Err(VersionBundleRunError::DuplicateOverride { index });
+            }
+        }
+
+        if let Some(table) = &self.header.table {
+            for body in &self.bodies {
+                for version in &body.versions {
+                    if version.table() != table.as_str() {
+                        return Err(VersionBundleRunError::TableMismatch {
+                            expected: table.to_string(),
+                            actual: version.table().to_owned(),
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Expand the run into today's singleton `VersionBundle` carriers.
+    pub fn expand(&self) -> Result<Vec<VersionBundle>, VersionBundleRunError> {
+        self.validate()?;
+        let mut overrides = BTreeMap::new();
+        for override_ in &self.overrides {
+            overrides.insert(override_.body_index as usize, override_);
+        }
+
+        Ok(self
+            .bodies
+            .iter()
+            .enumerate()
+            .map(|(index, body)| {
+                let override_ = overrides.get(&index).copied();
+                VersionBundle {
+                    tx: override_
+                        .and_then(|override_| override_.tx.clone())
+                        .unwrap_or_else(|| self.header.tx.clone()),
+                    versions: body.versions.clone(),
+                    scope: override_
+                        .and_then(|override_| override_.scope)
+                        .unwrap_or(self.header.scope),
+                    fate: override_
+                        .and_then(|override_| override_.fate.clone())
+                        .unwrap_or_else(|| self.header.fate.clone()),
+                    global_time: override_
+                        .and_then(|override_| override_.global_time)
+                        .unwrap_or(self.header.global_time),
+                    durability: override_
+                        .and_then(|override_| override_.durability)
+                        .unwrap_or(self.header.durability),
+                }
+            })
+            .collect())
+    }
+
+    /// Borrow the run bodies with header defaults and body overrides applied.
+    pub fn bundle_refs(&self) -> Result<Vec<VersionBundleRef<'_>>, VersionBundleRunError> {
+        self.validate()?;
+        let mut overrides = BTreeMap::new();
+        for override_ in &self.overrides {
+            overrides.insert(override_.body_index as usize, override_);
+        }
+
+        Ok(self
+            .bodies
+            .iter()
+            .enumerate()
+            .map(|(index, body)| {
+                let override_ = overrides.get(&index).copied();
+                VersionBundleRef {
+                    tx: override_
+                        .and_then(|override_| override_.tx.as_ref())
+                        .unwrap_or(&self.header.tx),
+                    versions: &body.versions,
+                    scope: override_
+                        .and_then(|override_| override_.scope)
+                        .unwrap_or(self.header.scope),
+                    fate: override_
+                        .and_then(|override_| override_.fate.as_ref())
+                        .unwrap_or(&self.header.fate),
+                    global_time: override_
+                        .and_then(|override_| override_.global_time)
+                        .unwrap_or(self.header.global_time),
+                    durability: override_
+                        .and_then(|override_| override_.durability)
+                        .unwrap_or(self.header.durability),
+                }
+            })
+            .collect())
+    }
+}
+
+/// Shared/default metadata for a packed version-bundle run.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct VersionBundleRunHeader {
+    /// Shared table context when every carried row-version belongs to one table.
+    pub table: Option<jazz_types::Intern<String>>,
+    /// Default transaction payload for each body.
+    pub tx: Transaction,
+    /// Default payload scope for each body.
+    pub scope: VersionBundleScope,
+    /// Declared number of bodies; must match `VersionBundleRun::bodies`.
+    pub body_count: u32,
+    /// Default fate for each body.
+    pub fate: Fate,
+    /// Default global timestamp for each body.
+    pub global_time: Option<GlobalTime>,
+    /// Default durability tier for each body.
+    pub durability: DurabilityTier,
+}
+
+/// Row-version payload body inside a packed run.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct VersionBundleRunBody {
+    /// Row versions carried by this body.
+    pub versions: Vec<VersionRecord>,
+}
+
+/// Per-body override for metadata that differs from the run header.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct VersionBundleRunOverride {
+    /// Zero-based index into `VersionBundleRun::bodies`.
+    pub body_index: u32,
+    /// Transaction override for this body.
+    pub tx: Option<Transaction>,
+    /// Payload-scope override for this body.
+    pub scope: Option<VersionBundleScope>,
+    /// Fate override for this body.
+    pub fate: Option<Fate>,
+    /// Global timestamp override for this body. `Some(None)` overrides to absent.
+    pub global_time: Option<Option<GlobalTime>>,
+    /// Durability override for this body.
+    pub durability: Option<DurabilityTier>,
+}
+
+impl VersionBundleRunOverride {
+    fn has_overrides(&self) -> bool {
+        self.tx.is_some()
+            || self.scope.is_some()
+            || self.fate.is_some()
+            || self.global_time.is_some()
+            || self.durability.is_some()
+    }
+}
+
+/// Validation failures for malformed packed version-bundle runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VersionBundleRunError {
+    /// A deferred record failed structural or canonical validation.
+    MalformedVersionRecord {
+        /// Table declared by the enclosing version.
+        table: String,
+    },
+    /// Runs must carry at least one body.
+    EmptyRun,
+    /// The declared body count did not match the actual body vector length.
+    BodyCountMismatch {
+        /// Header-declared body count.
+        declared: usize,
+        /// Actual number of run bodies.
+        actual: usize,
+    },
+    /// An override referenced a body that does not exist.
+    OverrideIndexOutOfRange {
+        /// Referenced body index.
+        index: usize,
+        /// Number of bodies in the run.
+        body_count: usize,
+    },
+    /// More than one override referenced the same body.
+    DuplicateOverride {
+        /// Duplicated body index.
+        index: usize,
+    },
+    /// A run declared shared table context but carried a different table.
+    TableMismatch {
+        /// Header table context.
+        expected: String,
+        /// Table found in a body version.
+        actual: String,
+    },
+}
+
+impl std::fmt::Display for VersionBundleRunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MalformedVersionRecord { table } => {
+                write!(f, "version for {table} has malformed record bytes")
+            }
+            Self::EmptyRun => write!(f, "version-bundle run has no bodies"),
+            Self::BodyCountMismatch { declared, actual } => write!(
+                f,
+                "version-bundle run body_count {declared} did not match {actual} bodies"
+            ),
+            Self::OverrideIndexOutOfRange { index, body_count } => write!(
+                f,
+                "version-bundle run override index {index} out of range for {body_count} bodies"
+            ),
+            Self::DuplicateOverride { index } => {
+                write!(
+                    f,
+                    "version-bundle run has duplicate override for body {index}"
+                )
+            }
+            Self::TableMismatch { expected, actual } => write!(
+                f,
+                "version-bundle run table context {expected} did not match body table {actual}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for VersionBundleRunError {}
+
+/// Build packed runs from adjacent singleton bundles.
+pub fn build_version_bundle_runs_from_singletons(
+    bundles: &[VersionBundle],
+) -> Result<Vec<VersionBundleRun>, VersionBundleRunError> {
+    if bundles.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(vec![VersionBundleRun::from_adjacent_singletons(bundles)?])
+}
+
+/// Build the outbound carrier stream for adjacent singleton bundles.
+pub fn build_version_carriers_from_singletons(
+    bundles: Vec<VersionBundle>,
+) -> Result<Vec<VersionCarrier>, VersionBundleRunError> {
+    if force_singleton_version_carriers() || bundles.len() <= 1 {
+        return Ok(bundles.into_iter().map(VersionCarrier::Bundle).collect());
+    }
+    Ok(vec![VersionCarrier::Run(
+        VersionBundleRun::from_adjacent_singleton_bundles(bundles)?,
+    )])
+}
+
+fn force_singleton_version_carriers() -> bool {
+    #[cfg(any(test, feature = "testing"))]
+    if FORCE_SINGLETON_VERSION_CARRIERS_FOR_TESTS.load(AtomicOrdering::Relaxed) {
+        return true;
+    }
+    crate::debug_env::force_singleton_version_carriers()
+}
+
+#[cfg(any(test, feature = "testing"))]
+static FORCE_SINGLETON_VERSION_CARRIERS_FOR_TESTS: AtomicBool = AtomicBool::new(false);
+
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+pub fn set_force_singleton_version_carriers_for_tests(enabled: bool) {
+    FORCE_SINGLETON_VERSION_CARRIERS_FOR_TESTS.store(enabled, AtomicOrdering::Relaxed);
+}
+
+/// Expand a carrier stream into singleton bundles.
+pub fn expand_version_carriers(
+    carriers: &[VersionCarrier],
+) -> Result<Vec<VersionBundle>, VersionBundleRunError> {
+    let mut bundles = Vec::new();
+    for carrier in carriers {
+        bundles.extend(carrier.expand()?);
+    }
+    Ok(bundles)
+}
+
+fn common_run_table(bundles: &[VersionBundle]) -> Option<jazz_types::Intern<String>> {
+    let mut table = None::<&str>;
+    for version in bundles.iter().flat_map(|bundle| &bundle.versions) {
+        match table {
+            None => table = Some(version.table()),
+            Some(current) if current == version.table() => {}
+            Some(_) => return None,
+        }
+    }
+    table.map(|table| jazz_types::Intern::new(table.to_owned()))
+}
+
+/// Wire handle for one usage-site subscription.
+///
+/// This key addresses `Subscribe`, `ViewUpdate`, and `Unsubscribe` messages on
+/// one link. Its `binding_id` is the subscriber-chosen usage-site handle, not
+/// necessarily the canonical binding id derived from the query's bound values.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub struct SubscriptionKey {
+    /// Registered query shape.
+    pub shape_id: ShapeId,
+    /// Usage-site subscription id. Historically this was often the
+    /// deterministic binding id; settled state must use [`BindingViewKey`]
+    /// instead.
+    pub binding_id: BindingId,
+    /// Serving-options identity for this usage site.
+    pub read_view: ReadViewKey,
+}
+
+/// Canonical settled-state key for one query binding in one read view.
+///
+/// Unlike [`SubscriptionKey`], this is not a wire subscription handle. It is
+/// keyed by the actual canonical binding values and serving-options identity, so
+/// multiple usage-site subscriptions for the same binding share one settled
+/// result/fact state.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub struct BindingViewKey {
+    /// Registered query shape.
+    pub shape_id: ShapeId,
+    /// Deterministic binding id derived from canonical binding values.
+    pub binding_id: BindingId,
+    /// Serving-options identity.
+    pub read_view: ReadViewKey,
+}
+
+/// Exact identity of a result selected by an authority.
+///
+/// A canonical query binding alone is not a permission boundary: a relay may
+/// carry the same query for two delegated claim snapshots. The full policy
+/// snapshot is therefore part of the Jazz result identity, never a truncated
+/// or hash-only discriminator.
+#[derive(
+    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub struct AuthorityResultKey {
+    /// Canonical query binding and requested serving view.
+    pub binding_view: BindingViewKey,
+    /// Complete immutable policy snapshot that selected the result.
+    pub policy_binding: Option<PolicyBindingKey>,
+}
+
+impl AuthorityResultKey {
+    /// Construct a result identity for an already scope-isolated local view.
+    pub const fn unscoped(binding_view: BindingViewKey) -> Self {
+        Self {
+            binding_view,
+            policy_binding: None,
+        }
+    }
+
+    /// Construct a result identity for a delegated authority policy snapshot.
+    pub fn policy_scoped(binding_view: BindingViewKey, policy_binding: PolicyBindingKey) -> Self {
+        Self {
+            binding_view,
+            policy_binding: Some(policy_binding),
+        }
+    }
+}
+
+impl BindingViewKey {
+    /// Create a canonical binding-view key.
+    pub fn new(shape_id: ShapeId, binding_id: BindingId, read_view: ReadViewKey) -> Self {
+        Self {
+            shape_id,
+            binding_id,
+            read_view,
+        }
+    }
+
+    /// Treat a wire subscription key as already canonical.
+    ///
+    /// Use this only for internal whole-table/coverage paths whose subscription
+    /// key was intentionally constructed from canonical binding values.
+    pub fn from_canonical_subscription_key(subscription: SubscriptionKey) -> Self {
+        Self::new(
+            subscription.shape_id,
+            subscription.binding_id,
+            subscription.read_view,
+        )
+    }
+}
+
+/// Shared coverage group for equivalent query bindings.
+#[derive(
+    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub struct CoverageKey {
+    /// Registered query shape.
+    pub shape_id: ShapeId,
+    /// Deterministic binding id derived from canonical binding values.
+    pub binding_id: BindingId,
+    /// Registration options that affect the view or its upstream routing.
+    pub opts: RegisterShapeOptions,
+    /// Exact logical policy context for a relay-multiplexed coverage group.
+    /// Empty for direct/local coverage, whose transport is already singular.
+    pub policy_binding: Option<PolicyBindingKey>,
+}
+
+/// Collision-safe canonical identity of a subscription policy snapshot.
+#[derive(
+    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub struct PolicyBindingKey {
+    /// Logical session subject selected at subscription admission.
+    pub identity: AuthorSubject,
+    /// Canonical named values retained rather than hashed so distinct
+    /// snapshots can never share coverage on a hash collision.
+    pub canonical_claims: CanonicalPolicyClaims,
+}
+
+/// Exact ordered policy claims with a private canonical comparison key.
+///
+/// The comparison bytes are process-local bookkeeping only. Serde persists or
+/// transports the ordinary named values and reconstructs them on read.
+#[derive(Clone, Debug)]
+pub struct CanonicalPolicyClaims {
+    claims: BTreeMap<String, Value>,
+    comparison_key: Vec<u8>,
+}
+
+impl CanonicalPolicyClaims {
+    /// Construct from the exact named claims map.
+    pub fn new(claims: BTreeMap<String, Value>) -> Self {
+        let mut comparison_key = Vec::new();
+        for (name, value) in &claims {
+            put_str(&mut comparison_key, name);
+            put_value(&mut comparison_key, value);
+        }
+        Self {
+            claims,
+            comparison_key,
+        }
+    }
+
+    /// Borrow the ordinary durable/wire claims representation.
+    pub fn claims(&self) -> &BTreeMap<String, Value> {
+        &self.claims
+    }
+}
+
+impl PartialEq for CanonicalPolicyClaims {
+    fn eq(&self, other: &Self) -> bool {
+        self.comparison_key == other.comparison_key
+    }
+}
+impl Eq for CanonicalPolicyClaims {}
+impl PartialOrd for CanonicalPolicyClaims {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for CanonicalPolicyClaims {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.comparison_key.cmp(&other.comparison_key)
+    }
+}
+impl std::hash::Hash for CanonicalPolicyClaims {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.comparison_key.hash(state)
+    }
+}
+
+impl serde::Serialize for CanonicalPolicyClaims {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.claims.serialize(serializer)
+    }
+}
+impl<'de> serde::Deserialize<'de> for CanonicalPolicyClaims {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::new(BTreeMap::deserialize(deserializer)?))
+    }
+}
+
+impl PolicyBindingKey {
+    /// Canonicalize the exact claims snapshot delegated with a subscription.
+    pub fn from_delegated_session(session: &DelegatedSessionBinding) -> Self {
+        Self {
+            identity: session.identity,
+            canonical_claims: CanonicalPolicyClaims::new(session.claims.clone()),
+        }
+    }
+
+    /// Rebuild an exact policy key from ordinary durable components.
+    pub fn from_canonical_parts(identity: AuthorSubject, claims: BTreeMap<String, Value>) -> Self {
+        Self {
+            identity,
+            canonical_claims: CanonicalPolicyClaims::new(claims),
+        }
+    }
+
+    /// Named claims in their durable canonical ordering.
+    pub fn claims(&self) -> &BTreeMap<String, Value> {
+        self.canonical_claims.claims()
+    }
+
+    /// Store provider claims once; reserved author bindings are reconstructed
+    /// from the separately stored exact identity when they match it. Other
+    /// scalar bindings remain exact; authorization validation lives at admission.
+    pub fn directory_value(&self) -> Result<Value, String> {
+        let derived = crate::model::policy_claims::canonical_policy_binding_claims(
+            &self.identity,
+            BTreeMap::new(),
+        );
+        let mut claims = self.claims().clone();
+        let mut presence = 0_u8;
+        // Bits use the eight derived names' canonical UTF-8 ordering. Absent
+        // entries remain absent: internal bindings may intentionally be partial.
+        for (bit, (name, expected)) in derived.into_iter().enumerate() {
+            if claims.get(&name) == Some(&expected) {
+                claims.remove(&name);
+                presence |= 1 << bit;
+            }
+        }
+        policy_directory_payload(presence, policy_binding_directory_claims_value(&claims)?)
+    }
+
+    #[doc(hidden)]
+    pub fn from_directory_value(identity: AuthorSubject, value: Value) -> Result<Self, String> {
+        let Value::Record(record) = value else {
+            return Err("policy directory payload must be record".into());
+        };
+        if *record.descriptor() != policy_directory_descriptor() {
+            return Err("policy directory descriptor mismatch".into());
+        }
+        let Value::U8(presence) = record.get_idx(0).map_err(|error| error.to_string())? else {
+            return Err("policy directory presence must be u8".into());
+        };
+        let value = record.get_idx(1).map_err(|error| error.to_string())?;
+        let mut claims = policy_binding_directory_claims_from_value(value)?;
+        for (bit, (name, expected)) in
+            crate::model::policy_claims::canonical_policy_binding_claims(&identity, BTreeMap::new())
+                .into_iter()
+                .enumerate()
+        {
+            if presence & (1 << bit) != 0 && claims.insert(name, expected).is_some() {
+                return Err("policy directory contains a redundant identity-derived claim".into());
+            }
+        }
+        Ok(Self::from_canonical_parts(identity, claims))
+    }
+
+    #[doc(hidden)]
+    pub fn directory_digest(&self) -> [u8; 32] {
+        let mut exact = Vec::new();
+        put_str(&mut exact, self.identity.canonical());
+        exact.extend_from_slice(&self.canonical_claims.comparison_key);
+        blake3::derive_key("jazz.authority-policy-binding-directory.v1", &exact)
+    }
+}
+
+pub use crate::model::policy_directory::{
+    policy_binding_directory_claims_from_value, policy_binding_directory_claims_value,
+    policy_directory_descriptor, policy_directory_payload,
+};
+
+/// Versioned query AST carried by shape registration.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct ShapeAst {
+    /// Wire AST version.
+    pub version: u32,
+    /// Schema version this shape was authored against.
+    pub schema_version: SchemaVersionId,
+    /// Registered shape body.
+    pub body: ShapeBody,
+}
+
+/// Facade syntax accepted by shape registration.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub enum ShapeBody {
+    /// Ordinary root-table query.
+    Query(Query),
+    /// Output-changing relation query, normalized by the query compiler.
+    Relation(
+        #[serde(
+            serialize_with = "crate::query::relation_query_wire::serialize_required",
+            deserialize_with = "crate::query::relation_query_wire::deserialize_required"
+        )]
+        RelationQuery,
+    ),
+}
+
+impl ShapeAst {
+    /// v0 query AST version.
+    pub const VERSION: u32 = 0;
+
+    /// Wrap a query AST in the current protocol version.
+    pub fn new(query: Query, schema_version: SchemaVersionId) -> Self {
+        Self {
+            version: Self::VERSION,
+            schema_version,
+            body: ShapeBody::Query(query),
+        }
+    }
+
+    /// Wrap a relation query AST in the current protocol version.
+    pub fn new_relation(query: RelationQuery, schema_version: SchemaVersionId) -> Self {
+        Self {
+            version: Self::VERSION,
+            schema_version,
+            body: ShapeBody::Relation(query),
+        }
+    }
+
+    /// Borrow the ordinary query body, if this shape uses that facade syntax.
+    pub fn query(&self) -> Option<&Query> {
+        match &self.body {
+            ShapeBody::Query(query) => Some(query),
+            ShapeBody::Relation(_) => None,
+        }
+    }
+
+    /// Wrap a validated query in the current protocol version.
+    pub fn from_validated(shape: &crate::query::ValidatedQuery) -> Self {
+        Self::new(shape.query().clone(), shape.schema_version())
+    }
+}
+
+/// Shape registration options.
+#[derive(
+    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub struct RegisterShapeOptions {
+    /// Durability tier the subscriber wants this shape served at.
+    #[serde(default = "default_register_shape_tier")]
+    pub tier: DurabilityTier,
+    /// Semantic read-view request for this shape registration.
+    #[serde(default)]
+    pub read_view: ReadViewSpec,
+    /// Internal ownership of the binding whose ViewUpdates a local relay may
+    /// consume as its authority.  Callers always use [`BindingSource::Ordinary`];
+    /// relay code creates `RelayAuthoritySession` only for its own upstream
+    /// coverage handle.
+    #[serde(default)]
+    #[doc(hidden)]
+    pub binding_source: BindingSource,
+}
+
+impl Default for RegisterShapeOptions {
+    fn default() -> Self {
+        Self {
+            tier: default_register_shape_tier(),
+            read_view: ReadViewSpec::default(),
+            binding_source: BindingSource::Ordinary,
+        }
+    }
+}
+
+/// Internal discriminator for otherwise-identical binding views.
+///
+/// It participates in [`RegisterShapeOptions::read_view_key`], so a local
+/// relay authority receipt cannot be confused with an ordinary Global read.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Deserialize,
+    serde::Serialize,
+)]
+pub enum BindingSource {
+    #[default]
+    #[doc(hidden)]
+    Ordinary,
+    #[doc(hidden)]
+    RelayAuthoritySession,
+}
+
+impl RegisterShapeOptions {
+    /// Whether this request uses the only read view currently executable.
+    pub fn has_default_read_view(&self) -> bool {
+        self.read_view.is_default()
+    }
+
+    /// Derive the authoritative read-view key from the full semantic options.
+    pub fn read_view_key(&self) -> ReadViewKey {
+        ReadViewKey::from_register_shape_options(self)
+    }
+}
+
+fn default_register_shape_tier() -> DurabilityTier {
+    DurabilityTier::Global
+}
+
+/// Semantic read-view request carried over the wire before local resolution.
+#[derive(
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Deserialize,
+    serde::Serialize,
+)]
+pub struct ReadViewSpec {
+    /// Which branch/snapshot family this read observes.
+    pub source: ReadViewSourceSpec,
+    /// Include deleted root rows in reads and subscription coverage.
+    #[serde(default)]
+    pub include_deleted: bool,
+}
+
+impl ReadViewSpec {
+    /// Whether this is the current/default read view implemented by execution.
+    /// An include-deleted current read is not default, so callers that gate a
+    /// fast path on this take the general path for it.
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+
+    /// Select a live head branch, optionally composed over one live or frozen base.
+    pub fn branch_view(head: BranchSelector, base: Option<BranchViewBase>) -> Self {
+        Self {
+            source: ReadViewSourceSpec::BranchView { head, base },
+            include_deleted: false,
+        }
+    }
+}
+
+/// Stable identity for read/serving options used by subscription coverage grouping.
+///
+/// Despite the historical name, this key is derived from the full
+/// [`RegisterShapeOptions`], including durability tier, semantic read view, and
+/// upstream-routing intent.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Deserialize,
+    serde::Serialize,
+)]
+pub struct ReadViewKey {
+    /// Canonical id of the resolved read view. Nil means the legacy
+    /// current/global default.
+    pub id: uuid::Uuid,
+}
+
+impl ReadViewKey {
+    /// Derive a stable key for one registration request.
+    pub fn from_register_shape_options(opts: &RegisterShapeOptions) -> Self {
+        let canonical = opts.canonical();
+        if canonical == RegisterShapeOptions::default() {
+            return Self::default();
+        }
+        let bytes = canonical_register_shape_options_bytes(&canonical);
+        Self {
+            id: uuid::Uuid::new_v5(&READ_VIEW_NAMESPACE, &bytes),
+        }
+    }
+}
+
+// Permanent canonical input to UUIDv5 `ReadViewKey` identities. These keys
+// enter durable settled-result rows, so they cannot inherit Rust/postcard enum
+// discriminants or field layout.
+const READ_VIEW_KEY_CODEC_MAGIC: &[u8; 4] = b"JRVK";
+const READ_VIEW_KEY_CODEC_VERSION: u8 = 2;
+// Include-deleted read views append their flag, so they get their own version
+// and every other read view keeps its existing durable key (SPEC 6 §6.5).
+const READ_VIEW_KEY_CODEC_VERSION_INCLUDE_DELETED: u8 = 3;
+
+fn canonical_register_shape_options_bytes(options: &RegisterShapeOptions) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(READ_VIEW_KEY_CODEC_MAGIC);
+    // Preserve existing durable keys; only the new visibility uses JRVK v3.
+    bytes.push(if options.read_view.include_deleted {
+        READ_VIEW_KEY_CODEC_VERSION_INCLUDE_DELETED
+    } else {
+        READ_VIEW_KEY_CODEC_VERSION
+    });
+    bytes.push(match options.tier {
+        DurabilityTier::None => 0,
+        DurabilityTier::Local => 1,
+        DurabilityTier::Global => 2,
+    });
+    bytes.push(match options.binding_source {
+        BindingSource::Ordinary => 0,
+        BindingSource::RelayAuthoritySession => 1,
+    });
+    put_read_view_source(&mut bytes, &options.read_view.source);
+    if options.read_view.include_deleted {
+        bytes.push(1);
+    }
+    bytes
+}
+
+fn put_read_view_source(bytes: &mut Vec<u8>, source: &ReadViewSourceSpec) {
+    match source {
+        ReadViewSourceSpec::Current => bytes.push(0),
+        ReadViewSourceSpec::BranchView { head, base } => {
+            bytes.push(1);
+            put_branch_selector(bytes, head);
+            match base {
+                None => bytes.push(0),
+                Some(BranchViewBase::Current(branch)) => {
+                    bytes.push(1);
+                    put_branch_selector(bytes, branch);
+                }
+                Some(BranchViewBase::Snapshot { branch, snapshot }) => {
+                    bytes.push(2);
+                    put_branch_selector(bytes, branch);
+                    put_snapshot_ref(bytes, snapshot);
+                }
+            }
+        }
+        ReadViewSourceSpec::Snapshot { snapshot } => {
+            bytes.push(2);
+            put_snapshot_ref(bytes, snapshot);
+        }
+    }
+}
+
+fn put_branch_selector(bytes: &mut Vec<u8>, selector: &BranchSelector) {
+    put_len(bytes, selector.values.len());
+    for (name, value) in &selector.values {
+        put_str(bytes, name);
+        put_bytes(bytes, &value.0);
+    }
+}
+
+fn put_snapshot_ref(bytes: &mut Vec<u8>, snapshot: &SnapshotRef) {
+    bytes.extend_from_slice(snapshot.owner.0.as_bytes());
+    bytes.extend_from_slice(&snapshot.global_base.0.to_le_bytes());
+    bytes.extend_from_slice(&snapshot.local_base.0.to_le_bytes());
+    // Dots are a frontier set, not an ordered stream.  A caller can construct
+    // the same snapshot through differently ordered or repeated observations;
+    // JRVK therefore commits to the sorted unique TxId set.
+    let dots = snapshot.dots.iter().copied().collect::<BTreeSet<_>>();
+    put_len(bytes, dots.len());
+    for dot in dots {
+        bytes.extend_from_slice(&dot.time.0.to_le_bytes());
+        bytes.extend_from_slice(dot.node.0.as_bytes());
+    }
+}
+
+impl RegisterShapeOptions {
+    fn canonical(&self) -> Self {
+        let mut canonical = self.clone();
+        canonical.read_view.canonicalize();
+        canonical
+    }
+}
+
+impl ReadViewSpec {
+    fn canonicalize(&mut self) {
+        self.source.canonicalize();
+    }
+}
+
+impl ReadViewSourceSpec {
+    fn canonicalize(&mut self) {}
+}
+
+pub use crate::model::branch::{
+    BranchCodecError, BranchColumnValue, BranchKey, BranchSelector, BranchViewBase, SnapshotRef,
+};
+
+/// Wire source selected by a read view.
+#[derive(
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Deserialize,
+    serde::Serialize,
+)]
+pub enum ReadViewSourceSpec {
+    /// Current default branch/source.
+    #[default]
+    Current,
+    /// A live branch head, optionally composed over one live or frozen base.
+    BranchView {
+        /// Named values for the requested head coordinate.
+        head: BranchSelector,
+        /// Optional single fallback source.
+        base: Option<BranchViewBase>,
+    },
+    /// Snapshot ref resolved by the receiving node.
+    Snapshot {
+        /// Historic frontier to read.
+        snapshot: SnapshotRef,
+    },
+}
+
+/// Usage-site subscription attach for one registered shape.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct Subscribe {
+    /// Shape whose binding set changes.
+    pub shape_id: ShapeId,
+    /// Usage-site subscription address.
+    pub subscription: SubscriptionKey,
+    /// Binding values in shape parameter order.
+    pub values: Vec<Value>,
+    /// Optional fast known-state declaration for this usage-site subscription.
+    pub known_state: Option<KnownStateDeclaration>,
+    /// Session policy context delegated by a trusted relay.
+    ///
+    /// Only a server-to-server relay link admitted as `SYSTEM` may carry this
+    /// field. Ordinary subscriber connections are authenticated by their
+    /// transport session instead and must never self-assert it.
+    pub delegated_session: Option<DelegatedSessionBinding>,
+}
+
+/// Immutable policy context attached to one relayed subscription.
+///
+/// This is intentionally a subscription-local snapshot rather than a lookup
+/// by identity: two active sessions may share an identity but carry different
+/// provider claims.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct DelegatedSessionBinding {
+    /// Identity whose `session` values the subscription may evaluate.
+    pub identity: AuthorSubject,
+    /// Already-admitted claims for that identity.
+    pub claims: BTreeMap<String, Value>,
+}
+
+/// Known-state declaration echoed by a subscriber on resubscribe.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum KnownStateDeclaration {
+    /// Fast optimistic declaration for the current-membership view.
+    Fast {
+        /// Completeness class this declaration claims.
+        completeness: KnownStateCompleteness,
+        /// Durable known-state cursor being echoed for payload dedup/repair;
+        /// never an active-authority settlement receipt.
+        position: GlobalTime,
+    },
+    /// Fast declaration qualified by the authorization state under which the
+    /// receiver applied it.
+    FastWithAuthorizationProgress {
+        /// Completeness class this declaration claims.
+        completeness: KnownStateCompleteness,
+        /// Durable known-state cursor being echoed for payload dedup/repair;
+        /// never an active-authority settlement receipt.
+        position: GlobalTime,
+        /// Server-stamped authorization generation echoed by the receiver.
+        authorization_progress: u64,
+    },
+    /// Retired tag 2 (`ExactVersionSet` before wire protocol v6). Uninhabited,
+    /// so a pre-v6 exact version-set declaration fails to decode instead of
+    /// being reinterpreted as a watermark prefix.
+    #[doc(hidden)]
+    Reserved2(ReservedWireMessage),
+    /// "I have Q at watermark W": the receiver holds the supporting set it
+    /// installed as `supporting_revision`, complete through `position`. A
+    /// serving peer that can answer from its `by_seq` index replies with a
+    /// [`SupportingRowsUpdate::CatchUp`] against that revision; any other
+    /// peer treats it as a fast declaration at `position`.
+    Watermark {
+        /// Watermark (global seq) the receiver's set is complete through.
+        position: GlobalTime,
+        /// Server-stamped authorization generation echoed by the receiver.
+        authorization_progress: Option<u64>,
+        /// Receiver's installed supporting-set revision.
+        supporting_revision: [u8; 16],
+    },
+}
+
+/// Known-state declaration completeness class.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum KnownStateCompleteness {
+    /// The subscriber has an unevicted fast current membership view through the
+    /// declared settled position.
+    FastCurrentMembership,
+}
+
+/// Reason a serving peer rejected one subscription attach.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum SubscribeRejectReason {
+    /// The shape/read-view cannot currently be maintained by the serving peer.
+    UnsupportedShapeCapability {
+        /// Human-readable diagnostic. Not part of semantic compatibility.
+        detail: String,
+    },
+    /// The shape is valid, but its schema has not yet reached this runtime.
+    ShapeRegistrationPendingCatalogueAdmission,
+    /// The serving peer failed while resolving or maintaining the subscription.
+    ///
+    /// This deliberately carries no server error detail: schema names, policy
+    /// expressions, and storage state are not safe to disclose to every peer.
+    ServerFailure {
+        /// Stable, client-safe classification of the server-side failure.
+        code: SubscribeServerFailureCode,
+    },
+    /// The receiver rejected an authority update before it could change its
+    /// maintained source closure.  `transition` is a receiver-generated,
+    /// client-safe description of the impossible predecessor-to-successor
+    /// transition; it deliberately excludes row bodies, version claims, and
+    /// policy data.
+    InvalidAuthoritySourceClosure {
+        /// Client-safe description of the rejected closure transition.
+        transition: String,
+    },
+}
+
+/// Client-safe classes for server-side subscription failures.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum SubscribeServerFailureCode {
+    /// The requested table was not present in the server's schema.
+    TableNotFound,
+    /// The server could not resolve the requested schema version or shape.
+    SchemaResolution,
+    /// Query validation failed on the serving peer.
+    QueryValidation,
+    /// Query lowering failed on the serving peer.
+    QueryLowering,
+    /// The serving peer could not evaluate the subscription's policy.
+    PolicyEvaluation,
+    /// A server-side failure did not fit a more specific safe class.
+    Internal,
+}
+
+/// Legacy-compatible table-qualified current content row entry:
+/// `(table, row_uuid, content_tx_id)`.
+pub type ResultRowEntry = (jazz_types::Intern<String>, RowUuid, TxId);
+
+/// Opaque replacement discriminator for a synthetic result member.
+///
+/// Aggregate result rows have no revision or version. The runtime needs a
+/// token solely to pair a retracted aggregate record with its replacement;
+/// callers cannot inspect or construct the token as a meaningful value.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct SyntheticReplacementToken(Vec<u8>);
+
+impl std::fmt::Debug for SyntheticReplacementToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SyntheticReplacementToken(..)")
+    }
+}
+
+impl SyntheticReplacementToken {
+    #[doc(hidden)]
+    pub fn from_encoded_record(value: Vec<u8>) -> Self {
+        Self(value)
+    }
+
+    #[doc(hidden)]
+    pub fn encoded_record(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+#[cfg(test)]
+mod synthetic_replacement_token_tests {
+    use super::SyntheticReplacementToken;
+
+    #[test]
+    fn replacement_token_does_not_expose_a_plausible_revision_value() {
+        let token = SyntheticReplacementToken::from_encoded_record(vec![6]);
+        assert_eq!(format!("{token:?}"), "SyntheticReplacementToken(..)");
+    }
+}
+
+/// Internal result member. Peer source-closure delivery rejects result-member
+/// deltas; this type is retained for local query evaluation and bookkeeping.
+///
+/// A member identifies one terminal output of a lowered query program. Ordinary
+/// current-row views use [`ResultMemberEntry::Row`] with a compatibility
+/// [`ResultRowEntry`] projection, but the member also carries enough optional
+/// identity to represent deleted-row, historical, branch, and schema-projected
+/// rows within the same internal result model.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub enum ResultMemberEntry {
+    /// Real table row membership.
+    Row(RealRowMemberEntry),
+    /// Synthetic result row, such as aggregate output.
+    Synthetic {
+        /// Logical synthetic result kind. This is a label, not identity.
+        table: String,
+        /// Stable identity derived from the aggregate group key.
+        row: Vec<u8>,
+        /// Opaque runtime-only discriminator for replacement pairing.
+        replacement: SyntheticReplacementToken,
+    },
+    /// Relation/path tuple membership.
+    PathTuple {
+        /// Path identity.
+        path: String,
+        /// Source row table.
+        source_table: jazz_types::Intern<String>,
+        /// Source row.
+        source_row: RowUuid,
+        /// Target table.
+        target_table: jazz_types::Intern<String>,
+        /// Target row.
+        target_row: RowUuid,
+        /// Optional edge/correlation identity for multipath relations.
+        edge_id: Option<Vec<u8>>,
+        /// Stable tuple revision.
+        revision: Vec<u8>,
+    },
+}
+
+/// Real table row membership, including both the ordinary current-content
+/// compatibility identity and the extra branch columns needed by historic,
+/// branch/prefix, include-deleted, and schema-projected reads.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct RealRowMemberEntry {
+    /// Logical table.
+    pub table: jazz_types::Intern<String>,
+    /// Row identity.
+    pub row_uuid: RowUuid,
+    /// Stable identity of the rendered output occurrence. This is the root
+    /// row for ordinary single-source output and the ordered source tuple for
+    /// a flat join. History roots also include their content transaction.
+    /// Serialized using the complete ResultKey encoding.
+    pub occurrence_id: Option<OutputOccurrenceId>,
+    /// Visible content transaction, when this member has a content row.
+    #[serde(default)]
+    pub content_tx: Option<TxId>,
+    /// Which register/layer this member represents.
+    #[serde(default)]
+    pub layer: ResultRowLayer,
+    /// Deletion-register transaction when membership is tombstone-aware.
+    #[serde(default)]
+    pub deletion_tx: Option<TxId>,
+    /// Source/read frontier this member was produced from.
+    #[serde(default)]
+    pub source: ResultRowSource,
+    /// Resolved read-view key for this member.
+    #[serde(default)]
+    pub read_view: ReadViewKey,
+    /// Schema version after lens/projection, when known on the result member.
+    #[serde(default)]
+    pub schema_version: Option<SchemaVersionId>,
+    /// Branch/prefix discriminator when it participates in member identity.
+    #[serde(default)]
+    pub branch_or_prefix: Option<Vec<u8>>,
+    /// Optional stable digest of the visible member row.
+    #[serde(default)]
+    pub row_digest: Option<Vec<u8>>,
+    /// Batch/transaction grouping identity for batch-centric visibility.
+    #[serde(default)]
+    pub batch: Option<TxId>,
+    /// Settled global position of this member's visible current winner, when
+    /// known. Unfated/local members carry `None` and are never eligible for
+    /// fast known-state body skipping.
+    #[serde(default)]
+    pub settle_position: Option<GlobalTime>,
+}
+
+impl RealRowMemberEntry {
+    /// Build the ordinary current-content row member used by current row views.
+    pub fn current_content(row: ResultRowEntry) -> Self {
+        let (table, row_uuid, content_tx) = row;
+        Self {
+            table,
+            row_uuid,
+            occurrence_id: Some(OutputOccurrenceId::single_source(ObjectId::from_uuid(
+                row_uuid.0,
+            ))),
+            content_tx: Some(content_tx),
+            layer: ResultRowLayer::Content,
+            deletion_tx: None,
+            source: ResultRowSource::Current,
+            read_view: ReadViewKey::default(),
+            schema_version: None,
+            branch_or_prefix: None,
+            row_digest: None,
+            batch: None,
+            settle_position: None,
+        }
+    }
+
+    /// Attach the known global settle position for this member.
+    pub fn with_settle_position(mut self, settle_position: Option<GlobalTime>) -> Self {
+        self.settle_position = settle_position;
+        self
+    }
+
+    /// Attach the stable rendered-output address supplied by the maintained
+    /// terminal. Join contributors remain in declared source order.
+    pub fn with_occurrence_id(mut self, occurrence_id: OutputOccurrenceId) -> Self {
+        self.occurrence_id = Some(occurrence_id);
+        self
+    }
+
+    /// Attach the rendered-output revision. Flat joins use this to distinguish
+    /// a source-content replacement while retaining the same occurrence id.
+    pub fn with_row_digest(mut self, row_digest: Vec<u8>) -> Self {
+        self.row_digest = Some(row_digest);
+        self
+    }
+
+    /// Stable output occurrence identity. Members constructed without an
+    /// explicit occurrence default to their single-source row identity.
+    pub fn output_occurrence_id(&self) -> OutputOccurrenceId {
+        self.occurrence_id.clone().unwrap_or_else(|| {
+            OutputOccurrenceId::single_source(ObjectId::from_uuid(self.row_uuid.0))
+        })
+    }
+
+    /// Return the ordinary current-content projection when available.
+    pub fn row_projection(&self) -> Option<ResultRowEntry> {
+        self.content_tx
+            .map(|tx| (self.table.clone(), self.row_uuid, tx))
+    }
+}
+
+/// Version/register layer represented by a real-row result member.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Deserialize,
+    serde::Serialize,
+)]
+pub enum ResultRowLayer {
+    /// Visible content register.
+    #[default]
+    Content,
+    /// Deletion register/tombstone.
+    Deletion,
+    /// Membership is determined by content-or-deletion identity.
+    ContentOrDeletion,
+}
+
+/// Source/read frontier that produced a real-row result member.
+#[derive(
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Deserialize,
+    serde::Serialize,
+)]
+pub enum ResultRowSource {
+    /// Current default source.
+    #[default]
+    Current,
+    /// Historic snapshot ref.
+    Snapshot {
+        /// Snapshot frontier.
+        snapshot: SnapshotRef,
+    },
+    /// Historic cut by global timestamp.
+    HistoryCut {
+        /// Global timestamp frontier.
+        global_time: GlobalTime,
+    },
+    /// Merge/composition of several source alternatives.
+    Merge {
+        /// Source alternatives.
+        inputs: Vec<ResultRowSource>,
+    },
+    /// Schema/lens projection over a base source.
+    LensProjection {
+        /// Projected schema version.
+        schema_version: SchemaVersionId,
+        /// Base source before projection.
+        base: Box<ResultRowSource>,
+    },
+    /// Local/open overlay over another source.
+    Overlay {
+        /// Overlay transaction.
+        tx: TxId,
+        /// Base source under the overlay.
+        base: Box<ResultRowSource>,
+    },
+}
+
+impl ResultMemberEntry {
+    /// Construct an ordinary row membership entry.
+    pub fn row(entry: ResultRowEntry) -> Self {
+        Self::Row(RealRowMemberEntry::current_content(entry))
+    }
+
+    /// Return the logical table name when this member belongs to a table-like
+    /// output. Synthetic rows use their synthetic table/relation name.
+    pub fn table_name(&self) -> Option<&str> {
+        match self {
+            Self::Row(entry) => Some(entry.table.as_str()),
+            Self::Synthetic { table, .. } => Some(table.as_str()),
+            Self::PathTuple { target_table, .. } => Some(target_table.as_str()),
+        }
+    }
+
+    /// Return the real-row member payload, when this member is a real row.
+    pub fn as_real_row(&self) -> Option<&RealRowMemberEntry> {
+        match self {
+            Self::Row(entry) => Some(entry),
+            Self::Synthetic { .. } | Self::PathTuple { .. } => None,
+        }
+    }
+
+    /// Return the stable rendered-output address for a real-row member.
+    pub fn output_occurrence_id(&self) -> Option<OutputOccurrenceId> {
+        self.as_real_row()
+            .map(RealRowMemberEntry::output_occurrence_id)
+    }
+
+    /// Return the ordinary current-content projection when this member has one.
+    pub fn as_row(&self) -> Option<ResultRowEntry> {
+        match self {
+            Self::Row(entry) => entry.row_projection(),
+            Self::Synthetic { .. } | Self::PathTuple { .. } => None,
+        }
+    }
+
+    /// Consume the ordinary row entry when this member is row-shaped.
+    pub fn into_row(self) -> Option<ResultRowEntry> {
+        match self {
+            Self::Row(entry) => entry.row_projection(),
+            Self::Synthetic { .. } | Self::PathTuple { .. } => None,
+        }
+    }
+}
+
+impl From<ResultRowEntry> for ResultMemberEntry {
+    fn from(entry: ResultRowEntry) -> Self {
+        Self::row(entry)
+    }
+}
+
+impl From<RealRowMemberEntry> for ResultMemberEntry {
+    fn from(entry: RealRowMemberEntry) -> Self {
+        Self::Row(entry)
+    }
+}
+
+impl PartialEq<ResultRowEntry> for ResultMemberEntry {
+    fn eq(&self, other: &ResultRowEntry) -> bool {
+        self.as_row() == Some(*other)
+    }
+}
+
+impl PartialEq<ResultMemberEntry> for ResultRowEntry {
+    fn eq(&self, other: &ResultMemberEntry) -> bool {
+        other == self
+    }
+}
+
+/// One exact native row version in a subscription's atomic supporting set.
+///
+/// Current-winner membership is explicit; query source aliases never cross this boundary.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct SupportingRow {
+    /// Permanent physical table identity; logical scan aliases never identify a row.
+    pub physical_table: crate::ids::GlobalPhysicalTableId,
+    /// Authored native-record table name used by the existing exact version repair API.
+    /// This is lookup metadata, not a query-source label; physical identity is authoritative.
+    #[serde(deserialize_with = "supporting_table_name::deserialize")]
+    pub version_table: jazz_types::Intern<String>,
+    /// Physical row identity.
+    pub row: RowUuid,
+    /// Exact content or deletion-register version.
+    pub version: RowVersionRefEntry,
+    /// This scope admits the version as the current winner of its register.
+    /// Historical support alone does not assert current membership.
+    pub is_current: bool,
+}
+
+impl SupportingRow {
+    /// Validate the native reference before catalogue-dependent receiver admission.
+    pub fn is_wire_valid(&self) -> bool {
+        !self.version_table.is_empty() && self.version.layer != ResultRowLayer::ContentOrDeletion
+    }
+}
+
+mod supporting_table_name {
+    use std::{borrow::Cow, cell::Cell, fmt};
+
+    use jazz_types::Intern;
+    use serde::de::{Error, Unexpected, Visitor};
+
+    thread_local! {
+        // Intern handles own permanent pool entries, never input-buffer references.
+        // Exact string equality makes this independent of schema/authority lifetimes.
+        static LAST: Cell<Option<Intern<String>>> = const { Cell::new(None) };
+        #[cfg(test)]
+        pub(super) static LOOKUPS: Cell<usize> = const { Cell::new(0) };
+        #[cfg(test)]
+        pub(super) static OWNED_VISITS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    fn intern(name: Cow<'_, str>) -> Intern<String> {
+        LAST.with(|last| {
+            if let Some(found) = last.get().filter(|old| old.as_str() == name.as_ref()) {
+                return found;
+            }
+            #[cfg(test)]
+            LOOKUPS.set(LOOKUPS.get() + 1);
+            let found = match name {
+                Cow::Borrowed(name) => Intern::from_ref(name),
+                Cow::Owned(name) => Intern::new(name),
+            };
+            last.set(Some(found));
+            found
+        })
+    }
+
+    struct TableName;
+
+    impl<'de> Visitor<'de> for TableName {
+        type Value = Intern<String>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a string")
+        }
+
+        fn visit_str<E: Error>(self, value: &str) -> Result<Self::Value, E> {
+            Ok(intern(Cow::Borrowed(value)))
+        }
+
+        fn visit_string<E: Error>(self, value: String) -> Result<Self::Value, E> {
+            #[cfg(test)]
+            OWNED_VISITS.set(OWNED_VISITS.get() + 1);
+            Ok(intern(Cow::Owned(value)))
+        }
+
+        fn visit_bytes<E: Error>(self, value: &[u8]) -> Result<Self::Value, E> {
+            match std::str::from_utf8(value) {
+                Ok(value) => self.visit_str(value),
+                Err(_) => Err(E::invalid_value(Unexpected::Bytes(value), &self)),
+            }
+        }
+
+        fn visit_byte_buf<E: Error>(self, value: Vec<u8>) -> Result<Self::Value, E> {
+            match String::from_utf8(value) {
+                Ok(value) => self.visit_string(value),
+                Err(error) => Err(E::invalid_value(
+                    Unexpected::Bytes(&error.into_bytes()),
+                    &self,
+                )),
+            }
+        }
+    }
+
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Intern<String>, D::Error> {
+        // Serialization stays the existing string representation. Request borrowing
+        // during decode instead of String::deserialize's allocate-before-intern path.
+        deserializer.deserialize_str(TableName)
+    }
+
+    #[cfg(test)]
+    pub(super) fn reset() {
+        LAST.set(None);
+        LOOKUPS.set(0);
+        OWNED_VISITS.set(0);
+    }
+}
+
+/// One typed non-row fact emitted by a maintained view.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub enum ProgramFactEntry {
+    /// Payload bytes for a non-versioned result member, such as aggregate/window output.
+    ResultPayload(ResultMemberPayloadEntry),
+    /// A relation edge between two materialized rows.
+    RelationEdge(RelationEdgeEntry),
+    /// Coverage for one correlated path expansion.
+    PathCorrelationCoverage(PathCorrelationCoverageEntry),
+    /// Complete authority-selected closure for one normalized program source.
+    ProgramSourceCoverage(ProgramSourceCoverageEntry),
+    /// Settled read-frontier fact.
+    ReadFrontierSettled(ReadFrontierSettledEntry),
+    /// Complete transaction payload coverage fact.
+    CompleteTxPayloadCoverage(CompleteTxPayloadCoverageEntry),
+    /// View-complete serializable transaction coverage fact.
+    #[serde(rename = "ViewCompleteExclusiveCoverage")]
+    ViewCompleteSerializableCoverage(ViewCompleteSerializableCoverageEntry),
+    /// Policy decision fact.
+    PolicyDecision(PolicyDecisionEntry),
+    /// Content/deletion/replacement version witness.
+    VersionWitness(VersionWitnessEntry),
+    /// A source version that belongs to the authority-approved input closure.
+    ///
+    /// This is an input fact, not a rendered result row: receivers use it to
+    /// advance their local maintained program even when output membership and
+    /// relation facts are unchanged.
+    CoveredInput(CoveredInputEntry),
+    /// Policy dependency witness.
+    PolicyWitness(PolicyWitnessEntry),
+    /// Contributing member/batch provenance.
+    ContributingMembers(ContributingMembersEntry),
+    /// Predicate-read validation fact.
+    PredicateRead(PredicateReadEntry),
+    /// Predicate output-set fact.
+    PredicateOutputSet(PredicateOutputSetEntry),
+    /// Point row-read validation fact.
+    PointRead(PointReadEntry),
+}
+
+impl ProgramFactEntry {
+    /// The only typed facts permitted in a peer `ViewUpdate` under
+    /// INV-SYNC-36. They describe the exact receiver input closure; every
+    /// other variant is authority output, policy-internal proof, or local
+    /// validation state and must not cross this boundary.
+    pub fn is_peer_source_closure_fact(&self) -> bool {
+        matches!(self, Self::ProgramSourceCoverage(_) | Self::CoveredInput(_))
+    }
+}
+
+/// Compatibility alias while current code still imports the previous name.
+pub type ViewFactEntry = ProgramFactEntry;
+
+/// Non-versioned result payload keyed by a typed result member.
+///
+/// Ordinary real rows travel via `VersionBundle`; synthetic/aggregate/window
+/// outputs use this fact to keep member identity and row bytes in the same
+/// typed program-output stream.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct ResultMemberPayloadEntry {
+    /// Member whose payload is encoded here.
+    pub member: ResultMemberEntry,
+    /// Descriptor or schema identity for decoding `record`.
+    pub descriptor: Vec<u8>,
+    /// Custom row-record encoded payload bytes.
+    pub record: Vec<u8>,
+}
+
+/// Relation edge fact emitted by query payloads.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct RelationEdgeEntry {
+    /// Logical path or relation name.
+    pub path: String,
+    /// Source row table.
+    pub source_table: jazz_types::Intern<String>,
+    /// Source row id.
+    pub source_row: RowUuid,
+    /// Target row table.
+    pub target_table: jazz_types::Intern<String>,
+    /// Target row id.
+    pub target_row: RowUuid,
+    /// Edge kind, when this is more specific than a plain include/join edge.
+    #[serde(default)]
+    pub kind: Option<RelationEdgeKind>,
+    /// Source version identity, when edge membership depends on a concrete version.
+    #[serde(default)]
+    pub source_version: Option<RowVersionRefEntry>,
+    /// Target version identity, when edge membership depends on a concrete version.
+    #[serde(default)]
+    pub target_version: Option<RowVersionRefEntry>,
+    /// Recursive depth for reachability/gather paths.
+    #[serde(default)]
+    pub depth: Option<u32>,
+    /// Multipath/edge id when several edges connect the same source/target.
+    #[serde(default)]
+    pub edge_id: Option<Vec<u8>>,
+    /// Union/policy branch alternative.
+    #[serde(default)]
+    pub branch: Option<Vec<u8>>,
+    /// Terminal role for intermediate/frontier/output relation rows.
+    #[serde(default)]
+    pub role: Option<RelationEdgeRole>,
+    /// Stable edge order when order affects the maintained output.
+    #[serde(default)]
+    pub order: Option<Vec<u8>>,
+    /// Whether this edge is a materialized match or a hole/null placeholder.
+    #[serde(default)]
+    pub hole_state: Option<PathHoleState>,
+}
+
+/// Concrete row-version reference used by facts.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct RowVersionRefEntry {
+    /// Transaction containing the version.
+    pub tx: TxId,
+    /// Schema version carried by the version row, when available.
+    #[serde(default)]
+    pub schema_version: Option<SchemaVersionId>,
+    /// Version/register layer.
+    #[serde(default)]
+    pub layer: ResultRowLayer,
+    /// Batch/transaction grouping identity.
+    #[serde(default)]
+    pub batch: Option<TxId>,
+    /// Branch/prefix discriminator.
+    #[serde(default)]
+    pub branch_or_prefix: Option<Vec<u8>>,
+    /// Optional visible row digest.
+    #[serde(default)]
+    pub row_digest: Option<Vec<u8>>,
+}
+
+/// Version/replacement witness for payload and removal materialization.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct VersionWitnessEntry {
+    /// Witness role, such as payload, replacement, or deletion.
+    pub role: String,
+    /// Witnessed version.
+    pub version: RowVersionRefEntry,
+    /// Result member this witness serves, when scoped to one member.
+    pub member: Option<ResultMemberEntry>,
+}
+
+/// One concrete source occurrence/version in a peer's covered query input.
+///
+/// The surrounding `ViewUpdate` supplies the exact subscription (and an
+/// authorization-scope wrapper, when present); `source` preserves the stable
+/// row occurrence and `version` pins the concrete content or deletion layer.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct CoveredInputEntry {
+    /// Stable normalized query source occurrence, never a runtime-local slot.
+    pub source: ProgramSourceId,
+    /// Logical table naming the concrete version body.
+    ///
+    /// This remains explicit because a source may be reached through a lens
+    /// whose source-role table and authored version-table label differ.
+    pub version_table: jazz_types::Intern<String>,
+    /// Source row occurrence within that table.
+    pub source_row: RowUuid,
+    /// Exact source version admitted in the covered input closure.
+    pub version: RowVersionRefEntry,
+}
+
+impl CoveredInputEntry {
+    /// Validate the frozen peer-wire identity without consulting local state.
+    ///
+    /// The subsequent receiver lookup is intentionally stricter: it must find
+    /// this complete `source` value among sources compiled for the subscription.
+    pub fn is_wire_valid(&self) -> bool {
+        self.source.is_wire_valid() && !self.version_table.is_empty()
+    }
+}
+
+/// Canonical, wire-safe identity of one logical source occurrence in a
+/// normalized maintained program.
+///
+/// It deliberately distinguishes repeated scans of the same table (aliases,
+/// relation paths, policy sources, and recursive roles) without referring to
+/// a collector slot or runtime allocation.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct ProgramSourceId {
+    /// Logical table emitted by this source occurrence.
+    pub table: jazz_types::Intern<String>,
+    /// Ordered normalized-role path from the query root to this occurrence.
+    pub path: Vec<ProgramSourceRole>,
+}
+
+/// Maximum normalized source-path depth admitted on the v1 peer wire.
+pub const MAX_PROGRAM_SOURCE_PATH_SEGMENTS: usize = 32;
+
+impl ProgramSourceId {
+    /// Whether this is a syntactically valid frozen source occurrence key.
+    ///
+    /// A receiver resolves this key only by complete equality against a source
+    /// occurrence compiled from its registered shape. Matching the table,
+    /// result member, collector position, or any path prefix is forbidden:
+    /// self-joins and repeated relation paths can share all of those weaker
+    /// properties. A missing exact occurrence therefore parks/rejects the
+    /// authority update rather than falling back to another source.
+    pub fn is_wire_valid(&self) -> bool {
+        !self.table.is_empty()
+            && !self.path.is_empty()
+            && self.path.len() <= MAX_PROGRAM_SOURCE_PATH_SEGMENTS
+            && self.path.iter().all(|role| match role {
+                ProgramSourceRole::Root => true,
+                ProgramSourceRole::Alias(name)
+                | ProgramSourceRole::RecursiveSeed(name)
+                | ProgramSourceRole::RecursiveStep(name)
+                | ProgramSourceRole::CorrelatedChild(name)
+                | ProgramSourceRole::Policy(name) => !name.is_empty(),
+            })
+    }
+}
+
+/// One component of a [`ProgramSourceId`] path.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub enum ProgramSourceRole {
+    /// Root query source.
+    Root,
+    /// Explicit alias in a join or relation path.
+    Alias(String),
+    /// Recursive seed source.
+    RecursiveSeed(String),
+    /// Recursive step/frontier source.
+    RecursiveStep(String),
+    /// Correlated child source.
+    CorrelatedChild(String),
+    /// Policy-augmentation source.
+    Policy(String),
+}
+
+/// Policy dependency witness fact.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct PolicyWitnessEntry {
+    /// Protected result member or row.
+    pub protected: ResultMemberEntry,
+    /// Policy path/branch identity.
+    pub policy_path: String,
+    /// Witness version proving or revoking visibility.
+    pub witness: RowVersionRefEntry,
+    /// Dependency edge kind.
+    pub edge_kind: Option<RelationEdgeKind>,
+}
+
+/// Derived-output provenance fact.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct ContributingMembersEntry {
+    /// Derived result member.
+    pub result: ResultMemberEntry,
+    /// Contributing member.
+    pub contributor: ResultMemberEntry,
+    /// Optional contributing transaction/batch.
+    pub batch: Option<TxId>,
+    /// Optional contribution role.
+    pub role: Option<String>,
+}
+
+/// Predicate-read validation fact.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct PredicateReadEntry {
+    /// Validation side: base or now.
+    pub role: PredicateOutputSetRoleEntry,
+    /// Shape id.
+    pub shape_id: ShapeId,
+    /// Binding id.
+    pub binding_id: BindingId,
+    /// Encoded predicate/range identity.
+    pub predicate: Vec<u8>,
+    /// Encoded read frontier or snapshot point.
+    pub frontier: Vec<u8>,
+}
+
+/// Point row-read validation fact.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct PointReadEntry {
+    /// Whether the row was present in this read.
+    pub present: bool,
+    /// Logical table.
+    pub table: jazz_types::Intern<String>,
+    /// Row identity.
+    pub row: RowUuid,
+    /// Concrete version read, when present.
+    pub version: Option<RowVersionRefEntry>,
+    /// Shape id.
+    pub shape_id: ShapeId,
+    /// Binding id.
+    pub binding_id: BindingId,
+}
+
+/// Relation edge kind.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub enum RelationEdgeKind {
+    /// Include edge.
+    Include,
+    /// Join edge.
+    Join,
+    /// Relation traversal edge.
+    Relation,
+    /// Recursive frontier/reachability edge.
+    Recursive,
+    /// Policy dependency edge.
+    Policy,
+}
+
+/// Role of a relation edge in the maintained program.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub enum RelationEdgeRole {
+    /// Internal edge only.
+    Intermediate,
+    /// Frontier/worklist edge.
+    Frontier,
+    /// Edge contributes directly to output membership.
+    Terminal,
+}
+
+/// Placeholder state for optional relation/include paths.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub enum PathHoleState {
+    /// Concrete matched edge.
+    Matched,
+    /// Placeholder for an absent optional target.
+    Hole,
+}
+
+/// Correlation coverage fact for relation/path materialization.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct PathCorrelationCoverageEntry {
+    /// Logical path or relation name.
+    pub path: String,
+    /// Source row table.
+    pub source_table: jazz_types::Intern<String>,
+    /// Source row id.
+    pub source_row: RowUuid,
+    /// Canonical encoded correlation key for the path expansion.
+    pub correlation_key: Vec<u8>,
+    /// Whether this correlation is complete for the subscription read view.
+    pub complete: bool,
+}
+
+/// Complete authority-selected closure for one normalized program source.
+///
+/// This is a control-plane receipt, not a row/range fact. A complete receiver
+/// receipt has exactly one entry for every compiled [`ProgramSourceId`], even
+/// when that source contributes zero rows. Its enclosing view-update generation
+/// identifies the immutable closure being installed.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct ProgramSourceCoverageEntry {
+    /// Exact normalized source occurrence whose input closure is complete.
+    pub source: ProgramSourceId,
+    /// Must be true for a receipt that may settle a receiver.
+    pub complete: bool,
+}
+
+/// Settled read-frontier fact.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct ReadFrontierSettledEntry {
+    /// Scope this frontier settles.
+    pub scope: String,
+    /// Durability tier that settled.
+    pub tier: DurabilityTier,
+    /// Optional ordered stream identity.
+    pub stream: Option<String>,
+    /// Canonical encoded frontier position.
+    pub frontier: Vec<u8>,
+}
+
+/// Complete transaction payload coverage fact.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct CompleteTxPayloadCoverageEntry {
+    /// Covered transaction/batch.
+    pub tx: TxId,
+    /// Durability tier at which the payload is complete.
+    pub tier: DurabilityTier,
+    /// Canonical payload digest.
+    pub payload_digest: Vec<u8>,
+}
+
+/// View-complete serializable transaction coverage fact.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct ViewCompleteSerializableCoverageEntry {
+    /// Covered transaction/batch.
+    pub tx: TxId,
+    /// View/source scope.
+    pub scope: String,
+    /// Optional result member this coverage is complete for.
+    pub result: Option<ResultMemberEntry>,
+    /// Durability tier at which this view coverage is complete.
+    pub tier: DurabilityTier,
+    /// Digest of members covered by this view/result.
+    pub covered_members_digest: Vec<u8>,
+}
+
+/// Tri-state policy decision fact.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct PolicyDecisionEntry {
+    /// Decision identity inside the program.
+    pub decision: Vec<u8>,
+    /// Decision outcome.
+    pub outcome: PolicyDecisionOutcomeEntry,
+    /// Optional machine-readable reason.
+    pub reason: Option<String>,
+}
+
+/// Wire policy decision outcome.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub enum PolicyDecisionOutcomeEntry {
+    /// Policy grants the operation.
+    Allowed,
+    /// Policy denies the operation.
+    Denied,
+    /// Caller did not provide input required by the policy.
+    IndeterminateRequiresInput {
+        /// Missing input name/category.
+        input: String,
+    },
+    /// The local node has not observed enough source/frontier coverage.
+    RequiresCoverage {
+        /// Coverage scope required before the decision can be known.
+        scope: String,
+        /// Canonical encoded frontier requirement.
+        frontier: Vec<u8>,
+    },
+}
+
+/// Predicate output-set fact.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+pub struct PredicateOutputSetEntry {
+    /// Validation side: base or now.
+    pub role: PredicateOutputSetRoleEntry,
+    /// Logical table.
+    pub table: jazz_types::Intern<String>,
+    /// Row identity.
+    pub row: RowUuid,
+    /// Version identity compared by validation.
+    pub version: RowVersionRefEntry,
+    /// Shape id.
+    pub shape_id: ShapeId,
+    /// Binding id.
+    pub binding_id: BindingId,
+}
+
+/// Predicate output-set comparison side.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize,
+)]
+pub enum PredicateOutputSetRoleEntry {
+    /// Base snapshot side.
+    Base,
+    /// Validation/current side.
+    Now,
+}
+
+/// Namespace used for migration-lens UUIDv5 ids.
+pub const MIGRATION_LENS_NAMESPACE: uuid::Uuid =
+    uuid::uuid!("5d13f9cb-8a10-5e0f-9a58-e56630a1dc22");
+
+/// Namespace used for semantic read-view UUIDv5 ids.
+pub const READ_VIEW_NAMESPACE: uuid::Uuid = uuid::uuid!("1a87cf70-f8f0-5ae7-a574-1f9b5e4517f1");
+
+/// Compiled in-memory schema version whose durable/wire form is the public schema.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SchemaVersion {
+    /// Content-addressed id, equal to `schema.version_id()`.
+    pub id: SchemaVersionId,
+    /// Compiled runtime schema. Serialization emits its retained public schema.
+    pub schema: JazzSchema,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct SchemaVersionWire {
+    id: SchemaVersionId,
+    /// Canonical public schema and PolicyExpr values encoded as JSON so public
+    /// Value remains portable across both JSON storage and postcard transport
+    /// serializers.
+    public_schema_json: Vec<u8>,
+}
+
+fn durable_public_schema_json(schema: &JazzSchema) -> Result<Vec<u8>, String> {
+    serde_json::to_vec(schema.public_schema()).map_err(|error| error.to_string())
+}
+
+/// Storage encoding version shared by all catalogue schemas.
+pub const CATALOGUE_SCHEMA_VERSION: u8 = 2;
+
+/// Canonical schema bytes used by catalogue storage and publication identity.
+///
+/// This is deliberately a small explicit envelope rather than the serde layout
+/// of `SchemaVersion`: version (see [`CATALOGUE_SCHEMA_VERSION`]), raw
+/// schema UUID, little-endian JSON length, and the canonical public-schema
+/// JSON bytes.
+pub fn canonical_catalogue_schema_bytes(schema: &SchemaVersion) -> Result<Vec<u8>, String> {
+    let public_schema = durable_public_schema_json(&schema.schema)?;
+    let length = u32::try_from(public_schema.len())
+        .map_err(|_| "catalogue public schema payload too large".to_owned())?;
+    let mut payload = Vec::with_capacity(1 + 16 + 4 + public_schema.len());
+    payload.push(CATALOGUE_SCHEMA_VERSION);
+    payload.extend_from_slice(schema.id.0.as_bytes());
+    payload.extend_from_slice(&length.to_le_bytes());
+    payload.extend_from_slice(&public_schema);
+    Ok(payload)
+}
+
+fn compile_public_schema_json(bytes: &[u8]) -> Result<JazzSchema, String> {
+    crate::model::public_schema_convert::decode_public_schema_json(bytes)
+}
+
+impl serde::Serialize for SchemaVersion {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let public_schema_json =
+            durable_public_schema_json(&self.schema).map_err(serde::ser::Error::custom)?;
+        let wire = SchemaVersionWire {
+            id: self.id,
+            public_schema_json,
+        };
+        wire.serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for SchemaVersion {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let SchemaVersionWire {
+            id,
+            public_schema_json,
+        } = SchemaVersionWire::deserialize(deserializer)?;
+        let schema =
+            compile_public_schema_json(&public_schema_json).map_err(serde::de::Error::custom)?;
+        // Keep identity validation at catalogue admission/open, where callers
+        // receive the established domain error rather than a codec error.
+        Ok(Self { id, schema })
+    }
+}
+
+impl SchemaVersion {
+    /// Construct a schema-version payload from a compiled schema.
+    ///
+    /// Durable or wire serialization requires the schema to retain the public
+    /// source attached by the public-schema compiler.
+    pub fn new(schema: JazzSchema) -> Self {
+        Self {
+            id: schema.version_id(),
+            schema,
+        }
+    }
+}
+
+/// Published bidirectional migration lens.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MigrationLens {
+    /// Content-addressed lens id.
+    pub id: MigrationLensId,
+    /// Source schema version.
+    pub source: SchemaVersionId,
+    /// Target schema version.
+    pub target: SchemaVersionId,
+    /// Per-table lens definitions.
+    pub table_lenses: Vec<TableLens>,
+}
+
+impl serde::Serialize for MigrationLens {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_bytes(&canonical_lens_bytes(self))
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for MigrationLens {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct LensBytes;
+        impl<'de> serde::de::Visitor<'de> for LensBytes {
+            type Value = MigrationLens;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a bounded canonical migration-lens byte blob")
+            }
+            fn visit_borrowed_bytes<E>(self, bytes: &'de [u8]) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                if bytes.len() > ProtocolCodecCursor::MAX_TOTAL_BYTES {
+                    return Err(E::custom(
+                        "migration lens blob exceeds aggregate byte budget",
+                    ));
+                }
+                decode_canonical_lens_bytes(bytes).map_err(E::custom)
+            }
+            fn visit_bytes<E>(self, bytes: &[u8]) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                if bytes.len() > ProtocolCodecCursor::MAX_TOTAL_BYTES {
+                    return Err(E::custom(
+                        "migration lens blob exceeds aggregate byte budget",
+                    ));
+                }
+                decode_canonical_lens_bytes(bytes).map_err(E::custom)
+            }
+        }
+        deserializer.deserialize_bytes(LensBytes)
+    }
+}
+
+impl MigrationLens {
+    /// Immutable content-addressed identity.
+    pub fn id(&self) -> MigrationLensId {
+        self.id
+    }
+    /// Published source schema identity.
+    pub fn source(&self) -> SchemaVersionId {
+        self.source
+    }
+    /// Published target schema identity.
+    pub fn target(&self) -> SchemaVersionId {
+        self.target
+    }
+    /// Canonically ordered, bijective table-lens declarations.
+    pub fn table_lenses(&self) -> &[TableLens] {
+        &self.table_lenses
+    }
+    /// Construct a migration lens and derive its content-addressed id.
+    pub fn new(
+        source: SchemaVersionId,
+        target: SchemaVersionId,
+        mut table_lenses: Vec<TableLens>,
+    ) -> Result<Self, &'static str> {
+        table_lenses.sort_by(|left, right| {
+            (&left.source_table, &left.target_table)
+                .cmp(&(&right.source_table, &right.target_table))
+        });
+        validate_protocol_lens_defaults(&table_lenses)?;
+        let mut sources = BTreeSet::new();
+        let mut targets = BTreeSet::new();
+        for table in &table_lenses {
+            if !sources.insert(&table.source_table) || !targets.insert(&table.target_table) {
+                return Err("migration lens table coordinates must be bijective");
+            }
+        }
+        let mut lens = Self {
+            id: MigrationLensId(uuid::Uuid::nil()),
+            source,
+            target,
+            table_lenses,
+        };
+        lens.id = lens.content_id();
+        Ok(lens)
+    }
+
+    /// Return the content-addressed id implied by this payload.
+    pub fn content_id(&self) -> MigrationLensId {
+        MigrationLensId(uuid::Uuid::new_v5(
+            &MIGRATION_LENS_NAMESPACE,
+            &canonical_lens_bytes(self),
+        ))
+    }
+}
+
+fn validate_protocol_lens_defaults(table_lenses: &[TableLens]) -> Result<(), &'static str> {
+    fn valid(value: &Value) -> bool {
+        match value {
+            Value::Large(_) | Value::Record(_) | Value::Enum(_) => false,
+            Value::Tuple(values) | Value::Array(values) => values.iter().all(valid),
+            Value::Nullable(Some(value)) => valid(value),
+            _ => true,
+        }
+    }
+    for table in table_lenses {
+        for op in &table.ops {
+            match op {
+                LensOp::AddColumn { default, .. } if !valid(default) => {
+                    return Err(
+                        "migration lens defaults cannot contain storage-only or descriptor-less values",
+                    );
+                }
+                LensOp::DropColumn {
+                    backwards_default, ..
+                } if !valid(backwards_default) => {
+                    return Err(
+                        "migration lens defaults cannot contain storage-only or descriptor-less values",
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+#[doc(hidden)]
+pub fn canonical_lens_bytes(lens: &MigrationLens) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    put_str(&mut bytes, "jazz-migration-lens-v1");
+    bytes.extend_from_slice(lens.source.as_bytes());
+    bytes.extend_from_slice(lens.target.as_bytes());
+    let mut table_lenses = lens.table_lenses.iter().collect::<Vec<_>>();
+    table_lenses.sort_by(|left, right| {
+        (&left.source_table, &left.target_table).cmp(&(&right.source_table, &right.target_table))
+    });
+    put_len(&mut bytes, table_lenses.len());
+    for table_lens in table_lenses {
+        put_str(&mut bytes, &table_lens.source_table);
+        put_str(&mut bytes, &table_lens.target_table);
+        put_len(&mut bytes, table_lens.ops.len());
+        for op in &table_lens.ops {
+            put_lens_op(&mut bytes, op);
+        }
+    }
+    bytes
+}
+
+/// Decode the sole canonical protocol-lens grammar used for durable Jazz
+/// catalogue publications. This is intentionally distinct from the server's
+/// schema-editor `LensTransform`: the two carry different operations and must
+/// never be lossily converted into one another.
+pub fn decode_canonical_lens_bytes(bytes: &[u8]) -> Result<MigrationLens, &'static str> {
+    let mut c = ProtocolCodecCursor {
+        bytes,
+        offset: 0,
+        budget: ProtocolCodecCursor::MAX_TOTAL_BYTES,
+        items: 0,
+    };
+    if c.string()? != "jazz-migration-lens-v1" {
+        return Err("invalid migration lens marker");
+    }
+    let source = SchemaVersionId(c.uuid()?);
+    let target = SchemaVersionId(c.uuid()?);
+    let mut table_lenses = Vec::new();
+    for _ in 0..c.count()? {
+        let source_table = c.string()?;
+        let target_table = c.string()?;
+        let mut ops = Vec::new();
+        for _ in 0..c.count()? {
+            ops.push(c.lens_op()?);
+        }
+        table_lenses.push(TableLens {
+            source_table,
+            target_table,
+            ops,
+        });
+    }
+    c.finish()?;
+    let lens =
+        MigrationLens::new(source, target, table_lenses).map_err(|_| "invalid migration lens")?;
+    if canonical_lens_bytes(&lens) != bytes {
+        return Err("noncanonical migration lens");
+    }
+    Ok(lens)
+}
+
+struct ProtocolCodecCursor<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+    budget: usize,
+    items: u32,
+}
+impl<'a> ProtocolCodecCursor<'a> {
+    const MAX_COUNT: u32 = 16_384;
+    const MAX_BYTES: usize = 16 * 1024 * 1024;
+    const MAX_TOTAL_BYTES: usize = 32 * 1024 * 1024;
+    const MAX_TOTAL_ITEMS: u32 = 65_536;
+    const MAX_DEPTH: usize = 64;
+    fn take(&mut self, n: usize) -> Result<&'a [u8], &'static str> {
+        if n > self.budget {
+            return Err("protocol aggregate byte budget exceeds limit");
+        }
+        let e = self
+            .offset
+            .checked_add(n)
+            .ok_or("truncated protocol codec")?;
+        let out = self
+            .bytes
+            .get(self.offset..e)
+            .ok_or("truncated protocol codec")?;
+        self.offset = e;
+        self.budget -= n;
+        Ok(out)
+    }
+    fn u8(&mut self) -> Result<u8, &'static str> {
+        Ok(self.take(1)?[0])
+    }
+    fn u32(&mut self) -> Result<u32, &'static str> {
+        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+    fn u64(&mut self) -> Result<u64, &'static str> {
+        Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+    }
+    fn i32(&mut self) -> Result<i32, &'static str> {
+        Ok(i32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+    fn i64(&mut self) -> Result<i64, &'static str> {
+        Ok(i64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+    }
+    fn uuid(&mut self) -> Result<uuid::Uuid, &'static str> {
+        Ok(uuid::Uuid::from_bytes(self.take(16)?.try_into().unwrap()))
+    }
+    fn count(&mut self) -> Result<u32, &'static str> {
+        let count = self.u32()?;
+        self.items = self
+            .items
+            .checked_add(count)
+            .ok_or("protocol aggregate item budget exceeds limit")?;
+        if count > Self::MAX_COUNT || self.items > Self::MAX_TOTAL_ITEMS {
+            Err("protocol collection count exceeds limit")
+        } else {
+            Ok(count)
+        }
+    }
+    fn bytes(&mut self) -> Result<Vec<u8>, &'static str> {
+        let n = self.u32()? as usize;
+        if n > Self::MAX_BYTES {
+            return Err("protocol byte length exceeds limit");
+        }
+        Ok(self.take(n)?.to_vec())
+    }
+    fn string(&mut self) -> Result<String, &'static str> {
+        String::from_utf8(self.bytes()?).map_err(|_| "invalid protocol utf8")
+    }
+    fn value(&mut self) -> Result<Value, &'static str> {
+        self.value_at(0)
+    }
+    fn value_at(&mut self, depth: usize) -> Result<Value, &'static str> {
+        if depth >= Self::MAX_DEPTH {
+            return Err("protocol value nesting exceeds limit");
+        }
+        Ok(match self.u8()? {
+            0 => Value::U8(self.u8()?),
+            1 => Value::U16(u16::from_le_bytes(self.take(2)?.try_into().unwrap())),
+            2 => Value::U32(self.u32()?),
+            3 => Value::U64(self.u64()?),
+            4 => Value::F64(f64::from_bits(self.u64()?)),
+            5 => Value::Bool(match self.u8()? {
+                0 => false,
+                1 => true,
+                _ => return Err("invalid protocol bool"),
+            }),
+            6 => Value::String(self.string()?),
+            7 => Value::Bytes(self.bytes()?),
+            8 => Value::Uuid(self.uuid()?),
+            9 => Value::EnumTag(self.u8()?),
+            10 => Value::Tuple(self.values_at(depth + 1)?),
+            11 => Value::Array(self.values_at(depth + 1)?),
+            12 => match self.u8()? {
+                0 => Value::Nullable(None),
+                1 => Value::Nullable(Some(Box::new(self.value_at(depth + 1)?))),
+                _ => return Err("invalid protocol nullable"),
+            },
+            13 => Value::I64(self.i64()?),
+            14 => Value::I32(self.i32()?),
+            15 => return Err("large default values are not supported in migration lenses"),
+            _ => return Err("invalid protocol value tag"),
+        })
+    }
+    fn values_at(&mut self, depth: usize) -> Result<Vec<Value>, &'static str> {
+        let mut v = Vec::new();
+        for _ in 0..self.count()? {
+            v.push(self.value_at(depth)?)
+        }
+        Ok(v)
+    }
+    fn lens_op(&mut self) -> Result<LensOp, &'static str> {
+        Ok(match self.u8()? {
+            0 => LensOp::RenameTable {
+                from: self.string()?,
+                to: self.string()?,
+            },
+            1 => LensOp::RenameColumn {
+                from: self.string()?,
+                to: self.string()?,
+            },
+            2 => LensOp::CopyColumn {
+                from: self.string()?,
+                to: self.string()?,
+            },
+            3 => LensOp::AddColumn {
+                column: self.string()?,
+                default: self.value()?,
+            },
+            4 => LensOp::DropColumn {
+                column: self.string()?,
+                backwards_default: self.value()?,
+            },
+            5 => LensOp::TransformColumn {
+                column: self.string()?,
+                transform: self.string()?,
+            },
+            6 => LensOp::RejectSourceDelta {
+                reason: self.string()?,
+            },
+            _ => return Err("invalid migration lens op"),
+        })
+    }
+    fn finish(self) -> Result<(), &'static str> {
+        if self.offset == self.bytes.len() {
+            Ok(())
+        } else {
+            Err("trailing protocol codec bytes")
+        }
+    }
+}
+
+fn put_lens_op(bytes: &mut Vec<u8>, op: &LensOp) {
+    match op {
+        LensOp::RenameTable { from, to } => {
+            bytes.push(0);
+            put_str(bytes, from);
+            put_str(bytes, to);
+        }
+        LensOp::RenameColumn { from, to } => {
+            bytes.push(1);
+            put_str(bytes, from);
+            put_str(bytes, to);
+        }
+        LensOp::CopyColumn { from, to } => {
+            bytes.push(2);
+            put_str(bytes, from);
+            put_str(bytes, to);
+        }
+        LensOp::AddColumn { column, default } => {
+            bytes.push(3);
+            put_str(bytes, column);
+            put_value(bytes, default);
+        }
+        LensOp::DropColumn {
+            column,
+            backwards_default,
+        } => {
+            bytes.push(4);
+            put_str(bytes, column);
+            put_value(bytes, backwards_default);
+        }
+        LensOp::TransformColumn { column, transform } => {
+            bytes.push(5);
+            put_str(bytes, column);
+            put_str(bytes, transform);
+        }
+        LensOp::RejectSourceDelta { reason } => {
+            bytes.push(6);
+            put_str(bytes, reason);
+        }
+    }
+}
+
+fn put_value(bytes: &mut Vec<u8>, value: &Value) {
+    match value {
+        Value::U8(value) => {
+            bytes.push(0);
+            bytes.push(*value);
+        }
+        Value::U16(value) => {
+            bytes.push(1);
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        Value::U32(value) => {
+            bytes.push(2);
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        Value::U64(value) => {
+            bytes.push(3);
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        Value::I32(value) => {
+            bytes.push(14);
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        Value::I64(value) => {
+            bytes.push(13);
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        Value::F64(value) => {
+            bytes.push(4);
+            bytes.extend_from_slice(&value.to_bits().to_le_bytes());
+        }
+        Value::Bool(value) => {
+            bytes.push(5);
+            bytes.push(u8::from(*value));
+        }
+        Value::String(value) => {
+            bytes.push(6);
+            put_str(bytes, value);
+        }
+        Value::Bytes(value) => {
+            bytes.push(7);
+            put_bytes(bytes, value);
+        }
+        Value::Uuid(value) => {
+            bytes.push(8);
+            bytes.extend_from_slice(value.as_bytes());
+        }
+        Value::EnumTag(value) => {
+            bytes.push(9);
+            bytes.push(*value);
+        }
+        Value::Tuple(values) => {
+            bytes.push(10);
+            put_values(bytes, values);
+        }
+        Value::Array(values) => {
+            bytes.push(11);
+            put_values(bytes, values);
+        }
+        Value::Nullable(value) => {
+            bytes.push(12);
+            match value {
+                Some(value) => {
+                    bytes.push(1);
+                    put_value(bytes, value);
+                }
+                None => bytes.push(0),
+            }
+        }
+        Value::Record(record) => {
+            // Policy comparison keys retain the complete portable record,
+            // including typed field identities. Migration defaults still
+            // reject records before this shared helper can encode them.
+            bytes.push(16);
+            put_bytes(
+                bytes,
+                &jazz_types::records::encode_record_descriptor(record.descriptor())
+                    .expect("admitted policy record descriptor has canonical encoding"),
+            );
+            put_bytes(bytes, record.raw());
+        }
+        Value::Enum(_) => {
+            panic!(
+                "union-valued values are an internal storage representation, not a Jazz protocol value"
+            )
+        }
+        Value::U48(_) => {
+            panic!("U48 is an engine-owned stamp width, not a Jazz protocol value")
+        }
+        Value::Large(value) => {
+            bytes.push(15);
+            let encoded = jazz_types::large_values::encode_stored_scalar(
+                value.kind,
+                &jazz_types::large_values::StoredScalar::Chunked(value.as_ref().clone()),
+            )
+            .expect("admitted large descriptor has canonical encoding");
+            put_bytes(bytes, &encoded);
+        }
+    }
+}
+
+fn put_values(bytes: &mut Vec<u8>, values: &[Value]) {
+    put_len(bytes, values.len());
+    for value in values {
+        put_value(bytes, value);
+    }
+}
+
+fn put_str(bytes: &mut Vec<u8>, value: &str) {
+    put_bytes(bytes, value.as_bytes());
+}
+
+fn put_bytes(bytes: &mut Vec<u8>, value: &[u8]) {
+    put_len(bytes, value.len());
+    bytes.extend_from_slice(value);
+}
+
+fn put_len(bytes: &mut Vec<u8>, len: usize) {
+    let len = u32::try_from(len).expect("canonical lens component exceeds u32");
+    bytes.extend_from_slice(&len.to_le_bytes());
+}
+
+/// Lens operations for one logical table.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct TableLens {
+    /// Source logical table.
+    pub source_table: String,
+    /// Target logical table.
+    pub target_table: String,
+    /// Ordered lens operations.
+    pub ops: Vec<LensOp>,
+}
+
+/// v0 migration lens operation set.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub enum LensOp {
+    /// Rename a table.
+    RenameTable {
+        /// Source table name.
+        from: String,
+        /// Target table name.
+        to: String,
+    },
+    /// Rename a column.
+    RenameColumn {
+        /// Source column name.
+        from: String,
+        /// Target column name.
+        to: String,
+    },
+    /// Copy a column.
+    CopyColumn {
+        /// Source column name.
+        from: String,
+        /// Target column name.
+        to: String,
+    },
+    /// Add a target column with a forward default.
+    AddColumn {
+        /// Target column name.
+        column: String,
+        /// Forward default value.
+        default: Value,
+    },
+    /// Drop a source column with a reverse default.
+    DropColumn {
+        /// Source column name.
+        column: String,
+        /// Backwards default used when translating from target to source.
+        backwards_default: Value,
+    },
+    /// Built-in transform placeholder. Evaluation lands in a later slice.
+    TransformColumn {
+        /// Column being transformed.
+        column: String,
+        /// Append-only built-in transform registry key.
+        transform: String,
+    },
+    /// Declare source deltas rejected by this lens.
+    RejectSourceDelta {
+        /// Human-readable rejection reason.
+        reason: String,
+    },
+}
+
+/// Core-ordered current write-schema pointer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct CurrentWriteSchema {
+    /// Monotone catalogue revision assigned by the core/admin lane.
+    pub revision: u64,
+    /// Current schema for canonical writes.
+    pub schema: SchemaVersionId,
+}
+
+/// Acknowledgement for catalogue lane messages.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct CatalogueAck {
+    /// Applied catalogue revision, if the message carried one.
+    pub revision: Option<u64>,
+    /// Published schema id, if any.
+    pub schema: Option<SchemaVersionId>,
+    /// Published lens id, if any.
+    pub lens: Option<MigrationLensId>,
+    /// True when the receiver installed or already had the value.
+    pub applied: bool,
+}
+
+/// Local embedding API events.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LocalEvent {
+    /// Local table mutation.
+    Mutate {
+        /// Mutated table.
+        table: String,
+    },
+    /// Open an serializable transaction.
+    OpenTx,
+    /// Write inside an serializable transaction.
+    WriteInTx {
+        /// Transaction id.
+        tx: TxId,
+    },
+    /// Commit an serializable transaction.
+    CommitTx {
+        /// Transaction id.
+        tx: TxId,
+    },
+    /// Abandon an serializable transaction.
+    AbandonTx {
+        /// Transaction id.
+        tx: TxId,
+    },
+    /// Run a query.
+    Query {
+        /// Query reference.
+        query_ref: u64,
+    },
+    /// Subscribe a query.
+    Subscribe {
+        /// Query reference.
+        query_ref: u64,
+        /// Query binding result set.
+        subscription: SubscriptionKey,
+    },
+    /// Remove a subscription.
+    Unsubscribe {
+        /// Query binding result set.
+        subscription: SubscriptionKey,
+    },
+}
+
+/// A single input to a node state machine.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Event {
+    /// Sync input.
+    Sync(SyncMessage),
+    /// Local input.
+    Local(LocalEvent),
+}
+
+/// Values emitted by a node after handling one event.
+#[derive(Clone, Debug, PartialEq)]
+pub enum OutboxMessage {
+    /// Sync output.
+    Sync(SyncMessage),
+    /// Query result notification.
+    QueryResult {
+        /// Query reference.
+        query_ref: u64,
+    },
+    /// Subscription change notification.
+    SubscriptionNotification {
+        /// Query binding result set.
+        subscription: SubscriptionKey,
+    },
+    /// Transaction fate notification.
+    TxFate {
+        /// Transaction id.
+        tx_id: TxId,
+        /// Observed fate.
+        fate: Fate,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::public_schema::{
+        ColumnType as PublicColumnType, PolicyExpr, SchemaBuilder, TablePolicies,
+        TableSchemaBuilder,
+    };
+    use jazz_types::column_schema::{ColumnSchema, ColumnType};
+    use jazz_types::records::ValueType;
+
+    // Internal wire corpus: byte compatibility and interning work cannot be
+    // observed through row queries. Public sync suites still gate visible behavior.
+    #[test]
+    fn supporting_table_borrowing_preserves_existing_wire_bytes_and_validation() {
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct PreviousSupportingRow {
+            physical_table: crate::ids::GlobalPhysicalTableId,
+            version_table: jazz_types::Intern<String>,
+            row: RowUuid,
+            version: RowVersionRefEntry,
+            is_current: bool,
+        }
+        for name in ["", "todos", "résumé/倉庫", &"long_label".repeat(100)] {
+            for populated in [false, true] {
+                let old = PreviousSupportingRow {
+                    is_current: true,
+                    physical_table: crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_bytes(
+                        [3; 16],
+                    )),
+                    version_table: jazz_types::Intern::from_ref(name),
+                    row: RowUuid::from_bytes([4; 16]),
+                    version: RowVersionRefEntry {
+                        tx: TxId::new(TxTime(987654), NodeUuid::from_bytes([5; 16])),
+                        schema_version: populated.then(|| SchemaVersionId::from_bytes([6; 16])),
+                        layer: ResultRowLayer::Content,
+                        batch: populated
+                            .then(|| TxId::new(TxTime(1234), NodeUuid::from_bytes([7; 16]))),
+                        branch_or_prefix: populated.then(|| vec![0, 1, 254, 255]),
+                        row_digest: populated.then(|| vec![42; 32]),
+                    },
+                };
+                let bytes = postcard::to_allocvec(&old).unwrap();
+                let row: SupportingRow = postcard::from_bytes(&bytes).unwrap();
+                assert_eq!(row.physical_table, old.physical_table);
+                assert_eq!(row.version_table, old.version_table);
+                assert_eq!(row.row, old.row);
+                assert_eq!(row.version, old.version);
+                assert_eq!(row.is_wire_valid(), !name.is_empty());
+                assert_eq!(postcard::to_allocvec(&row).unwrap(), bytes);
+                let old_again: PreviousSupportingRow =
+                    postcard::from_bytes(&postcard::to_allocvec(&row).unwrap()).unwrap();
+                assert_eq!(old_again.version_table, old.version_table);
+                let json = serde_json::to_vec(&old).unwrap();
+                assert_eq!(serde_json::from_slice::<SupportingRow>(&json).unwrap(), row);
+                assert_eq!(serde_json::to_vec(&row).unwrap(), json);
+                // Match existing postcard acceptance at every truncated boundary,
+                // including optional/default field semantics, rather than assuming it.
+                for end in 0..bytes.len() {
+                    assert_eq!(
+                        postcard::from_bytes::<SupportingRow>(&bytes[..end]).is_ok(),
+                        postcard::from_bytes::<PreviousSupportingRow>(&bytes[..end]).is_ok()
+                    );
+                }
+                let mut trailing = bytes.clone();
+                trailing.push(0);
+                let (_, new_tail) = postcard::take_from_bytes::<SupportingRow>(&trailing).unwrap();
+                let (_, old_tail) =
+                    postcard::take_from_bytes::<PreviousSupportingRow>(&trailing).unwrap();
+                assert_eq!(new_tail, old_tail);
+                assert_eq!(new_tail, &[0]);
+            }
+        }
+
+        #[derive(serde::Deserialize, serde::Serialize)]
+        struct Name(
+            #[serde(deserialize_with = "supporting_table_name::deserialize")]
+            jazz_types::Intern<String>,
+        );
+        // Existing postcard string grammar: unsigned length varint, then UTF-8.
+        const GOLDEN: &[u8] = &[5, b't', b'o', b'd', b'o', b's'];
+        assert_eq!(
+            postcard::from_bytes::<Name>(GOLDEN).unwrap().0.as_str(),
+            "todos"
+        );
+        assert_eq!(
+            postcard::to_allocvec(&Name("todos".to_owned().into())).unwrap(),
+            GOLDEN
+        );
+        for invalid in [&[1, 255][..], &[2, 0xc0, 0x80], &[2, b'x']] {
+            assert!(postcard::from_bytes::<Name>(invalid).is_err());
+            assert!(postcard::from_bytes::<jazz_types::Intern<String>>(invalid).is_err());
+        }
+        use serde::de::value::{BytesDeserializer, Error, StringDeserializer};
+        assert!(
+            supporting_table_name::deserialize(BytesDeserializer::<Error>::new(&[255])).is_err()
+        );
+        assert_eq!(
+            supporting_table_name::deserialize(BytesDeserializer::<Error>::new(b"valid"))
+                .unwrap()
+                .as_str(),
+            "valid"
+        );
+        assert_eq!(
+            supporting_table_name::deserialize(StringDeserializer::<Error>::new("owned".into()))
+                .unwrap()
+                .as_str(),
+            "owned"
+        );
+    }
+
+    #[test]
+    fn supporting_table_borrowing_uses_one_bounded_cache_entry_without_input_ownership() {
+        #[derive(serde::Deserialize)]
+        struct Name(
+            #[serde(deserialize_with = "supporting_table_name::deserialize")]
+            jazz_types::Intern<String>,
+        );
+        let first = jazz_types::Intern::<String>::from_ref("table_name_cache_first");
+        let second = jazz_types::Intern::<String>::from_ref("table_name_cache_second");
+        let bytes = postcard::to_allocvec(&first).unwrap();
+        supporting_table_name::reset();
+        for _ in 0..1000 {
+            assert_eq!(postcard::from_bytes::<Name>(&bytes).unwrap().0, first);
+        }
+        assert_eq!(supporting_table_name::LOOKUPS.get(), 1);
+        assert_eq!(supporting_table_name::OWNED_VISITS.get(), 0);
+        assert_eq!(
+            postcard::from_bytes::<Name>(&postcard::to_allocvec(&second).unwrap())
+                .unwrap()
+                .0,
+            second
+        );
+        assert_eq!(postcard::from_bytes::<Name>(&bytes).unwrap().0, first);
+        assert_eq!(
+            supporting_table_name::LOOKUPS.get(),
+            3,
+            "one entry, not an unbounded local interner"
+        );
+        drop(bytes);
+        assert_eq!(first.as_str(), "table_name_cache_first");
+        let independent = std::thread::spawn(move || {
+            supporting_table_name::reset();
+            let decoded = postcard::from_bytes::<Name>(&postcard::to_allocvec(&first).unwrap())
+                .unwrap()
+                .0;
+            assert_eq!(supporting_table_name::LOOKUPS.get(), 1);
+            decoded
+        })
+        .join()
+        .unwrap();
+        assert_eq!(independent, first);
+        assert_eq!(
+            supporting_table_name::LOOKUPS.get(),
+            3,
+            "other thread cannot alter this cache"
+        );
+    }
+
+    #[test]
+    fn peer_view_rejects_duplicate_exact_supporting_row() {
+        let row = SupportingRow {
+            is_current: true,
+            physical_table: crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_bytes([3; 16])),
+            version_table: "todos".to_owned().into(),
+            row: RowUuid::from_bytes([4; 16]),
+            version: RowVersionRefEntry {
+                tx: TxId::new(
+                    crate::time::TxTime(1),
+                    crate::ids::NodeUuid::from_bytes([5; 16]),
+                ),
+                schema_version: None,
+                layer: ResultRowLayer::Content,
+                batch: None,
+                branch_or_prefix: None,
+                row_digest: None,
+            },
+        };
+        let message = SyncMessage::ViewUpdate(ViewUpdatePayload {
+            subscription: SubscriptionKey {
+                shape_id: ShapeId(uuid::Uuid::from_bytes([1; 16])),
+                binding_id: BindingId(uuid::Uuid::from_bytes([2; 16])),
+                read_view: ReadViewKey::default(),
+            },
+            settled_through: GlobalTime(0),
+            version_carriers: Vec::new(),
+            peer_payload_inventory: PeerPayloadInventory::default(),
+            supporting_rows: SupportingRowsUpdate::snapshot(vec![row.clone(), row]),
+        });
+        assert!(matches!(
+            message.validate_wire_contract(),
+            Err(WireContractError::DuplicateSupportingRow)
+        ));
+    }
+
+    fn schema_id(byte: u8) -> SchemaVersionId {
+        SchemaVersionId::from_bytes([byte; 16])
+    }
+
+    #[test]
+    fn policy_directory_rebuilds_only_identity_derived_claims() {
+        // The private directory stores provider data and an exact identity;
+        // its encoded payload must not retain a second author representation.
+        let identity = AuthorSubject::authenticated("https://issuer.example", "alice")
+            .unwrap()
+            .with_account(crate::account_registry::AccountId(uuid::Uuid::from_bytes(
+                [7; 16],
+            )));
+        let provider = BTreeMap::from([("role".into(), Value::String("editor".into()))]);
+        let claims =
+            crate::model::policy_claims::canonical_policy_binding_claims(&identity, provider);
+        let key = PolicyBindingKey::from_canonical_parts(identity, claims.clone());
+        let encoded = key.directory_value().unwrap();
+        let Value::Record(fields) = encoded.clone() else {
+            panic!("typed directory record")
+        };
+        assert_eq!(fields.get_idx(0).unwrap(), Value::U8(255));
+        let stored =
+            policy_binding_directory_claims_from_value(fields.get_idx(1).unwrap()).unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(
+            stored.get("\0claims:role"),
+            Some(&Value::String("editor".into()))
+        );
+        let rebuilt = PolicyBindingKey::from_directory_value(identity, encoded).unwrap();
+        assert_eq!(rebuilt, key);
+        assert_eq!(rebuilt.directory_digest(), key.directory_digest());
+        let mut inconsistent = claims;
+        inconsistent.insert("user".into(), Value::String("spoof".into()));
+        // Internal policy tests may deliberately bind provider sub or user to
+        // a different scalar. Storage preserves it; admission owns validation.
+        let inconsistent = PolicyBindingKey::from_canonical_parts(identity, inconsistent);
+        assert_eq!(
+            PolicyBindingKey::from_directory_value(
+                identity,
+                inconsistent.directory_value().unwrap()
+            )
+            .unwrap(),
+            inconsistent
+        );
+        let redundant = policy_binding_directory_claims_value(&BTreeMap::from([(
+            "user".into(),
+            Value::String("spoof".into()),
+        )]))
+        .unwrap();
+        assert!(
+            PolicyBindingKey::from_directory_value(
+                identity,
+                policy_directory_payload(255, redundant).unwrap()
+            )
+            .is_err()
+        );
+        let derived = crate::model::policy_claims::canonical_policy_binding_claims(
+            &identity,
+            BTreeMap::new(),
+        );
+        assert_eq!(derived.len(), 8);
+        for mask in 0_u16..=255 {
+            let partial = derived
+                .iter()
+                .enumerate()
+                .filter(|(bit, _)| mask & (1 << bit) != 0)
+                .map(|(_, (key, value))| (key.clone(), value.clone()))
+                .collect();
+            let key = PolicyBindingKey::from_canonical_parts(identity, partial);
+            let encoded = key.directory_value().unwrap();
+            let Value::Record(fields) = &encoded else {
+                panic!("typed directory record")
+            };
+            assert_eq!(fields.get_idx(0).unwrap(), Value::U8(mask as u8));
+            let recovered = PolicyBindingKey::from_directory_value(identity, encoded).unwrap();
+            assert_eq!(recovered, key);
+            assert_eq!(recovered.directory_digest(), key.directory_digest());
+        }
+    }
+
+    #[test]
+    fn canonical_policy_claims_preserve_record_descriptor_and_payload() {
+        // Internal comparison identity is not directly observable through a
+        // public query; distinguish equal bytes with different field identities.
+        let record = |field: &str, value: u64| {
+            let descriptor = RecordDescriptor::new([(field, ValueType::U64)]);
+            Value::Record(OwnedRecord::new(
+                descriptor.create(&[Value::U64(value)]).unwrap(),
+                descriptor,
+            ))
+        };
+        let claims = |value| CanonicalPolicyClaims::new(BTreeMap::from([("user".into(), value)]));
+        assert_eq!(claims(record("a", 1)), claims(record("a", 1)));
+        assert_ne!(claims(record("a", 1)), claims(record("b", 1)));
+        assert_ne!(claims(record("a", 1)), claims(record("a", 2)));
+        let author = AuthorSubject::authenticated("https://issuer.example", "alice").unwrap();
+        assert_ne!(
+            claims(author.to_value()),
+            claims(
+                author
+                    .with_account(crate::account_registry::AccountId(uuid::Uuid::from_bytes(
+                        [7; 16]
+                    )))
+                    .to_value()
+            )
+        );
+    }
+
+    // Byte receipts belong here because integration results cannot detect an
+    // accidental change to persisted policy-claim node encoding.
+    #[test]
+    fn nested_policy_claim_v1_encoding_receipt() {
+        let path = vec!["org".to_owned(), "slug".to_owned()];
+        let key = crate::query::provider_claim_path_operand_key(&path);
+        assert_eq!(key.as_bytes(), b"\0claim-path-v1:3:org4:slug");
+        assert_eq!(
+            crate::query::operand_claim_path(&key),
+            vec!["claims", "org", "slug"]
+        );
+        assert_eq!(
+            crate::query::provider_claim_path_operand_key(&["org.slug".into()]).as_bytes(),
+            b"\0claims:org.slug"
+        );
+        let unusual = vec!["".to_owned(), "é:x".to_owned()];
+        let key = crate::query::provider_claim_path_operand_key(&unusual);
+        assert_eq!(key.as_bytes(), "\0claim-path-v1:0:4:é:x".as_bytes());
+        assert_eq!(crate::query::operand_claim_path(&key)[1..], unusual);
+
+        let object = crate::model::policy_claims::json_value_to_policy_claim(
+            serde_json::json!({"slug": "north", "revoked": null}),
+            crate::model::policy_claims::NumericClaimOrigin::ExactJson,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            object,
+            Value::Tuple(vec![
+                Value::Tuple(vec![Value::String("revoked".into()), Value::Nullable(None)]),
+                Value::Tuple(vec![
+                    Value::String("slug".into()),
+                    Value::String("north".into())
+                ]),
+            ])
+        );
+        let claims = BTreeMap::from([(crate::query::provider_claim_key("org"), object)]);
+        let encoded = policy_binding_directory_claims_value(&claims).unwrap();
+        let Value::Array(nodes) = &encoded else {
+            panic!("claim node array")
+        };
+        let mut receipt = blake3::Hasher::new();
+        for node in nodes {
+            let Value::Record(record) = node else {
+                panic!("claim node record")
+            };
+            receipt.update(&(record.raw().len() as u64).to_le_bytes());
+            receipt.update(record.raw());
+        }
+        assert_eq!(
+            receipt.finalize().to_hex().as_str(),
+            "115d7dd21a7920aff3799d618abdfdedf47dd42e20401bcb744e689314bf907b"
+        );
+        assert_eq!(
+            policy_binding_directory_claims_from_value(encoded).unwrap(),
+            claims
+        );
+    }
+
+    #[test]
+    fn policy_binding_directory_uses_typed_claim_nodes_without_an_opaque_blob() {
+        // A relay durable directory must preserve the exact session snapshot,
+        // including nested claim arrays, in normal record fields. The test
+        // intentionally checks the carrier shape as well as round-tripping:
+        // replacing it with postcard-in-Bytes would make the first assertion
+        // fail even if the logical values still happened to decode.
+        let claims = BTreeMap::from([
+            ("role".to_owned(), Value::String("editor".to_owned())),
+            (
+                "teams".to_owned(),
+                Value::Array(vec![
+                    Value::String("rhythm".to_owned()),
+                    Value::Nullable(None),
+                    Value::Array(vec![Value::U64(7)]),
+                ]),
+            ),
+        ]);
+        let encoded = policy_binding_directory_claims_value(&claims)
+            .expect("public policy claim vocabulary is persistable");
+        let Value::Array(nodes) = &encoded else {
+            panic!("claims must use a typed array carrier");
+        };
+        assert!(nodes.iter().all(|node| matches!(node, Value::Record(_))));
+        assert_eq!(
+            policy_binding_directory_claims_from_value(encoded)
+                .expect("typed claim carrier decodes"),
+            claims
+        );
+    }
+
+    /// Forces postcard's `serialize_bytes` representation rather than the
+    /// collection representation used by `Vec<u8>`.
+    struct PostcardByteBlob<'a>(&'a [u8]);
+
+    impl serde::Serialize for PostcardByteBlob<'_> {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            serializer.serialize_bytes(self.0)
+        }
+    }
+
+    #[test]
+    fn protocol_lens_storage_codec_covers_every_declared_operation_and_value_arm() {
+        let values = vec![
+            Value::U8(1),
+            Value::U16(2),
+            Value::U32(3),
+            Value::U64(4),
+            Value::I32(-5),
+            Value::I64(-6),
+            Value::F64(7.5),
+            Value::Bool(true),
+            Value::String("s".into()),
+            Value::Bytes(vec![8]),
+            Value::Uuid(uuid::Uuid::from_bytes([9; 16])),
+            Value::EnumTag(10),
+            Value::Tuple(vec![Value::U8(11)]),
+            Value::Array(vec![Value::U8(12)]),
+            Value::Nullable(None),
+            Value::Nullable(Some(Box::new(Value::U8(13)))),
+        ];
+        let ops = vec![
+            LensOp::RenameTable {
+                from: "a".into(),
+                to: "b".into(),
+            },
+            LensOp::RenameColumn {
+                from: "c".into(),
+                to: "d".into(),
+            },
+            LensOp::CopyColumn {
+                from: "e".into(),
+                to: "f".into(),
+            },
+            LensOp::TransformColumn {
+                column: "g".into(),
+                transform: "h".into(),
+            },
+            LensOp::RejectSourceDelta { reason: "i".into() },
+        ];
+        let mut all = ops;
+        for (index, value) in values.into_iter().enumerate() {
+            all.push(LensOp::AddColumn {
+                column: format!("add{index}"),
+                default: value.clone(),
+            });
+            all.push(LensOp::DropColumn {
+                column: format!("drop{index}"),
+                backwards_default: value,
+            });
+        }
+        let lens = MigrationLens::new(
+            schema_id(1),
+            schema_id(2),
+            vec![TableLens {
+                source_table: "source".into(),
+                target_table: "target".into(),
+                ops: all,
+            }],
+        )
+        .expect("valid migration lens");
+        let exact = canonical_lens_bytes(&lens);
+        assert_eq!(decode_canonical_lens_bytes(&exact).unwrap(), lens);
+        for malformed in [
+            vec![],
+            exact[..exact.len() - 1].to_vec(),
+            [exact.clone(), vec![0]].concat(),
+            {
+                let mut changed = exact.clone();
+                changed[0] ^= 1;
+                changed
+            },
+        ] {
+            assert!(decode_canonical_lens_bytes(&malformed).is_err());
+        }
+        // Planted sensitivity: accepting an alternate bool tag would make a
+        // malformed durable default indistinguishable from a valid one.
+        let bool_offset = exact.iter().position(|byte| *byte == 5).unwrap();
+        let mut planted = exact.clone();
+        planted[bool_offset + 1] = 2;
+        assert!(decode_canonical_lens_bytes(&planted).is_err());
+    }
+
+    #[test]
+    fn migration_lens_constructor_and_decoder_enforce_bijective_bounded_shape() {
+        let table = |source: &str, target: &str| TableLens {
+            source_table: source.into(),
+            target_table: target.into(),
+            ops: Vec::new(),
+        };
+        assert!(
+            MigrationLens::new(
+                schema_id(1),
+                schema_id(2),
+                vec![table("a", "b"), table("a", "c")]
+            )
+            .is_err()
+        );
+        assert!(
+            MigrationLens::new(
+                schema_id(1),
+                schema_id(2),
+                vec![table("a", "b"), table("c", "b")]
+            )
+            .is_err()
+        );
+
+        let lens = MigrationLens::new(
+            schema_id(1),
+            schema_id(2),
+            vec![table("a", "b"), table("c", "d")],
+        )
+        .unwrap();
+        let exact = canonical_lens_bytes(&lens);
+        // The final target byte is `d`; changing it to `b` plants a repeated
+        // target in otherwise fully well-formed bytes. Decode must return an
+        // error through the fallible constructor, never panic or normalize it.
+        let mut duplicate_target = exact.clone();
+        *duplicate_target.last_mut().unwrap() = b'b';
+        assert!(decode_canonical_lens_bytes(&duplicate_target).is_err());
+
+        // Header count is after marker (4+24), source UUID, and target UUID.
+        let count_offset = 4 + "jazz-migration-lens-v1".len() + 16 + 16;
+        let mut item_bomb = exact.clone();
+        item_bomb[count_offset..count_offset + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(decode_canonical_lens_bytes(&item_bomb).is_err());
+        let mut byte_bomb = exact.clone();
+        byte_bomb[0..4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(decode_canonical_lens_bytes(&byte_bomb).is_err());
+    }
+
+    #[test]
+    fn postcard_migration_lens_wire_cannot_bypass_validated_constructor() {
+        let valid = MigrationLens::new(
+            schema_id(1),
+            schema_id(2),
+            vec![TableLens {
+                source_table: "a".into(),
+                target_table: "b".into(),
+                ops: Vec::new(),
+            }],
+        )
+        .unwrap();
+        let mut malformed = canonical_lens_bytes(&valid);
+        malformed.push(0);
+        assert!(
+            postcard::from_bytes::<MigrationLens>(&postcard::to_allocvec(&malformed).unwrap())
+                .is_err()
+        );
+        // Planted sensitivity: if Deserialize stopped routing through the
+        // canonical parser, this trailing wire would decode and later reach
+        // content_id.
+    }
+
+    /// `MigrationLens` deliberately owns a custom byte-blob serde boundary:
+    /// consumers cannot construct a protocol lens without the canonical parser
+    /// re-checking the same bijection enforced by `MigrationLens::new`.
+    #[test]
+    fn postcard_migration_lens_rejects_bijectively_invalid_canonical_shape_without_panicking() {
+        // Build the canonical grammar directly instead of calling the checked
+        // constructor: `a -> b` and `a -> c` have a repeated source but
+        // different targets. The table sequence is already canonical, so this
+        // only fails if wire deserialization actually re-applies bijection.
+        let mut malformed = Vec::new();
+        put_str(&mut malformed, "jazz-migration-lens-v1");
+        malformed.extend_from_slice(schema_id(1).as_bytes());
+        malformed.extend_from_slice(schema_id(2).as_bytes());
+        put_len(&mut malformed, 2);
+        for target in ["b", "c"] {
+            put_str(&mut malformed, "a");
+            put_str(&mut malformed, target);
+            put_len(&mut malformed, 0);
+        }
+        let wire = postcard::to_allocvec(&PostcardByteBlob(&malformed)).expect("wrap lens blob");
+
+        let decoded = std::panic::catch_unwind(|| postcard::from_bytes::<MigrationLens>(&wire));
+        assert!(
+            decoded.is_ok(),
+            "malformed lens wire must return an error, not panic"
+        );
+        assert!(
+            decoded.unwrap().is_err(),
+            "duplicate source must not enter the catalogue"
+        );
+
+        // Planted sensitivity: changing one source makes the same canonical
+        // shape valid. This proves the rejection above is about bijection, not
+        // postcard framing or an accidentally malformed grammar.
+        let valid = MigrationLens::new(
+            schema_id(1),
+            schema_id(2),
+            vec![
+                TableLens {
+                    source_table: "a".into(),
+                    target_table: "b".into(),
+                    ops: Vec::new(),
+                },
+                TableLens {
+                    source_table: "d".into(),
+                    target_table: "c".into(),
+                    ops: Vec::new(),
+                },
+            ],
+        )
+        .expect("unique coordinates are valid");
+        assert!(
+            postcard::from_bytes::<MigrationLens>(
+                &postcard::to_allocvec(&valid).expect("wrap valid lens blob")
+            )
+            .is_ok()
+        );
+    }
+
+    /// The serde visitor must reject an oversized byte blob while it is still
+    /// borrowed from the input. This direct deserializer preserves the custom
+    /// error message that postcard's public error type intentionally erases.
+    #[test]
+    fn migration_lens_borrowed_visitor_rejects_oversized_blob_before_parsing() {
+        let oversized = vec![0xff; ProtocolCodecCursor::MAX_TOTAL_BYTES + 1];
+        let error = <MigrationLens as serde::Deserialize>::deserialize(
+            serde::de::value::BorrowedBytesDeserializer::<serde::de::value::Error>::new(&oversized),
+        )
+        .expect_err("oversized borrowed blob must be rejected");
+        assert_eq!(
+            error.to_string(),
+            "migration lens blob exceeds aggregate byte budget",
+            "the borrowed visitor must reject the declared blob before parsing"
+        );
+    }
+
+    /// The wire boundary must turn an oversized postcard byte blob into a
+    /// normal decode error rather than a panic.
+    #[test]
+    fn postcard_migration_lens_rejects_oversized_blob_without_panicking() {
+        let oversized = vec![0xff; ProtocolCodecCursor::MAX_TOTAL_BYTES + 1];
+        // `serialize_bytes` emits postcard's byte-blob length varint followed
+        // by this data. The payload is intentionally not a lens marker.
+        let wire =
+            postcard::to_allocvec(&PostcardByteBlob(&oversized)).expect("wrap oversized blob");
+        let decoded = std::panic::catch_unwind(|| postcard::from_bytes::<MigrationLens>(&wire));
+        assert!(
+            decoded.is_ok(),
+            "oversized lens wire must return an error, not panic"
+        );
+        assert!(decoded.unwrap().is_err(), "oversized blob must be rejected");
+    }
+
+    // This is intentionally an internal byte-level test: the durable physical
+    // identity is not observable through the public row API, and a behavioral
+    // round trip alone would not freeze the assigned version, tags, or widths.
+    #[test]
+    fn branch_coordinate_codec_has_frozen_declared_type_bytes() {
+        let integer =
+            BranchColumnValue::encode_typed(&Value::U32(0x0102_0304), &ValueType::U32).unwrap();
+        let string =
+            BranchColumnValue::encode_typed(&Value::String("hi".to_owned()), &ValueType::String)
+                .unwrap();
+        assert_eq!(integer.0, [1, 2, 4, 3, 2, 1]);
+        assert_eq!(string.0, [1, 6, 0, b'h', b'i']);
+
+        let stable_enum = ValueType::EnumTag(
+            jazz_types::records::ScalarEnumSchema::new("phase", ["draft", "ready"]).unwrap(),
+        );
+        let enum_value =
+            BranchColumnValue::encode_typed(&Value::String("ready".to_owned()), &stable_enum)
+                .unwrap();
+        assert_eq!(enum_value.0, [1, 8, 1]);
+        assert_eq!(
+            enum_value.decode_as(&stable_enum).unwrap(),
+            Value::EnumTag(1)
+        );
+
+        let key = BranchKey {
+            values: vec![("a".to_owned(), integer), ("z".to_owned(), string)],
+        };
+        let expected = [
+            1, // key codec version
+            2, 0, 0, 0, // entry count
+            1, 0, 0, 0, b'a', // first name
+            6, 0, 0, 0, 1, 2, 4, 3, 2, 1, // first value
+            1, 0, 0, 0, b'z', // second name
+            5, 0, 0, 0, 1, 6, 0, b'h', b'i', // second value
+        ];
+        assert_eq!(key.canonical_bytes(), expected);
+        assert_eq!(BranchKey::from_canonical_bytes(&expected).unwrap(), key);
+
+        let mut trailing = expected.to_vec();
+        trailing.push(0);
+        assert!(BranchKey::from_canonical_bytes(&trailing).is_err());
+        assert!(BranchKey::from_canonical_bytes(&[0]).is_err());
+
+        let append_entry = |bytes: &mut Vec<u8>, name: &str, value: &[u8]| {
+            bytes.extend((name.len() as u32).to_le_bytes());
+            bytes.extend(name.as_bytes());
+            bytes.extend((value.len() as u32).to_le_bytes());
+            bytes.extend(value);
+        };
+        let mut duplicate = vec![1];
+        duplicate.extend(2_u32.to_le_bytes());
+        append_entry(&mut duplicate, "a", &[1, 0, 7]);
+        append_entry(&mut duplicate, "a", &[1, 0, 8]);
+        assert!(BranchKey::from_canonical_bytes(&duplicate).is_err());
+
+        let mut descending = vec![1];
+        descending.extend(2_u32.to_le_bytes());
+        append_entry(&mut descending, "z", &[1, 0, 7]);
+        append_entry(&mut descending, "a", &[1, 0, 8]);
+        assert!(BranchKey::from_canonical_bytes(&descending).is_err());
+
+        let mut unknown_tag = vec![1];
+        unknown_tag.extend(1_u32.to_le_bytes());
+        append_entry(&mut unknown_tag, "a", &[1, u8::MAX]);
+        assert!(BranchKey::from_canonical_bytes(&unknown_tag).is_err());
+    }
+
+    #[test]
+    fn schema_version_persists_policy_source_and_recompiles_on_decode() {
+        let source = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("title", PublicColumnType::Text)
+                    .policies(TablePolicies::new().with_select(PolicyExpr::True)),
+            )
+            .build();
+        let compiled = crate::schema::JazzSchema::new(&source).expect("source schema compiles");
+        let version = SchemaVersion::new(compiled);
+
+        let stored = serde_json::to_string(&version).expect("source schema serializes");
+        let SchemaVersionWire {
+            public_schema_json, ..
+        } = serde_json::from_str(&stored).expect("decode stored schema envelope");
+        let stored_source_json =
+            String::from_utf8(public_schema_json).expect("public schema JSON is UTF-8");
+        let stored_source: serde_json::Value =
+            serde_json::from_str(&stored_source_json).expect("public schema JSON decodes");
+        assert!(
+            stored_source["tables"].is_object(),
+            "schema-version payloads preserve the public Schema JSON envelope"
+        );
+        assert!(stored_source_json.contains("\"policies\""));
+        assert!(stored_source_json.contains("\"type\":\"True\""));
+        assert!(!stored_source_json.contains("read_policy"));
+        assert!(!stored_source_json.contains("write_policies"));
+
+        let bytes = postcard::to_allocvec(&version).expect("source schema crosses the wire");
+        let decoded: SchemaVersion =
+            postcard::from_bytes(&bytes).expect("source schema recompiles on decode");
+        assert_eq!(decoded, version);
+        assert_eq!(
+            decoded.schema.public_schema(),
+            version.schema.public_schema()
+        );
+    }
+
+    #[test]
+    fn schema_version_serialization_trusts_the_retained_source_without_recompiling() {
+        let source = SchemaBuilder::new()
+            .table(TableSchemaBuilder::new("todos").column("title", PublicColumnType::Text))
+            .build();
+        let compiled = crate::schema::JazzSchema::new(&source).expect("source schema compiles");
+        let mut version = SchemaVersion::new(compiled);
+
+        // A test-only mutation makes recompilation observably disagree with the
+        // runtime value. Wire serialization must remain a source encoding step;
+        // recompiling here puts schema-size work on every propagated write.
+        version.schema.runtime_mut_for_testing().tables.clear();
+
+        let encoded = postcard::to_allocvec(&version)
+            .expect("serialization trusts the source established at construction");
+        let decoded: SchemaVersion = postcard::from_bytes(&encoded).expect("source recompiles");
+        assert_eq!(decoded.schema.public_schema(), &source);
+        assert_eq!(decoded.schema.tables().len(), 1);
+    }
+
+    #[test]
+    fn branch_view_keys_isolate_siblings_and_live_from_frozen_bases() {
+        let selector = |byte| {
+            BranchSelector::new([("branch", Value::Uuid(uuid::Uuid::from_bytes([byte; 16])))])
+        };
+        let key = |read_view| {
+            RegisterShapeOptions {
+                read_view,
+                ..RegisterShapeOptions::default()
+            }
+            .read_view_key()
+        };
+        let live =
+            ReadViewSpec::branch_view(selector(1), Some(BranchViewBase::Current(selector(2))));
+        let sibling =
+            ReadViewSpec::branch_view(selector(3), Some(BranchViewBase::Current(selector(2))));
+        let frozen = ReadViewSpec::branch_view(
+            selector(1),
+            Some(BranchViewBase::snapshot(
+                selector(2),
+                SnapshotRef {
+                    owner: NodeUuid::from_bytes([4; 16]),
+                    global_base: GlobalTime(5),
+                    local_base: TxTime(6),
+                    dots: Vec::new(),
+                },
+            )),
+        );
+
+        assert_ne!(key(live.clone()), key(sibling));
+        assert_ne!(key(live), key(frozen));
+
+        // Internal format receipt: this UUID is stored in settled result
+        // entries, so the exact canonical preimage must be pinned below the
+        // public subscription API boundary.
+        let options = RegisterShapeOptions {
+            tier: DurabilityTier::Global,
+            read_view: ReadViewSpec::branch_view(selector(1), None),
+            binding_source: BindingSource::RelayAuthoritySession,
+        };
+        assert_eq!(
+            hex::encode(canonical_register_shape_options_bytes(&options)),
+            "4a52564b0202010101000000060000006272616e63681200000001070101010101010101010101010101010100"
+        );
+        assert_eq!(
+            options.read_view_key().id,
+            uuid::uuid!("c42e5064-19cf-5246-be41-4385a11d305e")
+        );
+    }
+
+    /// Alice's v6 registration includes root deletion visibility.
+    /// This low-level byte fixture pins the wire layout independently of serde round trips.
+    #[test]
+    fn wire_v6_registration_options_bytes() {
+        let options = RegisterShapeOptions::default();
+        let bytes = postcard::to_allocvec(&options).unwrap();
+        assert_eq!(hex::encode(&bytes), "02000000");
+        assert_eq!(
+            postcard::from_bytes::<RegisterShapeOptions>(&bytes).unwrap(),
+            options
+        );
+    }
+
+    /// Internal encoding receipt: Alice's deleted-row coverage must have its
+    /// own durable identity without changing Bob's existing ordinary-read keys.
+    #[test]
+    fn include_deleted_registration_encoding_and_identity() {
+        let ordinary = RegisterShapeOptions::default();
+        let options = RegisterShapeOptions {
+            read_view: ReadViewSpec {
+                include_deleted: true,
+                ..Default::default()
+            },
+            ..ordinary.clone()
+        };
+        let bytes = postcard::to_allocvec(&options).unwrap();
+        assert_eq!(hex::encode(&bytes), "02000100");
+        assert_eq!(
+            postcard::from_bytes::<RegisterShapeOptions>(&bytes).unwrap(),
+            options
+        );
+        assert_eq!(
+            hex::encode(canonical_register_shape_options_bytes(&ordinary)),
+            "4a52564b02020000"
+        );
+        assert_eq!(
+            hex::encode(canonical_register_shape_options_bytes(&options)),
+            "4a52564b0302000001"
+        );
+        assert_ne!(ordinary.read_view_key(), options.read_view_key());
+    }
+
+    #[test]
+    fn read_view_key_canonicalizes_snapshot_dot_set_order_and_duplicates() {
+        let dot_a = TxId::new(TxTime(7), NodeUuid::from_bytes([0x71; 16]));
+        let dot_b = TxId::new(TxTime(9), NodeUuid::from_bytes([0x72; 16]));
+        let snapshot = |dots| SnapshotRef {
+            owner: NodeUuid::from_bytes([0x70; 16]),
+            global_base: GlobalTime(5),
+            local_base: TxTime(6),
+            dots,
+        };
+        let options = |snapshot| RegisterShapeOptions {
+            read_view: ReadViewSpec {
+                include_deleted: false,
+                source: ReadViewSourceSpec::Snapshot { snapshot },
+            },
+            ..RegisterShapeOptions::default()
+        };
+
+        let ordered = options(snapshot(vec![dot_a, dot_b]));
+        let permuted_and_duplicated = options(snapshot(vec![dot_b, dot_a, dot_b, dot_a]));
+        let ordered_bytes = canonical_register_shape_options_bytes(&ordered);
+        let equivalent_bytes = canonical_register_shape_options_bytes(&permuted_and_duplicated);
+
+        assert_eq!(ordered_bytes, equivalent_bytes);
+        assert_eq!(
+            hex::encode(ordered_bytes),
+            "4a52564b02020002707070707070707070707070707070700500000000000000060000000000000002000000070000000000000071717171717171717171717171717171090000000000000072727272727272727272727272727272"
+        );
+        assert_eq!(
+            ordered.read_view_key(),
+            permuted_and_duplicated.read_view_key()
+        );
+        assert_eq!(
+            ordered.read_view_key().id,
+            uuid::uuid!("9496f8c9-194c-5a93-a3bd-43dbc82016f6")
+        );
+    }
+
+    /// Alice's row-member identity retains union and history discriminators.
+    /// This lower-layer test covers the serializable internal member wrapper;
+    /// peer delivery rejects result members rather than transmitting them.
+    #[test]
+    fn result_member_serialization_preserves_complete_occurrence() {
+        let root = ObjectId::from_uuid(uuid::Uuid::from_bytes([1; 16]));
+        let joined = ObjectId::from_uuid(uuid::Uuid::from_bytes([2; 16]));
+        for occurrence in [
+            OutputOccurrenceId::single_source(root),
+            OutputOccurrenceId::with_union_arms(root, [joined], [(0, "direct".to_owned())])
+                .unwrap(),
+            OutputOccurrenceId::history(root, TxTime(42), NodeUuid::from_bytes([3; 16])),
+        ] {
+            let member: ResultMemberEntry = RealRowMemberEntry::current_content((
+                jazz_types::Intern::new("todos".to_owned()),
+                RowUuid(*root.uuid()),
+                TxId::new(TxTime(1), NodeUuid::from_bytes([3; 16])),
+            ))
+            .with_occurrence_id(occurrence.clone())
+            .into();
+            assert!(matches!(&member, ResultMemberEntry::Row(_)));
+            let bytes = postcard::to_allocvec(&member).unwrap();
+            let decoded: ResultMemberEntry = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(decoded.output_occurrence_id(), Some(occurrence));
+        }
+    }
+
+    #[test]
+    fn row_member_postcard_golden_decodes() {
+        // The occurrence crosses as its ResultKey (main's encoding since the
+        // unified occurrence serialization).
+        const GOLDEN: &[u8] = &[
+            0, 1, 116, 16, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 26, 2, 1, 1, 1, 1, 1,
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 16, 3, 3, 3, 3, 3, 3,
+            3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0,
+        ];
+        let member = ResultMemberEntry::Row(RealRowMemberEntry::current_content((
+            jazz_types::Intern::new("t".to_owned()),
+            RowUuid::from_bytes([1; 16]),
+            TxId::new(TxTime(2), NodeUuid::from_bytes([3; 16])),
+        )));
+        assert_eq!(postcard::to_allocvec(&member).unwrap(), GOLDEN);
+        let decoded: ResultMemberEntry = postcard::from_bytes(GOLDEN).unwrap();
+        assert_eq!(decoded, member);
+    }
+
+    #[test]
+    fn version_record_ordering_distinguishes_authored_presence() {
+        let table = TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)]);
+        let base = VersionRecord::from_cells(
+            &table,
+            schema_id(1),
+            RowUuid::from_bytes([1; 16]),
+            AuthorSubject::system_at(NodeUuid::from_bytes([1; 16])),
+            1,
+            AuthorSubject::system_at(NodeUuid::from_bytes([1; 16])),
+            1,
+            &BTreeMap::from([("title".to_owned(), Value::String("x".to_owned()))]),
+            None,
+        )
+        .unwrap();
+        let authored = base
+            .clone()
+            .with_authored_columns(Some(BTreeSet::from(["title".to_owned()])));
+
+        assert_ne!(base, authored);
+        assert_ne!(base.cmp(&authored), Ordering::Equal);
+    }
+
+    /// Union cells (`UnionExtraCells`) on a Core image: a `NULL` cell and a
+    /// value both survive the wire, and admission (`validate_receipt`)
+    /// rejects entries out of `(schema, table)` order or repeated, a
+    /// non-nullable cell and a cell that is not an application column. A
+    /// commit unit, whose versions are authored writes, never carries them.
+    #[test]
+    fn union_cells_round_trip_and_admission_rejects_non_canonical_entries() {
+        let table = TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)]);
+        let image = VersionRecord::from_cells(
+            &table,
+            schema_id(2),
+            RowUuid::from_bytes([1; 16]),
+            AuthorSubject::system_at(NodeUuid::from_bytes([1; 16])),
+            1,
+            AuthorSubject::system_at(NodeUuid::from_bytes([1; 16])),
+            1,
+            &BTreeMap::from([("title".to_owned(), Value::String("a".to_owned()))]),
+            None,
+        )
+        .unwrap();
+        let nullable_text = ValueType::Nullable(Box::new(ValueType::String));
+        let cells = |fields: &[(&str, ValueType)], values: &[Value]| {
+            let descriptor = RecordDescriptor::new(
+                fields
+                    .iter()
+                    .map(|(name, value_type)| (*name, value_type.clone())),
+            );
+            OwnedRecord::new(descriptor.create(values).unwrap(), descriptor)
+        };
+        let legacy = |schema: u8, value: Option<&str>| {
+            UnionExtraCells::new(
+                schema_id(schema),
+                "todos",
+                cells(
+                    &[
+                        ("_app_legacy", nullable_text.clone()),
+                        ("_app_note", nullable_text.clone()),
+                    ],
+                    &[
+                        Value::Nullable(
+                            value.map(|value| Box::new(Value::String(value.to_owned()))),
+                        ),
+                        Value::Nullable(None),
+                    ],
+                ),
+            )
+        };
+
+        let union = image
+            .clone()
+            .with_extra_cells(vec![legacy(3, Some("x")), legacy(1, None)]);
+        union.validate_receipt().unwrap();
+        let decoded: VersionRecord =
+            postcard::from_bytes(&postcard::to_allocvec(&union).unwrap()).unwrap();
+        assert_eq!(decoded, union);
+        assert_eq!(decoded.extra_cells()[0].schema_version(), schema_id(1));
+        assert_eq!(
+            decoded.extra_cells()[0]
+                .record()
+                .borrowed()
+                .get_idx(0)
+                .unwrap(),
+            Value::Nullable(None),
+            "a NULL union cell stays NULL"
+        );
+        assert_eq!(
+            decoded.extra_cells()[1]
+                .record()
+                .borrowed()
+                .get_idx(0)
+                .unwrap(),
+            Value::Nullable(Some(Box::new(Value::String("x".to_owned()))))
+        );
+
+        let mut unordered = union.clone();
+        unordered.row.extras.reverse();
+        assert!(
+            unordered.validate_receipt().is_err(),
+            "entries out of order"
+        );
+        let mut repeated = union.clone();
+        repeated.row.extras = vec![legacy(1, None), legacy(1, Some("x"))];
+        assert!(repeated.validate_receipt().is_err(), "entry repeated");
+        let not_nullable = image.clone().with_extra_cells(vec![UnionExtraCells::new(
+            schema_id(1),
+            "todos",
+            cells(
+                &[("_app_legacy", ValueType::String)],
+                &[Value::String("x".to_owned())],
+            ),
+        )]);
+        assert!(
+            not_nullable.validate_receipt().is_err(),
+            "non-nullable cell"
+        );
+        let not_app = image.clone().with_extra_cells(vec![UnionExtraCells::new(
+            schema_id(1),
+            "todos",
+            cells(
+                &[("row_uuid", nullable_text.clone())],
+                &[Value::Nullable(None)],
+            ),
+        )]);
+        assert!(
+            not_app.validate_receipt().is_err(),
+            "not an application cell"
+        );
+
+        assert_eq!(
+            crate::protocol_limits::commit_unit_limit_violation(&[image]),
+            None
+        );
+        assert!(
+            crate::protocol_limits::commit_unit_limit_violation(&[union])
+                .is_some_and(|reason| reason.contains("carries union cells")),
+            "a commit unit carrying union cells is rejected"
+        );
+    }
+
+    /// A `VersionRecord` ends with `base` (two postcard options), then
+    /// `counter_signs` (a postcard byte string: varint length, raw bytes). An
+    /// image or a patch with no base and no negative counter op ends in
+    /// `[0, 0, 0]`; a patch whose first counter op is negative ends in
+    /// `[0, 0, 1, 0b1]`.
+    #[test]
+    fn version_record_ends_with_base_and_counter_signs_on_the_wire() {
+        let table = TableSchema::new("counters", [ColumnSchema::new("count", ColumnType::U8)]);
+        let image = VersionRecord::from_cells(
+            &table,
+            schema_id(1),
+            RowUuid::from_bytes([1; 16]),
+            AuthorSubject::system_at(NodeUuid::from_bytes([1; 16])),
+            1,
+            AuthorSubject::system_at(NodeUuid::from_bytes([1; 16])),
+            1,
+            &BTreeMap::from([("count".to_owned(), Value::U8(57))]),
+            None,
+        )
+        .unwrap()
+        .with_authored_columns(Some(BTreeSet::from(["count".to_owned()])));
+        let negative = image.clone().with_counter_signs(vec![0b1]);
+
+        let image_bytes = postcard::to_allocvec(&image).unwrap();
+        let negative_bytes = postcard::to_allocvec(&negative).unwrap();
+        // ... authored_columns, base (none, none), counter_signs.
+        assert_eq!(&image_bytes[image_bytes.len() - 3..], &[0, 0, 0]);
+        assert_eq!(&negative_bytes[negative_bytes.len() - 4..], &[0, 0, 1, 0b1]);
+        assert_eq!(
+            image_bytes[..image_bytes.len() - 1],
+            negative_bytes[..negative_bytes.len() - 2]
+        );
+        let decoded: VersionRecord = postcard::from_bytes(&negative_bytes).unwrap();
+        assert_eq!(decoded.counter_signs(), &[0b1]);
+        assert_eq!(decoded, negative);
+        assert_ne!(image.cmp(&negative), Ordering::Equal);
+
+        // A base is `Some(seq)` (tag 1, varint) then `Some(tx id)` (tag 1,
+        // varint time, the node uuid as a 16-byte string).
+        let based = image.clone().with_base(RowBase {
+            seq: Some(GlobalTime(5)),
+            pending: Some(TxId::new(TxTime(7), NodeUuid::from_bytes([2; 16]))),
+        });
+        let based_bytes = postcard::to_allocvec(&based).unwrap();
+        let mut tail = vec![1, 5, 1, 7, 16];
+        tail.extend([2; 16]);
+        tail.push(0);
+        assert_eq!(&based_bytes[based_bytes.len() - tail.len()..], &tail[..]);
+        assert_eq!(
+            image_bytes[..image_bytes.len() - 3],
+            based_bytes[..based_bytes.len() - tail.len()]
+        );
+        let decoded: VersionRecord = postcard::from_bytes(&based_bytes).unwrap();
+        assert_eq!(decoded, based);
+        assert_eq!(decoded.base().seq, Some(GlobalTime(5)));
+    }
+
+    fn sample_lens() -> MigrationLens {
+        MigrationLens::new(
+            schema_id(1),
+            schema_id(2),
+            vec![TableLens {
+                source_table: "todos".to_owned(),
+                target_table: "tasks".to_owned(),
+                ops: vec![
+                    LensOp::RenameTable {
+                        from: "todos".to_owned(),
+                        to: "tasks".to_owned(),
+                    },
+                    LensOp::RenameColumn {
+                        from: "title".to_owned(),
+                        to: "name".to_owned(),
+                    },
+                    LensOp::AddColumn {
+                        column: "status".to_owned(),
+                        default: Value::String("open".to_owned()),
+                    },
+                ],
+            }],
+        )
+        .expect("valid migration lens")
+    }
+
+    #[test]
+    fn migration_lens_content_id_uses_canonical_payload_not_id_field() {
+        let lens = sample_lens();
+        let mut same_payload = lens.clone();
+        same_payload.id = MigrationLensId::from_bytes([0x99; 16]);
+
+        assert_eq!(lens.content_id(), same_payload.content_id());
+    }
+
+    #[test]
+    fn migration_lens_content_id_changes_when_structural_field_changes() {
+        let lens = sample_lens();
+        let mut changed = lens.clone();
+        changed.table_lenses[0].ops[2] = LensOp::AddColumn {
+            column: "status".to_owned(),
+            default: Value::String("closed".to_owned()),
+        };
+
+        assert_ne!(lens.content_id(), changed.content_id());
+    }
+
+    // Moved from query::relation_codec's tests: a shape carries the same
+    // typed relation Postcard as a query, with the same depth guard.
+    #[test]
+    fn shape_carries_relation_postcard_with_the_query_depth_guard() {
+        use crate::query::{
+            MAX_RELATION_DEPTH, RelationCmpOp, RelationColumnRef, RelationExpr, RelationPredicate,
+            RelationQuery, RelationValueRef,
+        };
+
+        let table_scan = [0, 1, b't', 0];
+        let mut relation = vec![1; MAX_RELATION_DEPTH + 1];
+        relation.extend([0, 1, b't', 0]);
+        relation.extend(std::iter::repeat_n(9, MAX_RELATION_DEPTH + 1));
+        let shape = crate::protocol::ShapeAst::new_relation(
+            RelationQuery {
+                rel: RelationExpr::TableScan {
+                    table: "t".into(),
+                    alias: None,
+                },
+            },
+            crate::ids::SchemaVersionId(uuid::Uuid::nil()),
+        );
+        let mut shape_bytes = postcard::to_allocvec(&shape).unwrap();
+        assert!(shape_bytes.ends_with(&table_scan));
+        shape_bytes.truncate(shape_bytes.len() - table_scan.len());
+        shape_bytes.extend(&relation);
+        assert!(
+            std::panic::catch_unwind(|| postcard::from_bytes::<crate::protocol::ShapeAst>(
+                &shape_bytes
+            ))
+            .is_ok()
+        );
+        assert!(postcard::from_bytes::<crate::protocol::ShapeAst>(&shape_bytes).is_err());
+        let valid_shape_bytes = postcard::to_allocvec(&shape).unwrap();
+        assert_eq!(
+            crate::postcard_exact::decode_postcard_exact::<crate::protocol::ShapeAst>(
+                &valid_shape_bytes
+            )
+            .unwrap(),
+            shape
+        );
+
+        let relation = RelationQuery {
+            rel: RelationExpr::Filter {
+                input: Box::new(RelationExpr::TableScan {
+                    table: "rows".into(),
+                    alias: None,
+                }),
+                predicate: RelationPredicate::Cmp {
+                    left: RelationColumnRef {
+                        scope: None,
+                        column: "value".into(),
+                    },
+                    op: RelationCmpOp::Eq,
+                    right: RelationValueRef::Literal(serde_json::json!(1.5)),
+                },
+            },
+        };
+        let shape = crate::protocol::ShapeAst::new_relation(
+            relation,
+            crate::ids::SchemaVersionId(uuid::Uuid::nil()),
+        );
+        let shape_bytes = postcard::to_allocvec(&shape).unwrap();
+        assert_eq!(
+            postcard::from_bytes::<crate::protocol::ShapeAst>(&shape_bytes).unwrap(),
+            shape
+        );
+    }
+}
+#[cfg(any(test, feature = "testing"))]
+#[doc(hidden)]
+pub mod supporting_set_test_oracle;
+
+// Durable record-field encodings for these types. They live beside the types
+// so the impls stay coherent once this layer is its own crate.
+jazz_types::impl_record_field_enum!(ResultRowLayer {
+    ResultRowLayer::Content = 0,
+    ResultRowLayer::Deletion = 1,
+    ResultRowLayer::ContentOrDeletion = 2,
+});

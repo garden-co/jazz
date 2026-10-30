@@ -12,13 +12,23 @@ import { GenericQueryBuilder } from "../../utility/generic-query-builder.js";
 const issuer = "https://inspector-save.test";
 const userId = "editor";
 const permittedOwner = "00000000-0000-4000-8000-000000000001";
-const inspectorSaveApp = s.defineApp({
-  todos: s.table({
-    title: s.string(),
-    owner_id: s.uuid(),
-    rank: s.bigint().optional(),
-  }),
-});
+const inspectorSaveApp = s.defineApp(
+  {
+    todos: s.table(
+      {
+        title: s.string(),
+        owner_id: s.uuid(),
+        rank: s.bigint().optional(),
+        largeCounts: s.array(s.bigint()).optional(),
+        textNumber: s.string().optional().default("restored-default"),
+        jsonNumber: s.json().optional(),
+        payload: s.bytes().optional(),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 const inspectorSavePermissions = s.definePermissions(inspectorSaveApp, ({ policy, session }) => {
   policy.todos.allowRead.where({ owner_id: session.user.account });
   policy.todos.allowInsert.where({ owner_id: session.user.account });
@@ -26,8 +36,34 @@ const inspectorSavePermissions = s.definePermissions(inspectorSaveApp, ({ policy
   policy.todos.allowDelete.where({ owner_id: session.user.account });
 });
 
+// Keep the BYTEA regression independent of unrelated nullable JSON semantics
+// tracked in #2733, while exercising the complete grid query against a real Db.
+const inspectorByteaApp = s.defineApp(
+  {
+    todos: s.table(
+      {
+        title: s.string(),
+        owner_id: s.uuid(),
+        payload: s.bytes().optional(),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
+const inspectorByteaPermissions = s.definePermissions(inspectorByteaApp, ({ policy, session }) => {
+  policy.todos.allowRead.where({ owner_id: session.user.account });
+  policy.todos.allowInsert.where({ owner_id: session.user.account });
+});
+
+let currentSchema = inspectorSaveApp.wasmSchema;
+let latestQuery: GenericQueryBuilder | null = null;
+
 vi.mock("jazz-tools/react", () => ({
-  useAll: () => ({ data: [], isLoading: false, error: null }),
+  useAll: (query: GenericQueryBuilder) => {
+    latestQuery = query;
+    return { data: [], isLoading: false, error: null };
+  },
   useDb: () => {
     if (!currentDb) throw new Error("Inspector integration Db is not initialized");
     return currentDb;
@@ -38,7 +74,7 @@ let currentDb: Db | null = null;
 
 vi.mock("../../contexts/devtools-context.js", () => ({
   useDevtoolsContext: () => ({
-    wasmSchema: inspectorSaveApp.wasmSchema,
+    wasmSchema: currentSchema,
     runtime: "standalone",
   }),
 }));
@@ -95,7 +131,7 @@ function instrumentDb(db: Db, interruptFirstConfirmation = false): InstrumentedD
 
     if (!interruptFirstConfirmation) return result;
     const realWait = result.wait.bind(result);
-    // Fault only after the real edge receipt resolves: the runtime has committed,
+    // Fault only after the real server receipt resolves: the runtime has committed,
     // but the Inspector observes the same ambiguity as a lost confirmation.
     return new Proxy(result, {
       get(target, property) {
@@ -151,8 +187,12 @@ function editStagedTextColumn(columnIndex: number, label: string, value: string)
   fireEvent.blur(editor);
 }
 
-async function createInspectorDb(): Promise<{ app: PolicyTestApp; db: Db }> {
-  const app = await createPolicyTestApp(inspectorSaveApp, inspectorSavePermissions, expect);
+async function createInspectorDb(
+  appSchema: Parameters<typeof createPolicyTestApp>[0] = inspectorSaveApp,
+  permissions: Parameters<typeof createPolicyTestApp>[1] = inspectorSavePermissions,
+): Promise<{ app: PolicyTestApp; db: Db }> {
+  const app = await createPolicyTestApp(appSchema, permissions, expect);
+  currentSchema = appSchema.wasmSchema;
   const db = app.as({
     issuer,
     user_id: userId,
@@ -168,7 +208,9 @@ describe("TableDataGrid real Db save retries", () => {
 
   afterEach(async () => {
     cleanup();
+    latestQuery = null;
     currentDb = null;
+    currentSchema = inspectorSaveApp.wasmSchema;
     await policyApp?.shutdown();
     policyApp = null;
   });
@@ -195,7 +237,7 @@ describe("TableDataGrid real Db save retries", () => {
       { timeout: 10_000 },
     );
     await expect(
-      setup.db.all(inspectorSaveApp.todos.where({ title: "committed once" }), { tier: "edge" }),
+      setup.db.all(inspectorSaveApp.todos.where({ title: "committed once" }), { tier: "remote" }),
     ).resolves.toEqual([
       expect.objectContaining({
         id: instrumented.insertIds[0],
@@ -224,7 +266,7 @@ describe("TableDataGrid real Db save retries", () => {
 
     await expect(
       setup.db.all(inspectorSaveApp.todos.where({ title: "updated after ambiguity" }), {
-        tier: "edge",
+        tier: "remote",
       }),
     ).resolves.toEqual([
       expect.objectContaining({
@@ -281,7 +323,7 @@ describe("TableDataGrid real Db save retries", () => {
     );
 
     await expect(
-      setup.db.all(inspectorSaveApp.todos.where({ id: insertedId }), { tier: "edge" }),
+      setup.db.all(inspectorSaveApp.todos.where({ id: insertedId }), { tier: "remote" }),
     ).resolves.toEqual([]);
     expect(instrumented.transactionCount()).toBe(2);
     expect(instrumented.insertIds).toEqual([insertedId]);
@@ -325,12 +367,67 @@ describe("TableDataGrid real Db save retries", () => {
     expect(instrumented.transactionCount()).toBe(2);
     expect(instrumented.insertIds).toEqual([expect.any(String), instrumented.insertIds[0]]);
     await expect(
-      setup.db.all(inspectorSaveApp.todos.where({ title: "retry same row" }), { tier: "edge" }),
+      setup.db.all(inspectorSaveApp.todos.where({ title: "retry same row" }), { tier: "remote" }),
     ).resolves.toEqual([
       expect.objectContaining({
         id: instrumented.insertIds[0],
         title: "retry same row",
         owner_id: permittedOwner,
+      }),
+    ]);
+  }, 30_000);
+
+  it("persists an explicitly selected NULL over a non-null default through the real Db", async () => {
+    const setup = await createInspectorDb();
+    policyApp = setup.app;
+    currentDb = setup.db;
+    renderGrid();
+
+    fireEvent.click(screen.getByRole("button", { name: "Insert row" }));
+    editStagedTextColumn(1, "title", "explicit-null");
+    editStagedTextColumn(2, "owner_id", permittedOwner);
+    const stagedRow = screen.getByText("staged").closest('[role="row"], tr');
+    expect(stagedRow).not.toBeNull();
+    const cells = within(stagedRow as HTMLElement).getAllByRole("gridcell");
+    fireEvent.doubleClick(cells[5]!);
+    fireEvent.click(screen.getByRole("button", { name: "Set textNumber to NULL" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(async () => {
+      const rows = await setup.db.all(inspectorSaveApp.todos.where({ title: "explicit-null" }), {
+        tier: "remote",
+      });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.textNumber).toBeNull();
+    });
+  }, 30_000);
+
+  it("uses the schema default when a staged insert leaves textNumber untouched", async () => {
+    const setup = await createInspectorDb();
+    policyApp = setup.app;
+    currentDb = setup.db;
+    renderGrid();
+
+    fireEvent.click(screen.getByRole("button", { name: "Insert row" }));
+    editStagedTextColumn(1, "title", "untouched-default");
+    editStagedTextColumn(2, "owner_id", permittedOwner);
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(
+      () => {
+        expect(screen.queryByRole("button", { name: "Save changes" })).toBeNull();
+      },
+      { timeout: 10_000 },
+    );
+    await expect(
+      setup.db.all(inspectorSaveApp.todos.where({ title: "untouched-default" }), {
+        tier: "remote",
+      }),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        title: "untouched-default",
+        owner_id: permittedOwner,
+        textNumber: "restored-default",
       }),
     ]);
   }, 30_000);
@@ -356,12 +453,51 @@ describe("TableDataGrid real Db save retries", () => {
       { timeout: 10_000 },
     );
 
-    await expect(setup.db.all(inspectorSaveApp.todos, { tier: "edge" })).resolves.toEqual(
+    await expect(setup.db.all(inspectorSaveApp.todos, { tier: "remote" })).resolves.toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           title: "exact bigint",
           owner_id: permittedOwner,
           rank: exactValue,
+        }),
+      ]),
+    );
+  }, 30_000);
+  it("round-trips nested BigInts while preserving decimal strings in Text", async () => {
+    const setup = await createInspectorDb();
+    policyApp = setup.app;
+    const instrumented = instrumentDb(setup.db);
+    currentDb = instrumented.db;
+    const exactValues = [-(1n << 63n), 9007199254740993n];
+    const decimalString = "9007199254740993";
+    renderGrid();
+
+    fireEvent.click(screen.getByRole("button", { name: "Insert row" }));
+    editStagedTextColumn(1, "title", "nested bigint");
+    editStagedTextColumn(2, "owner_id", permittedOwner);
+    editStagedTextColumn(
+      4,
+      "largeCounts",
+      JSON.stringify(exactValues, (_, value) =>
+        typeof value === "bigint" ? value.toString() : value,
+      ),
+    );
+    editStagedTextColumn(5, "textNumber", decimalString);
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(
+      () => {
+        expect(screen.queryByRole("button", { name: "Save changes" })).toBeNull();
+      },
+      { timeout: 10_000 },
+    );
+    await expect(setup.db.all(inspectorSaveApp.todos, { tier: "remote" })).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          title: "nested bigint",
+          owner_id: permittedOwner,
+          largeCounts: exactValues,
+          textNumber: decimalString,
         }),
       ]),
     );
@@ -377,14 +513,14 @@ describe("TableDataGrid real Db save retries", () => {
         owner_id: permittedOwner,
         rank: exactValue,
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
     await setup.db
       .insert(inspectorSaveApp.todos, {
         title: "nearby rank",
         owner_id: permittedOwner,
         rank: exactValue - 1n,
       })
-      .wait({ tier: "edge" });
+      .wait({ tier: "global" });
 
     const filters = JSON.stringify([
       { id: "hydrated-rank", column: "rank", operator: "eq", value: String(exactValue) },
@@ -400,13 +536,63 @@ describe("TableDataGrid real Db save retries", () => {
     const query = new GenericQueryBuilder("todos", inspectorSaveApp.wasmSchema).where({
       [hydratedFilter.column]: hydratedFilter.value,
     });
-    const rows = await setup.db.all(query, { tier: "edge" });
+    const rows = await setup.db.all(query, { tier: "remote" });
 
     expect(rows).toEqual([
       expect.objectContaining({
         title: "exact rank",
         owner_id: permittedOwner,
         rank: exactValue,
+      }),
+    ]);
+  }, 30_000);
+  it("round-trips a BYTEA equality filter through the grid URL and query runtime", async () => {
+    const setup = await createInspectorDb(inspectorByteaApp, inspectorByteaPermissions);
+    policyApp = setup.app;
+    const exactPayload = new Uint8Array([0, 255]);
+    await setup.db
+      .insert(inspectorByteaApp.todos, {
+        title: "exact payload",
+        owner_id: permittedOwner,
+        payload: exactPayload,
+      })
+      .wait({ tier: "global" });
+    await setup.db
+      .insert(inspectorByteaApp.todos, {
+        title: "nearby payload",
+        owner_id: permittedOwner,
+        payload: new Uint8Array([0, 254]),
+      })
+      .wait({ tier: "global" });
+
+    currentDb = setup.db;
+    renderGrid();
+
+    fireEvent.change(screen.getByLabelText("Column"), { target: { value: "payload" } });
+    fireEvent.change(screen.getByLabelText("Operator"), { target: { value: "eq" } });
+    fireEvent.change(screen.getByLabelText("Value"), { target: { value: "0, 255" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add where clause" }));
+
+    await waitFor(() => {
+      const query = latestQuery;
+      if (!query) throw new Error("TableDataGrid did not issue a query");
+      expect(JSON.parse(query._build())).toMatchObject({
+        conditions: [{ column: "payload", op: "eq", value: [0, 255] }],
+        select: ["*", "$createdAt", "$createdBy", "$updatedAt", "$updatedBy"],
+        orderBy: [["id", "asc"]],
+        limit: 26,
+        offset: 0,
+      });
+    });
+
+    const query = latestQuery;
+    if (!query) throw new Error("TableDataGrid did not issue a query");
+    const rows = await setup.db.all(query, { tier: "remote" });
+    expect(rows).toEqual([
+      expect.objectContaining({
+        title: "exact payload",
+        owner_id: permittedOwner,
+        payload: exactPayload,
       }),
     ]);
   }, 30_000);

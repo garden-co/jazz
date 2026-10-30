@@ -137,7 +137,7 @@ export function proveForegroundWriteAbi(
   const foreground = factory.openAttached(capability);
   const execute = (command: NativeForegroundCommand): NativeForegroundResponse =>
     codec.decode(foreground.execute(codec.encode(command)));
-  const requireTransaction = (kind: "mergeable" | "exclusive") => {
+  const requireTransaction = (kind: "mergeable" | "serializable") => {
     const response = execute({ type: "beginTransaction", kind });
     if (response.type !== "transactionOpened")
       throw new Error(`${kind} foreground transaction did not open`);
@@ -185,7 +185,7 @@ export function proveForegroundWriteAbi(
   if (retired.type !== "operationError")
     throw new Error("foreground accepted a terminal transaction handle");
 
-  const exclusive = requireTransaction("exclusive");
+  const exclusive = requireTransaction("serializable");
   const rollbackRowId = Uint8Array.from({ length: 16 }, () => 0x72);
   const rollbackInsert = execute({
     type: "insert",
@@ -366,7 +366,7 @@ export async function proveSameJsiRuntimeWriteSubscription(
           nativeSubscriptionDeltaHasFieldBytes(
             event.delta,
             "title",
-            Uint8Array.from([2, ...new TextEncoder().encode("subscription from foreground A")]),
+            Uint8Array.from([0, ...new TextEncoder().encode("subscription from foreground A")]),
           ),
         )
       ) {
@@ -767,15 +767,15 @@ function fixtureCells(
 ): Uint8Array {
   const bytes = {
     mergeable: [
-      1, 1, 5, 116, 105, 116, 108, 101, 8, 10, 2, 109, 101, 114, 103, 101, 97, 98, 108, 101,
+      1, 1, 5, 116, 105, 116, 108, 101, 8, 10, 0, 109, 101, 114, 103, 101, 97, 98, 108, 101,
     ],
-    updated: [1, 1, 5, 116, 105, 116, 108, 101, 8, 8, 2, 117, 112, 100, 97, 116, 101, 100],
-    upserted: [1, 1, 5, 116, 105, 116, 108, 101, 8, 9, 2, 117, 112, 115, 101, 114, 116, 101, 100],
+    updated: [1, 1, 5, 116, 105, 116, 108, 101, 8, 8, 0, 117, 112, 100, 97, 116, 101, 100],
+    upserted: [1, 1, 5, 116, 105, 116, 108, 101, 8, 9, 0, 117, 112, 115, 101, 114, 116, 101, 100],
     "rolled back": [
-      1, 1, 5, 116, 105, 116, 108, 101, 8, 12, 2, 114, 111, 108, 108, 101, 100, 32, 98, 97, 99, 107,
+      1, 1, 5, 116, 105, 116, 108, 101, 8, 12, 0, 114, 111, 108, 108, 101, 100, 32, 98, 97, 99, 107,
     ],
     "subscription from foreground A": [
-      1, 1, 5, 116, 105, 116, 108, 101, 8, 30, 2, 102, 111, 114, 101, 103, 114, 111, 117, 110, 100,
+      1, 1, 5, 116, 105, 116, 108, 101, 8, 30, 0, 102, 111, 114, 101, 103, 114, 111, 117, 110, 100,
       45, 97, 45, 115, 117, 98, 115, 99, 114, 105, 112, 116, 105, 111, 110, 45, 114, 111, 119,
     ],
   } as const;

@@ -4,7 +4,11 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Todo App - Jazz React Client</title>
+    <meta name="color-scheme" content="light dark" />
     <style>
+      :root {
+        color-scheme: light dark;
+      }
       body {
         font-family: system-ui;
         max-width: 600px;
@@ -26,7 +30,7 @@
         cursor: pointer;
       }
       small {
-        color: #666;
+        color: light-dark(#666, #9aa0a6);
       }
       form {
         margin-bottom: 1rem;

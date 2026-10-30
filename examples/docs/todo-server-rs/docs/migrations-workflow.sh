@@ -7,5 +7,5 @@
 npx jazz-tools@alpha migrations create <appId> --fromHash <fromHash> --toHash <toHash>
 
 # 3) Fill in migrate, rename the file, then publish the reviewed edge.
-npx jazz-tools@alpha migrations push <appId> <fromHash> <toHash>
+npx jazz-tools@alpha deploy <appId>
 # #endregion migrations-workflow-rust

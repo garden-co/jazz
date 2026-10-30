@@ -4,12 +4,19 @@ import type { JWK } from "jose";
 import type { WasmSchema } from "../drivers/types.js";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { CompiledPermissions } from "../permissions/index.js";
-import { JazzClient, type RequestLike, type Runtime } from "../runtime/client.js";
+import {
+  JazzClient,
+  type MutationErrorEvent,
+  type RequestLike,
+  type Runtime,
+} from "../runtime/client.js";
 import type { AppContext, Session } from "../runtime/context.js";
 import { RuntimeSource, type RuntimeClientContext } from "../runtime/runtime-source.js";
 import { Db, type DbConfig } from "../runtime/db.js";
 import { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
-import { SYSTEM_READ_SESSION } from "../runtime/system-identity.js";
+import { randomNodeUuidBytes } from "../runtime/runtime-entropy.js";
+import { shippedMigrations, type ClientMigrations } from "../runtime/client-migrations.js";
+import { DbAccessContext } from "../runtime/db-access-context.js";
 import { canonicalAuthorSubject, withCanonicalUser } from "../runtime/author-id.js";
 import { authorBytesForSession } from "../runtime/author-id.js";
 import type { AuthState } from "../runtime/auth-state.js";
@@ -25,6 +32,8 @@ import {
   verifiedLocalFirstRequestProof,
   type BackendRequestOptions,
 } from "./request-auth.js";
+import { deterministicBytes } from "../runtime/deterministic-bytes.js";
+import { resolveAllowLocalFirstAuth } from "./local-first-auth.js";
 
 export type BackendSchemaSource = WasmSchemaSource;
 export type BackendQuerySchemaSource = QuerySchemaSource;
@@ -34,7 +43,7 @@ export type BackendJwtPublicKey = JWK | string;
 export type BackendDriver =
   | {
       type: "persistent";
-      /** Path to the Fjall file used by the server runtime. */
+      /** Directory of the server runtime's SQLite store. */
       dataPath: string;
     }
   | {
@@ -53,11 +62,9 @@ type BackendContextSchemaConfig =
       permissions?: undefined;
     };
 
-export type BackendContextConfig = Omit<AppContext, "schema" | "driver" | "clientId" | "tier"> & {
+export type BackendContextConfig = Omit<AppContext, "schema" | "driver"> & {
   /** Server runtime driver mode and storage location. */
   driver: BackendDriver;
-  /** Optional node durability tier identity. */
-  tier?: "local" | "edge" | "global";
   /**
    * Direct JWKS endpoint used to verify external bearer JWTs in `forRequest()`.
    * Requires HTTPS, except development HTTP whose WHATWG-canonical hostname is
@@ -73,7 +80,14 @@ export type BackendContextConfig = Omit<AppContext, "schema" | "driver" | "clien
   jwtIssuer?: string;
   /** Required audience, or audiences, for external bearer JWTs accepted by `forRequest()`. */
   jwtAudience?: string | readonly string[];
-  /** Whether local-first bearer JWTs are accepted in `forRequest()`. Defaults to `true`. */
+  /**
+   * Whether request verification accepts local-first bearer JWTs, including in
+   * `forRequest()` and `withAttributionForRequest()`. Defaults to `false` when
+   * `NODE_ENV` is `production` (case-insensitive), and `true` otherwise.
+   * Explicit `true` or `false` overrides the default. The sync server must also
+   * accept the token and verify its account. This does not control whether the
+   * backend can create local-first accounts.
+   */
   allowLocalFirstAuth?: boolean;
 } & BackendContextSchemaConfig;
 
@@ -81,16 +95,26 @@ type ResolvedBackendContextConfig = BackendContextConfig & {
   allowLocalFirstAuth: boolean;
 };
 
-/** @internal A memory handle retains its node clock across failed-transition reopen. */
+/**
+ * @internal A memory handle retains its node, and that node's clock, across
+ * failed-transition reopen: its runtimes reuse one pooled node rather than
+ * minting a new one per open.
+ */
 export interface BackendNodeClock {
+  /** The pooled node, a random version-4 UUID. */
+  node: Uint8Array;
   initialHighWater?: bigint;
   closed(highWater: bigint): void;
 }
 
 type FlushableRuntime = Runtime & { flush?: () => void };
 
-function schemaHasNativePolicies(schema: WasmSchema): boolean {
-  return Object.values(schema).some((table) => table.policies !== undefined);
+/** Pre-listener mutation errors a backend context retains for its first listener. */
+export const MAX_PENDING_MUTATION_ERROR_EVENTS = 256;
+
+interface BackendMutationErrorSink {
+  hasMutationErrorListeners(): boolean;
+  deliverMutationError(event: MutationErrorEvent): void;
 }
 
 class BackendRuntimeSource extends RuntimeSource<DbConfig> {
@@ -108,6 +132,22 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
   private shutdownState: "open" | "closing" | "closed" = "open";
   private shutdownPromise?: Promise<void>;
   private gracefulWait?: object;
+  /**
+   * Every backend `Db` facade shares this source's single runtime, so its
+   * mutation errors belong to the source rather than to whichever facade
+   * happened to be created last. The source holds facades only weakly: a
+   * per-request `Db` that is dropped takes its listeners (and whatever they
+   * capture) with it, instead of living as long as the context.
+   */
+  private readonly mutationErrorSinks = new Set<WeakRef<BackendMutationErrorSink>>();
+  /**
+   * Rejections that arrive while no facade has a listener (for example,
+   * persisted in-flight writes settled during startup replay). They drain to
+   * whichever facade registers a listener first. Bounded: beyond the cap, the
+   * events are still logged as unhandled but only counted, not retained.
+   */
+  private readonly pendingMutationErrorEvents: MutationErrorEvent[] = [];
+  private droppedMutationErrorEvents = 0;
 
   constructor(
     private readonly config: ResolvedBackendContextConfig,
@@ -149,11 +189,11 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
   override createClient({
     config,
     schema,
+    migrations,
     onAuthFailure,
   }: RuntimeClientContext<DbConfig>): JazzClient {
     this.assertOpen();
-    const hasSeparatePermissionsBundle =
-      this.config.permissions !== undefined && !schemaHasNativePolicies(schema);
+    const hasSeparatePermissionsBundle = this.config.permissions !== undefined;
     const schemaJson = serializeRuntimeSchema(schema, {
       loadedPolicyBundle: hasSeparatePermissionsBundle,
     });
@@ -168,26 +208,36 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
     }
 
     this.initializedSchemaJson = schemaJson;
-    const nodeTier = this.config.tier ?? "edge";
     const env = this.config.env ?? "dev";
+    // SYSTEM provenance names this stable node. A persistent store keeps its
+    // transaction counter, so it writes as that node too. A memory store
+    // starts its counter over on every open, so it writes as a random node:
+    // its handle's pooled one (with that node's clock), or else a fresh one
+    // (transaction ids are `seq@node`).
+    const systemNode =
+      this.nodeIdentity ??
+      deterministicBytes(`${this.config.appId}:${env}:${this.nodeIdentityScope}:node`);
+    const persistent = this.config.driver.type === "persistent";
     this.runtime = new NativeRuntimeAdapter(
       NapiDb,
       schema,
-      this.nodeIdentity ??
-        deterministicBytes(`${this.config.appId}:${env}:${this.nodeIdentityScope}:node`),
+      persistent ? systemNode : (this.nodeClock?.node.slice() ?? randomNodeUuidBytes()),
       authorBytesForSession({ issuer: "https://jazz.invalid", user_id: "backend-open" }),
       1,
       true,
-      this.config.driver.type === "persistent"
-        ? {
-            persistentPath: this.config.driver.dataPath,
-            readAuthorizationHost: "trusted-serving",
-            backendMode: true,
-          }
-        : {
-            readAuthorizationHost: "trusted-serving",
-            backendMode: true,
-          },
+      {
+        ...(this.config.driver.type === "persistent"
+          ? { persistentPath: this.config.driver.dataPath }
+          : {}),
+        readAuthorizationHost: "trusted-serving",
+        backendMode: true,
+        systemNode,
+        slowQueryLog: {
+          appId: this.config.appId,
+          thresholdMs: this.config.slowQueryThresholdMs,
+        },
+        migrations,
+      },
     );
 
     if (this.nodeClock?.initialHighWater !== undefined) {
@@ -206,13 +256,54 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
         backendSecret: this.config.backendSecret,
         adminSecret: config.adminSecret,
         cookieSession: config.cookieSession,
-        tier: nodeTier,
-        defaultDurabilityTier:
-          this.config.defaultDurabilityTier ?? (config.serverUrl ? nodeTier : undefined),
       },
       { onAuthFailure },
     );
+    this.client.onMutationError((event) => this.handleMutationError(event));
     return this.client;
+  }
+
+  /**
+   * @internal Register a facade that now has mutation-error listeners and
+   * hand it any rejections that arrived while nobody was listening.
+   */
+  attachMutationErrorSink(sink: WeakRef<BackendMutationErrorSink>): void {
+    this.mutationErrorSinks.add(sink);
+    const target = sink.deref();
+    if (!target) return;
+    const dropped = this.droppedMutationErrorEvents;
+    this.droppedMutationErrorEvents = 0;
+    const pending = this.pendingMutationErrorEvents.splice(0);
+    if (dropped > 0) {
+      console.error(
+        `Jazz dropped ${dropped} unhandled mutation error(s) that arrived before a listener was attached; each was logged when it arrived.`,
+      );
+    }
+    for (const event of pending) target.deliverMutationError(event);
+  }
+
+  /** @internal A facade whose last listener was removed, or that shut down. */
+  detachMutationErrorSink(sink: WeakRef<BackendMutationErrorSink>): void {
+    this.mutationErrorSinks.delete(sink);
+  }
+
+  private handleMutationError(event: MutationErrorEvent): void {
+    const targets: BackendMutationErrorSink[] = [];
+    for (const sink of this.mutationErrorSinks) {
+      const target = sink.deref();
+      if (target?.hasMutationErrorListeners()) targets.push(target);
+      else this.mutationErrorSinks.delete(sink);
+    }
+    if (targets.length === 0) {
+      console.error("Unhandled Jazz mutation error", event);
+      if (this.pendingMutationErrorEvents.length < MAX_PENDING_MUTATION_ERROR_EVENTS) {
+        this.pendingMutationErrorEvents.push(event);
+      } else {
+        this.droppedMutationErrorEvents += 1;
+      }
+      return;
+    }
+    for (const target of targets) target.deliverMutationError(event);
   }
 
   override async waitForPendingWrites(signal?: AbortSignal): Promise<void> {
@@ -262,6 +353,9 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
         signal.removeEventListener("abort", onAbort);
       }
       this.explicitOfflineListeners.clear();
+      this.mutationErrorSinks.clear();
+      this.pendingMutationErrorEvents.length = 0;
+      this.droppedMutationErrorEvents = 0;
     });
     this.shutdownPromise = shutdown;
     // A failed native close may have partially torn down the runtime. Keep
@@ -382,17 +476,13 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
   }
 }
 
-class BackendDb extends Db {
+class BackendDb extends Db implements BackendMutationErrorSink {
   constructor(
     config: DbConfig,
     private readonly coreSource: BackendRuntimeSource,
     private readonly client: JazzClient,
     private readonly runtimeSchema: WasmSchema,
-    private readonly operationContext: {
-      session?: Session;
-      attribution?: string;
-      readSession?: Session;
-    } | null,
+    private readonly accessContext: DbAccessContext | null,
     scopedAuthState?: AuthState,
   ) {
     super(
@@ -407,12 +497,8 @@ class BackendDb extends Db {
     );
   }
 
-  protected override getRuntimeOperationContext(): {
-    session?: Session;
-    attribution?: string;
-    readSession?: Session;
-  } | null {
-    return this.operationContext;
+  protected override getAccessContext(): DbAccessContext | null {
+    return this.accessContext;
   }
 
   protected override getClient(_schema: WasmSchema): JazzClient {
@@ -426,20 +512,62 @@ class BackendDb extends Db {
     this.assertOpen();
     return this.client;
   }
-}
 
-export function deterministicBytes(seed: string): Uint8Array {
-  let hash = 0x811c9dc5;
-  const bytes = new Uint8Array(16);
-  const view = new DataView(bytes.buffer);
-  for (let round = 0; round < 4; round += 1) {
-    for (let i = 0; i < seed.length; i += 1) {
-      hash ^= seed.charCodeAt(i) + round;
-      hash = Math.imul(hash, 0x01000193);
+  private readonly backendMutationErrorListeners = new Set<(event: MutationErrorEvent) => void>();
+  private mutationErrorSinkRef: WeakRef<BackendMutationErrorSink> | undefined;
+
+  /**
+   * Attach a fallback listener for write rejections that are not handled by an
+   * active {@link WriteHandle.wait} call.
+   *
+   * On a backend context this is **context-wide**: every `Db` from the same
+   * context (`db()`, `asBackend()`, `forRequest()`, `forSession()`, ...)
+   * shares one runtime, so a listener sees rejections of writes made through
+   * any of them, for any session. A per-request handler must match events
+   * against its own transaction ids. Rejections that arrived before any
+   * listener existed (such as in-flight writes settled during startup replay)
+   * drain to whichever `Db` registers a listener first.
+   *
+   * The context holds this `Db` only weakly, so its listeners are released
+   * when the `Db` is dropped, when it shuts down, or via the returned callback.
+   * `context.db()` returns a new `Db` on each call, so keep a reference to the
+   * `Db` you register on (for example a long-lived `const db = context.db()`);
+   * a listener on a `Db` you don't keep stops firing once it is collected.
+   *
+   * @returns an unsubscribe callback
+   */
+  override onMutationError(listener: (event: MutationErrorEvent) => void): () => void {
+    this.assertOpen();
+    const first = this.backendMutationErrorListeners.size === 0;
+    this.backendMutationErrorListeners.add(listener);
+    if (first) {
+      if (!this.mutationErrorSinkRef) {
+        this.mutationErrorSinkRef = new WeakRef<BackendMutationErrorSink>(this);
+        this.onShutdown(() => this.releaseMutationErrorListeners());
+      }
+      this.coreSource.attachMutationErrorSink(this.mutationErrorSinkRef);
     }
-    view.setUint32(round * 4, hash >>> 0, true);
+    return () => {
+      this.backendMutationErrorListeners.delete(listener);
+      if (this.backendMutationErrorListeners.size === 0) this.releaseMutationErrorListeners();
+    };
   }
-  return bytes;
+
+  /** @internal */
+  hasMutationErrorListeners(): boolean {
+    return this.backendMutationErrorListeners.size > 0;
+  }
+
+  /** @internal */
+  deliverMutationError(event: MutationErrorEvent): void {
+    for (const listener of this.backendMutationErrorListeners) listener(event);
+  }
+
+  private releaseMutationErrorListeners(): void {
+    this.backendMutationErrorListeners.clear();
+    if (this.mutationErrorSinkRef)
+      this.coreSource.detachMutationErrorSink(this.mutationErrorSinkRef);
+  }
 }
 
 function assertValidBackendConfig(config: BackendContextConfig): void {
@@ -476,7 +604,7 @@ export class JazzContext {
     assertValidBackendConfig(config);
     this.config = {
       ...config,
-      allowLocalFirstAuth: config.allowLocalFirstAuth ?? true,
+      allowLocalFirstAuth: resolveAllowLocalFirstAuth(config.allowLocalFirstAuth),
     };
     this.defaultSchemaInput = config.app;
     this.nodeIdentityScope =
@@ -491,6 +619,12 @@ export class JazzContext {
     );
   }
 
+  /** The migrations the app behind `source` ships (see {@link ClientMigrations}). */
+  private shippedMigrations(source?: BackendSchemaInput): ClientMigrations | undefined {
+    const selected = source ?? this.defaultSchemaInput;
+    return selected ? shippedMigrations(resolveSchemaSource(selected)) : undefined;
+  }
+
   private resolveSchema(source?: BackendSchemaInput): WasmSchema {
     const selected = source ?? this.defaultSchemaInput;
     if (!selected) {
@@ -499,7 +633,7 @@ export class JazzContext {
       );
     }
     const schema = resolveSchemaSource(selected);
-    return this.config.permissions && !schemaHasNativePolicies(schema)
+    return this.config.permissions
       ? mergePermissionsIntoWasmSchema(schema, this.config.permissions)
       : schema;
   }
@@ -518,24 +652,17 @@ export class JazzContext {
   private wrapDb(
     client: JazzClient,
     schema: WasmSchema,
-    session?: Session,
-    attribution?: string,
+    accessContext: DbAccessContext | null = null,
     backendScoped = false,
-    backendReads = false,
   ): Db {
+    const session = accessContext?.writeSession;
     if (session) this.coreSource.admitSession(session);
     return new BackendDb(
       this.buildDbConfig(),
       this.coreSource,
       client,
       schema,
-      session || attribution || backendReads
-        ? {
-            session,
-            attribution,
-            readSession: backendReads ? SYSTEM_READ_SESSION : undefined,
-          }
-        : null,
+      accessContext,
       backendScoped
         ? {
             authMode: session?.authMode ?? "external",
@@ -553,6 +680,7 @@ export class JazzContext {
     return this.coreSource.createClient({
       config: this.buildDbConfig(),
       schema,
+      migrations: this.shippedMigrations(source),
       onAuthFailure: () => {},
     });
   }
@@ -565,6 +693,7 @@ export class JazzContext {
     const client = this.coreSource.createClient({
       config: this.buildDbConfig(),
       schema,
+      migrations: this.shippedMigrations(source),
       onAuthFailure: () => {},
     });
     return { client, schema };
@@ -594,7 +723,7 @@ export class JazzContext {
   asBackend(source?: BackendSchemaInput): Db {
     const { client, schema } = this.getClientAndSchema(source);
     this.enableBackendSyncIfConfigured(client);
-    return this.wrapDb(client, schema, undefined, undefined, true, false);
+    return this.wrapDb(client, schema, null, true);
   }
 
   /**
@@ -607,9 +736,7 @@ export class JazzContext {
     return this.wrapDb(
       client,
       schema,
-      undefined,
-      canonicalAuthorSubject(issuer, subject),
-      true,
+      DbAccessContext.forAttribution(canonicalAuthorSubject(issuer, subject)),
       true,
     );
   }
@@ -656,7 +783,7 @@ export class JazzContext {
     const session = await this.resolveRequestSession(request, options);
     const { client, schema } = this.getClientAndSchema(source);
     this.enableBackendSyncIfConfigured(client);
-    return this.wrapDb(client, schema, session, undefined, true);
+    return this.wrapDb(client, schema, DbAccessContext.forSession(session), true);
   }
 
   /**
@@ -669,9 +796,10 @@ export class JazzContext {
     return this.wrapDb(
       client,
       schema,
-      session,
-      canonicalAuthorSubject(session.issuer, session.user_id, session.account_id),
-      true,
+      DbAccessContext.forAttribution(
+        canonicalAuthorSubject(session.issuer, session.user_id, session.account_id),
+        session,
+      ),
       true,
     );
   }
@@ -691,7 +819,7 @@ export class JazzContext {
   forSession(session: Session, source?: BackendSchemaInput): Db {
     const { client, schema } = this.getClientAndSchema(source);
     this.enableBackendSyncIfConfigured(client);
-    return this.wrapDb(client, schema, session, undefined, true);
+    return this.wrapDb(client, schema, DbAccessContext.forSession(session), true);
   }
 
   /**

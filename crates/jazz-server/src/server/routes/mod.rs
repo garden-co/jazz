@@ -9,7 +9,7 @@
 //! so existing callers (`server::routes::create_router`) continue to resolve.
 
 mod accounts;
-mod http;
+pub(crate) mod http;
 mod utils;
 mod websocket;
 
@@ -30,12 +30,12 @@ use tower_http::trace::TraceLayer;
 use crate::server::{MAX_CATALOGUE_REQUEST_BODY_BYTES, ServerState};
 
 use http::{
-    admin_subscription_introspection_handler, health_handler, internal_shutdown_handler,
-    permissions_handler, permissions_head_handler, publish_migration_handler,
-    publish_permissions_handler, publish_schema_handler, schema_connectivity_handler,
-    schema_handler, schema_hashes_handler,
+    admin_subscription_introspection_handler, deploy_handler, health_handler,
+    internal_shutdown_handler, migration_graph_handler, permissions_handler, schema_handler,
+    schema_hashes_handler,
 };
 use utils::parse_app_id_param;
+pub(crate) use websocket::WebSocketAdmissionState;
 use websocket::ws_handler;
 
 async fn app_id_gate(
@@ -85,15 +85,10 @@ async fn app_shutdown_gate(
 
 pub fn create_router(state: Arc<ServerState>) -> Router {
     let admin_routes = Router::new()
-        .route("/accounts/resolve", post(accounts::resolve_for_edge))
-        .route("/schemas", post(publish_schema_handler))
-        .route("/schema-connectivity", get(schema_connectivity_handler))
-        .route("/permissions/head", get(permissions_head_handler))
-        .route(
-            "/permissions",
-            get(permissions_handler).post(publish_permissions_handler),
-        )
-        .route("/migrations", post(publish_migration_handler))
+        .route("/deploy", post(deploy_handler))
+        .route("/accounts/resolve", post(accounts::resolve_for_admin))
+        .route("/permissions", get(permissions_handler))
+        .route("/migrations/graph", get(migration_graph_handler))
         .route(
             "/introspection/subscriptions",
             get(admin_subscription_introspection_handler),
@@ -107,10 +102,6 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
         .route("/login-or-register", post(accounts::login_or_register))
         .route("/links/request", post(accounts::request_link))
         .route("/links/accept", post(accounts::accept_link))
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            accounts::forward_if_edge,
-        ))
         .layer(DefaultBodyLimit::max(64 * 1024));
     let traced_routes = Router::new()
         .nest("/accounts", account_routes)
@@ -139,12 +130,9 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
 
 #[cfg(test)]
 mod tests {
-    use super::http::*;
     use super::*;
 
-    use axum::extract::{Path, Query};
-    use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header};
-    use axum::response::Json;
+    use axum::http::{Method, StatusCode, header};
 
     use jazz::tools::AppId;
     use jazz::tools::public_schema::{
@@ -153,23 +141,17 @@ mod tests {
     };
     use jazz::tools::schema_lens::LensOp;
     use std::time::Duration;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
     use tower::ServiceExt;
 
     use crate::middleware::AuthConfig;
     use crate::server::{
-        EdgeUpstreamHealth, MAX_CATALOGUE_REQUEST_BODY_BYTES, ServerBuilder, ServerState,
-        StorageBackend,
+        MAX_CATALOGUE_REQUEST_BODY_BYTES, ServerBuilder, ServerState, StorageBackend,
     };
-    use jazz::wire::{
-        FEATURE_STRUCTURED_ERRORS, FEATURE_SYNC_MESSAGE_PAYLOAD, WireFrame, WireHello,
-        WirePeerRole, decode_frame, encode_frame,
-    };
+    use jazz::wire::{WireFrame, WireHello, WirePeerRole, decode_frame, encode_frame};
 
     use crate::server::catalogue::ConnectionSchemaDiagnostics;
     use axum::body;
-    use axum::routing::{get, post};
     use futures::{SinkExt as _, StreamExt as _};
     use jazz::ids::AuthorSubject;
     use serde_json::Value;
@@ -270,47 +252,24 @@ mod tests {
             .state
     }
 
-    async fn make_edge_state_with_schema(
-        schema: jazz::tools::public_schema::Schema,
-        upstream_url: String,
-    ) -> Arc<ServerState> {
-        ServerBuilder::new(AppId::from_name("test-app"))
-            .with_auth_config(test_auth_config())
-            .with_upstream_url(upstream_url)
-            .with_storage(StorageBackend::InMemory)
-            .with_schema(schema)
-            .build()
-            .await
-            .expect("build edge state with schema")
-            .state
-    }
-
     fn make_test_router(state: Arc<ServerState>) -> axum::Router {
         create_router(state)
     }
 
-    async fn publish_schema_for_test(app: &axum::Router, schema: Schema) {
-        let schema_json = serde_json::to_value(&schema).expect("schema request json");
-        assert!(
-            schema_json.get("tables").is_some(),
-            "admin schema requests retain the public Schema envelope"
-        );
-        let response = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri(test_app_route("/admin/schemas"))
-                    .header("Content-Type", "application/json")
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(axum::body::Body::from(
-                        serde_json::json!({ "schema": schema_json }).to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .expect("publish schema through admin route");
-        assert_eq!(response.status(), StatusCode::CREATED);
+    // Legacy catalogue fixtures need isolated drafts that public deploy rejects.
+    async fn store_schema_draft_for_test(state: &ServerState, schema: Schema) {
+        state
+            .catalogue
+            .publish_schema(&state.catalogue_store, schema)
+            .unwrap();
+    }
+
+    fn migration_deployment(migration: Value) -> Value {
+        serde_json::json!({
+            "targetSchemaHash": migration["toHash"],
+            "schemas": [], "migrations": [migration],
+            "permissions": std::collections::HashMap::<TableName, TablePolicies>::new(),
+        })
     }
 
     async fn post_internal_shutdown(
@@ -353,7 +312,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method(Method::OPTIONS)
-                    .uri(test_app_route("/admin/schemas"))
+                    .uri(test_app_route("/admin/deploy"))
                     .header(header::ORIGIN, "http://localhost:3000")
                     .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
                     .header(header::ACCESS_CONTROL_REQUEST_HEADERS, requested_headers)
@@ -396,14 +355,6 @@ mod tests {
                 "Vary must include {required}; got {vary:?}"
             );
         }
-    }
-
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    struct ForwardedAdminRequest {
-        method: String,
-        path: String,
-        admin_secret: Option<String>,
-        body: Option<Value>,
     }
 
     #[tokio::test]
@@ -483,36 +434,6 @@ mod tests {
         assert_eq!(
             state.shutdown.phase(),
             crate::server::ShutdownPhase::ShuttingDown
-        );
-    }
-
-    #[tokio::test]
-    async fn terminal_edge_upstream_failure_is_visible_in_health() {
-        let state = make_state_with_schema(Schema::new()).await;
-        state.set_edge_upstream_health(EdgeUpstreamHealth::Failed {
-            reason: "authority rejected edge credentials".to_owned(),
-        });
-        let health = make_test_router(state)
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri("/health")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(health.status(), StatusCode::SERVICE_UNAVAILABLE);
-        let body = body::to_bytes(health.into_body(), usize::MAX)
-            .await
-            .expect("health body");
-        let json: Value = serde_json::from_slice(&body).expect("health json");
-        assert_eq!(json["status"].as_str(), Some("unhealthy"));
-        assert_eq!(json["component"].as_str(), Some("edge_upstream"));
-        assert!(
-            json["reason"]
-                .as_str()
-                .is_some_and(|reason| reason.contains("rejected edge credentials"))
         );
     }
 
@@ -765,879 +686,18 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri(test_app_route("/admin/schemas"))
+                    .uri(test_app_route("/admin/deploy"))
                     .header("Content-Type", "application/json")
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::from(
-                        serde_json::json!({ "schema": legacy_tables }).to_string(),
+                        serde_json::json!({ "targetSchemaHash": "a".repeat(64), "schemas": [{"hash": "a".repeat(64), "schema": legacy_tables}], "migrations": [], "permissions": {} }).to_string(),
                     ))
                     .unwrap(),
             )
             .await
             .expect("publish obsolete schema shape");
 
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    }
-
-    #[tokio::test]
-    async fn edge_upstream_forwarding_proxies_schema_and_permissions_requests() {
-        use std::sync::{Arc, Mutex};
-
-        let forwarded = Arc::new(Mutex::new(Vec::<ForwardedAdminRequest>::new()));
-        let forwarded_for_router = forwarded.clone();
-        let expected_hash =
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
-        let authority_routes = axum::Router::new()
-            .route(
-                &test_app_route("/schemas"),
-                get({
-                    let forwarded = forwarded_for_router.clone();
-                    let expected_hash = expected_hash.clone();
-                    move |headers: HeaderMap| {
-                        let forwarded = forwarded.clone();
-                        let expected_hash = expected_hash.clone();
-                        async move {
-                            forwarded.lock().unwrap().push(ForwardedAdminRequest {
-                                method: "GET".to_string(),
-                                path: test_app_route("/schemas"),
-                                admin_secret: headers
-                                    .get("X-Jazz-Admin-Secret")
-                                    .and_then(|value| value.to_str().ok())
-                                    .map(str::to_string),
-                                body: None,
-                            });
-                            Json(serde_json::json!({ "hashes": [expected_hash] }))
-                        }
-                    }
-                }),
-            )
-            .route(
-                &test_app_route("/schema/{hash}"),
-                get({
-                    let forwarded = forwarded_for_router.clone();
-                    move |Path(hash): Path<String>, headers: HeaderMap| {
-                        let forwarded = forwarded.clone();
-                        async move {
-                            forwarded.lock().unwrap().push(ForwardedAdminRequest {
-                                method: "GET".to_string(),
-                                path: test_app_route(&format!("/schema/{hash}")),
-                                admin_secret: headers
-                                    .get("X-Jazz-Admin-Secret")
-                                    .and_then(|value| value.to_str().ok())
-                                    .map(str::to_string),
-                                body: None,
-                            });
-                            Json(serde_json::json!({
-                                "users": {
-                                    "columns": [
-                                        { "name": "name", "column_type": { "type": "Text" }, "nullable": false }
-                                    ]
-                                }
-                            }))
-                        }
-                    }
-                }),
-            )
-            .route(
-                &test_app_route("/admin/schemas"),
-                post({
-                    let forwarded = forwarded_for_router.clone();
-                    let expected_hash = expected_hash.clone();
-                    move |headers: HeaderMap, body: Json<Value>| {
-                        let forwarded = forwarded.clone();
-                        let expected_hash = expected_hash.clone();
-                        async move {
-                            forwarded.lock().unwrap().push(ForwardedAdminRequest {
-                                method: "POST".to_string(),
-                                path: test_app_route("/admin/schemas"),
-                                admin_secret: headers
-                                    .get("X-Jazz-Admin-Secret")
-                                    .and_then(|value| value.to_str().ok())
-                                    .map(str::to_string),
-                                body: Some(body.0),
-                            });
-                            (
-                                StatusCode::CREATED,
-                                Json(serde_json::json!({
-                                    "objectId": "11111111-1111-1111-1111-111111111111",
-                                    "hash": expected_hash,
-                                })),
-                            )
-                        }
-                    }
-                }),
-            )
-            .route(
-                &test_app_route("/admin/migrations"),
-                post({
-                    let forwarded = forwarded_for_router.clone();
-                    move |headers: HeaderMap, body: Json<Value>| {
-                        let forwarded = forwarded.clone();
-                        async move {
-                            forwarded.lock().unwrap().push(ForwardedAdminRequest {
-                                method: "POST".to_string(),
-                                path: test_app_route("/admin/migrations"),
-                                admin_secret: headers
-                                    .get("X-Jazz-Admin-Secret")
-                                    .and_then(|value| value.to_str().ok())
-                                    .map(str::to_string),
-                                body: Some(body.0),
-                            });
-                            (
-                                StatusCode::CREATED,
-                                Json(serde_json::json!({
-                                    "objectId": "22222222-2222-2222-2222-222222222222",
-                                    "fromHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                                    "toHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                                })),
-                            )
-                        }
-                    }
-                }),
-            )
-            .route(
-                &test_app_route("/admin/schema-connectivity"),
-                get({
-                    let forwarded = forwarded_for_router.clone();
-                    move |Query(params): Query<SchemaConnectivityParams>, headers: HeaderMap| {
-                        let forwarded = forwarded.clone();
-                        async move {
-                            forwarded.lock().unwrap().push(ForwardedAdminRequest {
-                                method: "GET".to_string(),
-                                path: format!(
-                                    "{}?fromHash={}&toHash={}",
-                                    test_app_route("/admin/schema-connectivity"),
-                                    params.from_hash, params.to_hash
-                                ),
-                                admin_secret: headers
-                                    .get("X-Jazz-Admin-Secret")
-                                    .and_then(|value| value.to_str().ok())
-                                    .map(str::to_string),
-                                body: None,
-                            });
-                            Json(serde_json::json!({
-                                "connected": true,
-                            }))
-                        }
-                    }
-                }),
-            )
-            .route(
-                &test_app_route("/admin/permissions/head"),
-                get({
-                    let forwarded = forwarded_for_router.clone();
-                    move |headers: HeaderMap| {
-                        let forwarded = forwarded.clone();
-                        async move {
-                            forwarded.lock().unwrap().push(ForwardedAdminRequest {
-                                method: "GET".to_string(),
-                                path: test_app_route("/admin/permissions/head"),
-                                admin_secret: headers
-                                    .get("X-Jazz-Admin-Secret")
-                                    .and_then(|value| value.to_str().ok())
-                                    .map(str::to_string),
-                                body: None,
-                            });
-                            Json(serde_json::json!({
-                                "head": {
-                                    "schemaHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                                    "version": 4,
-                                    "parentBundleObjectId": "33333333-3333-3333-3333-333333333333",
-                                    "bundleObjectId": "44444444-4444-4444-4444-444444444444"
-                                }
-                            }))
-                        }
-                    }
-                }),
-            )
-            .route(
-                &test_app_route("/admin/permissions"),
-                get({
-                    let forwarded = forwarded_for_router.clone();
-                    move |headers: HeaderMap| {
-                        let forwarded = forwarded.clone();
-                        async move {
-                            forwarded.lock().unwrap().push(ForwardedAdminRequest {
-                                method: "GET".to_string(),
-                                path: test_app_route("/admin/permissions"),
-                                admin_secret: headers
-                                    .get("X-Jazz-Admin-Secret")
-                                    .and_then(|value| value.to_str().ok())
-                                    .map(str::to_string),
-                                body: None,
-                            });
-                            Json(serde_json::json!({
-                                "head": {
-                                    "schemaHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                                    "version": 4,
-                                    "parentBundleObjectId": "33333333-3333-3333-3333-333333333333",
-                                    "bundleObjectId": "44444444-4444-4444-4444-444444444444"
-                                },
-                                "permissions": {
-                                    "users": {
-                                        "select": { "using": { "type": "True" } }
-                                    }
-                                }
-                            }))
-                        }
-                    }
-                }),
-            )
-            .route(
-                &test_app_route("/admin/permissions"),
-                post({
-                    let forwarded = forwarded_for_router.clone();
-                    move |headers: HeaderMap, body: Json<Value>| {
-                        let forwarded = forwarded.clone();
-                        async move {
-                            forwarded.lock().unwrap().push(ForwardedAdminRequest {
-                                method: "POST".to_string(),
-                                path: test_app_route("/admin/permissions"),
-                                admin_secret: headers
-                                    .get("X-Jazz-Admin-Secret")
-                                    .and_then(|value| value.to_str().ok())
-                                    .map(str::to_string),
-                                body: Some(body.0),
-                            });
-                            (
-                                StatusCode::CONFLICT,
-                                Json(serde_json::json!({
-                                    "error": {
-                                        "code": "bad_request",
-                                        "message": "stale permissions parent"
-                                    }
-                                })),
-                            )
-                        }
-                    }
-                }),
-            );
-        let authority_app = axum::Router::new().nest("/authority-prefix", authority_routes);
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind authority listener");
-        let authority_addr = listener.local_addr().expect("authority local addr");
-        let authority_task = tokio::spawn(async move {
-            axum::serve(listener, authority_app)
-                .await
-                .expect("serve authority app");
-        });
-
-        let schema = SchemaBuilder::new()
-            .table(TableSchema::builder("users").column("name", ColumnType::Text))
-            .build();
-        let state = make_edge_state_with_schema(
-            schema.clone(),
-            format!("http://{authority_addr}/authority-prefix"),
-        )
-        .await;
-        let app = make_test_router(state);
-
-        let schemas_response = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri(test_app_route("/schemas"))
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(schemas_response.status(), StatusCode::OK);
-
-        let schema_response = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri(test_app_route(&format!("/schema/{expected_hash}")))
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(schema_response.status(), StatusCode::OK);
-
-        let publish_schema_response = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri(test_app_route("/admin/schemas"))
-                    .header("Content-Type", "application/json")
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(axum::body::Body::from(
-                        serde_json::json!({ "schema": schema }).to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(publish_schema_response.status(), StatusCode::CREATED);
-
-        let publish_migration_response = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri(test_app_route("/admin/migrations"))
-                    .header("Content-Type", "application/json")
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(axum::body::Body::from(
-                        serde_json::json!({
-                            "fromHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                            "toHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                            "forward": [{
-                                "table": "users",
-                                "operations": [{
-                                    "type": "rename",
-                                    "column": "name",
-                                    "value": "full_name"
-                                }]
-                            }]
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(publish_migration_response.status(), StatusCode::CREATED);
-
-        let permissions_head_response = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri(test_app_route("/admin/permissions/head"))
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(permissions_head_response.status(), StatusCode::OK);
-
-        let schema_connectivity_response = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri(format!(
-                        "{}?fromHash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&toHash=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                        test_app_route("/admin/schema-connectivity")
-                    ))
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(schema_connectivity_response.status(), StatusCode::OK);
-
-        let permissions_response = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri(test_app_route("/admin/permissions"))
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(permissions_response.status(), StatusCode::OK);
-
-        let publish_permissions_response = app
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri(test_app_route("/admin/permissions"))
-                    .header("Content-Type", "application/json")
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(axum::body::Body::from(
-                        serde_json::json!({
-                            "schemaHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                            "permissions": {
-                                "users": {
-                                    "select": { "using": { "type": "True" } }
-                                }
-                            },
-                            "expectedParentBundleObjectId": "44444444-4444-4444-4444-444444444444"
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(publish_permissions_response.status(), StatusCode::CONFLICT);
-
-        let forwarded = forwarded.lock().unwrap().clone();
-        assert_eq!(forwarded.len(), 8);
-        assert!(
-            forwarded
-                .iter()
-                .all(|request| request.admin_secret.as_deref() == Some("admin-secret"))
-        );
-        assert_eq!(forwarded[0].path, test_app_route("/schemas"));
-        assert_eq!(
-            forwarded[1].path,
-            test_app_route(&format!("/schema/{expected_hash}"))
-        );
-        assert_eq!(forwarded[2].path, test_app_route("/admin/schemas"));
-        assert_eq!(forwarded[3].path, test_app_route("/admin/migrations"));
-        assert_eq!(forwarded[4].path, test_app_route("/admin/permissions/head"));
-        assert_eq!(
-            forwarded[5].path,
-            format!(
-                "{}?fromHash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&toHash=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                test_app_route("/admin/schema-connectivity")
-            )
-        );
-        assert_eq!(forwarded[6].path, test_app_route("/admin/permissions"));
-        assert_eq!(forwarded[7].path, test_app_route("/admin/permissions"));
-        assert_eq!(
-            forwarded[7]
-                .body
-                .as_ref()
-                .and_then(|body| body.get("expectedParentBundleObjectId"))
-                .and_then(Value::as_str),
-            Some("44444444-4444-4444-4444-444444444444")
-        );
-
-        authority_task.abort();
-    }
-
-    #[tokio::test]
-    async fn edge_catalogue_forwarding_rejects_invalid_admin_secret_before_upstream() {
-        use std::sync::{Arc, Mutex};
-
-        let forwarded_calls = Arc::new(Mutex::new(0usize));
-        let forwarded_calls_for_router = forwarded_calls.clone();
-        let authority_app = axum::Router::new().route(
-            &test_app_route("/schemas"),
-            get(move || {
-                let forwarded_calls = forwarded_calls_for_router.clone();
-                async move {
-                    *forwarded_calls.lock().unwrap() += 1;
-                    Json(serde_json::json!({ "hashes": [] }))
-                }
-            }),
-        );
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind authority listener");
-        let authority_addr = listener.local_addr().expect("authority local addr");
-        let authority_task = tokio::spawn(async move {
-            axum::serve(listener, authority_app)
-                .await
-                .expect("serve authority app");
-        });
-
-        let schema = SchemaBuilder::new()
-            .table(TableSchema::builder("users").column("name", ColumnType::Text))
-            .build();
-        let state = make_edge_state_with_schema(schema, format!("http://{authority_addr}")).await;
-        let app = make_test_router(state);
-
-        let response = app
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri(test_app_route("/schemas"))
-                    .header("X-Jazz-Admin-Secret", "wrong-secret")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(*forwarded_calls.lock().unwrap(), 0);
-
-        authority_task.abort();
-    }
-
-    #[tokio::test]
-    async fn edge_schema_connectivity_forwarding_encodes_reserved_query_values() {
-        use std::sync::{Arc, Mutex};
-
-        let forwarded = Arc::new(Mutex::new(Vec::<ForwardedAdminRequest>::new()));
-        let forwarded_for_router = forwarded.clone();
-        let authority_app = axum::Router::new().route(
-            &test_app_route("/admin/schema-connectivity"),
-            get(move |uri: Uri, headers: HeaderMap| {
-                let forwarded = forwarded_for_router.clone();
-                async move {
-                    forwarded.lock().unwrap().push(ForwardedAdminRequest {
-                        method: "GET".to_string(),
-                        path: uri
-                            .path_and_query()
-                            .map(|path_and_query| path_and_query.as_str().to_string())
-                            .unwrap_or_else(|| uri.path().to_string()),
-                        admin_secret: headers
-                            .get("X-Jazz-Admin-Secret")
-                            .and_then(|value| value.to_str().ok())
-                            .map(str::to_string),
-                        body: None,
-                    });
-                    Json(serde_json::json!({ "connected": true }))
-                }
-            }),
-        );
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind authority listener");
-        let authority_addr = listener.local_addr().expect("authority local addr");
-        let authority_task = tokio::spawn(async move {
-            axum::serve(listener, authority_app)
-                .await
-                .expect("serve authority app");
-        });
-
-        let schema = SchemaBuilder::new()
-            .table(TableSchema::builder("users").column("name", ColumnType::Text))
-            .build();
-        let state = make_edge_state_with_schema(schema, format!("http://{authority_addr}")).await;
-        let app = make_test_router(state);
-
-        let response = app
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri(format!(
-                        "{}?fromHash=aaa%26evil=1&toHash=bbb",
-                        test_app_route("/admin/schema-connectivity")
-                    ))
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let forwarded = forwarded.lock().unwrap().clone();
-        assert_eq!(forwarded.len(), 1);
-        assert_eq!(forwarded[0].admin_secret.as_deref(), Some("admin-secret"));
-        assert!(
-            !forwarded[0].path.contains("&evil=1"),
-            "reserved characters must remain inside fromHash, got {}",
-            forwarded[0].path
-        );
-        let forwarded_url =
-            reqwest::Url::parse(&format!("http://upstream.test{}", forwarded[0].path))
-                .expect("forwarded URL should parse");
-        let query_pairs: Vec<_> = forwarded_url.query_pairs().collect();
-        assert_eq!(query_pairs.len(), 2);
-        assert_eq!(query_pairs[0], ("fromHash".into(), "aaa&evil=1".into()));
-        assert_eq!(query_pairs[1], ("toHash".into(), "bbb".into()));
-
-        authority_task.abort();
-    }
-
-    #[tokio::test]
-    async fn permissions_handlers_publish_linear_head_and_reject_stale_parent() {
-        let schema = SchemaBuilder::new()
-            .table(TableSchema::builder("users").column("name", ColumnType::Text))
-            .build();
-        let schema_hash = SchemaHash::compute(&schema);
-        let state = make_state_with_schema(schema).await;
-        let app = make_test_router(state.clone());
-
-        let initial_head = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri(test_app_route("/admin/permissions/head"))
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(initial_head.status(), StatusCode::OK);
-        let initial_body = body::to_bytes(initial_head.into_body(), usize::MAX)
-            .await
-            .expect("initial permissions head body");
-        let initial_json: Value =
-            serde_json::from_slice(&initial_body).expect("initial permissions head json");
-        assert!(initial_json["head"].is_null());
-
-        let first_request_body = serde_json::json!({
-            "schemaHash": schema_hash.to_string(),
-            "permissions": {
-                "users": {
-                    "select": { "using": { "type": "True" } }
-                }
-            }
-        });
-        let first_response = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri(test_app_route("/admin/permissions"))
-                    .header("Content-Type", "application/json")
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(axum::body::Body::from(first_request_body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(first_response.status(), StatusCode::CREATED);
-        let first_body = body::to_bytes(first_response.into_body(), usize::MAX)
-            .await
-            .expect("first publish body");
-        let first_json: Value = serde_json::from_slice(&first_body).expect("first publish json");
-        let first_bundle_object_id = first_json["head"]["bundleObjectId"]
-            .as_str()
-            .expect("first bundle object id")
-            .to_string();
-        assert_eq!(first_json["head"]["version"].as_u64(), Some(1));
-        assert_eq!(first_json["head"]["parentBundleObjectId"], Value::Null);
-
-        let second_request_body = serde_json::json!({
-            "schemaHash": schema_hash.to_string(),
-            "permissions": {
-                "users": {
-                    "select": { "using": { "type": "False" } }
-                }
-            },
-            "expectedParentBundleObjectId": first_bundle_object_id,
-        });
-        let second_response = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri(test_app_route("/admin/permissions"))
-                    .header("Content-Type", "application/json")
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(axum::body::Body::from(second_request_body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(second_response.status(), StatusCode::CREATED);
-        let second_body = body::to_bytes(second_response.into_body(), usize::MAX)
-            .await
-            .expect("second publish body");
-        let second_json: Value = serde_json::from_slice(&second_body).expect("second publish json");
-        let second_bundle_object_id = second_json["head"]["bundleObjectId"]
-            .as_str()
-            .expect("second bundle object id")
-            .to_string();
-        assert_eq!(second_json["head"]["version"].as_u64(), Some(2));
-        assert_eq!(
-            second_json["head"]["parentBundleObjectId"].as_str(),
-            Some(first_bundle_object_id.as_str())
-        );
-
-        let stale_request_body = serde_json::json!({
-            "schemaHash": schema_hash.to_string(),
-            "permissions": {
-                "users": {
-                    "select": { "using": { "type": "True" } }
-                }
-            },
-            "expectedParentBundleObjectId": first_bundle_object_id,
-        });
-        let stale_response = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri(test_app_route("/admin/permissions"))
-                    .header("Content-Type", "application/json")
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(axum::body::Body::from(stale_request_body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(stale_response.status(), StatusCode::CONFLICT);
-
-        let head_response = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri(test_app_route("/admin/permissions/head"))
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(head_response.status(), StatusCode::OK);
-        let head_body = body::to_bytes(head_response.into_body(), usize::MAX)
-            .await
-            .expect("current permissions head body");
-        let head_json: Value =
-            serde_json::from_slice(&head_body).expect("current permissions head json");
-        assert_eq!(head_json["head"]["version"].as_u64(), Some(2));
-        assert_eq!(
-            head_json["head"]["bundleObjectId"].as_str(),
-            Some(second_bundle_object_id.as_str())
-        );
-
-        let permissions_response = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri(test_app_route("/admin/permissions"))
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(permissions_response.status(), StatusCode::OK);
-        let permissions_body = body::to_bytes(permissions_response.into_body(), usize::MAX)
-            .await
-            .expect("current permissions body");
-        let permissions_json: Value =
-            serde_json::from_slice(&permissions_body).expect("current permissions json");
-        assert_eq!(permissions_json["head"]["version"].as_u64(), Some(2));
-        assert_eq!(
-            permissions_json["permissions"]["users"]["select"]["using"]["type"].as_str(),
-            Some("False")
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn concurrent_permissions_publications_install_only_the_winning_runtime_head() {
-        let schema = SchemaBuilder::new()
-            .table(TableSchema::builder("users").column("name", ColumnType::Text))
-            .build();
-        let schema_hash = SchemaHash::compute(&schema);
-        let state = make_state_with_schema(schema).await;
-        let app = make_test_router(state.clone());
-        let start = Arc::new(tokio::sync::Barrier::new(2));
-
-        let publish =
-            |app: axum::Router, start: Arc<tokio::sync::Barrier>, policy_type: &'static str| {
-                let schema_hash = schema_hash.to_string();
-                tokio::spawn(async move {
-                    let request_body = serde_json::json!({
-                        "schemaHash": schema_hash,
-                        "permissions": {
-                            "users": {
-                                "select": { "using": { "type": policy_type } }
-                            }
-                        }
-                    });
-                    start.wait().await;
-                    app.oneshot(
-                        axum::http::Request::builder()
-                            .method("POST")
-                            .uri(test_app_route("/admin/permissions"))
-                            .header("Content-Type", "application/json")
-                            .header("X-Jazz-Admin-Secret", "admin-secret")
-                            .body(axum::body::Body::from(request_body.to_string()))
-                            .unwrap(),
-                    )
-                    .await
-                    .expect("publish permissions through admin route")
-                })
-            };
-
-        let allow_publish = publish(app.clone(), start.clone(), "True");
-        let deny_publish = publish(app, start, "False");
-        let (allow_response, deny_response) = tokio::join!(allow_publish, deny_publish);
-        let allow_response = allow_response.expect("allow publish task");
-        let deny_response = deny_response.expect("deny publish task");
-        let allow_status = allow_response.status();
-        let deny_status = deny_response.status();
-        assert_eq!(
-            [allow_status, deny_status]
-                .into_iter()
-                .filter(|status| *status == StatusCode::CREATED)
-                .count(),
-            1
-        );
-        assert_eq!(
-            [allow_status, deny_status]
-                .into_iter()
-                .filter(|status| *status == StatusCode::CONFLICT)
-                .count(),
-            1
-        );
-
-        let (winning_policy, created_response, conflict_response) =
-            if allow_status == StatusCode::CREATED {
-                (PolicyExpr::True, allow_response, deny_response)
-            } else {
-                (PolicyExpr::False, deny_response, allow_response)
-            };
-        let conflict_body = body::to_bytes(conflict_response.into_body(), usize::MAX)
-            .await
-            .expect("stale publish body");
-        let conflict_json: Value =
-            serde_json::from_slice(&conflict_body).expect("stale publish json");
-        assert!(
-            conflict_json["error"]
-                .as_str()
-                .is_some_and(|message| message.starts_with("stale permissions parent"))
-        );
-
-        let created_body = body::to_bytes(created_response.into_body(), usize::MAX)
-            .await
-            .expect("winning publish body");
-        let created_json: Value =
-            serde_json::from_slice(&created_body).expect("winning publish json");
-        let winning_bundle_object_id = created_json["head"]["bundleObjectId"]
-            .as_str()
-            .expect("winning bundle object id");
-        assert_eq!(created_json["head"]["version"].as_u64(), Some(1));
-        assert_eq!(created_json["head"]["parentBundleObjectId"], Value::Null);
-
-        let current = state
-            .catalogue
-            .current_permissions(&state.catalogue_store)
-            .expect("read winning permissions")
-            .expect("winning permissions head");
-        let users = TableName::new("users");
-        assert_eq!(current.head.schema_hash, schema_hash);
-        assert_eq!(
-            current.head.bundle_object_id.to_string(),
-            winning_bundle_object_id
-        );
-        assert_eq!(
-            current
-                .permissions
-                .get(&users)
-                .expect("winning users permissions")
-                .select
-                .using
-                .as_ref(),
-            Some(&winning_policy)
-        );
-
-        let runtime_snapshot = state
-            .runtime()
-            .expect("runtime shell started")
-            .trusted_catalogue_snapshot_for_test()
-            .await
-            .expect("read runtime catalogue");
-        let active_schema = runtime_snapshot
-            .schemas
-            .iter()
-            .find(|schema| schema.id == runtime_snapshot.current_write_schema.schema)
-            .expect("active runtime schema");
-        assert_eq!(
-            active_schema
-                .schema
-                .public_schema()
-                .get(&users)
-                .expect("runtime users table")
-                .policies
-                .select
-                .using
-                .as_ref(),
-            Some(&winning_policy)
-        );
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1665,7 +725,7 @@ mod tests {
             .expect("persist H1");
         let h1 = state
             .catalogue
-            .current_permissions_head(&state.catalogue_store)
+            .active_schema_summary(&state.catalogue_store)
             .expect("read H1")
             .expect("H1 exists")
             .bundle_object_id;
@@ -1742,10 +802,10 @@ mod tests {
 
         let current = state
             .catalogue
-            .current_permissions(&state.catalogue_store)
+            .active_schema(&state.catalogue_store)
             .expect("read durable permissions")
             .expect("durable H2");
-        assert_eq!(current.head.version, 2);
+        assert_eq!(current.summary.version, 2);
         assert_eq!(
             current
                 .permissions
@@ -1757,20 +817,14 @@ mod tests {
             Some(&PolicyExpr::False)
         );
 
-        let runtime_snapshot = state
+        let active_schema = state
             .runtime()
             .expect("runtime shell started")
-            .trusted_catalogue_snapshot_for_test()
+            .current_schema()
             .await
-            .expect("read runtime catalogue");
-        let active_schema = runtime_snapshot
-            .schemas
-            .iter()
-            .find(|schema| schema.id == runtime_snapshot.current_write_schema.schema)
-            .expect("active runtime schema");
+            .expect("read runtime schema");
         assert_eq!(
             active_schema
-                .schema
                 .public_schema()
                 .get(&users)
                 .expect("runtime users table")
@@ -1810,8 +864,124 @@ mod tests {
         assert!(json["permissions"].is_null());
     }
 
+    async fn read_migration_graph(app: &axum::Router) -> Value {
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(test_app_route("/admin/migrations/graph"))
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
     #[tokio::test]
-    async fn schema_connectivity_handler_reports_uploaded_migration_connectivity() {
+    async fn migration_graph_requires_admin_and_returns_empty_inventory() {
+        let state = ServerBuilder::new(AppId::from_name("test-app"))
+            .with_auth_config(test_auth_config())
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .unwrap()
+            .state;
+        let app = make_test_router(state);
+        for secret in [None, Some("wrong-secret")] {
+            let mut request =
+                axum::http::Request::builder().uri(test_app_route("/admin/migrations/graph"));
+            if let Some(secret) = secret {
+                request = request.header("X-Jazz-Admin-Secret", secret);
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(axum::body::Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        assert_eq!(
+            read_migration_graph(&app).await,
+            serde_json::json!({
+                "activeSchemaHash": null, "schemas": [], "migrations": []
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_graph_includes_isolated_schemas_forward_edges_and_active_schema() {
+        let schema = |column| {
+            SchemaBuilder::new()
+                .table(TableSchema::builder("users").column(column, ColumnType::Text))
+                .build()
+        };
+        let v1 = schema("email");
+        let v2 = schema("email_address");
+        let isolated = schema("unrelated");
+        let from = SchemaHash::compute(&v1).to_string();
+        let to = SchemaHash::compute(&v2).to_string();
+        let isolated_hash = SchemaHash::compute(&isolated).to_string();
+        let state = make_state_with_schema(v1.clone()).await;
+        let app = make_test_router(state.clone());
+        store_schema_draft_for_test(&state, v2).await;
+        store_schema_draft_for_test(&state, isolated).await;
+        assert_eq!(
+            read_migration_graph(&app).await["migrations"],
+            serde_json::json!([])
+        );
+        let mut transform = jazz::tools::schema_lens::LensTransform::new();
+        transform.push(
+            LensOp::RenameColumn {
+                table: "users".into(),
+                old_name: "email".into(),
+                new_name: "email_address".into(),
+            },
+            false,
+        );
+        state
+            .catalogue
+            .publish_lens(
+                &state.catalogue_store,
+                &jazz::tools::schema_lens::Lens::new(
+                    SchemaHash::compute(&v1),
+                    SchemaHash::from_hex(&to).unwrap(),
+                    transform,
+                ),
+            )
+            .unwrap();
+        let graph = read_migration_graph(&app).await;
+        let mut hashes = vec![from.clone(), to.clone(), isolated_hash];
+        hashes.sort();
+        assert_eq!(graph["schemas"], serde_json::json!(hashes));
+        assert_eq!(
+            graph["migrations"],
+            serde_json::json!([{ "fromHash": from, "toHash": to }])
+        );
+        assert_eq!(read_migration_graph(&app).await, graph);
+
+        state
+            .catalogue
+            .publish_permissions_bundle(
+                &state.catalogue_store,
+                SchemaHash::from_hex(&to).unwrap(),
+                std::collections::HashMap::new(),
+                None,
+            )
+            .unwrap();
+        let active = read_migration_graph(&app).await;
+        assert_eq!(active["activeSchemaHash"], to);
+        assert_eq!(active["schemas"], graph["schemas"]);
+        assert_eq!(active["migrations"], graph["migrations"]);
+    }
+
+    #[tokio::test]
+    async fn migration_graph_reports_deployed_migration() {
         let v1 = SchemaBuilder::new()
             .table(TableSchema::builder("users").column("email", ColumnType::Text))
             .build();
@@ -1824,7 +994,7 @@ mod tests {
 
         let state = make_state_with_schema(v1.clone()).await;
         let app = make_test_router(state.clone());
-        publish_schema_for_test(&app, v2).await;
+        store_schema_draft_for_test(&state, v2).await;
         let runtime_v1 = jazz::schema::JazzSchema::new(&v1).expect("convert source schema");
         let runtime_v2 = jazz::schema::JazzSchema::new(
             &state
@@ -1857,40 +1027,21 @@ mod tests {
             "publishing a schema draft must not expose it before its lineage lens"
         );
 
-        let disconnected = app
-            .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri(format!(
-                        "{}?fromHash={}&toHash={}",
-                        test_app_route("/admin/schema-connectivity"),
-                        v1_hash,
-                        v2_hash
-                    ))
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(disconnected.status(), StatusCode::OK);
-        let disconnected_body = body::to_bytes(disconnected.into_body(), usize::MAX)
-            .await
-            .expect("disconnected body");
-        let disconnected_json: Value =
-            serde_json::from_slice(&disconnected_body).expect("disconnected json");
-        assert_eq!(disconnected_json["connected"], Value::Bool(false));
+        assert_eq!(
+            read_migration_graph(&app).await["migrations"],
+            serde_json::json!([])
+        );
 
         let publish_migration_response = app
             .clone()
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri(test_app_route("/admin/migrations"))
+                    .uri(test_app_route("/admin/deploy"))
                     .header("Content-Type", "application/json")
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::from(
-                        serde_json::json!({
+                        migration_deployment(serde_json::json!({
                             "fromHash": v1_hash.to_string(),
                             "toHash": v2_hash.to_string(),
                             "forward": [{
@@ -1901,148 +1052,19 @@ mod tests {
                                     "value": "email_address"
                                 }]
                             }]
-                        })
+                        }))
                         .to_string(),
                     ))
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(publish_migration_response.status(), StatusCode::CREATED);
+        assert_eq!(publish_migration_response.status(), StatusCode::OK);
 
-        let connected = app
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri(format!(
-                        "{}?fromHash={}&toHash={}",
-                        test_app_route("/admin/schema-connectivity"),
-                        v1_hash,
-                        v2_hash
-                    ))
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(connected.status(), StatusCode::OK);
-        let connected_body = body::to_bytes(connected.into_body(), usize::MAX)
-            .await
-            .expect("connected body");
-        let connected_json: Value =
-            serde_json::from_slice(&connected_body).expect("connected json");
-        assert_eq!(connected_json["connected"], Value::Bool(true));
-    }
-
-    #[tokio::test]
-    async fn publish_schema_rejects_inline_permissions() {
-        let schema = SchemaBuilder::new()
-            .table(TableSchema::builder("users").column("name", ColumnType::Text))
-            .build();
-        let state = make_state_with_schema(schema.clone()).await;
-        let app = make_test_router(state);
-
-        let request_body = serde_json::json!({
-            "schema": schema,
-            "permissions": {
-                "users": {
-                    "select": { "using": { "type": "True" } }
-                }
-            }
-        });
-
-        let response = app
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri(test_app_route("/admin/schemas"))
-                    .header("Content-Type", "application/json")
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(axum::body::Body::from(request_body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
-    async fn edge_mode_forwards_admin_catalogue_publishing() {
-        use std::sync::{Arc, Mutex};
-
-        let schema = SchemaBuilder::new()
-            .table(TableSchema::builder("users").column("name", ColumnType::Text))
-            .build();
-
-        let forwarded = Arc::new(Mutex::new(Vec::<ForwardedAdminRequest>::new()));
-        let forwarded_for_router = forwarded.clone();
-        let authority_routes = axum::Router::new().route(
-            &test_app_route("/admin/schemas"),
-            post(move |headers: HeaderMap, body: Json<Value>| {
-                let forwarded = forwarded_for_router.clone();
-                async move {
-                    forwarded.lock().unwrap().push(ForwardedAdminRequest {
-                        method: "POST".to_string(),
-                        path: test_app_route("/admin/schemas"),
-                        admin_secret: headers
-                            .get("X-Jazz-Admin-Secret")
-                            .and_then(|value| value.to_str().ok())
-                            .map(str::to_string),
-                        body: Some(body.0),
-                    });
-                    (
-                        StatusCode::CREATED,
-                        Json(serde_json::json!({
-                            "objectId": "11111111-1111-1111-1111-111111111111",
-                            "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                        })),
-                    )
-                }
-            }),
-        );
-        let authority_app = axum::Router::new().nest("/authority-prefix", authority_routes);
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind authority listener");
-        let authority_addr = listener.local_addr().expect("authority local addr");
-        let authority_task = tokio::spawn(async move {
-            axum::serve(listener, authority_app)
-                .await
-                .expect("serve authority app");
-        });
-
-        let state = make_edge_state_with_schema(
-            schema.clone(),
-            format!("http://{authority_addr}/authority-prefix"),
-        )
-        .await;
-        let app = make_test_router(state);
-
-        let response = app
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri(test_app_route("/admin/schemas"))
-                    .header("Content-Type", "application/json")
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(axum::body::Body::from(
-                        serde_json::json!({ "schema": schema }).to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::CREATED);
-
-        let forwarded = forwarded.lock().unwrap().clone();
-        assert_eq!(forwarded.len(), 1);
-        assert_eq!(forwarded[0].method, "POST");
-        assert_eq!(forwarded[0].path, test_app_route("/admin/schemas"));
-        assert_eq!(forwarded[0].admin_secret.as_deref(), Some("admin-secret"));
-
-        authority_task.abort();
+        let graph = read_migration_graph(&app).await;
+        assert_eq!(graph["migrations"].as_array().unwrap().len(), 1);
+        assert_eq!(graph["migrations"][0]["fromHash"], v1_hash.to_string());
+        assert_eq!(graph["migrations"][0]["toHash"], v2_hash.to_string());
     }
 
     #[tokio::test]
@@ -2059,7 +1081,7 @@ mod tests {
 
         let state = make_state_with_schema(v1.clone()).await;
         let app = make_test_router(state.clone());
-        publish_schema_for_test(&app, v2).await;
+        store_schema_draft_for_test(&state, v2).await;
         let runtime_v1 = jazz::schema::JazzSchema::new(&v1).expect("convert source schema");
         let runtime_v2 = jazz::schema::JazzSchema::new(
             &state
@@ -2104,13 +1126,14 @@ mod tests {
                 }]
             }]
         });
+        let request_body = migration_deployment(request_body);
 
         let unauthorized = app
             .clone()
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri(test_app_route("/admin/migrations"))
+                    .uri(test_app_route("/admin/deploy"))
                     .header("Content-Type", "application/json")
                     .body(axum::body::Body::from(request_body.to_string()))
                     .unwrap(),
@@ -2123,7 +1146,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri(test_app_route("/admin/migrations"))
+                    .uri(test_app_route("/admin/deploy"))
                     .header("Content-Type", "application/json")
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::from(request_body.to_string()))
@@ -2131,7 +1154,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(created.status(), StatusCode::CREATED);
+        assert_eq!(created.status(), StatusCode::OK);
         assert_eq!(
             runtime_shell
                 .runtime_catalogue_contains(runtime_v2.version_id(), expected_runtime_lens.id())
@@ -2149,13 +1172,6 @@ mod tests {
             lens.is_some(),
             "published lens should be stored in the catalogue"
         );
-        assert!(
-            state
-                .catalogue
-                .are_schema_hashes_connected(&state.catalogue_store, v1_hash, v2_hash)
-                .expect("read schema connectivity"),
-            "published lens should connect the source and target schema hashes"
-        );
     }
 
     #[tokio::test]
@@ -2172,7 +1188,7 @@ mod tests {
 
         let state = make_state_with_schema(v1.clone()).await;
         let app = make_test_router(state.clone());
-        publish_schema_for_test(&app, v2).await;
+        store_schema_draft_for_test(&state, v2).await;
 
         let request_body = serde_json::json!({
             "fromHash": v1_hash.to_string(),
@@ -2187,12 +1203,13 @@ mod tests {
                 }]
             }]
         });
+        let request_body = migration_deployment(request_body);
 
         let created = app
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri(test_app_route("/admin/migrations"))
+                    .uri(test_app_route("/admin/deploy"))
                     .header("Content-Type", "application/json")
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::from(request_body.to_string()))
@@ -2206,7 +1223,7 @@ mod tests {
             .expect("migration response body");
         assert_eq!(
             created_status,
-            StatusCode::CREATED,
+            StatusCode::OK,
             "{}",
             String::from_utf8_lossy(&created_body)
         );
@@ -2257,7 +1274,7 @@ mod tests {
 
         let state = make_state_with_schema(v1.clone()).await;
         let app = make_test_router(state.clone());
-        publish_schema_for_test(&app, v2.clone()).await;
+        store_schema_draft_for_test(&state, v2.clone()).await;
 
         let request_body = serde_json::json!({
             "fromHash": v1_hash.to_string(),
@@ -2275,12 +1292,13 @@ mod tests {
                 }
             ]
         });
+        let request_body = migration_deployment(request_body);
 
         let created = app
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri(test_app_route("/admin/migrations"))
+                    .uri(test_app_route("/admin/deploy"))
                     .header("Content-Type", "application/json")
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::from(request_body.to_string()))
@@ -2288,7 +1306,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(created.status(), StatusCode::CREATED);
+        assert_eq!(created.status(), StatusCode::OK);
 
         let lens = state
             .catalogue_store
@@ -2302,10 +1320,7 @@ mod tests {
             LensOp::AddTable { table, schema } => {
                 assert_eq!(table, "profiles");
                 let expected = v2.get(&TableName::from("profiles")).unwrap();
-                assert_eq!(
-                    schema.columns.content_hash(),
-                    expected.columns.content_hash(),
-                );
+                assert_eq!(schema.columns, expected.columns);
                 assert_eq!(schema.policies, expected.policies);
             }
             other => panic!("expected AddTable op, got {other:?}"),
@@ -2315,10 +1330,7 @@ mod tests {
             LensOp::RemoveTable { table, schema } => {
                 assert_eq!(table, "legacy_profiles");
                 let expected = v1.get(&TableName::from("legacy_profiles")).unwrap();
-                assert_eq!(
-                    schema.columns.content_hash(),
-                    expected.columns.content_hash(),
-                );
+                assert_eq!(schema.columns, expected.columns);
                 assert_eq!(schema.policies, expected.policies);
             }
             other => panic!("expected RemoveTable op, got {other:?}"),
@@ -2550,10 +1562,7 @@ mod tests {
         ))
         .await
         .expect("send ws auth prelude");
-        let hello = WireFrame::Hello(WireHello::current(
-            WirePeerRole::Client,
-            FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
-        ));
+        let hello = WireFrame::Hello(WireHello::current(WirePeerRole::Client, 0));
         let encoded = vec![encode_frame(&hello).expect("encode hello")];
         let batch = postcard::to_allocvec(&encoded).expect("encode ws batch");
         ws.send(WsMessage::Binary(batch.into()))
@@ -2575,615 +1584,18 @@ mod tests {
             panic!("expected server hello");
         };
         assert_eq!(server_hello.role, WirePeerRole::Core);
-        assert_eq!(
-            server_hello.features,
-            FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS
-        );
+        assert_eq!(server_hello.features, 0);
 
         let _ = ws.close(None).await;
         server_task.abort();
     }
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn edge_catalogue_forwarding_times_out_before_response_headers() {
-        let authority_app = axum::Router::new().route(
-            &test_app_route("/schemas"),
-            get(|| async { std::future::pending::<Response>().await }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind hanging authority");
-        let address = listener.local_addr().expect("authority address");
-        let authority_task = tokio::spawn(async move {
-            axum::serve(listener, authority_app)
-                .await
-                .expect("serve authority");
-        });
-        let state = make_edge_state_with_schema(Schema::new(), format!("http://{address}")).await;
-        let response = tokio::time::timeout(
-            Duration::from_secs(31),
-            make_test_router(state).oneshot(
-                axum::http::Request::builder()
-                    .uri(test_app_route("/schemas"))
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(Body::empty())
-                    .unwrap(),
-            ),
-        )
-        .await
-        .expect("forwarding must have a total deadline")
-        .expect("router response");
-        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-        let body = body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("timeout body");
-        let error: Value = serde_json::from_slice(&body).expect("timeout JSON");
-        assert_eq!(
-            error["error"].as_str(),
-            Some("catalogue upstream request exceeded the 30-second total deadline")
-        );
-        authority_task.abort();
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn edge_catalogue_forwarding_times_out_while_reading_response_body() {
-        let authority_app = axum::Router::new().route(
-            &test_app_route("/schemas"),
-            get(|| async {
-                let stream = futures::stream::once(async {
-                    Ok::<_, std::convert::Infallible>(axum::body::Bytes::from_static(b"partial"))
-                })
-                .chain(futures::stream::pending::<
-                    Result<axum::body::Bytes, std::convert::Infallible>,
-                >());
-                (
-                    StatusCode::OK,
-                    [(header::CONTENT_TYPE, "application/json")],
-                    Body::from_stream(stream),
-                )
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind partial authority");
-        let address = listener.local_addr().expect("authority address");
-        let authority_task = tokio::spawn(async move {
-            axum::serve(listener, authority_app)
-                .await
-                .expect("serve authority");
-        });
-        let state = make_edge_state_with_schema(Schema::new(), format!("http://{address}")).await;
-        let response = tokio::time::timeout(
-            Duration::from_secs(31),
-            make_test_router(state).oneshot(
-                axum::http::Request::builder()
-                    .uri(test_app_route("/schemas"))
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(Body::empty())
-                    .unwrap(),
-            ),
-        )
-        .await
-        .expect("forwarding must have a total deadline")
-        .expect("router response");
-        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-        let body = body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("timeout body");
-        let error: Value = serde_json::from_slice(&body).expect("timeout JSON");
-        assert_eq!(
-            error["error"].as_str(),
-            Some("catalogue upstream request exceeded the 30-second total deadline")
-        );
-        authority_task.abort();
-    }
 
     #[tokio::test]
-    async fn edge_catalogue_forwarding_preserves_invalid_utf8_non_success_response() {
-        let authority_app = axum::Router::new().route(
-            &test_app_route("/schema/{hash}"),
-            get(|| async {
-                (
-                    StatusCode::CONFLICT,
-                    [(header::CONTENT_TYPE, "application/octet-stream")],
-                    Body::from(vec![0xff, 0x00, 0xfe]),
-                )
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind response authority");
-        let address = listener.local_addr().expect("authority address");
-        let authority_task = tokio::spawn(async move {
-            axum::serve(listener, authority_app)
-                .await
-                .expect("serve authority");
-        });
-        let state = make_edge_state_with_schema(Schema::new(), format!("http://{address}")).await;
-        let response = make_test_router(state)
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri(test_app_route(
-                        "/schema/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                    ))
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .expect("router response");
-        assert_eq!(response.status(), StatusCode::CONFLICT);
-        assert_eq!(
-            response.headers().get(header::CONTENT_TYPE).unwrap(),
-            "application/octet-stream"
-        );
-        assert_eq!(
-            body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .expect("response body")
-                .as_ref(),
-            &[0xff, 0x00, 0xfe]
-        );
-        authority_task.abort();
-    }
-
-    #[tokio::test]
-    async fn edge_catalogue_forwarding_rejects_chunked_response_over_limit() {
-        let authority_app = axum::Router::new().route(
-            &test_app_route("/schema/{hash}"),
-            get(|| async {
-                let stream = futures::stream::iter(vec![Ok::<_, std::convert::Infallible>(
-                    axum::body::Bytes::from(vec![b'x'; (8 << 20) + 1]),
-                )]);
-                (StatusCode::OK, Body::from_stream(stream))
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind oversized authority");
-        let address = listener.local_addr().expect("authority address");
-        let authority_task = tokio::spawn(async move {
-            axum::serve(listener, authority_app)
-                .await
-                .expect("serve authority");
-        });
-        let state = make_edge_state_with_schema(Schema::new(), format!("http://{address}")).await;
-        let response = make_test_router(state)
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri(test_app_route(
-                        "/schema/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                    ))
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .expect("router response");
-        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-        let body = body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("oversized response body");
-        let error: Value = serde_json::from_slice(&body).expect("oversized response JSON");
-        assert_eq!(
-            error["error"].as_str(),
-            Some("catalogue upstream response body exceeds the 8388608-byte limit")
-        );
-        authority_task.abort();
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn edge_catalogue_forwarding_shutdown_cancels_hanging_mutation() {
-        let authority_app = axum::Router::new().route(
-            &test_app_route("/admin/migrations"),
-            post(|| async { std::future::pending::<Response>().await }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind mutation authority");
-        let address = listener.local_addr().expect("authority address");
-        let authority_task = tokio::spawn(async move {
-            axum::serve(listener, authority_app)
-                .await
-                .expect("serve authority");
-        });
-        let state = make_edge_state_with_schema(Schema::new(), format!("http://{address}")).await;
-        let app = make_test_router(state.clone());
-        let request = tokio::spawn(async move {
-            app.oneshot(
-                axum::http::Request::builder()
-                    .method(Method::POST)
-                    .uri(test_app_route("/admin/migrations"))
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        r#"{"fromHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","toHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","forward":[]}"#,
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .expect("router response")
-        });
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        state.shutdown.request_shutdown();
-        let response = tokio::time::timeout(Duration::from_secs(2), request)
-            .await
-            .expect("shutdown must cancel forwarding")
-            .expect("forwarding task");
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        let body = body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("shutdown body");
-        let error: Value = serde_json::from_slice(&body).expect("shutdown JSON");
-        assert_eq!(
-            error["error"].as_str(),
-            Some(
-                "catalogue forwarding cancelled during shutdown; the upstream mutation outcome may be unknown; verify catalogue state before retrying"
-            )
-        );
-        assert_eq!(state.shutdown.active_app_requests(), 0);
-        authority_task.abort();
-    }
-    #[tokio::test]
-    async fn edge_catalogue_forwarding_rejects_expanded_canonical_migration() {
-        let state =
-            make_edge_state_with_schema(Schema::new(), "http://127.0.0.1:9".to_owned()).await;
-        let request = oversized_migration_for_test();
-        let error = forward_catalogue_request(
-            &state,
-            "admin-secret",
-            reqwest::Method::POST,
-            "/admin/migrations",
-            Some(CatalogueRequestBody::Migration(&request)),
-        )
-        .await
-        .expect_err("expanded canonical request must be rejected");
-        assert_eq!(error.0, StatusCode::PAYLOAD_TOO_LARGE);
-        assert_eq!(
-            error.1.0.error,
-            "canonical catalogue request body exceeds the 8388608-byte limit"
-        );
-    }
-
-    #[tokio::test]
-    async fn catalogue_forwarding_policy_validates_default_and_overflow_limits() {
-        let default = ServerBuilder::new(AppId::from_name("policy-default"))
-            .with_storage(StorageBackend::InMemory)
-            .build()
-            .await
-            .expect("default policy");
-        assert_eq!(
-            default.state.forwarding_policy.list_response_limit_bytes,
-            67_108_864
-        );
-        let explicit = ServerBuilder::new(AppId::from_name("policy-explicit"))
-            .with_storage(StorageBackend::InMemory)
-            .with_catalogue_list_response_limit_bytes(1 << 20)
-            .build()
-            .await
-            .expect("explicit policy");
-        assert_eq!(
-            explicit.state.forwarding_policy.list_response_limit_bytes,
-            1 << 20
-        );
-        let overflow = ServerBuilder::new(AppId::from_name("policy-overflow"))
-            .with_storage(StorageBackend::InMemory)
-            .with_catalogue_list_response_limit_bytes(usize::MAX)
-            .build()
-            .await;
-        assert!(overflow.is_err());
-    }
-    #[tokio::test]
-    async fn edge_catalogue_forwarding_uses_http1_for_raw_authority() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind raw authority");
-        let address = listener.local_addr().expect("raw authority address");
-        let authority_task = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.expect("accept raw authority");
-            let mut request = Vec::new();
-            let mut buffer = [0u8; 1024];
-            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
-                let read = stream.read(&mut buffer).await.expect("read raw request");
-                assert!(read > 0, "raw client request ended before headers");
-                request.extend_from_slice(&buffer[..read]);
-            }
-            let expected_prefix = format!(
-                "GET /apps/{}/schemas HTTP/1.1\r\n",
-                AppId::from_name("test-app")
-            );
-            assert!(
-                request.starts_with(expected_prefix.as_bytes()),
-                "catalogue forwarding must use HTTP/1.1 on the wire: {request:?}"
-            );
-            stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n[]")
-                .await
-                .expect("write raw response");
-        });
-        let state = make_edge_state_with_schema(Schema::new(), format!("http://{address}")).await;
-        let response = make_test_router(state)
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri(test_app_route("/schemas"))
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .expect("router response");
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .expect("response body")
-                .as_ref(),
-            b"[]"
-        );
-        authority_task.await.expect("raw authority task");
-    }
-
-    #[tokio::test]
-    async fn edge_catalogue_forwarding_rejects_h2_preface_on_http1_transport() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind h2 authority");
-        let address = listener.local_addr().expect("h2 authority address");
-        let authority_task = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.expect("accept h2 authority");
-            let mut request = [0u8; 512];
-            let _ = stream.read(&mut request).await.expect("read h1 request");
-            stream
-                .write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
-                .await
-                .expect("write h2 preface");
-        });
-        let state = make_edge_state_with_schema(Schema::new(), format!("http://{address}")).await;
-        let response = make_test_router(state)
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri(test_app_route("/schemas"))
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .expect("router response");
-        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-        assert!(
-            body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .expect("h2 rejection body")
-                .windows("failed to reach catalogue upstream".len())
-                .any(|window| window == b"failed to reach catalogue upstream")
-        );
-        authority_task.await.expect("h2 authority task");
-    }
-    #[tokio::test]
-    async fn edge_catalogue_forwarding_rejects_storage_closed_shutdown() {
-        let state =
-            make_edge_state_with_schema(Schema::new(), "http://127.0.0.1:9".to_owned()).await;
-        state.shutdown.request_shutdown();
-        assert_eq!(
-            state.run_shutdown_finalization().await,
-            crate::server::ShutdownPhase::StorageClosed
-        );
-        let error = forward_catalogue_request(
-            &state,
-            "admin-secret",
-            reqwest::Method::POST,
-            "/admin/migrations",
-            None,
-        )
-        .await
-        .expect_err("storage-closed forwarding must be rejected");
-        assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
-        assert!(
-            error.1.0.error.contains("cancelled during shutdown"),
-            "unexpected shutdown error: {}",
-            error.1.0.error
-        );
-    }
-    #[tokio::test]
-    async fn edge_catalogue_forwarding_validates_content_type_length() {
-        for (length, accepted) in [(1024usize, true), (1025, false)] {
-            let content_type = HeaderValue::from_bytes(&vec![b'x'; length]).unwrap();
-            let authority_app = axum::Router::new().route(
-                &test_app_route("/schema/{hash}"),
-                get(move || {
-                    let content_type = content_type.clone();
-                    async move {
-                        (
-                            StatusCode::OK,
-                            [(header::CONTENT_TYPE, content_type)],
-                            Body::from("ok"),
-                        )
-                    }
-                }),
-            );
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-                .await
-                .expect("bind content-type authority");
-            let address = listener.local_addr().expect("content-type address");
-            let authority_task = tokio::spawn(async move {
-                axum::serve(listener, authority_app)
-                    .await
-                    .expect("serve content-type authority");
-            });
-            let state =
-                make_edge_state_with_schema(Schema::new(), format!("http://{address}")).await;
-            let result = forward_catalogue_request(
-                &state,
-                "admin-secret",
-                reqwest::Method::GET,
-                "/schema/hash",
-                None,
-            )
-            .await;
-            if accepted {
-                let response = result.expect("1024-byte content type is accepted");
-                assert_eq!(response.status(), StatusCode::OK);
-                assert_eq!(
-                    response.headers()[header::CONTENT_TYPE].as_bytes().len(),
-                    length
-                );
-            } else {
-                assert_eq!(
-                    result.expect_err("1025-byte content type is rejected").0,
-                    StatusCode::BAD_GATEWAY
-                );
-            }
-            authority_task.abort();
-        }
-    }
-
-    #[tokio::test]
-    async fn edge_catalogue_forwarding_does_not_follow_redirects() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind redirect authority");
-        let address = listener.local_addr().expect("redirect address");
-        let authority_task = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.expect("accept redirect request");
-            let mut request = [0u8; 512];
-            let _ = stream
-                .read(&mut request)
-                .await
-                .expect("read redirect request");
-            stream
-                .write_all(b"HTTP/1.1 302 Found\r\nLocation: /other\r\nContent-Length: 0\r\n\r\n")
-                .await
-                .expect("write redirect response");
-        });
-        let state = make_edge_state_with_schema(Schema::new(), format!("http://{address}")).await;
-        let response = forward_catalogue_request(
-            &state,
-            "admin-secret",
-            reqwest::Method::GET,
-            "/schemas",
-            None,
-        )
-        .await
-        .expect("redirect response");
-        assert_eq!(response.status(), StatusCode::FOUND);
-        authority_task.await.expect("redirect authority task");
-    }
-
-    #[tokio::test]
-    async fn edge_catalogue_forwarding_handles_tiny_raw_writes_across_chunk_boundary() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind tiny-write authority");
-        let address = listener.local_addr().expect("tiny-write address");
-        let authority_task = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.expect("accept tiny-write request");
-            let mut request = [0u8; 512];
-            let _ = stream
-                .read(&mut request)
-                .await
-                .expect("read tiny-write request");
-            let body_length = 2 * 64 * 1024 + 1;
-            stream
-                .write_all(
-                    format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {body_length}\r\nConnection: close\r\n\r\n"
-                    )
-                    .as_bytes(),
-                )
-                .await
-                .expect("write tiny-write headers");
-            for _ in 0..body_length {
-                stream.write_all(b"x").await.expect("write tiny body byte");
-            }
-        });
-        let state = make_edge_state_with_schema(Schema::new(), format!("http://{address}")).await;
-        let response = forward_catalogue_request(
-            &state,
-            "admin-secret",
-            reqwest::Method::GET,
-            "/schema/hash",
-            None,
-        )
-        .await
-        .expect("tiny-write response");
-        let body = body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("tiny-write body");
-        assert_eq!(body.len(), 2 * 64 * 1024 + 1);
-        assert!(body.iter().all(|byte| *byte == b'x'));
-        authority_task.await.expect("tiny-write authority task");
-    }
-
-    #[tokio::test]
-    async fn edge_catalogue_forwarding_reuses_one_http1_connection_lease() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind lease authority");
-        let address = listener.local_addr().expect("lease address");
-        let authority_task = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.expect("accept lease connection");
-            for _ in 0..2 {
-                let mut request = Vec::new();
-                let mut buffer = [0u8; 512];
-                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
-                    let read = stream.read(&mut buffer).await.expect("read lease request");
-                    assert!(read > 0, "lease connection closed between requests");
-                    request.extend_from_slice(&buffer[..read]);
-                }
-                stream
-                    .write_all(
-                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok",
-                    )
-                    .await
-                    .expect("write lease response");
-            }
-        });
-        let state = make_edge_state_with_schema(Schema::new(), format!("http://{address}")).await;
-        for _ in 0..2 {
-            let response = forward_catalogue_request(
-                &state,
-                "admin-secret",
-                reqwest::Method::GET,
-                "/schemas",
-                None,
-            )
-            .await
-            .expect("leased response");
-            assert_eq!(response.status(), StatusCode::OK);
-            assert_eq!(
-                body::to_bytes(response.into_body(), usize::MAX)
-                    .await
-                    .expect("leased body")
-                    .as_ref(),
-                b"ok"
-            );
-        }
-        tokio::time::timeout(Duration::from_secs(1), authority_task)
-            .await
-            .expect("lease authority completion")
-            .expect("lease authority task");
-    }
-    #[tokio::test]
-    async fn catalogue_forwarding_without_authority_fails_closed() {
-        let state = make_state_with_schema(Schema::new()).await;
-        let error = forward_catalogue_request(
-            &state,
-            "admin-secret",
-            reqwest::Method::GET,
-            "/schemas",
-            None,
-        )
-        .await
-        .expect_err("core server has no forwarding authority");
-        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(error.1.0.error.contains("without a configured upstream"));
-    }
-    #[tokio::test]
-    async fn edge_catalogue_ingress_cap_blocks_only_oversized_authority_request() {
+    async fn catalogue_ingress_cap_blocks_only_oversized_request() {
         fn padded_migration(length: usize) -> Vec<u8> {
             let mut value = serde_json::json!({
-                "fromHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "toHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                "forward": [],
+                "targetSchemaHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "schemas": [], "migrations": [], "permissions": {},
                 "padding": ""
             });
             let base = serde_json::to_vec(&value).unwrap().len();
@@ -3191,30 +1603,14 @@ mod tests {
             serde_json::to_vec(&value).unwrap()
         }
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind ingress authority");
-        let address = listener.local_addr().expect("ingress authority address");
-        let authority_task = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.expect("accept ingress request");
-            let mut request = [0u8; 1024];
-            let _ = stream
-                .read(&mut request)
-                .await
-                .expect("read ingress request");
-            stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-                .await
-                .expect("write ingress response");
-        });
-        let state = make_edge_state_with_schema(Schema::new(), format!("http://{address}")).await;
+        let state = make_state_with_schema(Schema::new()).await;
         let app = make_test_router(state);
         let exact = app
             .clone()
             .oneshot(
                 axum::http::Request::builder()
                     .method(Method::POST)
-                    .uri(test_app_route("/admin/migrations"))
+                    .uri(test_app_route("/admin/deploy"))
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(padded_migration(
@@ -3224,12 +1620,12 @@ mod tests {
             )
             .await
             .expect("exact ingress response");
-        assert_eq!(exact.status(), StatusCode::OK);
+        assert_eq!(exact.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let oversized = app
             .oneshot(
                 axum::http::Request::builder()
                     .method(Method::POST)
-                    .uri(test_app_route("/admin/migrations"))
+                    .uri(test_app_route("/admin/deploy"))
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(padded_migration(
@@ -3240,6 +1636,130 @@ mod tests {
             .await
             .expect("oversized ingress response");
         assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
-        authority_task.await.expect("ingress authority task");
+    }
+
+    fn persistent_dynamic_builder(dir: &std::path::Path, name: &str) -> ServerBuilder {
+        ServerBuilder::new(AppId::from_name(name))
+            .with_auth_config(test_auth_config())
+            .with_storage(StorageBackend::Persistent {
+                path: dir.to_path_buf(),
+            })
+    }
+
+    async fn store_legacy_schema(state: &ServerState, schema: &Schema) {
+        state
+            .catalogue
+            .publish_schema(&state.catalogue_store, schema.clone())
+            .unwrap();
+        crate::server::runtime_catalogue::publish_runtime_catalogue(
+            state,
+            std::slice::from_ref(schema),
+            &[],
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    fn restart_fixture_schemas() -> (Schema, Schema) {
+        let first = SchemaBuilder::new()
+            .table(TableSchema::builder("notes").column("title", ColumnType::Text))
+            .build();
+        let unbridged = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("notes")
+                    .column("title", ColumnType::Text)
+                    .column("body", ColumnType::Text),
+            )
+            .build();
+        (first, unbridged)
+    }
+
+    /// A schema published without a lens is recorded by the admin catalogue
+    /// but never reaches the Core runtime store. The next restart must still
+    /// start, and keep serving the active schema.
+    #[tokio::test]
+    async fn dynamic_core_restarts_after_unbridged_schema_publish_over_active_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = "restart-unbridged-active";
+        let (first, unbridged) = restart_fixture_schemas();
+        let first_runtime = jazz::schema::JazzSchema::new(&first).unwrap();
+
+        let built = persistent_dynamic_builder(dir.path(), name)
+            .build()
+            .await
+            .unwrap();
+        store_legacy_schema(&built.state, &first).await;
+        crate::server::runtime_catalogue::publish_permissions_and_runtime(
+            &built.state,
+            SchemaHash::compute(&first),
+            std::collections::HashMap::from([(
+                TableName::new("notes"),
+                TablePolicies::new().with_select(PolicyExpr::True),
+            )]),
+            None,
+        )
+        .await
+        .unwrap();
+        store_legacy_schema(&built.state, &unbridged).await;
+        built.shutdown().await;
+
+        let restarted = persistent_dynamic_builder(dir.path(), name)
+            .build()
+            .await
+            .expect("restart after publishing a schema without a lens");
+        let current = restarted
+            .state
+            .runtime()
+            .expect("restarted core runtime")
+            .current_schema()
+            .await
+            .unwrap();
+        assert_eq!(current.version_id(), first_runtime.version_id());
+        restarted.shutdown().await;
+
+        let restarted_again = persistent_dynamic_builder(dir.path(), name)
+            .build()
+            .await
+            .expect("second restart stays healthy");
+        restarted_again.shutdown().await;
+    }
+
+    /// Same as above for an app that never published permissions, so startup
+    /// has no active schema to fall back on.
+    #[tokio::test]
+    async fn dynamic_core_restarts_after_unbridged_schema_publish_without_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let name = "restart-unbridged-no-permissions";
+        let (first, unbridged) = restart_fixture_schemas();
+        let first_runtime = jazz::schema::JazzSchema::new(&first).unwrap();
+
+        let built = persistent_dynamic_builder(dir.path(), name)
+            .build()
+            .await
+            .unwrap();
+        store_legacy_schema(&built.state, &first).await;
+        store_legacy_schema(&built.state, &unbridged).await;
+        built.shutdown().await;
+
+        let restarted = persistent_dynamic_builder(dir.path(), name)
+            .build()
+            .await
+            .expect("restart after publishing a schema without a lens");
+        let runtime = restarted.state.runtime().expect("restarted core runtime");
+        let current = runtime.current_schema().await.unwrap();
+        assert_eq!(current.version_id(), first_runtime.version_id());
+        assert!(
+            !runtime
+                .runtime_catalogue_contains_schema(
+                    jazz::schema::JazzSchema::new(&unbridged)
+                        .unwrap()
+                        .version_id()
+                )
+                .await
+                .unwrap(),
+            "reopening must not admit the unbridged schema as a side effect"
+        );
+        restarted.shutdown().await;
     }
 }

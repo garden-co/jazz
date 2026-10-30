@@ -3,6 +3,9 @@ import { app } from "./schema.js";
 
 // #region permissions-basic-vue
 export default s.definePermissions(app, ({ policy }) => [
+  policy.projects.allowRead.always(),
+  policy.projects.allowInsert.always(),
+
   policy.todos.allowRead.where({}),
   policy.todos.allowInsert.where({ done: false }),
   policy.todos.allowUpdate.whereOld({ done: false }).whereNew({}),

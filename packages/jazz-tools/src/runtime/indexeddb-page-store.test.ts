@@ -1,6 +1,5 @@
 import { acquireBrowserPhysicalDatabaseEpoch } from "./browser-physical-database-epoch.js";
 import { IDBFactory, indexedDB as fakeIndexedDb } from "fake-indexeddb";
-import { readFile } from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   INDEXEDDB_BTREE_DATABASE_VERSION,
@@ -17,6 +16,7 @@ import {
   INDEXEDDB_REPLICA_NODE_BYTES,
   INDEXEDDB_REPLICA_NODE_KEY,
   IndexedDbPageStore,
+  UnsupportedStorageCodecsError,
 } from "./indexeddb-page-store.js";
 
 async function ownReclamation(store: IndexedDbPageStore) {
@@ -61,6 +61,29 @@ describe("IndexedDbPageStore", () => {
     expect(await store.metadata()).toEqual(metadata);
     expect(await store.readPage(7)).toEqual(new Uint8Array([1, 2, 3]));
     expect(await store.readPage(3)).toEqual(new Uint8Array([4, 5]));
+    store.close();
+  });
+
+  it("reads several pages in request order, with null for absent ids", async () => {
+    const name = databaseName();
+    const store = await IndexedDbPageStore.open(name);
+    await store.commit({
+      expectedGeneration: 0,
+      metadata: { pageSize: INDEXEDDB_BTREE_PAGE_SIZE, rootPageId: 7, nextPageId: 8 },
+      pages: new Map([
+        [7, new Uint8Array([1, 2, 3])],
+        [3, new Uint8Array([4, 5])],
+      ]),
+    });
+
+    expect(await store.readPages([3, 5, 7, 3])).toEqual([
+      new Uint8Array([4, 5]),
+      null,
+      new Uint8Array([1, 2, 3]),
+      new Uint8Array([4, 5]),
+    ]);
+    expect(await store.readPages([])).toEqual([]);
+    await expect(store.readPages([1, -1])).rejects.toThrow();
     store.close();
   });
 
@@ -596,6 +619,45 @@ describe("IndexedDbPageStore", () => {
     }
   });
 
+  it("reports a codec-family mismatch as a typed storage-format refusal", async () => {
+    const required = INDEXEDDB_STORAGE_MANIFEST.requiredCodecIds;
+    // The last Groove browser root's inventory (alpha.59).
+    const groove = [
+      "groove.dictionary.v1",
+      "groove.durable-index.v2",
+      "groove.large-value.v2",
+      "groove.ordered-chunk-storage.v2",
+      "groove.ordered-kv.v1",
+      "jazz.node-storage.v2",
+    ];
+    for (const [requiredCodecIds, missing, unknown] of [
+      [groove, ["jazz.sqlite-storage.v1"], groove],
+      [[], ["jazz.sqlite-storage.v1"], []],
+      [[...required, "jazz.future.v2"], [], ["jazz.future.v2"]],
+      [["jazz.sqlite-storage.v2"], ["jazz.sqlite-storage.v1"], ["jazz.sqlite-storage.v2"]],
+    ] as const) {
+      const name = databaseName();
+      await installRawEpochOneFixture(name, { ...INDEXEDDB_STORAGE_MANIFEST, requiredCodecIds });
+      const refusal = await IndexedDbPageStore.open(name).then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      expect(refusal).toBeInstanceOf(UnsupportedStorageCodecsError);
+      expect(refusal).toMatchObject({
+        name: "UnsupportedStorageCodecsError",
+        code: "unsupported_storage_codecs",
+        missing,
+        unknown,
+      });
+      const raw = await openRawDatabase(name);
+      const tx = raw.transaction(INDEXEDDB_BTREE_PAGES_STORE, "readonly");
+      expect(await requestResult(tx.objectStore(INDEXEDDB_BTREE_PAGES_STORE).get(1))).toEqual(
+        new Uint8Array([1]).buffer,
+      );
+      raw.close();
+    }
+  });
+
   it("does not mutate a pre-settlement version-two namespace when rejecting its missing manifest", async () => {
     const name = databaseName();
     const raw = await createLegacyVersionTwoDatabase(name);
@@ -637,24 +699,6 @@ describe("IndexedDbPageStore", () => {
     );
     expect(metadata).toMatchObject({ generation: 1, rootPageId: 4, nextPageId: 5 });
     expect(await store.readPage(4)).toEqual(new Uint8Array([8, 6, 7, 5, 3, 0, 9]));
-    store.close();
-  });
-
-  it("persists the Rust-owned v1 page fixture byte-for-byte", async () => {
-    const fixture = hexBytes(
-      await readFile(
-        new URL("../../../../crates/idb-tree/fixtures/page-v1-leaf.hex", import.meta.url),
-        "utf8",
-      ),
-    );
-    const name = databaseName();
-    const store = await IndexedDbPageStore.open(name);
-    await store.commit({
-      expectedGeneration: 0,
-      metadata: { pageSize: INDEXEDDB_BTREE_PAGE_SIZE, rootPageId: 1, nextPageId: 2 },
-      pages: new Map([[1, fixture]]),
-    });
-    expect(await store.readPage(1)).toEqual(fixture);
     store.close();
   });
 
@@ -780,14 +824,4 @@ function transactionDone(tx: IDBTransaction): Promise<void> {
     tx.onerror = () => reject(tx.error ?? new Error("IndexedDB transaction failed"));
     tx.onabort = () => reject(tx.error ?? new Error("IndexedDB transaction aborted"));
   });
-}
-
-function hexBytes(value: string): Uint8Array {
-  const trimmed = value.trim();
-  if (trimmed.length % 2 !== 0) throw new Error("hex fixture must have even length");
-  return Uint8Array.from(
-    Array.from({ length: trimmed.length / 2 }, (_, index) =>
-      Number.parseInt(trimmed.slice(index * 2, index * 2 + 2), 16),
-    ),
-  );
 }

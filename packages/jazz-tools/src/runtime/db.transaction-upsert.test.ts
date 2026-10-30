@@ -4,20 +4,32 @@ import { createDb } from "./default-create-db.js";
 import type { Db } from "./db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
 
-const app = s.defineApp({
-  items: s.table({
-    title: s.string(),
-    note: s.string().default("default note"),
-    tags: s.array(s.string()).default([]),
-  }),
-});
+const app = s.defineApp(
+  {
+    items: s.table(
+      {
+        title: s.string(),
+        note: s.string().default("default note"),
+        tags: s.array(s.string()).default([]),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 
-const requiredArrayApp = s.defineApp({
-  items: s.table({
-    title: s.string(),
-    tags: s.array(s.string()),
-  }),
-});
+const requiredArrayApp = s.defineApp(
+  {
+    items: s.table(
+      {
+        title: s.string(),
+        tags: s.array(s.string()),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 
 let db: Db | undefined;
 afterEach(async () => {
@@ -25,11 +37,11 @@ afterEach(async () => {
   db = undefined;
 });
 
-describe.each(["mergeable", "exclusive"] as const)("%s transaction upserts", (kind) => {
+describe.each(["mergeable", "serializable"] as const)("%s transaction upserts", (kind) => {
   it("applies insert defaults and preserves omitted fields across staged patches", async () => {
     db = await createDb(await localAccountConfig("transaction-upsert-defaults"));
     await db.all(app.items);
-    const tx = kind === "mergeable" ? db.beginTransaction() : db.beginExclusiveTransaction();
+    const tx = kind === "mergeable" ? db.beginTransaction() : db.beginSerializableTransaction();
     const id = "00000000-0000-4000-8000-000000000101";
     try {
       tx.upsert(app.items, id, { title: "created" });
@@ -63,7 +75,7 @@ describe.each(["mergeable", "exclusive"] as const)("%s transaction upserts", (ki
   it("rejects an incomplete insert through transaction completion", async () => {
     db = await createDb(await localAccountConfig("transaction-upsert-required"));
     await db.all(app.items);
-    const tx = kind === "mergeable" ? db.beginTransaction() : db.beginExclusiveTransaction();
+    const tx = kind === "mergeable" ? db.beginTransaction() : db.beginSerializableTransaction();
     const id = "00000000-0000-4000-8000-000000000102";
     // A partial upsert is valid for an existing row, but cannot create one
     // without its required title. Rust must decide against transaction state.
@@ -87,7 +99,7 @@ it("requires arrays without defaults on insert instead of synthesizing an empty 
   ]);
 });
 
-describe.each(["direct", "mergeable", "exclusive"] as const)(
+describe.each(["direct", "mergeable", "serializable"] as const)(
   "%s required-array upserts",
   (kind) => {
     it("rejects omission on creation but preserves the array when patching an existing row", async () => {
@@ -99,7 +111,7 @@ describe.each(["direct", "mergeable", "exclusive"] as const)(
           db.upsert(requiredArrayApp.items, id, { title: "missing tags" }).wait({ tier: "local" }),
         ).rejects.toThrow("missing required field");
       } else {
-        const tx = kind === "mergeable" ? db.beginTransaction() : db.beginExclusiveTransaction();
+        const tx = kind === "mergeable" ? db.beginTransaction() : db.beginSerializableTransaction();
         tx.upsert(requiredArrayApp.items, id, { title: "missing tags" });
         await expect(tx.commit().wait({ tier: "local" })).rejects.toThrow("missing required field");
       }
@@ -112,7 +124,7 @@ describe.each(["direct", "mergeable", "exclusive"] as const)(
           .upsert(requiredArrayApp.items, inserted.value.id, { title: "patched" })
           .wait({ tier: "local" });
       } else {
-        const tx = kind === "mergeable" ? db.beginTransaction() : db.beginExclusiveTransaction();
+        const tx = kind === "mergeable" ? db.beginTransaction() : db.beginSerializableTransaction();
         tx.upsert(requiredArrayApp.items, inserted.value.id, { title: "patched" });
         await tx.commit().wait({ tier: "local" });
       }

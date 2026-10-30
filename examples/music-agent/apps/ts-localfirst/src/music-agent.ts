@@ -28,6 +28,12 @@ export type Attachment = {
   payload: Uint8Array;
 };
 
+/** Appends streamed prose to one transcript turn, in order. */
+export interface TurnWriter {
+  readonly id: string;
+  append(text: string): Promise<void>;
+}
+
 /**
  * Application-shaped persistence boundary. The in-memory implementation below
  * is deterministic for E2E; JazzMusicStore maps the same operations to Jazz.
@@ -35,6 +41,8 @@ export type Attachment = {
 export interface MusicStore {
   createConversation(title: string): Promise<string>;
   addTurn(turn: Omit<TranscriptTurn, "id">): Promise<string>;
+  /** Insert an empty turn whose body grows while other readers watch. */
+  beginTurn(turn: Omit<TranscriptTurn, "id" | "body">): Promise<TurnWriter>;
   streamTurn(
     turn: Omit<TranscriptTurn, "id" | "body">,
     body: StreamingValueSource,
@@ -48,7 +56,11 @@ export interface MusicStore {
   readAttachmentRange(id: string, start: number, end: number): Promise<Uint8Array>;
 }
 
-/** A Jazz adapter using the public typed Db surface, including streaming Text and Bytea writes. */
+/**
+ * A Jazz adapter using the public typed Db surface: streaming Text and Bytea
+ * inserts, page-relative appends (`update(..., { applyDiffs })`) and partial
+ * large-value reads (`select({ payload: { from, to } })`).
+ */
 export class JazzMusicStore implements MusicStore {
   constructor(private readonly db: Db) {}
 
@@ -64,6 +76,36 @@ export class JazzMusicStore implements MusicStore {
       body: turn.body,
       created_at: new Date(),
     }).value.id;
+  }
+
+  async beginTurn(turn: Omit<TranscriptTurn, "id" | "body">): Promise<TurnWriter> {
+    const id = await this.addTurn({ ...turn, body: "" });
+    const db = this.db;
+    // The writer owns this turn, so it knows the body's UTF-16 length without
+    // reading it back. Each append is an empty page at the end of the text.
+    let length = 0;
+    return {
+      id,
+      async append(text: string) {
+        if (!text) return;
+        await db
+          .update(
+            app.turns,
+            id,
+            {},
+            {
+              applyDiffs: {
+                body: {
+                  within: { from: length, to: length },
+                  splices: [{ at: 0, delete: 0, insert: text }],
+                },
+              },
+            },
+          )
+          .wait({ tier: "local" });
+        length += text.length;
+      },
+    };
   }
 
   async streamTurn(
@@ -116,11 +158,13 @@ export class JazzMusicStore implements MusicStore {
     }));
   }
 
-  async readAttachmentRange(_id: string, _start: number, _end: number): Promise<Uint8Array> {
-    // Typed Db currently has no range-read method. Deliberately do not access
-    // its private JazzClient; use the public JazzClient API when it is promoted
-    // to the typed facade.
-    throw new Error("Typed Db range reads are not available yet");
+  async readAttachmentRange(id: string, start: number, end: number): Promise<Uint8Array> {
+    // Only the requested byte page crosses into JavaScript; the rest of the
+    // attachment stays in Jazz.
+    const [page] = await this.db.all(
+      app.attachments.where({ id }).select({ payload: { from: start, to: end } }),
+    );
+    return page?.payload ?? new Uint8Array();
   }
 }
 
@@ -137,15 +181,20 @@ export class DeterministicMusicAgent {
       body: prompt,
     });
     const assistantOrdinal = existing.length + 1;
-    const assistantId = await this.store.streamTurn(
-      { conversationId, role: "assistant", ordinal: assistantOrdinal },
-      chunks([
-        "I found a focused listening path for ",
-        prompt,
-        ". ",
-        "Starting with the live cut.",
-      ]),
-    );
+    const assistant = await this.store.beginTurn({
+      conversationId,
+      role: "assistant",
+      ordinal: assistantOrdinal,
+    });
+    for (const part of [
+      "I found a focused listening path for ",
+      prompt,
+      ". ",
+      "Starting with the live cut.",
+    ]) {
+      await assistant.append(part);
+    }
+    const assistantId = assistant.id;
     await this.store.addToolCall({
       turnId: assistantId,
       name: "music.search",
@@ -181,6 +230,17 @@ export class MemoryMusicStore implements MusicStore {
     const id = this.id("turn");
     this.turns.push({ id, ...turn });
     return id;
+  }
+
+  async beginTurn(turn: Omit<TranscriptTurn, "id" | "body">): Promise<TurnWriter> {
+    const id = await this.addTurn({ ...turn, body: "" });
+    const stored = this.turns.find((candidate) => candidate.id === id)!;
+    return {
+      id,
+      async append(text: string) {
+        stored.body += text;
+      },
+    };
   }
 
   async streamTurn(

@@ -11,6 +11,8 @@ export {
   type BackendSchemaSource,
 } from "./create-jazz-context.js";
 export {
+  isRequestAuthenticationError,
+  RequestAuthenticationError,
   resolveRequestSession,
   type BackendRequestAuthConfig,
   type BackendRequestOptions,
@@ -18,3 +20,10 @@ export {
 export type { WasmSchema } from "../drivers/types.js";
 export type { PublicSession } from "../runtime/context.js";
 export { Db, type QueryBuilder, type QueryOptions, type TableProxy } from "../runtime/db.js";
+export {
+  type SnapshotRef,
+  parseSnapshotRef,
+  serializeSnapshotRef,
+  SnapshotRefFormatError,
+  UnsupportedSnapshotError,
+} from "../runtime/snapshot-ref.js";

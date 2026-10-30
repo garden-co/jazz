@@ -4,8 +4,6 @@ description: Build a server-side to-do API with Jazz and Hono, step by step.
 reviewedAt: "b29b48d1a"
 ---
 
-import { Callout } from "fumadocs-ui/components/callout";
-import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
 import SchemaSetup from "../../partials/schema-setup.mdx";
 import ServerAuthConfig from "../../partials/server-auth-config.mdx";
 import QuickstartSchemaTypesSummary from "../../partials/schema-types-summary.mdx";
@@ -28,6 +26,12 @@ pnpm add jazz-tools@alpha jazz-napi@alpha hono @hono/node-server
 pnpm add -D typescript tsx
 ```
 
+On Linux, GNU native bindings support x64 and ARM64 with glibc ≥ 2.34 and
+libstdc++ providing `GLIBCXX_3.4.29` / `CXXABI_1.3.13`, including AL2023.
+Alpine/musl is not a GNU NAPI target. Standalone CLI binaries have a separate
+support matrix. See the [Linux native package requirements](https://github.com/garden-co/jazz/blob/main/dev/artifacts/linux-napi/README.md)
+for the build baseline and verification details.
+
 ## Define your schema
 
 Create `schema.ts` at the root of your project (or `src/lib/schema.ts` for SvelteKit). This is the source of truth for your data model.
@@ -46,7 +50,7 @@ Create `schema.ts` at the root of your project (or `src/lib/schema.ts` for Svelt
 
 ### Add permissions
 
-A table with no [permission](/docs/auth/permissions) declarations is open to reads and writes. Once a table declares any policy, omitted operations are denied. For this quickstart, explicitly allow all four operations:
+Every operation requires an explicit [permission](/docs/auth/permissions) grant. Omitted operations are denied, including on tables with no policy declarations. For this quickstart, explicitly allow all four operations:
 
 ```ts title="permissions.ts"
 import { schema as s } from "jazz-tools";
@@ -72,16 +76,27 @@ export JAZZ_APP_ID=019d0ba1-519a-7e01-b0eb-0059ee898e4d
 
 Create `src/index.ts`. This quickstart puts everything in one file; a real app would split across multiple modules.
 
-<include cwd lang="ts" meta='title="src/index.ts"'>
-  ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-setup-ts
-</include>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="src/index.ts"'>
+      ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-setup-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts" meta='title="src/index.ts"'>
+      ../examples/docs/todo-effect/src/server.ts#quickstart-server-setup-effect
+    </include>
+  </Tab>
+</Tabs>
 
 - `appId` identifies the app namespace for storage and sync.
 - `app` is your typed schema export.
 - `permissions` is the server-side policy bundle.
 - `serverUrl` identifies the required reachable core; `initial: { backendSecret }` admits the backend account before opening its native client.
-- `jwksUrl` verifies external JWTs inside `await client.forRequest(req)`. Without it, the backend only accepts Jazz local-first tokens unless you set `allowLocalFirstAuth: false`. It does not currently accept anonymous bearer tokens.
+- `jwksUrl` verifies external JWTs inside `await client.forRequest(req)`. Without it or `jwtPublicKey`, the backend only accepts Jazz local-first tokens, provided `allowLocalFirstAuth` is enabled. That option defaults to `false` when `NODE_ENV` is `production` (case-insensitive) and `true` otherwise; explicit `true` or `false` overrides the default. It does not currently accept anonymous bearer tokens.
 - `dataPath` controls where local server state persists.
+
+The TypeScript example reads `JAZZ_ALLOW_LOCAL_FIRST_AUTH` as enabled for `true`, `1`, `yes`, `on` or `y` (case-insensitive). Any other set value disables it. Leave the variable unset to use the SDK default.
 
 For this TypeScript backend, use a direct HTTPS `jwksUrl`. HTTP is allowed for
 development only when the URL's WHATWG-canonical hostname is `localhost`,
@@ -113,17 +128,35 @@ Add each of the following snippets to `src/index.ts`, below the setup code.
 
 Use `db.insert` to create a new row.
 
-<include cwd lang="ts" meta='title="src/index.ts"'>
-  ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-write-ts
-</include>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="src/index.ts"'>
+      ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-write-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts" meta='title="src/index.ts"'>
+      ../examples/docs/todo-effect/src/server.ts#quickstart-server-write-effect
+    </include>
+  </Tab>
+</Tabs>
 
 ## Update and delete to-dos
 
 Use `db.update` and `db.delete` to modify existing rows.
 
-<include cwd lang="ts" meta='title="src/index.ts"'>
-  ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-update-ts
-</include>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="src/index.ts"'>
+      ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-update-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts" meta='title="src/index.ts"'>
+      ../examples/docs/todo-effect/src/server.ts#quickstart-server-update-effect
+    </include>
+  </Tab>
+</Tabs>
 
 Full mutation API: [Writing Data](/docs/writing/writing-data).
 
@@ -131,9 +164,18 @@ Full mutation API: [Writing Data](/docs/writing/writing-data).
 
 Use `db.all` to query rows. The query builder supports filtering, sorting, and pagination.
 
-<include cwd lang="ts" meta='title="src/index.ts"'>
-  ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-read-ts
-</include>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="src/index.ts"'>
+      ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-read-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts" meta='title="src/index.ts"'>
+      ../examples/docs/todo-effect/src/server.ts#quickstart-server-read-effect
+    </include>
+  </Tab>
+</Tabs>
 
 Full query API: [Reading Data](/docs/reading/queries).
 
@@ -141,9 +183,18 @@ Full query API: [Reading Data](/docs/reading/queries).
 
 Start the server at the bottom of `src/index.ts`:
 
-<include cwd lang="ts" meta='title="src/index.ts"'>
-  ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-listen-ts
-</include>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="src/index.ts"'>
+      ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-listen-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts" meta='title="src/index.ts"'>
+      ../examples/docs/todo-effect/src/server.ts#quickstart-server-listen-effect
+    </include>
+  </Tab>
+</Tabs>
 
 ```bash title="Terminal"
 npx tsx src/index.ts
@@ -173,9 +224,11 @@ curl -X DELETE http://localhost:3000/api/todos/<id> \
 
 <Callout type="info">
   `forRequest` verifies the caller's bearer token inside the backend context. The token above is a
-  Jazz self-signed dev token, which works because `allowLocalFirstAuth` defaults to `true`. If you
-  want to accept external JWTs from your auth provider, also set `jwksUrl` so the backend can verify
-  them via JWKS.
+  Jazz self-signed dev token. `allowLocalFirstAuth` defaults to `true` outside production. In
+  production, set `allowLocalFirstAuth: true` explicitly on the Node backend and enable local-first
+  authentication on the sync server, which still verifies the token and account. Existing production
+  backends that relied on the implicit default need this explicit setting. To accept external JWTs
+  from your auth provider, set `jwksUrl` so the backend can verify them via JWKS.
 </Callout>
 
 ## Authentication

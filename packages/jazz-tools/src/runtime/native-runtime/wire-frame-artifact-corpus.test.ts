@@ -4,23 +4,29 @@ import { describe, expect, it } from "vitest";
 
 import { hasJazzNapiBuild, loadNapiModule } from "../testing/napi-runtime-test-utils.js";
 import { hasJazzWasmBuild, loadWasmModuleForTest } from "../testing/wasm-runtime-test-utils.js";
-import { FEATURE_PAYLOAD_ZSTD, decodeWireError } from "./websocket.js";
+import {
+  FEATURE_PAYLOAD_ZSTD,
+  decodeWebSocketFrameBatch,
+  decodeWireError,
+  encodeWebSocketFrameBatch,
+} from "./websocket.js";
 
-type FrameFixture = { name: string; frame_hex: string };
-type ArtifactCorpus = {
+type Batch = { name: string; reader: Reader; batch_hex: string };
+type Reader = "server-opening" | "server" | "client";
+type SyncWireCorpus = {
   format: string;
-  error_frames: Array<{
-    name: string;
-    frame_hex: string;
-    code: string;
-    retry: string;
-    message: string;
-  }>;
-  rejections: Array<{ name: string; frame_hex: string; negotiated_features: string }>;
+  messages: Array<{ variant: string; reader: Reader; frame_hex: string }>;
+  fates: Array<{ name: string; reason: string | null; reader: Reader; frame_hex: string }>;
+  frames: Batch[];
+  rejections: Batch[];
 };
 
 type ArtifactFrameValidator = {
-  __testValidateWireFrameCorpus(frame: Uint8Array, negotiatedFeatures: string): void;
+  __testValidateWireFrameBatchCorpus(
+    batch: Uint8Array,
+    reader: Reader,
+    negotiatedFeatures: string,
+  ): void;
   __testWireFrameCorpusFeatures(): string;
 };
 
@@ -28,41 +34,49 @@ type WasmArtifactFrameValidator = ArtifactFrameValidator & {
   WasmDb: { prototype: { wireFeatures?: () => number } };
 };
 
-// The source fixtures freeze the exact Rust-produced v1 bytes. This test then
-// sends every complete Hello/message frame through both freshly generated artifacts,
-// not a JavaScript mirror of the Rust frame/payload/compression decoder.
+// `crates/jazz/fixtures/sqlite_sync_wire_v1.json` freezes one real Rust-encoded
+// frame of every SQLite sync message variant (see
+// crates/jazz/tests/sync_wire_corpus.rs), rejected Fate frames with and
+// without a reason name, Hello and Error frames, and
+// batches a reader must reject. Every one runs through both freshly generated
+// artifacts, not a JavaScript mirror of the Rust decoders.
 describe("wire frame artifact corpus", () => {
-  it("decodes every exact structured v1 error and rejects planted field drift", () => {
-    const corpus = artifactCorpus();
-    for (const error of corpus.error_frames) {
-      expect(decodeWireError(hexToBytes(error.frame_hex)), error.name).toEqual({
-        code: error.code,
-        retry: error.retry,
-        message: error.message,
-      });
-    }
-    const bootstrap = corpus.error_frames.find(
-      (error) => error.name === "runtime bootstrap not ready",
-    );
-    expect(bootstrap).toBeDefined();
-    expect(decodeWireError(hexToBytes(bootstrap!.frame_hex))).not.toEqual({
+  it("decodes the pinned structured error and the frames around it", () => {
+    const corpus = syncWireCorpus();
+    const error = corpus.frames.find((frame) => frame.name === "structured error");
+    expect(error).toBeDefined();
+    const [frame] = decodeWebSocketFrameBatch(hexToBytes(error!.batch_hex));
+    expect(decodeWireError(frame!)).toEqual({
       code: "malformed_frame",
-      retry: bootstrap!.retry,
-      message: bootstrap!.message,
-    });
-    expect(decodeWireError(hexToBytes(bootstrap!.frame_hex))).not.toEqual({
-      code: bootstrap!.code,
       retry: "never",
-      message: bootstrap!.message,
+      message: "malformed frame",
     });
   });
 
   it.skipIf(!hasJazzNapiBuild() || !hasJazzWasmBuild())(
-    "executes every complete v1 frame and rejects malformed input through NAPI and WASM",
+    "executes every pinned sync message and frame and rejects malformed input through NAPI and WASM",
     async () => {
-      const corpus = artifactCorpus();
-      expect(corpus.format).toBe("jazz-wire-frame-artifact-corpus-v1");
-      const accepted = [...rustHelloFixtures(), ...rustMessageFixtures(), ...corpus.error_frames];
+      const corpus = syncWireCorpus();
+      expect(corpus.format).toBe("jazz-sqlite-sync-wire-corpus-v1");
+      expect(corpus.messages.map((message) => message.variant)).toHaveLength(19);
+      expect(corpus.fates.map((fate) => fate.reason)).toEqual(["client_clock_too_far_ahead", null]);
+      const accepted = [
+        ...corpus.messages.map((message) => ({
+          name: message.variant,
+          reader: message.reader,
+          batch: encodeWebSocketFrameBatch([hexToBytes(message.frame_hex)]),
+        })),
+        ...corpus.fates.map((fate) => ({
+          name: fate.name,
+          reader: fate.reader,
+          batch: encodeWebSocketFrameBatch([hexToBytes(fate.frame_hex)]),
+        })),
+        ...corpus.frames.map((frame) => ({
+          name: frame.name,
+          reader: frame.reader,
+          batch: hexToBytes(frame.batch_hex),
+        })),
+      ];
       const [napi, wasm] = await Promise.all([
         // This is a deliberately test-only export (`skip_typescript` in
         // napi-rs), so production declarations must not advertise it.
@@ -89,8 +103,9 @@ describe("wire frame artifact corpus", () => {
         for (const frame of accepted) {
           expect(
             () =>
-              artifact.__testValidateWireFrameCorpus(
-                hexToBytes(frame.frame_hex),
+              artifact.__testValidateWireFrameBatchCorpus(
+                frame.batch,
+                frame.reader,
                 negotiatedFeatures,
               ),
             frame.name,
@@ -99,11 +114,12 @@ describe("wire frame artifact corpus", () => {
         for (const rejection of corpus.rejections) {
           expect(
             () =>
-              artifact.__testValidateWireFrameCorpus(
-                hexToBytes(rejection.frame_hex),
-                rejection.negotiated_features,
+              artifact.__testValidateWireFrameBatchCorpus(
+                hexToBytes(rejection.batch_hex),
+                rejection.reader,
+                negotiatedFeatures,
               ),
-            rejection.name,
+            `${rejection.reader}: ${rejection.name}`,
           ).toThrow();
         }
       }
@@ -111,22 +127,13 @@ describe("wire frame artifact corpus", () => {
   );
 });
 
-function artifactCorpus(): ArtifactCorpus {
-  return readJson("wire_frame_artifact_corpus.json") as ArtifactCorpus;
-}
-
-function rustHelloFixtures(): FrameFixture[] {
-  return (readJson("wire_hello_frames.json") as { fixtures: FrameFixture[] }).fixtures;
-}
-
-function rustMessageFixtures(): FrameFixture[] {
-  return (readJson("wire_message_frames.json") as { fixtures: FrameFixture[] }).fixtures;
-}
-
-function readJson(name: string): unknown {
+function syncWireCorpus(): SyncWireCorpus {
   return JSON.parse(
-    readFileSync(new URL(`../../../../../crates/jazz/fixtures/${name}`, import.meta.url), "utf8"),
-  );
+    readFileSync(
+      new URL("../../../../../crates/jazz/fixtures/sqlite_sync_wire_v1.json", import.meta.url),
+      "utf8",
+    ),
+  ) as SyncWireCorpus;
 }
 
 function hexToBytes(hex: string): Uint8Array {

@@ -6,6 +6,53 @@ import { useStandaloneContext } from "./contexts/standalone-context.js";
 
 const STORAGE_KEY = "jazz-inspector-standalone-config";
 
+type Deferred<T> = {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
+};
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: Deferred<T>["resolve"];
+  let reject!: Deferred<T>["reject"];
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
+}
+function storeActiveConnection() {
+  localStorage.setItem(
+    STORAGE_KEY,
+    JSON.stringify({
+      version: 2,
+      activeConnectionId: "local",
+      connections: [
+        {
+          id: "local",
+          name: "Local dev",
+          serverUrl: "http://localhost:19879",
+          appId: "local-app-id",
+          env: "dev",
+          schemaHash: "hash-a",
+        },
+      ],
+    }),
+  );
+}
+
+async function enterStoredConnectionSecret() {
+  expect(screen.getByLabelText("Admin secret")).toHaveProperty("value", "");
+  fireEvent.change(screen.getByLabelText("Admin secret"), {
+    target: { value: "local-admin-secret" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+  await screen.findByRole("heading", { name: "Select schema" });
+  fireEvent.change(screen.getByLabelText("Schema hash"), { target: { value: "hash-a" } });
+  fireEvent.click(screen.getByRole("button", { name: "Use schema" }));
+  expect(localStorage.getItem(STORAGE_KEY)).not.toContain("local-admin-secret");
+}
+
 const createJazzClientMock = vi.fn();
 const fetchSchemaHashesMock = vi.fn();
 const fetchStoredPermissionsMock = vi.fn();
@@ -79,6 +126,7 @@ describe("App", () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     localStorage.clear();
     cleanup();
   });
@@ -172,6 +220,156 @@ describe("App", () => {
       );
     });
   });
+
+  it("shuts down a client resolved before required schema setup fails", async () => {
+    storeActiveConnection();
+    const shutdown = vi.fn();
+    const client = { shutdown };
+    const pendingClient = deferred<typeof client>();
+    const pendingSchema = deferred<{ schema: object }>();
+    const setupError = new Error("Stored schema fetch failed");
+
+    createJazzClientMock.mockReturnValueOnce(pendingClient.promise);
+    fetchStoredWasmSchemaMock.mockReturnValueOnce(pendingSchema.promise);
+
+    render(<App />);
+    await enterStoredConnectionSecret();
+
+    await act(async () => {
+      pendingClient.resolve(client);
+      await pendingClient.promise;
+      await Promise.resolve();
+    });
+    await act(async () => {
+      pendingSchema.reject(setupError);
+      await expect(pendingSchema.promise).rejects.toBe(setupError);
+    });
+
+    expect((await screen.findByRole("alert")).textContent).toBe(setupError.message);
+    expect(shutdown).toHaveBeenCalledTimes(1);
+  });
+
+  it("shuts down a client that resolves after required schema-hash setup fails", async () => {
+    storeActiveConnection();
+    const shutdown = vi.fn();
+    const client = { shutdown };
+    const pendingClient = deferred<typeof client>();
+    const setupError = new Error("Schema hash fetch failed");
+
+    createJazzClientMock.mockReturnValueOnce(pendingClient.promise);
+    fetchSchemaHashesMock
+      .mockResolvedValueOnce({ hashes: ["hash-a"] })
+      .mockRejectedValueOnce(setupError);
+
+    render(<App />);
+    await enterStoredConnectionSecret();
+
+    expect((await screen.findByRole("alert")).textContent).toBe(setupError.message);
+
+    await act(async () => {
+      pendingClient.resolve(client);
+      await pendingClient.promise;
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(shutdown).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole("alert").textContent).toBe(setupError.message);
+  });
+
+  it("shuts down a resolved client when setup is disposed while still pending", async () => {
+    storeActiveConnection();
+    const shutdown = vi.fn();
+    const client = { shutdown };
+    const pendingClient = deferred<typeof client>();
+    const pendingSchema = deferred<{ schema: object }>();
+
+    createJazzClientMock.mockReturnValueOnce(pendingClient.promise);
+    fetchStoredWasmSchemaMock.mockReturnValueOnce(pendingSchema.promise);
+
+    const view = render(<App />);
+    await enterStoredConnectionSecret();
+
+    await act(async () => {
+      pendingClient.resolve(client);
+      await pendingClient.promise;
+      await Promise.resolve();
+    });
+    view.unmount();
+
+    expect(shutdown).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      pendingSchema.resolve({ schema: {} });
+      await pendingSchema.promise;
+      await Promise.resolve();
+    });
+    expect(shutdown).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the setup error visible when client shutdown rejects without an unhandled rejection", async () => {
+    storeActiveConnection();
+    const setupError = new Error("Schema hash fetch failed");
+    const shutdownError = new Error("Client shutdown failed");
+    const unhandledRejections: unknown[] = [];
+    const recordUnhandledRejection = (event: PromiseRejectionEvent) => {
+      event.preventDefault();
+      unhandledRejections.push(event.reason);
+    };
+    const shutdown = vi.fn().mockRejectedValue(shutdownError);
+    const client = { shutdown };
+
+    globalThis.addEventListener("unhandledrejection", recordUnhandledRejection);
+    try {
+      createJazzClientMock.mockResolvedValueOnce(client);
+      fetchSchemaHashesMock
+        .mockResolvedValueOnce({ hashes: ["hash-a"] })
+        .mockRejectedValueOnce(setupError);
+
+      render(<App />);
+      await enterStoredConnectionSecret();
+
+      expect((await screen.findByRole("alert")).textContent).toBe(setupError.message);
+      await waitFor(() => expect(shutdown).toHaveBeenCalledTimes(1));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(screen.getByRole("alert").textContent).toBe(setupError.message);
+      expect(unhandledRejections).toEqual([]);
+    } finally {
+      globalThis.removeEventListener("unhandledrejection", recordUnhandledRejection);
+    }
+  });
+
+  it("shuts down a client resolving after setup unmounts exactly once", async () => {
+    storeActiveConnection();
+    const shutdown = vi.fn();
+    const pendingClient = deferred<{ shutdown: typeof shutdown }>();
+    createJazzClientMock.mockReturnValueOnce(pendingClient.promise);
+    const view = render(<App />);
+    await enterStoredConnectionSecret();
+    view.unmount();
+    await act(async () => {
+      pendingClient.resolve({ shutdown });
+      await pendingClient.promise;
+    });
+    expect(shutdown).toHaveBeenCalledTimes(1);
+  });
+
+  it("shuts down an installed client on unmount without persisting its credential", async () => {
+    storeActiveConnection();
+    const shutdown = vi.fn();
+    createJazzClientMock.mockResolvedValueOnce({ shutdown });
+    const view = render(<App />);
+    await enterStoredConnectionSecret();
+    await screen.findByText("Inspector ready");
+    expect(createJazzClientMock).toHaveBeenCalledWith(
+      expect.objectContaining({ adminSecret: "local-admin-secret" }),
+    );
+    expect(shutdown).not.toHaveBeenCalled();
+    view.unmount();
+    expect(shutdown).toHaveBeenCalledTimes(1);
+    expect(localStorage.getItem(STORAGE_KEY)).not.toContain("local-admin-secret");
+  });
+
   it("lets you manage and switch between named stored connections", async () => {
     localStorage.setItem(
       STORAGE_KEY,
@@ -259,6 +457,51 @@ describe("App", () => {
     );
     expect(staging).not.toHaveProperty("adminSecret");
     expect(await screen.findByText("Inspector ready")).not.toBeNull();
+  });
+
+  it("keeps the selected connection in memory when storage cannot persist a switch", async () => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        version: 2,
+        activeConnectionId: "local",
+        connections: [
+          {
+            id: "local",
+            name: "Local dev",
+            serverUrl: "http://localhost:19879",
+            appId: "local-app-id",
+            env: "dev",
+            schemaHash: "hash-a",
+          },
+          {
+            id: "staging",
+            name: "Staging",
+            serverUrl: "https://staging.example.com",
+            appId: "staging-app-id",
+            env: "dev",
+            schemaHash: "hash-b",
+          },
+        ],
+      }),
+    );
+
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(await screen.findByRole("heading", { name: "Connections" })).not.toBeNull();
+
+    vi.spyOn(localStorage, "setItem").mockImplementation(() => {
+      throw new Error("storage unavailable");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Open Staging" }));
+
+    expect(await screen.findByRole("heading", { name: "Add connection" })).not.toBeNull();
+    expect(screen.getByLabelText("Server URL")).toHaveProperty(
+      "value",
+      "https://staging.example.com",
+    );
+    expect(screen.getByLabelText("App ID")).toHaveProperty("value", "staging-app-id");
   });
 
   it("adds a named connection from the connection manager", async () => {
@@ -486,6 +729,34 @@ describe("App", () => {
     const store = JSON.parse(localStorage.getItem(STORAGE_KEY)!);
     expect(store.connections).toHaveLength(2);
     expect(store.connections.find((c: { id: string }) => c.id === "saved").appId).toBe("saved-app");
+  });
+
+  it("removes legacy credentials when storage reads and removal work but migration writes fail", () => {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        version: 2,
+        activeConnectionId: "saved",
+        connections: [
+          {
+            id: "saved",
+            name: "Saved",
+            serverUrl: "https://saved.example.com",
+            appId: "saved-app",
+            adminSecret: "legacy-secret",
+            env: "dev",
+            schemaHash: "hash-a",
+          },
+        ],
+      }),
+    );
+    vi.spyOn(localStorage, "setItem").mockImplementation(() => {
+      throw new Error("storage quota exceeded");
+    });
+    render(<App />);
+    expect(localStorage.getItem(STORAGE_KEY)).toBeNull();
+    expect(screen.getByLabelText("Admin secret")).toHaveProperty("value", "");
+    expect(createJazzClientMock).not.toHaveBeenCalled();
   });
 
   it("scrubs secrets even when one stored connection is invalid", () => {

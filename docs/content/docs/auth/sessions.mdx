@@ -64,10 +64,12 @@ Declare a UUID column for account ownership:
 
 ```ts
 import { schema as s } from "jazz-tools";
+import { migrations } from "./migrations";
 
-const app = s.defineApp({
-  todos: s.table({ title: s.string(), owner_id: s.uuid() }),
-});
+const app = s.defineApp(
+  { todos: s.table({ title: s.string(), owner_id: s.uuid() }, {}) },
+  { migrations },
+);
 ```
 
 Filter with the account ID:

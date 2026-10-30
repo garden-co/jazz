@@ -1,6 +1,10 @@
 import { existsSync } from "node:fs";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { describe, expect, it, afterEach } from "vitest";
+import { describe, expect, it, afterEach, vi } from "vitest";
+import { validate } from "./cli.js";
 import { schemaToWasm } from "./codegen/schema-reader.js";
 import { loadCompiledSchema, schemaLoaderTestHooks } from "./schema-loader.js";
 
@@ -103,6 +107,37 @@ const FIXTURES_DIR = fileURLToPath(new URL("../tests/ts-dsl/fixtures", import.me
 const fixtureDir = (name: string) => `${FIXTURES_DIR}/${name}`;
 
 describe("bundled DSL schema loading", () => {
+  it("loads and validates separately authored schema, app, and declared relation permissions", async () => {
+    const root = fixtureDir("inferred-relations");
+    const { app } = await import("../tests/ts-dsl/fixtures/inferred-relations/app.js");
+    const { default: permissions } =
+      await import("../tests/ts-dsl/fixtures/inferred-relations/permissions.js");
+    const loaded = await loadCompiledSchema(root);
+    expect(loaded.wasmSchema).toEqual(app.wasmSchema);
+    expect(loaded.permissions).toEqual(permissions);
+    expect(loaded.permissionsFile).toBe(`${root}/permissions.ts`);
+    expect(loaded.permissions?.records?.select?.using).toMatchObject({
+      type: "ExistsRel",
+      rel: {
+        Project: {
+          input: {
+            Join: {
+              on: [{ left: { scope: "records", column: "person_ids" }, right: { column: "id" } }],
+            },
+          },
+        },
+      },
+    });
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await validate({ schemaDir: root });
+      expect(log).toHaveBeenCalledWith(`Loaded current permissions from ${root}/permissions.ts.`);
+      expect(log).toHaveBeenCalledWith("Validated 6 tables in schema.ts.");
+    } finally {
+      log.mockRestore();
+    }
+  });
+
   it("collects tables from a public bare jazz-tools side-effect import", async () => {
     const loaded = await loadCompiledSchema(fixtureDir("side-effect-only"));
 
@@ -115,6 +150,73 @@ describe("bundled DSL schema loading", () => {
 
     const sideEffect = await loadCompiledSchema(fixtureDir("side-effect-only"));
     expect(sideEffect.schema.tables.map((table) => table.name)).toEqual(["side_effect_tasks"]);
+  });
+
+  it("derives schema and inline permissions from one evaluation, fresh on each load", async () => {
+    const root = await mkdtemp(join(tmpdir(), "jazz-schema-evaluation-"));
+    const counter = join(root, "evaluations.txt");
+    try {
+      await writeFile(counter, "0");
+      await writeFile(
+        join(root, "schema.ts"),
+        `import { readFileSync, writeFileSync } from "node:fs";
+import { schema as s } from "jazz-tools";
+const counter = ${JSON.stringify(counter)};
+const evaluation = Number(readFileSync(counter, "utf8")) + 1;
+writeFileSync(counter, String(evaluation));
+const name = "tasks_" + evaluation;
+export const schema = { [name]: s.table({ title: s.string() }, {}) };
+export const permissions = { [name]: {} };
+`,
+      );
+
+      for (const evaluation of [1, 2]) {
+        const loaded = await loadCompiledSchema(root);
+        const name = `tasks_${evaluation}`;
+        expect(loaded.schema.tables.map((table) => table.name)).toEqual([name]);
+        expect(Object.keys(loaded.wasmSchema)).toEqual([name]);
+        expect(loaded.permissions).toEqual({ [name]: {} });
+        expect(loaded.permissionsFile).toBe(join(root, "schema.ts"));
+        expect(await readFile(counter, "utf8")).toBe(String(evaluation));
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("prefers a separate permissions file over malformed inline permissions", async () => {
+    const root = await mkdtemp(join(tmpdir(), "jazz-schema-permissions-"));
+    try {
+      await writeFile(
+        join(root, "schema.ts"),
+        `import { schema as s } from "jazz-tools";
+export const schema = { tasks: s.table({ title: s.string() }, {}) };
+export const permissions = "invalid inline permissions";
+`,
+      );
+      await writeFile(join(root, "permissions.ts"), "export default { tasks: {} };\n");
+
+      const loaded = await loadCompiledSchema(root);
+      expect(loaded.permissions).toEqual({ tasks: {} });
+      expect(loaded.permissionsFile).toBe(join(root, "permissions.ts"));
+
+      await rm(join(root, "permissions.ts"));
+      await expect(loadCompiledSchema(root)).rejects.toThrow(
+        "Invalid permissions export in schema.ts",
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a missing schema before malformed inline permissions", async () => {
+    const root = await mkdtemp(join(tmpdir(), "jazz-schema-errors-"));
+    try {
+      await writeFile(join(root, "schema.ts"), 'export const permissions = "invalid";\n');
+      await expect(loadCompiledSchema(root)).rejects.toThrow("Could not find a schema");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("cleans failed bundle state so a retry can load the schema", async () => {
@@ -162,8 +264,8 @@ describe("bundled DSL schema loading", () => {
       }
     }
 
-    expect(cleaned).toHaveLength(3);
-    expect(new Set(cleaned).size).toBe(3);
+    expect(cleaned).toHaveLength(2);
+    expect(new Set(cleaned).size).toBe(2);
   });
 
   it("propagates a cleanup failure after a successful load", async () => {

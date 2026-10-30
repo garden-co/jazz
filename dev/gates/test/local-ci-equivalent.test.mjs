@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { isDeepStrictEqual } from "node:util";
@@ -47,7 +48,9 @@ const sccacheExportStep = Object.freeze({
 const turboExportStep = Object.freeze({
   name: "Export trusted Turbo cache signing key",
   if: trustedTurboCondition,
-  env: { CACHE_SIGNATURE_KEY: "${{ secrets.TURBO_REMOTE_CACHE_SIGNATURE_KEY }}" },
+  env: {
+    CACHE_SIGNATURE_KEY: "${{ secrets.TURBO_REMOTE_CACHE_SIGNATURE_KEY }}",
+  },
   run: 'echo "TURBO_REMOTE_CACHE_SIGNATURE_KEY=${CACHE_SIGNATURE_KEY}" >> "${GITHUB_ENV}"',
 });
 const sccacheStatsStep = Object.freeze({
@@ -72,6 +75,12 @@ const isKnownAdminStep = (step) =>
 
 function assertCiSuiteUsesOnlySharedCorrectnessPartitions(model) {
   const expectedJobs = new Set(Object.values(ciPartitionJobs));
+  // A job may host several partitions (storage-compat also runs the
+  // differential oracle against the jazz build it just made); every run step must still
+  // be one of that job's shared partition commands, each invoked exactly once.
+  const jobCommands = new Map();
+  for (const [partition, jobName] of Object.entries(ciPartitionJobs))
+    jobCommands.set(jobName, [...(jobCommands.get(jobName) ?? []), partitionCommand(partition)]);
   for (const [partition, jobName] of Object.entries(ciPartitionJobs)) {
     const job = model.jobs?.[jobName];
     assert.ok(job, `CI omits ${jobName} for shared ${partition} partition`);
@@ -82,8 +91,9 @@ function assertCiSuiteUsesOnlySharedCorrectnessPartitions(model) {
       1,
       `${jobName} must invoke its shared ${partition} partition exactly once`,
     );
+    const allowed = jobCommands.get(jobName);
     for (const step of runSteps) {
-      if (step.run === expected || isKnownAdminStep(step)) continue;
+      if (allowed.includes(step.run) || isKnownAdminStep(step)) continue;
       assert.fail(`${jobName} has an unshared direct run step: ${step.name ?? step.run}`);
     }
   }
@@ -93,11 +103,7 @@ function assertCiSuiteUsesOnlySharedCorrectnessPartitions(model) {
   const aggregateRuns = (aggregate.steps ?? []).filter(({ run }) => typeof run === "string");
   assert.deepEqual(
     aggregateRuns.map(({ run }) => run.trim()),
-    [
-      'test "${WORKSPACE_RESULT}" = success\n' +
-        'test "${DIFFERENTIAL_RESULT}" = success\n' +
-        'test "${STORAGE_COMPAT_RESULT}" = success',
-    ],
+    ['test "${WORKSPACE_RESULT}" = success\n' + 'test "${STORAGE_COMPAT_RESULT}" = success'],
     "the Rust aggregate may check partition statuses, but must not add a correctness command",
   );
 
@@ -113,7 +119,10 @@ test("CI invokes only shared partitions and rejects a direct correctness bypass"
   assert.doesNotThrow(() => assertCiSuiteUsesOnlySharedCorrectnessPartitions(workflowModel));
 
   const planted = structuredClone(workflowModel);
-  planted.jobs.lint.steps.push({ name: "quiet bypass", run: "cargo test -p jazz" });
+  planted.jobs.lint.steps.push({
+    name: "quiet bypass",
+    run: "cargo test -p jazz",
+  });
   assert.throws(
     () => assertCiSuiteUsesOnlySharedCorrectnessPartitions(planted),
     /unshared direct run step: quiet bypass/,
@@ -320,10 +329,7 @@ test("the generated-artifact boundary fails before Node/browser tests can use st
       }),
     /generated artifact failure/,
   );
-  assert.deepEqual(seen, [
-    "all Rust workspace target classes",
-    "native correctness-artifact producer",
-  ]);
+  assert.deepEqual(seen, ["native correctness-artifact producer"]);
 });
 
 test("React Native is a distinct bridge-enabled CI partition with an admitted build", async () => {
@@ -352,7 +358,10 @@ test("React Native is a distinct bridge-enabled CI partition with an admitted bu
 
   const noConfig = reactNative.map((item) =>
     item.label === "React Native bridge tests"
-      ? { ...item, args: item.args.filter((arg) => arg !== "vitest.react-native.config.ts") }
+      ? {
+          ...item,
+          args: item.args.filter((arg) => arg !== "vitest.react-native.config.ts"),
+        }
       : item,
   );
   assert.throws(
@@ -398,18 +407,23 @@ test("a successful native producer remains visible when a TypeScript consumer fa
     /planted TS consumer failure/,
   );
   assert.deepEqual(seen, [
-    "all Rust workspace target classes",
     "native correctness-artifact producer",
     "preinstalled Chromium",
     "TypeScript consumers",
   ]);
 });
 
-test("storage compatibility executes the historical browser file and propagates its failure", async () => {
-  const partition = planFor({ partition: "storage-compat" });
+test("storage compatibility executes the historical native and browser corpora and propagates failure", async () => {
+  // The native corpus stays its own partition; the browser corpus runs in the
+  // TypeScript partition, which already produced the sealed artifacts it opens.
+  assert.deepEqual(
+    planFor({ partition: "storage-compat" }).map(({ label }) => label),
+    ["native storage compatibility corpus"],
+  );
+  const partition = planFor({ partition: "typescript" });
   const assertBrowser = (commands) => {
     const browser = commands.find((item) => item.label === "browser storage compatibility corpus");
-    assert.ok(browser, "storage partition must execute browser corpus");
+    assert.ok(browser, "TypeScript partition must execute browser corpus");
     assert.equal(browser.executable, "pnpm");
     assert.deepEqual(browser.args, [
       "--dir",
@@ -437,10 +451,58 @@ test("storage compatibility executes the historical browser file and propagates 
     /planted browser corpus failure/,
   );
   assert.deepEqual(seen, [
-    "native storage compatibility corpus",
     "native correctness-artifact producer",
     "preinstalled Chromium",
+    "TypeScript consumers",
     "browser storage compatibility corpus",
   ]);
   assert.equal(workflowModel.jobs["test-storage-compat"]["timeout-minutes"], 30);
+});
+
+test("CI lint enforces SPEC issue links and propagates an unlinked question failure", async (t) => {
+  const lint = planFor({ partition: "lint" });
+  const assertValidator = (commands) => {
+    assert.deepEqual(
+      commands.filter(({ label }) => label === "SPEC issue links"),
+      [
+        {
+          label: "SPEC issue links",
+          executable: "node",
+          args: ["dev/gates/spec-open-questions.mjs"],
+        },
+      ],
+      "lint must execute the SPEC issue-link validator exactly once",
+    );
+  };
+  assertValidator(lint);
+  assertCiSuiteUsesOnlySharedCorrectnessPartitions(workflowModel);
+  assert.throws(
+    () => assertValidator(lint.filter(({ label }) => label !== "SPEC issue links")),
+    /must execute the SPEC issue-link validator/,
+  );
+
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-spec-links-contract-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  for (const relative of ["dev/gates", "crates/jazz/SPEC"])
+    fs.mkdirSync(path.join(directory, relative), { recursive: true });
+  fs.copyFileSync(
+    path.join(root, "dev/gates/spec-open-questions.mjs"),
+    path.join(directory, "dev/gates/spec-open-questions.mjs"),
+  );
+  const spec = path.join(directory, "crates/jazz/SPEC/fixture.md");
+  const executeValidator = async (item) => {
+    if (item.label !== "SPEC issue links") return;
+    const result = spawnSync(item.executable, item.args, {
+      cwd: directory,
+      encoding: "utf8",
+    });
+    if (result.status !== 0) throw new Error(result.stderr);
+  };
+  fs.writeFileSync(spec, "🔶 [#1](https://github.com/garden-co/jazz/issues/1) — linked.\n");
+  await runPlan(lint, executeValidator);
+  fs.writeFileSync(spec, "🔶 An unresolved question without an issue.\n");
+  await assert.rejects(
+    runPlan(lint, executeValidator),
+    /unresolved question lacks a GitHub issue link/,
+  );
 });

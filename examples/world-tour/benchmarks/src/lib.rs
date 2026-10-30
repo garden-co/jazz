@@ -7,15 +7,14 @@
 use std::collections::BTreeMap;
 
 use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, PreparedQuery, block_on};
-use jazz::groove::records::Value;
-use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, gte, lit, lte};
-use jazz::schema::{JazzSchema, TableSchema};
+use jazz::records::Value;
+use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 
-type BenchDb = Db<MemoryStorage>;
+type BenchDb = Db;
 
 const DAY_SECONDS: u64 = 86_400;
 const WINDOW_START: u64 = 1_700_000_000;
@@ -25,8 +24,6 @@ const WINDOW_LIMIT: usize = 12;
 /// A deterministic, in-memory WorldTour workload fixture.
 pub struct Fixture {
     db: BenchDb,
-    stops_table: TableSchema,
-    venues_table: TableSchema,
     member_calendar_window: PreparedQuery,
     public_calendar_window: PreparedQuery,
 }
@@ -50,23 +47,8 @@ impl Fixture {
         status_for_stop: fn(usize) -> &'static str,
     ) -> Self {
         let schema = schema();
-        let stops_table = schema
-            .tables()
-            .iter()
-            .find(|table| table.name == "stops")
-            .expect("WorldTour benchmark schema has stops")
-            .clone();
-        let venues_table = schema
-            .tables()
-            .iter()
-            .find(|table| table.name == "venues")
-            .expect("WorldTour benchmark schema has venues")
-            .clone();
-        let families = schema.column_families();
-        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
         let db = block_on(Db::open(DbConfig::new(
             schema,
-            MemoryStorage::new(&refs).expect("valid memory storage families"),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x57; 16]),
                 author: AuthorSubject::SYSTEM,
@@ -143,8 +125,6 @@ impl Fixture {
             .expect("prepare public calendar window");
         Self {
             db,
-            stops_table,
-            venues_table,
             member_calendar_window,
             public_calendar_window,
         }
@@ -189,7 +169,7 @@ impl Fixture {
             .read(query)
             .expect("read calendar window")
             .into_iter()
-            .map(|row| match row.cell(&self.stops_table, "date") {
+            .map(|row| match row.cell("date") {
                 Some(Value::U64(value)) => value,
                 other => panic!("unexpected date value: {other:?}"),
             })
@@ -199,7 +179,6 @@ impl Fixture {
     fn calendar_window_venue_names(&self, query: &PreparedQuery) -> Vec<String> {
         assert_eq!(
             query
-                .shape()
                 .query()
                 .includes
                 .iter()
@@ -213,7 +192,7 @@ impl Fixture {
             .expect("read calendar window with included venues")
             .into_iter()
             .map(|stop| {
-                let Some(Value::Uuid(venue_id)) = stop.cell(&self.stops_table, "venueId") else {
+                let Some(Value::Uuid(venue_id)) = stop.cell("venueId") else {
                     panic!("calendar stop has a venueId")
                 };
                 let venue_query = self
@@ -227,7 +206,7 @@ impl Fixture {
                     .into_iter()
                     .next()
                     .expect("included venue is materialized");
-                match venue.cell(&self.venues_table, "name") {
+                match venue.cell("name") {
                     Some(Value::String(name)) => name,
                     other => panic!("unexpected included venue name: {other:?}"),
                 }
@@ -254,7 +233,8 @@ fn schema() -> JazzSchema {
                     .fk_column("venueId", "venues")
                     .column("date", ColumnType::Timestamp)
                     .column("status", ColumnType::Text)
-                    .column("publicDescription", ColumnType::Text),
+                    .column("publicDescription", ColumnType::Text)
+                    .index_only(["date"]),
             )
             .build(),
     )

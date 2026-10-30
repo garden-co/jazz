@@ -2,7 +2,7 @@ import { createInspectorAdminClient } from "jazz-tools/_dev/inspector-client";
 import { BrowserRouter } from "react-router";
 import { JazzClientProvider } from "jazz-tools/react";
 import { fetchSchemaHashes, fetchStoredPermissions, fetchStoredWasmSchema } from "jazz-tools";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { StandaloneProvider } from "./contexts/standalone-context.js";
 import { DevtoolsProvider } from "./contexts/devtools-context.js";
 import { InspectorRoutes } from "./routes.js";
@@ -39,6 +39,68 @@ type ConnectionFormMode = "connect" | "edit";
 type SchemaHashesResult = Awaited<ReturnType<typeof fetchSchemaHashes>> & {
   schemas?: SchemaHashInfo[];
 };
+type InspectorAdminClient = Awaited<ReturnType<typeof createInspectorAdminClient>>;
+
+type SetupState = "pending" | "transferred" | "failed" | "disposed";
+
+interface SetupLifetime {
+  resolveClient(client: InspectorAdminClient): void;
+  transfer(client: InspectorAdminClient): boolean;
+  fail(): void;
+  dispose(client?: InspectorAdminClient): void;
+}
+
+function createSetupLifetime(
+  shutdownClient: (client: InspectorAdminClient) => void,
+): SetupLifetime {
+  let state: SetupState = "pending";
+  let ownedClient: InspectorAdminClient | null = null;
+  let shutdownClaimed = false;
+
+  const shutdownOwnedClient = (client: InspectorAdminClient) => {
+    if (shutdownClaimed) return;
+    shutdownClaimed = true;
+    shutdownClient(client);
+  };
+
+  return {
+    resolveClient(client) {
+      if (state === "pending") {
+        ownedClient = client;
+      } else if (state === "failed" || state === "disposed") {
+        shutdownOwnedClient(client);
+      }
+    },
+    transfer(client) {
+      if (state !== "pending") {
+        if (state === "failed" || state === "disposed") {
+          shutdownOwnedClient(client);
+        }
+        return false;
+      }
+      state = "transferred";
+      ownedClient = null;
+      return true;
+    },
+    fail() {
+      if (state !== "pending") return;
+      state = "failed";
+      if (ownedClient) {
+        shutdownOwnedClient(ownedClient);
+        ownedClient = null;
+      }
+    },
+    dispose(client) {
+      if (state !== "pending") return;
+      state = "disposed";
+      if (client) ownedClient = client;
+      if (ownedClient) {
+        shutdownOwnedClient(ownedClient);
+        ownedClient = null;
+      }
+    },
+  };
+}
 
 export default function App() {
   const [initialState] = useState(() => {
@@ -67,9 +129,7 @@ export default function App() {
   const [activeAdminSecret, setActiveAdminSecret] = useState<string | null>(null);
   const [schemaHashes, setSchemaHashes] = useState<SchemaHashInfo[]>([]);
   const [availableSchemaHashes, setAvailableSchemaHashes] = useState<SchemaHashInfo[]>([]);
-  const [client, setClient] = useState<Awaited<
-    ReturnType<typeof createInspectorAdminClient>
-  > | null>(null);
+  const [client, setClient] = useState<InspectorAdminClient | null>(null);
   const [wasmSchema, setWasmSchema] = useState<import("jazz-tools").WasmSchema | null>(null);
   const [storedPermissions, setStoredPermissions] = useState<Awaited<
     ReturnType<typeof fetchStoredPermissions>
@@ -79,11 +139,24 @@ export default function App() {
 
   const activeConnection = getActiveConnection(connectionStore);
 
+  const shutdownClaims = useRef(new WeakSet<object>()).current;
+  const shutdownClient = (client: InspectorAdminClient) => {
+    if (shutdownClaims.has(client)) return;
+    shutdownClaims.add(client);
+    try {
+      Promise.resolve(client.shutdown()).catch(() => undefined);
+    } catch {
+      // Cleanup failures must not replace the setup error or become unhandled rejections.
+    }
+  };
+  const installedClient = useRef<InspectorAdminClient | null>(null);
+
   const clearRuntime = () => {
+    installedClient.current = null;
     setActiveAdminSecret(null);
     setClient((previousClient) => {
       if (previousClient) {
-        void previousClient.shutdown();
+        shutdownClient(previousClient);
       }
       return null;
     });
@@ -231,16 +304,23 @@ export default function App() {
     if (!activeConnection || !activeAdminSecret) return;
 
     let active = true;
+    const lifetime = createSetupLifetime(shutdownClient);
 
     const run = async () => {
       try {
+        const clientPromise = createInspectorAdminClient({
+          appId: activeConnection.appId,
+          serverUrl: activeConnection.serverUrl,
+          env: activeConnection.env,
+          adminSecret: activeAdminSecret,
+        });
+        void clientPromise.then(
+          (resolvedClient) => lifetime.resolveClient(resolvedClient),
+          () => undefined,
+        );
+
         const [resolvedClient, { schema }, schemaHashesResult, permissions] = await Promise.all([
-          createInspectorAdminClient({
-            appId: activeConnection.appId,
-            serverUrl: activeConnection.serverUrl,
-            env: activeConnection.env,
-            adminSecret: activeAdminSecret,
-          }),
+          clientPromise,
           fetchStoredWasmSchema(activeConnection.serverUrl, {
             appId: activeConnection.appId,
             adminSecret: activeAdminSecret,
@@ -257,13 +337,15 @@ export default function App() {
         ]);
 
         if (!active) {
-          void resolvedClient.shutdown();
+          lifetime.dispose(resolvedClient);
           return;
         }
 
+        if (!lifetime.transfer(resolvedClient)) return;
+        installedClient.current = resolvedClient;
         setClient((previousClient) => {
           if (previousClient) {
-            void previousClient.shutdown();
+            shutdownClient(previousClient);
           }
           return resolvedClient;
         });
@@ -275,17 +357,22 @@ export default function App() {
         setError(null);
         setIsSwitchingSchema(false);
       } catch (err) {
+        lifetime.fail();
         if (!active) return;
         const message = err instanceof Error ? err.message : String(err);
         setError(message);
         setIsSwitchingSchema(false);
       }
     };
-
     run();
-
     return () => {
       active = false;
+      lifetime.dispose();
+      const installed = installedClient.current;
+      installedClient.current = null;
+      if (installed) {
+        shutdownClient(installed);
+      }
     };
   }, [activeConnection, activeAdminSecret]);
 
@@ -507,7 +594,8 @@ function readStoredConnections(): StoredConnections {
       localStorage.removeItem(STORAGE_KEY);
       return emptyConnectionStore();
     }
-    writeStoredConnections(migrated);
+    // Migration must remove legacy credentials even when rewriting storage fails.
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated));
     return migrated;
   } catch {
     try {
@@ -587,7 +675,11 @@ function isLegacyStoredConfig(value: unknown): value is LegacyStoredConfig {
 }
 
 function writeStoredConnections(connections: StoredConnections): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(connections));
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(connections));
+  } catch {
+    // Keep the in-memory connection store responsive when storage is unavailable.
+  }
 }
 
 function emptyConnectionStore(): StoredConnections {

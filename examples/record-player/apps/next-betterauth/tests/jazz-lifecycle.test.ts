@@ -124,4 +124,69 @@ describe("RecordPlayer JazzLifecycle", () => {
     await Promise.all([a, b]);
     expect(events).toEqual(["open:a", "shutdown:a:undefined", "open:b"]);
   });
+
+  // #3840: React development mode mounts the provider, cleans it up and mounts
+  // it again in the same tick. On a reload the session is already signed in,
+  // so nothing re-runs the effect afterwards: the second mount must not reuse
+  // the first mount's reconciliation, which the cleanup's close() cancels, and
+  // the cancelled one must not enroll or open.
+  it("reopens when a mount, cleanup and remount happen before the first open", async () => {
+    const events: string[] = [];
+    const published: unknown[] = [];
+    const selected = account("a");
+    const manager = { getLoggedIn: () => selected, logout: vi.fn() } as never;
+    const lifecycle = new JazzLifecycle(
+      manager,
+      async (next) => {
+        events.push(`open:${next.identity.subject}`);
+        return client(events, next.identity.subject);
+      },
+      (next) => published.push(next),
+    );
+    const login = async () => {
+      events.push("login:a");
+    };
+    const first = lifecycle.reconcile("a", "session-a", login);
+    const closed = lifecycle.close();
+    const second = lifecycle.reconcile("a", "session-a", login);
+    await Promise.all([first, closed, second]);
+    expect(published.at(-1)).toBeDefined();
+    expect(lifecycle.isCurrent("a", "session-a")).toBe(true);
+    // Enrolls once: registering the same identity twice fails.
+    expect(events).toEqual(["login:a", "open:a"]);
+  });
+  it("enrolls once when a close and remount arrive while an enrollment is in flight", async () => {
+    const events: string[] = [];
+    let selected: ReturnType<typeof account> | undefined;
+    let releaseLogin!: () => void;
+    const loginPending = new Promise<void>((resolve) => {
+      releaseLogin = resolve;
+    });
+    const manager = { getLoggedIn: () => selected, logout: vi.fn() } as never;
+    const lifecycle = new JazzLifecycle(
+      manager,
+      async (next) => {
+        events.push(`open:${next.identity.subject}`);
+        return client(events, next.identity.subject);
+      },
+      () => {},
+    );
+    const enroll = async () => {
+      events.push("register:a");
+      await loginPending;
+      selected = account("a");
+    };
+    const first = lifecycle.reconcile("a", "session-a", enroll);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(events).toEqual(["register:a"]);
+    // The registration request is in flight when the view closes and remounts.
+    void lifecycle.close();
+    const second = lifecycle.reconcile("a", "session-a", enroll);
+    releaseLogin();
+    await first;
+    await second;
+    expect(lifecycle.isCurrent("a", "session-a")).toBe(true);
+    expect(events).toEqual(["register:a", "open:a"]);
+  });
 });

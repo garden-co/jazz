@@ -1,13 +1,12 @@
 use std::collections::BTreeMap;
 
-mod common;
+use crate::common;
 
 use jazz::block_on;
 use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource, SubscriptionEvent};
-use jazz::groove::records::Value;
-use jazz::groove::storage::TestStorage;
-use jazz::ids::{AuthorSubject, NodeUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{ArraySubquery, OrderDirection, Query, col, eq, param};
+use jazz::records::Value;
 use jazz::result_tree::ResultRelation;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
@@ -41,17 +40,11 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_db() -> Db<TestStorage> {
+fn open_db() -> Db {
     let schema = schema();
-    let column_families = schema.column_families();
-    let references = column_families
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
     block_on(Db::open(
         DbConfig::new(
             schema,
-            TestStorage::new(&references),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x71; 16]),
                 author: AuthorSubject::for_test_bytes([0x72; 16]),
@@ -76,6 +69,28 @@ fn children<'a>(
         panic!("expected array relation {name}");
     };
     children
+}
+
+/// The ids of the children a delivered row carries in its `name` relation
+/// cell, in relation order.
+fn relation_ids(row: &jazz::db::CurrentRow, name: &str) -> Vec<RowUuid> {
+    let Some(Value::Array(children)) = row
+        .cells()
+        .find(|(cell, _)| *cell == name)
+        .and_then(|(_, value)| value.cloned())
+    else {
+        panic!("expected array relation cell {name}");
+    };
+    children
+        .into_iter()
+        .map(|child| match child {
+            Value::Record(record) => match record.to_values().expect("child record")[0] {
+                Value::Uuid(id) => RowUuid(id),
+                ref other => panic!("expected a child row id, got {other:?}"),
+            },
+            other => panic!("expected a child record, got {other:?}"),
+        })
+        .collect()
 }
 
 #[test]
@@ -180,31 +195,15 @@ fn nested_tree_preserves_projection_order_offset_and_reset() {
     else {
         panic!("expected maintained reset");
     };
-    assert_eq!(added.len(), 1, "Groove emits one complete terminal parent");
+    assert_eq!(added.len(), 1, "the reset delivers one complete parent");
     assert_eq!(added[0].row_uuid(), parent);
-    let (descriptor, raw) = added[0].encoded_record();
-    let children_idx = descriptor
-        .field_index("children")
-        .expect("terminal relation field");
-    let Value::Array(children) = descriptor
-        .bind(raw)
-        .get_idx(children_idx)
-        .expect("decode terminal relation")
-    else {
-        panic!("expected terminal child array");
-    };
-    assert_eq!(children.len(), 2);
-    let child_ids_from_terminal = children
-        .into_iter()
-        .map(|value| match value {
-            Value::Record(child) => child.get_idx(0).expect("terminal child id"),
-            other => panic!("expected terminal child record, got {other:?}"),
-        })
-        .collect::<Vec<_>>();
     assert_eq!(
-        child_ids_from_terminal,
-        vec![Value::Uuid(child_ids[1].0), Value::Uuid(child_ids[0].0)]
+        relation_ids(&added[0], "children"),
+        vec![child_ids[1], child_ids[0]],
+        "the delivered relation keeps the include's order, offset and limit"
     );
+    assert!(relation_ids(&added[0], "empty").is_empty());
+    assert_eq!(relation_ids(&added[0], "ordered_children"), child_ids);
 }
 
 #[test]
@@ -260,21 +259,9 @@ fn maintained_array_subscription_with_root_parameter_lowers_and_delivers() {
     };
     assert_eq!(added.len(), 1);
     assert_eq!(added[0].row_uuid(), matching_parent);
-    let (descriptor, raw) = added[0].encoded_record();
-    let Value::Array(children) = descriptor
-        .bind(raw)
-        .get("children")
-        .expect("decode terminal children")
-    else {
-        panic!("expected terminal child array");
-    };
-    assert_eq!(children.len(), 1);
-    let Value::Record(child) = &children[0] else {
-        panic!("expected terminal child record");
-    };
-    assert_eq!(child.get_idx(0), Ok(Value::Uuid(initial_child.0)));
+    assert_eq!(relation_ids(&added[0], "children"), vec![initial_child]);
 
-    let _added_child = block_on(db.insert(
+    let added_child = block_on(db.insert(
         "children",
         BTreeMap::from([
             ("parent_id".to_owned(), Value::Uuid(matching_parent.0)),
@@ -285,31 +272,31 @@ fn maintained_array_subscription_with_root_parameter_lowers_and_delivers() {
     ))
     .expect("insert later child")
     .row_uuid();
+    block_on(db.tick()).expect("tick");
     let SubscriptionEvent::Delta {
         reset,
         added,
         updated,
         removed,
-        terminal_operations,
         ..
-    } = block_on(subscription.next_event()).expect("maintained terminal delivery")
+    } = block_on(subscription.next_event()).expect("maintained relation delivery")
     else {
         panic!("expected incremental maintained delta");
     };
     assert!(!reset);
     assert!(added.is_empty());
-    assert!(updated.is_empty());
     assert!(removed.is_empty());
-    assert!(matches!(
-        terminal_operations.as_slice(),
-        [jazz::groove::ivm::TerminalOperation {
-            path,
-            edit: jazz::groove::ivm::TerminalEdit::Insert { index: 1, .. },
-            ..
-        }] if path == &[jazz::groove::ivm::TerminalPathSegment::Collection(
-            "children".to_owned()
-        )]
-    ));
+    assert_eq!(updated.len(), 1, "the parent is updated in place");
+    assert_eq!(updated[0].row_uuid(), matching_parent);
+    assert_eq!(
+        relation_ids(&updated[0], "children"),
+        vec![initial_child, added_child],
+        "the new child is appended to the parent's relation"
+    );
+    assert!(
+        subscription.try_next_event().is_none(),
+        "the non-matching parent's subtree is not delivered"
+    );
 }
 
 #[test]
@@ -421,4 +408,112 @@ fn large_parent_is_materialized_atomically_without_a_frame_bound() {
     assert_eq!(children(&tree.roots[0], "children").len(), 2);
     block_on(db.subscribe(&prepared, ReadOpts::default()))
         .expect("large reset remains one atomic logical result");
+}
+
+/// Ordering or slicing an include by a column it does not select orders and
+/// slices the children by that column without exposing it, for one-shot
+/// reads and for maintained subscriptions (#2739).
+#[test]
+fn nested_order_by_unselected_column_reads_and_subscribes() {
+    let db = open_db();
+    let parent = block_on(db.insert(
+        "parents",
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("parent".to_owned())),
+            ("rank".to_owned(), Value::I32(0)),
+        ]),
+        Default::default(),
+    ))
+    .expect("insert parent")
+    .row_uuid();
+    let mut child_ids = Vec::new();
+    for (rank, label) in [(2, "last"), (0, "first"), (1, "middle")] {
+        let child = block_on(db.insert(
+            "children",
+            BTreeMap::from([
+                ("parent_id".to_owned(), Value::Uuid(parent.0)),
+                ("label".to_owned(), Value::String(label.to_owned())),
+                ("rank".to_owned(), Value::I32(rank)),
+            ]),
+            Default::default(),
+        ))
+        .expect("insert child")
+        .row_uuid();
+        block_on(db.insert(
+            "grandchildren",
+            BTreeMap::from([
+                ("child_id".to_owned(), Value::Uuid(child.0)),
+                (
+                    "label".to_owned(),
+                    Value::String(format!("{label} grandchild")),
+                ),
+                ("rank".to_owned(), Value::I32(0)),
+            ]),
+            Default::default(),
+        ))
+        .expect("insert grandchild");
+        child_ids.push(child);
+    }
+
+    for (direction, offset, limit, expected) in [
+        (
+            OrderDirection::Asc,
+            0,
+            None,
+            vec![child_ids[1], child_ids[2], child_ids[0]],
+        ),
+        (
+            OrderDirection::Desc,
+            0,
+            None,
+            vec![child_ids[0], child_ids[2], child_ids[1]],
+        ),
+        (OrderDirection::Asc, 1, Some(1), vec![child_ids[2]]),
+    ] {
+        let mut include = ArraySubquery::new("children", "children", "parent_id", "id")
+            .select(["label"])
+            .order_by("rank", direction)
+            .offset(offset)
+            .nested(
+                ArraySubquery::new("grandchildren", "grandchildren", "child_id", "id")
+                    .select(["label"]),
+            );
+        if let Some(limit) = limit {
+            include = include.limit(limit);
+        }
+        let prepared = db
+            .prepare_query(&child_query(include))
+            .expect("prepare include ordered by an unselected column");
+        let tree = block_on(db.all_result_tree(&prepared, ReadOpts::default()))
+            .expect("read include ordered by an unselected column");
+        assert_eq!(tree.roots.len(), 1);
+        let included = children(&tree.roots[0], "children");
+        assert_eq!(
+            included
+                .iter()
+                .map(|child| child.row.row_uuid())
+                .collect::<Vec<_>>(),
+            expected,
+            "{direction:?} offset {offset} limit {limit:?}"
+        );
+        for child in included {
+            assert!(
+                child.row.cells().all(|(name, _)| name != "rank"),
+                "the unselected sort column is not exposed"
+            );
+            assert!(matches!(child.row.cell_at(0), Some(Value::String(_))));
+            assert_eq!(children(child, "grandchildren").len(), 1);
+        }
+
+        let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default()))
+            .expect("open maintained subscription ordered by an unselected column");
+        let SubscriptionEvent::Delta {
+            reset: true, added, ..
+        } = block_on(subscription.next_event()).expect("maintained reset")
+        else {
+            panic!("expected maintained reset");
+        };
+        assert_eq!(added.len(), 1);
+        assert_eq!(added[0].row_uuid(), parent);
+    }
 }

@@ -1,17 +1,10 @@
 import { Utf8Decoder } from "../utf8.js";
-import type {
-  ColumnDescriptor,
-  ColumnType,
-  NativeTerminalRootLayout,
-  Value,
-  WasmRow,
-} from "../../drivers/types.js";
-import { isProvenanceMagicColumn } from "../../magic-columns.js";
-import { validateStructuredAuthorValue } from "../author-id.js";
+import { bytesToHex, formatUuidAt } from "../hex.js";
+import type { ColumnDescriptor, ColumnType, Value, WasmRow } from "../../drivers/types.js";
 import { exactSignedI64 } from "./exact-integer.js";
+import { concatBytes, isValidUtf8 } from "../util.js";
 
 const textDecoder = new Utf8Decoder({ fatal: true });
-const fatalUtf8Decoder = new Utf8Decoder({ fatal: true });
 
 export type ValueType = {
   tag: number;
@@ -76,6 +69,16 @@ export type NativeSubscriptionDelta = {
   updatedPreviousIndices: number[];
   updatedIndices: number[];
   removedIndices: number[];
+  /** Per updated row: each opted-in column's splices from its previous result. */
+  updatedSplices: Array<Array<{ column: string; splices: NativeSplice[] }>>;
+};
+/** One edit of a large value: bytes, and for text the same edit in UTF-16 units. */
+export type NativeSplice = {
+  at: number;
+  delete: number;
+  insert: Uint8Array;
+  atUtf16: number;
+  deleteUtf16: number;
 };
 export type NativeRelationSubscriptionSnapshot = {
   rootCount: number;
@@ -177,6 +180,18 @@ export function readNativeSubscriptionDelta(reader: PostcardReaderLike): NativeS
     updatedPreviousIndices: reader.readVec((indexReader) => indexReader.u64()),
     updatedIndices: reader.readVec((indexReader) => indexReader.u64()),
     removedIndices: reader.readVec((indexReader) => indexReader.u64()),
+    updatedSplices: reader.readVec((rowReader) =>
+      rowReader.readVec((columnReader) => ({
+        column: columnReader.string(),
+        splices: columnReader.readVec((spliceReader) => ({
+          at: spliceReader.u64(),
+          delete: spliceReader.u64(),
+          insert: spliceReader.bytes(),
+          atUtf16: spliceReader.u64(),
+          deleteUtf16: spliceReader.u64(),
+        })),
+      })),
+    ),
   };
   const rowCount = (batches: NativeRowBatch[]) =>
     batches.reduce((count, batch) => count + batch.rows.length, 0);
@@ -187,7 +202,8 @@ export function readNativeSubscriptionDelta(reader: PostcardReaderLike): NativeS
     delta.addedIndices.length !== rowCount(delta.added) ||
     delta.updatedPreviousIndices.length !== rowCount(delta.updated) ||
     delta.updatedIndices.length !== rowCount(delta.updated) ||
-    delta.removedIndices.length !== delta.removed.length
+    delta.removedIndices.length !== delta.removed.length ||
+    delta.updatedSplices.length !== rowCount(delta.updated)
   ) {
     throw new Error("subscription occurrence sidecar length mismatch");
   }
@@ -197,8 +213,8 @@ export function readNativeSubscriptionDelta(reader: PostcardReaderLike): NativeS
 
 function readResultKey(reader: PostcardReaderLike): Uint8Array {
   const key = reader.bytes();
-  if (key[0] !== 1 || !validTypedResultKey(key.subarray(1))) {
-    throw new Error("malformed ResultKey v1");
+  if (key[0] !== 2 || !validTypedResultKey(key.subarray(1))) {
+    throw new Error("malformed ResultKey");
   }
   return key;
 }
@@ -210,7 +226,7 @@ function validTypedResultKey(bytes: Uint8Array): boolean {
       (bytes[offset + 2]! << 8) |
       bytes[offset + 3]!) >>>
     0;
-  if (bytes.length < 24) return false;
+  if (bytes.length < 25) return false;
   let cursor = 16;
   const joined = readU32(cursor);
   cursor += 4;
@@ -238,16 +254,12 @@ function validTypedResultKey(bytes: Uint8Array): boolean {
     previousPosition = position;
     cursor += length;
   }
-  return cursor === bytes.length;
-}
-
-function isValidUtf8(bytes: Uint8Array): boolean {
-  try {
-    fatalUtf8Decoder.decode(bytes);
-    return true;
-  } catch {
-    return false;
+  for (let index = 0; index <= joined; index++) {
+    const hasTransaction = bytes[cursor++];
+    if (hasTransaction === 1) cursor += 24;
+    else if (hasTransaction !== 0) return false;
   }
+  return cursor === bytes.length;
 }
 
 export function readNativeRelationSubscriptionSnapshot(
@@ -383,18 +395,6 @@ export function readValueType(reader: PostcardReaderLike): ValueType {
 
 export function createRecord(descriptor: DescriptorField[], values: Uint8Array[]): Uint8Array {
   const layout = recordLayout(descriptor);
-  return createRecordWithLayout(layout, values);
-}
-
-function createRecordWithLayout(
-  layout: {
-    fields: FieldLayout[];
-    fixed: Extract<FieldLayout, { kind: "fixed" }>[];
-    variable: Extract<FieldLayout, { kind: "variable" }>[];
-    fixedSize: number;
-  },
-  values: Uint8Array[],
-): Uint8Array {
   const staticChunks = layout.fixed.map((field) => values[field.logicalIndex]);
   const variableChunks = layout.variable.map((field) => values[field.logicalIndex]);
   const fixed = concatBytes(staticChunks);
@@ -417,24 +417,6 @@ export function fieldIndex(descriptor: DescriptorField[], name: string): number 
   return index;
 }
 
-export function decodeRecordBool(
-  descriptor: DescriptorField[],
-  raw: Uint8Array,
-  logicalIndex: number,
-): boolean {
-  const bytes = decodeRecordBytes(descriptor, raw, logicalIndex);
-  if (bytes.length !== 1) throw new Error(`invalid bool size ${bytes.length}`);
-  return bytes[0] !== 0;
-}
-
-export function decodeRecordString(
-  descriptor: DescriptorField[],
-  raw: Uint8Array,
-  logicalIndex: number,
-): string {
-  return new Utf8Decoder().decode(decodeRecordBytes(descriptor, raw, logicalIndex));
-}
-
 export function decodeRecordBytes(
   descriptor: DescriptorField[],
   raw: Uint8Array,
@@ -449,49 +431,46 @@ export function decodeNativeRowValues(
   columns: readonly ColumnDescriptor[],
   raw: Uint8Array,
 ): Value[] {
-  const descriptor = descriptorFromColumns(columns);
+  const decodeField = createRecordValueDecoder(descriptorFromColumns(columns));
   return columns.map((column, index) => {
-    const bytes = decodeRecordValue(descriptor, raw, index);
+    const bytes = decodeField(raw, index);
     if (bytes == null) return { type: "Null" };
     return decodeBytes(column.column_type, bytes);
   });
 }
 
-export function decodeNativeRowValuesByColumn(
-  columns: readonly ColumnDescriptor[],
-  raw: Uint8Array,
-): Map<string, Value> {
-  const descriptor = descriptorFromColumns(columns);
-  const valuesByColumn = new Map<string, Value>();
-
-  for (let i = 0; i < columns.length; i++) {
-    const column = columns[i];
-    if (!column) continue;
-    const bytes = decodeRecordValue(descriptor, raw, i);
-    valuesByColumn.set(
-      column.name,
-      bytes == null ? { type: "Null" } : decodeBytes(column.column_type, bytes),
-    );
-  }
-
-  return valuesByColumn;
-}
-
-export function decodeNativeRow(
-  id: string,
-  columns: readonly ColumnDescriptor[],
-  raw: Uint8Array,
-): WasmRow {
-  const row = {
-    id,
-    values: decodeNativeRowValues(columns, raw),
-  };
+/**
+ * Attach `valuesByColumn` to a decoded row as a hidden (non-enumerable)
+ * companion of its positional `values`.
+ */
+export function withValuesByColumn<Row extends { values: Value[] }>(
+  row: Row,
+  valuesByColumn: Map<string, Value>,
+): Row {
   Object.defineProperty(row, "valuesByColumn", {
-    value: decodeNativeRowValuesByColumn(columns, raw),
+    value: valuesByColumn,
     enumerable: false,
     configurable: true,
   });
   return row;
+}
+
+/**
+ * Name the positional values decoded for `columns`. The map shares each Value
+ * object with the positional array, as terminal rows already do, instead of
+ * decoding the record a second time.
+ */
+export function namedValues(
+  columns: readonly ColumnDescriptor[],
+  values: Value[],
+): Map<string, Value> {
+  const valuesByColumn = new Map<string, Value>();
+  for (let i = 0; i < columns.length; i++) {
+    const column = columns[i];
+    if (!column) continue;
+    valuesByColumn.set(column.name, values[i]!);
+  }
+  return valuesByColumn;
 }
 
 const terminalRowKeyColumn: ColumnDescriptor = {
@@ -500,7 +479,7 @@ const terminalRowKeyColumn: ColumnDescriptor = {
   nullable: false,
 };
 
-/** Decode a Groove terminal record, whose first physical field is its row key. */
+/** Decode a terminal record, whose first physical field is its row key. */
 export function decodeNativeTerminalRow(
   id: string,
   columns: readonly ColumnDescriptor[],
@@ -515,438 +494,11 @@ export function decodeNativeTerminalRow(
     );
   }
   const values = decoded.slice(1);
-  const valuesByColumn = new Map(columns.map((column, index) => [column.name, values[index]!]));
-  const row = { id, values };
-  Object.defineProperty(row, "valuesByColumn", {
-    value: valuesByColumn,
-    enumerable: false,
-    configurable: true,
-  });
-  return row;
+  return withValuesByColumn({ id, values }, namedValues(columns, values));
 }
 
 /**
- * Decode a terminal root from the descriptor emitted with its edit.  Terminal
- * payloads are not all CurrentRow carriers: ordinary roots may be logical
- * non-nullable records while hop/gather roots retain nullable carriers.  The
- * producer descriptor is therefore the sole authority for byte layout.
- */
-export function decodeNativeTerminalRowWithDescriptor(
-  id: string,
-  descriptor: DescriptorField[],
-  columns: readonly ColumnDescriptor[],
-  raw: Uint8Array,
-): WasmRow {
-  assertTerminalRootDescriptorCompatible(descriptor, columns);
-  assertRecordLayoutIsComplete(descriptor, raw);
-  const key = decodeRecordValue(descriptor, raw, 0);
-  if (key == null || formatUuid(key) !== id) {
-    throw new Error("terminal record key does not match addressed key");
-  }
-  const values = columns.map((column, index) => {
-    const bytes = decodeRecordValue(descriptor, raw, index + 1);
-    return bytes == null
-      ? ({ type: "Null" } satisfies Value)
-      : decodeTerminalColumnBytes(column, bytes, descriptor[index + 1]?.valueType);
-  });
-  const valuesByColumn = new Map(columns.map((column, index) => [column.name, values[index]!]));
-  const row = { id, values };
-  Object.defineProperty(row, "valuesByColumn", {
-    value: valuesByColumn,
-    enumerable: false,
-    configurable: true,
-  });
-  return row;
-}
-
-/**
- * Compile the hot terminal-root decoder from an immutable producer-owned
- * layout. The descriptor's field identities and slots are checked once; each
- * operation thereafter carries only the layout ID and packed edit bytes.
- */
-export function compileNativeTerminalRootDecoder(
-  layout: NativeTerminalRootLayout,
-  descriptor: DescriptorField[],
-  columns: readonly ColumnDescriptor[],
-): (id: string, raw: Uint8Array) => WasmRow {
-  assertTerminalRootLayoutCompatible(descriptor, columns, layout);
-  const fieldsByName = new Map(layout.publicFields.map((field) => [field.name, field]));
-  const slots = columns.map((column) => fieldsByName.get(column.name)!.slot);
-  return (id, raw) => {
-    assertRecordLayoutIsComplete(descriptor, raw);
-    const key = decodeRecordValue(descriptor, raw, layout.rootKeySlot);
-    if (key == null || formatUuid(key) !== id) {
-      throw new Error("terminal record key does not match addressed key");
-    }
-    const values = columns.map((column, index) => {
-      const slot = slots[index]!;
-      const bytes = decodeRecordValue(descriptor, raw, slot);
-      return bytes == null
-        ? ({ type: "Null" } satisfies Value)
-        : decodeTerminalColumnBytes(column, bytes, descriptor[slot]?.valueType);
-    });
-    const valuesByColumn = new Map(columns.map((column, index) => [column.name, values[index]!]));
-    const row = { id, values };
-    Object.defineProperty(row, "valuesByColumn", {
-      value: valuesByColumn,
-      enumerable: false,
-      configurable: true,
-    });
-    return row;
-  };
-}
-
-function assertTerminalRootLayoutCompatible(
-  descriptor: readonly DescriptorField[],
-  columns: readonly ColumnDescriptor[],
-  layout: NativeTerminalRootLayout,
-): void {
-  if (layout.carrier !== "CurrentRow" && layout.carrier !== "Logical") {
-    throw new Error(`unsupported terminal root carrier ${String(layout.carrier)}`);
-  }
-  const root = descriptor[layout.rootKeySlot];
-  if (
-    !Number.isSafeInteger(layout.rootKeySlot) ||
-    root?.name !== layout.rootKeyFieldName ||
-    root.valueType.tag !== 11 ||
-    !isKnownValueType(root.valueType)
-  ) {
-    throw new Error("terminal root layout key slot does not match its descriptor");
-  }
-  if (layout.publicFields.length !== columns.length) {
-    throw new Error("terminal root layout does not match the public projection");
-  }
-  const columnsByName = new Map(columns.map((column) => [column.name, column]));
-  const seenNames = new Set<string>();
-  const seenSlots = new Set<number>([layout.rootKeySlot]);
-  for (let index = 0; index < layout.publicFields.length; index++) {
-    const field = layout.publicFields[index]!;
-    const column = columnsByName.get(field.name);
-    const descriptorField = descriptor[field.slot];
-    if (
-      !column ||
-      seenNames.has(field.name) ||
-      !Number.isSafeInteger(field.slot) ||
-      seenSlots.has(field.slot) ||
-      descriptorField?.name !== field.descriptorFieldName ||
-      !terminalLayoutValueTypeMatchesColumn(
-        descriptorField?.valueType,
-        column,
-        field.carrier ?? layout.carrier,
-      )
-    ) {
-      throw new Error(
-        `terminal root layout does not match the public projection at ${index}: ` +
-          `${field.name}/${field.descriptorFieldName}@${field.slot} vs ${column?.name ?? "<missing>"}/` +
-          `${descriptorField?.name ?? "<missing>"} (descriptor tag ${descriptorField?.valueType.tag ?? "?"}, ` +
-          `nullable ${String(column?.nullable)}, sparse ${String(column?.sparse)})`,
-      );
-    }
-    seenNames.add(field.name);
-    seenSlots.add(field.slot);
-  }
-}
-
-function terminalLayoutValueTypeMatchesColumn(
-  valueType: ValueType | undefined,
-  column: ColumnDescriptor,
-  carrier: NativeTerminalRootLayout["carrier"],
-): boolean {
-  // `sparse` describes the TS wildcard/storage carrier, not the declared
-  // public value. Rust collector descriptors have already removed it.
-  const logicalColumn = logicalStorageColumns([column])[0]!;
-  // Provenance lives in fixed CurrentRow system fields, not nullable _app_
-  // carriers. Authors are structured native records; timestamps retain their
-  // native scalar storage type.
-  if (isProvenanceMagicColumn(column.name)) {
-    return terminalValueTypeMatchesColumn(valueType, logicalColumn, false);
-  }
-  if (carrier === "Logical") {
-    return terminalValueTypeMatchesColumn(valueType, logicalColumn, false);
-  }
-  return (
-    valueType?.tag === 15 &&
-    valueType.inner !== undefined &&
-    terminalValueTypeMatchesColumn(valueType.inner, logicalColumn, false)
-  );
-}
-
-/**
- * Verify that an operation-supplied terminal descriptor can describe this
- * public projection.  This is intentionally stricter than layout matching:
- * a same-width scalar of the wrong type can otherwise be decoded as a valid,
- * but corrupt, public value.
- */
-export function assertTerminalRootDescriptorCompatible(
-  descriptor: DescriptorField[],
-  columns: readonly ColumnDescriptor[],
-): void {
-  const publicColumns = logicalStorageColumns(columns);
-  const matchesLogical = matchesNamedTerminalLayout(
-    descriptor,
-    "__jazz_terminal_row_key",
-    publicColumns,
-    (column) => column.name,
-    false,
-  );
-  const matchesPhysical = matchesNamedTerminalLayout(
-    descriptor,
-    "__jazz_terminal_row_key",
-    columns,
-    (column) => column.name,
-    false,
-  );
-  // CurrentRow is a distinct physical layout. Its row key is named row_uuid
-  // and its nullable application-cell carriers live in the _app_ namespace.
-  // Do not accept a nullable logical descriptor here: doing so would make an
-  // arbitrary reordering of same-typed fields indistinguishable from a native
-  // CurrentRow record.
-  const matchesCurrentRow = matchesNamedTerminalLayout(
-    descriptor,
-    "row_uuid",
-    publicColumns,
-    (column) => `_app_${column.name}`,
-    true,
-  );
-  if (!matchesLogical && !matchesPhysical && !matchesCurrentRow) {
-    throw new Error("terminal root descriptor does not match the public projection");
-  }
-}
-
-function matchesNamedTerminalLayout(
-  descriptor: readonly DescriptorField[],
-  keyName: string,
-  columns: readonly ColumnDescriptor[],
-  fieldName: (column: ColumnDescriptor) => string,
-  forceNullable: boolean,
-): boolean {
-  return (
-    descriptor.length >= columns.length + 1 &&
-    descriptor[0]?.name === keyName &&
-    descriptor[0]?.valueType.tag === 11 &&
-    isKnownValueType(descriptor[0].valueType) &&
-    columns.every(
-      (column, index) =>
-        descriptor[index + 1]?.name === fieldName(column) &&
-        terminalValueTypeMatchesColumn(descriptor[index + 1]?.valueType, column, forceNullable),
-    )
-  );
-}
-
-function terminalValueTypeMatchesColumn(
-  valueType: ValueType | undefined,
-  column: ColumnDescriptor,
-  forceNullable: boolean,
-): boolean {
-  if (!valueType || !isKnownValueType(valueType)) return false;
-  if (column.sparse) {
-    return (
-      valueType.tag === 15 &&
-      valueType.inner !== undefined &&
-      terminalValueTypeMatchesColumn(
-        valueType.inner,
-        { ...column, sparse: undefined },
-        forceNullable,
-      )
-    );
-  }
-  if (forceNullable || column.nullable) {
-    return (
-      valueType.tag === 15 &&
-      valueType.inner !== undefined &&
-      terminalValueTypeMatchesColumn(valueType.inner, { ...column, nullable: false }, false)
-    );
-  }
-  switch (column.column_type.type) {
-    case "Boolean":
-      return valueType.tag === 7;
-    case "Integer":
-      return valueType.tag === 4;
-    case "BigInt":
-      return valueType.tag === 5;
-    case "Timestamp":
-      return valueType.tag === 3;
-    case "Double":
-      return valueType.tag === 6;
-    case "Text":
-    case "Json":
-    case "Enum":
-      return valueType.tag === 8;
-    case "EnumPayload": {
-      const payloadColumn = column.column_type;
-      if (payloadColumn.type !== "EnumPayload") return false;
-      const payloadCases = valueType.enumSchema?.cases;
-      return (
-        valueType.tag === 17 &&
-        payloadCases !== undefined &&
-        payloadCases.length === payloadColumn.cases.length &&
-        payloadCases.every((payloadCase, caseIndex) => {
-          const declaredCase = payloadColumn.cases[caseIndex]!;
-          return (
-            payloadCase.name === declaredCase.name &&
-            payloadCase.payload.length === declaredCase.fields.length &&
-            payloadCase.payload.every(
-              (field, fieldIndex) =>
-                field.name === declaredCase.fields[fieldIndex]?.name &&
-                terminalValueTypeMatchesColumn(
-                  field.valueType,
-                  declaredCase.fields[fieldIndex]!,
-                  false,
-                ),
-            )
-          );
-        })
-      );
-    }
-    case "Uuid":
-      return valueType.tag === 11;
-    case "Bytea":
-      return valueType.tag === 9;
-    case "Array":
-      return (
-        valueType.tag === 14 &&
-        valueType.inner !== undefined &&
-        terminalValueTypeMatchesColumn(
-          valueType.inner,
-          { name: column.name, column_type: column.column_type.element, nullable: false },
-          false,
-        )
-      );
-    case "Row": {
-      // Terminal trees retain nested records, while ordinary packed rows use
-      // an opaque byte envelope. Both are sanctioned producer representations;
-      // any other variable-width type is not.
-      if (valueType.tag === 9) return true;
-      if (valueType.tag !== 16 || !valueType.record) return false;
-      const fields = valueType.record;
-      const columns = column.column_type.columns;
-      // Entity rows carry row_uuid; value records (including authors) do not.
-      const offset = fields.length === columns.length ? 0 : 1;
-      if (offset && (fields[0]?.name !== "row_uuid" || fields[0]?.valueType.tag !== 11)) {
-        return false;
-      }
-      return (
-        fields.length === columns.length + offset &&
-        columns.every((nested, index) => {
-          const field = fields[index + offset];
-          return (
-            field?.name === nested.name &&
-            terminalValueTypeMatchesColumn(field.valueType, nested, false)
-          );
-        })
-      );
-    }
-  }
-}
-
-function decodeTerminalColumnBytes(
-  column: ColumnDescriptor,
-  bytes: Uint8Array,
-  valueType: ValueType | undefined,
-): Value {
-  const recordType = nonNullableValueType(valueType);
-  if (column.column_type.type === "Row" && recordType?.tag === 16 && recordType.record) {
-    const descriptor = recordType.record;
-    assertRecordLayoutIsComplete(descriptor, bytes);
-    const columns = column.column_type.columns;
-    const offset = descriptor.length === columns.length ? 0 : 1;
-    const values = columns.map((nested, index): Value => {
-      const fieldIndex = index + offset;
-      const payload = decodeRecordValue(descriptor, bytes, fieldIndex);
-      return payload == null
-        ? { type: "Null" }
-        : decodeTerminalColumnBytes(nested, payload, descriptor[fieldIndex]?.valueType);
-    });
-    if (column.name === "$createdBy" || column.name === "$updatedBy") {
-      validateStructuredAuthorValue({ type: "Row", value: { values } });
-    }
-    const key = offset ? decodeRecordValue(descriptor, bytes, 0) : undefined;
-    return {
-      type: "Row",
-      value: {
-        ...(key ? { id: formatUuid(key) } : {}),
-        values,
-        valuesByColumn: new Map(columns.map((nested, index) => [nested.name, values[index]!])),
-      },
-    };
-  }
-  return decodeTerminalBytes(column.column_type, bytes, column.name);
-}
-
-function nonNullableValueType(valueType: ValueType | undefined): ValueType | undefined {
-  while (valueType?.tag === 15) valueType = valueType.inner;
-  return valueType;
-}
-
-function isKnownValueType(valueType: ValueType): boolean {
-  switch (valueType.tag) {
-    case 0:
-    case 1:
-    case 2:
-    case 3:
-    case 4:
-    case 5:
-    case 6:
-    case 7:
-    case 8:
-    case 9:
-      return true;
-    case 10:
-      return (
-        valueType.internal !== undefined &&
-        (valueType.internal.tag === 0 ||
-          valueType.internal.tag === 1 ||
-          (valueType.internal.tag === 2 &&
-            valueType.internal.kind !== undefined &&
-            valueType.internal.kind >= 0 &&
-            valueType.internal.kind <= 2))
-      );
-    case 11:
-      return true;
-    case 12:
-      return valueType.enumSchema?.variants !== undefined;
-    case 13:
-      return valueType.members !== undefined && valueType.members.every(isKnownValueType);
-    case 14:
-    case 15:
-      return valueType.inner !== undefined && isKnownValueType(valueType.inner);
-    case 16:
-      return (
-        valueType.record !== undefined &&
-        valueType.record.every((field) => isKnownValueType(field.valueType))
-      );
-    case 17:
-      return (
-        valueType.enumSchema?.cases !== undefined &&
-        valueType.enumSchema.cases.every((enumCase) =>
-          enumCase.payload.every((field) => isKnownValueType(field.valueType)),
-        )
-      );
-    default:
-      return false;
-  }
-}
-
-function assertRecordLayoutIsComplete(descriptor: DescriptorField[], raw: Uint8Array): void {
-  const layout = recordLayout(descriptor);
-  const variableCount = layout.variable.length;
-  const offsetTableLength = Math.max(0, variableCount - 1) * 4;
-  const variableStart = layout.fixedSize + offsetTableLength;
-  if (raw.length < variableStart || (variableCount === 0 && raw.length !== layout.fixedSize)) {
-    throw new Error("terminal record has trailing or truncated bytes");
-  }
-  let previous = variableStart;
-  for (let index = 0; index < variableCount - 1; index++) {
-    const next = readU32Le(raw, layout.fixedSize + index * 4);
-    if (next < previous || next > raw.length) {
-      throw new Error("terminal record has invalid variable-field offsets");
-    }
-    previous = next;
-  }
-}
-
-/**
- * Groove terminal payloads retain `Record` values for nested relation rows.
+ * Terminal payloads retain `Record` values for nested relation rows.
  * Ordinary packed transport deliberately represents those rows as byte arrays
  * with an id/length envelope instead. Both outer records have the same layout,
  * but decoding a terminal tree through the ordinary path makes the first UUID
@@ -956,11 +508,11 @@ function decodeNativeTerminalRowValues(
   columns: readonly ColumnDescriptor[],
   raw: Uint8Array,
 ): Value[] {
-  const descriptor = descriptorFromColumns(columns);
+  const decodeField = createRecordValueDecoder(descriptorFromColumns(columns));
   return columns.map((column, index) => {
-    const bytes = decodeRecordValue(descriptor, raw, index);
+    const bytes = decodeField(raw, index);
     if (bytes == null) return { type: "Null" };
-    return decodeTerminalColumnBytes(column, bytes, descriptor[index]?.valueType);
+    return decodeTerminalBytes(column.column_type, bytes, column.name);
   });
 }
 
@@ -990,44 +542,10 @@ export function encodeNativeRowValues(
   columns: readonly ColumnDescriptor[],
   values: readonly Value[],
 ): Uint8Array {
-  return createNativeRowValueEncoder(columns)(values);
-}
-
-export function createNativeRowValueEncoder(
-  columns: readonly ColumnDescriptor[],
-): (values: readonly Value[]) => Uint8Array {
-  const descriptor = descriptorFromColumns(columns);
-  const layout = recordLayout(descriptor);
-  return (values) => {
-    const encoded: Uint8Array[] = [];
-    encoded.length = columns.length;
-    for (let index = 0; index < columns.length; index += 1) {
-      encoded[index] = encodeNativeColumnValue(columns[index], values[index]);
-    }
-    return createRecordWithLayout(layout, encoded);
-  };
-}
-
-export function decodeNativeRowObject(
-  id: string | undefined,
-  columns: readonly ColumnDescriptor[],
-  raw: Uint8Array,
-): Record<string, unknown> {
-  const descriptor = descriptorFromColumns(columns);
-  const obj: Record<string, unknown> = {};
-  if (id !== undefined) {
-    obj.id = id;
-  }
-
-  for (let i = 0; i < columns.length; i++) {
-    const column = columns[i];
-    if (!column) continue;
-    const bytes = decodeRecordValue(descriptor, raw, i);
-    obj[column.name] =
-      bytes == null ? null : decodePlainValue(column.column_type, bytes, column.name);
-  }
-
-  return obj;
+  return createRecord(
+    descriptorFromColumns(columns),
+    columns.map((column, index) => encodeNativeColumnValue(column, values[index])),
+  );
 }
 
 export function decodeRecordValue(
@@ -1242,7 +760,7 @@ function encodeNativeNonNullValue(type: ColumnType, value: Value): Uint8Array {
     case "Json":
     case "Enum":
       if (value.type !== "Text") throw new Error(`expected ${type.type} value`);
-      return concatBytes([Uint8Array.of(2), new TextEncoder().encode(value.value)]);
+      return concatBytes([Uint8Array.of(0), new TextEncoder().encode(value.value)]);
     case "EnumPayload": {
       if (value.type !== "Enum") throw new Error("expected Enum payload value");
       const entry = type.cases.find((candidate) => candidate.name === value.value.case);
@@ -1258,7 +776,7 @@ function encodeNativeNonNullValue(type: ColumnType, value: Value): Uint8Array {
       return parseUuid(value.value);
     case "Bytea":
       if (value.type !== "Bytea") throw new Error("expected Bytea value");
-      return concatBytes([Uint8Array.of(2), value.value]);
+      return concatBytes([Uint8Array.of(0), value.value]);
     case "Array":
       if (value.type !== "Array") throw new Error("expected Array value");
       return encodeNativeArrayValue(type.element, value.value);
@@ -1436,7 +954,7 @@ function decodeBytes(type: ColumnType, bytes: Uint8Array): Value {
 }
 
 function decodeInlineScalar(bytes: Uint8Array): Uint8Array {
-  if (bytes[0] !== 2) {
+  if (bytes[0] !== 0) {
     throw new Error("indirect scalar crossed a logical binding boundary");
   }
   return bytes.subarray(1);
@@ -1459,46 +977,8 @@ function decodeRowValue(
   offset += 4;
   const raw = bytes.subarray(offset, offset + len);
   if (raw.byteLength !== len) throw new Error("invalid nested row value length");
-  const row: { id?: string; values: Value[]; valuesByColumn?: Map<string, Value> } = {
-    id,
-    values: decodeNativeRowValues(columns, raw),
-  };
-  Object.defineProperty(row, "valuesByColumn", {
-    value: decodeNativeRowValuesByColumn(columns, raw),
-    enumerable: false,
-    configurable: true,
-  });
-  return row;
-}
-
-function decodePlainValue(type: ColumnType, bytes: Uint8Array, columnName?: string): unknown {
-  const value = decodeBytes(type, bytes);
-  switch (type.type) {
-    case "Timestamp":
-      return timestampToDate(decodeNativeTimestamp(bytes, columnName), columnName);
-    case "Json":
-      return value.type === "Text" ? JSON.parse(value.value) : null;
-    case "Array":
-      return decodePlainArray(type.element, bytes);
-    case "Text":
-    case "Enum":
-    case "EnumPayload":
-    case "Bytea":
-    case "Uuid":
-    case "Boolean":
-    case "Integer":
-    case "BigInt":
-    case "Double":
-      return "value" in value ? value.value : null;
-    case "Row":
-      return "value" in value ? value.value : null;
-  }
-}
-
-function decodePlainArray(elementType: ColumnType, bytes: Uint8Array): unknown[] {
-  return decodeArrayElements(elementType, bytes, (element) =>
-    decodePlainValue(elementType, element),
-  );
+  const values = decodeNativeRowValues(columns, raw);
+  return withValuesByColumn({ id, values }, namedValues(columns, values));
 }
 
 function decodeArray(elementType: ColumnType, bytes: Uint8Array): Value[] {
@@ -1552,14 +1032,10 @@ export function decodeNativeTimestamp(bytes: Uint8Array, _columnName?: string): 
   return Number(raw);
 }
 
-function timestampToDate(value: number, _columnName?: string): Date {
-  return new Date(value);
-}
-
 function formatUuid(bytes: Uint8Array): string {
-  const hex = Array.from(bytes.subarray(0, 16), (byte) => byte.toString(16).padStart(2, "0")).join(
-    "",
-  );
+  if (bytes.length >= 16) return formatUuidAt(bytes, 0);
+  // Truncated input keeps the text the per-byte formatter produced.
+  const hex = bytesToHex(bytes);
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(
     16,
     20,
@@ -1672,17 +1148,6 @@ function expectSignedI32(value: Value): number {
 function expectSignedI64(value: Value): bigint {
   if (value.type !== "BigInt") throw new Error("expected BigInt value");
   return exactSignedI64(value.value, "BigInt value");
-}
-
-function concatBytes(chunks: Uint8Array[]): Uint8Array {
-  const length = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-  const out = new Uint8Array(length);
-  let offset = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, offset);
-    offset += chunk.length;
-  }
-  return out;
 }
 
 class OffsetWriter {

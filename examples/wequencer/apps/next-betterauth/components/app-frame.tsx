@@ -1,0 +1,51 @@
+"use client";
+
+import type { ReactNode } from "react";
+import { AppShell } from "@astryxdesign/core/AppShell";
+import { DropdownMenu } from "@astryxdesign/core/DropdownMenu";
+import { TopNav, TopNavHeading } from "@astryxdesign/core/TopNav";
+import { authClient } from "@/lib/auth-client";
+import { useGracefulSignOut } from "@/components/jazz-provider";
+
+/** The signed-in frame: product name on the left, the account menu on the right. */
+export function AppFrame({ children }: { children: ReactNode }) {
+  const { data: session } = authClient.useSession();
+
+  return (
+    <AppShell
+      height="auto"
+      contentPadding={4}
+      topNav={
+        <TopNav
+          heading={<TopNavHeading heading="Wequencer" headingHref="/dashboard" />}
+          endContent={session ? <AccountMenu name={session.user.name} /> : null}
+        />
+      }
+    >
+      {/* Jazz hooks need the account client, which opens once the session loads. */}
+      {session ? children : null}
+    </AppShell>
+  );
+}
+
+/** Only mounted once the Jazz account is open, so sign-out can close it cleanly. */
+function AccountMenu({ name }: { name: string }) {
+  const gracefulSignOut = useGracefulSignOut();
+
+  async function signOut() {
+    try {
+      await gracefulSignOut();
+      window.location.assign("/");
+    } catch {
+      // The owner-held lifecycle reopens the selected client and renders the error.
+    }
+  }
+
+  return (
+    <DropdownMenu
+      button={{ label: name, variant: "ghost" }}
+      alignment="end"
+      items={[{ label: "Sign out", onClick: () => void signOut() }]}
+    />
+  );
+}

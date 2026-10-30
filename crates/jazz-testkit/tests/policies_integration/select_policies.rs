@@ -7,12 +7,13 @@ use jazz::tools::{
     policy_expr as pe,
 };
 use jazz_server::JazzServer;
-use jazz_testkit::{TestingClient, wait_for_edge_txs};
+use jazz_testkit::{TestingClient, wait_for_global_txs};
 
 async fn query_documents_as_alice(client: &JazzClient) -> HashSet<ObjectId> {
     client
-        .query(Query::from("documents"), None)
+        .query(Query::from("documents"), jazz::tools::ReadTier::LocalFirst)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query documents as alice")
         .into_iter()
         .map(|(id, _)| id)
@@ -65,7 +66,7 @@ async fn rebac_select_policy_with_null_literal_filters_query_results() {
                 )
                 .expect("seed soft-deleted document");
             let hidden_tx = hidden_tx.expect("ordinary mutation commits immediately");
-            wait_for_edge_txs(&admin, &[visible_tx, hidden_tx]).await;
+            wait_for_global_txs(&admin, &[visible_tx, hidden_tx]).await;
 
             let alice = TestingClient::builder()
                 .with_server(&server)
@@ -137,7 +138,7 @@ async fn rebac_select_policy_with_is_null_filters_query_results() {
                 )
                 .expect("seed soft-deleted document");
             let hidden_tx = hidden_tx.expect("ordinary mutation commits immediately");
-            wait_for_edge_txs(&admin, &[visible_tx, hidden_tx]).await;
+            wait_for_global_txs(&admin, &[visible_tx, hidden_tx]).await;
 
             let alice = TestingClient::builder()
                 .with_server(&server)

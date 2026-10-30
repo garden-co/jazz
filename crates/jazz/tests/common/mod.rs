@@ -64,69 +64,74 @@ pub fn direct_subscription(
     }
 }
 
-/// Register the receiving half of an existing direct-node whole-table fixture.
-/// These crash/FIFO fixtures deliberately exercise NodeState below JazzServer:
-/// they need to interrupt persistence or schedule individual protocol frames.
-/// Registration remains explicit and precedes delivery, just as on a real link.
-/// The delegated snapshot models the fixture's already-admitted scope, not a
-/// capability that an ordinary network client may assert for itself.
-pub async fn register_direct_receiver(
-    node: &mut jazz::node::NodeState<jazz_storage_rocksdb::RocksDbStorage>,
-    schema: &JazzSchema,
-    table: &str,
-    scope: jazz::protocol::DelegatedSessionBinding,
-) {
-    use jazz::protocol::{RegisterShapeOptions, ShapeAst, Subscribe, SyncMessage};
-    use jazz::query::Query;
-
-    let shape = Query::from(table).validate(schema).unwrap();
-    let opts = RegisterShapeOptions::default();
-    let subscription = direct_subscription(schema, table, scope.identity);
-    for message in [
-        SyncMessage::RegisterShape {
-            shape_id: shape.shape_id(),
-            ast: ShapeAst::from_validated(&shape),
-            opts,
-        },
-        SyncMessage::Subscribe(Subscribe {
-            shape_id: shape.shape_id(),
-            subscription,
-            values: Vec::new(),
-            known_state: None,
-            delegated_session: Some(scope),
-        }),
-    ] {
-        let outcome = node.apply_sync_message(message).await.unwrap();
-        node.persist_and_settle_outcome(outcome).await.unwrap();
-    }
+/// The authority rejected a serializable commit because a read it made
+/// no longer holds.
+#[track_caller]
+pub fn assert_serialization_conflict(error: &jazz::db::Error) {
+    assert_eq!(error.code, jazz::db::ErrorCode::WriteRejected, "{error}");
+    // The reason crosses the sync wire with the rejection; the message
+    // keeps the text earlier bindings matched.
+    assert_eq!(
+        error.reason,
+        Some(jazz::db::Reason::SerializationConflict),
+        "{error}"
+    );
+    assert!(error.is_serialization_conflict(), "{error}");
+    assert!(error.message.contains("SerializationConflict"), "{error}");
 }
 
-pub async fn direct_query_update(
-    node: &mut jazz::node::NodeState<jazz_storage_rocksdb::RocksDbStorage>,
-    peer: &mut jazz::peer::PeerState,
-    schema: &JazzSchema,
-    table: &str,
-) -> jazz::protocol::SyncMessage {
-    let shape = jazz::query::Query::from(table).validate(schema).unwrap();
-    let binding = shape.bind(std::collections::BTreeMap::new()).unwrap();
-    let subscription = direct_subscription(schema, table, peer.identity());
-    let initial = peer.subscription_result_sets(subscription).is_none();
-    peer.set_subscription_policy_binding(subscription, (peer.identity(), Default::default()));
-    if initial
-        && let Some(update) = peer
-            .rehydrate_query_for_subscription_with_opts(
-                node,
-                subscription,
-                &shape,
-                &binding,
-                Default::default(),
-            )
-            .await
-            .unwrap()
-    {
-        return update;
+/// `text` with each stored column's hash suffix (`~` and six hex digits,
+/// SPEC 10.7) removed: physical names, SQL and plans as the logical names
+/// spell them.
+pub fn unhashed(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < text.len() {
+        // Only a suffix of a name: `~` after a name character, then
+        // exactly six lowercase hex digits and no further name character.
+        if bytes[i] == b'~'
+            && i > 0
+            && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_')
+            && bytes.len() >= i + 7
+            && bytes[i + 1..i + 7]
+                .iter()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
+            && bytes
+                .get(i + 7)
+                .is_none_or(|b| !b.is_ascii_alphanumeric() && *b != b'_')
+        {
+            i += 7;
+            continue;
+        }
+        let c = text[i..].chars().next().unwrap();
+        out.push(c);
+        i += c.len_utf8();
     }
-    peer.query_update_for_subscription(node, subscription, &shape, &binding)
-        .await
+    out
+}
+
+/// The physical column logical `column` of stored table `table` is kept
+/// in (`column~` and its hash, SPEC 10.7), quoted for SQL.
+pub fn physical_column(conn: &rusqlite::Connection, table: &str, column: &str) -> String {
+    let mut statement = conn
+        .prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))
+        .unwrap();
+    let names: Vec<String> = statement
+        .query_map([], |row| row.get(0))
         .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let name = names
+        .into_iter()
+        .find(|name| unhashed(name) == column)
+        .unwrap_or_else(|| panic!("{table} stores no column {column}"));
+    format!("\"{name}\"")
+}
+
+/// Where `db`'s current schema stores `table`'s `column`: the name a
+/// hand-built replicated write gives the cell (writes travel by stored
+/// names).
+pub fn stored(db: &jazz::db::Db, table: &str, column: &str) -> String {
+    db.stored_column_for_test(table, column).1
 }

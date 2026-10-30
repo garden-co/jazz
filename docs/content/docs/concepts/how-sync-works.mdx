@@ -4,8 +4,6 @@ description: An overview of how Jazz syncs data between clients, covering query 
 reviewedAt: "b29b48d1a"
 ---
 
-import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
-
 Traditional apps send queries to a remote server, which queries a database and returns data.
 
 This creates a few familiar problems:
@@ -34,9 +32,8 @@ for.
 
 When you register a query subscription with the server, it remembers.
 
-The server keeps a live query graph for that subscription. When local writes, remote replay, or
-schema/policy changes affect the result, it re-settles only the changed parts of the query and
-pushes the relevant row updates downstream.
+The server keeps that subscription live. When a write, a replayed change, or a schema/policy change
+could affect its result, the server re-evaluates it and pushes only the rows that changed.
 
 That means:
 
@@ -62,77 +59,96 @@ replayed automatically.
 
 ## Infrastructure tiers
 
-Jazz sync runs across three tiers:
+Jazz connects each client to Core, the server that authorizes and durably accepts writes.
 
 <TierSyncDiagram />
 
-**Local** is the first tier on the client itself. In browser persistent mode, a dedicated worker
-hosts that local durable copy in IndexedDB so it can respond immediately while updates from higher tiers
-stream in.
+**Local** is the client's copy of the data. In browser persistent mode, a worker owns
+that copy in IndexedDB. React Native uses a local native relay. These relays provide
+local persistence and connectivity; they do not replace Core's permission checks.
 
-**Edge** is the first server hop after the client. In cloud configurations it is usually a nearby
-node. Edge servers hold the data needed to serve the queries currently flowing through them.
-
-**Global** is the global reconciliation tier. Edge servers reconcile through global, which is how
-updates eventually spread to every subscribed client.
+**Core** owns the authoritative database. A `global` write confirmation means Core
+has accepted and durably stored the write.
 
 ### How data flows
 
-Writes flow **upward**:
-
 ```text
-app -> local -> edge -> global
+app -> local persistence -> Core
 ```
 
-As a write flows through the network, each tier can confirm that it has durably received it. That
-is what durability tiers are built on.
+A write first updates the app's local state. Jazz uploads it to Core, which checks
+permissions and either accepts or rejects it. Waiting for `local` confirms local
+persistence; waiting for `global` also requires Core acceptance. Neither choice
+changes whether the write is uploaded.
 
-Reads flow **downward on demand**. When you create a query subscription, it is forwarded upward.
-Each tier registers the subscription with the next tier and asks for the rows needed to satisfy it.
-That allows the system to replicate only the data that has actually been requested.
-
-Lower tiers have lower latency, but writes have further to travel before every other client can see
-them. As a rough guide:
-
-- waiting for the global core is only necessary if you want the strongest cross-region visibility
-- waiting for edge is useful when you want to know data has left the user's device
-- the default local tier is right for most local-first interactions
+Reads sync **on demand**. An active query asks Core for the row versions needed to
+evaluate it, subject to the account's permissions. Core sends changes while the
+subscription remains active. The client evaluates queries locally using the data
+it has received.
 
 <Callout type="info" title="Sync is automatic">
-  Sync happens whenever a node is online. Writes keep propagating upward even if your promise
-  resolves at the local tier. Reads similarly propagate downward as each tier registers the query
-  with the next one up. If higher tiers have newer rows, they stream down automatically.
+  Locally saved writes remain queued while disconnected. Jazz resumes uploading them and refreshes
+  active query subscriptions when the connection returns.
 </Callout>
 
 ## Consistency model
 
-Every write in Jazz produces a new **row version**. That row version is stored locally, can be
-replicated upward, and contributes to the current visible state for that row.
+Every write produces a new **row version**. Clients may temporarily disagree:
 
-Because sync is local-first, different tiers can temporarily disagree:
+- one client has an optimistic write that Core has not accepted yet;
+- another client has not received Core's latest update;
+- two clients have concurrent local writes.
 
-- your local tier may already have a newer row version than edge
-- one edge may have data another edge has not fetched yet
-- another client may have its own concurrent local write
+Core settles writes and sends the authorized updates needed by each subscription.
+Local-first reads can use cached data and pending edits immediately. Strict remote
+reads wait for Core-authorized query coverage and exclude pending local edits.
 
-All of that still converges. Row versions propagate upward, are durably stored at higher tiers, and
-flow back down to every subscribed client that needs them.
-
-When clients write concurrently to the same field of the same row, Jazz uses
-**last-writer-wins (LWW)** with deterministic hybrid logical clock ordering to decide the current
-visible result. Even row versions that lose that race remain in row history, so the system keeps
-enough information to reconcile deterministically and to support richer history-aware behaviour
-later.
+When clients write concurrently to the same field of the same row, Core decides the current visible
+result field by field, based on what each writer had seen. Every write records the version of the
+row it was made over. A field takes the new value unless another write changed that field since
+that version; then the value Core already accepted stays. Edits that lose remain in row history, so
+the system keeps enough information to show what was overridden and to support richer history-aware
+behaviour later.
 
 <Accordions type="single">
-<Accordion id="hybrid-logical-clock" title="What is a hybrid logical clock?">
-A hybrid logical clock gives each write a timestamp made from the device's clock time and a counter.
-The counter moves the timestamp forwards when several writes happen in the same millisecond or when
-the device's clock has fallen behind an earlier write.
+<Accordion id="concurrent-edits" title="Which edit wins a conflict?">
+Two edits conflict only when both change the same field and neither writer had seen the other's
+edit. Core accepts writes one at a time, in the order it receives them, so the edit it receives
+first wins and the other is kept in history as a lost edit. Device clocks play no part: an edit made
+after seeing a value always replaces it, even if the device's clock is behind.
 
-If two devices still produce the same timestamp, Jazz uses the ID of the writing node as a final
-tie-breaker. Once replicas have received the same updates, they choose the same winner regardless of
-the order in which the updates arrived.
+Every replica receives Core's result, so all replicas converge on the same row.
+
+Columns with a merge strategy combine concurrent edits instead of picking one: counters add up,
+grow-only sets union, and [text merge columns](/docs/schemas/column-types#mergeable-text-columns)
+merge the edits inside the string.
+
+</Accordion>
+<Accordion id="text-merges" title="How are concurrent edits to a text column merged?">
+A string column declared with `.merge("text")`, `.merge("markdown")` or `.merge("html")` still
+stores a plain string. Only Core merges. Your app writes the value it has, as usual. Until Core's
+result arrives, a client shows its own edit, then switches to the merged value.
+
+When Core receives an edit to such a column, it checks whether someone else changed that column
+since the version the writer saw. If not (the usual case), the edit is applied as is, with no
+extra work. If so, Core compares both edits with the version the writer started from, and applies
+both wherever they touch different parts of the text. An edit both people made applies once. Two
+insertions at the same spot both stay, the earlier one first. A long offline session merges the
+same way: each edit is compared with what that device had seen, including its own earlier edits.
+
+Where both people **replaced the same words**, Core cannot keep both. The edit it receives later wins
+that part of the text. Note that this is the opposite of an ordinary field, where the first edit
+Core receives wins. The rest of the text still merges, and the other person's version stays in the
+row's history.
+
+A merge has a fixed amount of work it may spend. A very large value that both sides rewrote
+heavily (for example a pasted replacement for a whole long document while someone else edits it)
+can exceed it. Then Core does not merge: the later edit's whole value wins, as for overlapping
+replacements. The limit is generous: a 1 MB document with thousands of scattered edits on each
+side merges well within it.
+
+An edit made on top of an edit Core rejected is rejected too, so a merge never brings back a rejected
+change.
 
 </Accordion>
 </Accordions>

@@ -24,7 +24,7 @@ export interface RemoteBrowserDbWaitForTitleInput {
   id: string;
   title: string;
   timeoutMs: number;
-  tier?: "local" | "edge";
+  tier?: "local-first" | "remote";
 }
 
 interface RemoteBrowserDbState {
@@ -103,7 +103,7 @@ export async function createRemoteBrowserDb(input: RemoteBrowserDbCreateInput): 
     _rowType: {} as Record<string, unknown>,
     _initType: {} as Record<string, unknown>,
   };
-  if (input.initialize) await db.all(query, { tier: "local" });
+  if (input.initialize) await db.all(query, { tier: "local-first" });
   if (input.initialRow) {
     await db.insert(table, input.initialRow).wait({ tier: "local" });
   }
@@ -120,7 +120,7 @@ export async function insertRemoteBrowserDbRow(input: {
   id: string;
   row: Record<string, unknown>;
   table?: string;
-  tier?: "local" | "edge";
+  tier?: "local" | "global";
 }): Promise<string> {
   const state = getRemoteStateStore().get(input.id);
   if (!state) throw new Error(`Remote browser db "${input.id}" was not initialized`);
@@ -158,11 +158,11 @@ export async function updateRemoteBrowserDbRow(input: {
 
 export async function queryRemoteBrowserDbRows(input: {
   id: string;
-  tier?: "local" | "edge";
+  tier?: "local-first" | "remote";
 }): Promise<Record<string, unknown>[]> {
   const state = getRemoteStateStore().get(input.id);
   if (!state) throw new Error(`Remote browser db "${input.id}" was not initialized`);
-  return state.db.all(state.query, { tier: input.tier ?? "local" });
+  return state.db.all(state.query, { tier: input.tier ?? "local-first" });
 }
 
 export async function waitForRemoteBrowserDbTitle(

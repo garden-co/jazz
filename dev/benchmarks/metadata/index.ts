@@ -1,16 +1,40 @@
-import { todoBenchmarks } from "../../../examples/todo-client-localfirst-ts/benchmarks/metadata.ts";
-import { permissionedBenchmarks } from "../../../examples/permissioned-resources/benchmarks/metadata.ts";
+import { stagePlanBenchmarks } from "../../../examples/stage-plan/benchmarks/metadata.ts";
+import { bandChatBenchmarks } from "../../../examples/band-chat/benchmarks/metadata.ts";
+import { bandBookBenchmarks } from "../../../examples/band-book/benchmarks/metadata.ts";
+import { worldTourBenchmarks } from "../../../examples/world-tour/benchmarks/metadata.ts";
+import { wequencerBenchmarks } from "../../../examples/wequencer/benchmarks/metadata.ts";
+import { posterShopBenchmarks } from "../../../examples/poster-shop/benchmarks/metadata.ts";
+import { recordPlayerBenchmarks } from "../../../examples/record-player/benchmarks/metadata.ts";
+import { epicDropBenchmarks } from "../../../examples/epic-drop/benchmarks/metadata.ts";
+import { jamazonBenchmarks } from "../../../examples/jamazon-warehouse/benchmarks/metadata.ts";
+import { musicAgentBenchmarks } from "../../../examples/music-agent/benchmarks/metadata.ts";
 import { bigLabelBenchmarks } from "../../../examples/big-label/benchmarks/metadata.ts";
-import { w1Benchmarks } from "../../../examples/benchmarks/w1/metadata.ts";
-import { coreBenchmarks } from "../../../crates/jazz/benches/metadata.ts";
+import { permissionedBenchmarks } from "../../../examples/permissioned-resources/benchmarks/metadata.ts";
+import { loadTimeBenchmarks } from "../example-load-times/metadata.ts";
 export { metadataRevision, throughput, type BenchmarkMetadata } from "./types.ts";
+export {
+  formerBenchmarks,
+  formerBenchmarkNames,
+  stitchedFormerNames,
+  type FormerBenchmark,
+} from "./former-names.ts";
 
+// Hero examples in the docs page's order, then the anonymized adopter
+// workload, then the example apps' browser load times.
 export const benchmarkMetadata = [
-  ...todoBenchmarks,
-  ...permissionedBenchmarks,
+  ...stagePlanBenchmarks,
+  ...bandChatBenchmarks,
+  ...bandBookBenchmarks,
+  ...worldTourBenchmarks,
+  ...wequencerBenchmarks,
+  ...posterShopBenchmarks,
+  ...recordPlayerBenchmarks,
+  ...epicDropBenchmarks,
+  ...jamazonBenchmarks,
+  ...musicAgentBenchmarks,
   ...bigLabelBenchmarks,
-  ...w1Benchmarks,
-  ...coreBenchmarks,
+  ...permissionedBenchmarks,
+  ...loadTimeBenchmarks,
 ];
 const byName = new Map(benchmarkMetadata.map((metadata) => [metadata.name, metadata]));
 if (byName.size !== benchmarkMetadata.length) throw new Error("Duplicate benchmark metadata name");

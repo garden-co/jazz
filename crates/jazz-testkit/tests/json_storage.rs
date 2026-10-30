@@ -56,18 +56,19 @@ async fn remote_whole_json_row_matches_explicit_projection() {
             let (id, _, tx) = client
                 .insert("documents", row_input!("payload" => raw))
                 .expect("insert JSON document");
-            jazz_testkit::wait_for_edge_txs(&client, &[tx.expect("insert transaction")]).await;
+            jazz_testkit::wait_for_global_txs(&client, &[tx.expect("insert transaction")]).await;
             for query in [
                 jazz::query::Query::from("documents"),
                 jazz::query::Query::from("documents").select(["payload"]),
             ] {
                 let rows = tokio::time::timeout(
                     std::time::Duration::from_secs(10),
-                    client.query_with_read_tier(query, jazz::tools::ReadTier::Remote),
+                    client.query(query, jazz::tools::ReadTier::Remote),
                 )
                 .await
                 .expect("JSON remote query settles")
                 .expect("JSON remote query succeeds");
+                let rows = jazz::tools::test_support::ordinary_rows(rows);
                 assert_eq!(rows, vec![(id, vec![Value::Text(raw.to_owned())])]);
             }
             client.shutdown().await.expect("shutdown JSON client");
@@ -119,9 +120,10 @@ async fn assert_documents_empty(client: &JazzClient, context: &str) {
     let rows = client
         .query(
             jazz::query::Query::from("documents").select(["payload"]),
-            None,
+            jazz::tools::ReadTier::LocalFirst,
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query documents after rejected write");
     assert!(
         rows.is_empty(),
@@ -133,9 +135,10 @@ async fn assert_json_array_documents_empty(client: &JazzClient, context: &str) {
     let rows = client
         .query(
             jazz::query::Query::from("documents").select(["payloads"]),
-            None,
+            jazz::tools::ReadTier::LocalFirst,
         )
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect("query documents after rejected nested JSON write");
     assert!(
         rows.is_empty(),
@@ -158,9 +161,10 @@ async fn json_column_preserves_original_text() {
             let rows = client
                 .query(
                     jazz::query::Query::from("documents").select(["payload"]),
-                    None,
+                    jazz::tools::ReadTier::LocalFirst,
                 )
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .expect("query stored JSON");
             assert_eq!(rows, vec![(id, vec![Value::Text(raw.to_owned())])]);
         })
@@ -225,6 +229,7 @@ async fn json_column_rejects_schema_invalid_update_and_preserves_original_text()
 
             let error = client
                 .update(
+                    "documents",
                     id,
                     vec![(
                         "payload".to_owned(),
@@ -242,9 +247,10 @@ async fn json_column_rejects_schema_invalid_update_and_preserves_original_text()
             let rows = client
                 .query(
                     jazz::query::Query::from("documents").select(["payload"]),
-                    None,
+                    jazz::tools::ReadTier::LocalFirst,
                 )
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .expect("query document after rejected update");
             assert_eq!(
                 rows,
@@ -324,16 +330,17 @@ async fn json_column_valid_default_is_inserted_when_omitted() {
             let rows = client
                 .query(
                     jazz::query::Query::from("documents").select(["payload"]),
-                    None,
+                    jazz::tools::ReadTier::LocalFirst,
                 )
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .expect("query defaulted JSON document");
             assert_eq!(rows, vec![(id, vec![Value::Text(default.to_owned())])]);
         })
         .await;
 }
 
-/// Alice exercises ordinary and exclusive insert, upsert, and update paths
+/// Alice exercises ordinary and serializable insert, upsert, and update paths
 /// with an ARRAY<JSON>; malformed or schema-invalid nested elements must be
 /// rejected before either path can create or alter a document.
 #[tokio::test(flavor = "current_thread")]
@@ -356,17 +363,17 @@ async fn json_array_elements_are_admitted_at_every_write_boundary() {
 
             let tx = client
                 .begin_transaction()
-                .expect("open exclusive transaction");
+                .expect("open serializable transaction");
             let error = tx
                 .insert("documents", row_input!("payloads" => invalid.clone()))
-                .expect_err("exclusive insert rejects schema-invalid nested JSON");
+                .expect_err("serializable insert rejects schema-invalid nested JSON");
             assert!(
                 error
                     .to_string()
                     .contains("JSON schema validation failed for column `payloads[0]`")
             );
             tx.rollback()
-                .expect("roll back rejected exclusive transaction");
+                .expect("roll back rejected serializable transaction");
             assert_json_array_documents_empty(&client, "rejected nested JSON inserts").await;
 
             let (id, _, _) = client
@@ -380,27 +387,31 @@ async fn json_array_elements_are_admitted_at_every_write_boundary() {
                 )
                 .expect("ordinary upsert accepts valid nested JSON");
             let error = client
-                .update(id, vec![("payloads".to_owned(), invalid.clone())])
+                .update(
+                    "documents",
+                    id,
+                    vec![("payloads".to_owned(), invalid.clone())],
+                )
                 .expect_err("ordinary update rejects schema-invalid nested JSON");
             assert!(error.to_string().contains("payloads[0]"));
 
             let tx = client
                 .begin_transaction()
-                .expect("open exclusive transaction");
+                .expect("open serializable transaction");
             let error = tx
                 .upsert(
                     "documents",
                     *id.uuid(),
                     row_input!("payloads" => malformed.clone()),
                 )
-                .expect_err("exclusive upsert rejects malformed nested JSON");
+                .expect_err("serializable upsert rejects malformed nested JSON");
             assert!(error.to_string().contains("payloads[0]"));
             let error = tx
-                .update(id, vec![("payloads".to_owned(), invalid)])
-                .expect_err("exclusive update rejects schema-invalid nested JSON");
+                .update("documents", id, vec![("payloads".to_owned(), invalid)])
+                .expect_err("serializable update rejects schema-invalid nested JSON");
             assert!(error.to_string().contains("payloads[0]"));
             tx.rollback()
-                .expect("roll back rejected exclusive transaction");
+                .expect("roll back rejected serializable transaction");
         })
         .await;
 }

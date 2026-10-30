@@ -19,17 +19,36 @@ Invariant digest:
 - `INV-RLS-3`: Policy::owneronly(table, column) MUST compare the named column to claim("user"), where claim("user") is bound from the authenticated AuthorSubject, not from caller-provided q...
 - `INV-RLS-4`: A table policy MUST validate as a query shape rooted at the table that carries the policy.
 - `INV-RLS-5`: Downstream view emission for a non-system peer MUST only add result members, program facts, and version bundles whose relevant content/deletion versions pass that peer...
-- `INV-RLS-6`: Read-policy revocation MUST remove rows from future settled subscription result sets and MUST NOT redact previously delivered local copies from the receiving node.
+- `INV-RLS-6`: Read-policy revocation MUST remove rows from future settled subscription result sets, and the server MUST evict them so the receiving node drops its local copies (`INV-SYNC-14`). Eviction is coherence, not redaction: it makes no confidentiality promise about data a node already received.
 - `INV-RLS-7`: A deletion-register version by a non-system author MUST satisfy the table write policy against the current global content version for that row; if there is no current...
 - `INV-RLS-8`: A deletion-register version MUST be readable to a non-system identity only when the row has a global content winner and that content winner satisfies the table read po...
-- `INV-RLS-9`: Join-based policies MUST require at least one matching global-current joined row that reaches the protected row and whose filters pass for the same authenticated ident...
+- `INV-RLS-9`: Join-based policies MUST require at least one matching joined
+  row that reaches the protected row and whose filters pass for the same
+  authenticated identity. Joined rows are read from committed state, except
+  that a WITH CHECK clause (insert check, update check) of a write in a commit
+  unit reads committed main-branch state overlaid with the unit's other
+  inserts, restores and updates: such a row contributes its post-transaction
+  content once that row's own write checks pass (until then an inserted or
+  restored row is absent and an updated row keeps its committed content). The
+  unit's deletes are not overlaid: a committed row the unit deletes stays
+  visible as committed, and a row the unit both inserts and deletes never
+  counts. The protected row itself, USING clauses and
+  read-for-write checks read committed state, and writes of any other
+  transaction are never evidence, including other pending transactions on a
+  self-finalizing node: committed state is authority-accepted (Global) state
+  on every decision path. A unit is accepted only if every WITH CHECK
+  clause also passes against the unit's full post-state; a write whose policy
+  is monotone in the rows present is re-checked there only when a table it
+  reads holds a unit write that replaced a row's earlier content (an update,
+  or an insert or restore of a row live before the unit) and was not yet
+  grounded when it passed.
 - `INV-RLS-10`: Query-driven sync MUST compose the root table read policy into the subscribed query and bind policy claims from server-authenticated identity so a client cannot widen...
-- `INV-RLS-11`: Relay peer links MUST have an explicit relay transport capability and no permission subject; edge-client peer links MUST use the terminated client AuthorSubject for policy-composed reads.
-- `INV-RLS-12`: Exclusive transaction view shipping MUST be policy-atomic per recipient and maintained subscription view: a non-system recipient MUST NOT receive a result member or pr...
+- `INV-RLS-11`: Relay peer links MUST have an explicit relay transport capability and no permission subject; client-to-Core peer links MUST use the admitted client AuthorSubject for policy-composed reads.
+- `INV-RLS-12`: Serializable transaction view shipping MUST be policy-atomic per recipient and maintained subscription view: a non-system recipient MUST NOT receive a result member or pr...
 - `INV-RLS-13`: Historical/as-of reads served for a link MUST evaluate read policy at the requested historical cut.
 - `INV-RLS-14`: Policy evaluation MUST deny when it cannot determine that a policy predicate is satisfied.
-- `INV-RLS-15`: A table with no declared policy clauses is public for reads and for writes by non-anonymous permission subjects; anonymous permission subjects are structurally read-only, and once a table declares any clause, every omitted operation is denied.
-- `INV-RLS-17`: A write whose Transaction.madeby differs from the authenticated permission subject MUST be accepted only via a trusted serving node (a core/edge Node accepting a Trust...
+- `INV-RLS-15`: Every omitted operation is denied at the serving authority, including when the table has no policy clauses; anonymous permission subjects remain structurally read-only.
+- `INV-RLS-17`: A write whose Transaction.madeby differs from the authenticated permission subject MUST be accepted only via a trusted serving node (a Core Node accepting a Trust...
 - `INV-RLS-18`: An uploaded commit unit MUST be authorized under the authenticated link identity: a Session link's madeby MUST equal that identity or be rejected, while a TrustedBacke...
 - `INV-RLS-19`: A required include MUST be treated as resolvable for a non-system
   reader only when its target row exists as a current row AND satisfies the target
@@ -74,11 +93,11 @@ authenticated claims for the peer being evaluated. The stored core shape is
 `insert_check`, `update_using`, `update_check`, and `delete_using` clauses.
 
 `TableSchema::new` defaults every clause to `None`. Such a **policy-free table**
-is public for reads and for writes by non-anonymous permission subjects so an
-app can use ordinary data before it introduces authorization. An anonymous
-permission subject remains structurally read-only regardless of table policy.
-Declaring any one clause closes that table's policy set: the declared operation
-is evaluated normally and every other operation with no clause is denied. For
+denies ordinary user reads and writes at the serving authority. Every operation
+requires an explicit grant. Trusted
+backend operations use their explicit SYSTEM capability; client-local optimistic
+staging does not grant authority acceptance. An anonymous permission subject
+remains structurally read-only regardless of table policy. For
 update, either `update_using` or `update_check` declares the update operation;
 when both are supplied, both must pass. An absent subclause within an otherwise
 declared update contributes no additional check. This rule is enforced by the
@@ -225,12 +244,129 @@ For an insert, `insert_check` is evaluated against the inserted row. For an
 update, `update_using` is evaluated against the previous content row and
 `update_check` is evaluated against the new content row; if both clauses are
 present both must pass. For a delete, `delete_using` is evaluated against the row
-being deleted. Subject to the structural anonymous-write gate, all of those
-operations are public on a policy-free table. On a table with any declared
-clause, an omitted insert or delete clause denies; an
+being deleted. An omitted insert or delete clause denies; an
 update with neither `update_using` nor `update_check` denies; and a missing read
 policy emits no rows. Missing clauses never fall back to another operation's
 policy.
+
+#### Policy evidence inside a transaction
+
+A transaction reads its own writes and nothing else that is uncommitted, and
+its policy checks follow the same rule (`INV-RLS-9`). This holds for mergeable
+and serializable commit units alike, and wherever a unit's write policies are
+decided: at the fate authority, when a node self-finalizes its own commit, and
+in terminal relay admission. Without it, a client that applies a transaction
+optimistically through its read-your-writes view would have the authority
+reject the same transaction, for example a task inserted together with the show
+its insert policy requires.
+
+"Committed" here means authority-accepted: every policy subplan of a unit's
+write-policy decision (WITH CHECK, USING and read-for-write alike) reads the
+Global tier, the current rows whose transactions the authority has accepted,
+never the Local read-your-writes view. This holds on every path that decides a
+unit: foreign ingest, a node finalizing its own mergeable or serializable commit
+(where the unit is already stored Pending and Local, `INV-TX-2`) and relay
+admission. So the candidate never justifies itself through its own pending
+rows, a committed row the unit deletes is not hidden by that pending deletion,
+and no other still-pending local transaction is evidence. The tier is part of
+each decision's own checks, not node state: ordinary policy checks on the same
+node read the Local view before, during and after a unit decision, and a
+decision that is dropped part-way leaves nothing behind.
+
+A WITH CHECK clause judges the row a write leaves behind, so the rows its policy
+joins read are committed main-branch state overlaid, row by row, with the unit's
+other inserts, restores and updates:
+
+- the unit's deletes are not overlaid. A committed row the unit deletes stays
+  visible as it was committed, so an admission can consume the request that
+  justifies it in the same transaction. A row the unit both inserts and deletes
+  has no committed state and so never satisfies an `exists`;
+- a row the unit inserts, restores or updates shows its post-transaction content
+  once every version the unit writes for that row has passed its own write
+  checks; until then an inserted or restored row is absent and an updated row
+  keeps its committed content;
+- the protected row itself is the inline candidate and is never overlaid, so an
+  `exists` over the written row's own table still sees that row as committed;
+- rows the unit does not name keep their committed state, so another
+  transaction's writes are never evidence, even while it is in flight.
+
+A commit unit carries its versions as a canonical set, not in the order the
+client made them, so the checks run in two stages:
+
+1. **Grounding.** Every write is checked against the evidence above. A row is
+   grounded once every version the unit writes for it has passed, and from the
+   next round on it shows its post-transaction content. The first round has
+   nothing grounded, and an ungrounded row shows exactly what committed state
+   shows, so the first round runs every check on committed state alone, with
+   no overlaid rows. A failed write is checked again only when a table its
+   policy reads has gained grounded rows. Because a row becomes evidence only
+   after its own checks pass, writes cannot justify each other in a cycle. If a
+   round grounds no new row while a write still fails, the unit is rejected.
+2. **Post-state.** When every write has passed, a write whose passing check
+   could have seen a different result in the unit's full post-state is
+   checked once more against that post-state: committed rows with all of the
+   unit's updates applied and its inserts and restores added, committed rows
+   it deletes still visible, rows it inserts and deletes left out, and the
+   protected row left out as above. Which writes are re-checked depends on the
+   policy:
+   - A **monotone** policy (see below) can only grant more as rows are added,
+     so grounding an insert or a restore cannot turn its pass into a failure;
+     only a write that replaces committed content can: an update, or an
+     insert or restore of a row that was live before the unit (the unit
+     deleted it first). Such a write is re-checked only when a table its
+     policy reads holds a replacing write that was not grounded when the
+     write passed.
+   - Any other policy is re-checked when a table it reads holds any unit row
+     that was not grounded when the write passed.
+
+**Monotonicity assumption.** The fate authority treats a WITH CHECK policy as
+monotone in the rows present when it is built only from positive evidence:
+existential joins (`exists`, `exists` over relations with inner joins),
+reachability, inheritance through a schema whose policies are all monotone,
+and row-level filters without `NOT`. A policy is treated as non-monotone, and
+keeps the full post-state pass, if any part of it uses `NOT` (on any operand),
+a non-inner relation join, an aggregate, or a limit or offset, or anything else
+that could grant on the absence of a row. Public schemas cannot currently
+express `NOT` around `exists` or non-inner relation joins, so the conservative
+rules only cost an extra pass; they are what keeps the narrowed pass sound if
+such constructs are ever admitted.
+
+The unit is accepted exactly when grounding passes every write and every write
+passes against the post-state. So no write is accepted on evidence the
+transaction itself takes away: demoting my own membership from admin to viewer
+in the same transaction as inserting a document that requires admin is
+rejected, although the insert's check passes while the demotion is not yet
+grounded. Both stages run over the canonical set, so the decision does not
+depend on the order in which the client made its writes.
+
+The first round reads no overlaid rows. Later rounds build one overlay per
+table and share it among their checks; a check overlays only the tables its
+policy reads, and still reads every unit row in those tables. A unit whose
+writes depend on each other's rows (a self-dependent chain) therefore costs
+time quadratic in its size. The post-state pass does not: its overlay is every
+row the unit leaves live but the one under check, so a re-check reaches the
+unit's rows through the policy's keys, as it does committed rows, and a write
+is re-checked only when a table its policy reads holds a later write that could
+take its pass away. The overlaid rows the grounding rounds' checks read are
+summed over every check after the first round, and a unit whose checks would
+read more than 262,144 of its own rows is rejected instead of being evaluated
+at unbounded cost. The
+rejection is `MalformedCommit` carrying "Reading more than 262144 rows of a
+transaction's own writes in its write-policy checks is not supported yet";
+applications receive it as a `write_rejected` rejection with that sentence as
+its reason. An import whose rows all rest on committed evidence and whose
+policies are monotone is decided in the first round, one check per write, and
+is never bounded this way.
+
+USING clauses (`update_using`, `delete_using`) and read-for-write checks judge
+the rows the transaction acts on, which are the committed rows, so they read
+committed state. Deleting a group together with its memberships is therefore
+authorized against the memberships the transaction removes. Branch-local
+writes are evaluated in their own branch view and take no overlay.
+
+The overlay only holds rows of the candidate unit, never a table-wide read, and
+it changes no wire or storage encoding: it is formed from the versions the unit
+already carries.
 
 #### Read-for-write authorization
 
@@ -256,7 +392,7 @@ ordinary insert. Its v1 branch-view copy descriptor is the only additional proof
 may satisfy this rule: the authority re-resolves its exact live or frozen source
 and evaluates that source's ordinary read policy. The client does not evaluate
 or receive policy support, and the descriptor is not a causal dependency,
-exclusive read set, or CAS precondition.
+serializable read set, or CAS precondition.
 
 An upsert asks whether its target row exists. If there is a current target row,
 that is a read and an upsert MUST be rejected unless the writer may read it. If
@@ -317,9 +453,9 @@ result-row add/remove, version bundle, rehydrate output, or query update
 not a user query that can be policy-composed. A scope-isolated client relay
 instead forwards an upstream
 request with a topology-assigned immutable delegated foreground-session binding;
-the edge/core authority narrows under that admitted binding, not under SYSTEM
-and not under claims supplied by the relay. An edge-client link similarly
-narrows under its terminated `AuthorSubject` (`INV-RLS-11`, ch. 9).
+Core narrows under that admitted binding, not under SYSTEM
+and not under claims supplied by the relay. A direct client connection
+is narrowed under its admitted `AuthorSubject` (`INV-RLS-11`, ch. 9).
 
 Include modes participate in this narrowing rather than sitting outside it. A
 required include — an `Include` with `JoinMode::Inner` or `require: true` — counts
@@ -332,29 +468,21 @@ unreadable target instead (`INV-RLS-5`), and `AuthorSubject::SYSTEM` bypasses th
 half and resolves on existence alone (`INV-RLS-2`, `INV-RLS-19`).
 
 The security boundary is _upstream emission_, not local storage. Read-policy
-revocation removes rows from **future** settled result sets but does **not**
-redact a copy already delivered to a receiving node (`INV-RLS-6`). A receiving
-node does not re-filter its own local reads or subscriptions by policy. The spec
-therefore makes no post-delivery confidentiality promise against a node that
-already received data: revocation is forward-looking sync narrowing.
+revocation removes rows from **future** settled result sets, and the server
+evicts them: an honest receiving node drops its copy (`INV-RLS-6`,
+`INV-SYNC-14`). A receiving node does not re-filter its own local reads or
+subscriptions by policy. Eviction keeps honest replicas coherent with what they
+may read; it is not redaction, and the spec makes no post-delivery
+confidentiality promise against a node that already received data.
 
 A client relay does not become an authority by retaining an authority-selected
 result. A scope-isolated relay may publish retained rows and repair payloads to
-an exactly same-scope foreground without re-running policy. For Edge/Global
+an exactly same-scope foreground without re-running policy. For Global
 results it must use the exact policy-scoped membership emitted by the authority;
 for Local results it uses retained knowledge, including previously delivered
-rows that a later authority result removes. A multiplexed relay must keep each
-policy binding's authoritative membership separate and may not treat possession
-of a cached row as permission to reveal it to another scope (ch. 9,
-`INV-EDGE-21..24`).
-
-A server Edge remains a serving authority: its ordinary query graph composes
-read policies locally. Verified upstream current-unavailable decisions add an
-exclusion for the exact admitted reader and claims. This excludes app/serving
-inputs only; raw policy-proof subplans and fresh permission probes must not
-consume it, or an old denial could prevent its own later readmission. SYSTEM
-and another reader's scope do not inherit the exclusion. Explicit extra-row and
-missing-body repair continue to obtain current Core authorization.
+rows that a later authority result removes. A relay serves one auth scope
+only, and possession of a cached row is never permission to reveal it to
+another scope (ch. 9, `INV-EDGE-21..24`).
 
 effective branch-view reads evaluate ordinary table policy over the effective branch-view
 view. Partition columns are normal policy-visible values, including references
@@ -402,8 +530,8 @@ user-visible merely because they participated in a policy decision, and any
 unsupported or indeterminate policy evaluation MUST deny.
 
 Join policies extend that same identity-bound evaluation across relationships. A
-join policy passes when a matching global-current row in the joined table reaches
-the protected row and its filters hold under the same identity (`INV-RLS-9`).
+join policy passes when a matching row in the joined table reaches the protected
+row and its filters hold under the same identity (`INV-RLS-9`).
 Policy joins may carry additional source-row equality correlations beyond their
 primary join key; these are part of the same join and must be enforced in direct
 evaluation, one-shot reads, and maintained subscription views.
@@ -452,29 +580,49 @@ updateability evaluated against whereOld only. The parent row is not changed by
 inserting the child, so parent whereNew/update-check clauses are not evaluated
 for that child insert decision.
 
-`allowedTo.<op>Referencing(sourcePolicy, viaColumn)` is reverse operation
-inheritance. It grants access to a target row only when there exists at least one
+The TypeScript `allowedTo.read/insert/update/delete(relationName)` helpers resolve
+only explicit relationship names declared on the protected table, matching
+`hopTo(name)`. A forward name lowers to the existing `Inherits` atom using its
+stored reference column; a reverse name lowers to `InheritsReferencing` using
+its source table and that source's declared forward reference column. Raw column
+names and convention-derived aliases are not accepted by these helpers. The
+`raw(...)` IR escape hatch retains its column-based contract. This is authoring
+resolution only; it does not change schema, wire, or storage encodings.
+
+`allowedTo.<op>Referencing(sourcePolicy, forwardRelationName)` is the explicit
+source-table form of reverse operation inheritance. It requires a named forward
+relationship on the source table that targets the protected table. In the
+following semantics, `viaColumn` denotes that relationship's stored column.
+Reverse operation inheritance grants access to a target row only when there exists at least one
 row in the source table whose `viaColumn` references the target row and that
 source row is allowed for the same `<op>` operation. It does not fall back to
 source read visibility, insert/update policy, ownership, or mere existence of a
-referencing row. For `deleteReferencing`, the source table's `delete_using`
+referencing row. Nullable references contribute no match; reference arrays use membership. For `deleteReferencing`, the source table's `delete_using`
 clause is the authority; if no source delete policy exists, enforcing/server
 authorization fails closed.
+
+Forward helpers preserve their existing `maxDepth` semantics. Reverse helpers
+reject an explicit `maxDepth`, because the current reverse expansion does not
+implement bounded recursion; cyclic reverse expansions are rejected during
+schema validation (bounded reverse support is tracked in [#3210](https://github.com/garden-co/jazz/issues/3210)). The global `allowedTo` context constrains typed names to the
+app's declared relationships; rule compilation additionally validates the
+particular protected table and, for `*Referencing`, the source direction and
+target. Update `whereOld` and `whereNew` remain separate row-image checks.
 
 _Further invariants._ `INV-RLS-8` — a deletion-register version is readable to a
 non-system identity only when the row has a global content winner that satisfies
 the read policy for that identity.
 that identity's read policy (ch. 12).
 
-### 7.5 Exclusive atomicity and historical reads
+### 7.5 Serializable atomicity and historical reads
 
-Exclusive transaction view shipping protects recipients from seeing an incomplete
+Serializable transaction view shipping protects recipients from seeing an incomplete
 policy-visible fragment for the maintained subscription view. It is
 **policy-atomic per recipient and per view**: a non-system recipient receives a
-result member or program fact from an exclusive transaction only when every
+result member or program fact from a serializable transaction only when every
 version required for that view is readable to it (`INV-RLS-12`). Versions
 outside that view need not be shipped or readable for the view to advance. This
-is distinct from exclusive serializability (ch. 3) and from write authorization:
+is distinct from serializability (ch. 3) and from write authorization:
 it governs only read/view shipping.
 
 Historical/as-of reads served for a link evaluate read policy **at the requested
@@ -512,9 +660,9 @@ ordinary optimistic pending versions. A draft created before or after the
 receipt remains visible through that same pending source; applying denial does
 not wait for the draft or start edit-specific retries. The durable denial stays
 in place, so rejecting or removing the draft cannot resurrect the settled row.
-Settled-only reads still exclude the row. Ahead storage can also contain
-Edge-accepted versions; those settled versions are excluded by exact version
-identity while distinct pending versions continue to participate.
+Settled-only reads still exclude the row. Ahead storage can also contain confirmed versions awaiting cleanup; those
+settled versions are excluded by exact version identity while distinct pending
+versions continue to participate.
 SYSTEM, trusted serving sources, authorization proof evaluation, historical
 snapshots, and non-default branch views do not consume the marker. Stored row
 content remains intact. A fresh verified `Readable` evaluation readmits the row;
@@ -568,7 +716,7 @@ verified route/request correlation precede this internal receipt application.
   explicit account/user/session/default identity terminology. Define how
   anonymous/local sessions, authenticated users, trusted backends, system links,
   and attribution-only writes map to `AuthorSubject`, claims, and link roles.
-- **Admission API.** Server and edge shells need an admission hook that turns
+- **Admission API.** Server shells need an admission hook that turns
   connection credentials into a link identity, claims, role, expiry, and optional
   backend trust. This hook must be the only source for policy claim bindings;
   client-supplied query bindings must never widen claims (ch. 8, ch. 13).
@@ -599,12 +747,8 @@ verified route/request correlation precede this internal receipt application.
 - **History visibility rule.** Decide whether current-row readability should
   imply visibility for all historical versions of that row, or whether history
   sync/read must evaluate read policy per historical cut.
-- **Permission subscriptions and TTL.** Edge mergeable authorization uses
-  upstream permission-scope subscriptions (ch. 9). The current contract is
-  sync-level deduplication and fanout of those scopes; TTL/expiry behavior is a
-  future policy for cache lifetime, not a source of permission truth here.
 - **Write-denial surfacing to clients.** A permission-denied write currently
-  never reaches edge durability and `AsyncWriteHandle.wait({ tier })` hangs
+  never reaches global durability and `AsyncWriteHandle.wait({ tier })` hangs
   instead of rejecting. Clients need a deterministic rejection signal (analogous
   to `SubscribeRejected` on the read path) so denied writes fail fast. Exposed
   by the auth example denial tests (both auth examples excluded from CI until
@@ -681,15 +825,15 @@ coordinate requires a content-layer witness; deletion-only carriers cannot clear
 an unavailable marker. Receivers expose typed
 outcomes only after that ingestion succeeds.
 
-An Edge trusted by its client may proxy the exchange. It retains a bounded
-mapping from downstream nonce/connection to fresh upstream nonce, selected
-admitted upstream link and immutable client policy binding. A delegated client
-binding remains client-scoped over a trusted backend link; SYSTEM is not a
-fallback. Receipts are admitted only against the still-selected live upstream
-mapping. Disconnect, cancellation and authority handoff invalidate requests;
-backpressure preserves unsent ownership. This is a trusted Edge forwarding
-contract, not an end-to-end signature protocol. An Edge's cached policy query
-never mints a definitive outcome.
+A local persistence relay may forward the exchange for its foreground. It
+retains a bounded mapping from downstream nonce/connection to fresh upstream
+nonce, selected admitted Core link and immutable client policy binding. A
+delegated client binding remains client-scoped; SYSTEM is not a fallback.
+Receipts are admitted only against the still-selected live upstream mapping.
+Disconnect, cancellation and authority handoff invalidate requests;
+backpressure preserves unsent ownership. This is a local relay forwarding
+contract, not an end-to-end signature protocol. Cached data never authorizes a
+relay to mint a definitive outcome.
 
 Raw admitted claims are the wire correlation key. After validation, the owner
 installs that immutable claims snapshot and derives the effective local policy

@@ -1,3 +1,4 @@
+import { todoCrudTest } from "../../../testing/todo-app-scenarios.js";
 import { createAccountManager } from "jazz-tools";
 import { prepareTestAccount } from "../../../testing/accounts.js";
 /**
@@ -93,110 +94,7 @@ describe("Solid Todo App E2E", () => {
     }
   });
 
-  it("renders the app with an empty todo list", async () => {
-    const el = await mountApp();
-
-    expect(el.querySelector("h1")!.textContent).toBe("Todos");
-    expect(el.querySelector("#todo-list")).toBeTruthy();
-    expect(el.querySelectorAll("#todo-list li").length).toBe(0);
-  });
-
-  it("adds a todo via the form", async () => {
-    const el = await mountApp();
-
-    const input = el.querySelector<HTMLInputElement>("input[type='text']")!;
-    const form = input.closest("form")!;
-
-    input.value = "Buy milk";
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-    form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-
-    await waitFor(
-      () => el.querySelectorAll("#todo-list li").length === 1,
-      3000,
-      "Todo should appear after form submit",
-    );
-
-    const li = el.querySelector("#todo-list li")!;
-    expect(li.querySelector("span")!.textContent).toBe("Buy milk");
-    expect(li.classList.contains("done")).toBe(false);
-  });
-
-  it("toggles a todo's done state via checkbox", async () => {
-    const el = await mountApp();
-
-    const input = el.querySelector<HTMLInputElement>("input[type='text']")!;
-    const form = input.closest("form")!;
-    input.value = "Toggle me";
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-    form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-
-    await waitFor(
-      () => el.querySelectorAll("#todo-list li").length === 1,
-      3000,
-      "Todo should appear",
-    );
-
-    const li = el.querySelector("#todo-list li")!;
-    expect(li.classList.contains("done")).toBe(false);
-
-    const checkbox = li.querySelector<HTMLInputElement>("input.toggle")!;
-    checkbox.click();
-
-    await waitFor(
-      () => el.querySelector("#todo-list li")!.classList.contains("done"),
-      3000,
-      "Todo should be marked done",
-    );
-  });
-
-  it("deletes a todo via the delete button", async () => {
-    const el = await mountApp();
-
-    const input = el.querySelector<HTMLInputElement>("input[type='text']")!;
-    const form = input.closest("form")!;
-    input.value = "Delete me";
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-    form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-
-    await waitFor(
-      () => el.querySelectorAll("#todo-list li").length === 1,
-      3000,
-      "Todo should appear",
-    );
-
-    const deleteBtn = el.querySelector<HTMLButtonElement>(".delete-btn")!;
-    deleteBtn.click();
-
-    await waitFor(
-      () => el.querySelectorAll("#todo-list li").length === 0,
-      3000,
-      "Todo should be removed",
-    );
-  });
-
-  it("renders multiple todos with correct state", async () => {
-    const el = await mountApp();
-
-    const input = el.querySelector<HTMLInputElement>("input[type='text']")!;
-    const form = input.closest("form")!;
-
-    for (const title of ["First", "Second", "Third"]) {
-      input.value = title;
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-      await new Promise((r) => setTimeout(r, 100));
-    }
-
-    await waitFor(
-      () => el.querySelectorAll("#todo-list li").length === 3,
-      3000,
-      "Should have 3 todos",
-    );
-
-    const titles = [...el.querySelectorAll("#todo-list li span")].map((s) => s.textContent);
-    expect(titles.sort()).toEqual(["First", "Second", "Third"]);
-  });
+  todoCrudTest({ it, expect, mount: mountApp, waitFor });
 
   it("persists todos across app unmount and remount (IndexedDB)", async () => {
     const dbName = crypto.randomUUID();

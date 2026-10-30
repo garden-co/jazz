@@ -1,9 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isAncestorComparison, resolveReleaseAncestors } from "./releases.ts";
+import { isVersionTag, resolveReleaseAncestors } from "./releases.ts";
 import type { RawRun } from "./model.ts";
 
-const tags = [{ name: "v2.0.0", sha: "tag", url: "https://example.com" }];
+// Oldest first, as the snapshot script lists them.
+const tags = [
+  { name: "v2.0.0-alpha.1", sha: "tag1", url: "https://example.com/1" },
+  { name: "v2.0.0-alpha.2", sha: "tag2", url: "https://example.com/2" },
+];
 const run = (sha: string, branch = "main"): RawRun => ({
   id: sha,
   date: "2026-09-13",
@@ -15,48 +19,39 @@ const run = (sha: string, branch = "main"): RawRun => ({
   ],
 });
 
-test("comparison direction proves ancestry, not date or a diverged merge base", () => {
-  for (const status of ["ahead", "identical"]) assert.ok(isAncestorComparison(status));
-  for (const status of ["behind", "diverged", "unknown"])
-    assert.equal(isAncestorComparison(status), false);
-});
-
-test("deduplicates main SHAs and leaves newer/diverged commits unreleased", async () => {
-  const calls: string[] = [];
-  const result = await resolveReleaseAncestors(
-    [run("old"), run("old"), run("new"), run("diverged"), run("pr", "feature"), run("tag")],
+test("main commits are attributed to the oldest release containing them", () => {
+  const containing: Record<string, string[]> = {
+    old: ["v2.0.0-alpha.2", "v2.0.0-alpha.1"],
+    mid: ["v2.0.0-alpha.2"],
+    new: [],
+  };
+  const asked: string[] = [];
+  const result = resolveReleaseAncestors(
+    [run("old"), run("old"), run("mid"), run("new"), run("pr", "feature"), run("tag2")],
     tags,
-    async (base, head) => {
-      assert.equal(head, "tag");
-      calls.push(base);
-      return base === "old" ? "ahead" : base === "new" ? "behind" : "diverged";
+    (sha) => {
+      asked.push(sha);
+      return new Set(containing[sha]);
     },
   );
-  assert.deepEqual([...result.included.keys()].sort(), ["old", "tag"]);
-  assert.deepEqual(calls.sort(), ["diverged", "new", "old"]);
+  assert.deepEqual(Object.fromEntries(result.included), {
+    old: "v2.0.0-alpha.1",
+    mid: "v2.0.0-alpha.2",
+    tag2: "v2.0.0-alpha.2",
+  });
+  // Deduplicated, exact tags need no lookup, PR runs are never reclassified.
+  assert.deepEqual(asked.sort(), ["mid", "new", "old"]);
   assert.deepEqual(result.warnings, []);
 });
 
-test("API failure preserves history without inventing release evidence", async () => {
-  const result = await resolveReleaseAncestors([run("old")], tags, async () => {
-    throw new Error("rate limited");
-  });
+test("a commit missing from the checkout stays unreleased with a warning", () => {
+  const result = resolveReleaseAncestors([run("gone")], tags, () => null);
   assert.equal(result.included.size, 0);
-  assert.match(result.warnings[0], /unverified release status/);
+  assert.match(result.warnings[0], /missing from the release history/);
 });
 
-test("request cap is explicit and never interpreted as non-ancestry proof", async () => {
-  let calls = 0;
-  const result = await resolveReleaseAncestors(
-    [run("a"), run("b")],
-    tags,
-    async () => {
-      calls++;
-      return "ahead";
-    },
-    1,
-  );
-  assert.equal(calls, 1);
-  assert.equal(result.included.size, 1);
-  assert.match(result.warnings[0], /request budget/);
+test("only semantic-version tags count as releases", () => {
+  for (const name of ["v2.0.0-alpha.57", "2.0.0", "v1.2.3+build"]) assert.ok(isVersionTag(name));
+  for (const name of ["jazz-sim-fixtures-v1", "perf-timeline-data", "v2"])
+    assert.equal(isVersionTag(name), false);
 });

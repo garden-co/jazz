@@ -1,0 +1,4 @@
+# Machine-specific configs for local runs (absolute paths); never commit.
+vite.local.config.ts
+vitest.local.config.ts
+vite.shots.config.ts

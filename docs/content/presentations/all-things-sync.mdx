@@ -1099,18 +1099,30 @@ where everyone can add letters and drag them around.
 
 ```ts
 const schema = {
-  canvases: s.table({ name: s.string() }),
-  letters: s.table({
-    canvasId: s.ref("canvases"),
-    char: s.string(),
-    x: s.number(),
-    y: s.number(),
-  }),
-  cursors: s.table({
-    canvasId: s.ref("canvases"),
-    x: s.number(),
-    y: s.number(),
-  }),
+  canvases: s.table(
+    { name: s.string() },
+    {
+      letters: s.reverse("letters", "canvas"),
+      cursors: s.reverse("cursors", "canvas"),
+    },
+  ),
+  letters: s.table(
+    {
+      canvasId: s.uuid(),
+      char: s.string(),
+      x: s.number(),
+      y: s.number(),
+    },
+    { canvas: s.rel("canvases", "canvasId") },
+  ),
+  cursors: s.table(
+    {
+      canvasId: s.uuid(),
+      x: s.number(),
+      y: s.number(),
+    },
+    { canvas: s.rel("canvases", "canvasId") },
+  ),
 };
 
 export const app = s.defineApp(schema);
@@ -1138,18 +1150,30 @@ for that.
 
 ```ts
 const schema = {
-  canvases: s.table({ name: s.string() }),
-  letters: s.table({
-    canvasId: s.ref("canvases"),
-    char: s.string(),
-    x: s.number(),
-    y: s.number(),
-  }),
-  cursors: s.table({
-    canvasId: s.ref("canvases"),
-    x: s.number(),
-    y: s.number(),
-  }),
+  canvases: s.table(
+    { name: s.string() },
+    {
+      letters: s.reverse("letters", "canvas"),
+      cursors: s.reverse("cursors", "canvas"),
+    },
+  ),
+  letters: s.table(
+    {
+      canvasId: s.uuid(),
+      char: s.string(),
+      x: s.number(),
+      y: s.number(),
+    },
+    { canvas: s.rel("canvases", "canvasId") },
+  ),
+  cursors: s.table(
+    {
+      canvasId: s.uuid(),
+      x: s.number(),
+      y: s.number(),
+    },
+    { canvas: s.rel("canvases", "canvasId") },
+  ),
 };
 
 export const app = s.defineApp(schema);
@@ -1204,18 +1228,30 @@ But to us it really just looks like reactive state.
 
 ```ts
 const schema = {
-  canvases: s.table({ name: s.string() }),
-  letters: s.table({
-    canvasId: s.ref("canvases"),
-    char: s.string(),
-    x: s.number(),
-    y: s.number(),
-  }),
-  cursors: s.table({
-    canvasId: s.ref("canvases"),
-    x: s.number(),
-    y: s.number(),
-  }),
+  canvases: s.table(
+    { name: s.string() },
+    {
+      letters: s.reverse("letters", "canvas"),
+      cursors: s.reverse("cursors", "canvas"),
+    },
+  ),
+  letters: s.table(
+    {
+      canvasId: s.uuid(),
+      char: s.string(),
+      x: s.number(),
+      y: s.number(),
+    },
+    { canvas: s.rel("canvases", "canvasId") },
+  ),
+  cursors: s.table(
+    {
+      canvasId: s.uuid(),
+      x: s.number(),
+      y: s.number(),
+    },
+    { canvas: s.rel("canvases", "canvasId") },
+  ),
 };
 
 export const app = s.defineApp(schema);
@@ -1289,18 +1325,30 @@ All of this is typesafe from our schema by the way.
 
 ```ts
 const schema = {
-  canvases: s.table({ name: s.string() }),
-  letters: s.table({
-    canvasId: s.ref("canvases"),
-    char: s.string(),
-    x: s.number(),
-    y: s.number(),
-  }),
-  cursors: s.table({
-    canvasId: s.ref("canvases"),
-    x: s.number(),
-    y: s.number(),
-  }),
+  canvases: s.table(
+    { name: s.string() },
+    {
+      letters: s.reverse("letters", "canvas"),
+      cursors: s.reverse("cursors", "canvas"),
+    },
+  ),
+  letters: s.table(
+    {
+      canvasId: s.uuid(),
+      char: s.string(),
+      x: s.number(),
+      y: s.number(),
+    },
+    { canvas: s.rel("canvases", "canvasId") },
+  ),
+  cursors: s.table(
+    {
+      canvasId: s.uuid(),
+      x: s.number(),
+      y: s.number(),
+    },
+    { canvas: s.rel("canvases", "canvasId") },
+  ),
 };
 
 export const app = s.defineApp(schema);

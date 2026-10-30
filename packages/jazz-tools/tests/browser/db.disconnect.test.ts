@@ -17,14 +17,17 @@ import {
 import { getJazzServerInfo, type JazzServerInfo } from "./testing-server.js";
 
 const schema = {
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-  }),
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+    },
+    {},
+  ),
 };
 
 type AppSchema = s.Schema<typeof schema>;
-const app: s.App<AppSchema> = s.defineApp(schema);
+const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
 const { todos } = app;
 type Todo = s.RowOf<typeof todos>;
 
@@ -94,14 +97,14 @@ describe("Db disconnect/reconnect", () => {
         SYNC_OPERATION_TIMEOUT_MS,
         "local subscription did not show its own write",
       );
-      await db.all(pending, { tier: "global" });
+      await db.all(pending, { tier: "remote" });
       await db.disconnect();
       if (mode === "reopen") {
         stop();
         await db.shutdown();
         ctx.untrack(db);
       }
-      await peer.all(todoByTitle(label), { tier: "global" });
+      await peer.all(todoByTitle(label), { tier: "remote" });
       await peer.update(todos, row.id, { done: true }).wait({ tier: "global" });
       if (mode === "reopen") {
         db = await open();
@@ -113,15 +116,17 @@ describe("Db disconnect/reconnect", () => {
         );
       }
       await db.reconnect();
-      expect(await db.all(pending, { tier: "global" })).toEqual([]);
+      expect(await db.all(pending, { tier: "remote" })).toEqual([]);
       // No broader remote query may fetch the missing newer version for us.
+      // Nothing watches a row that left every subscription: the resumed
+      // answer's listing evicts it rather than refreshing it.
       await waitForCondition(
         async () => {
           const cached = await db.all(todoByTitle(label), inspectorLocalQueryOptions());
-          return cached.some((item) => item.done) && !visible.some((item) => item.id === row.id);
+          return cached.length === 0 && !visible.some((item) => item.id === row.id);
         },
         SYNC_OPERATION_TIMEOUT_MS,
-        "current-row repair did not reach the foreground local cache",
+        "the row that left the query stayed in the foreground local cache",
       );
       stop();
     },
@@ -206,110 +211,105 @@ describe("Db disconnect/reconnect", () => {
   }, 60_000);
 
   describe("server-backed subscriptions", () => {
-    it.each(["edge", "global"] as const)(
-      "keeps a disconnected %s subscription pending, then hydrates its local write",
-      async (tier) => {
-        const { db, peer } = await createDbPair(ctx, createWorkerDb, createDirectDb);
-        const serverTitle = "existing server row";
-        await withTimeout(
-          peer.insert(todos, { title: serverTitle, done: true }).wait({ tier: "edge" }),
-          SYNC_OPERATION_TIMEOUT_MS,
-          "server row did not reach edge",
-        );
-        await waitForTodos(
-          db,
-          (rows) => rows.some((row) => row.title === serverTitle),
-          "db did not receive the existing server row",
-          SYNC_OPERATION_TIMEOUT_MS,
-          "edge",
-        );
-        await db.disconnect();
+    it("keeps a disconnected global subscription pending, then hydrates its local write", async () => {
+      const { db, peer } = await createDbPair(ctx, createWorkerDb, createDirectDb);
+      const serverTitle = "existing server row";
+      await withTimeout(
+        peer.insert(todos, { title: serverTitle, done: true }).wait({ tier: "global" }),
+        SYNC_OPERATION_TIMEOUT_MS,
+        "server row did not settle globally",
+      );
+      await waitForTodos(
+        db,
+        (rows) => rows.some((row) => row.title === serverTitle),
+        "db did not receive the existing server row",
+        SYNC_OPERATION_TIMEOUT_MS,
+        "remote",
+      );
+      await db.disconnect();
 
-        const title = "pending optimistic write";
-        const snapshots: Array<{
-          rows: Todo[];
-          edgeSettled: boolean;
-          afterReconnect: boolean;
-        }> = [];
-        let edgeSettled = false;
-        let reconnectRequested = false;
-        const unsubscribe = ctx.trackSubscription(
-          db.subscribe(
-            app.todos,
-            (rows) => {
-              snapshots.push({
-                rows,
-                edgeSettled,
-                afterReconnect: reconnectRequested,
-              });
-            },
-            { tier },
+      const title = "pending optimistic write";
+      const snapshots: Array<{
+        rows: Todo[];
+        globalSettled: boolean;
+        afterReconnect: boolean;
+      }> = [];
+      let globalSettled = false;
+      let reconnectRequested = false;
+      const unsubscribe = ctx.trackSubscription(
+        db.subscribe(
+          app.todos,
+          (rows) => {
+            snapshots.push({
+              rows,
+              globalSettled,
+              afterReconnect: reconnectRequested,
+            });
+          },
+          { tier: "remote" },
+        ),
+      );
+
+      const write = db.insert(todos, { title, done: false });
+      const globalWait = write.wait({ tier: "global" }).then(() => {
+        globalSettled = true;
+      });
+      await withTimeout(
+        write.wait({ tier: "local" }),
+        LOCAL_OPERATION_TIMEOUT_MS,
+        "local write did not become visible",
+      );
+      await expectStillPending(
+        write.wait({ tier: "global" }),
+        PENDING_ASSERTION_MS,
+        "global write settled before the delayed server snapshot was allowed to arrive",
+      );
+      expect(snapshots).toEqual([]);
+      reconnectRequested = true;
+      await db.reconnect();
+      await waitForCondition(
+        async () =>
+          snapshots.some(
+            ({ rows, afterReconnect }) => afterReconnect && rows.some((row) => row.title === title),
           ),
-        );
+        SYNC_OPERATION_TIMEOUT_MS,
+        "global subscription did not publish its authoritative snapshot after reconnect",
+      );
+      const beforeAcceptance = snapshots.at(-1)!.rows;
+      await withTimeout(
+        globalWait,
+        SYNC_OPERATION_TIMEOUT_MS,
+        "local write did not settle at global after reconnect",
+      );
 
-        const write = db.insert(todos, { title, done: false });
-        const edgeWait = write.wait({ tier }).then(() => {
-          edgeSettled = true;
-        });
-        await withTimeout(
-          write.wait({ tier: "local" }),
-          LOCAL_OPERATION_TIMEOUT_MS,
-          "local write did not become visible",
-        );
-        await expectStillPending(
-          write.wait({ tier }),
-          PENDING_ASSERTION_MS,
-          `${tier} write settled before the delayed server snapshot was allowed to arrive`,
-        );
-        expect(snapshots).toEqual([]);
-        reconnectRequested = true;
-        await db.reconnect();
-        await waitForCondition(
-          async () =>
-            snapshots.some(
-              ({ rows, afterReconnect }) =>
-                afterReconnect && rows.some((row) => row.title === title),
-            ),
-          SYNC_OPERATION_TIMEOUT_MS,
-          `${tier} subscription did not publish its authoritative snapshot after reconnect`,
-        );
-        const beforeAcceptance = snapshots.at(-1)!.rows;
-        await withTimeout(
-          edgeWait,
-          SYNC_OPERATION_TIMEOUT_MS,
-          `local write did not settle at ${tier} after reconnect`,
-        );
+      expect(snapshots.at(-1)!.rows).toEqual(beforeAcceptance);
+      expect(snapshots[0]!.afterReconnect).toBe(true);
+      unsubscribe();
+    }, 60_000);
 
-        expect(snapshots.at(-1)!.rows).toEqual(beforeAcceptance);
-        expect(snapshots[0]!.afterReconnect).toBe(true);
-        unsubscribe();
-      },
-      60_000,
-    );
-
-    it("keeps an edge subscription pending while disconnected, then hydrates its local update", async () => {
+    it("keeps a global subscription pending while disconnected, then hydrates its local update", async () => {
       const { db, peer } = await createDbPair(ctx, createWorkerDb, createDirectDb);
       const title = "pending optimistic update";
       const serverRow = await withTimeout(
-        peer.insert(todos, { title, done: false }).wait({ tier: "edge" }),
+        peer.insert(todos, { title, done: false }).wait({ tier: "global" }),
         SYNC_OPERATION_TIMEOUT_MS,
-        "server row did not reach edge",
+        "server row did not settle globally",
       );
       await waitForTodos(
         db,
         (rows) => rows.some((row) => row.id === serverRow.id),
         "db did not receive the row to update",
         SYNC_OPERATION_TIMEOUT_MS,
-        "edge",
+        "remote",
       );
       await db.disconnect();
 
       const snapshots: Array<{
         rows: Todo[];
-        edgeSettled: boolean;
+        globalSettled: boolean;
         afterReconnect: boolean;
       }> = [];
-      let edgeSettled = false;
+      let globalSettled = false;
       let reconnectRequested = false;
       const unsubscribe = ctx.trackSubscription(
         db.subscribe(
@@ -317,17 +317,17 @@ describe("Db disconnect/reconnect", () => {
           (rows) => {
             snapshots.push({
               rows,
-              edgeSettled,
+              globalSettled,
               afterReconnect: reconnectRequested,
             });
           },
-          { tier: "edge" },
+          { tier: "remote" },
         ),
       );
 
       const update = db.update(todos, serverRow.id, { done: true });
-      const edgeWait = update.wait({ tier: "edge" }).then(() => {
-        edgeSettled = true;
+      const globalWait = update.wait({ tier: "global" }).then(() => {
+        globalSettled = true;
       });
       await withTimeout(
         update.wait({ tier: "local" }),
@@ -335,7 +335,7 @@ describe("Db disconnect/reconnect", () => {
         "local update did not become visible",
       );
       await expectStillPending(
-        update.wait({ tier: "edge" }),
+        update.wait({ tier: "global" }),
         PENDING_ASSERTION_MS,
         "update settled before the delayed server snapshot was allowed to arrive",
       );
@@ -349,13 +349,13 @@ describe("Db disconnect/reconnect", () => {
               afterReconnect && rows.some((row) => row.id === serverRow.id && row.done),
           ),
         SYNC_OPERATION_TIMEOUT_MS,
-        "edge subscription did not publish its authoritative snapshot after reconnect",
+        "global subscription did not publish its authoritative snapshot after reconnect",
       );
       const beforeAcceptance = snapshots.at(-1)!.rows;
       await withTimeout(
-        edgeWait,
+        globalWait,
         SYNC_OPERATION_TIMEOUT_MS,
-        "local update did not settle at edge after reconnect",
+        "local update did not settle globally after reconnect",
       );
 
       expect(snapshots.at(-1)!.rows).toEqual(beforeAcceptance);
@@ -363,20 +363,20 @@ describe("Db disconnect/reconnect", () => {
       unsubscribe();
     }, 60_000);
 
-    it("keeps an edge subscription pending while disconnected, then hydrates its local delete", async () => {
+    it("keeps a global subscription pending while disconnected, then hydrates its local delete", async () => {
       const { db, peer } = await createDbPair(ctx, createWorkerDb, createDirectDb);
       const title = "pending optimistic delete";
       const serverRow = await withTimeout(
-        peer.insert(todos, { title, done: false }).wait({ tier: "edge" }),
+        peer.insert(todos, { title, done: false }).wait({ tier: "global" }),
         SYNC_OPERATION_TIMEOUT_MS,
-        "server row did not reach edge",
+        "server row did not settle globally",
       );
       await waitForTodos(
         db,
         (rows) => rows.some((row) => row.id === serverRow.id),
         "db did not receive the row to delete",
         SYNC_OPERATION_TIMEOUT_MS,
-        "edge",
+        "remote",
       );
       await db.disconnect();
 
@@ -395,13 +395,13 @@ describe("Db disconnect/reconnect", () => {
 
       const snapshots: Array<{
         rows: Todo[];
-        edgeSettled: boolean;
+        globalSettled: boolean;
         afterReconnect: boolean;
       }> = [];
-      let edgeSettled = false;
+      let globalSettled = false;
       let reconnectRequested = false;
-      const edgeWait = deletion.wait({ tier: "edge" }).then(() => {
-        edgeSettled = true;
+      const globalWait = deletion.wait({ tier: "global" }).then(() => {
+        globalSettled = true;
       });
       const unsubscribe = ctx.trackSubscription(
         db.subscribe(
@@ -409,15 +409,15 @@ describe("Db disconnect/reconnect", () => {
           (rows) => {
             snapshots.push({
               rows,
-              edgeSettled,
+              globalSettled,
               afterReconnect: reconnectRequested,
             });
           },
-          { tier: "edge" },
+          { tier: "remote" },
         ),
       );
       await expectStillPending(
-        deletion.wait({ tier: "edge" }),
+        deletion.wait({ tier: "global" }),
         PENDING_ASSERTION_MS,
         "delete settled before the delayed server snapshot was allowed to arrive",
       );
@@ -428,13 +428,13 @@ describe("Db disconnect/reconnect", () => {
         async () =>
           snapshots.some(({ rows, afterReconnect }) => afterReconnect && rows.length === 0),
         SYNC_OPERATION_TIMEOUT_MS,
-        "edge subscription did not publish its authoritative snapshot after reconnect",
+        "global subscription did not publish its authoritative snapshot after reconnect",
       );
       const beforeAcceptance = snapshots.at(-1)!.rows;
       await withTimeout(
-        edgeWait,
+        globalWait,
         SYNC_OPERATION_TIMEOUT_MS,
-        "local delete did not settle at edge after reconnect",
+        "local delete did not settle globally after reconnect",
       );
 
       expect(snapshots.at(-1)!.rows).toEqual(beforeAcceptance);
@@ -442,13 +442,13 @@ describe("Db disconnect/reconnect", () => {
       unsubscribe();
     }, 60_000);
 
-    it("publishes server deletions through an edge subscription", async () => {
+    it("publishes server deletions through a global subscription", async () => {
       const { db, peer } = await createDbPair(ctx, createDirectDb);
       const deletedTitle = "server row deleted live";
       const serverRow = await withTimeout(
-        peer.insert(todos, { title: deletedTitle, done: false }).wait({ tier: "edge" }),
+        peer.insert(todos, { title: deletedTitle, done: false }).wait({ tier: "global" }),
         SYNC_OPERATION_TIMEOUT_MS,
-        "server row did not reach edge",
+        "server row did not settle globally",
       );
       const snapshots: Todo[][] = [];
       const unsubscribe = ctx.trackSubscription(
@@ -457,24 +457,24 @@ describe("Db disconnect/reconnect", () => {
           (rows) => {
             snapshots.push(rows);
           },
-          { tier: "edge" },
+          { tier: "remote" },
         ),
       );
 
       await waitForCondition(
         async () => snapshots.some((rows) => rows.some((row) => row.title === deletedTitle)),
         SYNC_OPERATION_TIMEOUT_MS,
-        "edge subscription did not show the server row",
+        "global subscription did not show the server row",
       );
       await withTimeout(
-        peer.delete(todos, serverRow.id).wait({ tier: "edge" }),
+        peer.delete(todos, serverRow.id).wait({ tier: "global" }),
         SYNC_OPERATION_TIMEOUT_MS,
-        "server deletion did not reach edge",
+        "server deletion did not settle globally",
       );
       await waitForCondition(
         async () => snapshots.some((rows) => rows.length === 0),
         SYNC_OPERATION_TIMEOUT_MS,
-        "edge subscription did not publish the server deletion",
+        "global subscription did not publish the server deletion",
       );
       unsubscribe();
     }, 60_000);
@@ -489,7 +489,7 @@ describe("Db disconnect/reconnect", () => {
 
       const localRowsWhileOffline = await withTimeout(
         db.all(todoByTitle(offlineTitle), {
-          tier: "local",
+          tier: "local-first",
         }),
         LOCAL_OPERATION_TIMEOUT_MS,
         "direct server connection: local-tier read for disconnected write did not resolve",
@@ -510,7 +510,7 @@ describe("Db disconnect/reconnect", () => {
         (rows) => rows.some((row) => row.title === offlineTitle),
         "direct server connection: peer sees disconnected write after reconnect",
         SYNC_OPERATION_TIMEOUT_MS,
-        "edge",
+        "remote",
       );
     }, 60_000);
 
@@ -521,14 +521,14 @@ describe("Db disconnect/reconnect", () => {
 
       const serverOnlyTitle = "server only";
       await withTimeout(
-        peer.insert(todos, { title: serverOnlyTitle, done: true }).wait({ tier: "edge" }),
+        peer.insert(todos, { title: serverOnlyTitle, done: true }).wait({ tier: "global" }),
         SYNC_OPERATION_TIMEOUT_MS,
-        "direct server connection: peer write did not reach edge while db was disconnected",
+        "direct server connection: peer write did not settle globally while db was disconnected",
       );
 
       const localRowsWhileOffline = await withTimeout(
         db.all(todoByTitle(serverOnlyTitle), {
-          tier: "local",
+          tier: "local-first",
         }),
         LOCAL_OPERATION_TIMEOUT_MS,
         "direct server connection: local-tier read while disconnected did not resolve",
@@ -542,7 +542,7 @@ describe("Db disconnect/reconnect", () => {
         (rows) => rows.some((row) => row.title === serverOnlyTitle),
         "direct server connection: disconnected client receives server update after reconnect",
         SYNC_OPERATION_TIMEOUT_MS,
-        "edge",
+        "remote",
       );
     }, 60_000);
   });
@@ -561,7 +561,7 @@ describe("Db disconnect/reconnect", () => {
           secret,
         }),
       );
-      await owner.all(app.todos, { tier: "edge" });
+      await owner.all(app.todos, { tier: "remote" });
       await owner.disconnect();
 
       const title = "namespace-wide offline write";
@@ -571,9 +571,9 @@ describe("Db disconnect/reconnect", () => {
         "worker namespace: owner local write did not resolve while disconnected",
       );
 
-      // Attach only after the namespace is already offline. This is the
-      // important race: the late tab must await its init-state handshake
-      // before classifying RemoteIfPossible as Local rather than Edge.
+      // Attach only after the namespace is already offline. The late tab must
+      // learn the worker's offline state during its init handshake so a
+      // local-first read with a server wait never waits on the missing server.
       const editor = ctx.track(
         await createDb({
           appId: server.appId,
@@ -585,9 +585,12 @@ describe("Db disconnect/reconnect", () => {
 
       // The editor did not issue disconnect(), but it shares the durable
       // worker and must therefore make the same explicit-offline read choice.
-      // An Edge read would exclude this not-yet-settled row.
+      // A remote read would exclude this not-yet-settled row.
       const localFallback = await withWorkerOperationTimeout(
-        editor.all(todoByTitle(title), { tier: ReadTier.RemoteIfPossible }),
+        editor.all(todoByTitle(title), {
+          tier: ReadTier.LocalFirst,
+          firstLoadRemoteWaitMs: 60_000,
+        }),
         "worker namespace: editor did not use local fallback after owner disconnect",
       );
       expect(localFallback).toHaveLength(1);
@@ -596,7 +599,8 @@ describe("Db disconnect/reconnect", () => {
       const snapshots: Todo[][] = [];
       const unsubscribe = ctx.trackSubscription(
         editor.subscribe(todoByTitle(title), (rows) => snapshots.push(rows), {
-          tier: ReadTier.RemoteIfPossible,
+          tier: ReadTier.LocalFirst,
+          firstLoadRemoteWaitMs: 60_000,
         }),
       );
       await waitForCondition(
@@ -605,18 +609,18 @@ describe("Db disconnect/reconnect", () => {
         "worker namespace: late editor subscription did not use local fallback",
       );
 
-      const edgeWait = write.wait({ tier: "edge" });
+      const globalWait = write.wait({ tier: "global" });
       await expectStillPending(
-        edgeWait,
+        globalWait,
         PENDING_ASSERTION_MS,
-        "worker namespace: editor edge wait settled while the shared worker was offline",
+        "worker namespace: editor global wait settled while the shared worker was offline",
       );
 
       // Any attached tab can reconnect the namespace. The queued editor write
       // must retain its ordinary fate route and settle after that reconnect.
       await editor.reconnect();
       await withTimeout(
-        edgeWait,
+        globalWait,
         SYNC_OPERATION_TIMEOUT_MS,
         "worker namespace: editor write did not settle after reconnect",
       );
@@ -633,7 +637,7 @@ describe("Db disconnect/reconnect", () => {
 
       const localRows = await withWorkerOperationTimeout(
         db.all(todoByTitle(offlineTitle), {
-          tier: "local",
+          tier: "local-first",
         }),
         "worker mode: local-tier read for disconnected write did not resolve",
       );
@@ -652,7 +656,7 @@ describe("Db disconnect/reconnect", () => {
         (rows) => rows.some((row) => row.title === offlineTitle),
         "worker mode: peer sees disconnected write after reconnect",
         SYNC_OPERATION_TIMEOUT_MS,
-        "edge",
+        "remote",
       );
     }, 60_000);
 
@@ -663,14 +667,14 @@ describe("Db disconnect/reconnect", () => {
 
       const serverOnlyTitle = "server only";
       await withTimeout(
-        peer.insert(todos, { title: serverOnlyTitle, done: true }).wait({ tier: "edge" }),
+        peer.insert(todos, { title: serverOnlyTitle, done: true }).wait({ tier: "global" }),
         SYNC_OPERATION_TIMEOUT_MS,
-        "worker mode: peer write did not reach edge while db was disconnected",
+        "worker mode: peer write did not settle globally while db was disconnected",
       );
 
       const disconnectedLocalRows = await withWorkerOperationTimeout(
         db.all(todoByTitle(serverOnlyTitle), {
-          tier: "local",
+          tier: "local-first",
         }),
         "worker mode: local-tier read while disconnected did not resolve",
       );
@@ -683,11 +687,11 @@ describe("Db disconnect/reconnect", () => {
         (rows) => rows.some((row) => row.title === serverOnlyTitle),
         "worker mode: disconnected client receives server update after reconnect",
         SYNC_OPERATION_TIMEOUT_MS,
-        "edge",
+        "remote",
       );
     }, 60_000);
 
-    it("resolves local waits and keeps edge/global waits pending while disconnected", async () => {
+    it("resolves local waits and keeps global waits pending while disconnected", async () => {
       const { db } = await createDbPair(ctx, createWorkerDb);
 
       await db.disconnect();
@@ -719,13 +723,6 @@ describe("Db disconnect/reconnect", () => {
         () => phase,
       );
 
-      const edgeWait = db.insert(todos, { title: "edge wait", done: false }).wait({ tier: "edge" });
-      await expectStillPending(
-        edgeWait,
-        PENDING_ASSERTION_MS,
-        "worker mode: edge wait while disconnected",
-      );
-
       const globalWait = db
         .insert(todos, { title: "global wait", done: false })
         .wait({ tier: "global" });
@@ -738,59 +735,58 @@ describe("Db disconnect/reconnect", () => {
       await db.reconnect();
 
       await withTimeout(
-        edgeWait,
-        SYNC_OPERATION_TIMEOUT_MS,
-        "worker mode: edge wait did not settle after reconnect",
-      );
-      await withTimeout(
         globalWait,
         SYNC_OPERATION_TIMEOUT_MS,
         "worker mode: global wait did not settle after reconnect",
       );
     }, 60_000);
 
-    it("keeps local writes responsive while a disconnected edge query is pending", async () => {
+    it("keeps local writes responsive while a disconnected remote query is pending", async () => {
       const { db } = await createDbPair(ctx, createWorkerDb);
       await db.disconnect();
 
       const title = "strict query FIFO";
-      const edgeRead = db.all(todoByTitle(title), { tier: ReadTier.Remote });
+      const remoteRead = db.all(todoByTitle(title), { tier: ReadTier.Remote });
       const laterWrite = db.insert(todos, { title, done: false });
       await withWorkerOperationTimeout(
         laterWrite.wait({ tier: "local" }),
-        "worker mode: local write did not resolve independently of a parked edge query",
+        "worker mode: local write did not resolve independently of a parked remote query",
       );
 
       await db.reconnect();
-      const rows = await edgeRead;
+      const rows = await remoteRead;
       expect(rows).toHaveLength(1);
       expect(rows[0]?.title).toBe(title);
       await withTimeout(
         laterWrite.wait({ tier: "local" }),
         SYNC_OPERATION_TIMEOUT_MS,
-        "worker mode: queued write did not run after edge query",
+        "worker mode: queued write did not run after remote query",
       );
     }, 60_000);
 
-    it("keeps local writes responsive while a disconnected edge wait is pending", async () => {
+    it("keeps local writes responsive while a disconnected global wait is pending", async () => {
       const { db } = await createDbPair(ctx, createWorkerDb);
       const priorWrite = db.insert(todos, { title: "strict wait FIFO", done: false });
       await priorWrite.wait({ tier: "local" });
       await db.disconnect();
 
-      const edgeWait = priorWrite.wait({ tier: "edge" });
+      const globalWait = priorWrite.wait({ tier: "global" });
       const laterWrite = db.insert(todos, { title: "after strict wait", done: false });
       await withWorkerOperationTimeout(
         laterWrite.wait({ tier: "local" }),
-        "worker mode: local write did not resolve independently of a parked edge wait",
+        "worker mode: local write did not resolve independently of a parked global wait",
       );
 
       await db.reconnect();
-      await withTimeout(edgeWait, SYNC_OPERATION_TIMEOUT_MS, "worker mode: edge wait did not run");
+      await withTimeout(
+        globalWait,
+        SYNC_OPERATION_TIMEOUT_MS,
+        "worker mode: global wait did not run",
+      );
       await withTimeout(
         laterWrite.wait({ tier: "local" }),
         SYNC_OPERATION_TIMEOUT_MS,
-        "worker mode: queued write did not run after edge wait",
+        "worker mode: queued write did not run after global wait",
       );
     }, 60_000);
 
@@ -799,22 +795,22 @@ describe("Db disconnect/reconnect", () => {
       const write = db.insert(todos, { title: "blocked durability wait", done: false });
       await write.wait({ tier: "local" });
       await db.disconnect();
-      const edgeWait = write.wait({ tier: "edge" });
+      const globalWait = write.wait({ tier: "global" });
       await expectStillPending(
-        edgeWait,
+        globalWait,
         PENDING_ASSERTION_MS,
-        "worker mode: executing edge wait while disconnected",
+        "worker mode: executing global wait while disconnected",
       );
 
       await db.reconnect();
       await withTimeout(
-        edgeWait,
+        globalWait,
         SYNC_OPERATION_TIMEOUT_MS,
         "worker mode: durability wait did not settle after reconnect",
       );
     }, 60_000);
 
-    it("resolves local reads and defers edge reads while disconnected", async () => {
+    it("resolves local reads and defers remote reads while disconnected", async () => {
       const { db } = await createDbPair(ctx, createWorkerDb);
 
       await db.disconnect();
@@ -856,7 +852,7 @@ describe("Db disconnect/reconnect", () => {
         () => {
           callbacks += 1;
         },
-        { tier: "edge" },
+        { tier: "remote" },
       );
       const connection = (db as unknown as { connection: { reconnectWaiters: Set<unknown> } })
         .connection;
@@ -985,7 +981,7 @@ async function waitForTodos(
   predicate: (rows: Todo[]) => boolean,
   label: string,
   timeoutMs = SYNC_OPERATION_TIMEOUT_MS,
-  tier?: "local" | "edge",
+  tier?: "local-first" | "remote",
 ): Promise<Todo[]> {
   return waitForQuery(db, app.todos, predicate, label, timeoutMs, tier);
 }

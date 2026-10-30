@@ -11,12 +11,19 @@ import {
 
 import { withNativeRelayFixture } from "./fixture.js";
 
-const app = schema.defineApp({ documents: schema.table({ title: schema.string() }) });
+const app = schema.defineApp(
+  {
+    documents: schema.table({ title: schema.string() }, {}),
+  },
+  { migrations: "none" },
+);
 
 // writeState is the existing low-level NativeDb contract; public WriteHandle
 // exposes waits, so this receipt intentionally uses the real binding adapter.
-it("reads live native fate/durability and retires closed write state", async () => {
-  await withNativeRelayFixture(app, async (fixture) => {
+// The SQLite engine has no write-state snapshots yet: like the NAPI and WASM
+// bindings, the native relay answers with an explicit error, never a guess.
+it("refuses write state snapshots explicitly and retires closed writes", async () => {
+  await withNativeRelayFixture(app, {}, async (fixture) => {
     const commands = (await import("jazz-rn/relay")) as unknown as NativeForegroundModule;
     const native = new NativeForegroundDb(
       fixture.nativeHost.openAttached(fixture.capability),
@@ -29,13 +36,8 @@ it("reads live native fate/durability and retires closed write state", async () 
           title: { type: "Text", value: "local state" },
         }),
       );
-      expect(write.writeState()).toMatchObject({ fate: "Pending", global_time: null });
+      expect(() => write.writeState()).toThrow("write state snapshots is not supported yet");
       await write.wait("local");
-      expect(write.writeState()).toMatchObject({
-        fate: "Pending",
-        durability: "Local",
-        global_time: null,
-      });
       expect(write.close()).toBe(true);
       expect(write.close()).toBe(false);
       expect(() => write.writeState()).toThrow("write state is unavailable");
@@ -47,7 +49,7 @@ it("reads live native fate/durability and retires closed write state", async () 
 });
 
 it("delivers unwaited authority rejection once and leaves waited rejection with its waiter", async () => {
-  const { startLocalJazzServer, startTestJwtIssuer, deploy, mergePermissionsIntoWasmSchema } =
+  const { startLocalJazzServer, startTestJwtIssuer, deploy } =
     await import("../../src/testing/index.js");
   const issuer = await startTestJwtIssuer();
   const server = await startLocalJazzServer({
@@ -68,12 +70,15 @@ it("delivers unwaited authority rejection once and leaves waited rejection with 
       permissions,
     });
     await withNativeRelayFixture(
-      { wasmSchema: mergePermissionsIntoWasmSchema(app.wasmSchema, permissions) },
+      app,
+      permissions,
       async (fixture) => {
         const db = await fixture.createDb();
         const errors = vi.fn();
         db.onMutationError(errors);
-        const rejected = db.insert(app.documents, { title: "unwaited rejection" });
+        const rejected = db.insert(app.documents, {
+          title: "unwaited rejection",
+        });
         const id = await rejected.txId;
         await expect.poll(() => errors.mock.calls.length, { timeout: 10_000 }).toBe(1);
         expect(errors).toHaveBeenCalledWith(
@@ -87,7 +92,7 @@ it("delivers unwaited authority rejection once and leaves waited rejection with 
         );
         expect(await db.all(app.documents)).toEqual([]);
         const waited = db.insert(app.documents, { title: "waited rejection" });
-        await expect(waited.wait({ tier: "edge" })).rejects.toMatchObject({
+        await expect(waited.wait({ tier: "global" })).rejects.toMatchObject({
           name: "PersistedWriteRejectedError",
           code: "permission_denied",
         });
@@ -102,7 +107,10 @@ it("delivers unwaited authority rejection once and leaves waited rejection with 
           claims: { role: "user" },
           authMode: "external",
         },
-        upstream: { serverUrl: server.url, jwt: issuer.jwtForUser("rn-mutation-user") },
+        upstream: {
+          serverUrl: server.url,
+          jwt: issuer.jwtForUser("rn-mutation-user"),
+        },
       },
     );
   } finally {
@@ -112,7 +120,7 @@ it("delivers unwaited authority rejection once and leaves waited rejection with 
 }, 30_000);
 
 it("closes an unfinished large upload without publication or late mutation callbacks", async () => {
-  await withNativeRelayFixture(app, async (fixture) => {
+  await withNativeRelayFixture(app, {}, async (fixture) => {
     const observer = await fixture.createDb();
     const commands = (await import("jazz-rn/relay")) as unknown as NativeForegroundModule;
     const native = new NativeForegroundDb(
@@ -144,65 +152,102 @@ it("closes an unfinished large upload without publication or late mutation callb
   });
 });
 
+// The SQLite relay finishes and aborts uploads synchronously, so they need no
+// pending-operation admission: an upload stays usable while the foreground's
+// bounded pending operations are at capacity.
 it.each(["finish", "abort"] as const)(
-  "keeps an upload retryable when %s admission reaches native capacity",
+  "can %s an upload while pending operations are at native capacity",
   async (terminal) => {
-    await withNativeRelayFixture(app, async (fixture) => {
-      const commands = (await import("jazz-rn/relay")) as unknown as NativeForegroundModule;
-      const runtime = fixture.nativeHost.openAttached(fixture.capability);
-      const native = new NativeForegroundDb(runtime, commands);
-      const execute = (command: Parameters<typeof commands.encodeNativeForegroundCommand>[0]) =>
-        commands.decodeNativeForegroundResponse(
-          runtime.execute(commands.encodeNativeForegroundCommand(command)),
-        );
-      const operations: number[] = [];
-      try {
-        const seed = native.insert(
-          "documents",
-          encodeCellsForRow(app.wasmSchema.documents!, {
-            title: { type: "Text", value: "capacity waiter" },
-          }),
-        );
-        await seed.wait("local");
-        const txId = Uint8Array.from(
-          seed.txId.match(/../g)!.map((byte) => Number.parseInt(byte, 16)),
-        );
-        const rowId = crypto.getRandomValues(new Uint8Array(16));
-        const upload = native.beginStreamingMutation(
-          "documents",
-          rowId,
-          encodeCellsForPatch(app.wasmSchema.documents!, {}),
-          "title",
-        );
-        await upload.push(new TextEncoder().encode("retryable upload"));
-        let saturated = false;
-        // Real edge waiters remain pending because this fixture has no authority.
-        // Stop at the host's reported bound rather than inventing pending handles.
-        for (let attempt = 0; attempt < 128; attempt++) {
-          const response = execute({ type: "waitForTransaction", txId, tier: "edge" });
-          if (response.type === "operationError") {
-            expect(response.reason).toContain("capacity");
-            saturated = true;
-            break;
-          }
-          expect(response.type).toBe("pending");
-          if (response.type === "pending") operations.push(response.operation);
-        }
-        expect(saturated).toBe(true);
-        await expect(upload[terminal]()).rejects.toThrow("capacity");
-        for (const operation of operations.splice(0)) execute({ type: "cancel", operation });
-        if (terminal === "finish") {
-          const write = await upload.finish();
-          expect(write.rowId).toEqual(rowId);
-          await write.wait("local");
-        } else {
-          expect(await upload.abort()).toBe(true);
-          expect(await upload.abort()).toBe(false);
-        }
-      } finally {
-        for (const operation of operations) execute({ type: "cancel", operation });
-        native.close();
-      }
+    const { startLocalJazzServer, startTestJwtIssuer } = await import("../../src/testing/index.js");
+    const issuer = await startTestJwtIssuer();
+    const server = await startLocalJazzServer({
+      inMemory: true,
+      jwksUrl: issuer.jwksUrl,
+      jwtIssuer: issuer.issuer,
+      jwtAudience: issuer.audience,
     });
+    try {
+      await withNativeRelayFixture(
+        app,
+        {},
+        async (fixture) => {
+          const commands = (await import("jazz-rn/relay")) as unknown as NativeForegroundModule;
+          const runtime = fixture.nativeHost.openAttached(fixture.capability);
+          const native = new NativeForegroundDb(runtime, commands);
+          const execute = (command: Parameters<typeof commands.encodeNativeForegroundCommand>[0]) =>
+            commands.decodeNativeForegroundResponse(
+              runtime.execute(commands.encodeNativeForegroundCommand(command)),
+            );
+          const operations: number[] = [];
+          try {
+            // Offline from a configured authority, Global waits stay pending.
+            native.disconnectNativeUpstream();
+            const seed = native.insert(
+              "documents",
+              encodeCellsForRow(app.wasmSchema.documents!, {
+                title: { type: "Text", value: "capacity waiter" },
+              }),
+            );
+            await seed.wait("local");
+            const txId = Uint8Array.from(
+              seed.txId.match(/../g)!.map((byte) => Number.parseInt(byte, 16)),
+            );
+            const rowId = crypto.getRandomValues(new Uint8Array(16));
+            const upload = native.beginStreamingMutation(
+              "documents",
+              rowId,
+              encodeCellsForPatch(app.wasmSchema.documents!, {}),
+              "title",
+            );
+            await upload.push(new TextEncoder().encode("retryable upload"));
+            let saturated = false;
+            // Stop at the host's reported bound rather than inventing pending handles.
+            for (let attempt = 0; attempt < 128; attempt++) {
+              const response = execute({
+                type: "waitForTransaction",
+                txId,
+                tier: "global",
+              });
+              if (response.type === "operationError") {
+                expect(response.reason).toContain("capacity");
+                saturated = true;
+                break;
+              }
+              expect(response.type).toBe("pending");
+              if (response.type === "pending") operations.push(response.operation);
+            }
+            expect(saturated).toBe(true);
+            if (terminal === "finish") {
+              const write = await upload.finish();
+              expect(write.rowId).toEqual(rowId);
+              await write.wait("local");
+            } else {
+              expect(await upload.abort()).toBe(true);
+              expect(await upload.abort()).toBe(false);
+            }
+          } finally {
+            for (const operation of operations) execute({ type: "cancel", operation });
+            native.close();
+          }
+        },
+        {
+          appId: server.appId,
+          session: {
+            issuer: issuer.issuer,
+            user_id: "rn-capacity-user",
+            claims: {},
+            authMode: "external",
+          },
+          upstream: {
+            serverUrl: server.url,
+            jwt: issuer.jwtForUser("rn-capacity-user"),
+          },
+        },
+      );
+    } finally {
+      await server.stop();
+      await issuer.stop();
+    }
   },
+  30_000,
 );

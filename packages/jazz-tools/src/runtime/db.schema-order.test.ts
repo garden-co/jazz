@@ -1,3 +1,4 @@
+import { DbAccessContext } from "./db-access-context.js";
 import { describe, expect, it, vi } from "vitest";
 import { Db, type DbConfig, type QueryBuilder, type TableProxy } from "./db.js";
 import type { InsertValues, WasmRow, WasmSchema } from "../drivers/types.js";
@@ -18,7 +19,7 @@ class TestRuntimeSource extends RuntimeSource<DbConfig> {
 class TestDb extends Db {
   constructor(
     private readonly testClient: JazzClient,
-    private readonly testContext: { session?: Session } | null = null,
+    private readonly testContext: DbAccessContext | null = null,
   ) {
     super({ appId: "schema-order-test" }, new TestRuntimeSource(testClient));
   }
@@ -27,7 +28,7 @@ class TestDb extends Db {
     return this.testClient;
   }
 
-  protected override getRuntimeOperationContext(): { session?: Session } | null {
+  protected override getAccessContext(): DbAccessContext | null {
     return this.testContext;
   }
 }
@@ -318,7 +319,7 @@ describe("Db runtime schema order", () => {
       getSchema: () => new Map(Object.entries(generatedSchema)),
       queryInternal: query,
     } as unknown as JazzClient;
-    const db = new TestDb(client, { session });
+    const db = new TestDb(client, DbAccessContext.forSession(session));
     const builder = {
       _table: "todos",
       _schema: generatedSchema,
@@ -332,7 +333,7 @@ describe("Db runtime schema order", () => {
         }),
     } satisfies QueryBuilder<{ id: string; title: string; done: boolean }>;
 
-    const rows = await db.all(builder, { tier: "local" });
+    const rows = await db.all(builder, { tier: "local-first" });
 
     expect(query).toHaveBeenCalledTimes(1);
     expect(rows).toEqual([

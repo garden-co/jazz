@@ -2,6 +2,8 @@ import { Utf8Decoder } from "./utf8.js";
 import { runtimeRandomBytes } from "./runtime-entropy.js";
 import type { PublicSession, Session } from "./context.js";
 import { attachPublicSessionClaims, isUsableSubject, withCanonicalUser } from "./author-id.js";
+import { getTrustedReservedSession } from "./db-internal-session.js";
+import { isRecord } from "./util.js";
 
 export interface ClientSessionInput {
   /** @internal Assignment supplied by a validated account handle. */
@@ -89,6 +91,37 @@ export function isTrustedReservedSession(
   );
 }
 
+const retainedAccountSessions = new WeakSet<Session>();
+
+/**
+ * @internal Session for a retained external account opened before its first
+ * credential arrives. Only account-context creation mints it, from the
+ * non-secret `{ account, issuer, subject }` assignment its manager retained.
+ * It has no provider claims and no transport credential: the server rejects
+ * every request until a provider JWT for this exact identity replaces it.
+ */
+export function retainedAccountSession(identity: { issuer: string; subject: string }): Session {
+  if (
+    !isUsableSubject(identity.issuer) ||
+    !isUsableSubject(identity.subject) ||
+    isReservedJazzIssuer(identity.issuer)
+  ) {
+    throw new Error("A retained account session requires an external identity");
+  }
+  const session: Session = {
+    issuer: identity.issuer,
+    user_id: identity.subject,
+    claims: Object.create(null) as Record<string, unknown>,
+    authMode: "external",
+  };
+  retainedAccountSessions.add(session);
+  return session;
+}
+
+function isRetainedAccountSession(session: Session | undefined): session is Session {
+  return session !== undefined && retainedAccountSessions.has(session);
+}
+
 export interface JwtPayload {
   /** Application-defined flat JWT claims. Known transport claims below retain their types. */
   [claim: string]: unknown;
@@ -115,14 +148,14 @@ const REGISTERED_JWT_POLICY_FIELDS = new Set(["sub", "exp", "nbf", "iat", "iss",
 function isPolicyClaimValue(value: unknown): boolean {
   if (value === null || typeof value === "string" || typeof value === "boolean") return true;
   if (typeof value === "number") return Number.isFinite(value);
-  return Array.isArray(value) && value.every(isPolicyClaimValue);
+  if (Array.isArray(value)) return value.every(isPolicyClaimValue);
+  return isRecord(value) && Object.values(value).every(isPolicyClaimValue);
 }
 
 /**
- * Project decoded JWT metadata into Groove's deliberately non-recursive
- * local advisory policy corpus. The server independently verifies its JWT. This is kept separate from `PublicSession.claims`: registered
- * transport/security fields are verified identity, not provider policy data;
- * objects are handler metadata, not policy values.
+ * Preserve scalar, array, and nested object claims for local policy evaluation.
+ * The server independently verifies its JWT. Registered transport/security
+ * fields remain verified identity rather than provider policy data.
  */
 export function policyClaimsFromJwtPayload(payload: JwtPayload): Record<string, unknown> {
   const claims: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
@@ -164,10 +197,6 @@ function trimOptional(value?: string): string | undefined {
 
 function asUsableSubjectString(value: unknown): string | undefined {
   return typeof value === "string" && isUsableSubject(value) ? value : undefined;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function maybeBuffer(): BufferLike | undefined {
@@ -295,21 +324,46 @@ export function resolveJwtSession(jwtToken: string): PublicSession | null {
  *
  * Resolves the JWT bearer token to a session, or returns no session.
  */
+/** @internal True for a context opened from a retained assignment, before any credential. */
+export function isRetainedAccountSessionInput(config: ClientSessionInput): boolean {
+  const session = config.trustedReservedSession ?? getTrustedReservedSession(config);
+  return !config.jwtToken && !config.cookieSession && isRetainedAccountSession(session);
+}
+
 export function resolveClientSessionStateSync(config: ClientSessionInput): ClientSessionState {
+  // Configs carry the trusted session in a side table so it never becomes
+  // public configuration; inline inputs are accepted for transport payloads.
+  const trustedReservedSession = config.trustedReservedSession ?? getTrustedReservedSession(config);
   if (
     config.jwtToken &&
-    config.trustedReservedSession &&
+    trustedReservedSession &&
     isTrustedReservedSession(
-      config.trustedReservedSession,
-      trustedReservedSessionToken(config.trustedReservedSession),
+      trustedReservedSession,
+      trustedReservedSessionToken(trustedReservedSession),
     )
   ) {
     const internalSession = config.accountId
       ? markTrustedReservedSession({
-          ...config.trustedReservedSession,
+          ...trustedReservedSession,
           account_id: config.accountId,
         })
-      : config.trustedReservedSession;
+      : trustedReservedSession;
+    return {
+      transport: "bearer",
+      session: withCanonicalUser(internalSession),
+      internalSession,
+    };
+  }
+
+  if (
+    !config.jwtToken &&
+    !config.cookieSession &&
+    isRetainedAccountSession(trustedReservedSession)
+  ) {
+    // A retained account carries only its assignment until the provider
+    // supplies a JWT; that JWT then replaces this session (same principal).
+    const internalSession: Session = { ...trustedReservedSession, account_id: config.accountId };
+    retainedAccountSessions.add(internalSession);
     return {
       transport: "bearer",
       session: withCanonicalUser(internalSession),

@@ -47,11 +47,14 @@ impl Lcg {
     }
 
     /// Choose an index using integer weights.
+    ///
+    /// Panics if `weights` is empty, all weights are zero, or the total weight
+    /// overflows `u64`.
     pub fn weighted_index(&mut self, weights: &[u64]) -> usize {
         let total = weights
             .iter()
             .copied()
-            .reduce(u64::saturating_add)
+            .reduce(|total, weight| total.checked_add(weight).expect("weights total overflow"))
             .expect("weights must be non-empty");
         assert!(total > 0, "at least one weight must be positive");
         let mut draw = self.next_u64() % total;
@@ -126,5 +129,14 @@ mod tests {
         }
         assert!(counts[0] > counts[1]);
         assert!(counts[1] > counts[9]);
+    }
+
+    /// `Lcg::weighted_index` owns the public overflow contract; exercise it
+    /// directly before the RNG draw can occur.
+    #[test]
+    #[should_panic(expected = "weights total overflow")]
+    fn lcg_weighted_index_panics_on_total_weight_overflow() {
+        let mut rng = Lcg::new(7);
+        rng.weighted_index(&[u64::MAX, 1]);
     }
 }

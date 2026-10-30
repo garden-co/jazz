@@ -2,8 +2,16 @@
 
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { createJazzClient, JazzClientProvider, type JazzClient } from "jazz-tools/react";
+import { Banner } from "@astryxdesign/core/Banner";
+import { Button } from "@astryxdesign/core/Button";
+import { Card } from "@astryxdesign/core/Card";
+import { Heading } from "@astryxdesign/core/Heading";
+import { HStack, VStack } from "@astryxdesign/core/Stack";
+import { Text } from "@astryxdesign/core/Text";
+import { TextInput } from "@astryxdesign/core/TextInput";
 import { authClient, getJwtFromBetterAuth } from "../src/lib/auth-client";
 import { prepareAccounts } from "../src/lib/accounts";
+import { jazzEnv } from "../src/lib/jazz-env";
 import { JazzLifecycle } from "../src/lib/jazz-lifecycle";
 
 const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID!;
@@ -36,21 +44,26 @@ export function RecordPlayerProvider({ children }: { children: React.ReactNode }
   }, [attempt]);
   if (startupError)
     return (
-      <section>
-        <p role="alert">Could not start RecordPlayer: {startupError.message}</p>
-        <button
-          onClick={() => {
-            setStartupError(undefined);
-            setAttempt((value) => value + 1);
-          }}
-        >
-          Retry
-        </button>
-      </section>
+      <Banner
+        status="error"
+        title="Could not start RecordPlayer"
+        description={startupError.message}
+        endContent={
+          <Button
+            label="Retry"
+            variant="secondary"
+            size="sm"
+            onClick={() => {
+              setStartupError(undefined);
+              setAttempt((value) => value + 1);
+            }}
+          />
+        }
+      />
     );
-  if (isPending) return <p>Preparing your RecordPlayer…</p>;
+  if (isPending) return <Status>Preparing your RecordPlayer…</Status>;
   if (!session?.user) return <SignIn />;
-  if (!accounts) return <p>Connecting RecordPlayer…</p>;
+  if (!accounts) return <Status>Connecting RecordPlayer…</Status>;
   return (
     <AccountContext accounts={accounts} principal={session.user.id} sessionId={session.session.id}>
       {children}
@@ -75,7 +88,7 @@ function AccountContext({
   if (!lifecycleRef.current) {
     lifecycleRef.current = new JazzLifecycle(
       accounts,
-      (account) => createJazzClient({ appId, env: "dev", serverUrl, account }),
+      (account) => createJazzClient({ appId, env: jazzEnv, serverUrl, account }),
       setClient,
     );
   }
@@ -116,24 +129,31 @@ function AccountContext({
   const visibleClient = client && lifecycle.isCurrent(principal, sessionId) ? client : undefined;
   if (error && !visibleClient)
     return (
-      <section>
-        <p role="alert">Could not connect RecordPlayer: {error.message}</p>
-        <button
-          onClick={() =>
-            void lifecycle.reconcile(principal, sessionId, enroll).then(
-              () => setError(undefined),
-              (cause) => setError(cause instanceof Error ? cause : new Error(String(cause))),
-            )
-          }
-        >
-          Retry
-        </button>
-      </section>
+      <Banner
+        status="error"
+        title="Could not connect RecordPlayer"
+        description={error.message}
+        endContent={
+          <Button
+            label="Retry"
+            variant="secondary"
+            size="sm"
+            onClick={() =>
+              void lifecycle.reconcile(principal, sessionId, enroll).then(
+                () => setError(undefined),
+                (cause) => setError(cause instanceof Error ? cause : new Error(String(cause))),
+              )
+            }
+          />
+        }
+      />
     );
-  if (!visibleClient) return <p>Connecting RecordPlayer…</p>;
+  if (!visibleClient) return <Status>Connecting RecordPlayer…</Status>;
   return (
     <LifecycleContext.Provider value={lifecycle}>
-      {error && <p role="alert">Could not update RecordPlayer: {error.message}</p>}
+      {error && (
+        <Banner status="error" title="Could not update RecordPlayer" description={error.message} />
+      )}
       <JazzClientProvider client={visibleClient}>{children}</JazzClientProvider>
     </LifecycleContext.Provider>
   );
@@ -171,27 +191,45 @@ function SignIn() {
     }
   }
   return (
-    <section>
-      <h2>Sign in to RecordPlayer</h2>
-      <label>
-        Email
-        <input value={email} onChange={(event) => setEmail(event.target.value)} />
-      </label>
-      <label>
-        Password
-        <input
-          type="password"
-          value={password}
-          onChange={(event) => setPassword(event.target.value)}
-        />
-      </label>
-      <button disabled={pending} onClick={() => void authenticate("sign-in")}>
-        Sign in
-      </button>
-      <button disabled={pending} onClick={() => void authenticate("sign-up")}>
-        Create account
-      </button>
-      {error && <p role="alert">{error}</p>}
-    </section>
+    <div className="rp-sign-in">
+      <Card padding={6}>
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            void authenticate("sign-in");
+          }}
+        >
+          <VStack gap={4}>
+            <VStack gap={1}>
+              <Heading level={1}>Sign in to RecordPlayer</Heading>
+              <Text color="secondary">
+                A shared music library with playlists you can share. The demo account is filled in;
+                use it or create your own.
+              </Text>
+            </VStack>
+            <TextInput label="Email" type="email" value={email} onChange={setEmail} />
+            <TextInput label="Password" type="password" value={password} onChange={setPassword} />
+            <HStack gap={2} wrap="wrap">
+              <Button label="Sign in" type="submit" variant="primary" isDisabled={pending} />
+              <Button
+                label="Create account"
+                variant="secondary"
+                isDisabled={pending}
+                onClick={() => void authenticate("sign-up")}
+              />
+            </HStack>
+            {error && <Banner status="error" title="Could not sign in" description={error} />}
+          </VStack>
+        </form>
+      </Card>
+    </div>
+  );
+}
+
+function Status({ children }: { children: React.ReactNode }) {
+  return (
+    <Text color="secondary" role="status">
+      {children}
+    </Text>
   );
 }

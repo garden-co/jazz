@@ -6,7 +6,6 @@ import { PostcardReader, PostcardWriter } from "./native-codec.js";
 import {
   CLIENT_WIRE_FEATURES,
   FEATURE_PAYLOAD_ZSTD,
-  FEATURE_SYNC_MESSAGE_PAYLOAD,
   MAX_WIRE_PROTOCOL_VERSION,
   MIN_WIRE_PROTOCOL_VERSION,
   WIRE_PROTOCOL_VERSION,
@@ -19,7 +18,6 @@ import {
   encodeWebSocketFrameBatch,
   isWireHello,
   isWireError,
-  isWireMessage,
   peerIdentityForWebSocketAuth,
   policyClaimsForAdmittedWebSocket,
 } from "./websocket.js";
@@ -40,13 +38,13 @@ describe("admitted websocket policy claims", () => {
       exp: 2,
       aud: "app",
       role: "reader",
-      metadata: { ignored: true },
+      metadata: { enabled: true },
     });
     expect(
       policyClaimsForAdmittedWebSocket(
         JSON.stringify({ jwt_token, backend_session: { claims: { role: "wrong" } } }),
       ),
-    ).toEqual({ role: "reader" });
+    ).toEqual({ role: "reader", metadata: { enabled: true } });
     expect(
       policyClaimsForAdmittedWebSocket(
         JSON.stringify({
@@ -399,8 +397,9 @@ describe("websocket frame carrier", () => {
     expect(actual).toBe('["https://backend.example","backend-subject"]');
   });
 
-  it("keeps admin websocket links sessionless despite accompanying bearer payloads", () => {
+  it("uses SYSTEM for sessionless admin websocket links despite accompanying credentials", () => {
     const fallback = new TextEncoder().encode('["https://jazz.test","admin-cache"]');
+    const system = authorBytes("urn:jazz:system", "system");
     const validJwt = `header.${btoa(
       JSON.stringify({ iss: "https://issuer.example", sub: "provider-subject" }),
     )}.signature`;
@@ -411,7 +410,7 @@ describe("websocket frame carrier", () => {
           JSON.stringify({ admin_secret: "not inspected by the client", jwt_token }),
           fallback,
         ),
-      ).toBe(fallback);
+      ).toEqual(system);
     }
 
     expect(
@@ -426,7 +425,7 @@ describe("websocket frame carrier", () => {
         }),
         fallback,
       ),
-    ).toBe(fallback);
+    ).toEqual(system);
   });
 
   it("uses validated fallback subjects over whitespace raw auth subjects in both handshake shapes", () => {
@@ -457,7 +456,6 @@ describe("websocket frame carrier", () => {
     const reader = new PostcardReader(hello);
 
     expect(isWireHello(hello)).toBe(true);
-    expect(isWireMessage(hello)).toBe(false);
     expect(reader.u64()).toBe(0);
     expect(reader.u64()).toBe(MIN_WIRE_PROTOCOL_VERSION);
     expect(reader.u64()).toBe(MAX_WIRE_PROTOCOL_VERSION);
@@ -571,10 +569,30 @@ describe("websocket frame carrier", () => {
     }
   });
 
+  it("accepts the exact v6 Core advertisement for current and historical support", async () => {
+    expect(WIRE_PROTOCOL_VERSION).toBe(6);
+    const { carrier, socket } = carrierForTest();
+    socket.emitMessage(encodeWebSocketFrameBatch([encodeServerHello(1n, 6)]));
+    await expect(carrier.ready()).resolves.toBeDefined();
+    carrier.close();
+  });
+
   it("rejects non-exact server wire-version advertisements before payload decode", async () => {
     for (const [minProtocolVersion, maxProtocolVersion] of [
       [0, 1],
       [1, 2],
+      [2, 2],
+      [2, 3],
+      [3, 3],
+      [3, 4],
+      [3, 15],
+      [4, 4],
+      [4, 5],
+      [5, 5],
+      [5, 6],
+      [4, 15],
+      [5, 15],
+      [6, 15],
       [1, 15],
       [12, 12],
     ]) {
@@ -593,6 +611,28 @@ describe("websocket frame carrier", () => {
       );
       expect(socket.closed).toBe(true);
     }
+  });
+
+  it("reports a later-version server Hello as a version mismatch, whatever its body (#2468)", async () => {
+    // Only the tag and version range are shared across wire versions. A later
+    // server may lay out the rest of its Hello differently.
+    const next = WIRE_PROTOCOL_VERSION + 1;
+    const writer = new PostcardWriter();
+    writer.u64(0); // WireFrame::Hello
+    writer.u64(next);
+    writer.u64(next);
+    writer.u64(0x7f); // a body this version cannot parse
+    writer.u64(0x3fff);
+    writer.u64(42);
+    const laterHello = writer.finish();
+
+    expect(isWireHello(laterHello)).toBe(true);
+    const { carrier, socket } = carrierForTest();
+    socket.emitMessage(encodeWebSocketFrameBatch([laterHello]));
+    await expect(carrier.ready()).rejects.toThrow(
+      `server must advertise exactly wire protocol ${WIRE_PROTOCOL_VERSION}, got ${next}..=${next}`,
+    );
+    expect(socket.closed).toBe(true);
   });
 
   it("sends an authority-unbound hello first on every reconnect", async () => {
@@ -863,12 +903,12 @@ describe("websocket frame carrier", () => {
     });
 
     const suffixed = Uint8Array.from([...encoded, 0]);
-    expect(new PostcardReader(suffixed).u64()).toBe(2);
+    expect(new PostcardReader(suffixed).u64()).toBe(1);
     expect(() => isWireError(suffixed)).toThrow("WireFrame::Error has trailing postcard bytes");
     expect(() => decodeWireError(suffixed)).toThrow("WireFrame::Error has trailing postcard bytes");
 
-    expect(encoded[0]).toBe(2);
-    const nonminimalTag = Uint8Array.from([0x82, 0x00, ...encoded.slice(1)]);
+    expect(encoded[0]).toBe(1);
+    const nonminimalTag = Uint8Array.from([0x81, 0x00, ...encoded.slice(1)]);
     expect(() => isWireError(nonminimalTag)).toThrow("postcard u64 is not minimally encoded");
     expect(() => decodeWireError(nonminimalTag)).toThrow("postcard u64 is not minimally encoded");
 
@@ -908,46 +948,26 @@ describe("websocket frame carrier", () => {
     expect(errors).toEqual([{ code: "auth_failed", retry: "after_auth", message: "expired" }]);
   });
 
-  it("round-trips run-bearing Rust wire fixtures through the TS websocket frame codec", () => {
+  it("round-trips channel batches from Rust wire fixtures through the TS websocket codec", () => {
     const manifest = rustWireFixtureManifest();
+    expect(manifest.protocol_version).toBe(WIRE_PROTOCOL_VERSION);
+    for (const fixture of manifest.fixtures) {
+      const batch = hexToBytes(fixture.batch_hex);
+      const frames = decodeWebSocketFrameBatch(batch);
+      expect(bytesEqual(encodeWebSocketFrameBatch(frames), batch), fixture.name).toBe(true);
+      for (const frame of frames) {
+        const reader = new PostcardReader(frame);
+        expect(reader.u64()).toBe(2); // WireFrame::Channel
+        expect(reader.u64()).toBe(WIRE_PROTOCOL_VERSION);
+        expect(reader.u64()).toBe(0);
+        expect(reader.option(() => "session")).toBeUndefined();
+      }
+    }
     const fixture = manifest.fixtures.find(
       (candidate) => candidate.name === "view_update_mixed_version_carrier_runs",
     );
-
-    expect(manifest.protocol_version).toBe(WIRE_PROTOCOL_VERSION);
-    for (const candidate of manifest.fixtures) {
-      const candidateFrame = hexToBytes(candidate.frame_hex);
-      expect(isWireMessage(candidateFrame), candidate.name).toBe(true);
-      expect(
-        bytesEqual(
-          decodeWebSocketFrameBatch(encodeWebSocketFrameBatch([candidateFrame]))[0]!,
-          candidateFrame,
-        ),
-        candidate.name,
-      ).toBe(true);
-      const suffixed = Uint8Array.from([...candidateFrame, 0]);
-      expect(() => isWireMessage(suffixed), candidate.name).toThrow(
-        "WireFrame::Message has trailing postcard bytes",
-      );
-    }
-    expect(fixture?.name).toBe("view_update_mixed_version_carrier_runs");
     expect(fixture?.message_family).toBe("ViewUpdate");
-
-    const frame = hexToBytes(fixture!.frame_hex);
-    expect(isWireMessage(frame)).toBe(true);
-    expect([...decodeWebSocketFrameBatch(encodeWebSocketFrameBatch([frame]))[0]!]).toEqual([
-      ...frame,
-    ]);
-
-    const reader = new PostcardReader(frame);
-    expect(reader.u64()).toBe(1);
-    expect(reader.u64()).toBe(WIRE_PROTOCOL_VERSION);
-    expect(reader.u64()).toBe(FEATURE_SYNC_MESSAGE_PAYLOAD);
-    expect(reader.option(() => "session")).toBeUndefined();
-    const payload = reader.bytes();
-    // Protocol v11 removed the legacy branch-metadata variants; the two
-    // auxiliary chunk-I/O variants now precede ViewUpdate in the postcard enum.
-    expect(payload[0]).toBe(14);
+    expect(hexToBytes(fixture!.payload_hex)[0]).toBe(13);
   });
 });
 
@@ -956,7 +976,8 @@ type RustWireFixtureManifest = {
   fixtures: Array<{
     name: string;
     message_family: string;
-    frame_hex: string;
+    batch_hex: string;
+    payload_hex: string;
   }>;
 };
 
@@ -974,7 +995,7 @@ type RustWireHelloFixtureManifest = {
 function rustWireFixtureManifest(): RustWireFixtureManifest {
   return JSON.parse(
     readFileSync(
-      new URL("../../../../../crates/jazz/fixtures/wire_message_frames.json", import.meta.url),
+      new URL("../../../../../crates/jazz/fixtures/wire_message_frames_v6.json", import.meta.url),
       "utf8",
     ),
   ) as RustWireFixtureManifest;
@@ -983,7 +1004,7 @@ function rustWireFixtureManifest(): RustWireFixtureManifest {
 function rustWireHelloFixtureManifest(): RustWireHelloFixtureManifest {
   return JSON.parse(
     readFileSync(
-      new URL("../../../../../crates/jazz/fixtures/wire_hello_frames.json", import.meta.url),
+      new URL("../../../../../crates/jazz/fixtures/wire_hello_frames_v6.json", import.meta.url),
       "utf8",
     ),
   ) as RustWireHelloFixtureManifest;
@@ -1009,7 +1030,7 @@ function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
 
 function encodeWireError(code: number, retry: number, message: string): Uint8Array {
   const writer = new PostcardWriter();
-  writer.u64(2);
+  writer.u64(1);
   writer.u64(code);
   writer.u64(retry);
   writer.string(message);

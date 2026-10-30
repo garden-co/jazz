@@ -169,6 +169,7 @@ function JazzAppView<Client extends CoreJazzClient>({
         ? {
             status: admissionError ? ("error" as const) : ("transitioning" as const),
             error: admissionError,
+            needsLogin: false,
           }
         : snapshot),
       ...actions,

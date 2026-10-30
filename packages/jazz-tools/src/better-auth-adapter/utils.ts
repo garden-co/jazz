@@ -181,13 +181,24 @@ export function sortListByField<T extends Record<string, any> | null>(
       return 0;
     }
 
-    if (typeof a[field] === "string" && typeof b[field] === "string") {
-      return direction === "asc"
-        ? a[field].localeCompare(b[field])
-        : b[field].localeCompare(a[field]);
+    const aValue = a[field];
+    const bValue = b[field];
+    const aIsNullish = aValue === null || aValue === undefined;
+    const bIsNullish = bValue === null || bValue === undefined;
+
+    if (aIsNullish) {
+      return bIsNullish ? 0 : direction === "asc" ? -1 : 1;
     }
 
-    return direction === "asc" ? a[field] - b[field] : b[field] - a[field];
+    if (bIsNullish) {
+      return direction === "asc" ? 1 : -1;
+    }
+
+    if (typeof aValue === "string" && typeof bValue === "string") {
+      return direction === "asc" ? aValue.localeCompare(bValue) : bValue.localeCompare(aValue);
+    }
+
+    return direction === "asc" ? aValue - bValue : bValue - aValue;
   });
 
   return data;
@@ -247,29 +258,4 @@ export function isWhereBySingleField<T extends string>(
   }
 
   return isStringEqWhereByField(field, cond);
-}
-
-export function containWhereByField<T extends string>(
-  field: T,
-  where: CleanedWhere[] | undefined,
-): boolean {
-  if (where === undefined) {
-    return false;
-  }
-
-  return where.some((cond) => isWhereByField(field, cond));
-}
-
-export function extractWhereByField<T extends string>(
-  field: T,
-  where: CleanedWhere[] | undefined,
-): [CleanedWhere | undefined, CleanedWhere[]] {
-  if (where === undefined) {
-    return [undefined, []];
-  }
-
-  return [
-    where.find((cond) => isWhereByField(field, cond)),
-    where.filter((cond) => !isWhereByField(field, cond)),
-  ];
 }

@@ -65,8 +65,8 @@ republishes the schema on change — no restart needed.
 
 ```ts
 const schema = {
-  todos: s.table({ title: s.string(), done: s.boolean() }),
-  projects: s.table({ name: s.string() }),
+  todos: s.table({ title: s.string(), done: s.boolean() }, {}),
+  projects: s.table({ name: s.string() }, {}),
 };
 ```
 

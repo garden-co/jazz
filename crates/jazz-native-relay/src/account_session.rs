@@ -177,68 +177,39 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_begin_account_session_json
     storage_root_len: usize,
     out: *mut JazzNativeRelayBytes,
 ) -> JazzNativeRelayStatus {
-    if out.is_null() {
-        return JazzNativeRelayStatus::InvalidArgument;
-    }
-    unsafe {
-        *out = JazzNativeRelayBytes::EMPTY;
-    }
-    if lease.is_null()
-        || request.is_null()
-        || storage_root.is_null()
-        || request_len == 0
-        || request_len > NATIVE_RELAY_ADMISSION_MAX_BYTES
-        || storage_root_len == 0
-        || storage_root_len > 16 * 1024
-    {
-        return JazzNativeRelayStatus::InvalidArgument;
-    }
-    let request = unsafe { std::slice::from_raw_parts(request, request_len) };
-    let root = unsafe { std::slice::from_raw_parts(storage_root, storage_root_len) };
-    let root = match std::str::from_utf8(root) {
-        Ok(root) if !root.contains('\0') => std::path::Path::new(root),
-        _ => return JazzNativeRelayStatus::InvalidArgument,
-    };
-    let request = match serde_json::from_slice::<AccountSessionRequest>(request) {
-        Ok(request) => request,
-        Err(_) => return JazzNativeRelayStatus::InvalidCommand,
-    };
-    let app_id = request.app_id.clone();
-    let pending = match request.prepare(root) {
-        Ok(pending) => pending,
-        Err(status) => return status,
-    };
-    let lease = unsafe { &*lease };
-    let mut host = match lease.inner.lock() {
-        Ok(host) => host,
-        Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
-    };
-    if host
-        .invalidated_runtime_tokens
-        .contains(&lease.runtime_token)
-    {
-        return JazzNativeRelayStatus::InvalidHandle;
-    }
-    let capability = match host.allocate_admission_capability() {
-        Ok(capability) => capability,
-        Err(error) => return relay_status(error),
-    };
-    host.pending_private_sessions.insert(capability, pending);
-    host.account_session_owners.insert(
-        capability,
-        AccountSessionOwner {
-            runtime_token: lease.runtime_token,
-            app_id,
-        },
-    );
-    let bytes = capability.0.to_vec().into_boxed_slice();
-    unsafe {
-        *out = JazzNativeRelayBytes {
-            len: bytes.len(),
-            data: Box::into_raw(bytes).cast(),
+    ffi_call(|| {
+        unsafe { reset_out(out, JazzNativeRelayBytes::EMPTY)? };
+        let lease = unsafe { live_arg(lease)? };
+        let request =
+            unsafe { bounded_bytes_arg(request, request_len, NATIVE_RELAY_ADMISSION_MAX_BYTES)? };
+        let root = unsafe { bounded_bytes_arg(storage_root, storage_root_len, 16 * 1024)? };
+        let root = match std::str::from_utf8(root) {
+            Ok(root) if !root.contains('\0') => std::path::Path::new(root),
+            _ => return Err(JazzNativeRelayStatus::InvalidArgument),
         };
-    }
-    JazzNativeRelayStatus::Ok
+        let request = serde_json::from_slice::<AccountSessionRequest>(request)
+            .map_err(|_| JazzNativeRelayStatus::InvalidCommand)?;
+        let app_id = request.app_id.clone();
+        let pending = request.prepare(root)?;
+        let mut host = lease.lock()?;
+        if host
+            .invalidated_runtime_tokens
+            .contains(&lease.runtime_token)
+        {
+            return Err(JazzNativeRelayStatus::InvalidHandle);
+        }
+        let capability = host.allocate_admission_capability().map_err(relay_status)?;
+        host.pending_private_sessions.insert(capability, pending);
+        host.account_session_owners.insert(
+            capability,
+            AccountSessionOwner {
+                runtime_token: lease.runtime_token,
+                app_id,
+            },
+        );
+        unsafe { write_capability_out(out, capability) };
+        Ok(())
+    })
 }
 
 /// Attach a schema to a setup owned by this runtime lease.
@@ -255,54 +226,27 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_attach_account_schema_json
     schema_len: usize,
     out: *mut JazzNativeRelayBytes,
 ) -> JazzNativeRelayStatus {
-    if out.is_null() {
-        return JazzNativeRelayStatus::InvalidArgument;
-    }
-    unsafe {
-        *out = JazzNativeRelayBytes::EMPTY;
-    }
-    if lease.is_null()
-        || capability.is_null()
-        || capability_len != 32
-        || schema.is_null()
-        || schema_len == 0
-        || schema_len > NATIVE_RELAY_ADMISSION_MAX_BYTES
-    {
-        return JazzNativeRelayStatus::InvalidArgument;
-    }
-    let mut bytes = [0; 32];
-    bytes.copy_from_slice(unsafe { std::slice::from_raw_parts(capability, 32) });
-    let capability = AdmissionCapability(bytes);
-    let schema =
-        match std::str::from_utf8(unsafe { std::slice::from_raw_parts(schema, schema_len) }) {
-            Ok(schema) => schema,
-            Err(_) => return JazzNativeRelayStatus::InvalidCommand,
-        };
-    let lease = unsafe { &*lease };
-    let mut host = match lease.inner.lock() {
-        Ok(host) => host,
-        Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
-    };
-    if host
-        .account_session_owners
-        .get(&capability)
-        .map(|owner| owner.runtime_token)
-        != Some(lease.runtime_token)
-    {
-        return JazzNativeRelayStatus::InvalidHandle;
-    }
-    let admitted = match host.attach_canonical_schema(capability, schema) {
-        Ok(admitted) => admitted,
-        Err(status) => return status,
-    };
-    let bytes = admitted.0.to_vec().into_boxed_slice();
-    unsafe {
-        *out = JazzNativeRelayBytes {
-            len: bytes.len(),
-            data: Box::into_raw(bytes).cast(),
-        };
-    }
-    JazzNativeRelayStatus::Ok
+    ffi_call(|| {
+        unsafe { reset_out(out, JazzNativeRelayBytes::EMPTY)? };
+        let lease = unsafe { live_arg(lease)? };
+        let capability = unsafe { capability_arg(capability, capability_len)? };
+        let schema =
+            unsafe { bounded_bytes_arg(schema, schema_len, NATIVE_RELAY_ADMISSION_MAX_BYTES)? };
+        let schema =
+            std::str::from_utf8(schema).map_err(|_| JazzNativeRelayStatus::InvalidCommand)?;
+        let mut host = lease.lock()?;
+        if host
+            .account_session_owners
+            .get(&capability)
+            .map(|owner| owner.runtime_token)
+            != Some(lease.runtime_token)
+        {
+            return Err(JazzNativeRelayStatus::InvalidHandle);
+        }
+        let admitted = host.attach_canonical_schema(capability, schema)?;
+        unsafe { write_capability_out(out, admitted) };
+        Ok(())
+    })
 }
 
 /// Release pending or admitted account setup owned by this runtime. Close the
@@ -316,28 +260,20 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_release_account_session(
     capability: *const u8,
     capability_len: usize,
 ) -> JazzNativeRelayStatus {
-    if lease.is_null() || capability.is_null() || capability_len != 32 {
-        return JazzNativeRelayStatus::InvalidArgument;
-    }
-    let mut bytes = [0; 32];
-    bytes.copy_from_slice(unsafe { std::slice::from_raw_parts(capability, 32) });
-    let capability = AdmissionCapability(bytes);
-    let lease = unsafe { &*lease };
-    let mut host = match lease.inner.lock() {
-        Ok(host) => host,
-        Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
-    };
-    match host.account_session_owners.get(&capability) {
-        Some(owner) if owner.runtime_token != lease.runtime_token => {
-            return JazzNativeRelayStatus::InvalidHandle;
+    ffi_call(|| {
+        let lease = unsafe { live_arg(lease)? };
+        let capability = unsafe { capability_arg(capability, capability_len)? };
+        let mut host = lease.lock()?;
+        match host.account_session_owners.get(&capability) {
+            Some(owner) if owner.runtime_token != lease.runtime_token => {
+                return Err(JazzNativeRelayStatus::InvalidHandle);
+            }
+            None => return Ok(()),
+            _ => {}
         }
-        None => return JazzNativeRelayStatus::Ok,
-        _ => {}
-    }
-    match host.revoke_scope(capability) {
-        Ok(_) => JazzNativeRelayStatus::Ok,
-        Err(status) => status,
-    }
+        host.revoke_scope(capability)?;
+        Ok(())
+    })
 }
 
 /// Refresh the bearer for the exact identity already admitted by this handle.
@@ -354,71 +290,51 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_refresh_account_session(
     token: *const u8,
     token_len: usize,
 ) -> JazzNativeRelayStatus {
-    if lease.is_null()
-        || capability.is_null()
-        || capability_len != 32
-        || token.is_null()
-        || token_len == 0
-        || token_len > NATIVE_RELAY_ADMISSION_MAX_BYTES
-    {
-        return JazzNativeRelayStatus::InvalidArgument;
-    }
-    let mut bytes = [0; 32];
-    bytes.copy_from_slice(unsafe { std::slice::from_raw_parts(capability, 32) });
-    let capability = AdmissionCapability(bytes);
-    let token = match std::str::from_utf8(unsafe { std::slice::from_raw_parts(token, token_len) }) {
-        Ok(token) => token,
-        Err(_) => return JazzNativeRelayStatus::InvalidCommand,
-    };
-    let refresh: AccountSessionRefresh = match serde_json::from_str(token) {
-        Ok(refresh) => refresh,
-        Err(_) => return JazzNativeRelayStatus::InvalidCommand,
-    };
-    let token = refresh.jwt.as_str();
-    let lease = unsafe { &*lease };
-    let mut host = match lease.inner.lock() {
-        Ok(host) => host,
-        Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
-    };
-    let owner = match host.account_session_owners.get(&capability) {
-        Some(owner) if owner.runtime_token == lease.runtime_token => owner,
-        _ => return JazzNativeRelayStatus::InvalidHandle,
-    };
-    let author = if let Some(pending) = host.pending_private_sessions.get(&capability) {
-        pending.identity.author
-    } else if let Some(admitted) = host.admitted_scopes.get(&capability) {
-        admitted.config.identity.author
-    } else {
-        return JazzNativeRelayStatus::InvalidHandle;
-    };
-    if jazz::tools::unverified_jwt_scope_subject(token) != Some(author.principal_parts()) {
-        return JazzNativeRelayStatus::LifecycleFailure;
-    }
-    if author.principal_parts().0 == jazz::tools::identity::LOCAL_FIRST_ISSUER
-        && jazz::tools::identity::verify_client_runtime_author(
-            token,
-            &owner.app_id,
-            author.canonical(),
-        )
-        .is_err()
-    {
-        return JazzNativeRelayStatus::LifecycleFailure;
-    }
-    let claims = match advisory_claims(author, refresh.claims) {
-        Ok(claims) => claims,
-        Err(status) => return status,
-    };
-    if let Some(pending) = host.pending_private_sessions.get_mut(&capability) {
-        pending.claims = claims;
-        if let Some(socket) = &mut pending.socket {
-            socket.bearer = token.to_owned();
+    ffi_call(|| {
+        let lease = unsafe { live_arg(lease)? };
+        let capability = unsafe { capability_arg(capability, capability_len)? };
+        let token =
+            unsafe { bounded_bytes_arg(token, token_len, NATIVE_RELAY_ADMISSION_MAX_BYTES)? };
+        let refresh: AccountSessionRefresh = std::str::from_utf8(token)
+            .ok()
+            .and_then(|token| serde_json::from_str(token).ok())
+            .ok_or(JazzNativeRelayStatus::InvalidCommand)?;
+        let token = refresh.jwt.as_str();
+        let mut host = lease.lock()?;
+        let owner = match host.account_session_owners.get(&capability) {
+            Some(owner) if owner.runtime_token == lease.runtime_token => owner,
+            _ => return Err(JazzNativeRelayStatus::InvalidHandle),
+        };
+        let author = if let Some(pending) = host.pending_private_sessions.get(&capability) {
+            pending.identity.author
+        } else if let Some(admitted) = host.admitted_scopes.get(&capability) {
+            admitted.config.identity.author
+        } else {
+            return Err(JazzNativeRelayStatus::InvalidHandle);
+        };
+        if jazz::tools::unverified_jwt_scope_subject(token) != Some(author.principal_parts()) {
+            return Err(JazzNativeRelayStatus::LifecycleFailure);
         }
-        return JazzNativeRelayStatus::Ok;
-    }
-    match host.promote_account_scope_snapshot(capability, token, claims) {
-        Ok(()) => JazzNativeRelayStatus::Ok,
-        Err(status) => status,
-    }
+        if author.principal_parts().0 == jazz::tools::identity::LOCAL_FIRST_ISSUER
+            && jazz::tools::identity::verify_client_runtime_author(
+                token,
+                &owner.app_id,
+                author.canonical(),
+            )
+            .is_err()
+        {
+            return Err(JazzNativeRelayStatus::LifecycleFailure);
+        }
+        let claims = advisory_claims(author, refresh.claims)?;
+        if let Some(pending) = host.pending_private_sessions.get_mut(&capability) {
+            pending.claims = claims;
+            if let Some(socket) = &mut pending.socket {
+                socket.bearer = token.to_owned();
+            }
+            return Ok(());
+        }
+        host.promote_account_scope_snapshot(capability, token, claims)
+    })
 }
 
 impl NativeRelayHost {
@@ -467,6 +383,7 @@ impl NativeRelayHost {
                         relay.clone(),
                         author,
                         session,
+                        self.socket_connector(),
                     )?)
                 }
                 _ => None,
@@ -476,10 +393,7 @@ impl NativeRelayHost {
         };
         if let Some(relay) = &live_relay {
             let next = claims.clone();
-            if let Err(error) = relay.run(move |worker| {
-                worker.refresh_account_claims(author, next);
-                Ok(())
-            }) {
+            if let Err(error) = relay.refresh_account_claims(author, next) {
                 return Err(relay_status(error));
             }
         }
@@ -538,6 +452,46 @@ mod tests {
             ),
             server_url: None,
             claims: BTreeMap::new(),
+        }
+    }
+
+    // This C-ABI admission test inspects host state because a status/output
+    // assertion alone cannot prove the rejected bearer was not retained.
+    #[test]
+    fn remote_plaintext_transport_fails_before_account_admission() {
+        let root = tempfile::tempdir().unwrap();
+        let root_bytes = root.path().to_str().unwrap().as_bytes();
+        let mut request = external("alice");
+        request.server_url = Some("http://edge.example".into());
+        let request = serde_json::to_vec(&request).unwrap();
+
+        unsafe {
+            let host = jazz_native_relay_host_new();
+            let lease = jazz_native_relay_host_retain(host, 1);
+            let mut out = JazzNativeRelayBytes::EMPTY;
+            let status = jazz_native_relay_host_lease_begin_account_session_json(
+                lease,
+                request.as_ptr(),
+                request.len(),
+                root_bytes.as_ptr(),
+                root_bytes.len(),
+                &mut out,
+            );
+
+            assert_eq!(status, JazzNativeRelayStatus::RemotePlaintextEndpoint);
+            assert!(out.data.is_null());
+            assert_eq!(out.len, 0);
+            let state = match (*lease).inner.lock() {
+                Ok(state) => state,
+                Err(_) => panic!("relay host mutex poisoned"),
+            };
+            assert!(state.pending_private_sessions.is_empty());
+            assert!(state.account_session_owners.is_empty());
+            assert!(state.admitted_scopes.is_empty());
+            assert!(state.private_socket_sessions.is_empty());
+            drop(state);
+            jazz_native_relay_host_lease_free(lease);
+            jazz_native_relay_host_free(host);
         }
     }
 

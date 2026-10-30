@@ -131,6 +131,11 @@ const mocks = vi.hoisted(() => {
           onAuthFailure: vi.fn(),
           onMutationError: vi.fn(),
           onServerTransportError: vi.fn(),
+          onRemoteLinkStateChange: vi.fn(),
+          remoteLinkState: vi.fn(() => "connected"),
+          onUpstreamLinkStatusChange: vi.fn(),
+          upstreamLinkStatus: vi.fn(() => ({ state: "connected" })),
+          setRemoteLinkHint: vi.fn(),
           onPeerTransportWork: vi.fn(() => () => {}),
           progressPeerTransport: vi.fn(async () => undefined),
           retirePeerTransport: vi.fn(async (transport: Transport) => {
@@ -468,6 +473,9 @@ async function subscriberResponses(port: TestPort): Promise<unknown[]> {
   return event.frames.map((frame) => JSON.parse(new TextDecoder().decode(frame)));
 }
 
+/** Tabs present a credential upstream; only a retained account's tab opens without one. */
+const TAB_AUTH = '{"jwt_token":"tab-token"}';
+
 function options(dbName: string): BrowserWorkerInitOptions {
   return {
     schema: {},
@@ -477,7 +485,7 @@ function options(dbName: string): BrowserWorkerInitOptions {
     appId: "worker-initialization-test",
     storageOwner: "worker-initialization-test-owner",
     authSessionKey: "session",
-    authJson: "{}",
+    authJson: TAB_AUTH,
     sessionClaims: {},
   };
 }
@@ -1134,18 +1142,13 @@ describe("broker worker context initialization", () => {
       id: -3,
       binding,
       query: "{}",
-      options: '{"propagation":"full"}',
+      options: "{}",
     });
     await expect(cached).resolves.toMatchObject({
       type: "inspector-query-result",
       value: [{ id: "cached-row" }],
     });
-    expect(cacheRuntime.query).toHaveBeenCalledWith(
-      "{}",
-      undefined,
-      "local",
-      '{"propagation":"local-only"}',
-    );
+    expect(cacheRuntime.query).toHaveBeenCalledWith("{}", undefined, "local-only", "{}");
     inspectorPeer.emitMessage({ type: "inspect-subscribe", id: -4, binding, query: "{}" });
     await nextTask();
     expect(cacheRuntime.executeSubscription).toHaveBeenCalledWith(71, expect.any(Function));
@@ -1956,6 +1959,65 @@ describe("broker worker context initialization", () => {
     );
   });
 
+  it("starts the WASM fetch on a lease probe and reuses it for the runtime connect", async () => {
+    const wasmLoad = deferred<typeof mocks.wasmModule>();
+    mocks.loadWasmModule.mockReturnValueOnce(wasmLoad.promise);
+    const runtimeSources = { wasmUrl: "http://vite.test/assets/jazz_wasm_bg.wasm" };
+    const { port } = connectLeaseProbe();
+    const probeOutcome = port.waitForLeaseProbeOutcome();
+    port.emitMessage({
+      type: "probe-foreground-node-lease-worker",
+      attemptId: "prefetching-probe",
+      wasmPrefetch: { runtimeSources },
+    });
+
+    await expect(probeOutcome).resolves.toEqual({
+      type: "foreground-node-lease-worker-alive",
+      attemptId: "prefetching-probe",
+    });
+    // The fetch is under way before any durable root is admitted.
+    expect(mocks.loadWasmModule).toHaveBeenCalledExactlyOnceWith(runtimeSources);
+    expect(mocks.openPageStore).not.toHaveBeenCalled();
+
+    const connection = connect({ ...options("prefetched-wasm"), runtimeSources }, "tab");
+    wasmLoad.resolve(mocks.wasmModule);
+    expect((await connection).outcome).toEqual({ type: "runtime-ready" });
+    expect(mocks.loadWasmModule).toHaveBeenCalledOnce();
+  });
+
+  it("lets the runtime connect reload after a failed probe prefetch", async () => {
+    mocks.loadWasmModule.mockRejectedValueOnce(new Error("prefetch failed"));
+    const runtimeSources = { wasmUrl: "http://vite.test/assets/jazz_wasm_bg.wasm" };
+    const { port } = connectLeaseProbe();
+    const probeOutcome = port.waitForLeaseProbeOutcome();
+    port.emitMessage({
+      type: "probe-foreground-node-lease-worker",
+      attemptId: "failed-prefetch",
+      wasmPrefetch: { runtimeSources },
+    });
+    await probeOutcome;
+    await vi.waitFor(() => expect(mocks.loadWasmModule).toHaveBeenCalledOnce());
+
+    const { outcome } = await connect(
+      { ...options("after-failed-prefetch"), runtimeSources },
+      "tab",
+    );
+    expect(outcome).toEqual({ type: "runtime-ready" });
+    expect(mocks.loadWasmModule).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not prefetch in-memory WASM sources on a probe", async () => {
+    const { port } = connectLeaseProbe();
+    const probeOutcome = port.waitForLeaseProbeOutcome();
+    port.emitMessage({
+      type: "probe-foreground-node-lease-worker",
+      attemptId: "in-memory-probe",
+      wasmPrefetch: { runtimeSources: { wasmSource: new Uint8Array([0, 97, 115, 109]) } },
+    });
+    await probeOutcome;
+    expect(mocks.loadWasmModule).not.toHaveBeenCalled();
+  });
+
   it("does not let a second context repoint the process-wide WASM realm at another origin", async () => {
     const firstOptions = {
       ...options("first-origin"),
@@ -2189,12 +2251,14 @@ describe("broker worker context initialization", () => {
       false,
       initOptions.initialSyncFlushEvery,
       undefined,
+      // No app migrations bundle in these options.
+      undefined,
     ]);
     expect(mocks.openBrowser.mock.calls[0]?.[0]).toBe(mocks.pageStores[0]);
     expect(mocks.openBrowser.mock.calls[0]?.[2]).toBe(config);
     // Only the worker's physical-owner admission may grant relay serving.
     // It carries the exact admitted owner into the host-only WASM open.
-    expect(mocks.openBrowser.mock.calls[0]?.[3]).toBe(initOptions.storageOwner);
+    expect(mocks.openBrowser.mock.calls[0]?.[3]).toBe(initOptions.dbName);
     // NativeRuntimeAdapter is the final runtime boundary. It must receive the
     // persisted physical-replica identity, not a process constant or a node
     // intended for a different open attempt.
@@ -2251,7 +2315,7 @@ describe("broker worker context initialization", () => {
       selfSignedClientProof.token,
       selfSignedClientProof.appId,
       selfSignedClientProof.claimedAuthor,
-      initOptions.storageOwner,
+      initOptions.dbName,
     );
     expect(mocks.fromDb.mock.calls[0]?.[2]).toEqual(mocks.pageStores[0]?.canonicalReplicaNode);
   });
@@ -2664,6 +2728,18 @@ describe("broker worker context initialization", () => {
     expect(mocks.runtimes[0]?.acceptPeer).toHaveBeenCalledOnce();
   });
 
+  it("admits each tab as its own replica's author, so the runtime can refuse another user's", async () => {
+    const initOptions = options("tab-author-admission");
+    const first = await connect(initOptions, "first-tab");
+    const second = await connect({ ...initOptions, author: new Uint8Array([9]) }, "second-tab");
+    await initializeFollower(first.port, 1);
+    await initializeFollower(second.port, 2);
+    const acceptPeer = mocks.runtimes[0]?.acceptPeer;
+    expect(acceptPeer).toHaveBeenCalledTimes(2);
+    expect(acceptPeer?.mock.calls[0]?.[2]).toEqual(new Uint8Array([2]));
+    expect(acceptPeer?.mock.calls[1]?.[2]).toEqual(new Uint8Array([9]));
+  });
+
   it("keeps every tab attached after auth rejection so a sibling can refresh the session", async () => {
     const initOptions = {
       ...options("auth-recovery-owner"),
@@ -2772,7 +2848,7 @@ describe("broker worker context initialization", () => {
     editor.port.emitMessage({
       type: "reconnect",
       id: 2,
-      authJson: "{}",
+      authJson: TAB_AUTH,
       sessionClaims: {},
     });
     await Promise.resolve();
@@ -2791,6 +2867,64 @@ describe("broker worker context initialization", () => {
         explicitlyDisconnected: false,
       });
     }
+  });
+
+  it("dials the server only once a retained account's tab supplies its first credential", async () => {
+    const base = { ...options("retained-first-credential"), serverUrl: "ws://server.test" };
+    // A tab reopening a retained account before its provider answers. The
+    // server would reject a credential-less connection as a terminal failure
+    // and end every remote subscription, so nothing may dial yet.
+    const retained = await connect({ ...base, authJson: '{"jwt_token":null}' }, "retained-tab");
+    await initializeFollower(retained.port, 1);
+    const runtime = mocks.runtimes[0]!;
+    retained.port.emitMessage({
+      type: "reconnect",
+      id: 2,
+      authJson: '{"jwt_token":null}',
+      sessionClaims: {},
+    });
+    await retained.port.waitForEvent((event) => event.type === "result" && event.id === 2);
+    expect(runtime.connect).not.toHaveBeenCalled();
+
+    // Revalidation binds the provider JWT: that update dials, with it.
+    const restored = retained.port.waitForEvent((event) => event.type === "auth-restored");
+    retained.port.emitMessage({
+      type: "update-auth",
+      authJson: '{"jwt_token":"revalidated"}',
+      sessionClaims: { role: "editor" },
+    });
+    await restored;
+    expect(runtime.connect).toHaveBeenCalledOnce();
+    expect(runtime.connect).toHaveBeenCalledWith("ws://server.test", '{"jwt_token":"revalidated"}');
+    expect(runtime.updateAuth).not.toHaveBeenCalled();
+  });
+
+  it("keeps a sibling tab's credential when a tab joins without one, but takes any real credential", async () => {
+    const base = { ...options("retained-tab-credential"), serverUrl: "ws://server.test" };
+    const signedIn = await connect(
+      { ...base, authJson: '{"jwt_token":"sibling"}' },
+      "signed-in-tab",
+    );
+    await initializeFollower(signedIn.port, 1);
+    const runtime = mocks.runtimes[0]!;
+    await vi.waitFor(() =>
+      expect(runtime.connect).toHaveBeenCalledWith("ws://server.test", '{"jwt_token":"sibling"}'),
+    );
+    runtime.updateAuth.mockClear();
+
+    // A tab reopening a retained account before its provider answers.
+    await connect({ ...base, authJson: '{"jwt_token":null}' }, "retained-tab");
+    expect(runtime.updateAuth).not.toHaveBeenCalled();
+
+    for (const authJson of [
+      '{"jwt_token":null,"admin_secret":"admin"}',
+      '{"jwt_token":null,"backend_secret":"backend"}',
+      '{"jwt_token":"fresh"}',
+    ]) {
+      await connect({ ...base, authJson }, `credential-tab-${authJson.length}`);
+      expect(runtime.updateAuth).toHaveBeenLastCalledWith(authJson);
+    }
+    expect(runtime.updateAuth).toHaveBeenCalledTimes(3);
   });
 
   it("publishes reconnected claims to every tab only after upstream admission", async () => {
@@ -2864,11 +2998,11 @@ describe("broker worker context initialization", () => {
     const late = await connect(initOptions, "late-tab");
     const runtime = mocks.runtimes[0]!;
     const callback = runtime.onServerTransportError.mock.calls[0]?.[0] as
-      | ((error: Error) => void)
+      | ((error: Error, state: { retrying: boolean }) => void)
       | undefined;
     expect(callback).toBeTypeOf("function");
     const terminalError = new Error("Protocol: terminal maintained view failure");
-    callback?.(terminalError);
+    callback?.(terminalError, { retrying: false });
 
     for (const port of [owner.port, successor.port]) {
       await expect(
@@ -2880,6 +3014,7 @@ describe("broker worker context initialization", () => {
           message: terminalError.message,
           stack: terminalError.stack,
         },
+        retrying: false,
       });
     }
     expect(late.port.hasEvent((event) => event.type === "transport-error")).toBe(false);

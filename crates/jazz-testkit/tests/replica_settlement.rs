@@ -14,32 +14,26 @@ mod relay_topology {
     use std::collections::BTreeMap;
 
     use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, SubscriptionEvent, block_on};
-    use jazz::groove::records::Value;
-    use jazz::groove::storage::MemoryStorage;
     use jazz::ids::{AuthorSubject, NodeUuid};
-    use jazz::node::CommitUnitTrust;
+    use jazz::records::Value;
     use jazz::schema::JazzSchema;
     use jazz::tools::{ColumnType, SchemaBuilder, TableSchema};
     use jazz::tx::DurabilityTier;
     use jazz_testkit::duplex_transport::duplex;
 
     fn schema() -> JazzSchema {
+        use jazz::tools::test_support::AllowAll;
         let source = SchemaBuilder::new()
             .table(TableSchema::builder("documents").column("title", ColumnType::Text))
+            .allow_all()
             .build();
         JazzSchema::new(&source).expect("replica settlement public schema compiles")
     }
 
-    fn open_db(node: u8, author: AuthorSubject) -> Db<MemoryStorage> {
+    fn open_db(node: u8, author: AuthorSubject) -> Db {
         let schema = schema();
-        let column_families = schema.column_families();
-        let refs = column_families
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
         block_on(Db::open(DbConfig::new(
             schema,
-            MemoryStorage::new(&refs).expect("valid memory storage families"),
             DbIdentity {
                 node: NodeUuid::from_bytes([node; 16]),
                 author,
@@ -48,16 +42,10 @@ mod relay_topology {
         .expect("open database")
     }
 
-    fn open_authority(node: u8) -> Db<MemoryStorage> {
+    fn open_authority(node: u8) -> Db {
         let schema = schema();
-        let column_families = schema.column_families();
-        let refs = column_families
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
         block_on(Db::open_history_complete(DbConfig::new(
             schema,
-            MemoryStorage::new(&refs).expect("valid memory storage families"),
             DbIdentity {
                 node: NodeUuid::from_bytes([node; 16]),
                 author: AuthorSubject::SYSTEM,
@@ -74,7 +62,7 @@ mod relay_topology {
         std::iter::from_fn(|| subscription.try_next_event()).collect()
     }
 
-    fn tick(db: &Db<MemoryStorage>, context: &str) {
+    fn tick(db: &Db, context: &str) {
         block_on(db.tick()).expect(context);
     }
 
@@ -109,7 +97,9 @@ mod relay_topology {
         let seeder = open_db(0x41, bob);
         let (seeder_transport, authority_seed_transport) = duplex();
         let _seeder_connection = block_on(seeder.connect_upstream(seeder_transport));
-        let _authority_seed_subscriber = authority.accept_subscriber(authority_seed_transport, bob);
+        let _authority_seed_subscriber = authority
+            .accept_subscriber(authority_seed_transport, bob)
+            .unwrap();
         let seeded = block_on(seeder.insert(
             "documents",
             document_cells("settled at the authority"),
@@ -122,19 +112,18 @@ mod relay_topology {
 
         let (client_transport, relay_subscriber_transport) = duplex();
         let _client_connection = block_on(client.connect_upstream(client_transport));
-        let _relay_subscriber = relay.accept_subscriber(relay_subscriber_transport, alice);
+        let _relay_subscriber = relay
+            .accept_subscriber(relay_subscriber_transport, alice)
+            .unwrap();
         let (relay_upstream_transport, authority_transport) = duplex();
         let _relay_upstream = block_on(relay.connect_upstream(relay_upstream_transport));
         // The relay-to-authority hop is a trusted backend link. It delegates
         // Alice's immutable session binding inside its propagated
         // subscription; Core must not model the physical transport as Alice's
         // direct session link.
-        let _authority_subscriber = authority.accept_subscriber_with_claims_and_trust(
-            authority_transport,
-            AuthorSubject::SYSTEM,
-            BTreeMap::new(),
-            CommitUnitTrust::TrustedBackend,
-        );
+        let _authority_subscriber = authority
+            .accept_subscriber(authority_transport, AuthorSubject::SYSTEM)
+            .unwrap();
 
         let documents = client
             .prepare_query(&client.table("documents"))
@@ -142,7 +131,7 @@ mod relay_topology {
         let mut subscription = block_on(client.subscribe(
             &documents,
             ReadOpts {
-                tier: DurabilityTier::Global,
+                tier: jazz::db::ReadTier::Remote,
                 ..ReadOpts::default()
             },
         ))
@@ -215,7 +204,9 @@ mod relay_topology {
 
         let (client_transport, relay_subscriber_transport) = duplex();
         let _client_connection = block_on(client.connect_upstream(client_transport));
-        let _relay_subscriber = relay.accept_subscriber(relay_subscriber_transport, alice);
+        let _relay_subscriber = relay
+            .accept_subscriber(relay_subscriber_transport, alice)
+            .unwrap();
 
         // Install the relay's upstream transport but leave the far end
         // unattached so the handshake never completes during the hold phase.
@@ -228,7 +219,7 @@ mod relay_topology {
         let mut subscription = block_on(client.subscribe(
             &documents,
             ReadOpts {
-                tier: DurabilityTier::Global,
+                tier: jazz::db::ReadTier::Remote,
                 ..ReadOpts::default()
             },
         ))
@@ -250,12 +241,9 @@ mod relay_topology {
         // session. Keeping the same admission model in the delayed-handshake
         // case proves that non-settlement is caused by the missing upstream
         // frontier, rather than rejected delegated policy context.
-        let _authority_subscriber = authority.accept_subscriber_with_claims_and_trust(
-            held_authority_transport,
-            AuthorSubject::SYSTEM,
-            BTreeMap::new(),
-            CommitUnitTrust::TrustedBackend,
-        );
+        let _authority_subscriber = authority
+            .accept_subscriber(held_authority_transport, AuthorSubject::SYSTEM)
+            .unwrap();
         let mut events = premature;
         for _ in 0..4 {
             tick(&authority, "process the queued handshake");
@@ -303,7 +291,7 @@ mod relay_topology {
         client.set_non_durable_client();
         let (client_transport, relay_transport) = duplex();
         let _client_connection = block_on(client.connect_upstream(client_transport));
-        let _relay_subscriber = relay.accept_subscriber(relay_transport, alice);
+        let _relay_subscriber = relay.accept_subscriber(relay_transport, alice).unwrap();
 
         let documents = client
             .prepare_query(&client.table("documents"))
@@ -355,7 +343,7 @@ mod relay_topology {
         let mut subscription = block_on(node.subscribe(
             &documents,
             ReadOpts {
-                tier: DurabilityTier::Global,
+                tier: jazz::db::ReadTier::Remote,
                 ..ReadOpts::default()
             },
         ))
@@ -370,9 +358,9 @@ mod relay_topology {
         let rows = node.read(&documents).expect("one-shot local read");
         assert_eq!(rows.len(), 1, "the local read must resolve immediately");
         assert_eq!(rows[0].row_uuid(), written.row_uuid());
-        let one = node.one(&documents).expect("one-shot local single read");
+        let one = node.read(&documents).expect("one-shot local single read");
         assert_eq!(
-            one.map(|row| row.row_uuid()),
+            one.first().map(|row| row.row_uuid()),
             Some(written.row_uuid()),
             "single-row local reads must also resolve immediately"
         );
@@ -398,7 +386,7 @@ mod relay_topology {
         let mut subscription = block_on(node.subscribe(
             &documents,
             ReadOpts {
-                tier: DurabilityTier::Global,
+                tier: jazz::db::ReadTier::Remote,
                 ..ReadOpts::default()
             },
         ))
@@ -414,7 +402,9 @@ mod relay_topology {
              pending: {premature:?}"
         );
 
-        let _authority_subscriber = authority.accept_subscriber(held_authority_transport, alice);
+        let _authority_subscriber = authority
+            .accept_subscriber(held_authority_transport, alice)
+            .unwrap();
         let mut events = Vec::new();
         for _ in 0..4 {
             tick(&authority, "process the queued handshake");
@@ -483,7 +473,9 @@ mod relay_topology {
 
         let (client_transport, authority_transport) = duplex();
         let _client_connection = block_on(client.connect_upstream(client_transport));
-        let _authority_subscriber = authority.accept_subscriber(authority_transport, alice);
+        let _authority_subscriber = authority
+            .accept_subscriber(authority_transport, alice)
+            .unwrap();
 
         let documents = client
             .prepare_query(&client.table("documents"))
@@ -491,7 +483,7 @@ mod relay_topology {
         let mut subscription = block_on(client.subscribe(
             &documents,
             ReadOpts {
-                tier: DurabilityTier::Global,
+                tier: jazz::db::ReadTier::Remote,
                 ..ReadOpts::default()
             },
         ))
@@ -532,25 +524,19 @@ mod relay_topology {
     }
 
     /// Detaching preserves a held remote subscription. Alice can still read
-    /// her row locally, but Edge and Global subscriptions wait for a fresh
+    /// her row locally, but Global subscriptions wait for a fresh
     /// authority response and deliver the settled answer without duplication.
     /// Public `Db` nodes let this test withhold authority processing across
     /// the exact detach/reattach transition.
     ///
     /// ```text
-    /// alice ──subscribe(Edge/Global)──► silent upstream [held]
+    /// alice ──subscribe(Global)──► silent upstream [held]
     ///   ├──detach──► Local read ✓, remote subscription held
     ///   ├──reattach──► remote subscription still held
     ///   ◄──one settled answer── authority confirms
     /// ```
     #[test]
     fn detaching_the_upstream_keeps_subscription_held_until_reconnected_authority_confirms() {
-        for tier in [DurabilityTier::Edge, DurabilityTier::Global] {
-            assert_detached_subscription_waits_for_authority(tier);
-        }
-    }
-
-    fn assert_detached_subscription_waits_for_authority(tier: DurabilityTier) {
         let alice = AuthorSubject::for_test_bytes([0xa8; 16]);
         let node = open_db(0x18, alice);
         let (upstream_transport, _held_far_end) = duplex();
@@ -569,7 +555,7 @@ mod relay_topology {
         let mut subscription = block_on(node.subscribe(
             &documents,
             ReadOpts {
-                tier,
+                tier: jazz::db::ReadTier::Remote,
                 ..ReadOpts::default()
             },
         ))
@@ -579,7 +565,7 @@ mod relay_topology {
         }
         assert!(
             drain(&mut subscription).is_empty(),
-            "{tier:?} subscription must stay held while the upstream is silent"
+            "Global subscription must stay held while the upstream is silent"
         );
 
         assert!(node.detach_connection(&upstream));
@@ -588,7 +574,7 @@ mod relay_topology {
         }
         assert!(
             drain(&mut subscription).is_empty(),
-            "detaching must not release the held {tier:?} subscription"
+            "detaching must not release the held Global subscription"
         );
         let local_rows = node.read(&documents).expect("Local read after detach");
         assert_eq!(local_rows.len(), 1);
@@ -597,7 +583,9 @@ mod relay_topology {
         let authority = open_authority(0x38);
         let (replacement_transport, authority_transport) = duplex();
         let _replacement = block_on(node.connect_upstream(replacement_transport));
-        let _subscriber = authority.accept_subscriber(authority_transport, alice);
+        let _subscriber = authority
+            .accept_subscriber(authority_transport, alice)
+            .unwrap();
         for _ in 0..3 {
             tick(
                 &node,
@@ -606,7 +594,7 @@ mod relay_topology {
         }
         assert!(
             drain(&mut subscription).is_empty(),
-            "reattaching alone must not settle the {tier:?} subscription"
+            "reattaching alone must not settle the Global subscription"
         );
 
         let mut events = Vec::new();
@@ -634,11 +622,14 @@ mod relay_topology {
         assert_eq!(
             settled.len(),
             1,
-            "authority confirmation must deliver one settled {tier:?} answer: {events:?}"
+            "authority confirmation must deliver one settled Global answer: {events:?}"
         );
         let (reset, delivered_tier, added) = settled[0];
         assert!(*reset, "the initial answer must replace prior membership");
-        assert!(*delivered_tier >= tier, "the answer must satisfy {tier:?}");
+        assert!(
+            *delivered_tier >= DurabilityTier::Global,
+            "the answer must satisfy Global"
+        );
         assert_eq!(
             added.len(),
             1,
@@ -652,7 +643,7 @@ mod relay_topology {
         }
         assert!(
             drain(&mut subscription).is_empty(),
-            "the confirmed {tier:?} answer must not be delivered twice"
+            "the confirmed Global answer must not be delivered twice"
         );
     }
 }
@@ -679,8 +670,10 @@ mod client_transport {
     const HOLD_WINDOW: Duration = Duration::from_millis(1200);
 
     fn document_schema() -> Schema {
+        use jazz::tools::test_support::AllowAll;
         SchemaBuilder::new()
             .table(TableSchema::builder("documents").column("title", ColumnType::Text))
+            .allow_all()
             .build()
     }
 
@@ -736,7 +729,7 @@ mod client_transport {
                 let (document_id, _, transaction_id) = alice
                     .insert("documents", row_input!("title" => "settled before offline"))
                     .expect("insert document");
-                support::wait_for_edge_txs(
+                support::wait_for_global_txs(
                     &alice,
                     &[transaction_id.expect("ordinary mutation commits immediately")],
                 )
@@ -871,7 +864,7 @@ mod client_transport {
                     .with_app_id(app_id)
                     .with_schema(schema.clone())
                     .with_data_dir(data_dir.path())
-                    .with_storage_factory(jazz_testkit::persistent_storage_factory())
+                    .with_persistent_storage()
                     .start()
                     .await
                     .expect("start test server");
@@ -885,7 +878,7 @@ mod client_transport {
                 let alice = support::connect(context)
                     .await
                     .expect("connect through gate");
-                support::wait_for_edge_query_ready(&alice, "documents", Duration::from_secs(30))
+                support::wait_for_remote_query_ready(&alice, "documents", Duration::from_secs(30))
                     .await;
 
                 let (document_id, _, transaction_id) = alice
@@ -932,7 +925,7 @@ mod client_transport {
                     .with_app_id(app_id)
                     .with_schema(schema.clone())
                     .with_data_dir(data_dir.path())
-                    .with_storage_factory(jazz_testkit::persistent_storage_factory())
+                    .with_persistent_storage()
                     .start()
                     .await
                     .expect("start test server");
@@ -1000,7 +993,7 @@ mod client_transport {
                 let (document_id, _, transaction_id) = alice
                     .insert("documents", row_input!("title" => "settled before expiry"))
                     .expect("insert document");
-                support::wait_for_edge_txs(
+                support::wait_for_global_txs(
                     &alice,
                     &[transaction_id.expect("ordinary mutation commits immediately")],
                 )

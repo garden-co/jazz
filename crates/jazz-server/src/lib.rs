@@ -1,13 +1,17 @@
 //! Native HTTP/WebSocket server adapter for Jazz's semantic runtime.
 
-pub mod loopback;
+mod kv;
 pub mod middleware;
+pub mod profiling;
+pub mod resources;
+pub mod runtime;
 pub mod server;
+pub mod storage_cache;
+mod tcp;
 
 pub use middleware::AuthConfig;
 pub use server::{
-    BuiltServer, EdgeUpstreamHealth, ServerBuilder, ServerState, ServerTopology,
-    ShutdownController, ShutdownPhase, StorageBackend,
+    BuiltServer, ServerBuilder, ServerState, ShutdownController, ShutdownPhase, StorageBackend,
 };
 #[cfg(feature = "embedded-server")]
 pub use server::{
@@ -19,9 +23,8 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use axum::serve;
-use jazz::node::EdgeCacheBudget;
 use jazz::tools::AppId;
-use jazz::tools::native_transport_connector::NativeTransportConnector;
+use profiling::DiagnosticsConfig;
 use tokio::task::JoinHandle;
 use tracing::info;
 
@@ -35,13 +38,13 @@ pub async fn run(
     data_dir: &str,
     in_memory: bool,
     auth_config: AuthConfig,
-    upstream_url: Option<String>,
-    edge_cache_budget: Option<EdgeCacheBudget>,
     bound_port_file: Option<String>,
     shutdown_timeout: Duration,
-    native_transport: std::sync::Arc<dyn NativeTransportConnector>,
+    diagnostics: DiagnosticsConfig,
+    limits: resources::ServerResourceLimits,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let app_id = AppId::from_string(app_id_str)?;
+    diagnostics.validate()?;
     let app_id_string = app_id.to_string();
     let admin_secret = auth_config.admin_secret.clone();
     info!("Starting Jazz server for app: {}", app_id);
@@ -50,32 +53,48 @@ pub async fn run(
     } else {
         info!("Data directory: {}", data_dir);
     }
-    let edge_catalogue_list_limit = catalogue_list_limit_from_env(upstream_url.is_some(), || {
-        std::env::var("JAZZ_CATALOGUE_LIST_RESPONSE_LIMIT_BYTES")
-    })?;
-    let builder = ServerBuilder::new(app_id)
+    match limits.memory_limit_bytes {
+        Some(limit) => info!("Memory limit: {} MiB", limit / (1024 * 1024)),
+        None => info!("Memory limit: none detected"),
+    }
+    info!(
+        "WebSocket connection cap: {}",
+        limits.max_websocket_connections
+    );
+    if !limits.stored_arrangements {
+        tracing::warn!("--no-stored-arrangements has no effect: SQLite reads stored tables by key");
+    }
+    let ceiling = limits.query_cache_ceiling_bytes();
+    storage_cache::set_budget(ceiling);
+    if let Some(ceiling) = ceiling {
+        info!(
+            "Storage cache budget: {} MiB{}",
+            ceiling / (1024 * 1024),
+            if limits.memory_limit_bytes.is_some() {
+                ", lowered under memory pressure"
+            } else {
+                ""
+            }
+        );
+    }
+    // Serves until this function returns, and leaves the process unbounded
+    // again for a server started after it.
+    let _cache_budget = CacheBudgetGuard(
+        limits
+            .cache_budget_governor()
+            .map(|governor| AbortOnDrop(tokio::spawn(govern_cache_budget(governor)))),
+    );
+    let mut builder = ServerBuilder::new(app_id)
         .with_auth_config(auth_config)
         .with_shutdown_timeout(shutdown_timeout)
-        .with_native_transport_connector(native_transport);
-    let builder = match upstream_url {
-        Some(url) => builder.with_upstream_url(url),
-        None => builder,
-    };
-    let builder = match edge_catalogue_list_limit {
-        Some(limit) => builder.with_catalogue_list_response_limit_bytes(limit),
-        None => builder,
-    };
-    let builder = match edge_cache_budget {
-        Some(budget) => builder.with_edge_cache_budget(budget),
-        None => builder,
-    };
+        .with_max_websocket_connections(limits.max_websocket_connections);
+    if let Some(dump) = diagnostics.heap_profiler {
+        builder = builder.with_heap_profiler(dump);
+    }
     let built = if in_memory {
         builder.with_storage(StorageBackend::InMemory).build().await
     } else {
         builder
-            .with_storage_factory(std::sync::Arc::new(
-                jazz_storage_rocksdb::RocksDbStorageFactory,
-            ))
             .with_storage(StorageBackend::Persistent {
                 path: data_dir.into(),
             })
@@ -85,6 +104,21 @@ pub async fn run(
     .map_err(|error| format!("failed to build server: {error}"))?;
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], port))).await?;
     let bound_addr = listener.local_addr()?;
+    // Serves until this function returns, including while the app drains.
+    let _diagnostics_task = match diagnostics.listen {
+        Some(addr) => {
+            let listener = tokio::net::TcpListener::bind(addr).await?;
+            info!("Diagnostics listening on http://{}", listener.local_addr()?);
+            let router =
+                profiling::diagnostics_router(diagnostics.heap_profiler, diagnostics.token.clone());
+            Some(AbortOnDrop(tokio::spawn(async move {
+                if let Err(error) = serve(listener, router).await {
+                    tracing::warn!("diagnostics listener stopped: {error}");
+                }
+            })))
+        }
+        None => None,
+    };
     let shutdown = built.state.shutdown.clone();
     let mut sigterm_task = install_signal_before_readiness(
         || spawn_sigterm_shutdown_task(shutdown.clone()),
@@ -120,6 +154,19 @@ pub async fn run(
                 shutdown.active_websockets() as u64
             })
         });
+    #[cfg(feature = "otel")]
+    let _query_cache_gauges = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .is_ok()
+        .then(|| {
+            let meter = opentelemetry::global::meter("jazz-server");
+            jazz_otel::register_query_cache_metrics(&meter, || jazz_otel::QueryCacheUsage {
+                budget_bytes: storage_cache::budget().map(|bytes| bytes as u64),
+                resident_bytes: storage_cache::resident_bytes() as u64,
+                // SQLite recycles pages rather than evicting buckets.
+                evicted_buckets: 0,
+                process_rss_bytes: resources::process_rss_bytes(),
+            })
+        });
     let shutdown_budget = shutdown_timeout
         .saturating_mul(2)
         .saturating_add(Duration::from_secs(5));
@@ -133,7 +180,7 @@ pub async fn run(
         phase
     });
     let mut serve_task = tokio::spawn(async move {
-        serve(listener, built.app)
+        serve(tcp::low_latency_listener(listener), built.app)
             .with_graceful_shutdown(async {
                 let _ = serve_shutdown_rx.await;
             })
@@ -186,62 +233,6 @@ pub async fn run(
     Ok(())
 }
 
-fn catalogue_list_limit_from_env(
-    edge: bool,
-    read: impl FnOnce() -> Result<String, std::env::VarError>,
-) -> Result<Option<usize>, String> {
-    if !edge {
-        return Ok(None);
-    }
-    match read() {
-        Ok(value) => {
-            let parsed = value.parse::<usize>().map_err(|_| {
-                "JAZZ_CATALOGUE_LIST_RESPONSE_LIMIT_BYTES must be a positive decimal usize"
-                    .to_owned()
-            })?;
-            if parsed == 0 {
-                return Err(
-                    "JAZZ_CATALOGUE_LIST_RESPONSE_LIMIT_BYTES must be a positive decimal usize"
-                        .to_owned(),
-                );
-            }
-            Ok(Some(parsed))
-        }
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(error) => Err(format!(
-            "failed to read JAZZ_CATALOGUE_LIST_RESPONSE_LIMIT_BYTES: {error}"
-        )),
-    }
-}
-
-#[cfg(test)]
-mod environment_tests {
-    use super::catalogue_list_limit_from_env;
-
-    #[test]
-    fn catalogue_limit_environment_is_edge_only() {
-        assert_eq!(
-            catalogue_list_limit_from_env(false, || Ok("not-a-limit".to_owned())).unwrap(),
-            None
-        );
-    }
-    #[test]
-    fn catalogue_limit_environment_validates_edge_values() {
-        assert_eq!(
-            catalogue_list_limit_from_env(true, || Ok("12345".to_owned())).unwrap(),
-            Some(12345)
-        );
-        assert_eq!(
-            catalogue_list_limit_from_env(true, || Err(std::env::VarError::NotPresent)).unwrap(),
-            None
-        );
-        assert!(catalogue_list_limit_from_env(true, || Ok("0".to_owned())).is_err());
-        assert!(
-            catalogue_list_limit_from_env(true, || Ok("usize-max-overflow".to_owned())).is_err()
-        );
-    }
-}
-
 fn install_signal_before_readiness<T, E>(
     install_signal: impl FnOnce() -> Result<T, E>,
     publish_readiness: impl FnOnce() -> Result<(), E>,
@@ -255,12 +246,17 @@ fn spawn_sigterm_shutdown_task(
     shutdown: ShutdownController,
 ) -> Result<JoinHandle<()>, std::io::Error> {
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     Ok(tokio::spawn(async move {
-        if sigterm.recv().await.is_some() {
+        let signal_name = tokio::select! {
+            result = sigterm.recv() => result.map(|_| "SIGTERM"),
+            result = sigint.recv() => result.map(|_| "SIGINT"),
+        };
+        if let Some(signal_name) = signal_name {
             if shutdown.request_shutdown() {
-                info!("Received SIGTERM; starting controlled shutdown");
+                info!("Received {signal_name}; starting controlled shutdown");
             } else {
-                info!("Received SIGTERM; controlled shutdown is already in progress");
+                info!("Received {signal_name}; controlled shutdown is already in progress");
             }
         }
     }))
@@ -269,6 +265,69 @@ fn spawn_sigterm_shutdown_task(
 fn spawn_sigterm_shutdown_task(_: ShutdownController) -> Result<JoinHandle<()>, std::io::Error> {
     Ok(tokio::spawn(async { std::future::pending::<()>().await }))
 }
+struct AbortOnDrop(JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Resets the process-wide storage cache budget when its server stops.
+struct CacheBudgetGuard(#[allow(dead_code)] Option<AbortOnDrop>);
+
+impl Drop for CacheBudgetGuard {
+    fn drop(&mut self) {
+        storage_cache::set_budget(None);
+    }
+}
+
+/// How often the storage cache budget follows the resident set.
+const CACHE_BUDGET_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Keep the process-wide storage cache budget in step with memory pressure.
+async fn govern_cache_budget(mut governor: resources::CacheBudgetGovernor) {
+    let ceiling = governor.ceiling_bytes();
+    let floor = governor.floor_bytes();
+    let mib = |bytes: usize| bytes / (1024 * 1024);
+    let mut interval = tokio::time::interval(CACHE_BUDGET_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        interval.tick().await;
+        let Some(rss) = resources::process_rss_bytes() else {
+            return;
+        };
+        let current = governor.budget_bytes();
+        let next = governor.step(rss, storage_cache::resident_bytes());
+        if next == current {
+            continue;
+        }
+        storage_cache::set_budget(Some(next));
+        let rss_mib = rss / (1024 * 1024);
+        if current == ceiling {
+            tracing::info!(
+                rss_mib,
+                budget_mib = mib(next),
+                "memory pressure: storage cache budget lowered, queries read more from disk"
+            );
+        } else if next == floor {
+            tracing::warn!(
+                rss_mib,
+                budget_mib = mib(next),
+                "memory pressure: storage cache budget at its floor"
+            );
+        } else if next == ceiling {
+            tracing::info!(
+                rss_mib,
+                budget_mib = mib(next),
+                "storage cache budget back at its ceiling"
+            );
+        } else {
+            tracing::debug!(rss_mib, budget_mib = mib(next), "storage cache budget");
+        }
+    }
+}
+
 async fn abort_task<T>(task: &mut JoinHandle<T>) {
     task.abort();
     let _ = tokio::time::timeout(Duration::from_millis(50), task).await;
@@ -357,7 +416,7 @@ mod tests {
 
     #[test]
     fn semantic_runtime_facade_is_consumable_without_core_state_access() {
-        let _boundary = |runtime: &jazz::serving::ServerRuntimeHandle| {
+        let _boundary = |runtime: &crate::runtime::ServerRuntimeHandle| {
             let _activity = runtime.subscribe_activity();
             runtime.notify_activity();
         };

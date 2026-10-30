@@ -1,0 +1,131 @@
+---
+title: History
+description: Query and subscribe to previous versions of your data.
+---
+
+Every table has a read-only history table, available as `app.$history.tableName`.
+It contains all accepted versions of each row, including the current version.
+Pending writes do not appear until the server accepts them.
+
+## Querying history
+
+Filter by a row ID to read its versions:
+
+```ts
+const versions = await db.all(
+  app.$history.tasks
+    .where({ id: taskId })
+    .orderBy("$acceptedAt", "desc")
+    .select("title", "$acceptedAt", "$transactionId"),
+);
+```
+
+Every version keeps the original row's `id`. Use `id` and `$transactionId` together
+to distinguish versions; `id` alone is not unique in history results.
+
+You can filter historical column values, select fields, sort, and paginate. To read
+several rows' histories, use an explicit ID list:
+
+```ts
+const versions = await db.all(
+  app.$history.tasks
+    .where({ id: { in: taskIds }, done: false })
+    .orderBy("$acceptedAt", "desc")
+    .limit(20),
+);
+```
+
+You can also subscribe to historical data. New accepted versions will update the result.
+
+## Version metadata
+
+History rows include two additional columns by default:
+
+| Column           | TypeScript type | Meaning                                 |
+| ---------------- | --------------- | --------------------------------------- |
+| `$acceptedAt`    | `Date`          | When the server accepted the version.   |
+| `$transactionId` | `TxId`          | The transaction that wrote the version. |
+
+The usual attribution columns (`$createdAt`, `$createdBy`, `$updatedAt`, and
+`$updatedBy`) are also available.
+
+## Local and remote reads
+
+History uses the same [read tiers](/docs/reading/queries) as ordinary queries:
+
+- `"local-first"` reads locally available history and fetches missing history from
+  upstream. A subscription updates as that history arrives. The initial result may
+  be incomplete; use `firstLoadRemoteWaitMs` to allow a bounded wait.
+- `"remote"` waits for the server's result, fetching the required versions.
+
+```ts
+const versions = await db.all(history, { tier: "remote" });
+```
+
+Neither tier exposes pending versions in history.
+
+## Permissions
+
+Access to history follows the current row's read policy. If you can read
+the current row, you can read its previous values, even if those values would not
+satisfy the policy themselves.
+
+<Callout type="warn" title="History access is automatic">
+  History is exposed for every table, with no opt-in. Anyone who can read the current row can also
+  read its previous versions, including versions written while they were denied access. Granting
+  read access to a row therefore grants access to its history, not just changes made after
+  permission was granted.
+</Callout>
+
+## Deleted rows
+
+Deleting the current row removes its history from the default result;
+restoring it makes the retained versions visible again.
+
+Use `.includeDeleted()` to read previous versions of a deleted row:
+
+```ts
+const versions = await db.all(history.includeDeleted());
+```
+
+Deletion-only and restore-only events do not add content versions. Restoring with
+replacement content does.
+
+## Branches
+
+For a [branched table](/docs/concepts/branches), select one branch through query options:
+
+```ts
+const versions = await db.all(history, { branch: "draft", tier: "remote" });
+```
+
+Only that branch's versions are returned. Server permissions use the current row
+in that branch. History queries do not yet support an inherited `base`.
+
+This makes private drafts possible. Write a draft's edits to a branch that only its
+author can read, then merge by writing the final content into `main`. The merge
+lands in `main` as one new version, so readers of `main` see it without the draft's
+intermediate versions, and readers who can't read the draft branch get no draft
+history at all.
+
+<Callout type="warn" title="Draft history follows current access">
+  Within a branch, history access follows current read access. If you later make a draft branch
+  readable, for example by changing its status, its readers can read that branch's whole history,
+  including versions written while they had no access.
+</Callout>
+
+## Schema changes
+
+History is read through [schema lenses](/docs/schemas/migrations) using the querying app's schema. Renamed columns use their new names, added columns receive their lens defaults, and
+removed columns are omitted.
+
+## Limitations
+
+- Every history source must be constrained by an exact `id` or an explicit `id.in`
+  list. Queries over all rows' histories are unsupported.
+- `$transactionId` can be selected but cannot be used in filters.
+- History is indexed by row ID only. Additional filters are evaluated over those
+  rows' versions.
+- History tables cannot be mutation targets or used on either side of
+  `.include()`, `.hopTo()`, or `.gather()`.
+- History queries do not yet support using `base` branches.

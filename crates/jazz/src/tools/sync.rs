@@ -1,50 +1,14 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// Persistence tier — declaration order defines Ord (Local < EdgeServer < GlobalServer).
+/// Persistence tier: local storage or the authoritative Core.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub enum DurabilityTier {
     Local,
-    EdgeServer,
     GlobalServer,
 }
 
-/// Product-level consistency choice for reads.
-///
-/// Read tiers deliberately do not expose the storage/protocol durability
-/// lattice.  [`ReadTier::LocalFirst`] reads what is locally known,
-/// [`ReadTier::Remote`] waits for the ordinary remote view, and
-/// [`ReadTier::RemoteIfPossible`] may start locally only when a host has been
-/// explicitly disconnected.  A transport timeout, connection error, or slow
-/// remote is never an offline fallback signal.
-///
-/// The Rust native facade has no public explicit-offline toggle, so
-/// `RemoteIfPossible` uses the same strict initial remote gate as `Remote` there.
-/// Browser and other host bindings apply the explicit-disconnect fallback at
-/// their connection boundary before lowering this choice.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum ReadTier {
-    /// Read immediately from local knowledge.
-    LocalFirst,
-    /// Wait for the ordinary remote view.
-    Remote,
-    /// Use local knowledge only while the host is explicitly disconnected;
-    /// otherwise wait for the ordinary remote view.
-    RemoteIfPossible,
-}
-
-impl ReadTier {
-    /// Lower this product-level choice to the legacy facade durability tier.
-    ///
-    /// This is intentionally read-only. Writes and write settlement keep using
-    /// [`DurabilityTier`] directly.
-    pub const fn legacy_durability_tier(self) -> DurabilityTier {
-        match self {
-            Self::LocalFirst => DurabilityTier::Local,
-            Self::Remote | Self::RemoteIfPossible => DurabilityTier::EdgeServer,
-        }
-    }
-}
+pub use crate::db::ReadTier;
 
 /// Unique identifier for a client connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -70,5 +34,52 @@ impl Default for ClientId {
 impl std::fmt::Display for ClientId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn durability_v2_has_only_local_and_global_tags() {
+        for (bytes, expected, encoded) in [
+            (vec![0], DurabilityTier::Local, vec![0]),
+            (vec![1], DurabilityTier::GlobalServer, vec![1]),
+        ] {
+            assert_eq!(
+                postcard::from_bytes::<DurabilityTier>(&bytes).unwrap(),
+                expected
+            );
+            assert_eq!(postcard::to_allocvec(&expected).unwrap(), encoded);
+        }
+        assert!(postcard::from_bytes::<DurabilityTier>(&[2]).is_err());
+    }
+
+    /// A read without options is LocalFirst and delivers its local opening
+    /// without waiting for a server.
+    #[test]
+    fn read_opts_default_to_local_first_delivering_the_local_opening() {
+        let opts = crate::db::ReadOpts::default();
+        assert_eq!(opts.tier, ReadTier::LocalFirst);
+        assert_eq!(opts.first_load, crate::db::FirstLoad::Deliver);
+    }
+
+    /// The serialized read-tier encoding is not observable through the
+    /// client API, so it is pinned here: the three tiers decode, and removed tier names and unknown tags are rejected.
+    #[test]
+    fn only_the_three_read_tiers_decode() {
+        for (tier, bytes) in [
+            (ReadTier::LocalFirst, vec![0]),
+            (ReadTier::Remote, vec![1]),
+            (ReadTier::LocalOnly, vec![2]),
+        ] {
+            assert_eq!(postcard::to_allocvec(&tier).unwrap(), bytes);
+            assert_eq!(postcard::from_bytes::<ReadTier>(&bytes).unwrap(), tier);
+        }
+        assert!(postcard::from_bytes::<ReadTier>(&[3]).is_err());
+        for removed in ["\"RemoteIfPossible\"", "\"LocalFirstUnlessEmpty\""] {
+            assert!(serde_json::from_str::<ReadTier>(removed).is_err());
+        }
     }
 }

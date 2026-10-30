@@ -120,17 +120,23 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         readAll: (
           query: QueryBuilder<Record<string, unknown>>,
         ) => Promise<Record<string, unknown>[]> = async (query) =>
-          (await config.db()).all(query, { tier: "global" }),
+          (await config.db()).all(query, { tier: "remote" }),
       ): Promise<JazzRowRecord[]> => {
         const table = getPrefixedModelName(model);
+        const storedSortBy = options.sortBy
+          ? {
+              ...options.sortBy,
+              field: getFieldName({ model, field: options.sortBy.field }),
+            }
+          : undefined;
 
         const querySupportedByJazz = isQuerySupported(wasmSchema[table]!, options.where);
 
         if (querySupportedByJazz) {
           // Preserve ordering semantics: until sorting is lowered, pagination
           // must remain after the client-side sort. Predicate-only bounded reads
-          // (including mutation/uniqueness warmups) can be bounded in Groove.
-          const lowerPagination = options.sortBy === undefined;
+          // (including mutation/uniqueness warmups) can be bounded by the engine.
+          const lowerPagination = storedSortBy === undefined;
           const qb = createQueryBuilder(table, wasmSchema, {
             conditions: (options.where ?? []).map((condition) =>
               toQueryCondition(model, condition),
@@ -140,7 +146,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
           });
 
           let rows = (await readAll(qb)) as JazzRowRecord[];
-          rows = sortListByField(rows, options.sortBy);
+          rows = sortListByField(rows, storedSortBy);
           if (!lowerPagination) {
             rows = paginateList(rows, options.limit, options.offset);
           }
@@ -156,7 +162,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         let rows = (await readAll(qb)) as JazzRowRecord[];
 
         rows = filterListByWhere(rows, options.where);
-        rows = sortListByField(rows, options.sortBy);
+        rows = sortListByField(rows, storedSortBy);
         rows = paginateList(rows, options.limit, options.offset);
 
         return rows;
@@ -170,7 +176,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
             conditions: [{ column: "id", op: "eq", value: jazzRowId }],
             limit: 1,
           }),
-          { tier: "global" },
+          { tier: "remote" },
         );
       };
 
@@ -195,7 +201,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         readAll: (
           query: QueryBuilder<Record<string, unknown>>,
         ) => Promise<Record<string, unknown>[]> = async (query) =>
-          (await config.db()).all(query, { tier: "global" }),
+          (await config.db()).all(query, { tier: "remote" }),
       ): Promise<void> => {
         const table = getPrefixedModelName(model);
         const uniqueConstraints = getUniqueConstraints(model);
@@ -244,7 +250,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         readAll: (
           query: QueryBuilder<Record<string, unknown>>,
         ) => Promise<Record<string, unknown>[]> = async (query) =>
-          (await config.db()).all(query, { tier: "global" }),
+          (await config.db()).all(query, { tier: "remote" }),
       ): Promise<void> => {
         const table = getPrefixedModelName(model);
         const existing = await readAll(
@@ -258,62 +264,110 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         }
       };
 
-      const isRetryableExclusiveConflict = (error: unknown) =>
+      const isRetryableSerializationConflict = (error: unknown) =>
         error instanceof PersistedWriteRejectedError &&
-        (error.code === "cascade_rejected" ||
-          error.code === "exclusive_conflict" ||
-          error.code === "transaction_conflict");
+        (error.code === "serialization_conflict" || error.code === "transaction_conflict");
 
-      const runExclusiveMutation = async (
-        model: string,
-        where: CleanedWhere[],
-        preflight: (match: JazzRowRecord) => Promise<void>,
-        mutate: (
-          tx: TransactionScope<"exclusive">,
-          match: JazzRowRecord,
-        ) => JazzRowRecord | Promise<JazzRowRecord>,
-      ): Promise<JazzRowRecord | null> => {
-        const db = await config.db();
-
+      /** Re-runs `attempt` until it is not rejected by a concurrent serializable transaction. */
+      const retryOnSerializationConflict = async <T>(attempt: () => Promise<T>): Promise<T> => {
         while (true) {
-          // Synchronize the relevant query before anchoring the exclusive snapshot. This also
-          // initializes the Jazz client, which is required before starting an exclusive
-          // transaction.
-          const [globalMatch] = await findAllRows(model, { where, limit: 1 }, (query) =>
-            db.all(query, { tier: "global" }),
-          );
-          if (!globalMatch) return null;
-          await preflight(globalMatch);
-
           try {
-            const result = await db.exclusiveTransaction(async (tx) => {
-              const [match] = await findAllRows(model, { where, limit: 1 }, (query) =>
-                tx.all(query, { tier: "local" }),
-              );
-              if (!match) {
-                return null;
-              }
-
-              return mutate(tx, match);
-            });
-
-            return await result.wait();
+            return await attempt();
           } catch (error) {
-            if (isRetryableExclusiveConflict(error)) {
-              continue;
-            }
-
+            if (isRetryableSerializationConflict(error)) continue;
             throw error;
           }
         }
       };
 
-      let exclusiveMutationTail = Promise.resolve();
+      const readLocalFirst =
+        (tx: TransactionScope<"serializable">) => (query: QueryBuilder<Record<string, unknown>>) =>
+          tx.all(query, { tier: "local-first" });
 
-      const serializeExclusiveMutation = async <T>(operation: () => Promise<T>): Promise<T> => {
-        const previous = exclusiveMutationTail;
+      const runSerializableMutation = async (
+        model: string,
+        where: CleanedWhere[],
+        preflight: (match: JazzRowRecord) => Promise<void>,
+        mutate: (
+          tx: TransactionScope<"serializable">,
+          match: JazzRowRecord,
+        ) => JazzRowRecord | Promise<JazzRowRecord>,
+      ): Promise<JazzRowRecord | null> => {
+        const db = await config.db();
+
+        return retryOnSerializationConflict(async () => {
+          // Synchronize the relevant query before anchoring the serializable snapshot. This also
+          // initializes the Jazz client, which is required before starting a serializable
+          // transaction.
+          const [globalMatch] = await findAllRows(model, { where, limit: 1 }, (query) =>
+            db.all(query, { tier: "remote" }),
+          );
+          if (!globalMatch) return null;
+          await preflight(globalMatch);
+
+          const result = await db.serializableTransaction(async (tx) => {
+            const [match] = await findAllRows(model, { where, limit: 1 }, readLocalFirst(tx));
+            if (!match) {
+              return null;
+            }
+
+            return mutate(tx, match);
+          });
+
+          return await result.wait();
+        });
+      };
+
+      /** Applies `update` to the rows matching `where` (at most `limit`) and returns their ids. */
+      const updateMatchingRows = async (
+        model: string,
+        where: CleanedWhere[],
+        update: Record<string, unknown>,
+        limit?: number,
+      ): Promise<string[]> => {
+        const db = await config.db();
+        const { id: _id, ...fields } = update;
+        const qb = createQueryBuilder(getPrefixedModelName(model), wasmSchema);
+        const assertUpdatesUnique = (
+          matches: JazzRowRecord[],
+          readAll?: (
+            query: QueryBuilder<Record<string, unknown>>,
+          ) => Promise<Record<string, unknown>[]>,
+        ) =>
+          assertUniqueConstraints(
+            model,
+            matches.map((match) => ({ ...match, ...fields })),
+            new Set(matches.map((match) => match.id)),
+            readAll,
+          );
+
+        return retryOnSerializationConflict(async () => {
+          const globalMatches = await findAllRows(model, { where, limit });
+          if (globalMatches.length === 0) return [];
+          await assertUpdatesUnique(globalMatches);
+
+          const result = await db.serializableTransaction(
+            async (tx: TransactionScope<"serializable">) => {
+              const matches = await findAllRows(model, { where, limit }, readLocalFirst(tx));
+              if (matches.length === 0) return [];
+
+              await assertUpdatesUnique(matches, readLocalFirst(tx));
+              for (const match of matches) {
+                tx.update(qb, match.id, fields);
+              }
+              return matches.map((match) => match.id);
+            },
+          );
+          return await result.wait();
+        });
+      };
+
+      let serializableMutationTail = Promise.resolve();
+
+      const enqueueSerializableMutation = async <T>(operation: () => Promise<T>): Promise<T> => {
+        const previous = serializableMutationTail;
         let release = () => {};
-        exclusiveMutationTail = new Promise<void>((resolve) => {
+        serializableMutationTail = new Promise<void>((resolve) => {
           release = resolve;
         });
         await previous;
@@ -332,37 +386,28 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
           const { id, ...fields } = data as Record<string, unknown> & { id?: string };
           const qb = createQueryBuilder(table, wasmSchema);
 
-          while (true) {
-            // Do the potentially remote reads before opening the exclusive batch.
+          return retryOnSerializationConflict(async () => {
+            // Do the potentially remote reads before opening the serializable batch.
             // The same predicates are repeated locally below, where the authority
             // serializes the actual admission decision.
             await findAllRows(model, { limit: 1 });
             await assertUniqueConstraints(model, [{ id: "<new>", ...fields }]);
             if (id) await assertRowIdAvailable(model, id);
 
-            try {
-              const result = await db.exclusiveTransaction(
-                async (tx: TransactionScope<"exclusive">) => {
-                  await assertUniqueConstraints(
-                    model,
-                    [{ id: "<new>", ...fields }],
-                    undefined,
-                    (query) => tx.all(query, { tier: "local" }),
-                  );
-                  if (id) {
-                    await assertRowIdAvailable(model, id, (query) =>
-                      tx.all(query, { tier: "local" }),
-                    );
-                  }
-                  return tx.insert(qb, fields, id ? { id } : undefined);
-                },
-              );
-              return await result.wait();
-            } catch (error) {
-              if (isRetryableExclusiveConflict(error)) continue;
-              throw error;
-            }
-          }
+            const result = await db.serializableTransaction(
+              async (tx: TransactionScope<"serializable">) => {
+                await assertUniqueConstraints(
+                  model,
+                  [{ id: "<new>", ...fields }],
+                  undefined,
+                  readLocalFirst(tx),
+                );
+                if (id) await assertRowIdAvailable(model, id, readLocalFirst(tx));
+                return tx.insert(qb, fields, id ? { id } : undefined);
+              },
+            );
+            return await result.wait();
+          });
         },
 
         async findOne({ model, where, select, join }): Promise<any> {
@@ -373,7 +418,10 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
             limit: 1,
           });
 
-          return applySelect(first ?? null, select);
+          return applySelect(
+            first ?? null,
+            select?.map((field) => getFieldName({ model, field })),
+          );
         },
 
         async findMany({
@@ -394,7 +442,12 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
             offset,
           });
 
-          return rows.map((row) => applySelect(row, _select));
+          return rows.map((row) =>
+            applySelect(
+              row,
+              _select?.map((field) => getFieldName({ model, field })),
+            ),
+          );
         },
 
         async count({ model, where }) {
@@ -402,88 +455,12 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         },
 
         async update({ model, where, update }): Promise<any> {
-          const db = await config.db();
-          const { id: _id, ...fields } = update as Record<string, unknown>;
-          const table = getPrefixedModelName(model);
-          const qb = createQueryBuilder(table, wasmSchema);
-
-          while (true) {
-            const [globalMatch] = await findAllRows(model, { where, limit: 1 });
-            if (!globalMatch) return null;
-            await assertUniqueConstraints(
-              model,
-              [{ ...globalMatch, ...fields }],
-              new Set([globalMatch.id]),
-            );
-
-            try {
-              const result = await db.exclusiveTransaction(
-                async (tx: TransactionScope<"exclusive">) => {
-                  const [match] = await findAllRows(model, { where, limit: 1 }, (query) =>
-                    tx.all(query, { tier: "local" }),
-                  );
-                  if (!match) return null;
-
-                  await assertUniqueConstraints(
-                    model,
-                    [{ ...match, ...fields }],
-                    new Set([match.id]),
-                    (query) => tx.all(query, { tier: "local" }),
-                  );
-                  tx.update(qb, match.id, fields);
-                  return match.id;
-                },
-              );
-              const id = await result.wait();
-              return id ? findByJazzRowId(model, id) : null;
-            } catch (error) {
-              if (isRetryableExclusiveConflict(error)) continue;
-              throw error;
-            }
-          }
+          const [id] = await updateMatchingRows(model, where, update as Record<string, unknown>, 1);
+          return id ? findByJazzRowId(model, id) : null;
         },
 
         async updateMany({ model, where, update }) {
-          const db = await config.db();
-          const { id: _id, ...fields } = update as Record<string, unknown>;
-          const table = getPrefixedModelName(model);
-          const qb = createQueryBuilder(table, wasmSchema);
-
-          while (true) {
-            const globalMatches = await findAllRows(model, { where });
-            if (globalMatches.length === 0) return 0;
-            await assertUniqueConstraints(
-              model,
-              globalMatches.map((match) => ({ ...match, ...fields })),
-              new Set(globalMatches.map((match) => match.id)),
-            );
-
-            try {
-              const result = await db.exclusiveTransaction(
-                async (tx: TransactionScope<"exclusive">) => {
-                  const matches = await findAllRows(model, { where }, (query) =>
-                    tx.all(query, { tier: "local" }),
-                  );
-                  if (matches.length === 0) return 0;
-
-                  await assertUniqueConstraints(
-                    model,
-                    matches.map((match) => ({ ...match, ...fields })),
-                    new Set(matches.map((match) => match.id)),
-                    (query) => tx.all(query, { tier: "local" }),
-                  );
-                  for (const match of matches) {
-                    tx.update(qb, match.id, fields);
-                  }
-                  return matches.length;
-                },
-              );
-              return await result.wait();
-            } catch (error) {
-              if (isRetryableExclusiveConflict(error)) continue;
-              throw error;
-            }
-          }
+          return (await updateMatchingRows(model, where, update as Record<string, unknown>)).length;
         },
 
         async delete({ model, where }) {
@@ -523,8 +500,8 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         }): Promise<T | null> {
           const table = getPrefixedModelName(model);
           const qb = createQueryBuilder(table, wasmSchema);
-          const consumed = await serializeExclusiveMutation(() =>
-            runExclusiveMutation(
+          const consumed = await enqueueSerializableMutation(() =>
+            runSerializableMutation(
               model,
               where,
               async () => {},
@@ -551,49 +528,39 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         }): Promise<T | null> {
           const table = getPrefixedModelName(model);
           const qb = createQueryBuilder(table, wasmSchema);
-          const updated = await serializeExclusiveMutation(() =>
-            runExclusiveMutation(
+          const incrementedFields = (match: JazzRowRecord) => {
+            const fields: Record<string, unknown> = {};
+            for (const [field, delta] of Object.entries(increment)) {
+              const current = match[field];
+              if (typeof current !== "number") {
+                throw new TypeError(
+                  `Cannot increment non-numeric field "${table}.${field}" with value "${String(current)}"`,
+                );
+              }
+              fields[field] = current + delta;
+            }
+            Object.assign(fields, set);
+            delete fields.id;
+            return fields;
+          };
+          const updated = await enqueueSerializableMutation(() =>
+            runSerializableMutation(
               model,
               where,
               async (match) => {
-                const fields: Record<string, unknown> = {};
-                for (const [field, delta] of Object.entries(increment)) {
-                  const current = match[field];
-                  if (typeof current !== "number") {
-                    throw new TypeError(
-                      `Cannot increment non-numeric field "${table}.${field}" with value "${String(current)}"`,
-                    );
-                  }
-                  fields[field] = current + delta;
-                }
-                Object.assign(fields, set);
-                delete fields.id;
                 await assertUniqueConstraints(
                   model,
-                  [{ ...match, ...fields }],
+                  [{ ...match, ...incrementedFields(match) }],
                   new Set([match.id]),
                 );
               },
               async (tx, match) => {
-                const fields: Record<string, unknown> = {};
-                for (const [field, delta] of Object.entries(increment)) {
-                  const current = match[field];
-                  if (typeof current !== "number") {
-                    throw new TypeError(
-                      `Cannot increment non-numeric field "${table}.${field}" with value "${String(current)}"`,
-                    );
-                  }
-                  fields[field] = current + delta;
-                }
-
-                Object.assign(fields, set);
-                delete fields.id;
-
+                const fields = incrementedFields(match);
                 await assertUniqueConstraints(
                   model,
                   [{ ...match, ...fields }],
                   new Set([match.id]),
-                  (query) => tx.all(query, { tier: "local" }),
+                  readLocalFirst(tx),
                 );
                 tx.update(qb, match.id, fields);
 
@@ -602,7 +569,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
                     conditions: [{ column: "id", op: "eq", value: match.id }],
                     limit: 1,
                   }),
-                  { tier: "local" },
+                  { tier: "local-first" },
                 );
                 if (!persisted) {
                   throw new Error(

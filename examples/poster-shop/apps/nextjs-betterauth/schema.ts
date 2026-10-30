@@ -1,72 +1,140 @@
 import { schema as s } from "jazz-tools";
 import { schema as betterAuthSchema } from "./schema-better-auth/schema";
+import { migrations } from "./migrations";
 
 const schema = {
   ...betterAuthSchema,
-  canvases: s.table({ title: s.string(), width: s.int(), height: s.int() }),
+  canvases: s.table(
+    { title: s.string(), width: s.int(), height: s.int() },
+    {
+      canvasMembersViaCanvas: s.reverse("canvasMembers", "canvas"),
+      canvasInvitesViaCanvas: s.reverse("canvasInvites", "canvas"),
+      layersViaCanvas: s.reverse("layers", "canvas"),
+      assetsViaCanvas: s.reverse("assets", "canvas"),
+      shapesViaCanvas: s.reverse("shapes", "canvas"),
+      cursorsViaCanvas: s.reverse("cursors", "canvas"),
+      checkpointsViaCanvas: s.reverse("checkpoints", "canvas"),
+    },
+  ),
   canvasMembers: s
-    .table({
-      canvasId: s.ref("canvases"),
-      // Jazz account ids are stable across linked external identities.
-      memberAuthor: s.uuid(),
-      role: s.enum("viewer", "editor", "admin"),
-    })
+    .table(
+      {
+        canvasId: s.uuid(),
+        // Jazz account ids are stable across linked external identities.
+        memberAuthor: s.uuid(),
+        role: s.enum("viewer", "editor", "admin"),
+      },
+      { canvas: s.rel("canvases", "canvasId") },
+    )
     .indexOnly(["canvasId", "memberAuthor"]),
+  // An admin-issued invite link. Redeeming one is a server-side action
+  // (app/api/join) that checks the token with backend authority and adds a
+  // membership; clients never write their own membership row. The token only
+  // ever travels in a URL fragment, and a single-use invite is deleted in the
+  // same serializable transaction that admits its first redeemer.
+  canvasInvites: s
+    .table(
+      {
+        canvasId: s.uuid(),
+        token: s.string(),
+        role: s.enum("viewer", "editor"),
+        singleUse: s.boolean().default(false),
+      },
+      { canvas: s.rel("canvases", "canvasId") },
+    )
+    .indexOnly(["canvasId", "token"]),
   // Every live canvas view is parent-scoped and ordered. Keep those indexes in
   // the app schema rather than relying on a renderer-side sort or scan.
   layers: s
-    .table({
-      canvasId: s.ref("canvases"),
-      name: s.string(),
-      zIndex: s.int(),
-      visible: s.boolean(),
-    })
+    .table(
+      {
+        canvasId: s.uuid(),
+        name: s.string(),
+        zIndex: s.int(),
+        visible: s.boolean(),
+        // A locked layer is an authorization fact, not only a UI hint: shape
+        // writes on a locked layer are denied by permissions.ts.
+        locked: s.boolean().default(false),
+      },
+      { canvas: s.rel("canvases", "canvasId"), shapesViaLayer: s.reverse("shapes", "layer") },
+    )
     .indexOnly(["canvasId", "zIndex"]),
-  // Asset bytes deliberately remain outside the canvas listing projection.
-  // fileId is the future large-value/blob locator (#1833, #1839, #1844); this
-  // metadata row is useful even when the bytes are not locally available.
+  // `bytes` is a large value written with db.insertStreaming. Listings select
+  // only the metadata columns, and the image is read back with typed byte-range
+  // selections, so browsing the shelf never materializes every upload.
   assets: s
-    .table({
-      canvasId: s.ref("canvases"),
-      name: s.string(),
-      mimeType: s.string(),
-      byteLength: s.int(),
-      fileId: s.string().optional(),
-    })
+    .table(
+      {
+        canvasId: s.uuid(),
+        name: s.string(),
+        mimeType: s.string(),
+        byteLength: s.int(),
+        width: s.int(),
+        height: s.int(),
+        bytes: s.bytes(),
+      },
+      { canvas: s.rel("canvases", "canvasId"), shapesViaAsset: s.reverse("shapes", "asset") },
+    )
     .indexOnly(["canvasId", "name"]),
   shapes: s
-    .table({
-      canvasId: s.ref("canvases"),
-      layerId: s.ref("layers"),
-      assetId: s.ref("assets").optional(),
-      kind: s.enum("rect", "ellipse", "text", "image"),
-      x: s.float(),
-      y: s.float(),
-      width: s.float(),
-      height: s.float(),
-      rotation: s.float(),
-      zIndex: s.int(),
-      text: s.string().optional(),
-      fill: s.string(),
-    })
-    .indexOnly(["canvasId", "zIndex"])
-    .indexOnly(["layerId", "zIndex"]),
+    .table(
+      {
+        canvasId: s.uuid(),
+        layerId: s.uuid(),
+        assetId: s.uuid().optional(),
+        kind: s.enum("rect", "ellipse", "text", "image"),
+        x: s.float(),
+        y: s.float(),
+        width: s.float(),
+        height: s.float(),
+        rotation: s.float(),
+        zIndex: s.int(),
+        text: s.string().optional(),
+        fill: s.string(),
+      },
+      {
+        canvas: s.rel("canvases", "canvasId"),
+        layer: s.rel("layers", "layerId"),
+        asset: s.rel("assets", "assetId"),
+      },
+    )
+    // One call: `indexOnly` replaces any earlier list rather than adding to it.
+    .indexOnly(["canvasId", "layerId", "zIndex"]),
   cursors: s
-    .table({
-      canvasId: s.ref("canvases"),
-      author: s.uuid(),
-      x: s.float(),
-      y: s.float(),
-      color: s.string(),
-    })
+    .table(
+      {
+        canvasId: s.uuid(),
+        author: s.uuid(),
+        x: s.float(),
+        y: s.float(),
+        color: s.string(),
+        name: s.string().default(""),
+        // Cleared when the pointer leaves the poster, so idle collaborators
+        // do not leave a frozen arrow behind.
+        active: s.boolean().default(true),
+      },
+      { canvas: s.rel("canvases", "canvasId") },
+    )
     .indexOnly(["canvasId", "author"]),
-  // A checkpoint is an immutable, named application history marker. It does
-  // not claim branch winner semantics that the core has not specified yet.
+  // A checkpoint is an immutable, named application snapshot: `snapshot` holds
+  // the layers and shapes as they were when it was saved (see
+  // src/lib/poster.ts). It does not claim branch winner semantics that the
+  // core has not specified yet.
   checkpoints: s
-    .table({ canvasId: s.ref("canvases"), label: s.string(), branch: s.string() })
-    .indexOnly(["canvasId", "label"]),
+    .table(
+      {
+        canvasId: s.uuid(),
+        label: s.string(),
+        snapshot: s.json(),
+      },
+      { canvas: s.rel("canvases", "canvasId") },
+    )
+    .indexOnly(["canvasId"]),
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema);
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
 export type Canvas = s.RowOf<typeof app.canvases>;
+export type Layer = s.RowOf<typeof app.layers>;
+export type Shape = s.RowOf<typeof app.shapes>;
+export type Cursor = s.RowOf<typeof app.cursors>;

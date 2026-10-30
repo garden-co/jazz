@@ -5,12 +5,17 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { defineMigration, exportLocalFirstSecret, schema as s } from "../index.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
+import { appMigrations } from "../testing/client-migrations.js";
 import { createJazzSession } from "./index.js";
 
-const before = { entries: s.table({ text: s.string() }) };
-const after = { ...before, controls: s.table({ value: s.string() }) };
-const oldApp = s.defineApp(before);
-const newApp = s.defineApp(after);
+const before = { entries: s.table({ text: s.string() }, {}) };
+const after = { ...before, controls: s.table({ value: s.string() }, {}) };
+const migration = defineMigration({ from: before, to: after, createTables: { controls: true } });
+// Each app ships its migrations, as its generated module would hold them.
+const oldApp = s.defineApp(before, { migrations: await appMigrations(before) });
+const newApp = s.defineApp(after, {
+  migrations: await appMigrations(before, { to: after, migration }),
+});
 const oldPermissions = s.definePermissions(oldApp, ({ policy }) => {
   policy.entries.allowRead.always();
 });
@@ -31,7 +36,11 @@ describe("offline persistent schema bootstrap", () => {
           backendSecret: randomUUID(),
           allowLocalFirstAuth: true,
         };
-        let server = await startLocalJazzServer({ ...settings, schema: oldApp });
+        let server = await startLocalJazzServer({
+          ...settings,
+          schema: oldApp,
+          permissions: oldPermissions,
+        });
         type Session = Awaited<ReturnType<typeof createJazzSession>>;
         const sessions = new Set<Session>();
         let readerSecret: string | undefined;
@@ -44,6 +53,7 @@ describe("offline persistent schema bootstrap", () => {
             appId: settings.appId,
             serverUrl: server.url,
             app: clientApp,
+            permissions: clientApp === newApp ? newPermissions : oldPermissions,
             driver: { type: "persistent", dataPath: join(directory, name) },
             initial: asReader ? "local-first" : { backendSecret: settings.backendSecret },
           });
@@ -74,18 +84,14 @@ describe("offline persistent schema bootstrap", () => {
             .wait({ tier: "global" });
           await close(seed.session);
           const original = await open(oldApp, "reader");
-          expect(await original.db.all(oldApp.entries, { tier: "global" })).toHaveLength(1);
+          expect(await original.db.all(oldApp.entries, { tier: "remote" })).toHaveLength(1);
           await close(original.session);
           await deploy({
             ...settings,
             serverUrl: server.url,
             schema: newApp,
             permissions: newPermissions,
-            migration: defineMigration({
-              from: before,
-              to: after,
-              createTables: { controls: true },
-            }),
+            migration,
           });
           if (restart) {
             const port = server.port;
@@ -93,23 +99,45 @@ describe("offline persistent schema bootstrap", () => {
             server = await startLocalJazzServer({ ...settings, port });
           }
           const upgraded = await open(newApp, "reader");
-          expect(await upgraded.db.all(newApp.entries, { tier: "global" })).toMatchObject([
+          expect(await upgraded.db.all(newApp.entries, { tier: "remote" })).toMatchObject([
             { text: "retained row" },
           ]);
-          expect(await upgraded.db.all(newApp.controls, { tier: "global" })).toEqual([]);
+          expect(await upgraded.db.all(newApp.controls, { tier: "remote" })).toEqual([]);
           await close(upgraded.session);
           const reopened = await open(newApp, "reader");
-          expect(await reopened.db.all(newApp.entries, { tier: "local" })).toHaveLength(1);
+          expect(await reopened.db.all(newApp.entries, { tier: "local-first" })).toHaveLength(1);
           await close(reopened.session);
           // An incompatible, unpublished target cannot borrow B's admission.
-          const incompatible = s.defineApp({ entries: s.table({ text: s.boolean() }) });
-          const rejected = await open(incompatible, "reader");
-          await expect(rejected.db.all(incompatible.entries, { tier: "global" })).rejects.toThrow(
+          // Its `text` changes type in place, so it is a new required column
+          // with no value in the retained row: the store refuses it, when it
+          // opens on it or when a read first uses it.
+          const incompatible = s.defineApp(
+            { entries: s.table({ text: s.boolean() }, {}) },
+            { migrations: "none" },
+          );
+          const refused = async () => {
+            const attempt = await open(incompatible, "reader");
+            try {
+              await attempt.db.all(incompatible.entries, { tier: "remote" });
+            } finally {
+              await close(attempt.session);
+            }
+          };
+          await expect(refused()).rejects.toThrow(
+            /changing the type of required column entries\.text without a default/,
+          );
+          // Optional, it opens, and waits for an admission that never comes.
+          const optional = s.defineApp(
+            { entries: s.table({ text: s.boolean().optional() }, {}) },
+            { migrations: "none" },
+          );
+          const rejected = await open(optional, "reader");
+          await expect(rejected.db.all(optional.entries, { tier: "remote" })).rejects.toThrow(
             /awaiting published catalogue admission/,
           );
           await close(rejected.session);
           const retained = await open(newApp, "reader");
-          expect(await retained.db.all(newApp.entries, { tier: "local" })).toHaveLength(1);
+          expect(await retained.db.all(newApp.entries, { tier: "local-first" })).toHaveLength(1);
           await close(retained.session);
         } finally {
           for (const session of sessions) await close(session);

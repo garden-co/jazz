@@ -16,6 +16,10 @@ const bigintSchemaColumns = [
   ...schemaColumns,
   { name: "rank", column_type: { type: "BigInt" }, nullable: false },
 ] satisfies ColumnDescriptor[];
+const jsonSchemaColumns = [
+  ...schemaColumns,
+  { name: "metadata", column_type: { type: "Json" }, nullable: false },
+] satisfies ColumnDescriptor[];
 
 describe("TableFilterBuilder", () => {
   afterEach(() => {
@@ -120,6 +124,57 @@ describe("TableFilterBuilder", () => {
       column: "count",
       operator: "notIn",
       value: [3, 5],
+    });
+  });
+  it("keeps JSON object strings with commas intact in in values", () => {
+    const onClausesChange = vi.fn();
+    render(
+      <TableFilterBuilder
+        schemaColumns={jsonSchemaColumns}
+        clauses={[]}
+        onClausesChange={onClausesChange}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Column"), { target: { value: "metadata" } });
+    fireEvent.change(screen.getByLabelText("Operator"), { target: { value: "in" } });
+    fireEvent.change(screen.getByLabelText("Value"), {
+      target: { value: '{"label":"urgent, high"}, {"state":"open"}' },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add where clause" }));
+
+    expect(onClausesChange).toHaveBeenCalledTimes(1);
+    const clauses = onClausesChange.mock.calls[0]?.[0] as TableFilterClause[];
+    expect(clauses[0]).toMatchObject({
+      column: "metadata",
+      operator: "in",
+      value: [{ label: "urgent, high" }, { state: "open" }],
+    });
+  });
+
+  it("keeps nested JSON arrays intact in notIn values", () => {
+    const onClausesChange = vi.fn();
+    render(
+      <TableFilterBuilder
+        schemaColumns={jsonSchemaColumns}
+        clauses={[]}
+        onClausesChange={onClausesChange}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Column"), { target: { value: "metadata" } });
+    fireEvent.change(screen.getByLabelText("Operator"), { target: { value: "notIn" } });
+    fireEvent.change(screen.getByLabelText("Value"), {
+      target: { value: '["nested", ["deep, value"]], ["separate"]' },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add where clause" }));
+
+    expect(onClausesChange).toHaveBeenCalledTimes(1);
+    const clauses = onClausesChange.mock.calls[0]?.[0] as TableFilterClause[];
+    expect(clauses[0]).toMatchObject({
+      column: "metadata",
+      operator: "notIn",
+      value: [["nested", ["deep, value"]], ["separate"]],
     });
   });
 

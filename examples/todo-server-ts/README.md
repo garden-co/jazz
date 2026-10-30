@@ -41,6 +41,11 @@ one with `db.getLocalFirstIdentityProof()` and send it on every todo request:
 curl -H "Authorization: Bearer $JAZZ_TOKEN" http://localhost:3000/todos
 ```
 
+This example explicitly sets `allowLocalFirstAuth: true`, so those tokens also work when
+`NODE_ENV=production`. The sync server must allow local-first authentication too; for a
+self-hosted production server, set `JAZZ_ALLOW_LOCAL_FIRST_AUTH=true` or pass
+`--allow-local-first-auth`.
+
 For an external auth provider, set either `JAZZ_JWKS_URL` or `JAZZ_JWT_PUBLIC_KEY` before
 starting the server. The JWT's verified `sub` claim becomes the Jazz session's `user_id`.
 Clients never send `owner_id`; `POST /todos` always assigns the authenticated session owner.

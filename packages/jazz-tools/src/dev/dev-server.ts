@@ -1,4 +1,9 @@
+import {
+  mergePermissionsIntoWasmSchema,
+  type CompiledPermissionsMap,
+} from "../schema-permissions.js";
 import { randomUUID } from "node:crypto";
+import { isIP } from "node:net";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,8 +14,20 @@ import { resolveSchemaSource, type SchemaSourceInput } from "../schema-source.js
 export { deploy, type DeployOptions } from "./catalogue.js";
 
 const DEFAULT_APP_ID = "00000000-0000-0000-0000-000000000001";
+function validateServerHost(host: string | undefined): string | undefined {
+  if (host === undefined) return undefined;
+  if (isIP(host) === 0) {
+    throw new Error(`Invalid Jazz server host "${host}". Expected a concrete IP address.`);
+  }
+  if (host === "0.0.0.0" || host === "::") {
+    throw new Error(`Invalid Jazz server host "${host}". Wildcard addresses are not supported.`);
+  }
+  return host;
+}
 
-export interface StartLocalJazzServerOptions {
+interface LocalJazzServerOptions {
+  /** Concrete IP address used for both listener binding and the advertised URL. */
+  host?: string;
   appId?: string;
   port?: number;
   dataDir?: string;
@@ -20,17 +37,16 @@ export interface StartLocalJazzServerOptions {
   jwtAudience?: string;
   backendSecret?: string;
   adminSecret?: string;
-  upstreamUrl?: string;
   allowLocalFirstAuth?: boolean;
   telemetryCollectorUrl?: string;
   enableLogs?: boolean;
-  /**
-   * Schema used to initialize the server's core runtime. Byte input remains
-   * available for native callers; TypeScript callers can pass an app, query,
-   * or raw WasmSchema directly.
-   */
-  schema?: Uint8Array | SchemaSourceInput;
 }
+
+export type StartLocalJazzServerOptions = LocalJazzServerOptions &
+  (
+    | { schema: SchemaSourceInput; permissions: CompiledPermissionsMap }
+    | { schema?: undefined; permissions?: undefined }
+  );
 
 export interface LocalJazzServerHandle {
   appId: string;
@@ -49,6 +65,8 @@ async function createOwnedDataDir(): Promise<string> {
 /**
  * Start a local Jazz sync server.
  *
+ * To initialize an app, pass its schema and permissions. Omit both to deploy later.
+ *
  * When no port is provided, an available localhost port is chosen automatically.
  * When no data directory is provided, the server owns a temporary directory and
  * removes it when {@link LocalJazzServerHandle.stop} is called. Pass
@@ -62,6 +80,23 @@ async function createOwnedDataDir(): Promise<string> {
 export async function startLocalJazzServer(
   options: StartLocalJazzServerOptions = {},
 ): Promise<LocalJazzServerHandle> {
+  if ((options as { upstreamUrl?: unknown }).upstreamUrl !== undefined) {
+    throw new Error(
+      "Server edges are no longer supported. Remove upstreamUrl and connect clients directly to Core.",
+    );
+  }
+  if (options.schema !== undefined && options.permissions == null) {
+    throw new Error(
+      "startLocalJazzServer requires permissions when schema is provided. Pass {} to deny all access.",
+    );
+  }
+  const host = validateServerHost(options.host);
+  const schema =
+    options.schema === undefined
+      ? undefined
+      : encodeSchema(
+          mergePermissionsIntoWasmSchema(resolveSchemaSource(options.schema), options.permissions),
+        );
   const appId = options.appId ?? DEFAULT_APP_ID;
   // Ask the server to bind port 0 when callers do not require a particular
   // address. Unlike probing a candidate port first, this is atomic and remains
@@ -77,6 +112,7 @@ export async function startLocalJazzServer(
     server = await JazzServer.start({
       appId,
       port,
+      host,
       dataDir,
       inMemory: options.inMemory,
       jwksUrl: options.jwksUrl,
@@ -84,16 +120,9 @@ export async function startLocalJazzServer(
       jwtAudience: options.jwtAudience,
       backendSecret,
       adminSecret,
-      upstreamUrl: options.upstreamUrl,
       allowLocalFirstAuth: options.allowLocalFirstAuth,
       telemetryCollectorUrl: options.telemetryCollectorUrl,
-      schema: options.schema
-        ? [
-            ...(options.schema instanceof Uint8Array
-              ? options.schema
-              : encodeSchema(resolveSchemaSource(options.schema))),
-          ]
-        : undefined,
+      schema: schema ? [...schema] : undefined,
     });
   } catch (error) {
     if (ownsDataDir && dataDir) {

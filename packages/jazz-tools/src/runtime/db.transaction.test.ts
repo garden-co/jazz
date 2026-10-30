@@ -1,47 +1,61 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
-import { ExclusiveWriteHandle } from "./client.js";
+import { SerializableWriteHandle } from "./client.js";
 import { createDb as createAccountDb } from "./default-create-db.js";
 import { type Db } from "./db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
 import { createDb } from "./testing/create-internal-db.js";
 
 const todoSchema = {
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-  }),
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+    },
+    {},
+  ),
 };
 type TodoSchema = s.Schema<typeof todoSchema>;
-const app: s.App<TodoSchema> = s.defineApp(todoSchema);
+const app: s.App<TodoSchema> = s.defineApp(todoSchema, { migrations: "none" });
 
 const otherTodoSchema = {
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-    note: s.string().default(""),
-  }),
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+      note: s.string().default(""),
+    },
+    {},
+  ),
 };
 type OtherTodoSchema = s.Schema<typeof otherTodoSchema>;
-const otherApp: s.App<OtherTodoSchema> = s.defineApp(otherTodoSchema);
+const otherApp: s.App<OtherTodoSchema> = s.defineApp(otherTodoSchema, { migrations: "none" });
 
 const taggedTodoSchema = {
-  tagged_todos: s.table({
-    title: s.string(),
-    tags: s.array(s.string()).default([]),
-  }),
+  tagged_todos: s.table(
+    {
+      title: s.string(),
+      tags: s.array(s.string()).default([]),
+    },
+    {},
+  ),
 };
 type TaggedTodoSchema = s.Schema<typeof taggedTodoSchema>;
-const taggedApp: s.App<TaggedTodoSchema> = s.defineApp(taggedTodoSchema);
+const taggedApp: s.App<TaggedTodoSchema> = s.defineApp(taggedTodoSchema, { migrations: "none" });
 
 const defaultsTodoSchema = {
-  defaults_todos: s.table({
-    title: s.string().default("default title"),
-    done: s.boolean().default(false),
-  }),
+  defaults_todos: s.table(
+    {
+      title: s.string().default("default title"),
+      done: s.boolean().default(false),
+    },
+    {},
+  ),
 };
 type DefaultsTodoSchema = s.Schema<typeof defaultsTodoSchema>;
-const defaultsApp: s.App<DefaultsTodoSchema> = s.defineApp(defaultsTodoSchema);
+const defaultsApp: s.App<DefaultsTodoSchema> = s.defineApp(defaultsTodoSchema, {
+  migrations: "none",
+});
 
 let db: Db;
 
@@ -59,34 +73,56 @@ afterEach(async () => {
 });
 
 function allTodos() {
-  return db.all(app.todos.where({}), { tier: "local" });
+  return db.all(app.todos.where({}), { tier: "local-first" });
 }
 
-describe("Db exclusive transaction initialization", () => {
-  it("rejects beginning an exclusive transaction before the JazzClient exists", () => {
-    expect(() => db.beginExclusiveTransaction()).toThrow(
-      "Cannot begin an exclusive transaction before the JazzClient has been created. Run a query or mutation first.",
+describe("Db serializable transaction initialization", () => {
+  it("rejects beginning a serializable transaction before the JazzClient exists", () => {
+    expect(() => db.beginSerializableTransaction()).toThrow(
+      "Cannot begin a serializable transaction before the JazzClient has been created. Run a query or mutation first.",
     );
   });
 });
 
 describe("Db transactions", () => {
-  it("anchors an exclusive read snapshot at the public begin call", async () => {
+  it.each(["mergeable", "serializable"] as const)(
+    "finishes an outstanding %s read before committing its transaction",
+    async (kind) => {
+      await db.shutdown();
+      db = await createAccountDb(await localAccountConfig(`pending-read-${crypto.randomUUID()}`));
+      await allTodos();
+      const tx =
+        kind === "serializable" ? db.beginSerializableTransaction() : db.beginTransaction();
+      const inserted = tx.insert(app.todos, { title: "read before commit", done: false });
+      const reading = tx.all(app.todos.where({ id: inserted.id }), { tier: "local-first" });
+      const committed = tx.commit();
+      expect(committed).not.toBeInstanceOf(Promise);
+      expect(() => tx.update(app.todos, inserted.id, { title: "too late" })).toThrow();
+      expect(() => tx.commit()).toThrow();
+      await expect(reading).resolves.toEqual([inserted]);
+      await committed.wait({ tier: "local" });
+      await expect(allTodos()).resolves.toEqual([inserted]);
+    },
+  );
+
+  it("anchors a serializable read snapshot at the public begin call", async () => {
     const { value: beforeBegin } = db.insert(app.todos, {
       title: "visible at begin",
       done: false,
     });
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     db.insert(app.todos, { title: "committed after begin", done: false });
 
-    await expect(tx.all(app.todos.where({}), { tier: "local" })).resolves.toEqual([beforeBegin]);
+    await expect(tx.all(app.todos.where({}), { tier: "local-first" })).resolves.toEqual([
+      beforeBegin,
+    ]);
     await tx.rollback();
   });
 
-  it("rolls back an exclusive callback transaction when commit is called inside the callback", async () => {
+  it("rolls back a serializable callback transaction when commit is called inside the callback", async () => {
     await allTodos();
     await expect(
-      db.exclusiveTransaction(async (tx) => {
+      db.serializableTransaction(async (tx) => {
         tx.insert(app.todos, { title: "Rejected callback transaction", done: false });
         // @ts-expect-error - commit is not available on TransactionScope
         return tx.commit();
@@ -96,10 +132,10 @@ describe("Db transactions", () => {
     await expect(allTodos()).resolves.toEqual([]);
   });
 
-  it("rolls back an exclusive callback transaction when rollback is called inside the callback", async () => {
+  it("rolls back a serializable callback transaction when rollback is called inside the callback", async () => {
     await allTodos();
     await expect(
-      db.exclusiveTransaction(async (tx) => {
+      db.serializableTransaction(async (tx) => {
         tx.insert(app.todos, { title: "Rejected callback transaction", done: false });
         // @ts-expect-error - rollback is not available on TransactionScope
         return tx.rollback();
@@ -132,12 +168,12 @@ describe("Db transactions", () => {
 
       await expect(allTodos()).resolves.toEqual([]);
       await expect(
-        tx.one(app.todos.where({ id: inserted.id }), { tier: "local" }),
+        tx.one(app.todos.where({ id: inserted.id }), { tier: "local-first" }),
       ).resolves.toEqual(inserted);
 
       tx.update(app.todos, inserted.id, { done: true });
       await expect(
-        tx.one(app.todos.where({ id: inserted.id }), { tier: "local" }),
+        tx.one(app.todos.where({ id: inserted.id }), { tier: "local-first" }),
       ).resolves.toEqual({
         ...inserted,
         done: true,
@@ -147,13 +183,13 @@ describe("Db transactions", () => {
     });
 
     await result.wait({ tier: "local" });
-    await expect(db.one(app.todos.where({ id: result.value }), { tier: "local" })).resolves.toEqual(
-      {
-        id: result.value,
-        title: "staged",
-        done: true,
-      },
-    );
+    await expect(
+      db.one(app.todos.where({ id: result.value }), { tier: "local-first" }),
+    ).resolves.toEqual({
+      id: result.value,
+      title: "staged",
+      done: true,
+    });
   });
 
   it("reads insert update delete effects inside a mergeable callback transaction", async () => {
@@ -164,7 +200,7 @@ describe("Db transactions", () => {
       tx.update(app.todos, existing.id, { done: true });
       tx.delete(app.todos, inserted.id);
 
-      await expect(tx.all(app.todos.where({}), { tier: "local" })).resolves.toEqual([
+      await expect(tx.all(app.todos.where({}), { tier: "local-first" })).resolves.toEqual([
         { id: existing.id, title: "committed", done: true },
       ]);
 
@@ -172,7 +208,7 @@ describe("Db transactions", () => {
     });
 
     await result.wait({ tier: "local" });
-    await expect(db.all(app.todos.where({}), { tier: "local" })).resolves.toEqual([
+    await expect(db.all(app.todos.where({}), { tier: "local-first" })).resolves.toEqual([
       { id: existing.id, title: "committed", done: true },
     ]);
   });
@@ -186,17 +222,17 @@ describe("Db transactions", () => {
     const result = await db.transaction(async (tx) => {
       const restored = tx.restore(app.todos, deleted.id, { title: "restored", done: true });
 
-      await expect(tx.one(app.todos.where({ id: deleted.id }), { tier: "local" })).resolves.toEqual(
-        restored,
-      );
+      await expect(
+        tx.one(app.todos.where({ id: deleted.id }), { tier: "local-first" }),
+      ).resolves.toEqual(restored);
 
       return restored;
     });
 
     await result.wait({ tier: "local" });
-    await expect(db.one(app.todos.where({ id: deleted.id }), { tier: "local" })).resolves.toEqual(
-      result.value,
-    );
+    await expect(
+      db.one(app.todos.where({ id: deleted.id }), { tier: "local-first" }),
+    ).resolves.toEqual(result.value);
   });
 
   it("applies defaults to empty inserts and restores inside a mergeable callback transaction", async () => {
@@ -207,7 +243,7 @@ describe("Db transactions", () => {
       const restored = tx.restore(defaultsApp.defaults_todos, inserted.id, {});
 
       await expect(
-        tx.one(defaultsApp.defaults_todos.where({ id: inserted.id }), { tier: "local" }),
+        tx.one(defaultsApp.defaults_todos.where({ id: inserted.id }), { tier: "local-first" }),
       ).resolves.toEqual(restored);
 
       return restored;
@@ -215,7 +251,7 @@ describe("Db transactions", () => {
 
     await result.wait({ tier: "local" });
     await expect(
-      db.one(defaultsApp.defaults_todos.where({ id: inserted.id }), { tier: "local" }),
+      db.one(defaultsApp.defaults_todos.where({ id: inserted.id }), { tier: "local-first" }),
     ).resolves.toEqual(inserted);
   });
 
@@ -229,14 +265,16 @@ describe("Db transactions", () => {
       // assertions pin the observable behavior: explicit title ordering here,
       // and SPEC 6.4.1's implicit ascending row_uuid ordering below.
       await expect(
-        tx.all(app.todos.where({}).orderBy("title", "asc"), { tier: "local" }),
+        tx.all(app.todos.where({}).orderBy("title", "asc"), { tier: "local-first" }),
       ).resolves.toMatchObject([{ title: "a" }, { title: "b" }, { title: "c" }]);
 
-      return tx.all(app.todos.where({}), { tier: "local" });
+      return tx.all(app.todos.where({}), { tier: "local-first" });
     });
 
     await result.wait({ tier: "local" });
-    await expect(db.all(app.todos.where({}), { tier: "local" })).resolves.toEqual(result.value);
+    await expect(db.all(app.todos.where({}), { tier: "local-first" })).resolves.toEqual(
+      result.value,
+    );
   });
 
   it("applies non-eq predicates and limit offset inside a mergeable transaction", async () => {
@@ -248,12 +286,12 @@ describe("Db transactions", () => {
 
       await expect(
         tx.all(app.todos.where({ title: { gt: "b" } } as never).orderBy("title", "asc"), {
-          tier: "local",
+          tier: "local-first",
         }),
       ).resolves.toMatchObject([{ title: "c" }, { title: "d" }]);
 
       return tx.all(app.todos.where({}).orderBy("title", "asc").offset(1).limit(2), {
-        tier: "local",
+        tier: "local-first",
       });
     });
 
@@ -275,7 +313,7 @@ describe("Db transactions", () => {
         tx.insert(taggedApp.tagged_todos, { title: "home", tags: ["personal"] });
 
         return tx.all(taggedApp.tagged_todos.where({ tags: { contains: "urgent" } } as never), {
-          tier: "local",
+          tier: "local-first",
         });
       });
 
@@ -286,31 +324,16 @@ describe("Db transactions", () => {
     }
   });
 
-  it("types exclusive transaction waits without durability options", async () => {
-    if (false) {
-      const result = await db.exclusiveTransaction((tx) => tx.kind);
-      void result.wait();
-      // @ts-expect-error - exclusive transactions are confirmed by the global authority.
-      void result.wait({ tier: "global" });
-
-      const tx = db.beginExclusiveTransaction();
-      const committed = await tx.commit();
-      void committed.wait();
-      // @ts-expect-error - exclusive transactions are confirmed by the global authority.
-      void committed.wait({ tier: "global" });
-    }
-  });
-
-  it("commits an empty exclusive transaction synchronously at begin", async () => {
+  it("commits an empty serializable transaction synchronously at begin", async () => {
     await allTodos();
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     const committed = tx.commit();
-    expect(committed).toBeInstanceOf(ExclusiveWriteHandle);
+    expect(committed).toBeInstanceOf(SerializableWriteHandle);
   });
 
-  it("rejects exclusive transaction operations after commit", async () => {
+  it("rejects serializable transaction operations after commit", async () => {
     await allTodos();
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     tx.insert(app.todos, { title: "Committed transaction", done: false });
     const openTransactionId = tx.openTransactionId();
 
@@ -327,9 +350,9 @@ describe("Db transactions", () => {
     );
   });
 
-  it("rejects exclusive transaction operations after rollback", async () => {
+  it("rejects serializable transaction operations after rollback", async () => {
     await allTodos();
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     tx.insert(app.todos, { title: "Rolled-back transaction", done: false });
     const openTransactionId = tx.openTransactionId();
 
@@ -346,9 +369,9 @@ describe("Db transactions", () => {
     );
   });
 
-  it("rejects exclusive writes from a second schema view", async () => {
+  it("rejects serializable writes from a second schema view", async () => {
     await allTodos();
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     tx.insert(app.todos, { title: "Primary client", done: false });
     expect(() =>
       tx.insert(otherApp.todos, { title: "Second schema", done: false, note: "kept" }),
@@ -435,7 +458,7 @@ describe("Db mergeable transactions", () => {
       const tx = sessionDb.beginTransaction();
       tx.insert(app.todos, { title: "Session-scoped transaction", done: false });
       await tx.commit();
-      await expect(sessionDb.all(app.todos.where({}), { tier: "local" })).resolves.toEqual([
+      await expect(sessionDb.all(app.todos.where({}), { tier: "local-first" })).resolves.toEqual([
         { id: expect.any(String), title: "Session-scoped transaction", done: false },
       ]);
     } finally {

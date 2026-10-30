@@ -113,20 +113,23 @@ function dependencyInputs(definition) {
 function configuredCargoInputs(definition) {
   const { config, rootManifest, localRoot } = definition;
   const rootCrate = rootManifest.slice(0, -"/Cargo.toml".length);
-  const expected = dependencyInputs(definition)
+  const closure = dependencyInputs(definition);
+  const expected = closure
     .filter((path) => !localRoot || path !== rootCrate)
+    // Jazz's layer crates live under crates/jazz/layers/, which the
+    // `crates/jazz/**` input already covers.
+    .filter((path) => !closure.some((other) => path.startsWith(`${other}/`)))
     .map((path) => `$TURBO_ROOT$/${path}/**`)
     .sort();
   const actual = turbo.tasks[config].inputs
-    .filter((input) => /^\$TURBO_ROOT\$\/crates\/[^/]+\/\*\*$/.test(input))
+    .filter((input) => /^\$TURBO_ROOT\$\/(?:crates|vendor)\/[^/]+\/\*\*$/.test(input))
     .sort();
   assert.deepEqual(actual, expected, `${config} diverges from its Cargo dependency closure`);
 }
 
 const expectedAffectedTasks = new Map([
   ["jazz", new Set(tasks)],
-  ["groove", new Set(tasks)],
-  ["jazz-native-transport", new Set(["@jazz/rust#build:crates", "jazz-napi#build"])],
+  ["jazz-native-transport", new Set(["jazz-napi#build"])],
   ["benchmark-guard", new Set()],
 ]);
 const closures = [...expectedAffectedTasks].map(([name, affected]) => ({

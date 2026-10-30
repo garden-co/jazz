@@ -1,15 +1,5 @@
 import { browserAuthSecretStore, type AuthSecretStore } from "../runtime/auth-secret-store.js";
-
-const listenersByStore = new WeakMap<AuthSecretStore, Set<() => void>>();
-
-function getListeners(store: AuthSecretStore): Set<() => void> {
-  let listeners = listenersByStore.get(store);
-  if (!listeners) {
-    listeners = new Set();
-    listenersByStore.set(store, listeners);
-  }
-  return listeners;
-}
+import { getLocalFirstAuthController } from "../runtime/local-first-auth-controller.js";
 
 /**
  * Reactive local-first auth secret. Mirrors `useLocalFirstAuth()` from
@@ -60,64 +50,15 @@ export class LocalFirstAuth {
   signOut: () => Promise<void>;
 
   constructor(store: AuthSecretStore = browserAuthSecretStore) {
-    const listeners = getListeners(store);
+    const controller = getLocalFirstAuthController(store);
+    this.login = controller.login;
+    this.signOut = controller.signOut;
 
-    const notify = () => {
-      for (const fn of listeners) fn();
-    };
-
-    this.login = async (secret: string) => {
-      try {
-        await store.saveSecret(secret);
-      } finally {
-        notify();
-      }
-    };
-
-    this.signOut = async () => {
-      try {
-        await store.clearSecret();
-      } finally {
-        notify();
-      }
-    };
-
-    $effect(() => {
-      let cancelled = false;
-      let latestCallId = 0;
-
-      const refetch = () => {
-        const callId = ++latestCallId;
-        const stale = () => cancelled || callId !== latestCallId;
-        const onError = (err: unknown) => {
-          if (stale()) return;
-          console.warn("[LocalFirstAuth] secret store failed:", err);
-          this.secret = null;
-          this.isLoading = false;
-        };
-
-        this.isLoading = true;
-        try {
-          store
-            .getOrCreateSecret()
-            .then((resolved) => {
-              if (stale()) return;
-              this.secret = resolved;
-              this.isLoading = false;
-            })
-            .catch(onError);
-        } catch (err) {
-          onError(err);
-        }
-      };
-
-      refetch();
-      listeners.add(refetch);
-
-      return () => {
-        cancelled = true;
-        listeners.delete(refetch);
-      };
-    });
+    $effect(() =>
+      controller.watch((state) => {
+        this.secret = state.secret;
+        this.isLoading = state.isLoading;
+      }, "LocalFirstAuth"),
+    );
   }
 }

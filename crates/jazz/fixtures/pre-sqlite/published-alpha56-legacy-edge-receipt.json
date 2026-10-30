@@ -1,0 +1,90 @@
+{
+  "schema": 1,
+  "releaseTag": "v2.0.0-alpha.56",
+  "releaseTagCommit": "8af685e184c8691a244da1171a51c745a7208e3b",
+  "producer": "dev/fixtures/produce-alpha56-legacy-edge-receipt.mjs",
+  "packages": [
+    {
+      "name": "jazz-tools",
+      "version": "2.0.0-alpha.56",
+      "url": "https://registry.npmjs.org/jazz-tools/-/jazz-tools-2.0.0-alpha.56.tgz",
+      "sha256": "e1fc3784b9c0df80d6e39183d4a9468bf2ba5c4f42604b635f2d7925450db99f",
+      "integrity": "sha512-rk3uH7x/zgyqcunTFKL6H/phtop/ofQFsH2DlFIcP01SjIYfeb/kJUOy/gpSI72VmO5ZV0nY7zLlrTdKkNkeVQ=="
+    },
+    {
+      "name": "jazz-napi",
+      "version": "2.0.0-alpha.56",
+      "url": "https://registry.npmjs.org/jazz-napi/-/jazz-napi-2.0.0-alpha.56.tgz",
+      "sha256": "ec9d40082d02befc28dbd3aa0e0ba8ae6e5806613ffca15d930c6fa66b27ad5e",
+      "integrity": "sha512-Yoi+HMBIXthGL+s+msr6zxaRQ96W8MuJVE+aEJkJG7Irum9F4g6JYYojEo9EVq+Wt53pjmLtshyMeyErw8p0JA=="
+    },
+    {
+      "name": "@garden-co/jazz-napi-linux-x64-gnu",
+      "version": "2.0.0-alpha.56",
+      "url": "https://registry.npmjs.org/@garden-co/jazz-napi-linux-x64-gnu/-/jazz-napi-linux-x64-gnu-2.0.0-alpha.56.tgz",
+      "integrity": "sha512-rYSREq9Ftn/bb4zNGGCu9DnYg3Elss/U0srAbiBRntStTOyWeexcj8YxFt3s7mUZ/tQBOBmyeDCDNLO5rhjLgQ=="
+    },
+    {
+      "name": "undici",
+      "version": "8.11.0",
+      "role": "Node WebSocket carrier only",
+      "integrity": "sha512-AdzuGcAkzhbha3GgCSoUBx2P0quwym6qdFNCQz/fDGZc8w9XJ741wHUbt2kTmfPz+ZIOMkySFkiY7RXmiDDC8w=="
+    }
+  ],
+  "nativeManifest": {
+    "target": "x86_64-unknown-linux-gnu",
+    "profile": "release",
+    "git": {
+      "head": "f704e2fad3e88401522ad02a8e331ceff1714eb4",
+      "tree": "db0767e2fa649bfab7b438d986334dfd531ee66f",
+      "dirtyDiff": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"
+    },
+    "cargoLock": "e9979cebee564dd8ceaae24e20debdf2c7bf111311facc911b55b3959eee366a",
+    "artifacts": [
+      {
+        "file": "jazz-napi.linux-x64-gnu.node",
+        "sha256": "3b7cc0aa4aeea083f88e5ed6d5fbcc7f47822c02f1e48b1f9ec84ebb784fae45"
+      }
+    ]
+  },
+  "archive": {
+    "file": "published-alpha56-legacy-edge-receipt-rocksdb.tar.gz.base64",
+    "root": "rocksdb-epoch-1",
+    "sha256": "784f1ad4473464784f83bf169be6c13a60b84b408e77728ff93a2dc8630248a7"
+  },
+  "receipt": {
+    "producer": "dev/fixtures/produce-alpha56-legacy-edge-receipt.mjs",
+    "packages": {
+      "jazz-tools": "2.0.0-alpha.56",
+      "jazz-napi": "2.0.0-alpha.56"
+    },
+    "appId": "00000000-0000-0000-0000-0000000a1056",
+    "node": "56565656565656565656565656565656",
+    "author": "[\"5a94575a-92ef-5a80-a4dd-9464b4ed0b42\",\"urn:jazz:local-first\",\"99e369b8-e499-5d5c-8e14-d04de8c1eeae\"]",
+    "confirmed": {
+      "rowId": "a6a6a6a6-0000-4000-8000-0000000c0056",
+      "txId": "b25a1be0b0c85d2fd093bd107d5fde49"
+    },
+    "edgeAccepted": {
+      "rowId": "a6a6a6a6-0000-4000-8000-0000000e0056",
+      "txId": "c0dba78a1f6f2565569f631a08ed692b"
+    }
+  },
+  "transactionRecords": {
+    "columnFamily": "__groove_class_meta",
+    "edgeAccepted": {
+      "description": "fate Accepted (tag 1), durability tag 2 (retired Edge), global_time null",
+      "txTime": 469296518081282048,
+      "txNode": "56565656-5656-5656-5656-565656565656",
+      "keyHex": "000000116a617a7a5f7472616e73616374696f6e7303068346b25e900000030000000000000001",
+      "valueHex": "000000905eb2468306010000000000000000010000000100000000000000000000000000000000000000000000000000000000000000000000000002ad000000ae000000af000000b0000000b1000000b2000000b300000003010000040100005a94575a92ef5a80a4dd9464b4ed0b42190000000275726e3a6a617a7a3a6c6f63616c2d66697273740239396533363962382d653439392d356435632d386531342d64303464653863316565616500000000000001015a94575a92ef5a80a4dd9464b4ed0b42190000000275726e3a6a617a7a3a6c6f63616c2d66697273740239396533363962382d653439392d356435632d386531342d6430346465386331656561650000"
+    },
+    "coreConfirmed": {
+      "description": "control: fate Accepted (tag 1), durability tag 3 (Global), global_time present",
+      "txTime": 469296518052970496,
+      "txNode": "56565656-5656-5656-5656-565656565656",
+      "keyHex": "000000116a617a7a5f7472616e73616374696f6e7303068346b25ce00000030000000000000001",
+      "valueHex": "000000e05cb24683060100000000000000000100000001010000d05db246830600000000000000000000000000000000000000000000000000000003ad000000ae000000af000000b0000000b1000000b2000000b300000003010000040100005a94575a92ef5a80a4dd9464b4ed0b42190000000275726e3a6a617a7a3a6c6f63616c2d66697273740239396533363962382d653439392d356435632d386531342d64303464653863316565616500000000000001015a94575a92ef5a80a4dd9464b4ed0b42190000000275726e3a6a617a7a3a6c6f63616c2d66697273740239396533363962382d653439392d356435632d386531342d6430346465386331656561650000"
+    }
+  }
+}

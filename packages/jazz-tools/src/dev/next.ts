@@ -1,7 +1,16 @@
+import { realpathSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
-import { dirname, join, relative, resolve } from "node:path";
-import { buildInspectorLink } from "./inspector-link.js";
+import { createRequire } from "node:module";
+import { dirname, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
+import { logInspectorLink } from "./inspector-link.js";
 import { ManagedDevRuntime } from "./managed-runtime.js";
+import {
+  OVERLAY_EMBEDDED_PREFIX,
+  OVERLAY_ENABLED_MESSAGE,
+  startOverlayAssetServer,
+  type OverlayAssetServer,
+} from "./inspector-overlay/serve.js";
 import type { JazzPluginOptions, JazzServerOptions } from "./vite.js";
 
 export interface NextJazzServerOptions extends JazzServerOptions {
@@ -38,6 +47,34 @@ const PUBLIC_TELEMETRY_COLLECTOR_URL_ENV = "NEXT_PUBLIC_JAZZ_TELEMETRY_COLLECTOR
 const SCHEMA_HASH_STUB_SUBPATH = join("node_modules", ".cache", "jazz", "schema-hash.js");
 const SCHEMA_HASH_ALIAS = "jazz-tools/_dev/schema-hash";
 const WASM_PACKAGE_ALIAS = "jazz-wasm";
+const NAPI_PACKAGE = "jazz-napi";
+
+/** Turbopack reads absolute alias targets as server-relative paths; spell a
+ * file relative to the project instead. */
+function turbopackProjectPath(file: string): string {
+  const fromProject = relative(process.cwd(), file);
+  return fromProject === "" ? "." : fromProject.startsWith(".") ? fromProject : `./${fromProject}`;
+}
+
+/**
+ * Turbopack honours `serverExternalPackages` only for packages that resolve
+ * into a `node_modules` directory. A workspace-linked `jazz-napi` (as in this
+ * monorepo) resolves outside one, so Turbopack bundles its native loader and
+ * the route fails at runtime. In that case, alias `jazz-napi` to a module that
+ * loads it through Node at runtime. Installed packages keep the plain external,
+ * which output tracing can follow.
+ */
+function workspaceNapiTurbopackAlias(): Record<string, string> {
+  let entry: string;
+  try {
+    entry = realpathSync(createRequire(import.meta.url).resolve(NAPI_PACKAGE));
+  } catch {
+    return {};
+  }
+  if (entry.split(sep).includes("node_modules")) return {};
+  const runtimeModule = fileURLToPath(new URL("./napi-runtime.js", import.meta.url));
+  return { [NAPI_PACKAGE]: turbopackProjectPath(runtimeModule) };
+}
 
 function sealedWasmAliases() {
   const sealedWasmPackage = process.env.JAZZ_CORRECTNESS_WASM_PACKAGE;
@@ -46,15 +83,9 @@ function sealedWasmAliases() {
   if (!sealedWasmPackage) return undefined;
 
   const entry = resolve(sealedWasmPackage, "jazz_wasm.js");
-  // Turbopack interprets absolute alias targets as server-relative paths. Its
-  // project-relative spelling and Webpack's absolute spelling name the same
-  // immutable snapshot for every Next runtime import.
-  const fromProject = relative(process.cwd(), entry);
-  return {
-    webpack: entry,
-    turbopack:
-      fromProject === "" ? "." : fromProject.startsWith(".") ? fromProject : `./${fromProject}`,
-  };
+  // Turbopack's project-relative spelling and Webpack's absolute spelling name
+  // the same immutable snapshot for every Next runtime import.
+  return { webpack: entry, turbopack: turbopackProjectPath(entry) };
 }
 
 async function writeSchemaHashStub(appRoot: string, hash: string): Promise<void> {
@@ -68,21 +99,35 @@ const runtime = new ManagedDevRuntime({
   serverUrl: PUBLIC_SERVER_URL_ENV,
   telemetryCollectorUrl: PUBLIC_TELEMETRY_COLLECTOR_URL_ENV,
 });
+let overlayServer: Promise<OverlayAssetServer> | undefined;
 
-function mergeServerExternalPackages(existing: string[] | undefined): string[] {
-  return Array.from(new Set([...(existing ?? []), "jazz-napi"]));
-}
+type NextRewrite = { source: string; destination: string; [key: string]: unknown };
+type NextRewrites =
+  | NextRewrite[]
+  | { beforeFiles?: NextRewrite[]; afterFiles?: NextRewrite[]; fallback?: NextRewrite[] };
 
-async function resolveConfig(
-  input: NextConfigInput | undefined,
-  phase: string,
-  context: NextConfigContextLike,
-): Promise<NextConfigLike> {
-  if (!input) return {};
-  if (typeof input === "function") {
-    return (await input(phase, context)) ?? {};
-  }
-  return input;
+/** Add module aliases to both bundlers, after any the config already sets. */
+function withResolveAliases(
+  config: NextConfigLike,
+  aliases: { webpack: Record<string, string>; turbopack: Record<string, string> },
+): NextConfigLike {
+  const previousWebpack = config.webpack as
+    | ((config: WebpackConfig, ctx: unknown) => WebpackConfig)
+    | undefined;
+  const previousTurbopack = config.turbopack as TurbopackConfig | undefined;
+  return {
+    ...config,
+    turbopack: {
+      ...previousTurbopack,
+      resolveAlias: { ...previousTurbopack?.resolveAlias, ...aliases.turbopack },
+    },
+    webpack: (config: WebpackConfig, ctx: unknown) => {
+      const next = previousWebpack ? previousWebpack(config, ctx) : config;
+      next.resolve = next.resolve ?? {};
+      next.resolve.alias = { ...next.resolve.alias, ...aliases.webpack };
+      return next;
+    },
+  };
 }
 
 export function withJazz(
@@ -92,46 +137,33 @@ export function withJazz(
   let hasLoggedInspectorLink = false;
 
   return async (phase, context) => {
-    const resolved = await resolveConfig(nextConfig, phase, context);
+    const resolved =
+      (typeof nextConfig === "function" ? await nextConfig(phase, context) : nextConfig) ?? {};
     const sealedWasm = sealedWasmAliases();
+    const resolvedTurbopack = resolved.turbopack as TurbopackConfig | undefined;
+    const napiAlias = workspaceNapiTurbopackAlias();
     const merged: NextConfigLike = {
       ...resolved,
-      serverExternalPackages: mergeServerExternalPackages(resolved.serverExternalPackages),
+      serverExternalPackages: Array.from(
+        new Set([...(resolved.serverExternalPackages ?? []), NAPI_PACKAGE]),
+      ),
+      ...(Object.keys(napiAlias).length > 0
+        ? {
+            turbopack: {
+              ...resolvedTurbopack,
+              resolveAlias: { ...napiAlias, ...resolvedTurbopack?.resolveAlias },
+            },
+          }
+        : {}),
     };
 
-    const previousWebpack = merged.webpack as
-      | ((config: WebpackConfig, ctx: unknown) => WebpackConfig)
-      | undefined;
-    const previousTurbopack = (merged.turbopack as TurbopackConfig | undefined) ?? {};
-
-    const withSealedWasm = (config: NextConfigLike): NextConfigLike => {
-      if (!sealedWasm) return config;
-      const configuredWebpack = config.webpack as
-        | ((config: WebpackConfig, ctx: unknown) => WebpackConfig)
-        | undefined;
-      const configuredTurbopack = config.turbopack as TurbopackConfig | undefined;
-      return {
-        ...config,
-        turbopack: {
-          ...previousTurbopack,
-          ...configuredTurbopack,
-          resolveAlias: {
-            ...previousTurbopack.resolveAlias,
-            ...configuredTurbopack?.resolveAlias,
-            [WASM_PACKAGE_ALIAS]: sealedWasm.turbopack,
-          },
-        },
-        webpack: (config: WebpackConfig, ctx: unknown) => {
-          const next = configuredWebpack ? configuredWebpack(config, ctx) : config;
-          next.resolve = next.resolve ?? {};
-          next.resolve.alias = {
-            ...next.resolve.alias,
-            [WASM_PACKAGE_ALIAS]: sealedWasm.webpack,
-          };
-          return next;
-        },
-      };
-    };
+    const withSealedWasm = (config: NextConfigLike): NextConfigLike =>
+      sealedWasm
+        ? withResolveAliases(config, {
+            webpack: { [WASM_PACKAGE_ALIAS]: sealedWasm.webpack },
+            turbopack: { [WASM_PACKAGE_ALIAS]: sealedWasm.turbopack },
+          })
+        : config;
 
     // Everything below is dev-only: managed server, APP_ID/SERVER_URL
     // injection. In production the host app supplies those via its own env.
@@ -153,10 +185,40 @@ export function withJazz(
       onSchemaPush: (hash) => writeSchemaHashStub(resolvedAppRoot, hash),
     });
     if (!hasLoggedInspectorLink) {
-      console.log(
-        `[jazz] Open the inspector: ${buildInspectorLink(managed.serverUrl, managed.appId)}`,
-      );
+      logInspectorLink(managed);
       hasLoggedInspectorLink = true;
+    }
+
+    let inspectorConfig: NextConfigLike = {};
+    if (options.inspector !== false) {
+      overlayServer ??= startOverlayAssetServer()
+        .then((server) => {
+          console.log(OVERLAY_ENABLED_MESSAGE);
+          return server;
+        })
+        .catch((error) => {
+          overlayServer = undefined;
+          throw error;
+        });
+      const { origin } = await overlayServer;
+      const previousRewrites = merged.rewrites as (() => Promise<NextRewrites>) | undefined;
+      inspectorConfig = {
+        async rewrites() {
+          const existing = previousRewrites ? await previousRewrites() : [];
+          const inspectorRewrite = {
+            source: `${OVERLAY_EMBEDDED_PREFIX}/:path*`,
+            destination: `${origin}${OVERLAY_EMBEDDED_PREFIX}/:path*`,
+          };
+          // Reserve the inspector route before filesystem routes; preserve the
+          // afterFiles semantics of the application's array-form rewrites.
+          return Array.isArray(existing)
+            ? { beforeFiles: [inspectorRewrite], afterFiles: existing, fallback: [] }
+            : {
+                ...existing,
+                beforeFiles: [inspectorRewrite, ...(existing.beforeFiles ?? [])],
+              };
+        },
+      };
     }
 
     const stubPath = join(resolvedAppRoot, SCHEMA_HASH_STUB_SUBPATH);
@@ -164,33 +226,23 @@ export function withJazz(
     // refuses to resolve them. Use the project-root-relative form there. Webpack
     // is happy with either, so feed it the absolute path for clarity.
     const turbopackStubPath = `./${SCHEMA_HASH_STUB_SUBPATH}`;
-    return withSealedWasm({
-      ...merged,
-      env: {
-        ...merged.env,
-        [PUBLIC_APP_ID_ENV]: managed.appId,
-        [PUBLIC_SERVER_URL_ENV]: managed.serverUrl,
-        ...(managed.telemetryCollectorUrl
-          ? { [PUBLIC_TELEMETRY_COLLECTOR_URL_ENV]: managed.telemetryCollectorUrl }
-          : {}),
-      },
-      turbopack: {
-        ...previousTurbopack,
-        resolveAlias: {
-          ...previousTurbopack.resolveAlias,
-          [SCHEMA_HASH_ALIAS]: turbopackStubPath,
+    return withSealedWasm(
+      withResolveAliases(
+        {
+          ...merged,
+          ...inspectorConfig,
+          env: {
+            ...merged.env,
+            ...runtime.clientEnv(managed),
+            ...(options.inspector !== false ? { NEXT_PUBLIC_JAZZ_INSPECTOR: "1" } : {}),
+          },
         },
-      },
-      webpack: (config: WebpackConfig, ctx: unknown) => {
-        const next = previousWebpack ? previousWebpack(config, ctx) : config;
-        next.resolve = next.resolve ?? {};
-        next.resolve.alias = {
-          ...next.resolve.alias,
-          [SCHEMA_HASH_ALIAS]: stubPath,
-        };
-        return next;
-      },
-    });
+        {
+          webpack: { [SCHEMA_HASH_ALIAS]: stubPath },
+          turbopack: { [SCHEMA_HASH_ALIAS]: turbopackStubPath },
+        },
+      ),
+    );
   };
 }
 
@@ -206,4 +258,8 @@ interface TurbopackConfig {
 
 export async function __resetJazzNextPluginForTests(): Promise<void> {
   await runtime.resetForTests();
+  if (overlayServer) {
+    await (await overlayServer).close();
+    overlayServer = undefined;
+  }
 }

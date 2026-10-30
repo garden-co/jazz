@@ -36,6 +36,12 @@ function makeHarness(appId: string, options?: { throwOnSubscribe?: Error }) {
     getAuthState: () => ({ authMode: "local-first" as const, session: null }),
     onAuthChanged: () => () => {},
     updateAuthToken: () => {},
+    getSyncStatus: () => ({
+      link: { state: "local-only" as const },
+      pendingUploads: 0,
+      synced: true,
+    }),
+    onSyncStatusChange: () => () => {},
     subscribeDelta: (_query: QueryBuilder<Todo>, callbacks: DbDeltaSubscriptionCallbacks<Todo>) => {
       if (options?.throwOnSubscribe) {
         throw options.throwOnSubscribe;
@@ -72,7 +78,7 @@ afterEach(() => {
 });
 
 describe("react-core/useAll", () => {
-  it("returns no result when no query is provided", () => {
+  it("returns no result without subscribing when no query is provided", () => {
     if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
       expectTypeOf(useAll<Todo>()).toEqualTypeOf<NoQueryResult>();
       expectTypeOf(useAll<Todo>(undefined)).toEqualTypeOf<NoQueryResult>();
@@ -80,9 +86,7 @@ describe("react-core/useAll", () => {
       const maybeQuery = makeQuery() as QueryBuilder<Todo> | undefined;
       expectTypeOf(useAll(maybeQuery)).toEqualTypeOf<UseAllResult<Todo> | NoQueryResult>();
     }
-  });
 
-  it("returns no result without subscribing when no query is provided", () => {
     const { client, subscribeCalls } = makeHarness("rc-all-00");
     let result: NoQueryResult | undefined;
 

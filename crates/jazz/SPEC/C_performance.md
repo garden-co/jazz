@@ -55,8 +55,12 @@ representation is `PeerState::shipped_complete_tx_payloads`; the known-state
 successor remains an implementation transition, not an invariant condition.
 
 A **full-diff full recompute is sometimes correctness-preserving, not a failure**. For
-example, a permission change can make an old exclusive transaction newly
-visible, and the test expects exactly one `full_diff_recomputes_out`. Large reset
+example, a permission change can make an old serializable transaction newly
+visible. `MaintainedSubscriptionViewMetrics::full_diff_fallbacks` counts each
+recompute of an already-published view by cause (membership reconciliation,
+query reopen, authorization-support reopen); opening a view is not counted.
+`claim_refresh_counts_one_full_diff_fallback_and_incremental_deltas_count_none`
+pins one query reopen per claim refresh and none for incremental deltas. Large reset
 rehydrates deliberately avoid a duplicate groove hydration and full-diff from
 stored peer state thereafter. There is no `LARGE_REHYDRATE_RESULT_ROWS` constant.
 
@@ -74,10 +78,9 @@ current-row subscriptions through the global-current tables (receipt:
 `benches/cold_subscription.rs`).
 
 **Implementation status (verified).**
-`denormalized_current_content_witness_projects_history_provenance_to_unix_milliseconds` verifies
-the current-sourced witness bytes, and
-`maintained_relation_include_single_row_changes_are_scale_independent` is the
-canonical scale-independence canary.
+`include_live::renaming_a_sender_updates_exactly_their_messages` is the
+canonical incremental-delivery canary, and `include_live::include_target_change_cost`
+is its timing probe.
 
 Winner metadata needed for sync payload witnesses and known-state dedup is also
 part of the compact current representation: current content/register rows carry
@@ -102,8 +105,8 @@ the table, the shape, or a per-call derivation instead of the actual change.
   settlement throughput and propagation-inclusive throughput. Per-commit fan-out is
   intended to be O(delta), not O(table). The relay whole-table full recompute case has
   been fixed (degenerate system whole-table views stay incremental);
-  filtered/join/edge-client views still take the conservative full-diff full recompute
-  on exclusive-sibling drains — measure whether that path needs delta-sizing
+  filtered/join/client views still take the conservative full-diff full recompute
+  on serializable-sibling drains — measure whether that path needs delta-sizing
   too.
 - **Cross-scenario levers** (from profiling): avoid per-call
   `prepared_query_plan` lookup/deep hashing; intern result-set table keys (~25%
@@ -237,7 +240,7 @@ Two work items:
    not O(table). Determine whether S4's peers ride the incremental
    receiver path at all, and why incremental cost grows with table
    size (candidates: closure expansion per output row — item 4 below;
-   exclusive-finalize forcing full evaluation; whole-table degenerate
+   serializable-finalize forcing full evaluation; whole-table degenerate
    shape lacking delta translation). This is now the top engine lever
    for the S4-vs-SQLite gap.
 

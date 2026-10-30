@@ -305,6 +305,12 @@ proportional to history depth within those selected branches. A future
 snapshot-current materialization or checkpoint index could make this bounded
 by current rows, but that optimization is not part of the initial contract.
 
+Branch layers and refs compose by one rule (SPEC 4 §4.7). Each branch layer
+is itself the `[local, origin]` stack of its key, so a live view reads
+`[head@local, head@origin, base@local, base@origin]`. Under an index path,
+the base is masked by the head's presence rather than by the head's index
+matches (`INV-REF-3`).
+
 Layer fallback is intentionally independent. Head content does not restore an
 inherited deletion; a head `Restored` winner may reveal inherited content; a
 head deletion hides either head or inherited content (`INV-BVIEW-9`,
@@ -381,7 +387,7 @@ This descriptor is neither a version parent nor a transaction read set, CAS
 condition, history edge, or contribution-merge dependency. It therefore does
 not park on source history, create cross-branch causality, or make the source
 currentness a serializability condition beyond the authority's one-time
-admission check. Root/head-local mutations and exclusive transactions continue
+admission check. Root/head-local mutations and serializable transactions continue
 to use their ordinary existing validation paths.
 
 For example, when `R` is inherited from `Main` and an update is requested in
@@ -441,6 +447,27 @@ Policy dependency tables project the same named selectors as user-query tables.
 Tables whose projected head and base branch keys are equal have one maintained source,
 preventing duplicate shared evidence.
 
+A write wakes a branch-view subscription only when it lands on a branch key the
+view reads: the head's, or the live base's, per branched table. Writes to other
+branch keys of the same table, and to a frozen base, never re-run it. Other
+wakes re-run the view's whole query: the per-row re-check of current reads does
+not apply under a view yet, and one write to a base wakes every view over it.
+
+Across sync, a replica's live branch-view read carries its view
+(ch. 8 §8.4). The upstream keeps the result in that view, so the replica
+receives the view's own window rather than every branch key's matching rows.
+Other branch keys' rows can still arrive: a supporting row is followed by id
+under any branch key, a row leaving the result ships with all its branch
+keys' images, and so can a resumed read's prior diff. A resumed read diffs
+its view as of `since` (§8.11), the frozen base keeping its own cut. The
+upstream also ships the head rows that mask base rows the view's query
+matches (ch. 8 §8.4), so a base row arriving through another read is masked
+by a head image the view's own result would not ship, within the limits
+§8.4 lists. A head version the reader's policy denies hides the row from the
+view rather than exposing the base's version it overrides: the replica keeps
+a marker of it (ch. 8 §8.4), as the authority's evaluation of the view hides
+it.
+
 ### 11.6 Cross-branch-key merge helper
 
 Cross-branch-key merge is a high-level local calculation, not an admission or
@@ -498,7 +525,9 @@ duplicates; Jazz provides no global merge cursor or exactly-once import claim
 Branch-key evolution is monotone. A schema may add an ordinary column to
 `branchBy` only when that column has an immutable, typed, deterministic default.
 Old history and selectors authored under an older schema normalize the missing
-column to that default (`INV-BVIEW-19`).
+column to that default (`INV-BVIEW-19`). The SQLite store leaves a branch
+column at its default out of the stored branch key, so rows written before the
+column existed keep their key, and a node on either version keys them alike.
 
 For example:
 

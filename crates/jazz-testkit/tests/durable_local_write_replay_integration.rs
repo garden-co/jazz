@@ -11,12 +11,14 @@ use jazz_server::JazzServer;
 use support::{has_row, wait_for_rows};
 
 fn test_schema() -> Schema {
+    use jazz::tools::test_support::AllowAll;
     SchemaBuilder::new()
         .table(
             TableSchema::builder("todos")
                 .column("title", ColumnType::Text)
                 .column("completed", ColumnType::Boolean),
         )
+        .allow_all()
         .build()
 }
 
@@ -36,9 +38,6 @@ async fn persistent_restart_replays_pending_write_with_valid_token_impl() {
     context.admin_secret = None;
     context.client_id = Some(ClientId::new());
     context.storage = ClientStorage::Persistent;
-    context.storage_factory = Some(std::sync::Arc::new(
-        jazz_storage_rocksdb::RocksDbStorageFactory,
-    ));
 
     support::enroll_test_context(&mut context)
         .await

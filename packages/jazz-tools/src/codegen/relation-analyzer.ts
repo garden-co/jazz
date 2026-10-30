@@ -1,9 +1,9 @@
+import { assertRelationshipDeclaration } from "../relationships.js";
 /**
  * Analyze schema to derive forward and reverse relations.
  */
 
 import type { WasmSchema } from "../drivers/types.js";
-import pluralize from "pluralize-esm";
 
 /**
  * A relation between two tables (forward or reverse).
@@ -30,159 +30,78 @@ export interface Relation {
 export class AmbiguousRelationNameError extends Error {}
 export class DuplicateColumnNameError extends Error {}
 
-function columnDescriptorProvenance(
-  index: number,
-  column: WasmSchema[string]["columns"][number],
-): string {
-  const reference = column.references ? ` referencing "${column.references}"` : "";
-  return `descriptor #${index + 1} (${column.column_type.type}${reference})`;
-}
-
-function validateUniqueColumnDescriptors(schema: WasmSchema): void {
-  for (const [tableName, table] of Object.entries(schema)) {
-    const seen = new Map<string, number>();
-    for (const [index, column] of table.columns.entries()) {
-      const previousIndex = seen.get(column.name);
-      if (previousIndex !== undefined) {
-        const previous = table.columns[previousIndex]!;
-        throw new DuplicateColumnNameError(
-          `Table "${tableName}" has duplicate column descriptor "${column.name}": ${columnDescriptorProvenance(previousIndex, previous)} conflicts with ${columnDescriptorProvenance(index, column)}. Column names must be unique before relation names are derived.`,
-        );
-      }
-      seen.set(column.name, index);
-    }
-  }
-}
-
-function relationProvenance(relation: Relation): string {
-  const referenceColumn = relation.type === "forward" ? relation.fromColumn : relation.toColumn;
-  const referenceTable = relation.type === "forward" ? relation.fromTable : relation.toTable;
-  const referencedTable = relation.type === "forward" ? relation.toTable : relation.fromTable;
-
-  return `${relation.type} relation generated from reference column "${referenceTable}.${referenceColumn}" to "${referencedTable}.id"`;
-}
-
-function addRelation(
-  relations: Map<string, Relation[]>,
-  outputColumnsByTable: Map<string, Set<string>>,
-  relation: Relation,
-): void {
-  const tableRelations = relations.get(relation.fromTable);
-  if (!tableRelations) {
-    throw new Error(`Unknown relation source table "${relation.fromTable}"`);
-  }
-
-  // A scalar reference may intentionally use its own relation name (for
-  // example `team: ref("teams")`). The typed include API replaces that one
-  // reference value with the joined row. Every other output-column collision
-  // would instead make two independently-addressable public values share a
-  // key, so reject it.
-  const isOwnReferenceColumn = relation.type === "forward" && relation.fromColumn === relation.name;
-  if (!isOwnReferenceColumn && outputColumnsByTable.get(relation.fromTable)?.has(relation.name)) {
-    throw new AmbiguousRelationNameError(
-      `Generated relation name "${relation.name}" on table "${relation.fromTable}" (${relationProvenance(relation)}) collides with the stored/public output column "${relation.fromTable}.${relation.name}". Rename the reference column or the output column.`,
-    );
-  }
-
-  const existing = tableRelations.find((candidate) => candidate.name === relation.name);
-  if (existing) {
-    throw new AmbiguousRelationNameError(
-      `Generated relation name "${relation.name}" is ambiguous on table "${relation.fromTable}" between ${relationProvenance(existing)} and ${relationProvenance(relation)}. Rename one of the reference columns.`,
-    );
-  }
-  tableRelations.push(relation);
-}
-
-/**
- * Capitalize the first letter of a string.
- */
-function capitalize(s: string): string {
-  return s.charAt(0).toUpperCase() + s.slice(1);
-}
-
-function forwardRefNameFromFK(columnName: string): string {
-  const withoutIdSuffix = columnName.replace(/(?:_ids|Ids|_id|Id)$/, "");
-  const requiresPluralization = columnName.endsWith("s");
-  return requiresPluralization ? pluralize.plural(withoutIdSuffix) : withoutIdSuffix;
-}
-
-/**
- * Analyze a WasmSchema and derive all forward and reverse relations.
- *
- * Forward relations: Created from FK columns, stripping Id/_id/Ids/_ids suffixes.
- *   e.g., parent_id -> parent, assignees_ids -> assignees
- *
- * Reverse relations: Created on the target table of each FK.
- *   e.g., todos.owner_id -> users gets a todosViaOwner reverse relation
- *
- * @param schema The WasmSchema to analyze
- * @returns Map from table name to array of relations on that table
- */
+/** Resolve only declared relationships. Reference columns never imply aliases or inverses. */
 export function analyzeRelations(schema: WasmSchema): Map<string, Relation[]> {
-  validateUniqueColumnDescriptors(schema);
-
-  const relations = new Map<string, Relation[]>();
-  const outputColumnsByTable = new Map<string, Set<string>>();
-
-  // Initialize empty arrays for all tables
+  const result = new Map<string, Relation[]>();
   for (const [tableName, table] of Object.entries(schema)) {
-    relations.set(tableName, []);
-    // `id` is implicit in every public row even though it is not a stored
-    // descriptor. Includes are materialized onto the same public row object,
-    // so relation names must not shadow either it or a stored column.
-    outputColumnsByTable.set(tableName, new Set(["id", ...table.columns.map((col) => col.name)]));
-  }
-
-  for (const [tableName, table] of Object.entries(schema)) {
-    for (const col of table.columns) {
-      if (col.references) {
-        const isUuidRef =
-          col.column_type.type === "Uuid" ||
-          (col.column_type.type === "Array" && col.column_type.element.type === "Uuid");
-        if (!isUuidRef) {
-          throw new Error(
-            `Column "${tableName}.${col.name}" uses references but is not UUID or UUID[]`,
-          );
-        }
-        const isForwardArray =
-          col.column_type.type === "Array" && col.column_type.element.type === "Uuid";
-
-        const forwardName = forwardRefNameFromFK(col.name);
-        const forwardRelation: Relation = {
-          name: forwardName,
-          type: "forward",
-          fromTable: tableName,
-          toTable: col.references,
-          fromColumn: col.name,
-          toColumn: "id",
-          isArray: isForwardArray,
-          nullable: col.nullable,
-        };
-        addRelation(relations, outputColumnsByTable, forwardRelation);
-
-        // Verify the referenced table exists
-        if (!relations.has(col.references)) {
-          throw new Error(
-            `Table "${tableName}" references unknown table "${col.references}" via column "${col.name}"`,
-          );
-        }
-
-        // Reverse relation on target table: todosViaParent
-        const reverseName = `${tableName}Via${capitalize(forwardName)}`;
-        const reverseRelation: Relation = {
-          name: reverseName,
-          type: "reverse",
-          fromTable: col.references,
-          toTable: tableName,
-          fromColumn: "id",
-          toColumn: col.name,
-          isArray: true,
-          nullable: false, // Arrays are not nullable, just empty
-        };
-        addRelation(relations, outputColumnsByTable, reverseRelation);
-      }
+    const columns = new Set<string>();
+    for (const column of table.columns) {
+      if (columns.has(column.name))
+        throw new DuplicateColumnNameError(
+          `Table "${tableName}" has duplicate column descriptor "${column.name}".`,
+        );
+      columns.add(column.name);
+    }
+    result.set(tableName, []);
+    for (const name of Object.keys(table.relations ?? {})) {
+      if (
+        !name ||
+        ["__proto__", "constructor", "prototype"].includes(name) ||
+        name.startsWith("$") ||
+        name === "id" ||
+        columns.has(name)
+      )
+        throw new AmbiguousRelationNameError(
+          `Relationship "${tableName}.${name}" collides with a stored/public output column.`,
+        );
     }
   }
-
-  return relations;
+  for (const [tableName, table] of Object.entries(schema)) {
+    for (const [name, declaration] of Object.entries(table.relations ?? {})) {
+      assertRelationshipDeclaration(declaration, `${tableName}.${name}`);
+      if (!Object.hasOwn(schema, declaration.table))
+        throw new Error(
+          `Relationship "${tableName}.${name}" references unknown table "${declaration.table}".`,
+        );
+      const forward =
+        declaration.kind === "forward"
+          ? declaration
+          : schema[declaration.table]!.relations?.[declaration.relation];
+      if (!forward || forward.kind !== "forward")
+        throw new Error(
+          `Reverse relationship "${tableName}.${name}" must reference a named forward relation on "${declaration.table}".`,
+        );
+      if (declaration.kind === "reverse" && forward.table !== tableName)
+        throw new Error(
+          `Reverse relationship "${tableName}.${name}" references a forward relation targeting "${forward.table}", not "${tableName}".`,
+        );
+      const source = declaration.kind === "forward" ? table : schema[declaration.table]!;
+      const column = source.columns.find((c) => c.name === forward.column);
+      if (!column)
+        throw new Error(
+          `Relationship "${tableName}.${name}" references unknown column "${forward.column}".`,
+        );
+      const array =
+        column.column_type.type === "Array" && column.column_type.element.type === "Uuid";
+      if (column.column_type.type !== "Uuid" && !array)
+        throw new Error(
+          `Relationship "${tableName}.${name}" requires UUID or UUID[] column "${forward.column}".`,
+        );
+      if (column.references && column.references !== forward.table)
+        throw new Error(
+          `Relationship "${tableName}.${name}" conflicts with column reference target "${column.references}".`,
+        );
+      result.get(tableName)!.push({
+        name,
+        type: declaration.kind,
+        fromTable: tableName,
+        toTable: declaration.table,
+        fromColumn: declaration.kind === "forward" ? forward.column : "id",
+        toColumn: declaration.kind === "forward" ? "id" : forward.column,
+        isArray: declaration.kind === "reverse" || array,
+        nullable: declaration.kind === "forward" && column.nullable,
+      });
+    }
+  }
+  return result;
 }

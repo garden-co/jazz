@@ -1,4 +1,6 @@
+import { isProvisionalAccount } from "../accounts/enrollment.js";
 import type { JazzSession } from "./state.js";
+import { createListeners, toError } from "../runtime/util.js";
 
 /** A stable provider session identifier, never a JWT. Pending means initial hydration. */
 export interface AuthProviderState {
@@ -25,7 +27,10 @@ export interface AuthProviderConnection {
 }
 const owners = new WeakMap<object, AuthProviderConnection>();
 const releases = new WeakMap<object, Promise<void>>();
-const asError = (cause: unknown) => (cause instanceof Error ? cause : new Error(String(cause)));
+/** @internal Whether an auth provider connection currently drives this session's logins. */
+export function hasAuthProviderConnection(session: object): boolean {
+  return owners.has(session);
+}
 
 /** Reconcile a provider with an externally owned Jazz session.
  * Signup, login and restoration atomically login-or-register. For linking an
@@ -48,17 +53,35 @@ export function connectAuthProvider<Client>(
   let running: Promise<void> | undefined;
   let signOut: (() => unknown) | undefined;
   let failure: Error | undefined;
-  const listeners = new Set<() => void>();
+  /** The retained account an in-flight admission is revalidating in place. */
+  let revalidating: object | undefined;
+  const listeners = createListeners();
   function publish() {
     if (disposed) return;
     const current = session.getSnapshot();
     const error = failure ?? desired.error ?? current.error;
-    const ready =
+    // A retained account opens before the provider has hydrated. Keep it
+    // usable while the provider hydrates and while its first admission
+    // revalidates it in place; a signed-out provider or a different identity
+    // replaces it through an ordinary transition instead.
+    const provisional =
       !signOut &&
-      !desired.isPending &&
       !error &&
-      admitted === desired.key &&
-      (desired.key === null ? current.status === "signed-out" : current.status === "ready");
+      current.status === "ready" &&
+      current.account !== undefined &&
+      (desired.isPending
+        ? isProvisionalAccount(current.account)
+        : desired.key !== null &&
+          !!running &&
+          attempted === desired.key &&
+          revalidating === current.account);
+    const ready =
+      provisional ||
+      (!signOut &&
+        !desired.isPending &&
+        !error &&
+        admitted === desired.key &&
+        (desired.key === null ? current.status === "signed-out" : current.status === "ready"));
     const isPending = !!desired.isPending || !!running || (!error && admitted !== desired.key);
     if (
       snapshot.key === desired.key &&
@@ -68,7 +91,7 @@ export function connectAuthProvider<Client>(
     )
       return;
     snapshot = { key: desired.key, ready, isPending, error };
-    for (const listener of [...listeners]) listener();
+    listeners.notify();
   }
   function reconcile(): Promise<void> {
     if (disposed || desired.isPending || desired.error || signOut) {
@@ -85,6 +108,14 @@ export function connectAuthProvider<Client>(
     attempted = key;
     admitted = undefined;
     failure = undefined;
+    const opened = session.getSnapshot();
+    revalidating =
+      key !== null &&
+      opened.status === "ready" &&
+      opened.account !== undefined &&
+      isProvisionalAccount(opened.account)
+        ? opened.account
+        : undefined;
     let established = false;
     const operation = Promise.resolve().then(async () => {
       await predecessor;
@@ -117,11 +148,12 @@ export function connectAuthProvider<Client>(
     });
     const task = operation
       .catch((cause) => {
-        if (!disposed && token === generation) failure = asError(cause);
+        if (!disposed && token === generation) failure = toError(cause);
       })
       .finally(() => {
         if (running !== task) return;
         running = undefined;
+        revalidating = undefined;
         publish();
         if (!disposed && token !== generation) void reconcile();
       });
@@ -132,12 +164,7 @@ export function connectAuthProvider<Client>(
   const unsubscribe = session.subscribe(publish);
   const connection: AuthProviderConnection = {
     getSnapshot: () => snapshot,
-    subscribe(listener) {
-      listeners.add(listener);
-      return () => {
-        listeners.delete(listener);
-      };
-    },
+    subscribe: listeners.subscribe,
     update(next) {
       if (disposed) return;
       if (desired.key !== next.key || !!desired.isPending !== !!next.isPending) {
@@ -191,7 +218,7 @@ export function connectAuthProvider<Client>(
       });
       running = operation
         .catch((cause) => {
-          failure = asError(cause);
+          failure = toError(cause);
         })
         .finally(() => {
           running = undefined;

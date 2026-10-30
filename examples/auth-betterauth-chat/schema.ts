@@ -1,17 +1,21 @@
 import { schema as s } from "jazz-tools";
 import { schema as betterauthSchema } from "./schema-better-auth/schema";
+import { migrations } from "./migrations";
 
 const schema = {
   ...betterauthSchema,
-  messages: s.table({
-    author_name: s.string(),
-    chat_id: s.string(),
-    text: s.string(),
-    sent_at: s.timestamp(),
-  }),
+  messages: s.table(
+    {
+      author_name: s.string(),
+      chat_id: s.string(),
+      text: s.string(),
+      sent_at: s.timestamp(),
+    },
+    {},
+  ),
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema);
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
 
 export type Message = s.RowOf<typeof app.messages>;

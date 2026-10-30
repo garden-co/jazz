@@ -101,13 +101,13 @@ Invariant digest:
 - `INV-QUERY-10`: Include missing-target semantics MUST be local view/API behavior: `JoinMode::Inner` drops parents with unresolvable include targets, `JoinMode::Holes` keeps them, and `require_includes` tightens holes mode by requiring include matches without broadening payload material; sync MUST NOT drop readable parents solely because included targets are absent.
 - `INV-QUERY-11`: Local/unsettled query reads MUST return rows complete only relative to node-local visible-current knowledge.
 - `INV-QUERY-12`: Settled query reads on a subscriber MUST be answerable from the subscription's settled subscription result set; unresolvable result-set entries are an invariant violation rather than a degraded answer.
-- `INV-QUERY-13`: `tx_query` inside an open exclusive transaction MUST record a binding-sensitive `PredicateRead { shape_id, shape, binding_id, binding_values }`.
-- `INV-QUERY-14`: Exclusive predicate validation MUST reject an exclusive transaction when the shape/binding output set changed between `base_snapshot.global_base` and validation time, and MUST ignore irrelevant changes outside the shape.
+- `INV-QUERY-13`: `tx_query` inside an open serializable transaction MUST record a binding-sensitive `PredicateRead { shape_id, shape, binding_id, binding_values }`.
+- `INV-QUERY-14`: Serializable predicate validation MUST reject a serializable transaction when the shape/binding output set changed between `base_snapshot.global_base` and validation time, and MUST ignore irrelevant changes outside the shape.
 - `INV-QUERY-15`: Incremental query result-set updates MUST converge to the same typed result-member and program-fact state as a full rehydrate over the same committed state.
 - `INV-QUERY-16`: Same-drain result churn MUST be folded by net output-row outcome: enter-then-leave sends no stale add, leave-then-reenter replaces the old entry, and same-tx retract/assert churn sends no update.
 - `INV-QUERY-17`: When a row remains in a query result but its visible content version changes, result-set entries MUST track the new `TxId` even if projected cell values are identical.
-- `INV-QUERY-19`: Exclusive transaction view shipping MUST be view-atomic, not transport-atomic: a visible exclusive result for a maintained subscription view MUST include every exclusive version required by that view, but the `VersionBundle` MAY omit transaction versions outside that view.
-- `INV-QUERY-20`: Query payload dedup MUST be per peer across all subscriptions for complete transaction payloads: already-covered complete payloads are referenced via `peer_payload_inventory.complete_tx_payloads`, and partial bundles, including partial mergeable or exclusive bundles, MUST NOT establish complete-transaction payload coverage.
+- `INV-QUERY-19`: Serializable transaction view shipping MUST be view-atomic, not transport-atomic: a visible serializable result for a maintained subscription view MUST include every serializable version required by that view, but the `VersionBundle` MAY omit transaction versions outside that view.
+- `INV-QUERY-20`: Query payload dedup MUST be per peer across all subscriptions for complete transaction payloads: already-covered complete payloads are referenced via `peer_payload_inventory.complete_tx_payloads`, and partial bundles, including partial mergeable or serializable bundles, MUST NOT establish complete-transaction payload coverage.
 - `INV-QUERY-21`: Array subqueries are distinct from forward `Include` paths and are assembled by Groove's sole public output terminal into recursive root values. Public one-shot, subscription, and sync carriers MUST contain terminal roots or root-addressed structural edits, never a parallel relation-edge/row-batch representation. Child clauses affect only their slot unless an explicit requirement filters root membership.
 - `INV-QUERY-22`: Structured query output MUST be constructed only by the output terminal as an ordered tree. Initial hydration and resets carry complete roots; maintained changes carry stable-keyed root/path insert, update, remove, and move edits without a higher-level assembler.
 - `INV-QUERY-23`: A flat joined output occurrence MUST be identified by its ordered contributing source-row ids, not by its root row id; maintained delivery MUST address additions, removals, and replacements by that composite occurrence identity.
@@ -141,6 +141,19 @@ not a fallback to one-shot sorting. Prepared graph lowering MUST preserve the
 semantics of every accepted predicate shape and explicitly reject unsupported
 predicate shapes (`INV-LOWER-11`).
 
+Accepted non-null scalar-double predicates (`eq`, `ne`, `lt`, `lte`, `gt`,
+`gte`) MUST use numeric partial ordering, including when both operands are
+literals. Bare doubles and doubles wrapped in `Nullable(Some(...))` have the
+same comparison semantics: negative values retain numeric order and `-0.0`
+equals `+0.0`. A direct unordered comparison (a NaN operand) is false for every
+operator, including `ne`. Fully resolved constant `Not` and `Not(In)` predicates
+MUST complement the folded boolean result, so negating an unordered constant
+comparison is true rather than another false comparison with an inverted
+operator. This does not change row-dependent NaN or SQL-null negation semantics.
+The scalar predicate rule does not change structural literal identity
+(`Eq`/`Hash`/`Ord`), canonical raw-bit encodings, null semantics, or comparisons
+of composite values.
+
 The engine-owned `RowUuid` is distinct from a declared `id` user column. Its
 public query spelling is intentionally not standardized yet; see the linked
 open question below rather than treating any current partial alias as API.
@@ -158,7 +171,7 @@ universal `_id` contract from support in an individual query form.
 **Implementation status (2026-07-27).** Parameterized `!=` predicates are
 accepted for maintained subscriptions; the behavior is covered by
 `maintained_subscription_view_ne_param_stays_maintained` in
-`crates/jazz/src/peer.rs`.
+`crates/jazz/layers/node/src/peer.rs`.
 
 An `array_subquery` names an output relation (`column_name`), an inner table,
 and a correlation from a parent-scope column to an inner-table column. It may
@@ -181,6 +194,12 @@ whose record is publicly returned. Flat joined output is a separate target AST
 form, described in §6.4.1. Conflating these two forms would make policy
 traversal accidentally promise a public tuple shape.
 
+An explicit source-column/target-column equality may also constrain membership
+through compatible non-reference columns, such as two text columns.
+This remains an existential join: matching joined rows do not produce
+public tuples. UUID and array reference traversals retain their declared-FK
+validation, and source-lookup traversals retain their existing reference rules.
+
 ### 6.1.1 Membership and containment filters
 
 Membership and containment semantics are core-owned query semantics. Binding
@@ -202,10 +221,20 @@ Supported matrix:
 | Array<T>          | Membership in a list of whole-array values.                                                               | Element membership with a needle of type `T`; this includes arrays of numbers, booleans, UUID/reference values, enums, timestamps, and text. |
 
 Invalid operator/type combinations must be rejected before execution with a
-clear type error. In particular, `contains` on a scalar non-text column is never
-interpreted as stringification, and `in` candidates (including parameters) must
-match the column's whole-value type except for the narrow compatibility
-coercions listed above. Integer literals are the one scalar compatibility rule:
+clear type error. For a supported text or array `contains` haystack and a known
+mismatched needle, validation MUST report the expected and actual needle types:
+expected is `String` for text or the declared array member type (including
+member nullability), while actual preserves operand nullability. Outer
+haystack nullability is ignored only when selecting text/array semantics.
+When the opposite operand supplies enough type information, validation MUST
+infer an unknown `Operand::Param`'s type. Claims are not parameter bindings:
+statically known claim types participate in normal checking, while provider or
+session claims without a declared static type MUST remain dynamically typed
+until execution.
+`contains` on a scalar non-text column is never interpreted as stringification,
+and `in` candidates (including parameters) must match the column's whole-value
+type except for the narrow compatibility coercions listed above. Integer
+literals are the one scalar compatibility rule:
 for equality, ordering, and `in`, an Integer (`I32`) literal is widened when
 compared with a BigInt (`I64`) column, and a BigInt literal is narrowed for an
 Integer column only when its value is representable as `I32`. This normalization
@@ -217,6 +246,14 @@ a singleton array or a `contains` predicate. Compatibility coercions may recurse
 into an array-valued literal only when they preserve that array shape. Any
 broader literal-vs-column coercion needs an explicit spec decision before
 implementation.
+
+For equality comparisons (`eq`/`ne`), an empty array literal may be compared
+directly with a column whose schema-resolved type is `Array<T>` after removing
+its outer nullability wrapper, if present, in either operand order. This is a
+validation-only exception for the untyped empty literal: it does not apply
+through an inferred parameter, and it does not rewrite either operand or its
+canonical bytes. Nonempty literals must satisfy the ordinary element-type
+compatibility rules above. Ordered comparisons remain invalid for arrays.
 
 `in` is whole-value membership and `contains` is single-element membership;
 neither is an array subset/superset operator. A scalar `in` candidate for an
@@ -253,6 +290,42 @@ validation. Its identity is content-addressed independently of the shape:
 with values encoded in parameter-name order. Binding rejects missing, unknown,
 or type-mismatched params (`INV-QUERY-3`).
 
+Parameter types are finalised before type-sensitive predicate checks. Direct
+column comparisons in either operand order anchor a parameter's complete type.
+The six binary comparisons (`eq`, `ne`, `gt`, `gte`, `lt`, `lte`) also propagate
+that type between independently valued parameter names when their complete
+underlying descriptors match exactly. Across an anchored chain or cycle, any
+required occurrence makes the connected exact-base parameters required;
+nullable-only groups retain `Nullable(T)`. Only one outer nullable wrapper is
+removed for this relationship: nested member types, record layouts and enum
+identities remain part of the descriptor. Unanchored groups and incompatible
+types are rejected rather than guessed. Ordered comparisons still require an
+orderable type; type propagation does not substitute or equate binding values.
+
+For example, comparing `p` with nullable UUID ownership, comparing `p` with `q`,
+and comparing `p` with required UUID membership requires bare UUID bindings for
+both names, in every occurrence order and after canonical query revalidation.
+Nullable carriers, including `Nullable(None)`, are rejected for both holes.
+A nullable-only group accepts nullable UUID carriers. Adding `IsNull(p)` to the
+mixed group rejects the query consistently: nullness is checked against the
+final domain, not a provisional nullable type.
+
+Preparation retains operator-specific inference: `in` relates whole values
+with directional compatibility, while `contains` infers a String needle from
+a String haystack or an exact member needle from an Array haystack. A required
+member supplies a required needle constraint even when another comparison uses
+a nullable column; an explicitly nullable member still rejects a separately
+required needle. A typed needle can infer an otherwise unanchored Array haystack
+only after available haystack anchors settle. Constructor members remain
+dependent on their final needle types. Typed literals provide fallback
+inference; checked integer-literal
+normalisation, overflow rejection and the direct-column empty-array exception
+above remain unchanged. An empty `in` eliminates its unused parameter hole.
+Broad compatibility, such as enum/U8 comparisons, is not a transitive type
+relationship. UNION arms still validate independently and merge parameter
+domains only when their complete types are equal. This is bounded anchored
+inference, not generic or polymorphic parameter solving.
+
 Claims are a separate input channel. `Operand::Claim` is _not_
 client-supplied binding data: claim bindings are injected server-side from the
 subscriber's authenticated identity and admission/session claims by policy
@@ -262,6 +335,14 @@ provenance; accountless readers have no ownership authority. Provider claims
 such as `sub` and `user_id` retain their admission-defined values. Additional claim names are product/admission-defined
 and must come from the trusted admission/session context, never from ordinary
 query bindings.
+
+Provider claim paths may traverse nested JSON object fields. Path segments are
+literal keys: `["claims", "org", "slug"]` differs from
+`["claims", "org.slug"]`. Traversal through a missing key or a non-object value
+is unbound and denies the corresponding predicate, including under negation.
+An explicit null leaf remains bound: it matches `IS NULL`, while a missing leaf
+does not. Arrays remain values for containment/membership; object traversal does
+not interpret numeric segments as array indexes.
 
 #### Prepared claim parameters
 
@@ -465,7 +546,7 @@ join sees the accumulated wide left row, and the final terminal input carries
 every source needed for the tuple and its identity. The contribution lowerer
 used for include closure intentionally does something narrower: it projects a
 join to `RIGHT_JOIN_PREFIX` only
-(`crates/jazz/src/node/query_engine/lowering.rs:5199-5251`). That projection is
+(`crates/jazz/layers/engine/src/query_engine/lowering.rs:5199-5251`). That projection is
 correct for a source-membership fact, but MUST NOT be reused for flat output.
 
 This is achievable with the existing Groove join representation. An inner join
@@ -479,7 +560,7 @@ create an arrangement-key arity obstacle. They do increase arrangement value and
 terminal-payload bytes, which are ordinary descriptor/payload costs, not a
 reason to introduce a second terminal. The source resolver already supplies the
 policy-filtered projected source boundary before query composition
-(`crates/jazz/src/node/query_eval.rs:537-1066`, `2036-2184`); wide lowering
+(`crates/jazz/layers/node/src/node/query_eval.rs:537-1066`, `2036-2184`); wide lowering
 preserves that ordering.
 
 The one-shot public Rust facade currently returns `Vec<(ObjectId, Vec<Value>)>`
@@ -535,15 +616,20 @@ source-id vector above. A `UNION ALL` relation arm additionally contributes its
 stable normalized arm label immediately before that arm's source-row id. This
 typed `(arm-label, row-id)` carrier is retained below the public projection and
 is used by Root grouping, maintained membership, reset snapshots, and
-`ResultKey`. Every ResultKey uses one complete version-1 typed encoding:
-`1 | root:16 | joined_count:u32be | joined:16* | arm_count:u32be |
-(position:u32be | label_length:u32be | label:utf8)*`, where source position
-zero is the root and joined sources are positions one through `joined_count`.
-Ordinary results carry
-zero joined rows and arms; ordinary joins carry zero arms; union occurrences
-carry their ordered arm records. Empty, duplicate-position, or out-of-range
-discriminators are malformed. The former concatenated-UUID and tag-2 encodings
-are unreleased superseded formats and MUST be rejected.
+`ResultKey`. All ResultKeys use one encoding:
+`2 | root:16 | joined_count:u32be | joined:16* | arm_count:u32be |
+(position:u32be | label_length:u32be | label:utf8)* |
+(has_transaction:u8 [tx_time:u64be | tx_node:16]) × (1 + joined_count)`, where
+source position zero is the root and joined sources are positions one through
+`joined_count`. There is one transaction flag per source position, written in
+position order (root first, then each joined source). A flag is 0 for a current
+source and 1 for a history source version, which is then followed by that
+version's `tx_time` and `tx_node`; the root and any joined source may each be
+history versions. Other flag values are malformed.
+Ordinary results carry zero joined rows and arms; ordinary joins carry zero
+arms; union occurrences carry their ordered arm records. Empty,
+duplicate-position, or out-of-range discriminators are malformed. Previous
+encodings MUST be rejected; Rust and TypeScript migrate together.
 Nested non-recursive unions compose their stable semantic arm labels into one
 typed path component; sibling insertion or reordering therefore does not rekey
 unchanged arms. Sibling arm labels MUST be non-empty and unique within their
@@ -557,11 +643,20 @@ labels supplied by their normalized source. A builder without such declared
 identity MUST reject that shape; it MUST NOT invent an ordinal merely to retain
 duplicate derivations.
 
+A history root's optional transaction uses the full packed HLC and originating
+node UUID, with no node-local aliases. History joins and union arms remain
+unsupported. `fixtures/result-key.json` pins a history key and the binding golden
+fixture covers current and union keys. These ephemeral keys are neither
+persisted nor sent by the active peer protocol, so no backward-compatible
+decoder or storage migration is required.
+
 Public subscription transports MUST carry the opaque versioned `ResultKey`
 sidecar aligned with added, updated, and removed rows. They MUST validate the
-alignment and key encoding before applying a delta. Serializing the legacy
-two-field `OutputOccurrenceId` alone is insufficient because its byte-compatible
-form intentionally does not carry typed union-arm discriminators.
+alignment and key encoding before applying a delta. Direct serialization of
+`OutputOccurrenceId` MUST delegate to `ResultKey` and preserve union-arm and
+history-version discriminators. There is no separate field-based occurrence
+encoding or typed-row member variant. The retired two-field representation is
+not supported.
 
 Maintained flat-join additions, removals, updates, reset snapshots, and the
 subscriber cache MUST be keyed by `OutputOccurrenceId`; the root `ObjectId`
@@ -597,19 +692,19 @@ stable, and a descriptor does not depend on runtime data.
 
 The existing public `JoinSpec { table, alias, on }` advertises aliases and an
 arbitrary equality from the accumulated left result to the newly joined table
-(`crates/jazz/src/tools/public_api/query.rs:196-213`). The core `JoinVia` AST is
+(`crates/jazz/layers/model/src/model/public_api/query.rs:196-213`). The core `JoinVia` AST is
 not that form: it has no alias or accumulated-left scope, and only represents a
 root- or immediately-nested reference/junction traversal with a target column,
 optional source column/lookup, correlations, filters, and nested joins
-(`crates/jazz/src/query.rs:2045-2071`; validation at
-`crates/jazz/src/query.rs:2713-2822`). **Recommendation:** extend the core with
+(`crates/jazz/layers/model/src/query.rs:2045-2071`; validation at
+`crates/jazz/layers/model/src/query.rs:2713-2822`). **Recommendation:** extend the core with
 a separately named flat-join AST and lower the public `JoinSpec` into it; do not
 try to encode aliases or arbitrary accumulated joins in `JoinVia`, and do not
 leave the public builder advertising a shape that the client rejects. This is a
 small, explicit surface addition rather than a policy-model change.
 
 `result_element_index` is not part of core `Query`
-(`crates/jazz/src/query.rs:24-61`), and MUST be removed from the
+(`crates/jazz/layers/model/src/query.rs:24-61`), and MUST be removed from the
 public flat-join surface. It is fully expressible as a qualified projection:
 select the desired source's qualified columns (including its explicit row-id
 field where needed), or make that table the query root when its `ObjectId` is the
@@ -643,7 +738,7 @@ materialize root `CurrentRow`s`, and expand-mode occurrence-addressed public
 delivery is not complete. Collect-mode structured output already uses the sole
 Groove terminal and typed terminal operations. The ordinary current
 source resolver already applies source authorization and schema projection
-before lowered query composition (`crates/jazz/src/node/query_eval.rs:537-1066`,
+before lowered query composition (`crates/jazz/layers/node/src/node/query_eval.rs:537-1066`,
 `2036-2184`); this target relies on that existing source boundary.
 
 ### 6.4.2 Uncorrelated policy existence
@@ -669,8 +764,11 @@ produces `[rowB, rowB]`, while a missing B produces `[rowA]`.
 
 Explicit `order_by` overrides the default primary ordering for the result boundary
 where it appears. Ordered row-valued results remain total and replay-stable:
-after the user-declared order terms, ties are broken by ascending row id unless
-the query surface later exposes an explicit, stable tie policy. Child-local
+after the user-declared order terms, ties are broken by row id in the direction
+of the last declared term (ascending when that term is ascending, descending when
+it is descending) unless the query surface later exposes an explicit, stable tie
+policy. Following the last term's direction lets one declared index, which ends
+in the row id, supply the whole order in either scan direction. Child-local
 `order_by` overrides only that child relation's ordering and does not reorder
 parents or sibling relation payloads. The row id used for relation defaults and explicit ordering ties
 is the child source row id, and its ordering is independently evaluated within
@@ -701,7 +799,9 @@ key encoding where that type is a valid key part (groove ch. 2). A grouped query
 whose group key contains a type without a specified stable order must be rejected
 until that type's ordering is specified. If an explicit `order_by` is applied to
 grouped output and multiple groups tie on the user order terms, the group key is
-the stable tie-breaker.
+the stable tie-breaker. Opaque synthetic row and occurrence identities identify
+groups but do not define their order. Apply this logical ordering before the
+grouped output's `offset` and `limit`.
 
 Ordering is part of the delivered result, not a presentation hint. Initial
 snapshots, reset-result-set `ViewUpdate`s, maintained subscription deltas, and
@@ -828,14 +928,21 @@ resolved read identity from the semantic read view plus tier; callers do not
 supply the key as independent identity. The wire vocabulary is `RegisterShape`,
 `Subscribe`, `Unsubscribe`, and `ViewUpdate` (ch. 8).
 
-The permanent `JRVK` V1 preimage for that resolved identity is `magic "JRVK" |
-version 1 | tier:u8 | propagate_upstream:u8 | binding_source:u8 | source`. A
+The `JRVK` V2 preimage for that resolved identity is `magic "JRVK" |
+version 2 | tier:u8 | binding_source:u8 | source`. A
 snapshot source encodes `owner:uuid | global_base:u64le | local_base:u64le |
 dot_count:u32le | dots`, where every dot is `tx_time:u64le | node:uuid`. Dots
 are a set: the encoder sorts `TxId` by `(time, node)` and removes duplicates
 before writing `dot_count` and the dot sequence. Thus equivalent snapshot
 frontiers yield the same UUIDv5 read-view key regardless of observation order
 or repeated dots. No generic Rust serializer is part of this durable identity.
+
+A read view with `include_deleted` set uses the `JRVK` V3 preimage
+`magic "JRVK" | version 3 | tier:u8 | binding_source:u8 | source | 0x01`.
+The V3 key exists only for include-deleted reads; every other read view keeps
+its V2 preimage and therefore its existing durable key. Include-deleted and
+ordinary subscriptions of the same shape, binding and source thus never share
+coverage or a settled result.
 
 The serving authority maintains flat result members, association state, and
 version witnesses for each program instance, then its output terminal renders
@@ -851,12 +958,12 @@ state as a reset `ViewUpdate` over the same committed history (`INV-QUERY-15`).
 Reset `ViewUpdate`s retain
 per-peer complete payload coverage (`INV-QUERY-7`). Payload dedup is per peer for
 complete transaction payloads: a complete payload already shipped to a peer is
-emitted at most once per update (`INV-QUERY-20`). Partial payloads, including exclusive
+emitted at most once per update (`INV-QUERY-20`). Partial payloads, including serializable
 payloads, do not establish complete-transaction payload coverage unless the peer
-has received all versions for the transaction. Exclusive `ViewUpdate` visibility
-is view-atomic: a bundle may carry the exclusive versions needed for the
+has received all versions for the transaction. Serializable `ViewUpdate` visibility
+is view-atomic: a bundle may carry the serializable versions needed for the
 maintained subscription view, and result members for that view are emitted only
-when that view's exclusive payload is complete (`INV-QUERY-19`, ch. 3).
+when that view's serializable payload is complete (`INV-QUERY-19`, ch. 3).
 
 A subscription MUST remain active until it is explicitly removed; it MUST NOT
 expire solely because a TTL elapses. Registration and re-registration are
@@ -881,18 +988,43 @@ rows complete only relative to the node's own visible-current knowledge
 (`INV-QUERY-11`). A settled read on a subscriber is answered from the
 subscription's settled subscription result set; an unresolvable result-set entry is an
 invariant violation, not a degraded answer (`INV-QUERY-12`).
-An include-deleted one-shot read widens only the root current-row source: deleted
-root rows may be returned and marked deleted, while joins, reachability access
-tables, reachability edge tables, and include payloads continue to use ordinary
-visible-current witnesses.
+An include-deleted read, one-shot or subscription, widens only the root
+current-row source: deleted root rows may be returned, while joins,
+reachability access tables, reachability edge tables, include payloads and
+policy dependencies continue to use ordinary visible-current witnesses. A
+one-shot read marks returned deleted rows deleted. A subscription carries the
+flag in its `ReadViewSpec` (§6.5), so the authority admits deleted root rows
+under the include-deleted read policy; the covered input carries the
+authority's deletion bit, which keeps deleted rows out of the subscriber's
+visible-current join and include witnesses, but published subscription rows
+are not marked deleted. Subscription deletion state is exposed through the
+`$deletedAt`/`$deletedBy` columns instead (below). Deleting, restoring or
+revoking access to a row updates the subscription like any other change: a
+restoration replaces the deleted row with the live one, and a row whose read
+policy no longer holds, including because its granting row was deleted, leaves
+the result. Include-deleted reads, one-shot or live, accept the current
+source and branch views; subscriptions and transaction reads, which register
+as snapshot subscriptions, accept snapshots too. A replica keeps a live
+branch-view read in its view upstream (ch. 8 §8.4, ch. 11 §11.5). History
+queries keep their own branch selection.
 
-Inside an open exclusive transaction, `tx_query` records a binding-sensitive
+Inside an open serializable transaction, `tx_query` records a binding-sensitive
 `PredicateRead` (`INV-QUERY-13`). The later phantom check (ch. 3,
 `INV-QUERY-14`) compares the shape+binding output `(RowUuid, TxId)` set at
 `base_snapshot.global_base` against now.
 
 Allowed "magic" select columns are the provenance columns `$createdAt`,
-`$createdBy`, `$updatedAt`, `$updatedBy`. Alpha-compatible permission
+`$createdBy`, `$updatedAt`, `$updatedBy`, and the deletion columns `$deletedAt`
+and `$deletedBy`, with the author paths `$createdBy.*`, `$updatedBy.*` and
+`$deletedBy.*`. The deletion columns require `includeDeleted` and are rejected
+without it; they are nullable (`Nullable(U64)` physical milliseconds and
+`Nullable(RowAuthor)`) and are `NULL` for live and restored rows. A deleted
+row's values are the current deletion winner's authored `$updatedAt` and
+`$updatedBy`, not its acceptance time. Every history version of a row carries
+the same current deletion values, so a restoration clears them on all
+versions. They may be selected, filtered, and ordered, but only on the root of
+a plain query: flat joins reject them, because joined sources read only live
+rows. Alpha-compatible permission
 introspection fields such as `$canRead` are not
 ordinary stored columns and are not executable query columns. Permission
 introspection is exposed through standalone dry-run APIs (ch. 7, ch. 13), so
@@ -913,7 +1045,7 @@ Default result ordering is a conformance requirement for every public query
 surface. The test plan below records additional intended coverage.
 
 - Strengthen the maintained-vs-one-shot differential oracle command
-  `JAZZ_SEED_COUNT=300 cargo test -p jazz m3_maintained_one_shot_differential_oracle`
+  `cargo test -p jazz --test maintained_differential maintained_one_shot_differential_oracle -- --ignored`
   to compare the canonical `ResultTree` specified in appendix D, rather than a
   root-id set. The oracle should keep using public query shapes/builders and
   compare the maintained stream's reduced result to the one-shot result at each
@@ -930,12 +1062,11 @@ surface. The test plan below records additional intended coverage.
   whose input rows are inserted in non-key order. These cases should assert the
   lexicographic group-key order and explicit `orderBy` override/tie behavior.
 - Add a facade-level canary next to
-  `crates/jazz/tests/incremental_delivery_canary.rs` for a large unordered
+  `crates/jazz/tests/include_live.rs` for a large unordered
   relation/include result. It should subscribe through the public `Db` API,
   insert one child whose id belongs in the middle of the child relation, assert
   the complete touched-parent replacement's order, and pin the bounded
-  allocation/byte expectation for the collector exception to
-  `groove/SPEC/INVARIANTS.md::INV-INC-1`.
+  allocation/byte expectation for the collector exception to `INV-PERF-9`.
 - Keep Rust tests aligned with
   `crates/jazz/TESTING_GUIDELINES.md`: prefer black-box integration tests
   through `Db`, `JazzClient`, `TestingClient`, public schema/permission builders,

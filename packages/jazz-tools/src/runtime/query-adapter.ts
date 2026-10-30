@@ -1,3 +1,4 @@
+import { resolveQueryTable } from "./history-relation.js";
 /**
  * Translate public QueryBuilder JSON into the runtime query payload.
  *
@@ -41,7 +42,7 @@ function relationColumnsForTable(
   scope: string,
   schema: WasmSchema,
 ): RelProjectColumn[] {
-  const tableSchema = schema[table];
+  const tableSchema = resolveQueryTable(schema, table);
   if (!tableSchema) {
     throw new Error(`Unknown table "${table}" in relation projection.`);
   }
@@ -62,7 +63,7 @@ function getColumnType(schema: WasmSchema, table: string, column: string): Colum
   if (column === "id") return { type: "Uuid" };
   const magicType = magicColumnType(column);
   if (magicType) return magicType;
-  const tableSchema = schema[table];
+  const tableSchema = resolveQueryTable(schema, table);
   if (!tableSchema) return undefined;
   const col = tableSchema.columns.find((c) => c.name === column);
   return col?.column_type;
@@ -385,6 +386,17 @@ function conditionToRelPredicate(
   if (!columnType) {
     throw new Error(`Unknown column "${column}" in table "${table}"`);
   }
+  const isNullValue = cond.value === undefined ? true : cond.value;
+  if (cond.op === "isNull") {
+    if (typeof isNullValue !== "boolean") {
+      throw new Error('"isNull" operator requires a boolean value.');
+    }
+    return isNullValue ? { IsNull: { column: columnRef } } : { IsNotNull: { column: columnRef } };
+  }
+  if (cond.value === null) {
+    if (cond.op === "eq") return { IsNull: { column: columnRef } };
+    if (cond.op === "ne") return { IsNotNull: { column: columnRef } };
+  }
   if (columnType.type === "Row" && magicColumnType(column)) {
     if (cond.op !== "eq" && cond.op !== "ne") {
       throw new Error(`Structured author column "${column}" only supports eq/ne operators.`);
@@ -401,7 +413,8 @@ function conditionToRelPredicate(
       }
       return value as Record<string, unknown>;
     };
-    const wholeAuthor = column === "$createdBy" || column === "$updatedBy";
+    const wholeAuthor =
+      column === "$createdBy" || column === "$updatedBy" || column === "$deletedBy";
     const author = wholeAuthor ? object(cond.value, ["account", "identity"]) : undefined;
     const identity = object(author ? author.identity : cond.value, ["issuer", "subject"]);
     if (
@@ -501,7 +514,6 @@ function conditionToRelPredicate(
       : {
           Literal: toRuntimeValue(cond.value, valueTypeForCondition),
         };
-  const isNullValue = cond.value === undefined ? true : cond.value;
   if (columnType.type === "Bytea" && ["gt", "gte", "lt", "lte"].includes(cond.op)) {
     throw new Error(`BYTEA column "${column}" only supports eq/ne operators.`);
   }
@@ -513,14 +525,8 @@ function conditionToRelPredicate(
   }
   switch (cond.op) {
     case "eq":
-      if (cond.value === null) {
-        return { IsNull: { column: columnRef } };
-      }
       return { Cmp: { left: columnRef, op: "Eq", right: rightLiteral } };
     case "ne":
-      if (cond.value === null) {
-        return { IsNotNull: { column: columnRef } };
-      }
       return {
         Cmp: {
           left: columnRef,
@@ -560,11 +566,6 @@ function conditionToRelPredicate(
           right: rightLiteral,
         },
       };
-    case "isNull":
-      if (typeof isNullValue !== "boolean") {
-        throw new Error('"isNull" operator requires a boolean value.');
-      }
-      return isNullValue ? { IsNull: { column: columnRef } } : { IsNotNull: { column: columnRef } };
     case "contains":
       return { Contains: { left: columnRef, right: rightLiteral } };
     default:
@@ -768,10 +769,11 @@ function translateBuiltRelationToRelExpr(
   relation: BuiltRelation,
   relations: Map<string, Relation[]>,
   schema: WasmSchema,
+  unionArm = false,
 ): { expr: RelExpr; outputTable: string } {
   if (relation.union) {
     const inputs = relation.union.inputs.map((arm) =>
-      translateBuiltRelationToRelExpr(arm.input, relations, schema),
+      translateBuiltRelationToRelExpr(arm.input, relations, schema, true),
     );
     const first = inputs[0];
     if (!first) {
@@ -781,14 +783,20 @@ function translateBuiltRelationToRelExpr(
       throw new Error("union(...) requires all seed relations to output the same table.");
     }
     return {
-      expr: {
-        Union: {
-          inputs: relation.union.inputs.map((arm, index) => ({
-            label: arm.label,
-            input: inputs[index]!.expr,
-          })),
+      expr: applyRelationWindow(
+        {
+          Union: {
+            inputs: relation.union.inputs.map((arm, index) => ({
+              label: arm.label,
+              input: inputs[index]!.expr,
+            })),
+          },
         },
-      },
+        relation,
+        first.outputTable,
+        first.outputTable,
+        schema,
+      ),
       outputTable: first.outputTable,
     };
   }
@@ -816,7 +824,43 @@ function translateBuiltRelationToRelExpr(
   expr = lowerHopsToRelExpr(expr, outputTable, hops, relations, schema);
   outputTable = resolveHopsOutputTable(outputTable, hops, relations);
 
+  const outputScope = hops.length ? `__hop_${hops.length - 1}` : outputTable;
+  if (unionArm && hops.length === 0 && !relation.gather) {
+    expr = {
+      Project: { input: expr, columns: relationColumnsForTable(outputTable, outputScope, schema) },
+    };
+  }
+  expr = applyRelationWindow(expr, relation, outputTable, outputScope, schema);
+
   return { expr, outputTable };
+}
+
+function applyRelationWindow(
+  input: RelExpr,
+  relation: BuiltRelation,
+  table: string,
+  scope: string,
+  schema: WasmSchema,
+): RelExpr {
+  let expr = input;
+  if (relation.orderBy?.length) {
+    expr = {
+      OrderBy: {
+        input: expr,
+        terms: toRuntimeOrderBy(relation.orderBy, schema, table).map(({ column, direction }) => ({
+          column: relColumn(column, scope),
+          direction,
+        })),
+      },
+    };
+  }
+  if (relation.offset !== undefined && relation.offset > 0) {
+    expr = { Offset: { input: expr, offset: relation.offset } };
+  }
+  if (relation.limit !== undefined) {
+    expr = { Limit: { input: expr, limit: relation.limit } };
+  }
+  return expr;
 }
 
 /**
@@ -873,7 +917,7 @@ function translateBuilderToRelationIr(
   // The Rust relation facade identifies its output scope through Project. A
   // payload match can be the only relation feature, so preserve the ordinary
   // root-table result shape with an explicit identity projection in that case.
-  if (builder.hops.length === 0 && builder.gather === undefined) {
+  if (builder.hops.length === 0 && builder.gather === undefined && builder.union === undefined) {
     const columns = schema[relationTable]?.columns;
     if (!columns) throw new Error(`Unknown table "${relationTable}" in relation query.`);
     relation = {
@@ -990,27 +1034,34 @@ function toFlatConditions(
  * @param schema WasmSchema for relation analysis
  * @returns JSON string for runtime query()
  */
-export function translateQuery(builderJson: string, schema: WasmSchema): string {
-  const builder = normalizeBuiltQuery(JSON.parse(builderJson));
+export function translateQuery(
+  builderJson: string,
+  schema: WasmSchema,
+  prepared?: ReturnType<typeof normalizeBuiltQuery>,
+): string {
+  const builder = prepared ?? normalizeBuiltQuery(JSON.parse(builderJson));
   const relations = analyzeRelations(schema);
+  const translated = usesNativeRelationFeatures(builder)
+    ? translateBuilderToRelationIr(builderJson, schema)
+    : undefined;
+  const outputTable = translated?.outputTable ?? builder.table;
   const selectColumns =
-    builder.select.length > 0 ? resolveSelectedColumns(builder.table, schema, builder.select) : [];
+    builder.select.length > 0 ? resolveSelectedColumns(outputTable, schema, builder.select) : [];
   const projectedColumns = visibleSelectColumns(
     selectColumns,
     builder.partialSelect,
     schema,
-    builder.table,
+    outputTable,
   );
   const arraySubqueries = toArraySubqueries(builder.includes, builder.table, relations, schema, {
     requireIncludes: builder.requireIncludes,
   });
 
-  if (usesNativeRelationFeatures(builder)) {
-    const { relation, outputTable } = translateBuilderToRelationIr(builderJson, schema);
+  if (translated) {
     return stringifyRuntimeQuery({
       table: outputTable,
       array_subqueries: arraySubqueries,
-      relation_ir: relation,
+      relation_ir: translated.relation,
       ...(builder.includeDeleted ? { include_deleted: true } : {}),
       ...(projectedColumns ? { select_columns: projectedColumns } : {}),
     });

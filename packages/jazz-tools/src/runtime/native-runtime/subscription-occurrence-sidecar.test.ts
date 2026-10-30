@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { expect, it } from "vitest";
 import { PostcardReader, PostcardWriter, readNativeSubscriptionDelta } from "./native-codec.js";
 
@@ -27,14 +28,15 @@ function encodeSubscriptionDelta(delta: {
   writer.vec((indexWriter, index) => indexWriter.u64(index), updatedKeys.length);
   writer.vec((indexWriter, index) => indexWriter.u64(index), updatedKeys.length);
   writer.vec((indexWriter, index) => indexWriter.u64(index), removedKeys.length);
+  writer.vec((row) => row.vec(() => undefined, 0), updatedKeys.length); // updated splices
   return writer.finish();
 }
 
 it("preserves typed occurrence keys in the native subscription wire sidecar", () => {
   const typedKey = (label: string) => {
     const labelBytes = new TextEncoder().encode(label);
-    const key = new Uint8Array(1 + 16 + 4 + 16 + 4 + 4 + 4 + labelBytes.length);
-    key[0] = 1;
+    const key = new Uint8Array(1 + 16 + 4 + 16 + 4 + 4 + 4 + labelBytes.length + 2);
+    key[0] = 2;
     key.fill(1, 1, 17);
     new DataView(key.buffer).setUint32(17, 1);
     key.fill(2, 21, 37);
@@ -80,11 +82,11 @@ it("rejects malformed or misaligned subscription occurrence sidecars", () => {
     removedOccurrenceKeys: [Uint8Array.from([2, 0])],
   });
   expect(() => readNativeSubscriptionDelta(new PostcardReader(malformed))).toThrow(
-    "malformed ResultKey v1",
+    "malformed ResultKey",
   );
 
-  const zeroArm = new Uint8Array(41);
-  zeroArm[0] = 1;
+  const zeroArm = new Uint8Array(43);
+  zeroArm[0] = 2;
   zeroArm.fill(1, 1, 17);
   new DataView(zeroArm.buffer).setUint32(17, 1);
   zeroArm.fill(2, 21, 37);
@@ -96,8 +98,8 @@ it("rejects malformed or misaligned subscription occurrence sidecars", () => {
   });
   expect(() => readNativeSubscriptionDelta(new PostcardReader(aliasedV1))).not.toThrow();
 
-  const invalidUtf8 = new Uint8Array(50);
-  invalidUtf8[0] = 1;
+  const invalidUtf8 = new Uint8Array(51);
+  invalidUtf8[0] = 2;
   invalidUtf8.fill(1, 1, 17);
   new DataView(invalidUtf8.buffer).setUint32(17, 1);
   invalidUtf8.fill(2, 21, 37);
@@ -112,6 +114,50 @@ it("rejects malformed or misaligned subscription occurrence sidecars", () => {
     removedOccurrenceKeys: [invalidUtf8],
   });
   expect(() => readNativeSubscriptionDelta(new PostcardReader(malformedLabel))).toThrow(
-    "malformed ResultKey v1",
+    "malformed ResultKey",
   );
+});
+
+// Alice's Rust-produced version key must survive the native binding unchanged,
+// including HLC values above JavaScript's exact integer range.
+it("preserves versioned result keys and rejects malformed history sidecars", () => {
+  const fixture = JSON.parse(
+    readFileSync(
+      new URL("../../../../../crates/jazz/fixtures/result-key.json", import.meta.url),
+      "utf8",
+    ),
+  ) as { key: number[]; joined_key: number[] };
+  const key = Uint8Array.from(fixture.key);
+  const joined = Uint8Array.from(fixture.joined_key);
+  const earlier = key.slice();
+  earlier[33] = 254;
+  const decode = (keys: Uint8Array[]) =>
+    readNativeSubscriptionDelta(
+      new PostcardReader(
+        encodeSubscriptionDelta({
+          added: [],
+          updated: [],
+          removed: keys.map(() => ({ table: "history.todos", rowId: key.slice(1, 17) })),
+          removedOccurrenceKeys: keys,
+        }),
+      ),
+    );
+  expect(decode([joined]).removedOccurrenceKeys).toEqual([joined]);
+  expect(decode([key, earlier]).removedOccurrenceKeys).toEqual([key, earlier]);
+  const oldCurrentKey = Uint8Array.from([1, ...key.slice(1, 25)]);
+  const oldHistoryKey = Uint8Array.from([...key.slice(0, 25), ...key.slice(26)]);
+  const invalidFlag = key.slice();
+  invalidFlag[25] = 2;
+  for (const invalid of [oldCurrentKey, oldHistoryKey, invalidFlag]) {
+    expect(() => decode([invalid])).toThrow("malformed ResultKey");
+  }
+  for (let length = 0; length < key.length; length++) {
+    expect(() => decode([key.slice(0, length)])).toThrow("malformed ResultKey");
+  }
+  expect(() => decode([Uint8Array.from([...key, 0])])).toThrow("malformed ResultKey");
+  for (const offset of [17, 21]) {
+    const invalid = key.slice();
+    invalid[offset] = 1;
+    expect(() => decode([invalid])).toThrow("malformed ResultKey");
+  }
 });

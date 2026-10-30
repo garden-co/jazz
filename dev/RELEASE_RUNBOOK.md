@@ -8,7 +8,9 @@ this document or public receipts.
 
 - Triage the release milestone. Identify blockers, deferred issues and pending
   approvals; verify each included PR has independent review and passing gates.
-- Merge approved changes. Confirm Changesets refreshes the release PR from main.
+- Merge approved changes. Cut the reviewed candidate from `main` into the protected, long-lived `release`
+  branch. Confirm Changesets refreshes `changeset-release/release` targeting
+  `release`; ordinary development continues on `main`.
 - Audit changesets against the previous release: include important user-visible
   fixes, migrations and compatibility changes, with detailed commit/PR references.
   Keep announcement prose separate from the detailed package changelog.
@@ -93,7 +95,10 @@ this document or public receipts.
 - Merge the approved release PR only when ready: the publisher can trigger from
   that merge. Avoid dispatching a duplicate publish run.
 - If manual dispatch is needed, use `publish-jazz-tools-alpha.yml` on the exact
-  committed release revision with `mode=publish` and the expected source version.
+  `release` branch with `mode=publish`, `expected-sha=<exact merged version PR SHA>`
+  and `version=<expected source version>`. The workflow rejects a moved branch,
+  a different version, any other branch, or a commit that is not the merge of
+  `changeset-release/release` into `release`. Dry-runs may use feature branches.
   Check workflow inputs before running it. Never publish from a mutable working tree.
 - Watch individual jobs and inspect failure logs. Warm caches can shorten the run,
   but do not replace validation or guarantee identical artifacts.
@@ -103,12 +108,28 @@ this document or public receipts.
 - Verify every expected npm package/version, native payload, dependency and dist-tag
   using registry reads and installation. Confirm the source tag matches the exact
   released source. Build artifacts alone are not proof of npm publication.
-- Promote the verified docs and Inspector deployments.
+- Promote the verified docs deployment. The publisher stages and promotes the
+  Inspector itself; if its Inspector jobs fail, re-run the failed jobs on that
+  publisher run first, then follow the manual recovery in
+  `packages/inspector/README.md` ("Staging a release on Vercel").
 - Treat Cloud activation as two explicit operations: selecting the new catalog
   default for newly created apps, and upgrading existing eligible tenants through
   a controlled fleet rollout. Have infra confirm the exact version and image digest
   in the status API and both regions. Never include legacy or preview tenants in a
   stable fleet rollout.
+- The release go-ahead names each activation it covers: the npm publish, the
+  catalog default for new apps, the fleet rollout of existing tenants and the
+  GitHub Release. If the owner defers one, record that in the release checklist
+  with who will do it next.
+- Right after npm verification, the release coordinator opens the catalog PR that
+  makes the release the default for new apps and asks infra to start the fleet
+  rollout. The coordinator owns both until infra reports the tenant counts per
+  version; the release is not finished while eligible stable tenants remain on an
+  older version without a recorded reason.
+- With the fleet rollout, hand infra the smoke probe update: bump `jazz-tools`
+  and `jazz-napi` in `kubernetes/tests/v2-sync` (garden-co/infra) to the new
+  release, port any API changes the release requires, and redeploy the probe.
+  Probes left on an old client stop testing what adopters run.
 - Create a new ordinary tenant with the real npm release; validate/deploy schema
   and permissions and run authenticated write/read/update/delete plus
   reconnect/reopen. Delete test tenants. Check existing sync probes and rollout
@@ -127,6 +148,10 @@ this document or public receipts.
   Publish it with `prerelease=false`; do not use generated commit lists as a
   substitute for the audited changelog. Set latest deliberately for the new normal
   release rather than leaving the benchmark-fixtures release as latest.
+- Merge `release` back into `main` with a merge commit (a PR from a branch cut
+  from `main`, never squashed), as described under "Release branch lifecycle"
+  below. Without it `main` keeps stale package versions, changelogs and
+  `.changeset/pre.json`.
 - Publish the announcement only with explicit authorization, linking to release
   notes, upgrade instructions and relevant measured benchmarks.
 - Close the completed milestone after moving unresolved work to its agreed target.
@@ -153,3 +178,58 @@ not publish. `publish-jazz-tools-alpha.yml` publishes packages and creates the
 source tag. GitHub Release creation/publication is currently manual. Do not assume
 a green Changesets action or an existing tag means the packages or GitHub Release
 have been published.
+
+## Release branch lifecycle and alpha55 migration
+
+`main` remains the development branch and `.changeset/config.json` keeps
+`baseBranch: main` for ordinary development comparisons. Only pushes to `release`
+update the Changesets version PR. Manual Changesets dispatch must also select
+`release`; preview lookup uses the actual invocation ref, never the repository
+default branch. Protect `release` against direct updates, deletion and force
+pushes; require reviewed PRs and the applicable CI checks.
+
+For the alpha55 transition:
+
+1. Record the candidate SHA, existing version PR #2748 head SHA, expected version
+   (verify `alpha.55` in package manifests), and draft release ID/body before
+   changing automation. Preserve the old PR/branch until the replacement is verified.
+2. Create `release` at the agreed candidate. Land this setup on `main`, then merge
+   the setup into `release` through a normal setup PR. Do not merge #2748 or any
+   version PR as part of setup. Setup does not change prerelease bookkeeping and
+   cannot pass the publisher's exact merged-version-PR gate.
+3. Dispatch Changesets on `release` to create `changeset-release/release` targeting
+   `release`. Compare its version, consumed changesets and changelog with #2748;
+   carry any intentionally edited release prose into the replacement and preserve
+   the draft GitHub Release. Close the superseded PR only after this comparison.
+4. Build new preview receipts at the replacement's exact head SHA. An old preview
+   is reusable only when the publisher proves complete Git tree and package-version
+   equality; a workflow-only change still invalidates reuse. Record expected SHA
+   and version before approving publication. No production deployment, package
+   publication, source tag or release publication belongs to this setup operation.
+5. Configure docs staging to build the `release` candidate, and keep automatic
+   production-domain assignment disabled for docs and Inspector. The publisher
+   stages the Inspector from the tested prebuilt artifact, not from Vercel's Git
+   integration. These Vercel settings are
+   external to the build-only `docs.yml`. Record deployment IDs and source SHAs.
+   Inspector promotion defaults to `release` and requires an explicit exact SHA;
+   it must find that SHA's staged deployment, never the newest `main` deployment.
+
+After publishing, merge `release` back to `main` with a merge commit, preserving
+ancestry. Include versioned manifests, changelogs, lockfile changes and
+`.changeset/pre.json`; keep any new main-only changeset files and do not add their
+IDs to the consumed prerelease list. Resolve conflicts by preserving both the
+released bookkeeping and unconsumed development work, then rerun the focused
+release-cycle test. Do not reset prerelease state, cherry-pick only package
+versions, or regenerate versions on main during the backmerge. For the next cut,
+merge the selected main revision into `release` through a reviewed PR; repeat
+versioning there. The fixture test in `dev/artifacts/release-branch-policy.test.mjs`
+executes the installed pinned Changesets CLI across this full cycle.
+
+The Changesets workflow explicitly dispatches CI and preview because PRs created
+with `GITHUB_TOKEN` do not automatically trigger PR workflows. It checks the PR
+and branch head before and after dispatch. If either moves, rerun Changesets on
+`release`; required checks attach to the actual executed commit and cannot satisfy
+a different head. Release pushes run the trusted suite with credentialed caches
+disabled, retaining ordinary GitHub caches until external branch OIDC trust is
+explicitly enabled. Main pushes retain shared-cache writes; trusted same-repository
+PRs retain shared-cache reads. This setup requires no external IAM change.

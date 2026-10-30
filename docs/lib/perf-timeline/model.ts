@@ -52,6 +52,24 @@ export const stages: Record<Stage, { label: string; color: string; dash: string 
   open: { label: "Open PR", color: "#7761b8", dash: "7 5" },
 };
 
+/**
+ * Whether `buildTimeline` could place any result of this run. Every run it
+ * admits passes this check, so results only need fetching for these runs.
+ */
+export function mayBeAdmitted(
+  run: Pick<RawRun, "id" | "commit">,
+  releases: readonly Release[],
+  backfills: readonly HistoricalBackfill[] = [],
+): boolean {
+  const branch = run.commit.branch;
+  return (
+    branch?.name === "main" ||
+    branch?.pullRequest?.status === "OPEN" ||
+    releases.some((r) => r.sha === run.commit.hash) ||
+    backfills.some((b) => b.receipts.some((r) => r.runId === run.id))
+  );
+}
+
 export function buildTimeline(
   runs: RawRun[],
   releases: Release[],
@@ -66,7 +84,15 @@ export function buildTimeline(
   // A result ID is the measurement receipt. Do not average reruns, manufacture
   // zeros for missing jobs, or mix instruction-simulation results into seconds.
   const seen = new Set<string>();
-  for (const run of runs) {
+  // The scheduled nightly CodSpeed run measures extra cases on main. It must
+  // not add a second point at a commit whose merge (or earlier nightly) run
+  // already measured that benchmark: summaries compare a point with the one
+  // before it, and two points of one commit would show noise as change.
+  // Scheduled runs are placed last, so the merge run's point wins either way.
+  const measured = new Set<string>();
+  const scheduled = (run: RawRun) => run.event === "Schedule";
+  const ordered = [...runs.filter((r) => !scheduled(r)), ...runs.filter(scheduled)];
+  for (const run of ordered) {
     if (!Number.isFinite(Date.parse(run.date))) continue;
     const branch = run.commit.branch;
     const pr = branch?.pullRequest;
@@ -121,6 +147,12 @@ export function buildTimeline(
       }
       if (seen.has(result.id)) continue;
       seen.add(result.id);
+      const atCommit = `${result.benchmark.id}@${run.commit.hash}`;
+      if (scheduled(run) && measured.has(atCommit)) {
+        excludedResults++;
+        continue;
+      }
+      measured.add(atCommit);
       const bench = benchmarks.get(result.benchmark.id) ?? { ...result.benchmark, points: [] };
       bench.points.push({
         ...time,
@@ -168,7 +200,8 @@ export function formatTime(seconds: number): string {
   if (seconds >= 1) return `${seconds.toLocaleString("en-US", { maximumFractionDigits: 2 })} s`;
   if (seconds >= 0.001)
     return `${(seconds * 1000).toLocaleString("en-US", { maximumFractionDigits: 2 })} ms`;
-  return `${(seconds * 1e6).toLocaleString("en-US", { maximumFractionDigits: 2 })} µs`;
+  // Milliseconds are the smallest unit shown: 42 µs reads as 0.042 ms.
+  return `${(seconds * 1000).toLocaleString("en-US", { maximumSignificantDigits: 3 })} ms`;
 }
 
 export function checkpoint(point: Point): string {

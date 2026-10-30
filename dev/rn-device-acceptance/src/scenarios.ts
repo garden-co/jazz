@@ -19,7 +19,7 @@ export const scenarioPlan: readonly ScenarioResult[] = [
   ],
   [
     "foreground-write-transaction",
-    "JSI foreground commits and rolls back native mergeable/exclusive transactions",
+    "JSI foreground commits and rolls back native mergeable/serializable transactions",
   ],
   [
     "local-write-subscription",
@@ -28,6 +28,10 @@ export const scenarioPlan: readonly ScenarioResult[] = [
   [
     "independent-jsi-runtime-subscription",
     "Two physical JSI runtimes observe one relay write (explicit installed-device gap; current ABI receipt covers aliases in one JSI runtime only)",
+  ],
+  [
+    "typing-composer",
+    "Public RN Db API types into a composer row under a maintained subscription; records per-keystroke JS-blocked time and write-to-echo latency, with no dropped, reordered or reappearing characters",
   ],
   ["reconnect", "UI-A reconnects without replacing the admitted relay scope"],
   [
@@ -53,6 +57,7 @@ export const scenarioPlan: readonly ScenarioResult[] = [
     scenario === "foreground-byte-abi" ||
     scenario === "foreground-write-transaction" ||
     scenario === "local-write-subscription" ||
+    scenario === "typing-composer" ||
     scenario === "scope-isolation" ||
     scenario === "logout-revocation" ||
     scenario === "logout-auth-switch" ||

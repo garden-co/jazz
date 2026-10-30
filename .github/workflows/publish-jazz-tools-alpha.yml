@@ -3,7 +3,7 @@ name: Publish jazz-tools alpha
 on:
   push:
     branches:
-      - main
+      - release
     paths:
       - .changeset/pre.json
   workflow_call:
@@ -23,8 +23,12 @@ on:
         options:
           - publish
           - dry-run
+      expected-sha:
+        description: "Required exact release commit SHA for manual publication."
+        required: false
+        type: string
       version:
-        description: "Optional expected source version. It must match the checked-out release snapshot."
+        description: "Required expected source version for manual publication. Must match the release snapshot."
         required: false
         type: string
 
@@ -52,6 +56,9 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           REF: ${{ github.ref }}
           SHA: ${{ github.sha }}
+          RELEASE_MODE: ${{ inputs.mode || github.event.inputs.mode || 'publish' }}
+          EXPECTED_SHA: ${{ inputs.expected-sha }}
+          EXPECTED_VERSION: ${{ inputs.version }}
         with:
           script: |
             const eventName = process.env.EVENT_NAME;
@@ -70,14 +77,14 @@ jobs:
                 owner,
                 repo,
                 state: "closed",
-                base: "main",
+                base: "release",
                 sort: "updated",
                 direction: "desc",
                 per_page: 100,
               });
 
               return mergedPulls.filter(
-                (pr) => pr.merged_at !== null && pr.head.ref.startsWith("changeset-release/"),
+                (pr) => pr.merged_at !== null && pr.head.ref === "changeset-release/release",
               );
             }
 
@@ -104,52 +111,16 @@ jobs:
               releasePrHeadSha = releasePr.head.sha;
             }
 
-            if (eventName !== "push") {
+            if (process.env.RELEASE_MODE === "dry-run") {
               shouldRun = "true";
-              reason = `non-push invocation (${eventName})`;
-
-              if (ref === "refs/heads/main") {
-                const mergedReleasePrs = await listRecentMergedReleasePrs();
-                const currentVersion = await getToolsVersion(sha).catch((error) => {
-                  core.info(`Failed to read current tools version at ${sha}: ${error.message}`);
-                  return "";
-                });
-
-                let releasePr = null;
-                let matchSource = "";
-
-                if (currentVersion) {
-                  for (const pr of mergedReleasePrs) {
-                    const prVersion = await getToolsVersion(pr.head.sha).catch((error) => {
-                      core.info(
-                        `Failed to read release PR head version for #${pr.number}: ${error.message}`,
-                      );
-                      return "";
-                    });
-
-                    if (prVersion === currentVersion) {
-                      releasePr = pr;
-                      matchSource = `merged changeset release PR matching packages/jazz-tools version ${currentVersion}`;
-                      break;
-                    }
-                  }
-                }
-
-                if (!releasePr && mergedReleasePrs.length > 0) {
-                  releasePr = mergedReleasePrs[0];
-                  matchSource = "latest merged changeset release PR";
-                }
-
-                if (releasePr) {
-                  applyReleasePrMetadata(releasePr);
-                  reason = `${reason}; matched release PR #${releasePr.number} (${matchSource})`;
-                } else {
-                  reason = `${reason}; no merged changeset-release/* PR metadata found`;
-                }
-              }
-            } else if (ref !== "refs/heads/main") {
-              shouldRun = "false";
-              reason = `push is not on main (${ref})`;
+              reason = "dry-run invocation";
+            } else if (ref !== "refs/heads/release") {
+              core.setFailed(`Publication requires refs/heads/release, got ${ref}`);
+              reason = "publication is restricted to release";
+            } else if (eventName !== "push" &&
+                       (process.env.EXPECTED_SHA !== sha || !process.env.EXPECTED_VERSION)) {
+              core.setFailed("Manual publication requires the exact expected-sha and version inputs");
+              reason = "missing or mismatched manual release expectations";
             } else {
               let matchSource = "commit pull association";
               const associatedPulls = await github.request(
@@ -164,8 +135,9 @@ jobs:
               let releasePr = associatedPulls.data.find(
                 (pr) =>
                   pr.merged_at !== null &&
-                  pr.base.ref === "main" &&
-                  pr.head.ref.startsWith("changeset-release/"),
+                  pr.base.ref === "release" &&
+                  pr.merge_commit_sha === sha &&
+                  pr.head.ref === "changeset-release/release",
               );
 
               if (!releasePr) {
@@ -175,13 +147,19 @@ jobs:
                 releasePr = mergedReleasePrs.find((pr) => pr.merge_commit_sha === sha);
               }
 
+              if (releasePr && eventName !== "push" &&
+                  await getToolsVersion(sha) !== process.env.EXPECTED_VERSION) {
+                core.setFailed("Expected version does not match the release snapshot");
+                releasePr = null;
+              }
               if (releasePr) {
                 shouldRun = "true";
                 reason = `merged changeset release PR #${releasePr.number} (${matchSource})`;
                 applyReleasePrMetadata(releasePr);
               } else {
                 shouldRun = "false";
-                reason = "main push is not from a merged changeset-release/* PR";
+                reason = "release commit is not from a merged changeset-release/release PR";
+                if (eventName !== "push") core.setFailed(reason);
               }
             }
 
@@ -198,6 +176,50 @@ jobs:
           echo "release_pr_number=${{ steps.gate.outputs.release_pr_number }}"
           echo "release_pr_head_ref=${{ steps.gate.outputs.release_pr_head_ref }}"
           echo "release_pr_head_sha=${{ steps.gate.outputs.release_pr_head_sha }}"
+
+  # Publication requires the release test tier on the exact tree being
+  # published: CI, starters E2E and RN device acceptance on the Version
+  # Packages PR head, which changesets-release-pr.yml dispatches. Dry runs
+  # build candidates before that tier has run, so they skip this gate.
+  release-test-gate:
+    name: Require release tests on the published tree
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 5
+    needs: [release-push-gate]
+    if: >-
+      needs.release-push-gate.outputs.should_run == 'true' &&
+      (inputs.mode || github.event.inputs.mode || 'publish') == 'publish'
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          sparse-checkout: dev/scripts
+      - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          SHA: ${{ github.sha }}
+          RELEASE_PR_HEAD_REF: ${{ needs.release-push-gate.outputs.release_pr_head_ref }}
+          RELEASE_PR_HEAD_SHA: ${{ needs.release-push-gate.outputs.release_pr_head_sha }}
+        with:
+          script: |
+            const { evaluateReleaseTestGate } = await import(
+              `${process.env.GITHUB_WORKSPACE}/dev/scripts/release-test-gate.mjs`
+            );
+            const { ok, lines } = await evaluateReleaseTestGate({
+              github,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: process.env.SHA,
+              headSha: process.env.RELEASE_PR_HEAD_SHA,
+              headRef: process.env.RELEASE_PR_HEAD_REF,
+            });
+            for (const line of lines) core.info(line);
+            if (!ok) {
+              core.setFailed(
+                "Release tests have not passed on the tree being published. Rerun or dispatch the failing workflow on the Version Packages PR head, then rerun this workflow.",
+              );
+            }
 
   resolve-preview-artifacts:
     name: Resolve preview artifact source
@@ -256,7 +278,7 @@ jobs:
 
             if (releaseMode !== "publish") {
               reason = `preview artifact reuse disabled for mode=${releaseMode}`;
-            } else if (ref !== "refs/heads/main") {
+            } else if (ref !== "refs/heads/release") {
               reason = `preview artifact reuse disabled for ${eventName} on ${ref}`;
             } else if (!releasePrNumber || !releasePrHeadRef || !releasePrHeadSha) {
               reason = "release PR metadata unavailable for artifact reuse";
@@ -282,11 +304,11 @@ jobs:
               let treeReuseSafe = currentTree === previewTree;
 
               if (!treeReuseSafe) {
-                reason = `main tree ${currentTree} differs from release PR head tree ${previewTree}`;
+                reason = `release tree ${currentTree} differs from release PR head tree ${previewTree}`;
               }
 
               if (treeReuseSafe && currentVersion !== previewVersion) {
-                reason = `main version ${currentVersion} differs from release PR head version ${previewVersion}`;
+                reason = `release version ${currentVersion} differs from release PR head version ${previewVersion}`;
                 treeReuseSafe = false;
               }
 
@@ -329,6 +351,7 @@ jobs:
                     "pkg-jazz-napi",
                     "pkg-jazz-rn",
                     "pkg-create-jazz",
+                    "inspector-prebuilt",
                   ];
 
                   const availableArtifacts = new Set(
@@ -374,11 +397,16 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     needs:
       - release-push-gate
+      - release-test-gate
       - resolve-preview-artifacts
       - build
     if: >-
       always() &&
       needs.release-push-gate.outputs.should_run == 'true' &&
+      (
+        needs.release-test-gate.result == 'success' ||
+        (inputs.mode || github.event.inputs.mode || 'publish') == 'dry-run'
+      ) &&
       (
         needs.resolve-preview-artifacts.outputs.use_preview_artifacts == 'true' ||
         needs.build.result == 'success'
@@ -525,6 +553,7 @@ jobs:
       - name: Verify staged jazz-napi platform artifacts
         run: |
           test -f crates/jazz-napi/npm/linux-x64-gnu/jazz-napi.linux-x64-gnu.node
+          test -f crates/jazz-napi/npm/linux-arm64-gnu/jazz-napi.linux-arm64-gnu.node
           test -f crates/jazz-napi/npm/darwin-x64/jazz-napi.darwin-x64.node
           test -f crates/jazz-napi/npm/darwin-arm64/jazz-napi.darwin-arm64.node
           test -f crates/jazz-napi/npm/win32-x64-msvc/jazz-napi.win32-x64-msvc.node
@@ -542,7 +571,7 @@ jobs:
           # `resolve-preview-artifacts` only permits reuse after proving the
           # release source and preview source have equivalent trees. Preserve
           # the latter's commit SHA here: it is the value sealed into its
-          # relay-artifact manifests, whereas main's merge commit has a
+          # relay-artifact manifests, whereas release's merge commit has a
           # different SHA despite the same source tree.
           JAZZ_REUSE_PREVIEW_ARTIFACTS: ${{ needs.resolve-preview-artifacts.outputs.use_preview_artifacts }}
           JAZZ_RELEASE_PR_HEAD_SHA: ${{ needs.release-push-gate.outputs.release_pr_head_sha }}
@@ -747,17 +776,70 @@ jobs:
 
           npm dist-tag add "create-jazz@${CREATE_JAZZ_VERSION}" latest
 
+  # Read-only check that the Inspector Vercel token can see its project. It runs
+  # in candidate dry-runs too, so a broken token shows up before anything
+  # publishes. It deliberately does not gate npm publication.
+  inspector-preflight:
+    name: Check Inspector Vercel access
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: [release-push-gate]
+    if: needs.release-push-gate.outputs.should_run == 'true'
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    env:
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_INSPECTOR_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_INSPECTOR_PROJECT_ID }}
+      VERCEL_TOKEN: ${{ secrets.VERCEL_INSPECTOR_TOKEN }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+
+      - run: node dev/scripts/promote-inspector-deployment.mjs preflight
+
+  # Deploy the exact inspector-prebuilt bytes that were built for this tree
+  # (the tested candidate's when its artifacts were reused) instead of waiting
+  # for Vercel's Git integration to build `release`, which it never does.
+  stage-inspector-production:
+    name: Stage inspector production
+    needs:
+      - release-push-gate
+      - resolve-preview-artifacts
+      - publish-npm
+      - inspector-preflight
+    if: >-
+      always() &&
+      needs.release-push-gate.outputs.should_run == 'true' &&
+      needs.publish-npm.result == 'success' &&
+      needs.inspector-preflight.result == 'success' &&
+      (inputs.mode || github.event.inputs.mode || 'publish') == 'publish'
+    uses: ./.github/workflows/stage-inspector-production.yml
+    permissions:
+      actions: read
+      contents: read
+    with:
+      artifact-run-id: ${{ needs.resolve-preview-artifacts.outputs.use_preview_artifacts == 'true' && needs.resolve-preview-artifacts.outputs.preview_run_id || '' }}
+      source-sha: ${{ github.sha }}
+      source-branch: release
+    secrets: inherit
+
   deploy-inspector-production:
     name: Promote inspector production
     needs:
       - release-push-gate
       - publish-npm
+      - stage-inspector-production
     if: >-
       always() &&
       needs.release-push-gate.outputs.should_run == 'true' &&
       needs.publish-npm.result == 'success' &&
+      needs.stage-inspector-production.result == 'success' &&
       (inputs.mode || github.event.inputs.mode || 'publish') == 'publish'
     uses: ./.github/workflows/promote-inspector-production.yml
     with:
       deploy-sha: ${{ github.sha }}
+      deployment-url: ${{ needs.stage-inspector-production.outputs.deployment-url }}
     secrets: inherit

@@ -1,12 +1,15 @@
 //! Dedicated owner for the Rust account registry and its durable adapter.
-use jazz::account_registry::storage::{RegistryError, StoredAccountRegistry};
+use super::account_store::{RegistryError, StoredAccountRegistry};
+use crate::kv::HostSql;
 use jazz::account_registry::{AccountCommand, AccountCommandResult, Assignment, Principal};
-use jazz::groove::storage::{BoxedStorage, MemoryStorage, StorageFactory};
-use std::{
-    path::PathBuf,
-    sync::{Arc, mpsc},
-};
+use std::sync::mpsc;
 use tokio::sync::oneshot;
+
+/// Tests can make the next registry write fail after it commits.
+#[cfg(test)]
+type Failpoint = std::sync::Arc<std::sync::atomic::AtomicBool>;
+#[cfg(not(test))]
+type Failpoint = ();
 
 enum Request {
     Execute(
@@ -27,50 +30,35 @@ enum Request {
 pub(crate) struct AccountRegistryOwner {
     sender: mpsc::Sender<Request>,
     closed: std::sync::atomic::AtomicBool,
-    changes: tokio::sync::watch::Sender<u64>,
+    /// Template receiver. The only sender lives on the owner thread, so the
+    /// watch closes (and every subscriber re-checks and fails closed) if that
+    /// thread exits for any reason, including a panic.
+    changes: tokio::sync::watch::Receiver<u64>,
+    #[cfg(test)]
+    failpoint: Failpoint,
 }
 
 impl AccountRegistryOwner {
-    pub(crate) fn open(
-        durable: Option<(Arc<dyn StorageFactory>, PathBuf)>,
-    ) -> Result<Self, String> {
+    /// Own the registry kept in `storage`.
+    pub(crate) fn open(storage: HostSql) -> Result<Self, String> {
         let (sender, receiver) = mpsc::channel();
-        let (changes, _) = tokio::sync::watch::channel(0u64);
-        let notify = changes.clone();
+        let (notify, changes) = tokio::sync::watch::channel(0u64);
         let (ready, opened) = mpsc::sync_channel(1);
         std::thread::Builder::new()
             .name("jazz-account-registry".into())
             .spawn(move || {
-                let storage: Result<BoxedStorage, String> = match durable {
-                    Some((factory, path)) => {
-                        let profile = jazz::storage_codec_profile::epoch_1_storage_codec_profile()
-                            .and_then(|profile| {
-                                // Versions this isolated root's journal keys and closed
-                                // descriptor; values use ordinary Groove records.
-                                profile.with_additional_codecs(["jazz.account-journal.v1"])
-                            });
-                        profile
-                            .map_err(|error| error.to_string())
-                            .and_then(|profile| {
-                                jazz::db::block_on(factory.open(
-                                    path,
-                                    vec!["default".into()],
-                                    profile,
-                                ))
-                                .map_err(|error| error.to_string())
-                            })
-                    }
-                    None => MemoryStorage::new(&["default"])
-                        .map(BoxedStorage::new)
-                        .map_err(|error| error.to_string()),
-                };
-                let registry = storage.and_then(|storage| {
-                    jazz::db::block_on(StoredAccountRegistry::open(storage))
+                let registry = {
+                    #[cfg(test)]
+                    let failpoint = storage.failpoint();
+                    #[cfg(not(test))]
+                    let failpoint: Failpoint = ();
+                    StoredAccountRegistry::open(storage)
+                        .map(|registry| (registry, failpoint))
                         .map_err(|error| error.to_string())
-                });
+                };
                 let mut registry = match registry {
-                    Ok(registry) => {
-                        if ready.send(Ok(())).is_err() {
+                    Ok((registry, failpoint)) => {
+                        if ready.send(Ok(failpoint)).is_err() {
                             return;
                         }
                         registry
@@ -83,45 +71,77 @@ impl AccountRegistryOwner {
                 while let Ok(request) = receiver.recv() {
                     match request {
                         Request::Execute(command, response) => {
-                            let result = jazz::db::block_on(registry.execute(&command));
-                            if result.is_ok() {
+                            let result = registry.execute(&command);
+                            // Announce a success, and any `Unavailable` failure:
+                            // it may come after the write committed (for example
+                            // a failed durable flush), so live sockets must
+                            // re-check rather than trust their last lookup. `Decision` errors are
+                            // rejected before any write and change nothing, so
+                            // they stay silent (a spammed denied request must not
+                            // force a lookup on every live socket).
+                            if announces(&result) {
                                 notify.send_modify(|revision| *revision = revision.wrapping_add(1));
                             }
                             let _ = response.send(result);
                         }
                         Request::LoginOrRegister(principal, response) => {
-                            let result = jazz::db::block_on(registry.login_or_register(&principal));
-                            if result.as_ref().is_ok_and(|result| result.created) {
+                            let result = registry.login_or_register(&principal);
+                            let created = result.as_ref().is_ok_and(|result| result.created);
+                            if created || matches!(result, Err(RegistryError::Unavailable(_))) {
                                 notify.send_modify(|revision| *revision = revision.wrapping_add(1));
                             }
                             let _ = response.send(result.map(|result| result.assignment));
                         }
                         Request::Login(principal, response) => {
-                            let _ = response.send(jazz::db::block_on(registry.login(&principal)));
+                            // A lookup never mutates: nothing to announce.
+                            let _ = response.send(registry.login(&principal));
                         }
                         Request::Close(response) => {
-                            let result = jazz::db::block_on(registry.close())
-                                .map_err(|error| error.to_string());
-                            let _ = response.send(result);
+                            drop(registry);
+                            let _ = response.send(Ok(()));
                             return;
                         }
                     }
                 }
-                let _ = jazz::db::block_on(registry.close());
             })
             .map_err(|error| error.to_string())?;
-        opened
+        #[cfg_attr(not(test), allow(clippy::let_unit_value))]
+        let _failpoint = opened
             .recv()
             .map_err(|_| "account registry owner exited during startup".to_owned())??;
         Ok(Self {
             sender,
             changes,
             closed: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            failpoint: _failpoint,
         })
     }
 
+    /// Tests: a registry whose store lives in memory.
+    #[cfg(test)]
+    pub(crate) fn in_memory_for_test() -> Self {
+        let store = crate::runtime::AppStore::memory().expect("memory store");
+        Self::open(store.sql().expect("store")).expect("registry")
+    }
+
+    /// Tests: the next registry write commits and then reports a failure.
+    #[cfg(test)]
+    pub(crate) fn fail_next_write_for_test(&self) {
+        self.failpoint
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Tests: whether the injected failure is still waiting for a write.
+    #[cfg(test)]
+    pub(crate) fn write_failure_pending_for_test(&self) -> bool {
+        self.failpoint.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
-        self.changes.subscribe()
+        let mut changes = self.changes.clone();
+        changes.mark_unchanged();
+        changes
     }
 
     pub(crate) fn close(&self) -> Result<(), String> {
@@ -173,6 +193,11 @@ impl Drop for AccountRegistryOwner {
         let _ = self.close();
     }
 }
+/// Whether a registry command result may have changed what `login` answers.
+fn announces<T>(result: &Result<T, RegistryError>) -> bool {
+    !matches!(result, Err(RegistryError::Decision(_)))
+}
+
 fn unavailable() -> RegistryError {
     RegistryError::Unavailable("registry owner stopped".into())
 }
@@ -186,7 +211,7 @@ mod tests {
     // Observer invalidation is an internal owner contract, not an HTTP result.
     #[tokio::test]
     async fn login_or_register_notifies_only_new_assignments() {
-        let owner = AccountRegistryOwner::open(None).unwrap();
+        let owner = AccountRegistryOwner::in_memory_for_test();
         let mut changes = owner.subscribe();
         let principal = Principal {
             issuer: "https://issuer.example".into(),
@@ -200,26 +225,39 @@ mod tests {
         owner.close().unwrap();
     }
 
-    // The registry owner must reject even an empty old-preview root at the
-    // manifest boundary, before attempting command replay.
-    #[test]
-    fn old_preview_registry_profile_is_rejected() {
-        use jazz::groove::storage::OrderedKvStorage;
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("accounts.rocksdb");
-        let factory = jazz_storage_rocksdb::RocksDbStorageFactory;
-        let old_profile = jazz::storage_codec_profile::epoch_1_storage_codec_profile()
-            .unwrap()
-            .with_additional_codecs(["jazz.account-command.v1"])
-            .unwrap();
-        jazz::db::block_on(async {
-            let storage = factory
-                .open(path.clone(), vec!["default".into()], old_profile)
-                .await
-                .unwrap();
-            storage.close().await.unwrap();
-        });
-        assert!(AccountRegistryOwner::open(Some((Arc::new(factory), path))).is_err());
+    // Live sockets skip their per-message registry lookup while this watch is
+    // unchanged (#3387). A request the registry rejects before any write (a
+    // `Decision` error) changes nothing and must stay silent, so denied
+    // requests cannot force a lookup on every live socket; the watch must close
+    // once the owner thread is gone. (`Unavailable` failures are announced;
+    // the websocket failed-flush test covers them.)
+    #[tokio::test]
+    async fn changes_skip_rejected_requests_and_close_with_the_owner() {
+        let owner = AccountRegistryOwner::in_memory_for_test();
+        let mut changes = owner.subscribe();
+        assert!(!changes.has_changed().unwrap());
+        let unknown = Principal {
+            issuer: "https://issuer.example".into(),
+            subject: "nobody".into(),
+        };
+        let failed = owner
+            .execute(AccountCommand::Revoke {
+                approver: unknown.clone(),
+                target: unknown.clone(),
+            })
+            .await;
+        assert!(
+            matches!(failed, Err(RegistryError::Decision(_))),
+            "an unassigned approver cannot revoke: {failed:?}"
+        );
+        assert!(owner.login(unknown).await.is_err(), "no assignment exists");
+        assert!(!changes.has_changed().unwrap(), "rejections change nothing");
+        owner.close().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while changes.changed().await.is_ok() {}
+        })
+        .await
+        .expect("the watch closes when the owner thread exits");
     }
 
     // Internal durable-owner test: HTTP tests cover authentication, while this
@@ -227,13 +265,10 @@ mod tests {
     #[tokio::test]
     async fn disk_recovery_preserves_pending_links_and_permanent_revoked_assignments() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("accounts.rocksdb");
+        let storage = crate::runtime::StorageConfig::data_dir(directory.path());
         let open = || {
-            AccountRegistryOwner::open(Some((
-                Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory),
-                path.clone(),
-            )))
-            .unwrap()
+            let store = crate::runtime::AppStore::open(&storage).unwrap();
+            AccountRegistryOwner::open(store.sql().unwrap()).unwrap()
         };
         let alice = Principal {
             issuer: "https://issuer.example".into(),

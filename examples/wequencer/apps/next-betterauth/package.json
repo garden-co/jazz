@@ -11,9 +11,13 @@
     "test": "vitest run",
     "test:browser": "vitest run --config vitest.config.browser.ts",
     "test:browser:focused": "node scripts/test-browser-focused.mjs",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@astryxdesign/core": "0.6.3",
+    "@garden-co/design": "github:garden-co/design#fe96522c2484b894380fab7f0217b76ee4bda3a2",
+    "@noble/hashes": "2.0.1",
     "better-auth": "1.7.1",
     "jazz-tools": "workspace:*",
     "next": "catalog:default",

@@ -1,27 +1,22 @@
 use std::collections::BTreeMap;
 
 use jazz::block_on;
-use jazz::db::{
-    Db, DbConfig, DbIdentity, LocalUpdates, Propagation, ReadOpts, SeededRowIdSource,
-    SubscriptionEvent,
-};
-use jazz::groove::records::Value;
-use jazz::groove::storage::TestStorage;
+use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource, SubscriptionEvent};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::{CurrentWriteSchema, LensOp, MigrationLens, SchemaVersion, TableLens};
 use jazz::query::{OrderDirection, Query, col, eq, param};
+use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::public_schema::{
     CmpOp as PublicCmpOp, PolicyExpr as PublicPolicyExpr, PolicyValue as PublicPolicyValue,
-    RelColumnRef, RelExpr, RelJoinCondition, RelJoinKind, RelKeyRef, RelPredicateCmpOp,
-    RelPredicateExpr, RelProjectColumn, RelProjectExpr, RelRecursionBound, RelValueRef,
-    RowIdRef as RelRowIdRef, Value as PublicValue,
+    RecursionBound, RelationCmpOp, RelationColumnRef, RelationExpr, RelationJoinCondition,
+    RelationJoinKind, RelationKeyRef, RelationPredicate, RelationProjectColumn,
+    RelationProjectExpr, RelationRowIdRef, RelationValueRef, Value as PublicValue,
 };
 use jazz::tools::{
     ColumnType as PublicColumnType, Schema as PublicSchema, SchemaBuilder, TablePolicies,
     TableSchemaBuilder,
 };
-use jazz::tx::DurabilityTier;
 
 const DOCUMENTS: &str = "documents";
 const MEMBERSHIPS: &str = "memberships";
@@ -55,7 +50,7 @@ fn test_user_claims(region: &str) -> BTreeMap<String, Value> {
     BTreeMap::from([(provider_claim("region"), Value::String(region.to_owned()))])
 }
 
-type BenchDb = Db<TestStorage>;
+type BenchDb = Db;
 
 fn row(tag: u8) -> RowUuid {
     RowUuid::from_bytes([tag; 16])
@@ -162,106 +157,106 @@ fn schema_with_membership_policy(membership_policy: Option<PublicPolicyExpr>) ->
 fn two_hop_seeded_policy_schema() -> JazzSchema {
     let document_policy = exists(MEMBERSHIPS, vec![outer_eq("document", "id")]);
     let membership_policy = exists(PROJECTS, vec![outer_eq("id", "project")]);
-    let seed = RelExpr::Project {
-        input: Box::new(RelExpr::Filter {
-            input: Box::new(RelExpr::TableScan {
+    let seed = RelationExpr::Project {
+        input: Box::new(RelationExpr::Filter {
+            input: Box::new(RelationExpr::TableScan {
                 table: GROUP_MEMBERS.into(),
                 alias: None,
             }),
-            predicate: RelPredicateExpr::Cmp {
-                left: RelColumnRef {
+            predicate: RelationPredicate::Cmp {
+                left: RelationColumnRef {
                     scope: None,
                     column: "user".to_owned(),
                 },
-                op: RelPredicateCmpOp::Eq,
-                right: RelValueRef::SessionRef(vec![
+                op: RelationCmpOp::Eq,
+                right: RelationValueRef::SessionRef(vec![
                     "user".to_owned(),
                     "identity".to_owned(),
                     "subject".to_owned(),
                 ]),
             },
         }),
-        columns: vec![RelProjectColumn {
+        columns: vec![RelationProjectColumn {
             alias: "id".to_owned(),
-            expr: RelProjectExpr::Column(RelColumnRef {
+            expr: RelationProjectExpr::Column(RelationColumnRef {
                 scope: None,
                 column: "group".to_owned(),
             }),
         }],
     };
-    let step = RelExpr::Project {
-        input: Box::new(RelExpr::Join {
-            left: Box::new(RelExpr::Filter {
-                input: Box::new(RelExpr::TableScan {
+    let step = RelationExpr::Project {
+        input: Box::new(RelationExpr::Join {
+            left: Box::new(RelationExpr::Filter {
+                input: Box::new(RelationExpr::TableScan {
                     table: GROUP_EDGES.into(),
                     alias: Some("edges".to_owned()),
                 }),
-                predicate: RelPredicateExpr::Cmp {
-                    left: RelColumnRef {
+                predicate: RelationPredicate::Cmp {
+                    left: RelationColumnRef {
                         scope: Some("edges".to_owned()),
                         column: "member".to_owned(),
                     },
-                    op: RelPredicateCmpOp::Eq,
-                    right: RelValueRef::RowId(RelRowIdRef::Frontier),
+                    op: RelationCmpOp::Eq,
+                    right: RelationValueRef::RowId(RelationRowIdRef::Frontier),
                 },
             }),
-            right: Box::new(RelExpr::TableScan {
+            right: Box::new(RelationExpr::TableScan {
                 table: GROUPS.into(),
                 alias: Some("target".to_owned()),
             }),
-            on: vec![RelJoinCondition {
-                left: RelColumnRef {
+            on: vec![RelationJoinCondition {
+                left: RelationColumnRef {
                     scope: Some("edges".to_owned()),
                     column: "parent".to_owned(),
                 },
-                right: RelColumnRef {
+                right: RelationColumnRef {
                     scope: Some("target".to_owned()),
                     column: "id".to_owned(),
                 },
             }],
-            join_kind: RelJoinKind::Inner,
+            join_kind: RelationJoinKind::Inner,
         }),
-        columns: vec![RelProjectColumn {
+        columns: vec![RelationProjectColumn {
             alias: "id".to_owned(),
-            expr: RelProjectExpr::Column(RelColumnRef {
+            expr: RelationProjectExpr::Column(RelationColumnRef {
                 scope: Some("target".to_owned()),
                 column: "id".to_owned(),
             }),
         }],
     };
     let project_policy = PublicPolicyExpr::ExistsRel {
-        rel: RelExpr::Filter {
-            input: Box::new(RelExpr::Join {
-                left: Box::new(RelExpr::Gather {
+        rel: RelationExpr::Filter {
+            input: Box::new(RelationExpr::Join {
+                left: Box::new(RelationExpr::Gather {
                     seed: Box::new(seed),
                     step: Box::new(step),
-                    frontier_key: RelKeyRef::RowId(RelRowIdRef::Current),
-                    bound: RelRecursionBound::MaxDepth(8),
-                    dedupe_key: vec![RelKeyRef::RowId(RelRowIdRef::Current)],
+                    frontier_key: RelationKeyRef::RowId(RelationRowIdRef::Current),
+                    bound: RecursionBound::MaxDepth(8),
+                    dedupe_key: vec![RelationKeyRef::RowId(RelationRowIdRef::Current)],
                 }),
-                right: Box::new(RelExpr::TableScan {
+                right: Box::new(RelationExpr::TableScan {
                     table: PROJECT_ACCESS.into(),
                     alias: Some("access".to_owned()),
                 }),
-                on: vec![RelJoinCondition {
-                    left: RelColumnRef {
+                on: vec![RelationJoinCondition {
+                    left: RelationColumnRef {
                         scope: None,
                         column: "id".to_owned(),
                     },
-                    right: RelColumnRef {
+                    right: RelationColumnRef {
                         scope: Some("access".to_owned()),
                         column: "group".to_owned(),
                     },
                 }],
-                join_kind: RelJoinKind::Inner,
+                join_kind: RelationJoinKind::Inner,
             }),
-            predicate: RelPredicateExpr::Cmp {
-                left: RelColumnRef {
+            predicate: RelationPredicate::Cmp {
+                left: RelationColumnRef {
                     scope: Some("access".to_owned()),
                     column: "project".to_owned(),
                 },
-                op: RelPredicateCmpOp::Eq,
-                right: RelValueRef::RowId(RelRowIdRef::Outer),
+                op: RelationCmpOp::Eq,
+                right: RelationValueRef::RowId(RelationRowIdRef::Outer),
             },
         },
     };
@@ -390,12 +385,9 @@ fn open_db_with_schema(schema: JazzSchema) -> BenchDb {
 }
 
 fn open_db_with_schema_as(schema: JazzSchema, author: AuthorSubject) -> BenchDb {
-    let families = schema.column_families();
-    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(
         DbConfig::new(
             schema,
-            TestStorage::new(&family_refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x82; 16]),
                 author,
@@ -420,10 +412,7 @@ fn row_ids_for_identity(
 
 fn opts() -> ReadOpts {
     ReadOpts {
-        tier: DurabilityTier::Local,
-        local_updates: LocalUpdates::Immediate,
-        propagation: Propagation::LocalOnly,
-        include_deleted: false,
+        tier: jazz::db::ReadTier::LocalOnly,
         ..ReadOpts::default()
     }
 }
@@ -1215,15 +1204,10 @@ fn prepared_binding_reprepares_claim_routing_after_schema_change() {
     )
     .expect("valid migration lens");
     let publication = db
-        .author_schema_lineage_publication(
-            v2.clone(),
-            lens,
-            Vec::<String>::new(),
-            Vec::<String>::new(),
-        )
+        .author_schema_lineage_publication(v2.clone(), lens)
         .expect("authority authors v1-to-v2 lineage");
-    block_on(db.publish_schema_with_lens(1, publication)).expect("publish v1-to-v2 lineage");
-    block_on(db.set_current_write_schema(CurrentWriteSchema {
+    block_on(db.publish_schema_with_lens(publication)).expect("publish v1-to-v2 lineage");
+    block_on(db.activate_catalogue_schema_for_test(CurrentWriteSchema {
         revision: 1,
         schema: v2.id,
     }))
@@ -1260,7 +1244,7 @@ fn prepared_binding_reprepares_claim_routing_after_schema_change() {
     assert_eq!(projected[0].cell_at(2), Some(Value::U64(0)));
     assert_eq!(
         db.read(&prepared_team_v1)
-            .expect("invalidate stale v1 Groove handle after catalogue rebuild")
+            .expect("invalidate stale v1 handle after catalogue rebuild")
             .into_iter()
             .map(|row| row.row_uuid())
             .collect::<Vec<_>>(),
@@ -1341,15 +1325,10 @@ fn rebuilt_subscription_drop_releases_rehydrated_handle_without_touching_peer() 
     )
     .expect("valid migration lens");
     let publication = db
-        .author_schema_lineage_publication(
-            v2.clone(),
-            lens,
-            Vec::<String>::new(),
-            Vec::<String>::new(),
-        )
+        .author_schema_lineage_publication(v2.clone(), lens)
         .expect("authority authors v1-to-v2 lineage");
-    block_on(db.publish_schema_with_lens(1, publication)).expect("publish v1-to-v2 lineage");
-    block_on(db.set_current_write_schema(CurrentWriteSchema {
+    block_on(db.publish_schema_with_lens(publication)).expect("publish v1-to-v2 lineage");
+    block_on(db.activate_catalogue_schema_for_test(CurrentWriteSchema {
         revision: 1,
         schema: v2.id,
     }))
@@ -1384,13 +1363,13 @@ fn rebuilt_subscription_drop_releases_rehydrated_handle_without_touching_peer() 
         Some(SubscriptionEvent::Delta { updated, .. })
             if updated.iter().any(|output| output.row_uuid() == row(0x42))
     ));
-    assert_eq!(db.active_groove_subscriptions_for_test(), 2);
+    assert_eq!(db.runtime_stats_for_test().active_subscriptions, 2);
 
     drop(stream_a);
     // Stream Drop is deliberately non-blocking. The successor runtime handle
     // must be retired by the next node owner turn, without touching Bob's.
     block_on(db.tick()).expect("drain A finalization after runtime rebuild");
-    assert_eq!(db.active_groove_subscriptions_for_test(), 1);
+    assert_eq!(db.runtime_stats_for_test().active_subscriptions, 1);
     block_on(db.insert(
         DOCUMENTS,
         BTreeMap::from([
@@ -1410,7 +1389,7 @@ fn rebuilt_subscription_drop_releases_rehydrated_handle_without_touching_peer() 
 }
 
 #[test]
-/// A prepared join owned by Alice survives a catalogue-driven Groove rebuild.
+/// A prepared join owned by Alice survives a catalogue-driven rebuild.
 ///
 /// Alice publishes a compatible schema lineage after preparing the v1 join;
 /// the test then occupies the rebuilt runtime with a distinct v2 handle before
@@ -1489,15 +1468,10 @@ fn prepared_join_handle_recompiles_after_catalogue_runtime_rebuild() {
     )
     .expect("valid migration lens");
     let publication = db
-        .author_schema_lineage_publication(
-            v2.clone(),
-            lens,
-            Vec::<String>::new(),
-            Vec::<String>::new(),
-        )
+        .author_schema_lineage_publication(v2.clone(), lens)
         .expect("authority authors v1-to-v2 lineage");
-    block_on(db.publish_schema_with_lens(1, publication)).expect("publish v2 with lineage lens");
-    block_on(db.set_current_write_schema(CurrentWriteSchema {
+    block_on(db.publish_schema_with_lens(publication)).expect("publish v2 with lineage lens");
+    block_on(db.activate_catalogue_schema_for_test(CurrentWriteSchema {
         revision: 1,
         schema: v2.id,
     }))

@@ -31,8 +31,8 @@ republishes the schema on change — no restart needed.
 
 ```ts
 const schema = {
-  todos: s.table({ title: s.string(), done: s.boolean() }),
-  projects: s.table({ name: s.string() }),
+  todos: s.table({ title: s.string(), done: s.boolean() }, {}),
+  projects: s.table({ name: s.string() }, {}),
 };
 ```
 
@@ -47,6 +47,14 @@ Set `BETTER_AUTH_SECRET` and the Jazz application/server variables supplied by t
 ## Deploying to production
 
 Use persistent Better Auth storage and deploy the configured Jazz server.
+
+## JWT configuration
+
+`APP_ORIGIN` defaults to `http://localhost:3001`, the Better Auth server.
+Set it consistently in `.env` or the process environment. Better Auth and
+the Jazz plugin use it for matching issuer/audience settings and the JWKS
+endpoint. Production Jazz servers need a reachable JWKS URL and matching
+issuer/audience too; JWKS alone is not sufficient for linking or signing in.
 
 ## Known limitations
 

@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   buildTimeline,
+  mayBeAdmitted,
   formatTime,
   calendarDay,
   checkpoint,
@@ -54,6 +55,48 @@ test("only exact releases, main and open PRs are retained throughout the dataset
   assert.equal(points.has("4"), false);
   assert.equal(data.excludedRuns, 3);
   assert.equal(points.size, 3);
+});
+
+test("results are only needed for runs mayBeAdmitted accepts", () => {
+  // The loader fetches results only for runs mayBeAdmitted accepts, so every
+  // run buildTimeline admits must pass it, and dropping the others' results
+  // must not change the timeline.
+  const releases = [{ name: "v2.0.0", sha: "tagged", url: "https://example.com/tag" }];
+  const harness = { ...run("harness", "bench/backfill"), date: "2026-09-14T12:00:00Z" };
+  const backfills = [
+    {
+      releaseTag: "v2.0.0",
+      engineSha: "tagged",
+      harnessSha: "harness",
+      harnessSourceSha: "source",
+      effectiveDate: "2026-09-10T00:00:00Z",
+      dateSource: "npm jazz-tools time[2.0.0]",
+      workflowUrl: "https://example.com/workflow",
+      receipts: [{ runId: "harness", resultId: "result-harness", benchmarkName: "read" }],
+    },
+  ];
+  const runs = [
+    run("main"),
+    { ...run("tagged", "release"), date: "2026-09-12T12:00:00Z" },
+    run("1", "feature", "OPEN"),
+    run("2", "old", "MERGED"),
+    run("3", "abandoned", "CLOSED"),
+    run("4", "unknown"),
+    harness,
+  ];
+  const full = buildTimeline(runs, releases, "now", new Map(), backfills);
+  for (const r of runs) {
+    const alone = buildTimeline([r], releases, "now", new Map(), backfills);
+    if (alone.excludedRuns === 0) assert.ok(mayBeAdmitted(r, releases, backfills), r.id);
+  }
+  const trimmed = runs.map((r) =>
+    mayBeAdmitted(r, releases, backfills) ? r : { ...r, results: [] },
+  );
+  assert.deepEqual(buildTimeline(trimmed, releases, "now", new Map(), backfills), full);
+  assert.deepEqual(
+    runs.filter((r) => mayBeAdmitted(r, releases, backfills)).map((r) => r.id),
+    ["main", "tagged", "1", "harness"],
+  );
 });
 
 test("benchmarks with only excluded runs disappear from navigation data", () => {
@@ -135,6 +178,45 @@ test("retains independent reruns, deduplicates result IDs and sorts chronologica
   );
 });
 
+test("a scheduled run never adds a second point for a benchmark already measured at that SHA", () => {
+  const merge = run("merge");
+  const nightly = run("nightly");
+  nightly.event = "Schedule";
+  nightly.date = "2026-09-14T03:17:00Z";
+  nightly.commit.hash = merge.commit.hash;
+  nightly.results.push({
+    id: "result-nightly-extra",
+    benchmark: { id: "bench-2", name: "nightly_only" },
+    walltime: { min: 1.9, median: 2, max: 2.1 },
+  });
+  const again = structuredClone(nightly);
+  again.id = "nightly-again";
+  again.results = again.results.map((r) => ({ ...r, id: `${r.id}-again` }));
+  // Whatever order the runs arrive in, the merge run keeps the only point of
+  // the shared benchmark, and the nightly-only case gets exactly one point.
+  for (const runs of [
+    [merge, nightly, again],
+    [again, nightly, merge],
+  ]) {
+    const data = buildTimeline(runs, []);
+    const byId = new Map(data.benchmarks.map((b) => [b.id, b.points]));
+    assert.deepEqual(
+      byId.get("bench-1")?.map((p) => p.runId),
+      ["merge"],
+    );
+    assert.equal(byId.get("bench-2")?.length, 1);
+    assert.equal(data.excludedResults, 3);
+  }
+  // A scheduled run at a new commit is still an ordinary main point.
+  const later = run("later");
+  later.event = "Schedule";
+  const data = buildTimeline([merge, later], []);
+  assert.deepEqual(
+    data.benchmarks[0].points.map((p) => p.runId),
+    ["later", "merge"],
+  );
+});
+
 test("timing ticks are rounded in displayed units, mirrored without altering raw data", () => {
   const r = run("ticks");
   r.results[0].walltime = { min: 0.2, median: 0.9, max: 1 };
@@ -198,7 +280,8 @@ test("benchmark identity, not display name, separates measurements", () => {
 test("formats seconds without confusing milliseconds or microseconds", () => {
   assert.equal(formatTime(42.154), "42.15 s");
   assert.equal(formatTime(0.042154), "42.15 ms");
-  assert.equal(formatTime(0.000042154), "42.15 µs");
+  assert.equal(formatTime(0.000042154), "0.0422 ms");
+  assert.equal(formatTime(0.0002963), "0.296 ms");
 });
 
 test("historical backfill places only approved receipts on release day with true provenance", () => {

@@ -114,6 +114,14 @@ const app = {
   resource_access_edges: new ResourceGrantQueryBuilder(),
   wasmSchema: {
     todos: {
+      relations: {
+        project: { kind: "forward" as const, table: "projects", column: "projectId" },
+        resource_access_edgesViaResource: {
+          kind: "reverse" as const,
+          table: "resource_access_edges",
+          relation: "resourceRelation",
+        },
+      },
       columns: [
         { name: "id", column_type: { type: "Uuid" }, nullable: false },
         { name: "ownerId", column_type: { type: "Text" }, nullable: false },
@@ -127,12 +135,32 @@ const app = {
       ],
     },
     projects: {
+      relations: {
+        todosViaProject: { kind: "reverse" as const, table: "todos", relation: "project" },
+      },
       columns: [
         { name: "id", column_type: { type: "Uuid" }, nullable: false },
         { name: "ownerId", column_type: { type: "Text" }, nullable: false },
       ],
     },
     teams: {
+      relations: {
+        team_team_edgesViaChild_team: {
+          kind: "reverse" as const,
+          table: "team_team_edges",
+          relation: "child_teamRelation",
+        },
+        team_team_edgesViaParent_team: {
+          kind: "reverse" as const,
+          table: "team_team_edges",
+          relation: "parent_teamRelation",
+        },
+        resource_access_edgesViaTeam: {
+          kind: "reverse" as const,
+          table: "resource_access_edges",
+          relation: "teamRelation",
+        },
+      },
       columns: [
         { name: "id", column_type: { type: "Uuid" }, nullable: false },
         { name: "kind", column_type: { type: "Text" }, nullable: false },
@@ -140,6 +168,10 @@ const app = {
       ],
     },
     team_team_edges: {
+      relations: {
+        child_teamRelation: { kind: "forward" as const, table: "teams", column: "child_team" },
+        parent_teamRelation: { kind: "forward" as const, table: "teams", column: "parent_team" },
+      },
       columns: [
         { name: "id", column_type: { type: "Uuid" }, nullable: false },
         {
@@ -157,6 +189,10 @@ const app = {
       ],
     },
     resource_access_edges: {
+      relations: {
+        teamRelation: { kind: "forward" as const, table: "teams", column: "team" },
+        resourceRelation: { kind: "forward" as const, table: "todos", column: "resource" },
+      },
       columns: [
         { name: "id", column_type: { type: "Uuid" }, nullable: false },
         {
@@ -185,7 +221,7 @@ describe("permissions type inference", () => {
       expectTypeOf(session.claims["role"]!.path).toEqualTypeOf<string[]>();
       expectTypeOf(isCreator).toEqualTypeOf<PermissionExpressionInput>();
       expectTypeOf(anyOf([])).toEqualTypeOf<PermissionExpressionInput>();
-      expectTypeOf(allowedTo.read("projectId")).toEqualTypeOf<PermissionExpressionInput>();
+      expectTypeOf(allowedTo.read("project")).toEqualTypeOf<PermissionExpressionInput>();
 
       const manualExpression: PolicyExpr = { type: "True" };
       expectTypeOf(raw(manualExpression)).toEqualTypeOf<PermissionExpression>();
@@ -196,7 +232,7 @@ describe("permissions type inference", () => {
       const reachableTeams = policy.teams.gather({
         start: { kind: "individual", identity_key: session.claims["sub"] },
         step: ({ current }) =>
-          policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+          policy.team_team_edges.where({ child_team: current }).hopTo("parent_teamRelation"),
       });
 
       function hasViewerGrant(resource: unknown) {
@@ -222,9 +258,9 @@ describe("permissions type inference", () => {
           ]),
         ),
         policy.todos.allowUpdate
-          .whereOld(allowedTo.update("projectId", { maxDepth: 4 }))
-          .whereNew(allowedTo.update("projectId", { maxDepth: 4 })),
-        policy.projects.allowRead.where(allowedTo.readReferencing(policy.todos, "projectId")),
+          .whereOld(allowedTo.update("project", { maxDepth: 4 }))
+          .whereNew(allowedTo.update("project", { maxDepth: 4 })),
+        policy.projects.allowRead.where(allowedTo.readReferencing(policy.todos, "project")),
         policy.teams.allowRead.where({
           "resource_access_edges.grant_role": "viewer",
         }),
@@ -234,7 +270,7 @@ describe("permissions type inference", () => {
 
   it("supports reusable helpers annotated with the public condition input type", () => {
     definePermissions(app, ({ policy, allOf, anyOf, allowedTo, isCreator, raw, session }) => {
-      const policyAtom = (): PermissionExpressionInput => allowedTo.read("projectId");
+      const policyAtom = (): PermissionExpressionInput => allowedTo.read("project");
       const creatorAtom: PermissionExpressionInput = isCreator;
 
       const legacyRawHelper = (): PolicyExpr => ({ type: "True" });
@@ -295,7 +331,7 @@ describe("permissions type inference", () => {
   it("rejects invalid table/column usage at compile time where possible", () => {
     definePermissions(app, ({ policy, allowedTo }) => [
       policy.todos.allowRead.where({ done: true }),
-      policy.todos.allowRead.where(allowedTo.read("projectId")),
+      policy.todos.allowRead.where(allowedTo.read("project")),
     ]);
 
     definePermissions(app, ({ policy }) => {

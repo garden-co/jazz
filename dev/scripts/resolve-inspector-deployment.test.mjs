@@ -31,7 +31,7 @@ function jsonResponse(body, init = {}) {
   };
 }
 
-test("resolveInspectorDeployment writes GitHub output for the latest staged deployment from main", async () => {
+test("resolveInspectorDeployment writes GitHub output for the latest staged deployment from release", async () => {
   const outputFile = makeOutputFile();
   const requests = [];
   const logs = [];
@@ -77,7 +77,7 @@ test("resolveInspectorDeployment writes GitHub output for the latest staged depl
   assert.equal(requestUrl.searchParams.get("projectId"), "project_inspector");
   assert.equal(requestUrl.searchParams.get("target"), "production");
   assert.equal(requestUrl.searchParams.get("state"), "READY");
-  assert.equal(requestUrl.searchParams.get("branch"), "main");
+  assert.equal(requestUrl.searchParams.get("branch"), "release");
   assert.equal(requestUrl.searchParams.get("sha"), "sha-current");
   assert.equal(requestUrl.searchParams.get("teamId"), "team_alice");
   assert.deepEqual(logs, [
@@ -115,7 +115,7 @@ test("resolveInspectorDeployment marks an already promoted deployment", async ()
   );
 });
 
-test("resolveInspectorDeployment uses the latest main deployment before older staged deployments", async () => {
+test("resolveInspectorDeployment uses the latest release deployment before older staged deployments", async () => {
   const outputFile = makeOutputFile();
 
   const result = await resolveInspectorDeployment({
@@ -182,7 +182,7 @@ test("resolveInspectorDeployment reports the last matching deployments when none
         sleeps.push(delayMs);
       },
     }),
-    /No staged inspector production deployment found on main\.[\s\S]*jazz-inspector-main\.vercel\.app state=READY target=production substate=QUEUED/,
+    /No staged inspector production deployment found on release\.[\s\S]*jazz-inspector-main\.vercel\.app state=READY target=production substate=QUEUED/,
   );
   assert.deepEqual(sleeps, [5]);
   assert.equal(fs.existsSync(outputFile), false);
@@ -277,7 +277,7 @@ test("resolveInspectorDeployment ignores an old promoted deployment with a diffe
       attempts: 1,
       log: () => {},
     }),
-    /No staged inspector production deployment found on main/,
+    /No staged inspector production deployment found on release/,
   );
   assert.equal(fs.existsSync(outputFile), false);
 });

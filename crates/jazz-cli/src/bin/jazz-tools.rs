@@ -7,18 +7,30 @@
 //! jazz-tools server <APP_ID> [--port 1625] [--data-dir ./data] [--in-memory]
 //! ```
 
-// mimalloc replaces the system allocator for ~12-26% throughput on the server's
-// allocation-heavy paths (query/insert/observer). The global allocator is a
-// per-binary choice; library code in `jazz-tools` does not declare one so that
-// consumers (jazz-napi, todo-server, third-party embedders) keep theirs.
+// The global allocator is a per-binary choice; library code in `jazz-tools`
+// does not declare one so that consumers (jazz-napi, todo-server, third-party
+// embedders) keep theirs. mimalloc replaces the system allocator for
+// throughput on the server's allocation-heavy paths (query/insert/observer).
+//
+// With the `heap-profiling` feature on Linux, where production servers run,
+// a sampling wrapper records a stack for about one allocation per 512 KiB
+// (`JAZZ_HEAP_PROFILE_SAMPLE_BYTES`; `0` turns it off), so operators can see
+// which code holds memory (see `jazz_cli::heap_profiling`).
+#[cfg(heap_profiling)]
+#[global_allocator]
+static GLOBAL: jazz_cli::heap_profiling::SamplingAllocator<mimalloc::MiMalloc> =
+    jazz_cli::heap_profiling::SamplingAllocator::new(mimalloc::MiMalloc);
+
+#[cfg(not(heap_profiling))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use clap::{Parser, Subcommand};
-use jazz_cli::commands;
+use jazz::tools::AppId;
 #[cfg(feature = "otel")]
 use jazz_otel as otel;
 use jazz_server::AuthConfig;
+use jazz_server::profiling::DiagnosticsConfig;
 
 const DEFAULT_SHUTDOWN_TIMEOUT_SECS: u64 = 30;
 const MAX_SHUTDOWN_TIMEOUT_SECS: u64 = 60 * 60;
@@ -165,14 +177,6 @@ enum Commands {
         #[arg(long, env = "JAZZ_ADMIN_SECRET")]
         admin_secret: Option<String>,
 
-        /// Upstream server URL. When set, this server runs as an edge.
-        #[arg(long, env = "JAZZ_UPSTREAM_URL")]
-        upstream_url: Option<String>,
-
-        /// Edge cache eviction byte budget. Absent disables automatic edge eviction.
-        #[arg(long, env = "JAZZ_EDGE_CACHE_BUDGET_BYTES")]
-        edge_cache_budget_bytes: Option<u64>,
-
         /// Graceful shutdown network-drain timeout in seconds.
         #[arg(
             long,
@@ -182,9 +186,57 @@ enum Commands {
         )]
         shutdown_timeout_secs: u64,
 
+        /// Maximum live WebSocket connections. Upgrades beyond it get
+        /// `503 Service Unavailable` with `Retry-After`.
+        #[arg(
+            long,
+            env = "JAZZ_MAX_CONNECTIONS",
+            default_value_t = jazz_server::server::DEFAULT_MAX_WEBSOCKET_CONNECTIONS,
+            value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..),
+        )]
+        max_connections: usize,
+
+        /// Memory the server sizes its caches against, in bytes. Defaults to
+        /// the container's cgroup memory limit.
+        #[arg(long, env = "JAZZ_MEMORY_LIMIT_BYTES", value_parser = clap::value_parser!(u64).range(1..))]
+        memory_limit_bytes: Option<u64>,
+
+        /// Read the query indexes of stored tables from storage by key,
+        /// keeping only a bounded cache of them in memory. `0` holds them
+        /// all in memory instead.
+        #[arg(
+            long,
+            env = "JAZZ_STORED_ARRANGEMENTS",
+            default_value_t = true,
+            action = clap::ArgAction::Set,
+            value_parser = clap::builder::BoolishValueParser::new(),
+        )]
+        stored_arrangements: bool,
+
+        /// Bytes the query cache may keep while memory is plentiful.
+        /// Defaults to a quarter of the memory limit; it is lowered under
+        /// memory pressure either way. `0` keeps nothing resident, so every
+        /// query reads the indexes of stored tables from storage.
+        #[arg(long, env = "JAZZ_QUERY_CACHE_BUDGET_BYTES", value_parser = clap::value_parser!(u64))]
+        query_cache_budget_bytes: Option<u64>,
+
         /// Internal testing hook: write the resolved listen port after binding.
         #[arg(long, env = "JAZZ_BOUND_PORT_FILE", hide = true)]
         bound_port_file: Option<String>,
+
+        /// Address for a diagnostics listener serving `/debug/pprof/heap`,
+        /// e.g. `0.0.0.0:6060`.
+        ///
+        /// Non-loopback addresses require `--diagnostics-token`. The same
+        /// profile is served on the main port with the admin secret.
+        #[arg(long, env = "JAZZ_DIAGNOSTICS_LISTEN")]
+        diagnostics_listen: Option<std::net::SocketAddr>,
+
+        /// Bearer token the diagnostics listener requires
+        /// (`Authorization: Bearer <TOKEN>`). A read-only scrape credential
+        /// that can be shared across servers without their admin secrets.
+        #[arg(long, env = "JAZZ_DIAGNOSTICS_TOKEN", requires = "diagnostics_listen")]
+        diagnostics_token: Option<String>,
     },
 }
 
@@ -198,8 +250,19 @@ enum CreateResource {
     },
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // Before the runtime starts its worker threads: only threads that start
+    // after sampling is turned on sample.
+    #[cfg(heap_profiling)]
+    jazz_cli::heap_profiling::configure();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("failed to start the async runtime")
+        .block_on(run())
+}
+
+async fn run() {
     // Initialize tracing with layered subscriber
     init_tracing();
 
@@ -213,7 +276,8 @@ async fn main() {
     match cli.command {
         Commands::Create { resource } => match resource {
             CreateResource::App { name } => {
-                commands::create::app(name);
+                let app_id = name.map_or_else(AppId::random, |name| AppId::from_name(&name));
+                println!("{app_id}");
             }
         },
         Commands::Server {
@@ -230,10 +294,14 @@ async fn main() {
             allow_local_first_auth,
             backend_secret,
             admin_secret,
-            upstream_url,
-            edge_cache_budget_bytes,
             shutdown_timeout_secs,
+            max_connections,
+            memory_limit_bytes,
+            stored_arrangements,
+            query_cache_budget_bytes,
             bound_port_file,
+            diagnostics_listen,
+            diagnostics_token,
         } => {
             let node_env_mode = resolve_node_env_mode();
             let explicitly_allowed = allow_local_first_auth;
@@ -272,17 +340,29 @@ async fn main() {
                 admin_secret,
                 ..Default::default()
             };
-            let edge_cache_budget = edge_cache_budget_bytes.map(jazz::node::EdgeCacheBudget::new);
-            if let Err(e) = commands::server::run(
+            if let Err(e) = jazz_server::run(
                 &app_id,
                 port,
                 &data_dir,
                 in_memory,
                 auth_config,
-                upstream_url,
-                edge_cache_budget,
                 bound_port_file,
                 std::time::Duration::from_secs(shutdown_timeout_secs),
+                DiagnosticsConfig {
+                    #[cfg(heap_profiling)]
+                    heap_profiler: Some(jazz_cli::heap_profiling::activate()),
+                    #[cfg(not(heap_profiling))]
+                    heap_profiler: None,
+                    listen: diagnostics_listen,
+                    token: diagnostics_token,
+                },
+                jazz_server::resources::ServerResourceLimits {
+                    max_websocket_connections: max_connections,
+                    memory_limit_bytes: memory_limit_bytes
+                        .or_else(jazz_server::resources::detect_memory_limit_bytes),
+                    stored_arrangements,
+                    query_cache_budget_bytes,
+                },
             )
             .await
             {
@@ -295,10 +375,18 @@ async fn main() {
     }
 }
 
+fn validate_removed_edge_environment(
+    upstream_configured: bool,
+    cache_configured: bool,
+) -> Result<(), String> {
+    if upstream_configured || cache_configured {
+        return Err("Semantic edge servers are no longer supported. Remove JAZZ_UPSTREAM_URL and JAZZ_EDGE_CACHE_BUDGET_BYTES only if this process is intended to be Core; otherwise connect clients directly to the existing Core server.".to_owned());
+    }
+    Ok(())
+}
+
 fn validate_server_cli_options(command: &Commands) -> Result<(), String> {
     let Commands::Server {
-        upstream_url,
-        admin_secret,
         jwks_url,
         jwt_public_key,
         jwt_issuer,
@@ -309,9 +397,10 @@ fn validate_server_cli_options(command: &Commands) -> Result<(), String> {
         return Ok(());
     };
 
-    if upstream_url.is_some() && admin_secret.is_none() {
-        return Err("--admin-secret / JAZZ_ADMIN_SECRET is required when --upstream-url / JAZZ_UPSTREAM_URL is set".to_string());
-    }
+    validate_removed_edge_environment(
+        std::env::var_os("JAZZ_UPSTREAM_URL").is_some(),
+        std::env::var_os("JAZZ_EDGE_CACHE_BUDGET_BYTES").is_some(),
+    )?;
 
     let external_jwt_key_configured = jwks_url.is_some() || jwt_public_key.is_some();
     if external_jwt_key_configured {
@@ -580,6 +669,74 @@ mod tests {
     }
 
     #[test]
+    fn server_command_reads_query_cache_switches_from_env() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
+        let _stored_guard = EnvVarGuard::set("JAZZ_STORED_ARRANGEMENTS", "0");
+        let _budget_guard = EnvVarGuard::set("JAZZ_QUERY_CACHE_BUDGET_BYTES", "1048576");
+        let cli = Cli::try_parse_from([
+            "jazz-tools",
+            "server",
+            "7c5fd0da-4bd1-4ba9-9203-41e1f0da142c",
+        ])
+        .expect("server command should parse");
+        match cli.command {
+            Commands::Server {
+                stored_arrangements,
+                query_cache_budget_bytes,
+                ..
+            } => {
+                assert!(!stored_arrangements);
+                assert_eq!(query_cache_budget_bytes, Some(1 << 20));
+            }
+            _ => panic!("expected server command"),
+        }
+    }
+
+    #[test]
+    fn server_command_defaults_and_validates_max_connections() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
+        let _env_guard = EnvVarGuard::remove("JAZZ_MAX_CONNECTIONS");
+        let _stored_guard = EnvVarGuard::remove("JAZZ_STORED_ARRANGEMENTS");
+        let _budget_guard = EnvVarGuard::remove("JAZZ_QUERY_CACHE_BUDGET_BYTES");
+        let cli = Cli::try_parse_from([
+            "jazz-tools",
+            "server",
+            "7c5fd0da-4bd1-4ba9-9203-41e1f0da142c",
+        ])
+        .expect("server command should parse");
+        match cli.command {
+            Commands::Server {
+                max_connections,
+                memory_limit_bytes,
+                stored_arrangements,
+                query_cache_budget_bytes,
+                ..
+            } => {
+                assert_eq!(
+                    max_connections,
+                    jazz_server::server::DEFAULT_MAX_WEBSOCKET_CONNECTIONS
+                );
+                assert_eq!(memory_limit_bytes, None);
+                assert!(stored_arrangements);
+                assert_eq!(query_cache_budget_bytes, None);
+            }
+            _ => panic!("expected server command"),
+        }
+
+        assert!(
+            Cli::try_parse_from([
+                "jazz-tools",
+                "server",
+                "7c5fd0da-4bd1-4ba9-9203-41e1f0da142c",
+                "--max-connections",
+                "0",
+            ])
+            .is_err(),
+            "a zero connection cap would refuse every client"
+        );
+    }
+
+    #[test]
     fn server_command_defaults_shutdown_timeout_secs() {
         let _lock = ENV_LOCK.lock().expect("env lock");
         let _env_guard = EnvVarGuard::remove("JAZZ_SHUTDOWN_TIMEOUT_SECS");
@@ -662,67 +819,30 @@ mod tests {
     }
 
     #[test]
-    fn server_command_parses_upstream_url_and_admin_secret() {
+    fn server_command_rejects_removed_edge_flags() {
         let _lock = ENV_LOCK.lock().expect("env lock");
-        let cli = Cli::try_parse_from([
-            "jazz-tools",
-            "server",
-            "00000000-0000-0000-0000-000000000001",
-            "--upstream-url",
-            "https://core.example.com",
-            "--admin-secret",
-            "admin-secret",
-        ])
-        .expect("server command should parse");
-
-        match cli.command {
-            Commands::Server {
-                upstream_url,
-                admin_secret,
-                ..
-            } => {
-                assert_eq!(upstream_url.as_deref(), Some("https://core.example.com"));
-                assert_eq!(admin_secret.as_deref(), Some("admin-secret"));
-            }
-            _ => panic!("expected server command"),
+        for flag in ["--upstream-url", "--edge-cache-budget-bytes"] {
+            let error = Cli::try_parse_from([
+                "jazz-tools",
+                "server",
+                "00000000-0000-0000-0000-000000000001",
+                flag,
+                "unused",
+            ])
+            .err()
+            .expect("removed server roles must not silently become Core");
+            assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
         }
     }
 
     #[test]
-    fn server_cli_validation_allows_admin_secret_only_in_edge_mode() {
-        let _lock = ENV_LOCK.lock().expect("env lock");
-        let cli = Cli::try_parse_from([
-            "jazz-tools",
-            "server",
-            "00000000-0000-0000-0000-000000000001",
-            "--upstream-url",
-            "https://core.example.com",
-            "--admin-secret",
-            "admin-secret",
-        ])
-        .expect("server command should parse");
-
-        validate_server_cli_options(&cli.command)
-            .expect("edge mode should only require admin secret");
-    }
-
-    #[test]
-    fn server_cli_validation_requires_admin_secret_in_edge_mode() {
-        let _lock = ENV_LOCK.lock().expect("env lock");
-        let cli = Cli::try_parse_from([
-            "jazz-tools",
-            "server",
-            "00000000-0000-0000-0000-000000000001",
-            "--upstream-url",
-            "https://core.example.com",
-        ])
-        .expect("server command should parse");
-
-        let error = validate_server_cli_options(&cli.command)
-            .expect_err("edge mode without admin secret should fail validation");
-
-        assert!(error.contains("--admin-secret"));
-        assert!(error.contains("--upstream-url"));
+    fn obsolete_edge_environment_cannot_silently_start_core() {
+        assert!(validate_removed_edge_environment(false, false).is_ok());
+        for configured in [(true, false), (false, true), (true, true)] {
+            let error = validate_removed_edge_environment(configured.0, configured.1).unwrap_err();
+            assert!(error.contains("no longer supported"));
+            assert!(error.contains("existing Core"));
+        }
     }
 
     #[test]

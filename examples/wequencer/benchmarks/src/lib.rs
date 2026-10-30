@@ -3,38 +3,47 @@
 //! The native model deliberately duplicates the application schema and query
 //! shapes. It does not import a shared application helper.
 
+pub mod pad_history;
+pub mod pattern_views;
+
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 
 use jazz::db::{
     Db, DbConfig, DbIdentity, InsertOptions, PreparedQuery, ReadOpts, SubscriptionEvent,
-    UpdateOptions, block_on,
+    SubscriptionStream, UpdateOptions, block_on,
 };
-use jazz::groove::records::Value;
-use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
-use jazz::schema::{JazzSchema, TableSchema};
+use jazz::records::Value;
+use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 
 pub const TRACKS: usize = 16;
 pub const STEPS: usize = 64;
 
-type BenchDb = Db<MemoryStorage>;
+type BenchDb = Db;
 
 pub struct Fixture {
     db: BenchDb,
-    session_table: TableSchema,
-    member_table: TableSchema,
-    track_table: TableSchema,
-    step_table: TableSchema,
-    transport_table: TableSchema,
     session_list: PreparedQuery,
     session_tracks: PreparedQuery,
     own_membership: PreparedQuery,
     session_presence: PreparedQuery,
     track_window: PreparedQuery,
     transport_receipts: PreparedQuery,
+    /// One ordered step subscription per track, as the pattern grid renders.
+    pattern_tracks: Vec<PreparedQuery>,
+    pad_enabled: RefCell<Vec<bool>>,
+    pad_toggles: Cell<usize>,
+}
+
+/// The session grid a bandmate keeps subscribed: the ordered track list and
+/// one ordered step subscription per track.
+pub struct LivePattern {
+    _tracks: SubscriptionStream,
+    steps: Vec<SubscriptionStream>,
 }
 
 impl Default for Fixture {
@@ -45,7 +54,7 @@ impl Default for Fixture {
 
 impl Fixture {
     pub fn new() -> Self {
-        let (db, session_table, member_table, track_table, step_table, transport_table) = open_db();
+        let db = open_db();
         let session_id = row_id(1, 0);
         let profile_id = row_id(2, 0);
         insert(
@@ -173,20 +182,98 @@ impl Fixture {
                     .limit(1),
             )
             .expect("prepare Wequencer transport receipt query");
+        let pattern_tracks = (0..TRACKS)
+            .map(|track| {
+                db.prepare_query(
+                    &Query::from("steps")
+                        .filter(eq(col("track_id"), lit(row_id(4, track).0)))
+                        .order_by("position", OrderDirection::Asc),
+                )
+                .expect("prepare Wequencer pattern-track query")
+            })
+            .collect();
+        let pad_enabled = (0..TRACKS * STEPS)
+            .map(|pad| (pad / STEPS + pad % STEPS).is_multiple_of(3))
+            .collect();
         Self {
             db,
-            session_table,
-            member_table,
-            track_table,
-            step_table,
-            transport_table,
             session_list,
             session_tracks,
             own_membership,
             session_presence,
             track_window,
             transport_receipts,
+            pattern_tracks,
+            pad_enabled: RefCell::new(pad_enabled),
+            pad_toggles: Cell::new(0),
         }
+    }
+
+    /// Opening a session's pattern grid: subscribe to the ordered track list
+    /// and each track's ordered steps, and receive every first result.
+    /// Returns the live grid and the number of rows delivered.
+    pub fn open_pattern(&self) -> (LivePattern, usize) {
+        let mut tracks = self.subscribe(&self.session_tracks);
+        let mut rows = initial_rows(&mut tracks);
+        let steps = self
+            .pattern_tracks
+            .iter()
+            .map(|query| {
+                let mut stream = self.subscribe(query);
+                rows += initial_rows(&mut stream);
+                stream
+            })
+            .collect();
+        (
+            LivePattern {
+                _tracks: tracks,
+                steps,
+            },
+            rows,
+        )
+    }
+
+    /// Toggles one pad of the live grid and waits until that track's
+    /// subscription shows it. Successive calls walk across tracks and steps.
+    /// Returns the number of step rows the subscription updated.
+    pub fn toggle_pad(&self, live: &mut LivePattern) -> usize {
+        let toggle = self.pad_toggles.get();
+        self.pad_toggles.set(toggle + 1);
+        let track = toggle % TRACKS;
+        let step = (toggle / TRACKS) % STEPS;
+        let enabled = {
+            let mut pads = self.pad_enabled.borrow_mut();
+            let pad = &mut pads[track * STEPS + step];
+            *pad = !*pad;
+            *pad
+        };
+        let write = block_on(self.db.update(
+            "steps",
+            row_id(32 + track as u8, step),
+            BTreeMap::from([("enabled".into(), Value::Bool(enabled))]),
+            UpdateOptions::default(),
+        ))
+        .expect("toggle Wequencer pad");
+        block_on(write.wait(DurabilityTier::Local)).expect("pad toggle reaches local durability");
+        match block_on(live.steps[track].next_event()).expect("track observes the pad toggle") {
+            SubscriptionEvent::Delta { updated, .. } => updated.len(),
+            event => panic!("unexpected pattern event: {event:?}"),
+        }
+    }
+
+    /// Whether any track subscription other than `track` has an undelivered
+    /// event. A pad toggle must only wake its own track.
+    pub fn other_tracks_pending(live: &mut LivePattern, track: usize) -> bool {
+        live.steps
+            .iter_mut()
+            .enumerate()
+            .filter(|(index, _)| *index != track)
+            .any(|(_, stream)| stream.try_next_event().is_some())
+    }
+
+    fn subscribe(&self, query: &PreparedQuery) -> SubscriptionStream {
+        block_on(self.db.subscribe(query, ReadOpts::default()))
+            .expect("open Wequencer subscription")
     }
 
     /// Reads the parent-scoped browser query shapes. The values make their
@@ -197,7 +284,7 @@ impl Fixture {
             .read(&self.session_list)
             .expect("read Wequencer session-browser query")
             .into_iter()
-            .map(|row| match row.cell(&self.session_table, "title") {
+            .map(|row| match row.cell("title") {
                 Some(Value::String(title)) => title,
                 value => panic!("unexpected session title: {value:?}"),
             })
@@ -207,7 +294,7 @@ impl Fixture {
             .read(&self.session_tracks)
             .expect("read Wequencer session-track query")
             .into_iter()
-            .map(|row| match row.cell(&self.track_table, "position") {
+            .map(|row| match row.cell("position") {
                 Some(Value::I32(position)) => position as u64,
                 value => panic!("unexpected track position: {value:?}"),
             })
@@ -217,7 +304,7 @@ impl Fixture {
             .read(&self.own_membership)
             .expect("read Wequencer membership query")
             .into_iter()
-            .filter(|row| matches!(row.cell(&self.member_table, "role"), Some(Value::String(_))))
+            .filter(|row| matches!(row.cell("role"), Some(Value::String(_))))
             .count();
         let presence_count = self
             .db
@@ -238,11 +325,11 @@ impl Fixture {
             .expect("read Wequencer track")
             .into_iter()
             .map(|row| {
-                let position = match row.cell(&self.step_table, "position") {
+                let position = match row.cell("position") {
                     Some(Value::I32(position)) => position as u64,
                     value => panic!("unexpected step position: {value:?}"),
                 };
-                let enabled = match row.cell(&self.step_table, "enabled") {
+                let enabled = match row.cell("enabled") {
                     Some(Value::Bool(enabled)) => enabled,
                     value => panic!("unexpected enabled value: {value:?}"),
                 };
@@ -267,11 +354,11 @@ impl Fixture {
             .expect("read bounded Wequencer playhead query")
             .into_iter()
             .map(|row| {
-                let position = match row.cell(&self.step_table, "position") {
+                let position = match row.cell("position") {
                     Some(Value::I32(position)) => position as u64,
                     value => panic!("unexpected step position: {value:?}"),
                 };
-                let enabled = match row.cell(&self.step_table, "enabled") {
+                let enabled = match row.cell("enabled") {
                     Some(Value::Bool(enabled)) => enabled,
                     value => panic!("unexpected enabled value: {value:?}"),
                 };
@@ -290,11 +377,11 @@ impl Fixture {
             .into_iter()
             .next()
             .expect("fixture transport receipt");
-        let playing = match row.cell(&self.transport_table, "playing") {
+        let playing = match row.cell("playing") {
             Some(Value::Bool(playing)) => playing,
             value => panic!("unexpected transport playing state: {value:?}"),
         };
-        let bar = match row.cell(&self.transport_table, "bar") {
+        let bar = match row.cell("bar") {
             Some(Value::I32(bar)) => bar as u64,
             value => panic!("unexpected transport bar: {value:?}"),
         };
@@ -396,6 +483,15 @@ impl Fixture {
     }
 }
 
+fn initial_rows(stream: &mut SubscriptionStream) -> usize {
+    match block_on(stream.next_event()).expect("subscription has an initial result") {
+        SubscriptionEvent::Delta {
+            reset: true, added, ..
+        } => added.len(),
+        event => panic!("unexpected initial Wequencer event: {event:?}"),
+    }
+}
+
 fn schema() -> JazzSchema {
     let source = SchemaBuilder::new()
         .table(
@@ -407,7 +503,8 @@ fn schema() -> JazzSchema {
             TableSchemaBuilder::new("sessions")
                 .column("title", ColumnType::Text)
                 .column("tempo_bpm", ColumnType::Integer)
-                .column("loop_steps", ColumnType::Integer),
+                .column("loop_steps", ColumnType::Integer)
+                .index_only(["$createdAt"]),
         )
         .table(
             TableSchemaBuilder::new("session_members")
@@ -422,7 +519,8 @@ fn schema() -> JazzSchema {
                 .column("position", ColumnType::Integer)
                 .column("name", ColumnType::Text)
                 .column("color", ColumnType::Text)
-                .index_only(["session_id", "position"]),
+                .index_only(["session_id", "position"])
+                .composite_index(["session_id", "position"]),
         )
         .table(
             TableSchemaBuilder::new("steps")
@@ -431,7 +529,8 @@ fn schema() -> JazzSchema {
                 .column("velocity", ColumnType::Integer)
                 .column("enabled", ColumnType::Boolean)
                 .column("probability", ColumnType::Integer)
-                .index_only(["track_id", "position"]),
+                .index_only(["track_id", "position"])
+                .composite_index(["track_id", "position"]),
         )
         .table(
             TableSchemaBuilder::new("transport_observations")
@@ -439,7 +538,8 @@ fn schema() -> JazzSchema {
                 .column("playing", ColumnType::Boolean)
                 .column("bar", ColumnType::Integer)
                 .column("observed_at", ColumnType::Timestamp)
-                .index_only(["session_id", "observed_at"]),
+                .index_only(["session_id", "observed_at"])
+                .composite_index(["session_id", "observed_at"]),
         )
         .table(
             TableSchemaBuilder::new("presence")
@@ -453,33 +553,10 @@ fn schema() -> JazzSchema {
     JazzSchema::new(&source).expect("Wequencer schema compiles")
 }
 
-fn open_db() -> (
-    BenchDb,
-    TableSchema,
-    TableSchema,
-    TableSchema,
-    TableSchema,
-    TableSchema,
-) {
+fn open_db() -> BenchDb {
     let schema = schema();
-    let table = |name| {
-        schema
-            .tables()
-            .iter()
-            .find(|table| table.name == name)
-            .unwrap_or_else(|| panic!("{name} table"))
-            .clone()
-    };
-    let session_table = table("sessions");
-    let member_table = table("session_members");
-    let track_table = table("tracks");
-    let step_table = table("steps");
-    let transport_table = table("transport_observations");
-    let families = schema.column_families();
-    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let db = block_on(Db::open(DbConfig::new(
         schema,
-        MemoryStorage::new(&family_refs).expect("valid memory storage families"),
         DbIdentity {
             node: NodeUuid::from_bytes([0xe1; 16]),
             author: AuthorSubject::SYSTEM,
@@ -506,14 +583,7 @@ fn open_db() -> (
             ("loop_steps".into(), Value::I32(STEPS as i32)),
         ]),
     );
-    (
-        db,
-        session_table,
-        member_table,
-        track_table,
-        step_table,
-        transport_table,
-    )
+    db
 }
 
 fn insert(db: &BenchDb, table: &str, id: RowUuid, cells: BTreeMap<String, Value>) {

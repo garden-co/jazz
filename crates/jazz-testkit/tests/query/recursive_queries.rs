@@ -7,8 +7,7 @@ use crate::support::{
 use jazz::query::{Gather, Query, col, eq, lit};
 use jazz::row_input;
 use jazz::tools::{
-    ColumnType, DurabilityTier, JazzClient, ObjectId, QueryResult, Schema, SchemaBuilder,
-    TableSchema, Value,
+    ColumnType, JazzClient, ObjectId, QueryResult, Schema, SchemaBuilder, TableSchema, Value,
 };
 use jazz_server::JazzServer;
 
@@ -29,6 +28,7 @@ macro_rules! local_tokio_test {
 }
 
 fn team_graph_schema() -> Schema {
+    use jazz::tools::test_support::AllowAll;
     SchemaBuilder::new()
         .table(
             TableSchema::builder("teams")
@@ -40,6 +40,7 @@ fn team_graph_schema() -> Schema {
                 .fk_column("child_team", "teams")
                 .fk_column("parent_team", "teams"),
         )
+        .allow_all()
         .build()
 }
 
@@ -170,7 +171,7 @@ async fn recursive_gather_query_returns_seed_and_ancestors_from_edge_table() {
     let rows = wait_for_query_results(
         &clients.bob,
         query,
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
         QUERY_TIMEOUT,
         "recursive gather rows",
         |rows| {

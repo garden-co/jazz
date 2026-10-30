@@ -37,7 +37,7 @@ src/
   app.html                        ← HTML shell
   app.css                         ← global styles
   app.d.ts                        ← SvelteKit types
-  hooks.server.ts                 ← Better Auth handler + cookie route gate
+  hooks.server.ts                 ← Better Auth handler + session route gate
   lib/
     schema.ts                     ← Jazz app schema (todos table)
     permissions.ts                ← row-level access policy ($createdBy)
@@ -56,11 +56,11 @@ src/
 ## How it works
 
 Route protection is handled by `hooks.server.ts`, which routes all
-`/api/auth/*` traffic through `svelteKitHandler` and checks the session
-cookie on every other request — redirecting `/` to `/dashboard` for
-signed-in users, and `/dashboard/*` back to `/` for signed-out users.
-This uses `getSessionCookie`, a cheap cookie-presence check, not a full
-DB read.
+`/api/auth/*` traffic through `svelteKitHandler` and validates the canonical
+Better Auth session on the root and dashboard routes — redirecting `/` to
+`/dashboard` for signed-in users, and `/dashboard/*` back to `/` for
+signed-out or invalid-session users. Other routes are left untouched by the
+gate.
 
 The app owns one `JazzSession` and connects it to Better Auth with `connectBetterAuth`.
 Sign-up and sign-in forms only call Better Auth. The connection watches initial
@@ -81,8 +81,8 @@ republishes the schema on change — no restart needed.
 
 ```ts
 const schema = {
-  todos: s.table({ title: s.string(), done: s.boolean() }),
-  projects: s.table({ name: s.string() }),
+  todos: s.table({ title: s.string(), done: s.boolean() }, {}),
+  projects: s.table({ name: s.string() }, {}),
 };
 ```
 
@@ -117,6 +117,14 @@ invalidates all existing Better Auth sessions.
 Better Auth's in-memory adapter (`src/lib/auth.ts`) is a placeholder.
 Swap it for a persistent database adapter before shipping, or users will
 be wiped on every process restart.
+
+## JWT configuration
+
+`APP_ORIGIN` defaults to `http://localhost:5173`. Better Auth uses it for its
+base URL, issuer, and audience; `jazzSvelteKit` uses the same value for
+`jwksUrl`, `jwtIssuer`, and `jwtAudience`. Set it consistently for the app
+and plugin. Production Jazz servers need a reachable JWKS endpoint and
+matching issuer/audience too; JWKS alone is not sufficient to authenticate.
 
 ## Known limitations
 

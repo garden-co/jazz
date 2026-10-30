@@ -4,9 +4,7 @@ use std::time::Duration;
 
 use jazz::row_input;
 use jazz::tools::public_schema::{PolicyExpr, TablePolicies};
-use jazz::tools::{
-    ColumnType, DurabilityTier, Schema, SchemaBuilder, TableSchema, Value, policy_expr,
-};
+use jazz::tools::{ColumnType, Schema, SchemaBuilder, TableSchema, Value, policy_expr};
 use jazz_server::JazzServer;
 use serde_json::json;
 use support::{
@@ -151,7 +149,7 @@ async fn query_applies_claims_select_policy() {
                     row_input!("name" => "Party Room", "join_code" => "secret-123"),
                 )
                 .expect("admin creates claims-gated room");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &admin,
                 &[transaction_id.expect("ordinary mutation commits immediately")],
             )
@@ -171,7 +169,7 @@ async fn query_applies_claims_select_policy() {
             wait_for_query(
                 &alice,
                 query.clone(),
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 QUERY_TIMEOUT,
                 "matching claim sees row",
                 |rows| rows.iter().any(|(id, _)| *id == room_id).then_some(()),
@@ -188,8 +186,9 @@ async fn query_applies_claims_select_policy() {
                 .await;
 
             let bob_rows = bob
-                .query(query.clone(), Some(DurabilityTier::EdgeServer))
+                .query(query.clone(), jazz::tools::ReadTier::Remote)
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .expect("bob queries rooms");
             assert!(
                 bob_rows.iter().all(|(id, _)| *id != room_id),
@@ -206,8 +205,9 @@ async fn query_applies_claims_select_policy() {
                 .await;
 
             let carol_rows = carol
-                .query(query, Some(DurabilityTier::EdgeServer))
+                .query(query, jazz::tools::ReadTier::Remote)
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .expect("carol queries rooms");
             assert!(
                 carol_rows.iter().all(|(id, _)| *id != room_id),
@@ -253,7 +253,7 @@ async fn numeric_claims_match_integer_columns_across_core_widths() {
                     row_input!("access_level" => Value::BigInt(7)),
                 )
                 .expect("admin creates bigint claims row");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &admin,
                 &[
                     integer_tx.expect("ordinary mutation commits immediately"),
@@ -274,7 +274,7 @@ async fn numeric_claims_match_integer_columns_across_core_widths() {
             wait_for_query(
                 &bigint_claim_user,
                 jazz::query::Query::from("integer_claim_rows"),
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 QUERY_TIMEOUT,
                 "I64 claim matches I32 column",
                 |rows| {
@@ -297,7 +297,7 @@ async fn numeric_claims_match_integer_columns_across_core_widths() {
             wait_for_query(
                 &integer_claim_user,
                 jazz::query::Query::from("bigint_claim_rows"),
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 QUERY_TIMEOUT,
                 "U32 claim matches I64 column",
                 |rows| {
@@ -346,7 +346,7 @@ async fn session_role_in_list_matches_equivalent_or_policy() {
             let (or_row_id, _, or_tx_id) = admin
                 .insert("role_or_rooms", row_input!("name" => "or room"))
                 .expect("admin creates or room");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &admin,
                 &[
                     in_list_tx_id.expect("ordinary mutation commits immediately"),
@@ -374,7 +374,7 @@ async fn session_role_in_list_matches_equivalent_or_policy() {
                 wait_for_query(
                     &client,
                     in_list_query.clone(),
-                    Some(DurabilityTier::EdgeServer),
+                    jazz::tools::ReadTier::Remote,
                     QUERY_TIMEOUT,
                     "matching role sees SessionInList row",
                     |rows| {
@@ -387,7 +387,7 @@ async fn session_role_in_list_matches_equivalent_or_policy() {
                 wait_for_query(
                     &client,
                     or_query.clone(),
-                    Some(DurabilityTier::EdgeServer),
+                    jazz::tools::ReadTier::Remote,
                     QUERY_TIMEOUT,
                     "matching role sees Or-of-equals row",
                     |rows| rows.iter().any(|(id, _)| *id == or_row_id).then_some(()),
@@ -422,12 +422,14 @@ async fn session_role_in_list_matches_equivalent_or_policy() {
                     .await;
 
                 let in_list_rows = client
-                    .query(in_list_query.clone(), Some(DurabilityTier::EdgeServer))
+                    .query(in_list_query.clone(), jazz::tools::ReadTier::Remote)
                     .await
+                    .map(jazz::tools::test_support::ordinary_rows)
                     .unwrap_or_else(|error| panic!("{label} queries SessionInList rooms: {error}"));
                 let or_rows = client
-                    .query(or_query.clone(), Some(DurabilityTier::EdgeServer))
+                    .query(or_query.clone(), jazz::tools::ReadTier::Remote)
                     .await
+                    .map(jazz::tools::test_support::ordinary_rows)
                     .unwrap_or_else(|error| panic!("{label} queries Or-of-equals rooms: {error}"));
 
                 assert!(
@@ -475,7 +477,7 @@ async fn subscription_matches_claims_select_query() {
                     row_input!("name" => "Subscription Room", "join_code" => "secret-123"),
                 )
                 .expect("admin creates claims-gated room");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &admin,
                 &[transaction_id.expect("ordinary mutation commits immediately")],
             )
@@ -508,7 +510,7 @@ async fn subscription_matches_claims_select_query() {
             wait_for_query(
                 &alice,
                 query.clone(),
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 QUERY_TIMEOUT,
                 "matching claim one-shot sees row",
                 |rows| rows.iter().any(|(id, _)| *id == room_id).then_some(()),
@@ -541,8 +543,9 @@ async fn subscription_matches_claims_select_query() {
                 "wrong claim subscription should not see row: {bob_log:?}"
             );
             let bob_rows = bob
-                .query(query.clone(), Some(DurabilityTier::EdgeServer))
+                .query(query.clone(), jazz::tools::ReadTier::Remote)
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .expect("bob queries rooms");
             assert!(
                 bob_rows.iter().all(|(id, _)| *id != room_id),
@@ -575,8 +578,9 @@ async fn subscription_matches_claims_select_query() {
                 "missing claim subscription should not see row: {carol_log:?}"
             );
             let carol_rows = carol
-                .query(query, Some(DurabilityTier::EdgeServer))
+                .query(query, jazz::tools::ReadTier::Remote)
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .expect("carol queries rooms");
             assert!(
                 carol_rows.iter().all(|(id, _)| *id != room_id),
@@ -631,7 +635,7 @@ async fn same_identity_sessions_keep_claims_isolated() {
                     row_input!("name" => "visible before revocation"),
                 )
                 .expect("writer inserts initially visible room");
-            support::wait_for_edge_txs(&writer, &[initial_tx.expect("ordinary mutation commits immediately")]).await;
+            support::wait_for_global_txs(&writer, &[initial_tx.expect("ordinary mutation commits immediately")]).await;
 
             let mut stream = authorized
                 .subscribe(query.clone())
@@ -656,8 +660,9 @@ async fn same_identity_sessions_keep_claims_isolated() {
                 .connect()
                 .await;
             let non_admin_rows = non_admin
-                .query(query.clone(), Some(DurabilityTier::EdgeServer))
+                .query(query.clone(), jazz::tools::ReadTier::Remote)
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .expect("non-admin sibling performs one-shot read");
             assert!(
                 non_admin_rows.is_empty(),
@@ -671,7 +676,7 @@ async fn same_identity_sessions_keep_claims_isolated() {
             let (future_id, _, future_tx) = writer
                 .insert("admin_rooms", row_input!("name" => "visible to original session"))
                 .expect("writer inserts a later room");
-            support::wait_for_edge_txs(&writer, &[future_tx.expect("ordinary mutation commits immediately")]).await;
+            support::wait_for_global_txs(&writer, &[future_tx.expect("ordinary mutation commits immediately")]).await;
             wait_for_subscription_update(
                 &mut stream,
                 &mut stream_log,
@@ -729,7 +734,7 @@ async fn same_shape_subscriptions_route_claims_per_identity() {
                     row_input!("name" => "Beta Room", "join_code" => "beta"),
                 )
                 .expect("admin creates beta room");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &admin,
                 &[
                     alpha_tx.expect("ordinary mutation commits immediately"),
@@ -766,8 +771,9 @@ async fn same_shape_subscriptions_route_claims_per_identity() {
                 "simple claim route must not receive beta row: {simple_log:?}"
             );
             let simple_rows = simple
-                .query(query.clone(), Some(DurabilityTier::EdgeServer))
+                .query(query.clone(), jazz::tools::ReadTier::Remote)
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .expect("simple queries rooms");
             assert_eq!(
                 simple_rows.iter().filter(|(id, _)| *id == alpha_id).count(),
@@ -801,8 +807,9 @@ async fn same_shape_subscriptions_route_claims_per_identity() {
             )
             .await;
             let admin_rows = admin_reader
-                .query(query.clone(), Some(DurabilityTier::EdgeServer))
+                .query(query.clone(), jazz::tools::ReadTier::Remote)
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .expect("admin queries rooms");
             assert!(
                 admin_rows.iter().any(|(id, _)| *id == alpha_id)
@@ -836,8 +843,9 @@ async fn same_shape_subscriptions_route_claims_per_identity() {
                 "spy subscription must not receive rows: {spy_log:?}"
             );
             let spy_rows = spy
-                .query(query, Some(DurabilityTier::EdgeServer))
+                .query(query, jazz::tools::ReadTier::Remote)
                 .await
+                .map(jazz::tools::test_support::ordinary_rows)
                 .expect("spy queries rooms");
             assert!(
                 spy_rows
@@ -882,7 +890,7 @@ async fn numeric_claims_authorize_writes_across_core_widths() {
                     row_input!("access_level" => Value::Integer(-7)),
                 )
                 .expect("I64 claim creates I32 row");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &bigint_claim_user,
                 &[integer_tx.expect("ordinary mutation commits immediately")],
             )
@@ -903,7 +911,7 @@ async fn numeric_claims_authorize_writes_across_core_widths() {
                     row_input!("access_level" => Value::BigInt(7)),
                 )
                 .expect("U32 claim creates I64 row");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &integer_claim_user,
                 &[bigint_tx.expect("ordinary mutation commits immediately")],
             )

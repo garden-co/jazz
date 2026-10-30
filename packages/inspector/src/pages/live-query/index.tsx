@@ -1,9 +1,5 @@
 import { fetchServerSubscriptions } from "jazz-tools";
-import type {
-  DurabilityTier,
-  InspectorSubscription,
-  IntrospectionSubscriptionGroup,
-} from "jazz-tools";
+import type { InspectorSubscription, IntrospectionSubscriptionGroup } from "jazz-tools";
 import {
   flexRender,
   getCoreRowModel,
@@ -88,13 +84,13 @@ function formatTime(value: string | number): string {
   return new Date(value).toLocaleTimeString();
 }
 
-function tierRank(tier: DurabilityTier): number {
+function tierRank(tier: InspectorSubscription["tier"]): number {
   switch (tier) {
-    case "local":
+    case "local-only":
       return 0;
-    case "edge":
+    case "local-first":
       return 1;
-    case "global":
+    case "remote":
       return 2;
   }
 }
@@ -206,13 +202,8 @@ function OverlayLiveQuery() {
         accessorKey: "tier",
         header: "Tier",
         sortingFn: (left, right, columnId) =>
-          tierRank(left.getValue<DurabilityTier>(columnId)) -
-          tierRank(right.getValue<DurabilityTier>(columnId)),
-        cell: (info) => info.getValue<string>(),
-      },
-      {
-        accessorKey: "propagation",
-        header: "Propagation",
+          tierRank(left.getValue<InspectorSubscription["tier"]>(columnId)) -
+          tierRank(right.getValue<InspectorSubscription["tier"]>(columnId)),
         cell: (info) => info.getValue<string>(),
       },
       {
@@ -371,7 +362,6 @@ function StandaloneLiveQuery() {
               <tr>
                 <th>Count</th>
                 <th>Table</th>
-                <th>Propagation</th>
                 <th>Branches</th>
                 <th>Query</th>
               </tr>
@@ -388,7 +378,6 @@ function StandaloneLiveQuery() {
                       {query.table}
                     </Link>
                   </td>
-                  <td>{query.propagation}</td>
                   <td>{query.branches.join(", ")}</td>
                   <td>
                     <pre className={styles.codeBlock}>{query.query}</pre>

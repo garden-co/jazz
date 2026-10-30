@@ -72,20 +72,22 @@ failures=0; ran=0; budget_exhausted=false; deadline=$(( $(date +%s) + budget_sec
 # sleeping or relying on host scheduling. It is not used by the workflow.
 [[ "${JAZZ_SOAK_TEST_EXHAUST_BUDGET:-}" == 1 ]] && deadline=$(date +%s)
 run_seed() {
-  local suite="$1" seed="$2" test_name env_args test_args log status replay
+  local suite="$1" seed="$2" test_target test_name env_args test_args log status replay
   if [[ "$suite" == sync ]]; then
-    test_name="node::tests::sync::convergence_and_fates::m3_seeded_sync_interleavings_converge_against_oracle"
+    test_target="integration"
+    test_name="sync_differential::clients_converge_on_the_servers_truth_under_concurrent_writes"
     env_args=("JAZZ_SEED=$seed" "JAZZ_COMMIT_COUNT=$sync_commits")
     test_args=(--exact)
   else
-    test_name="node::tests::harness::m3_maintained_one_shot_differential_oracle"
+    test_target="maintained_differential"
+    test_name="maintained_one_shot_differential_oracle"
     env_args=("JAZZ_SEED=$seed" "JAZZ_DIFFERENTIAL_STEP_COUNT=$differential_steps" "JAZZ_DIFFERENTIAL_CHURN_DEPTHS=$churn_depths")
     test_args=(--exact --ignored)
   fi
   log="$output/logs/${suite}-seed-${seed}.log"
-  replay="CARGO_TARGET_DIR=\${CARGO_TARGET_DIR:-target} timeout --kill-after=30s ${case_timeout}s env ${env_args[*]} cargo test -p jazz --lib --no-default-features --features testing,transport-compression-zstd ${test_name} -- ${test_args[*]}"
+  replay="CARGO_TARGET_DIR=\${CARGO_TARGET_DIR:-target} timeout --kill-after=30s ${case_timeout}s env ${env_args[*]} cargo test -p jazz --no-default-features --features testing,transport-compression-zstd --test ${test_target} ${test_name} -- ${test_args[*]}"
   set +e
-  timeout --kill-after=30s "${case_timeout}s" env "${env_args[@]}" cargo test -p jazz --lib --no-default-features --features testing,transport-compression-zstd "$test_name" -- "${test_args[@]}" >"$log" 2>&1
+  timeout --kill-after=30s "${case_timeout}s" env "${env_args[@]}" cargo test -p jazz --no-default-features --features testing,transport-compression-zstd --test "$test_target" "$test_name" -- "${test_args[@]}" >"$log" 2>&1
   status=$?
   set -e
   if (( status == 124 || status == 137 )); then result=timeout; else result=passed; (( status == 0 )) || result=failed; fi

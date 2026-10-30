@@ -23,6 +23,10 @@ try {
     ["exec", "turbo", "run", "build", "--filter=jazz-tools", "--only"],
     { cwd: root, rootDir: root },
   );
+  await runCorrectnessConsumer("pnpm", ["--filter", "inspector", "run", "build:embedded"], {
+    cwd: root,
+    rootDir: root,
+  });
   console.log("ts-consumers: build retained its admitted native artifact snapshot");
   await runCorrectnessConsumer("bash", ["dev/gates/run-ts-tests.sh"], {
     cwd: root,

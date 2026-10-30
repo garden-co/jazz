@@ -1,3 +1,4 @@
+import { createInspectorLocalQueryOptions as inspectorLocalQueryOptions } from "../../src/internal/inspector-query.js";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createBrowserTestDb as createDb } from "./support.js";
 import type { Db } from "../../src/runtime/db.js";
@@ -52,6 +53,25 @@ describe("db.all browser integration", () => {
       await assertConditionQuery(conditionsDb, testCase);
     });
   }
+
+  it("supports the internal local-only read tier", async () => {
+    const db = track(
+      await createDb({
+        appId: "db-all-test",
+        driver: { type: "persistent", dbName: uniqueDbName("local-only") },
+      }),
+    );
+    db.insert(todos, {
+      title: "local-only-task",
+      done: false,
+      priority: 1,
+      owner_id: undefined,
+      tags: ["local"],
+    });
+    await expect(db.all(todos, inspectorLocalQueryOptions())).resolves.toEqual([
+      expect.objectContaining({ title: "local-only-task" }),
+    ]);
+  });
 
   it("returns BYTEA columns as Uint8Array", async () => {
     const db = track(
@@ -199,7 +219,7 @@ describe("db.all browser integration", () => {
     expect(teamRows).toHaveLength(1);
     expect(teamRows[0]).toMatchObject({ id: teamId, name: "FK Team" });
 
-    const itemRows = await db.all(bundles.where({ id: bundleId }).hopTo("items"));
+    const itemRows = await db.all(bundles.where({ id: bundleId }).hopTo("itemsRelation"));
     expect(itemRows).toHaveLength(2);
     expect(itemRows.map((row) => row.label).sort()).toEqual(["A", "B"]);
   });

@@ -6,7 +6,9 @@ import type {
   QueryOptions,
   SubscriptionHandle,
 } from "./runtime/db.js";
+import { createInspectorLocalQueryOptions } from "./internal/inspector-query.js";
 import type { SubscriptionDelta } from "./runtime/subscription-manager.js";
+import { parseSnapshotRef } from "./runtime/snapshot-ref.js";
 import {
   SubscriptionsOrchestrator,
   makeDeferred,
@@ -30,6 +32,7 @@ type SubscribeCall = {
 
 type UnitHarness = {
   manager: SubscriptionsOrchestrator;
+  setSession: (session: Session | null) => void;
   makeEntry: () => {
     key: string;
     entry: CacheEntryHandle<Todo>;
@@ -77,6 +80,7 @@ function createUnitHarness(
   initialSession?: Session | null,
 ): UnitHarness {
   const calls: SubscribeCall[] = [];
+  let currentSession = initialSession;
   const all = vi.fn(async () => []);
   let throwOnSubscribe: Error | null = null;
   let nextReadiness: Promise<void> | null = null;
@@ -88,7 +92,6 @@ function createUnitHarness(
       query: QueryBuilder<T>,
       callbacks: DbDeltaSubscriptionCallbacks<T>,
       options?: QueryOptions,
-      session?: Session,
     ): SubscriptionHandle;
   } = {
     all,
@@ -96,7 +99,6 @@ function createUnitHarness(
       query: QueryBuilder<T>,
       callbacks: DbDeltaSubscriptionCallbacks<T>,
       options?: QueryOptions,
-      session?: Session,
     ): SubscriptionHandle {
       if (throwOnSubscribe) {
         throw throwOnSubscribe;
@@ -111,7 +113,7 @@ function createUnitHarness(
         onError: callbacks.onError,
         query: query as QueryBuilder<any>,
         options,
-        session,
+        session: currentSession ?? undefined,
         unsubscribe,
       });
       if (errorOnSubscribe) {
@@ -125,6 +127,11 @@ function createUnitHarness(
 
   return {
     manager,
+    setSession(session) {
+      // The source updates its identity before notifying subscription observers.
+      currentSession = session;
+      manager.setSession(session);
+    },
     makeEntry() {
       const key = manager.makeQueryKey(makeQuery());
       const entry = manager.getCacheEntry<Todo>(key);
@@ -236,10 +243,10 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     });
 
     try {
-      const key = harness.manager.makeQueryKey(query, { tier: "edge" });
+      const key = harness.manager.makeQueryKey(query, { tier: "remote" });
       expect(key).toBe(
         `app-so-u07:${JSON.stringify({
-          tier: "edge",
+          tier: "remote",
         })}:${query._build()}`,
       );
     } finally {
@@ -259,6 +266,200 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       expect(remoteKey).not.toBe(defaultKey);
       expect(localFirstKey).not.toBe(defaultKey);
       expect(localFirstKey).not.toBe(remoteKey);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U30 makeQueryKey accepts a scalar bigint branch selector", async () => {
+    const harness = createUnitHarness("app-so-u30");
+    try {
+      const options = { branch: 9007199254740993n } satisfies QueryOptions;
+      const key = harness.manager.makeQueryKey(makeQuery(), options);
+
+      expect(typeof key).toBe("string");
+      harness.manager.getCacheEntry<Todo>(key);
+      expect(harness.calls).toHaveLength(1);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U31 makeQueryKey accepts a bigint live base selector", async () => {
+    const harness = createUnitHarness("app-so-u31");
+    try {
+      const options = {
+        branch: 7n,
+        base: 3n,
+      } satisfies QueryOptions;
+      const key = harness.manager.makeQueryKey(makeQuery(), options);
+
+      expect(typeof key).toBe("string");
+      harness.manager.getCacheEntry<Todo>(key);
+      expect(harness.calls).toHaveLength(1);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U32 makeQueryKey accepts a bigint tuple base selector", async () => {
+    const harness = createUnitHarness("app-so-u32");
+    try {
+      const options = {
+        branch: 7n,
+        base: [3n, parseSnapshotRef(`jazz-snapshot-v1:${"0".repeat(72)}`)] as const,
+      } satisfies QueryOptions;
+      const key = harness.manager.makeQueryKey(makeQuery(), options);
+
+      expect(typeof key).toBe("string");
+      harness.manager.getCacheEntry<Todo>(key);
+      expect(harness.calls).toHaveLength(1);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U33 makeQueryKey accepts a frozen bigint base selector", async () => {
+    const harness = createUnitHarness("app-so-u33");
+    try {
+      const options = Object.freeze({
+        branch: 7n,
+        base: Object.freeze([3n, parseSnapshotRef(`jazz-snapshot-v1:${"0".repeat(72)}`)] as const),
+      }) satisfies QueryOptions;
+      const key = harness.manager.makeQueryKey(makeQuery(), options);
+
+      expect(typeof key).toBe("string");
+      harness.manager.getCacheEntry<Todo>(key);
+      expect(harness.calls).toHaveLength(1);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U34 qualified bigint branch selectors are equivalent regardless of insertion order", async () => {
+    const harness = createUnitHarness("app-so-u34");
+    try {
+      const query = makeQuery();
+      const firstKey = harness.manager.makeQueryKey(query, {
+        branch: { workspace: 7n, tenant: "acme" },
+      });
+      const secondKey = harness.manager.makeQueryKey(query, {
+        branch: { tenant: "acme", workspace: 7n },
+      });
+
+      expect(secondKey).toBe(firstKey);
+      const firstEntry = harness.manager.getCacheEntry<Todo>(firstKey);
+      const secondEntry = harness.manager.getCacheEntry<Todo>(secondKey);
+      expect(secondEntry).toBe(firstEntry);
+      expect(harness.calls).toHaveLength(1);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U35 bigint and string branch selectors do not collide", async () => {
+    const harness = createUnitHarness("app-so-u35");
+    try {
+      const query = makeQuery();
+      const bigintKey = harness.manager.makeQueryKey(query, { branch: 7n });
+      const stringKey = harness.manager.makeQueryKey(query, { branch: "7" });
+
+      expect(stringKey).not.toBe(bigintKey);
+      harness.manager.getCacheEntry<Todo>(bigintKey);
+      harness.manager.getCacheEntry<Todo>(stringKey);
+      expect(harness.calls).toHaveLength(2);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U36 makeQueryKey does not mutate frozen bigint branch/base options", async () => {
+    const harness = createUnitHarness("app-so-u36");
+    try {
+      const options = Object.freeze({
+        branch: Object.freeze({ workspace: 7n, tenant: "acme" }),
+        base: Object.freeze([
+          Object.freeze({ workspace: 3n, tenant: "base" }),
+          parseSnapshotRef(`jazz-snapshot-v1:${"0".repeat(72)}`),
+        ] as const),
+      }) satisfies QueryOptions;
+
+      const before = {
+        branch: { workspace: 7n, tenant: "acme" },
+        base: [
+          { workspace: 3n, tenant: "base" },
+          parseSnapshotRef(`jazz-snapshot-v1:${"0".repeat(72)}`),
+        ] as const,
+      };
+      const key = harness.manager.makeQueryKey(makeQuery(), options);
+
+      expect(typeof key).toBe("string");
+      expect(options).toEqual(before);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U37 forwards exact bigint branch/base values to the delta source", async () => {
+    const harness = createUnitHarness("app-so-u37");
+    try {
+      const options = {
+        tier: "remote",
+        branch: { workspace: 9007199254740993n, tenant: "acme" },
+        base: [
+          { workspace: 3n, tenant: "base" },
+          parseSnapshotRef(`jazz-snapshot-v1:${"0".repeat(72)}`),
+        ] as const,
+      } satisfies QueryOptions;
+      const key = harness.manager.makeQueryKey(makeQuery(), options);
+
+      harness.manager.getCacheEntry<Todo>(key);
+
+      expect(harness.calls[0]?.options).toEqual(options);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U38 repeated equal bigint selectors share one cache entry", async () => {
+    const harness = createUnitHarness("app-so-u38");
+    try {
+      const query = makeQuery();
+      const firstKey = harness.manager.makeQueryKey(query, {
+        branch: 7n,
+        base: [3n, parseSnapshotRef(`jazz-snapshot-v1:${"0".repeat(72)}`)] as const,
+      });
+      const secondKey = harness.manager.makeQueryKey(query, {
+        branch: 7n,
+        base: [3n, parseSnapshotRef(`jazz-snapshot-v1:${"0".repeat(72)}`)] as const,
+      });
+
+      expect(secondKey).toBe(firstKey);
+      const firstEntry = harness.manager.getCacheEntry<Todo>(firstKey);
+      const secondEntry = harness.manager.getCacheEntry<Todo>(secondKey);
+      expect(secondEntry).toBe(firstEntry);
+      expect(harness.calls).toHaveLength(1);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("SO-U39 Inspector-local options remain isolated from ordinary options", async () => {
+    const harness = createUnitHarness("app-so-u39");
+    try {
+      const query = makeQuery();
+      const ordinaryKey = harness.manager.makeQueryKey(query, { branch: "main" });
+      const inspectorKey = harness.manager.makeQueryKey(
+        query,
+        createInspectorLocalQueryOptions({ branch: "main" }),
+      );
+
+      expect(inspectorKey).not.toBe(ordinaryKey);
+      expect(inspectorKey).toContain("inspector-local:");
+      const ordinaryEntry = harness.manager.getCacheEntry<Todo>(ordinaryKey);
+      const inspectorEntry = harness.manager.getCacheEntry<Todo>(inspectorKey);
+      expect(inspectorEntry).not.toBe(ordinaryEntry);
+      expect(harness.calls).toHaveLength(2);
     } finally {
       await harness.manager.shutdown();
     }
@@ -587,9 +788,97 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
 
       unsubscribe();
 
-      const internal = (harness.manager as any).entries.get(key);
+      const internal = (harness.manager as any).slots.get(key).entry;
       expect(internal.cleanupTimeoutId).not.toBeNull();
       expect(harness.calls[0]?.unsubscribe).not.toHaveBeenCalled();
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("cleans up at the first unused deadline despite continuous deltas", async () => {
+    vi.useFakeTimers();
+    const harness = createUnitHarness();
+    try {
+      const { entry } = harness.makeEntry();
+      const off = entry.subscribe({});
+      harness.emit(0, makeDelta([makeTodo("opening")]));
+      off();
+      for (let index = 0; index < 2; index++) {
+        await vi.advanceTimersByTimeAsync(10_000);
+        harness.emit(0, makeDelta([makeTodo(`update-${index}`)]));
+        expect(harness.calls[0]?.unsubscribe).not.toHaveBeenCalled();
+      }
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(harness.calls[0]?.unsubscribe).toHaveBeenCalledOnce();
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("a returning listener owns the entry until its own unused deadline", async () => {
+    vi.useFakeTimers();
+    const harness = createUnitHarness();
+    try {
+      const { entry } = harness.makeEntry();
+      entry.subscribe({})();
+      await vi.advanceTimersByTimeAsync(20_000);
+      const onfulfilled = vi.fn();
+      const off = entry.subscribe({ onfulfilled });
+      await vi.advanceTimersByTimeAsync(60_000);
+      harness.emit(0, makeDelta([makeTodo("slow-opening")]));
+      expect(onfulfilled).toHaveBeenCalledWith([makeTodo("slow-opening")]);
+      expect(harness.calls[0]?.unsubscribe).not.toHaveBeenCalled();
+      off();
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(harness.calls[0]?.unsubscribe).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(harness.calls[0]?.unsubscribe).toHaveBeenCalledOnce();
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("lets an uncommitted Suspense reader receive a delayed first result", async () => {
+    vi.useFakeTimers();
+    const harness = createUnitHarness();
+    try {
+      const { key, entry } = harness.makeEntry();
+      const pendingRead = entry.promise;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(harness.calls[0]?.unsubscribe).not.toHaveBeenCalled();
+      harness.emit(0, makeDelta([makeTodo("delayed")]));
+      await expect(pendingRead).resolves.toEqual([makeTodo("delayed")]);
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(harness.manager.getCacheEntry(key)).toBe(entry);
+      const onfulfilled = vi.fn();
+      const off = entry.subscribe({ onfulfilled });
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(onfulfilled).toHaveBeenCalledWith([makeTodo("delayed")]);
+      expect(harness.calls[0]?.unsubscribe).not.toHaveBeenCalled();
+      off();
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  // #3069: a Suspense read abandoned before its first result is not held
+  // until the client closes: its unused deadline starts with that result.
+  it("cleans up an abandoned Suspense read one unused deadline after its first result", async () => {
+    vi.useFakeTimers();
+    const harness = createUnitHarness();
+    try {
+      const { key, entry } = harness.makeEntry();
+      void entry.promise;
+      await vi.advanceTimersByTimeAsync(60_000);
+      harness.emit(0, makeDelta([makeTodo("abandoned")]));
+      for (let index = 0; index < 2; index++) {
+        await vi.advanceTimersByTimeAsync(10_000);
+        harness.emit(0, makeDelta([makeTodo(`update-${index}`)]));
+      }
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(harness.calls[0]?.unsubscribe).toHaveBeenCalledOnce();
+      expect((harness.manager as any).slots.has(key)).toBe(false);
     } finally {
       await harness.manager.shutdown();
     }
@@ -603,14 +892,14 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       const unsubscribeA = entry.subscribe({});
       unsubscribeA();
 
-      const internal = (harness.manager as any).entries.get(key);
+      const internal = (harness.manager as any).slots.get(key).entry;
       expect(internal.cleanupTimeoutId).not.toBeNull();
 
       const unsubscribeB = entry.subscribe({});
       expect(internal.cleanupTimeoutId).toBeNull();
 
       vi.advanceTimersByTime(30_000);
-      expect((harness.manager as any).entries.has(key)).toBe(true);
+      expect((harness.manager as any).slots.has(key)).toBe(true);
 
       unsubscribeB();
     } finally {
@@ -624,21 +913,21 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     try {
       const { key, entry } = harness.makeEntry();
       const unsubscribe = entry.subscribe({});
-      const internal = (harness.manager as any).entries.get(key);
+      const internal = (harness.manager as any).slots.get(key).entry;
 
       unsubscribe();
       vi.advanceTimersByTime(30_000);
 
       expect(harness.calls[0]?.unsubscribe).toHaveBeenCalledTimes(1);
-      expect((harness.manager as any).entries.has(key)).toBe(false);
-      expect((harness.manager as any).queryDefinitions.has(key)).toBe(false);
+      expect((harness.manager as any).slots.has(key)).toBe(false);
+      expect(() => harness.manager.getCacheEntry(key)).toThrow(/Unknown query key/);
       expect(internal.listeners.size).toBe(0);
     } finally {
       await harness.manager.shutdown();
     }
   });
 
-  it("SO-U18 shutdown tears down entries and clears definition maps", async () => {
+  it("SO-U18 shutdown tears down entries and clears registrations", async () => {
     const harness = createUnitHarness();
     const firstKey = harness.manager.makeQueryKey(makeQuery({ table: "todos", marker: "first" }));
     const secondKey = harness.manager.makeQueryKey(makeQuery({ table: "todos", marker: "second" }));
@@ -651,8 +940,9 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
 
     expect(harness.calls[0]?.unsubscribe).toHaveBeenCalledTimes(1);
     expect(harness.calls[1]?.unsubscribe).toHaveBeenCalledTimes(1);
-    expect((harness.manager as any).entries.size).toBe(0);
-    expect((harness.manager as any).queryDefinitions.size).toBe(0);
+    expect((harness.manager as any).slots.size).toBe(0);
+    expect(() => harness.manager.getCacheEntry(firstKey)).toThrow(/Unknown query key/);
+    expect(() => harness.manager.getCacheEntry(secondKey)).toThrow(/Unknown query key/);
 
     offA();
     offB();
@@ -682,6 +972,35 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     }
   });
 
+  it("hydration settles pending readers without re-entrant listener notifications", async () => {
+    const harness = createUnitHarness();
+    try {
+      const query = makeQuery();
+      const key = harness.manager.makeQueryKey(query);
+      const entry = harness.manager.getCacheEntry<Todo>(key);
+      const onfulfilled = vi.fn();
+      const onDelta = vi.fn();
+      entry.subscribe({ onfulfilled, onDelta });
+      const snapshot = [makeTodo("seed")];
+
+      harness.manager.makeQueryKey(query, undefined, snapshot);
+
+      expect(entry.state).toEqual({ status: "fulfilled", data: snapshot, error: null });
+      expect(onfulfilled).not.toHaveBeenCalled();
+      expect(onDelta).not.toHaveBeenCalled();
+      await expect(entry.promise).resolves.toBe(snapshot);
+      expect(onfulfilled).not.toHaveBeenCalled();
+      expect(onDelta).not.toHaveBeenCalled();
+
+      const delta = makeDelta([makeTodo("live")]);
+      harness.emit(0, delta);
+      expect(onDelta).toHaveBeenCalledExactlyOnceWith(delta);
+      expect(entry.state).toEqual({ status: "fulfilled", data: delta.all, error: null });
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
   it("SO-U20 listener unsubscribe is idempotent", async () => {
     vi.useFakeTimers();
     const harness = createUnitHarness();
@@ -692,14 +1011,41 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       unsubscribe();
       unsubscribe();
 
-      const internal = (harness.manager as any).entries.get(key);
+      const internal = (harness.manager as any).slots.get(key).entry;
       expect(internal.listeners.size).toBe(0);
       expect(internal.cleanupTimeoutId).not.toBeNull();
 
       vi.advanceTimersByTime(30_000);
 
       expect(harness.calls[0]?.unsubscribe).toHaveBeenCalledTimes(1);
-      expect((harness.manager as any).entries.has(key)).toBe(false);
+      expect((harness.manager as any).slots.has(key)).toBe(false);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it("session changes and shutdown visit live entries in activation order", async () => {
+    const harness = createUnitHarness();
+    try {
+      const first = makeQuery({ table: "todos", marker: "first" });
+      const second = makeQuery({ table: "todos", marker: "second" });
+      const firstKey = harness.manager.makeQueryKey(first);
+      const secondKey = harness.manager.makeQueryKey(second);
+      harness.manager.getCacheEntry(secondKey);
+      harness.manager.getCacheEntry(firstKey);
+
+      harness.setSession({
+        user_id: "alice",
+        claims: {},
+        issuer: "https://issuer.example",
+        authMode: "external",
+      });
+
+      expect(harness.calls.map((call) => call.query)).toEqual([second, first, second, first]);
+      await harness.manager.shutdown();
+      expect(vi.mocked(harness.calls[2]!.unsubscribe).mock.invocationCallOrder[0]).toBeLessThan(
+        vi.mocked(harness.calls[3]!.unsubscribe).mock.invocationCallOrder[0]!,
+      );
     } finally {
       await harness.manager.shutdown();
     }
@@ -726,7 +1072,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       expect(harness.calls).toHaveLength(1);
       expect(harness.calls[0]?.session).toEqual(initialSession);
 
-      harness.manager.setSession(nextSession);
+      harness.setSession(nextSession);
 
       expect(harness.calls).toHaveLength(2);
       expect(harness.calls[0]?.unsubscribe).toHaveBeenCalledTimes(1);
@@ -750,7 +1096,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
 
       expect(harness.calls).toHaveLength(1);
 
-      harness.manager.setSession({
+      harness.setSession({
         user_id: "alice",
         claims: { role: "reader" },
         issuer: "https://issuer.example",
@@ -817,12 +1163,80 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       expect(first.status === "fulfilled" ? first.data : undefined).toEqual(snapshot);
       expect(first).toBe(second);
       expect(harness.calls).toHaveLength(0);
+
+      const entry = harness.manager.getCacheEntry<Todo>(key);
+      expect(entry.state).toBe(first);
+      expect(harness.manager.peekState<Todo>(key)).toBe(first);
     } finally {
       await harness.manager.shutdown();
     }
   });
 
-  it("SO-U28 destroying a seeded entry drops its memoised peekState snapshot", async () => {
+  it("re-registering an unopened query replaces its stable seed and retains a copy", async () => {
+    const harness = createUnitHarness();
+    try {
+      const query = makeQuery();
+      const key = harness.manager.makeQueryKey(query, undefined, [makeTodo("old")]);
+      const previous = harness.manager.peekState<Todo>(key);
+      const replacement = [makeTodo("new")];
+
+      expect(harness.manager.makeQueryKey(query, undefined, replacement)).toBe(key);
+      replacement.push(makeTodo("caller-only"));
+      const state = harness.manager.peekState<Todo>(key);
+      expect(state).not.toBe(previous);
+      expect(state).toBe(harness.manager.peekState<Todo>(key));
+      expect(state).toEqual({ status: "fulfilled", data: [makeTodo("new")], error: null });
+      expect(harness.calls).toHaveLength(0);
+
+      const entry = harness.manager.getCacheEntry<Todo>(key);
+      expect(entry.state).toEqual(state);
+      await expect(entry.promise).resolves.toEqual([makeTodo("new")]);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it.each(["fulfilled", "rejected"] as const)(
+    "re-registering a %s live query preserves its current state and promise",
+    async (status) => {
+      const harness = createUnitHarness();
+      try {
+        const query = makeQuery();
+        const key = harness.manager.makeQueryKey(query);
+        const entry = harness.manager.getCacheEntry<Todo>(key);
+        if (status === "fulfilled") {
+          harness.emit(0, makeDelta([makeTodo("live")]));
+        } else {
+          harness.emitError(0, new Error("live error"));
+        }
+        const state = entry.state;
+        const promise = entry.promise;
+
+        expect(harness.manager.makeQueryKey(query, undefined, [makeTodo("seed")])).toBe(key);
+        expect(harness.manager.getCacheEntry<Todo>(key)).toBe(entry);
+        expect(harness.manager.peekState<Todo>(key)).toBe(state);
+        expect(entry.promise).toBe(promise);
+        expect(harness.calls).toHaveLength(1);
+      } finally {
+        await harness.manager.shutdown();
+      }
+    },
+  );
+
+  it("shutdown clears registrations and seeds that never opened a subscription", async () => {
+    const harness = createUnitHarness();
+    const query = makeQuery();
+    const key = harness.manager.makeQueryKey(query, undefined, [makeTodo("seed")]);
+    expect(harness.manager.peekState<Todo>(key).status).toBe("fulfilled");
+
+    await harness.manager.shutdown();
+
+    expect(harness.calls).toHaveLength(0);
+    expect(harness.manager.peekState<Todo>(key).status).toBe("pending");
+    expect(() => harness.manager.getCacheEntry(key)).toThrow(/Unknown query key/);
+  });
+
+  it("SO-U28 destroying a seeded entry retires its query slot", async () => {
     vi.useFakeTimers();
     const harness = createUnitHarness("app-so-u28");
     try {
@@ -835,12 +1249,47 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       unsubscribe();
       vi.advanceTimersByTime(30_000);
 
-      expect((harness.manager as any).entries.has(key)).toBe(false);
+      expect((harness.manager as any).slots.has(key)).toBe(false);
       expect(harness.manager.peekState<Todo>(key).status).toBe("pending");
     } finally {
       await harness.manager.shutdown();
     }
   });
+
+  it.each(["registered", "live"] as const)(
+    "late cleanup from a retired entry preserves its %s replacement",
+    async (phase) => {
+      vi.useFakeTimers();
+      const harness = createUnitHarness();
+      try {
+        const query = makeQuery();
+        const key = harness.manager.makeQueryKey(query);
+        const retired = harness.manager.getCacheEntry<Todo>(key);
+        retired.subscribe({})();
+        vi.advanceTimersByTime(30_000);
+        expect(() => harness.manager.getCacheEntry(key)).toThrow(/Unknown query key/);
+
+        harness.manager.makeQueryKey(query, undefined, [makeTodo("replacement")]);
+        if (phase === "live") {
+          harness.manager.getCacheEntry<Todo>(key).subscribe({});
+        }
+        const replacementState = harness.manager.peekState<Todo>(key);
+
+        // An already-queued source callback can outlive its unsubscribe and
+        // schedule another cleanup for the retired entry.
+        harness.emit(0, makeDelta([makeTodo("retired late result")]));
+        vi.advanceTimersByTime(30_000);
+
+        expect(harness.manager.peekState<Todo>(key)).toBe(replacementState);
+        const replacement = harness.manager.getCacheEntry<Todo>(key);
+        expect(replacement).not.toBe(retired);
+        expect(replacement.state).toBe(replacementState);
+        expect(harness.calls[1]?.unsubscribe).not.toHaveBeenCalled();
+      } finally {
+        await harness.manager.shutdown();
+      }
+    },
+  );
 
   it("SO-U29 a session change clears cached rows and reloads from the new session", async () => {
     const sessionA: Session = {
@@ -868,7 +1317,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       expect(entry.status).toBe("fulfilled");
       onfulfilled.mockClear();
 
-      harness.manager.setSession(sessionB);
+      harness.setSession(sessionB);
 
       expect(entry.status).toBe("pending");
       expect(onReset).toHaveBeenCalledTimes(1);

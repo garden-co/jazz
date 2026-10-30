@@ -1,0 +1,15 @@
+# The Linux server's heap sampler walks frame pointers to record stacks
+# (crates/jazz-cli/src/heap_profiling/sampler.rs), and CPU profilers use them
+# too. Rust's prebuilt std already keeps them. A RUSTFLAGS environment
+# variable replaces this, so set the flag there as well when using one.
+[target.'cfg(target_os = "linux")']
+rustflags = ["-C", "force-frame-pointers=yes"]
+
+# sqlite-wasm-rs compiles SQLite for wasm32-unknown-unknown against its own
+# bundled libc headers. Some clang builds (e.g. Ubuntu 22.04's) also search the
+# host's /usr/include for that target, and the host glibc headers then fail to
+# find their multiarch parts. Keep wasm C builds to clang's builtin headers.
+# The bundled shim also uses C23 attribute syntax ([[noreturn]]), which older
+# clang (Ubuntu 22.04's clang 14) only parses with an explicit C2x mode.
+[env]
+CFLAGS_wasm32_unknown_unknown = "-nostdlibinc -std=gnu2x"

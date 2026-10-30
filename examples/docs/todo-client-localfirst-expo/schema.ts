@@ -1,22 +1,33 @@
 // #region schema-expo
 import { schema as s } from "jazz-tools";
+import { migrations } from "./migrations";
 
 const schema = {
-  projects: s.table({
-    name: s.string(),
-  }),
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-    description: s.string().optional(),
-    owner_id: s.uuid(),
-    parentId: s.ref("todos").optional(),
-    projectId: s.ref("projects").optional(),
-  }),
+  projects: s.table(
+    {
+      name: s.string(),
+    },
+    { todos: s.reverse("todos", "project") },
+  ),
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+      description: s.string().optional(),
+      owner_id: s.uuid(),
+      parentId: s.uuid().optional(),
+      projectId: s.uuid().optional(),
+    },
+    {
+      parent: s.rel("todos", "parentId"),
+      children: s.reverse("todos", "parent"),
+      project: s.rel("projects", "projectId"),
+    },
+  ),
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema);
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
 
 export type Todo = s.RowOf<typeof app.todos>;
 // #endregion schema-expo

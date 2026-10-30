@@ -14,7 +14,6 @@ use jazz::tools::{
     SchemaBuilder, TableSchema, Value,
 };
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 use tempfile::TempDir;
@@ -279,13 +278,11 @@ fn make_context(
         server_url,
         data_dir,
         storage: ClientStorage::Persistent,
-        storage_factory: Some(std::sync::Arc::new(
-            jazz_storage_rocksdb::RocksDbStorageFactory,
-        )),
         account_id: None,
         jwt_token: Some(jwt_token),
         backend_secret: None,
         admin_secret: None,
+        migrations: Default::default(),
     }
 }
 
@@ -293,7 +290,7 @@ async fn wait_for_todos_count(
     client: &JazzClient,
     expected_count: usize,
     timeout: Duration,
-    durability_tier: Option<DurabilityTier>,
+    read_tier: jazz::tools::ReadTier,
 ) -> Vec<(jazz::tools::ObjectId, Vec<Value>)> {
     let query = jazz::query::Query::from("todos");
     let deadline = tokio::time::Instant::now() + timeout;
@@ -302,10 +299,11 @@ async fn wait_for_todos_count(
     while tokio::time::Instant::now() < deadline {
         if let Ok(Ok(rows)) = tokio::time::timeout(
             Duration::from_secs(8),
-            client.query(query.clone(), durability_tier),
+            client.query(query.clone(), read_tier),
         )
         .await
         {
+            let rows = jazz::tools::test_support::ordinary_rows(rows);
             if rows.len() == expected_count {
                 return rows;
             }
@@ -320,14 +318,14 @@ async fn wait_for_todos_count(
     );
 }
 
-async fn wait_for_edge_query_ready(client: &JazzClient, timeout: Duration) {
+async fn wait_for_remote_query_ready(client: &JazzClient, timeout: Duration) {
     let query = jazz::query::Query::from("todos");
     let deadline = tokio::time::Instant::now() + timeout;
 
     while tokio::time::Instant::now() < deadline {
         if let Ok(Ok(_)) = tokio::time::timeout(
             Duration::from_secs(8),
-            client.query(query.clone(), Some(DurabilityTier::EdgeServer)),
+            client.query(query.clone(), jazz::tools::ReadTier::Remote),
         )
         .await
         {
@@ -336,7 +334,7 @@ async fn wait_for_edge_query_ready(client: &JazzClient, timeout: Duration) {
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
 
-    panic!("timed out waiting for EdgeServer query readiness");
+    panic!("timed out waiting for GlobalServer query readiness");
 }
 
 #[tokio::test]
@@ -357,21 +355,6 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
     let app_id = AppId::from_string(APP_ID_STR).expect("parse app id");
 
     let server = ServerProcess::start(0, server_data.path(), &jwks_server.endpoint()).await;
-    let publish_schema_response = Client::new()
-        .post(format!(
-            "{}/apps/{}/admin/schemas",
-            server.base_url(),
-            APP_ID_STR
-        ))
-        .header("X-Jazz-Admin-Secret", ADMIN_SECRET)
-        .json(&json!({ "schema": test_schema(), "permissions": null }))
-        .send()
-        .await
-        .expect("publish schema");
-    assert_eq!(
-        publish_schema_response.status(),
-        reqwest::StatusCode::CREATED
-    );
     publish_allow_all_permissions(&server.base_url(), app_id, ADMIN_SECRET, &test_schema()).await;
 
     let client_dir = TempDir::new().expect("client dir");
@@ -385,7 +368,7 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
         .await
         .expect("enroll the restart fixture before public admission");
     let client = connect_native(context).await.expect("connect client");
-    wait_for_edge_query_ready(&client, Duration::from_secs(30)).await;
+    wait_for_remote_query_ready(&client, Duration::from_secs(30)).await;
 
     let (_, _, transaction_id) = client
         .insert(
@@ -402,7 +385,7 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
     client
         .wait_for_transaction(
             transaction_id.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
+            DurabilityTier::GlobalServer,
         )
         .await
         .expect("wait for create before restart");
@@ -411,7 +394,7 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
         &client,
         1,
         Duration::from_secs(20),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
     )
     .await;
 
@@ -425,13 +408,13 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
         &client,
         1,
         Duration::from_secs(25),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
     )
     .await;
     assert_eq!(
         rows_after_restart.len(),
         1,
-        "existing client should continue serving Edge-settled queries after server restart"
+        "existing client should continue serving Remote-settled queries after server restart"
     );
 
     let (_, _, transaction_id) = client
@@ -449,7 +432,7 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
     client
         .wait_for_transaction(
             transaction_id.expect("ordinary mutation commits immediately"),
-            DurabilityTier::EdgeServer,
+            DurabilityTier::GlobalServer,
         )
         .await
         .expect("wait for create after restart");
@@ -458,13 +441,13 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
         &client,
         2,
         Duration::from_secs(25),
-        Some(DurabilityTier::EdgeServer),
+        jazz::tools::ReadTier::Remote,
     )
     .await;
     assert_eq!(
         rows_after_create.len(),
         2,
-        "mutations after restart should still settle at Edge without explicit catalogue re-sync"
+        "mutations after restart should still settle at Global without explicit catalogue re-sync"
     );
 
     client.shutdown().await.expect("shutdown client");
@@ -487,11 +470,11 @@ async fn memory_storage_client_does_not_persist_local_state_to_disk_impl() {
         server_url: String::new(),
         data_dir: data_dir.path().to_path_buf(),
         storage: ClientStorage::Memory,
-        storage_factory: None,
         account_id: Some(AccountId(uuid::Uuid::from_bytes([0xa9; 16]))),
         jwt_token: Some(make_jwt("memory-writer")),
         backend_secret: None,
         admin_secret: None,
+        migrations: Default::default(),
     };
 
     let client = connect_native(context.clone())
@@ -512,7 +495,10 @@ async fn memory_storage_client_does_not_persist_local_state_to_disk_impl() {
         .expect("create todo");
 
     let initial_rows = client
-        .query(jazz::query::Query::from("todos"), None)
+        .query(
+            jazz::query::Query::from("todos"),
+            jazz::tools::ReadTier::LocalFirst,
+        )
         .await
         .expect("query rows before restart");
     assert_eq!(
@@ -523,10 +509,6 @@ async fn memory_storage_client_does_not_persist_local_state_to_disk_impl() {
 
     client.shutdown().await.expect("shutdown memory client");
 
-    assert!(
-        !data_dir.path().join("jazz.rocksdb").exists(),
-        "memory storage should not create a RocksDB database on disk"
-    );
     assert!(
         !data_dir.path().join("jazz.sqlite").exists(),
         "memory storage should not create a SQLite database on disk"
@@ -540,7 +522,10 @@ async fn memory_storage_client_does_not_persist_local_state_to_disk_impl() {
         .await
         .expect("reconnect memory client");
     let rows_after_restart = restarted
-        .query(jazz::query::Query::from("todos"), None)
+        .query(
+            jazz::query::Query::from("todos"),
+            jazz::tools::ReadTier::LocalFirst,
+        )
         .await
         .expect("query rows after restart");
     assert_eq!(

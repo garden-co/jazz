@@ -2,10 +2,16 @@ import { testWasmDelivery } from "../../dev/gates/test-wasm-delivery.mjs";
 import { createWorkerFaultBundleFixture } from "./tests/browser/worker-fault-bundle-node.js";
 import { recoverPendingIndexedDbWrites } from "./tests/browser/indexeddb-pending-recovery-node.js";
 import {
-  liveEdgeBackendOpen,
-  liveEdgeBackendInsert,
-  liveEdgeBackendClose,
-} from "./tests/browser/live-edge-replay-node.js";
+  liveAuthorityBackendOpen,
+  liveAuthorityBackendInsert,
+  liveAuthorityBackendClose,
+} from "./tests/browser/live-authority-replay-node.js";
+import {
+  largeValueRewriteBackendOpen,
+  largeValueRewriteBackendSeed,
+  largeValueRewriteBackendAppend,
+  largeValueRewriteBackendClose,
+} from "./tests/browser/large-value-rewrite-node.js";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { defineConfig } from "vitest/config";
 import wasm from "vite-plugin-wasm";
@@ -15,11 +21,13 @@ import { resolve } from "node:path";
 import { playwright } from "@vitest/browser-playwright";
 import { readCorrectnessArtifactSnapshot } from "../../dev/artifacts/test-artifact-store.mjs";
 import {
-  blockJazzServerNetwork,
   jazzServerInfo,
   jazzServerJwtForUser,
   stopJazzServerByUrl,
-  unblockJazzServerNetwork,
+  blockJazzServerTransport,
+  unblockJazzServerTransport,
+  createJazzServerTransportControl,
+  stopJazzServerTransportControl,
 } from "./tests/browser/testing-server-node.js";
 import {
   closeRemoteBrowserDb,
@@ -155,22 +163,34 @@ export default defineConfig({
           if (!output) return null;
           // A reviewed source run exports to a new external candidate, never
           // overwriting a checked-in or previously produced physical receipt.
-          writeFileSync(output, `${JSON.stringify(records, null, 2)}\n`, { flag: "wx" });
+          writeFileSync(output, `${JSON.stringify(records, null, 2)}\n`, {
+            flag: "wx",
+          });
           return output;
         },
-        liveEdgeBackendOpen: async (_context, info) => liveEdgeBackendOpen(info),
-        liveEdgeBackendInsert: async (_context, appId, seed, title) =>
-          liveEdgeBackendInsert(appId, seed, title),
-        liveEdgeBackendClose: async (_context, appId) => liveEdgeBackendClose(appId),
+        liveAuthorityBackendOpen: async (_context, info) => liveAuthorityBackendOpen(info),
+        liveAuthorityBackendInsert: async (_context, appId, seed, title) =>
+          liveAuthorityBackendInsert(appId, seed, title),
+        liveAuthorityBackendClose: async (_context, appId) => liveAuthorityBackendClose(appId),
+        largeValueRewriteBackendOpen: async (_context, info) => largeValueRewriteBackendOpen(info),
+        largeValueRewriteBackendSeed: async (_context, appId, conversationId, attachmentBytes) =>
+          largeValueRewriteBackendSeed(appId, conversationId, attachmentBytes),
+        largeValueRewriteBackendAppend: async (_context, appId, turnId, words, delayMs) =>
+          largeValueRewriteBackendAppend(appId, turnId, words, delayMs),
+        largeValueRewriteBackendClose: async (_context, appId) =>
+          largeValueRewriteBackendClose(appId),
         jazzBrowserTopologyLog: async (_context, status, label, elapsedMs) => {
           console.info(`[jazz-browser-topology] ${status} ${label} (${elapsedMs}ms)`);
         },
-        jazzServerInfo: async (_context, appId, schema) => jazzServerInfo(appId, schema),
+        jazzServerInfo: async (_context, appId) => jazzServerInfo(appId),
         jazzServerStop: async (_context, serverUrl) => stopJazzServerByUrl(serverUrl),
-        jazzServerBlockNetwork: async ({ context }, serverUrl) =>
-          blockJazzServerNetwork(context, serverUrl),
-        jazzServerUnblockNetwork: async ({ context }, serverUrl) =>
-          unblockJazzServerNetwork(context, serverUrl),
+        jazzServerTransportControlCreate: async (_context, serverUrl) =>
+          createJazzServerTransportControl(serverUrl),
+        jazzServerTransportControlBlock: async (_context, url, direction: "both" | "inbound") =>
+          blockJazzServerTransport(url, direction),
+        jazzServerTransportControlUnblock: async (_context, url) => unblockJazzServerTransport(url),
+        jazzServerTransportControlStop: async (_context, proxyUrl) =>
+          stopJazzServerTransportControl(proxyUrl),
         createRemoteBrowserDb: async ({ context, page }, input) =>
           createRemoteBrowserDb(context, page, input),
         waitForRemoteBrowserDbTitle: async (_commandContext, input) =>

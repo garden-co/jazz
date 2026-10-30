@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { resolveRemoteDeps } from "./deps.js";
 import { readSourceSnapshot, scaffold } from "./scaffold.js";
 
 const { tigedMock } = vi.hoisted(() => ({ tigedMock: vi.fn() }));
@@ -174,5 +175,36 @@ describe("scaffold() release source snapshots", () => {
       }),
     ).rejects.toThrow(/immutable source snapshot.*does not fall back to main/i);
     expect(fs.existsSync(targetDir)).toBe(false);
+  });
+
+  it("resolves a package when the alternate crates lookup has a transport failure", async () => {
+    const rawBase = "https://raw.githubusercontent.com/garden-co/jazz/test-ref";
+    const packageUrl = `${rawBase}/packages/jazz-tools/package.json`;
+    const cratesUrl = `${rawBase}/crates/jazz-tools/package.json`;
+    const fetchCalls: string[] = [];
+    vi.mocked(fetch).mockImplementation(async (url) => {
+      fetchCalls.push(String(url));
+      if (url === `${rawBase}/pnpm-workspace.yaml`)
+        return new Response("packages:\n  - packages/*\ncrates:\n  - crates/*\n");
+      if (url === packageUrl) return new Response(JSON.stringify({ version: "1.2.3" }));
+      if (url === cratesUrl) throw new Error("crates transport unavailable");
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    await expect(
+      resolveRemoteDeps(
+        { dependencies: { "jazz-tools": "workspace:^" } },
+        { repo: "garden-co/jazz", ref: "test-ref" },
+      ),
+    ).resolves.toMatchObject({
+      dependencies: { "jazz-tools": "^1.2.3" },
+    });
+
+    expect(fetchCalls).toEqual([
+      `${rawBase}/pnpm-workspace.yaml`,
+      packageUrl,
+      cratesUrl,
+      cratesUrl,
+    ]);
   });
 });

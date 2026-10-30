@@ -1,152 +1,118 @@
 <template>
-  <div class="stop-detail">
+  <section class="stop-detail">
     <template v-if="!editing">
-      <div v-if="canEdit" class="edit-bar">
-        <button class="edit-btn" @click="startEdit">Edit</button>
-      </div>
-
-      <h2 class="venue-name">{{ venue?.name }}</h2>
-      <p class="venue-location">{{ venue?.city }}, {{ venue?.country }}</p>
-
-      <p class="stop-date">{{ formattedDate }}</p>
-
-      <p v-if="stop.publicDescription" class="public-description">
-        {{ stop.publicDescription }}
-      </p>
-
-      <p v-if="venue?.capacity" class="venue-capacity">
-        Capacity: {{ venue.capacity.toLocaleString() }}
-      </p>
-
-      <template v-if="canEdit">
-        <span class="status-badge" :class="stop.status">{{ stop.status }}</span>
-
-        <p v-if="stop.privateNotes" class="private-notes">
-          {{ stop.privateNotes }}
+      <div class="stack-2">
+        <div class="row-between">
+          <h3 class="heading-3">{{ stop.venue?.name }}</h3>
+          <span class="badge" :data-tone="stop.status">{{ statusLabels[stop.status] }}</span>
+        </div>
+        <p class="text-secondary">
+          {{ stop.venue?.city }}, {{ stop.venue?.country }} · {{ formatLongDate(stop.date) }}
         </p>
-      </template>
+      </div>
+      <p v-if="stop.publicDescription">{{ stop.publicDescription }}</p>
+      <dl class="facts">
+        <template v-if="stop.venue?.capacity">
+          <dt>Capacity</dt>
+          <dd>{{ stop.venue.capacity.toLocaleString("en-GB") }}</dd>
+        </template>
+        <template v-if="note">
+          <dt>Private notes</dt>
+          <dd>{{ note.body }}</dd>
+        </template>
+      </dl>
+      <div class="actions">
+        <Button @click="startEdit">Edit stop</Button>
+      </div>
     </template>
 
-    <template v-else>
-      <h2 class="venue-name">{{ venue?.name }}</h2>
-      <p class="venue-location">{{ venue?.city }}, {{ venue?.country }}</p>
-
-      <label class="label">
-        Date
-        <input v-model="editDate" class="input" type="date" required />
+    <form v-else class="form" @submit.prevent="save">
+      <h3 class="heading-3">Edit {{ stop.venue?.name }}</h3>
+      <label class="field">
+        <span class="field__label">Date</span>
+        <input v-model="draft.date" class="input" type="date" required />
       </label>
-
-      <label class="label">
-        Status
-        <select v-model="editStatus" class="input">
-          <option value="confirmed">Confirmed</option>
-          <option value="tentative">Tentative</option>
-          <option value="cancelled">Cancelled</option>
+      <label class="field">
+        <span class="field__label">Status</span>
+        <select v-model="draft.status" class="input">
+          <option v-for="(label, value) in statusLabels" :key="value" :value="value">
+            {{ label }}
+          </option>
         </select>
       </label>
-
-      <label class="label">
-        Public description
-        <textarea v-model="editDescription" class="input textarea" rows="3" />
+      <label class="field">
+        <span class="field__label">Public description</span>
+        <textarea v-model="draft.description" class="input" rows="3" />
       </label>
-
-      <label class="label">
-        Private notes
-        <textarea v-model="editNotes" class="input textarea" rows="2" />
+      <label class="field">
+        <span class="field__label">Private notes</span>
+        <textarea v-model="draft.notes" class="input" rows="2" />
+        <span class="field__hint">Only band members can read these.</span>
       </label>
-
       <div class="actions">
-        <button class="btn primary" @click="save">Save</button>
-        <button class="btn secondary" @click="cancelEdit">Cancel</button>
+        <Button variant="primary" type="submit">Save</Button>
+        <Button @click="editing = false">Cancel</Button>
+        <Button variant="destructive" class="push-end" @click="deleteStop">Delete stop</Button>
       </div>
-
-      <button class="btn destructive" @click="deleteStop">Delete stop</button>
-    </template>
-  </div>
+    </form>
+  </section>
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from "vue";
-import { useDb, useSession } from "jazz-tools/vue";
-import { app } from "../../schema.js";
-import type { StopWithVenue } from "../../schema.js";
+import { computed, reactive, ref } from "vue";
+import { useAll, useDb } from "jazz-tools/vue";
+import { app, type StopStatus, type StopWithVenue } from "../../schema.js";
+import { formatLongDate, fromDateInput, statusLabels, toDateInput } from "../lib/format.js";
+import { reportWriteError } from "../lib/write-errors.js";
+import Button from "./ui/Button.vue";
 
-const props = defineProps<{
-  stop: StopWithVenue;
-}>();
-
-const emit = defineEmits<{
-  close: [];
-}>();
+const props = defineProps<{ stop: StopWithVenue }>();
+const emit = defineEmits<{ deleted: [] }>();
 
 const db = useDb();
-const session = useSession();
-const canEdit = !!session.value;
-
-const venue = computed(() => props.stop.venue);
-
-const formattedDate = computed(() => {
-  const d = props.stop.date;
-  const date = d instanceof Date ? d : new Date(d);
-  return date.toLocaleDateString("en-GB", {
-    weekday: "long",
-    day: "numeric",
-    month: "long",
-    year: "numeric",
-  });
-});
+const { data: notes } = useAll(() => app.stopNotes.where({ stopId: props.stop.id }).limit(1));
+const note = computed(() => notes.value?.[0] ?? null);
 
 const editing = ref(false);
-const editDate = ref("");
-const editStatus = ref<"confirmed" | "tentative" | "cancelled">("confirmed");
-const editDescription = ref("");
-const editNotes = ref("");
-
-function formatDateForInput(d: Date | string): string {
-  const date = d instanceof Date ? d : new Date(d);
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
+const draft = reactive({ date: "", status: "confirmed" as StopStatus, description: "", notes: "" });
 
 function startEdit() {
-  editDate.value = formatDateForInput(props.stop.date);
-  editStatus.value = props.stop.status;
-  editDescription.value = props.stop.publicDescription;
-  editNotes.value = props.stop.privateNotes ?? "";
+  Object.assign(draft, {
+    date: toDateInput(props.stop.date),
+    status: props.stop.status,
+    description: props.stop.publicDescription,
+    notes: note.value?.body ?? "",
+  });
   editing.value = true;
 }
 
-function parseLocalDate(dateString: string): Date {
-  const [y, m, d] = dateString.split("-").map(Number);
-  return new Date(y, m - 1, d);
-}
-
+// The stop and its private note change together, in one transaction.
 function save() {
-  db.update(app.stops, props.stop.id, {
-    date: parseLocalDate(editDate.value),
-    status: editStatus.value,
-    publicDescription: editDescription.value,
-    privateNotes: editNotes.value || undefined,
-  });
-  editing.value = false;
-}
-
-function cancelEdit() {
+  const { id, bandId, date } = props.stop;
+  const existing = note.value;
+  // Keep the show's time of day when only the day changes.
+  const day = fromDateInput(draft.date);
+  day.setHours(date.getHours(), date.getMinutes());
+  const body = draft.notes.trim();
+  db.transaction((tx) => {
+    tx.update(app.stops, id, {
+      date: day,
+      status: draft.status,
+      publicDescription: draft.description,
+    });
+    if (existing && body) tx.update(app.stopNotes, existing.id, { body });
+    else if (existing) tx.delete(app.stopNotes, existing.id);
+    else if (body) tx.insert(app.stopNotes, { stopId: id, bandId, body });
+  }).catch(reportWriteError);
   editing.value = false;
 }
 
 function deleteStop() {
-  db.delete(app.stops, props.stop.id);
-  emit("close");
+  const existing = note.value;
+  db.transaction((tx) => {
+    if (existing) tx.delete(app.stopNotes, existing.id);
+    tx.delete(app.stops, props.stop.id);
+  }).catch(reportWriteError);
+  emit("deleted");
 }
 </script>
-
-<style>
-@import "../styles/forms.css";
-</style>
-
-<style scoped>
-@import "../styles/stop-detail.css";
-</style>

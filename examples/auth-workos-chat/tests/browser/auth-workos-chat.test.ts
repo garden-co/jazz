@@ -55,7 +55,7 @@ async function send(client: JazzClient, chat_id: string, text: string): Promise<
     text,
     sent_at: new Date(),
   });
-  return (await handle.wait({ tier: "edge" })).id;
+  return (await handle.wait({ tier: "global" })).id;
 }
 
 async function update(
@@ -63,11 +63,11 @@ async function update(
   messageId: string,
   patch: { text?: string; chat_id?: string },
 ) {
-  await client.db.update(app.messages, messageId, patch).wait({ tier: "edge" });
+  await client.db.update(app.messages, messageId, patch).wait({ tier: "global" });
 }
 
 async function remove(client: JazzClient, messageId: string): Promise<void> {
-  await client.db.delete(app.messages, messageId).wait({ tier: "edge" });
+  await client.db.delete(app.messages, messageId).wait({ tier: "global" });
 }
 
 describe("auth-workos-chat permissions", () => {

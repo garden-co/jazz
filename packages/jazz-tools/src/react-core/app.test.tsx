@@ -3,6 +3,7 @@ import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { renderToString } from "react-dom/server";
 import { afterEach, expect, it, vi } from "vitest";
 import { AccountManager } from "../accounts/state.js";
+import { prepareAccountManager } from "../accounts/persistence.js";
 import { createJazzSessionOwner } from "../session/state.js";
 import { betterAuth, jwtAuth, type JazzAuth } from "../session/app.js";
 import { ConfiguredJazzAppProvider, useJazzAuth, type JazzAuthState } from "./app.js";
@@ -340,4 +341,63 @@ it("masks ready children when replacing a BetterAuth client", async () => {
   view.rerender(tree(1, betterAuth(makeClient(true))));
   expect(commits).not.toContain("1:ready");
   expect(view.container.textContent).toBe("transitioning");
+});
+
+it("exposes needsLogin so a manual-mode app logs a reloaded account in again", async () => {
+  // A browser that signed in as alice, then reloaded: her account reopens at
+  // once, with no credential, and the identity already reads as signed in.
+  const registry = "https://core.example/apps/test/accounts";
+  const alice = { issuer: "https://issuer.example", subject: "alice" };
+  const jwt = () =>
+    `e30.${btoa(JSON.stringify({ iss: alice.issuer, sub: alice.subject, exp: Math.floor(Date.now() / 1000) + 3600 }))}.sig`;
+  const fetch = vi.fn(
+    async () =>
+      new Response(
+        JSON.stringify({ account: "00000000-0000-4000-8000-00000000000a", identity: alice }),
+      ),
+  );
+  let stored: string | null = null;
+  const store = {
+    read: async () => stored,
+    update: async (transform: (value: string | null) => string) => {
+      stored = transform(stored);
+    },
+  };
+  const manager = () =>
+    prepareAccountManager({
+      appId: "test",
+      registry,
+      store,
+      fetch,
+      retainAccountAssignment: true,
+      mintToken: () => "unused",
+    });
+  await (await manager()).loginJWT(jwt());
+  await waitFor(() => expect(JSON.parse(stored!).assignment).not.toBeNull());
+  const accounts = await manager();
+  const client = makeFakeClient({ authMode: "external", userId: "alice", claims: {} });
+  client.shutdown = vi.fn(async () => {});
+  const opened = vi.fn(async () => client);
+  const factory = () => createJazzSessionOwner({ accounts, openClient: opened });
+
+  const getToken = vi.fn(async () => jwt());
+  const seen: boolean[] = [];
+  function SignedInShopper() {
+    const { needsLogin, account, sessionActions } = useJazzAuth();
+    seen.push(needsLogin);
+    useEffect(() => {
+      if (needsLogin) void sessionActions.loginOrRegisterJWT({ getToken });
+    }, [needsLogin, sessionActions]);
+    return <p>{`${account?.identity.subject}:${needsLogin ? "needs-login" : "synced"}`}</p>;
+  }
+  const view = render(
+    <ConfiguredJazzAppProvider config={{}} createJazzSession={factory} loading={<Status />}>
+      <SignedInShopper />
+    </ConfiguredJazzAppProvider>,
+  );
+  await waitFor(() => expect(view.container.textContent).toBe("alice:synced"));
+  expect(seen[0]).toBe(true);
+  expect(getToken).toHaveBeenCalledOnce();
+  // Re-admitted in place: the same client stayed open throughout.
+  expect(opened).toHaveBeenCalledOnce();
 });

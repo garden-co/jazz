@@ -3,19 +3,25 @@ import { useAll, useDb, useSession } from "jazz-tools/react";
 
 // #region shared-schema
 const schema = {
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-  }),
-  todoShares: s.table({
-    todoId: s.ref("todos"),
-    user_id: s.uuid(),
-    can_edit: s.boolean(),
-  }),
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+    },
+    { shares: s.reverse("todoShares", "todo") },
+  ),
+  todoShares: s.table(
+    {
+      todoId: s.uuid(),
+      user_id: s.uuid(),
+      can_edit: s.boolean(),
+    },
+    { todo: s.rel("todos", "todoId") },
+  ),
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema);
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
 // #endregion shared-schema
 
 // #region shared-permissions

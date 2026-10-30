@@ -28,9 +28,6 @@ async fn shutdown_releases_persistent_storage_for_reopen_impl() {
     let data_dir = TempDir::new().expect("create persistent client directory");
     let mut context = server.make_client_context_for_user(test_schema(), "storage-release-user");
     context.storage = ClientStorage::Persistent;
-    context.storage_factory = Some(std::sync::Arc::new(
-        jazz_storage_rocksdb::RocksDbStorageFactory,
-    ));
     context.data_dir = data_dir.path().to_path_buf();
 
     let client = jazz_testkit::connect(context.clone())
@@ -40,8 +37,9 @@ async fn shutdown_releases_persistent_storage_for_reopen_impl() {
     client.shutdown().await.expect("shutdown persistent client");
 
     let error = retained_clone
-        .query_with_read_tier(Query::from("todos"), ReadTier::LocalFirst)
+        .query(Query::from("todos"), ReadTier::LocalFirst)
         .await
+        .map(jazz::tools::test_support::ordinary_rows)
         .expect_err("a retained JazzClient clone must not revive a shut-down context");
     assert!(
         error.to_string().contains("client is shut down"),

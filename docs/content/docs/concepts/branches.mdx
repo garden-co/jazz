@@ -28,18 +28,22 @@ The smallest useful model adds a normal string column to the table and lists it 
 
 ```ts title="schema.ts"
 import { schema as s } from "jazz-tools";
+import { migrations } from "./migrations";
 
 const schema = {
   documents: s
-    .table({
-      branch: s.string(),
-      title: s.string(),
-    })
+    .table(
+      {
+        branch: s.string(),
+        title: s.string(),
+      },
+      {},
+    )
     .branchBy("branch"),
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema);
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
 ```
 
 `branch` is still an ordinary application column. `branchBy` additionally tells Jazz to keep each
@@ -74,18 +78,28 @@ branch needs queryable metadata, model it as an ordinary row and make the branch
 
 ```ts title="schema.ts"
 const schema = {
-  branches: s.table({
-    workspace_id: s.uuid(),
-    name: s.string(),
-    base_branch_id: s.ref("branches").optional(),
-    base_snapshot_ref: s.json().optional(),
-    status: s.enum(["open", "approved", "archived"]),
-  }),
+  branches: s.table(
+    {
+      workspace_id: s.uuid(),
+      name: s.string(),
+      base_branch_id: s.uuid().optional(),
+      base_snapshot_ref: s.string().optional(),
+      status: s.enum(["open", "approved", "archived"]),
+    },
+    {
+      baseBranch: s.rel("branches", "base_branch_id"),
+      derivedBranches: s.reverse("branches", "baseBranch"),
+      documents: s.reverse("documents", "branch"),
+    },
+  ),
   documents: s
-    .table({
-      branch_id: s.ref("branches"),
-      title: s.string(),
-    })
+    .table(
+      {
+        branch_id: s.uuid(),
+        title: s.string(),
+      },
+      { branch: s.rel("branches", "branch_id") },
+    )
     .branchBy("branch_id"),
 };
 ```
@@ -131,11 +145,14 @@ them with the array form:
 ```ts
 const schema = {
   documents: s
-    .table({
-      workspace_id: s.ref("workspaces"),
-      branch_id: s.ref("branches"),
-      title: s.string(),
-    })
+    .table(
+      {
+        workspace_id: s.uuid(),
+        branch_id: s.uuid(),
+        title: s.string(),
+      },
+      { workspace: s.rel("workspaces", "workspace_id"), branch: s.rel("branches", "branch_id") },
+    )
     .branchBy(["workspace_id", "branch_id"]),
 };
 ```
@@ -217,8 +234,23 @@ An unbranched table is shared by every branch view.
 
 ## Use a frozen base
 
-If a draft should keep seeing main exactly as it was at a particular point, pass a snapshot
-reference with the resolved base:
+Capture a snapshot when a draft should keep seeing its base at a fixed point. Store the reference
+in a string column alongside the base branch ID:
+
+```ts
+import { parseSnapshotRef, serializeSnapshotRef } from "jazz-tools";
+
+// Earlier queries or mutations have attached this app's schema to db.
+const captured = await db.captureSnapshot();
+await db
+  .update(app.branches, branchRow.id, {
+    base_branch_id: mainBranch.id,
+    base_snapshot_ref: serializeSnapshotRef(captured),
+  })
+  .wait({ tier: "local" });
+```
+
+After reopening the same dataset, read the branch row and restore its saved reference:
 
 ```ts
 if (!branchRow.base_branch_id || !branchRow.base_snapshot_ref) {
@@ -227,14 +259,36 @@ if (!branchRow.base_branch_id || !branchRow.base_snapshot_ref) {
 
 const frozenDraft = {
   branch: branchRow.id,
-  base: [branchRow.base_branch_id, branchRow.base_snapshot_ref],
+  base: [branchRow.base_branch_id, parseSnapshotRef(branchRow.base_snapshot_ref)],
 } as const;
 
 const documents = await db.all(app.documents, frozenDraft);
 ```
 
-Jazz applies that cut consistently to base rows and to base data reached through joins and
-permissions. The app decides which snapshot to use.
+The frozen draft keeps the captured base values as main changes. Draft edits remain visible above
+the frozen base and leave main untouched. Jazz applies the cut consistently to base rows and base
+data reached through joins and permissions.
+
+Capture includes earlier locally committed writes, including writes awaiting server acceptance.
+It excludes changes staged in an uncommitted transaction and writes admitted after capture.
+Capture works offline and does not wait for the server. To capture after a particular write has
+been accepted, await that write's `wait({ tier: "global" })` before capturing; other local pending
+writes are still included.
+
+On React Native, snapshot capture requires a native build with capture support. Older compatible
+native builds continue to support existing operations; calling `captureSnapshot()` on them throws
+`UnsupportedSnapshotError` (`code: "unsupported_snapshot"`). Rebuild the native app to use capture.
+
+The persisted string uses the versioned `jazz-snapshot-v1` format. Use the public parser and
+serializer so malformed or unsupported references are rejected. The reference contains no data,
+grants no permission and does not retain history. Restore it against the same dataset with its
+captured history intact. Reopening a persistent local-only store can reuse its pending frontier;
+another device or a partial synced cache may need authority coverage. If Jazz cannot certify the
+exact history, a new read reports an unavailable-history error (`code: "not_observed"`) instead of
+using a live base. An already-open frozen subscription keeps its captured base values: later base
+writes, server acceptance and rejection do not change that materialised snapshot. Its draft head
+remains live. A new or reopened read may fail if rejection has removed history needed to rebuild
+the captured base; the reference itself does not retain that history.
 
 ## Merging stays a userland operation
 
@@ -248,5 +302,5 @@ mergeable transaction semantics; branch views do not introduce a distributed exa
 distributed uniqueness guarantee.
 
 See the [branching project planner example](https://github.com/garden-co/jazz/tree/main/examples/branching-project-planner-ts)
-for a complete userland model with scenario rows, reference-based authorization, a live base, and
-copy-on-write editing.
+for scenario rows, reference-based authorization, live and frozen bases, persisted snapshot
+restoration, and copy-on-write editing.

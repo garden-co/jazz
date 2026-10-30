@@ -5,15 +5,19 @@ import { isInspectorLocalQueryOptions } from "../internal/inspector-query.js";
 import type { JazzClient, Row } from "./client.js";
 import { RuntimeSource, type RuntimeClientContext } from "./runtime-source.js";
 import type { WasmSchema } from "../drivers/types.js";
+import { ownerPreparation } from "./write-preparation.js";
 
 const todoSchema = {
-  todos: s.table({
-    title: s.string(),
-    done: s.boolean(),
-  }),
+  todos: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+    },
+    {},
+  ),
 };
 type TodoSchema = s.Schema<typeof todoSchema>;
-const app: s.App<TodoSchema> = s.defineApp(todoSchema);
+const app: s.App<TodoSchema> = s.defineApp(todoSchema, { migrations: "none" });
 
 const todoRow: Row = {
   id: "todo-1",
@@ -114,24 +118,44 @@ describe("Db.one", () => {
     });
   });
 
+  it("preserves the public opening method and reserved ID after owner preparation", async () => {
+    const { client, query, beginTransaction } = makeClient();
+    const db = new TestDb(client);
+    await db.one(app.todos);
+    query.mockClear();
+    let release!: () => void;
+    ownerPreparation(client).run(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const tx = db.beginTransaction();
+    const id = tx.openTransactionId();
+    const reading = tx.one(app.todos);
+    expect(beginTransaction).not.toHaveBeenCalled();
+    release();
+    await reading;
+    expect(beginTransaction).toHaveBeenCalledExactlyOnceWith("mergeable", undefined, undefined, id);
+    expect(query.mock.calls[0]?.[1]).toMatchObject({ openTransactionId: id });
+  });
+
   it("lowers public options before adding transaction-owned read controls", async () => {
     const { client, query } = makeClient();
     const db = new TestDb(client);
     const tx = db.beginTransaction();
 
     await tx.all(app.todos.where({ done: false }), {
-      tier: "local",
+      tier: "local-first",
       // JavaScript callers can supply these despite their absence from the
       // public type. They must not override transaction semantics.
       propagation: "local-only",
       localUpdates: "visible",
       openTransactionId: "forged-open-transaction",
-      runtimeSettledTier: "global",
     } as any);
 
     expect(query.mock.calls[0]?.[1]).toEqual({
-      tier: "local",
-      localUpdates: "deferred",
+      tier: "local-first",
       openTransactionId: "00000000000070008000000000000001",
     });
   });

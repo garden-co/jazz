@@ -1,40 +1,52 @@
 import { describe, expect, it } from "vitest";
-import { schema as s } from "../../src/index.js";
+import { schema as s, migration as m } from "../../src/index.js";
 
 describe("typed migration object syntax", () => {
   it("serializes add, drop, and rename operations from the migrate object", () => {
-    const migration = s.defineMigration({
+    const migration = m.defineMigration({
       fromHash: "aaaaaaaaaaaa",
       toHash: "bbbbbbbbbbbb",
       from: {
-        users: s.table({
-          email: s.string(),
-          legacyPriority: s.int().optional(),
-        }),
-        todos: s.table({
-          title: s.string(),
-          done: s.boolean(),
-        }),
+        users: s.table(
+          {
+            email: s.string(),
+            legacyPriority: s.int().optional(),
+          },
+          {},
+        ),
+        todos: s.table(
+          {
+            title: s.string(),
+            done: s.boolean(),
+          },
+          {},
+        ),
       },
       to: {
-        users: s.table({
-          emailAddress: s.string(),
-        }),
-        todos: s.table({
-          title: s.string(),
-          done: s.boolean(),
-          description: s.string().optional(),
-          ownerId: s.ref("users").optional(),
-        }),
+        users: s.table(
+          {
+            emailAddress: s.string(),
+          },
+          { todosViaOwner: s.reverse("todos", "owner") },
+        ),
+        todos: s.table(
+          {
+            title: s.string(),
+            done: s.boolean(),
+            description: s.string().optional(),
+            ownerId: s.uuid().optional(),
+          },
+          { owner: s.rel("users", "ownerId") },
+        ),
       },
       migrate: {
         users: {
-          emailAddress: s.renameFrom("email"),
-          legacyPriority: s.drop.int({ backwardsDefault: null }),
+          emailAddress: m.renameFrom("email"),
+          legacyPriority: m.drop.int({ backwardsDefault: null }),
         },
         todos: {
-          description: s.add.string({ default: null }),
-          ownerId: s.add.ref("users", { default: null }),
+          description: m.add.string({ default: null }),
+          ownerId: m.add.ref("users", { default: null }),
         },
       },
     });
@@ -77,27 +89,33 @@ describe("typed migration object syntax", () => {
   });
 
   it("serializes table renames", () => {
-    const migration = s.defineMigration({
+    const migration = m.defineMigration({
       fromHash: "aaaaaaaaaaaa",
       toHash: "bbbbbbbbbbbb",
       from: {
-        users: s.table({
-          email: s.string(),
-        }),
+        users: s.table(
+          {
+            email: s.string(),
+          },
+          {},
+        ),
       },
       to: {
-        people: s.table({
-          emailAddress: s.string(),
-          nickname: s.string().optional(),
-        }),
+        people: s.table(
+          {
+            emailAddress: s.string(),
+            nickname: s.string().optional(),
+          },
+          {},
+        ),
       },
       renameTables: {
-        people: s.renameTableFrom("users"),
+        people: m.renameTableFrom("users"),
       },
       migrate: {
         people: {
-          emailAddress: s.renameFrom("email"),
-          nickname: s.add.string({ default: null }),
+          emailAddress: m.renameFrom("email"),
+          nickname: m.add.string({ default: null }),
         },
       },
     });
@@ -124,24 +142,36 @@ describe("typed migration object syntax", () => {
   });
 
   it("serializes table additions and removals", () => {
-    const migration = s.defineMigration({
+    const migration = m.defineMigration({
       fromHash: "aaaaaaaaaaaa",
       toHash: "bbbbbbbbbbbb",
       from: {
-        users: s.table({
-          email: s.string(),
-        }),
-        legacyProfiles: s.table({
-          bio: s.string().optional(),
-        }),
+        users: s.table(
+          {
+            email: s.string(),
+          },
+          {},
+        ),
+        legacyProfiles: s.table(
+          {
+            bio: s.string().optional(),
+          },
+          {},
+        ),
       },
       to: {
-        users: s.table({
-          email: s.string(),
-        }),
-        profiles: s.table({
-          bio: s.string().optional(),
-        }),
+        users: s.table(
+          {
+            email: s.string(),
+          },
+          {},
+        ),
+        profiles: s.table(
+          {
+            bio: s.string().optional(),
+          },
+          {},
+        ),
       },
       createTables: {
         profiles: true,
@@ -166,27 +196,33 @@ describe("typed migration object syntax", () => {
   });
 
   it("allows combining table renames with column migrations", () => {
-    const migration = s.defineMigration({
+    const migration = m.defineMigration({
       fromHash: "aaaaaaaaaaaa",
       toHash: "bbbbbbbbbbbb",
       from: {
-        users: s.table({
-          email: s.string(),
-        }),
+        users: s.table(
+          {
+            email: s.string(),
+          },
+          {},
+        ),
       },
       to: {
-        people: s.table({
-          emailAddress: s.string(),
-          age: s.int(),
-        }),
+        people: s.table(
+          {
+            emailAddress: s.string(),
+            age: s.int(),
+          },
+          {},
+        ),
       },
       renameTables: {
-        people: s.renameTableFrom("users"),
+        people: m.renameTableFrom("users"),
       },
       migrate: {
         people: {
-          emailAddress: s.renameFrom("email"),
-          age: s.add.int({ default: 18 }),
+          emailAddress: m.renameFrom("email"),
+          age: m.add.int({ default: 18 }),
         },
       },
     });
@@ -215,18 +251,24 @@ describe("typed migration object syntax", () => {
   it("cannot combine createTables/dropTables with column migrations", () => {
     expect(() => {
       // @ts-expect-error cannot combine createTables/dropTables with column migrations
-      s.defineMigration({
+      m.defineMigration({
         fromHash: "aaaaaaaaaaaa",
         toHash: "bbbbbbbbbbbb",
         from: {
-          users: s.table({
-            email: s.string(),
-          }),
+          users: s.table(
+            {
+              email: s.string(),
+            },
+            {},
+          ),
         },
         to: {
-          people: s.table({
-            emailAddress: s.string(),
-          }),
+          people: s.table(
+            {
+              emailAddress: s.string(),
+            },
+            {},
+          ),
         },
         createTables: {
           people: true,
@@ -236,7 +278,7 @@ describe("typed migration object syntax", () => {
         },
         migrate: {
           people: {
-            emailAddress: s.renameFrom("email"),
+            emailAddress: m.renameFrom("email"),
           },
         },
       });
@@ -246,26 +288,32 @@ describe("typed migration object syntax", () => {
   it("rejects explicit table renames that still do not match after applying column migrations", () => {
     expect(() => {
       // @ts-expect-error explicit table renames that still do not match after column migrations
-      s.defineMigration({
+      m.defineMigration({
         fromHash: "aaaaaaaaaaaa",
         toHash: "bbbbbbbbbbbb",
         from: {
-          users: s.table({
-            email: s.string(),
-          }),
+          users: s.table(
+            {
+              email: s.string(),
+            },
+            {},
+          ),
         },
         to: {
-          people: s.table({
-            emailAddress: s.string(),
-            age: s.int(),
-          }),
+          people: s.table(
+            {
+              emailAddress: s.string(),
+              age: s.int(),
+            },
+            {},
+          ),
         },
         renameTables: {
-          people: s.renameTableFrom("users"),
+          people: m.renameTableFrom("users"),
         },
         migrate: {
           people: {
-            emailAddress: s.renameFrom("email"),
+            emailAddress: m.renameFrom("email"),
           },
         },
       });
@@ -276,160 +324,211 @@ describe("typed migration object syntax", () => {
 
   it("typechecks migrate coverage and op shapes", () => {
     if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
-      s.defineMigration({
+      m.defineMigration({
         fromHash: "aaaaaaaaaaaa",
         toHash: "bbbbbbbbbbbb",
         from: {
-          todos: s.table({
-            title: s.string(),
-          }),
+          todos: s.table(
+            {
+              title: s.string(),
+            },
+            {},
+          ),
         },
         to: {
-          todos: s.table({
-            title: s.string(),
-            description: s.string().optional(),
-          }),
+          todos: s.table(
+            {
+              title: s.string(),
+              description: s.string().optional(),
+            },
+            {},
+          ),
         },
         migrate: {
           todos: {
-            description: s.add.string({ default: null }),
+            description: m.add.string({ default: null }),
           },
         },
       });
 
-      s.defineMigration({
+      m.defineMigration({
         fromHash: "aaaaaaaaaaaa",
         toHash: "bbbbbbbbbbbb",
         from: {
-          todos: s.table({
-            title: s.string(),
-          }),
+          todos: s.table(
+            {
+              title: s.string(),
+            },
+            {},
+          ),
         },
         to: {
-          todos: s.table({
-            title: s.string(),
-            description: s.string().optional(),
-          }),
+          todos: s.table(
+            {
+              title: s.string(),
+              description: s.string().optional(),
+            },
+            {},
+          ),
         },
         migrate: {
           todos: {
-            // @ts-expect-error added columns must use s.add.*(...) or s.renameFrom(...)
-            description: s.drop.string({ backwardsDefault: null }),
+            // @ts-expect-error added columns must use m.add.*(...) or m.renameFrom(...)
+            description: m.drop.string({ backwardsDefault: null }),
           },
         },
       });
 
-      s.defineMigration({
+      m.defineMigration({
         fromHash: "aaaaaaaaaaaa",
         toHash: "bbbbbbbbbbbb",
         from: {
-          todos: s.table({
-            title: s.string(),
-          }),
+          todos: s.table(
+            {
+              title: s.string(),
+            },
+            {},
+          ),
         },
         to: {
-          todos: s.table({
-            title: s.string(),
-            description: s.string(),
-          }),
+          todos: s.table(
+            {
+              title: s.string(),
+              description: s.string(),
+            },
+            {},
+          ),
         },
         migrate: {
           todos: {
             // @ts-expect-error required added columns need a non-null default of the right type
-            description: s.add.string({ default: null }),
+            description: m.add.string({ default: null }),
           },
         },
       });
 
       // @ts-expect-error removed columns must be dropped or renamed from
-      s.defineMigration({
+      m.defineMigration({
         fromHash: "aaaaaaaaaaaa",
         toHash: "bbbbbbbbbbbb",
         from: {
-          users: s.table({
-            email: s.string(),
-          }),
+          users: s.table(
+            {
+              email: s.string(),
+            },
+            {},
+          ),
         },
         to: {
-          users: s.table({}),
+          users: s.table({}, {}),
         },
         migrate: {},
       });
 
       // @ts-expect-error target-only tables must be declared in createTables
-      s.defineMigration({
+      m.defineMigration({
         fromHash: "aaaaaaaaaaaa",
         toHash: "bbbbbbbbbbbb",
         from: {
-          users: s.table({
-            email: s.string(),
-          }),
+          users: s.table(
+            {
+              email: s.string(),
+            },
+            {},
+          ),
         },
         to: {
-          users: s.table({
-            email: s.string(),
-          }),
-          profiles: s.table({
-            bio: s.string().optional(),
-          }),
+          users: s.table(
+            {
+              email: s.string(),
+            },
+            {},
+          ),
+          profiles: s.table(
+            {
+              bio: s.string().optional(),
+            },
+            {},
+          ),
         },
       });
 
       // @ts-expect-error source-only tables must be declared in dropTables
-      s.defineMigration({
+      m.defineMigration({
         fromHash: "aaaaaaaaaaaa",
         toHash: "bbbbbbbbbbbb",
         from: {
-          users: s.table({
-            email: s.string(),
-          }),
-          legacyProfiles: s.table({
-            bio: s.string().optional(),
-          }),
+          users: s.table(
+            {
+              email: s.string(),
+            },
+            {},
+          ),
+          legacyProfiles: s.table(
+            {
+              bio: s.string().optional(),
+            },
+            {},
+          ),
         },
         to: {
-          users: s.table({
-            email: s.string(),
-          }),
+          users: s.table(
+            {
+              email: s.string(),
+            },
+            {},
+          ),
         },
       });
 
-      // @ts-expect-error s.renameTableFrom(...) must point at a removed table with the same shape
-      s.defineMigration({
+      // @ts-expect-error m.renameTableFrom(...) must point at a removed table with the same shape
+      m.defineMigration({
         fromHash: "aaaaaaaaaaaa",
         toHash: "bbbbbbbbbbbb",
         from: {
-          legacyUsers: s.table({
-            email: s.json(),
-          }),
+          legacyUsers: s.table(
+            {
+              email: s.json(),
+            },
+            {},
+          ),
         },
         to: {
-          users: s.table({
-            email: s.string(),
-          }),
+          users: s.table(
+            {
+              email: s.string(),
+            },
+            {},
+          ),
         },
         renameTables: {
-          users: s.renameTableFrom("legacyUsers"),
+          users: m.renameTableFrom("legacyUsers"),
         },
       });
 
-      // @ts-expect-error s.renameFrom(...) must point at a removed column with the same type
-      s.defineMigration({
+      // @ts-expect-error m.renameFrom(...) must point at a removed column with the same type
+      m.defineMigration({
         fromHash: "aaaaaaaaaaaa",
         toHash: "bbbbbbbbbbbb",
         from: {
-          users: s.table({
-            email: s.string(),
-          }),
+          users: s.table(
+            {
+              email: s.string(),
+            },
+            {},
+          ),
         },
         to: {
-          users: s.table({
-            emailAddress: s.int(),
-          }),
+          users: s.table(
+            {
+              emailAddress: s.int(),
+            },
+            {},
+          ),
         },
         migrate: {
           users: {
-            emailAddress: s.renameFrom("email"),
+            emailAddress: m.renameFrom("email"),
           },
         },
       });

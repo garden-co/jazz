@@ -31,13 +31,10 @@ Invariant digest:
 - `INV-LENS-19`: Policy evaluation under lenses MUST translate data into the pinned permission evaluation schema and MUST NOT translate policy bundles.
 - `INV-LENS-20`: Published physical lineages and authored schema variants MUST NOT be automatically garbage-collected.
 - `INV-LENS-21`: A compatible table rename MUST retain its `PhysicalTableId`; deletion history and combined-current state therefore continue under that id without copying, rewriting, or rescanning unrelated lineages.
-- `INV-LENS-23`: The `jazz_catalogue` bootstrap kernel uses only the fixed
-  numeric record kinds `0..=7` described in §10.2. Unknown kinds fail closed
-  during discovery and reopen. This freezes the kernel discriminator only; it
-  does not yet freeze descriptor identity or the remaining catalogue payload
-  encodings.
+- `INV-LENS-23`: A store MUST be reopened only by the storage format it was written in (`_jazz_format`); another format, an unstamped or damaged file, or a pre-SQLite store MUST be refused with a typed error, the file left unchanged.
+- `INV-LENS-25`: The deploy catalogue MUST be the store's typed catalogue tables (§10.2), written in the same transaction as the admission and activation they describe. A change that fails leaves no rows; nothing is recovered from blobs or replayed on open; every permissions revision is kept.
 - `INV-LENS-22`: A content version's explicit authored-column presence MUST be stored only as a nullable, strictly increasing array of nonzero local `PhysicalColumnId`s; the exact authored schema/table mapping converts it to or from logical wire names, and malformed or unmapped ids MUST fail before any derived current row is persisted.
-- `INV-LENS-24`: A global physical UUID is permanently issued across the whole durable catalogue lineage. Admission, pending/staged replay, snapshot installation, reopen, and authority allocation MUST reject or avoid reusing any retired table, column epoch, or recursive enum-occurrence UUID; only an exact compatible source-to-target coordinate may retain its UUID.
+- `INV-LENS-24`: A stored table or column name MUST never be reused for another logical column; only a compatible re-addition keeps its predecessor's identity (§10.7).
 
 ## Details
 
@@ -69,147 +66,61 @@ a mismatched durable lens identity unrepresentable (`INV-LENS-1`, `INV-LENS-2`).
 
 ### 10.2 The catalogue
 
-#### Epoch-pinned catalogue kernel
+#### Catalogue tables (SQLite engine)
 
-`jazz_catalogue.kind` is stored as a `U64` and forms the composite primary key
-`(kind, id)` with the record UUID. The current storage epoch permanently maps
-`genesis = 0`, `schema = 1`, `lens = 2`, `schema_lineage_staged = 3`,
-`schema_lineage_pending = 4`, `schema_lineage_active = 5`,
-`write_pointer_pending = 6`, and `bootstrap_ready = 7`. Discovery and reopen
-reject every other numeric kind rather than guessing how to decode it.
+A store's catalogue is SQLite rows in the store file, beside the rows they
+describe (`crates/jazz/layers/db/src/catalogue.rs` and `names.rs`). There is
+no catalogue blob, snapshot or recovery log, and nothing is replayed on open:
+what an open needs is read back from its own rows.
 
-The kernel payloads that establish recovery state have their own explicit,
-versioned binary layouts; they are not authoritative JSON. In this epoch,
-`schema` is `[v1, schema_uuid, public_schema_json_len:u32-le,
-public_schema_json]`, `bootstrap_ready` is `[v1, genesis_uuid,
-pointer_revision:u64-le, pointer_schema_uuid, active_catalogue_seq:u64-le]`,
-and the pending write-pointer and active-lineage receipts are likewise fixed
-`v1` UUID/integer tuples. A decoder accepts exactly one known version and
-must consume the entire payload before it returns a value to catalogue
-recovery; it does not fall back to the former JSON bytes. The public-schema
-body is decoded and re-encoded with the canonical public-schema serializer,
-and those bytes must match exactly, so insignificant whitespace, field
-reordering, or alternate JSON spellings are corruption rather than aliases.
-Each pending write-pointer row id is UUIDv5 under its schema UUID over the
-little-endian revision bytes; recovery verifies that join and rejects two rows
-claiming the same revision before building resident pointer state.
+| Table                  | Key                     | Holds                                                                                                                                                                                      |
+| ---------------------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `_jazz_versions`       | `n`                     | each admitted schema version, in admission order, and on a replica the names digest its authority confirmed (`confirmed`, §10.7)                                                           |
+| `_jazz_names`          | `(n, tbl, col)`         | the stored table and column each version's names resolve to                                                                                                                                |
+| `_jazz_stored_columns` | `(tbl, col)`            | each stored column's value type and backwards default                                                                                                                                      |
+| `_jazz_lens_cells`     | `(tbl, col, since)`     | stored columns a lens fills in rows written by versions that do not name them                                                                                                              |
+| `_jazz_schemas`        | public schema hash      | each structural schema (policies cleared) as canonical JSON, the version `n` it was admitted as (`NULL` until admitted) and `published_at`                                                 |
+| `_jazz_lenses`         | `(source, target)` hash | each published migration's forward transform as canonical JSON, with `published_at`                                                                                                        |
+| `_jazz_permissions`    | `revision`              | every permissions revision: the write schema it selects, its per-table policies (defaults omitted) as canonical JSON, `published_at`, and once activated `activated_seq` and `read_digest` |
 
-For example, a bootstrap receipt whose genesis UUID begins `00112233…`, whose
-pointer revision is `0x0102030405060708`, and whose active sequence is
-`0x1112131415161718` begins with `01 00 11 22 33 … 08 07 06 05 04 03 02 01`.
-Appending even one byte, adding whitespace to the embedded public-schema JSON,
-using an arbitrary pending-pointer row id, duplicating a pending revision,
-truncating a payload, or changing `01` to an unknown version rejects reopen
-before resident catalogue state is replaced.
+Definitions are immutable and stored whole as canonical JSON text (object
+keys sorted, no whitespace), so SQL can read them with `json_each`; decisions
+about them (admission, publication time, activation) are real columns. The
+current permissions revision is the highest; its parent is the one before it.
+Every revision is kept.
 
-This freezes the numeric discriminator and primary-key layout plus only the
-schema envelope, bootstrap receipt, pending write-pointer, and active-lineage
-receipt representations described above. It does not freeze the remaining
-catalogue payload codecs, schema-descriptor identity model, physical identity
-allocation, or complete catalogue lifecycle guarantees. Those remain part of
-the catalogue storage settlement tracked by
-[#2037](https://github.com/garden-co/jazz/issues/2037) and
-[#1779](https://github.com/garden-co/jazz/issues/1779).
+`Db::apply_catalogue(CatalogueChange { put, admit, activate })` writes new
+definition rows, admits versions with their lenses and makes a write schema
+current at a revision in one savepoint: a change that fails leaves neither
+rows nor in-memory state behind. A server deploy computes that change from
+the stored rows (`prepare_catalogue_change`) and applies it in one
+transaction, so a deploy is never half written. Admitted versions are
+immutable: a deploy that gives an admitted version a new incoming lens is
+refused and must publish a new convergent target instead. Lenses are needed
+only at admission, because the cells they produce are persisted in
+`_jazz_lens_cells`.
 
-#### Node-local protocol lineage payloads
+On open, a store makes the head revision's write schema (with its policies)
+current; with no revision yet it opens under the lowest admitted version, and
+a store with no catalogue at all under the schema it was given. The server's
+HTTP catalogue index (schema hashes, lenses, permission bundle ids) is
+rebuilt from these rows; a permission bundle id is a version 5 UUID over the
+bundle's canonical JSON, chained to its parent revision.
 
-The node-owned `lens`, `schema_lineage_staged`, and
-`schema_lineage_pending` catalogue records are restart-authoritative protocol
-facts. Epoch 1 stores them in separately versioned, exact-consumed canonical
-binary payloads: a lens is `v1 | canonical MigrationLens bytes`; a lineage
-publication binds its ID, canonical schema envelope, canonical protocol lens,
-sorted new/dropped table names, and permanent physical-identity manifest; a
-staged receipt additionally carries its catalogue sequence, node-local schema
-alias, and canonical physical mapping, while a pending receipt carries its
-sequence and publication. Counts and byte lengths are checked before decoding
-their bodies; unknown versions, unordered/duplicate names, malformed nested
-records, trailing bytes, or a content ID/canonical re-encoding mismatch reject
-reopen before resident state changes. The former naked serde JSON has no
-compatibility decoder in this experimental storage epoch.
-
-The protocol `MigrationLens` is intentionally distinct from the server schema
-editor's `LensTransform`. A protocol lens describes a published source/target
-table lineage and includes copy, transform, reverse-default, and
-source-rejection operations; the server editor includes draft operation state
-and table-schema edit operations. They share low-level canonical primitives
-where appropriate but are not converted or encoded as each other.
-
-#### Server `cat:` recovery entries
-
-The server-local catalogue is also restart authority. Its only epoch-1 key is
-`"cat:v1:" | object_id:uuid[16]` in the default ordered-KV family. The raw UUID
-bytes are the identity and ordering coordinate; dashed, simple-hex, textual,
-short, extended, or a prior `cat:` spelling is not an alias. Recovery scans the
-whole reserved `cat:` namespace so that an old or alternate key fails closed
-rather than becoming invisible state.
-
-The matching value is exactly `"JCAT" | v1:u8 | object_id:uuid[16] |
-metadata_count:u16be | (key_len:u16be | UTF-8 key | value_len:u16be | UTF-8
-value)* | content_len:u32be | content`. Metadata keys are strictly increasing
-unsigned UTF-8 byte order; a key is bound to the repeated value object ID.
-Unknown versions, malformed UTF-8, duplicate/alternate map spelling,
-truncation, a trailing byte, a key/value ID mismatch, or an unsupported key
-namespace rejects the entire recovery scan before a resident catalogue index is
-constructed. The previous `HashMap` JSON/admin-row representation has no
-compatibility decoder in epoch 1 (`INV-LENS-25`).
-
-For example, object ID `4a…4a` has key
-`63 61 74 3a 76 31 3a 4a 4a … 4a` (`cat:v1:` plus sixteen raw `4a` bytes).
-Swapping the `app_id` and `type` metadata entries or copying that valid `JCAT`
-value under a different key fails before a valid earlier row can become
-resident.
-
-#### Nested server catalogue payloads
-
-The structural schema, migration-lens, and permissions payload families are
-restart-authoritative subrecords of a `JCAT` entry. Epoch 1 accepts only their
-frozen `v1` outer versions (`schema v1`, `lens v1`, and `permissions v1`,
-including the permissions bundle and head envelopes) and has no decoder for
-the former JSON-bearing versions or pre-freeze outer labels. These outer
-envelope labels are independent of the nested tagged-record `v1` algebra and
-of runtime schema-generation identities. Their `ColumnType::Json`
-schema declaration and `PolicyExpr::ExistsRel` relation tree use one nested
-`v1` tagged record/enum algebra: UTF-8 strings and fixed-width integer
-primitives use the same explicit primitive rules as the enclosing catalogue
-codec; every relation variant, predicate, value reference, row-id reference,
-join kind, projection, and recursion bound has a fixed numeric tag. A JSON
-object is a counted record of strictly increasing UTF-8 byte-ordered keys;
-arrays retain their declared order. Thus object source order and serde map
-layout are not identity, while every schema/policy field needed to reconstruct
-the semantic declaration is represented in the bytes.
-
-A nested codec marker other than `v1`, an unknown enum tag, a non-`0|1`
-presence flag, duplicate or unordered JSON object key, malformed number,
-overstated count, outer noncanonical ordering, truncation, or any suffix is
-corruption. Decoders reconstruct and re-encode the full payload before
-returning it; unequal bytes are rejected. Schema recovery additionally
-requires the decoded schema hash, `schema_hash` metadata, and JCAT object ID to
-agree, while a lens requires its source/target hash metadata and derived object
-ID to agree. These checks occur during the complete catalogue scan before a
-resident index is published. For example, the exact v12 JSON-schema fixture
-starts `0c 01 00 00 00 04 00 00 00 64 6f 63 73 ... 0c 01 01 07`; changing the
-last `01` (nested codec version) to `02`, or appending one byte to a valid
-permissions relation payload, rejects reopen rather than selecting a fallback
-or recovering a partial catalogue.
+The storage format is `jazz::format::STORAGE_FORMAT`; a layout change bumps
+it. The pinned corpora `sqlite-storage-v1` and `server-data-dir-v1` read the
+current layout back.
 
 Schema evolution is coordinated through the catalogue, which serializes
-publication and write-pointer changes under administrative authority. Catalogue
+publication and active schema changes under administrative authority. Catalogue
 mutations travel as admin-gated
-`SyncMessage::{PublishSchemaWithLens, PublishLens, SetCurrentWriteSchema}`
+`SyncMessage::{PublishSchemaWithLens, PublishLens}`
 messages with `CatalogueAck` replies; a non-admin author is rejected
 (`INV-LENS-3`). `AuthorSubject::SYSTEM` is the catalogue admin.
 
-The authority allocates the genesis physical-identity manifest exactly once.
-Every non-genesis publication is authored from its source schema's durable
-manifest, preserving mapped UUIDs and minting only genuinely new identities.
-On reopen, a node validates each decoded local physical mapping against the
-exact genesis or lineage-publication manifest and replays every source-to-target
-identity evolution before admitting any catalogue state. Local numeric aliases
-are compression details and never authorize a replacement UUID manifest.
-
 Exactly one database-wide catalogue sequencer assigns a dense monotone
-`CatalogueSeq`. An arbitrary core or replica never assigns catalogue sequence;
-edges forward authenticated, prevalidated requests to that sequencer. Catalogue
+`CatalogueSeq`. Core owns this sequencer; clients and local relays never assign catalogue
+sequence. Authenticated publication requests are evaluated at Core. Catalogue
 sequence is an administrative ordering domain, not a Jazz data transaction and
 not branch-branch-local row causality. A receiver parks an envelope whose earlier catalogue
 sequence or active source schema is missing. The same sequence with different
@@ -336,6 +247,10 @@ must observe the already-active lineage and retain one history/current result,
 never a second projection or a stale pending activation.
 
 ### 10.3 Shared physical storage
+
+This section and its physical-identity manifests describe the retired Groove
+engine. On the SQLite engine, versions share stored tables and columns
+through `_jazz_names`, and identities are name-based (§10.7).
 
 Physical storage preserves the version under which data was stored. Every stored
 content/register row carries a `schema_version` ref, represented locally as a
@@ -536,6 +451,52 @@ installs the authority UUID manifest, and reconciles ancestors and descendants
 around the local anchor. Pending local rows therefore remain addressable while
 cross-node semantic identity converges.
 
+**Union row cases.** Besides one Groove case per schema version (tag = the
+schema's local alias), every physical history, global current, ahead current
+and ahead shadow table has a **union case** per schema version `G` whose
+lineage has columns `G` does not map: tag = `alias(G) | 1 << 31`, fields =
+`G`'s own case followed by those columns ("extras"), in physical column id
+order. The extras of `G` are the columns of the same physical table mapped by
+any schema version ranked no later than `G` in the catalogue: a lineage's
+target ranks at its catalogue position and the authority genesis before them
+all. Every node replicates that order from its Core, so every node that knows
+`G` derives the same extras, fixed once `G` is published; old union cases
+never change. Local aliases cannot order them: a client allocates its own
+schema's alias first and learns older schemas later. A schema version only
+the node knows (not yet published) has no union case. Rejected-version tables
+have no union case. A union row reads exactly like a `G` row to code that only
+knows `G`.
+
+Core stores each post-image in the union case of the schema version ranked
+last among those mapping the table (ch. 4 §4.6, "Across schema versions").
+That need not be the write's own schema, nor name the table as the write
+does, so a post-image replaces the write's pending record by its physical
+row (table, branch, row), not by its name or schema. An extra is
+**derived** when the lens path from `G` carries it on from one of `G`'s own
+columns (a rename chain or a bijective transform); it stays null, and readers
+derive it from `G`'s cell as for any `G` row. Every other extra is
+**stored**: a column `G` dropped, a sibling's column, and a copy
+(`CopyColumn`) target, which is a column of its own (ch. 4 §4.6) whose
+writes a lens from `G` would otherwise overwrite with the source's value.
+The lens path is taken through schema versions ranked no later than `G`
+only, so the stored set is fixed with `G`'s union case: a later schema with
+several predecessors cannot open a shorter route that turns a stored extra
+into a derived one (or the reverse) under existing union rows. Reading a
+union row as schema `R`, by any read path: a column of `R` that is a stored
+extra reads that field (null reads as absent); any other column takes the
+`G` → `R` projection.
+
+On the wire a Core image keeps `G`'s cells and descriptor; its stored extras
+travel as `UnionExtraCells`, one entry per schema version defining them, each
+a record of that schema's authored cells (`_app_<column>`, nullable). The
+entries travel inside the row's `JVRR` v3 blob, flagged by its descriptor
+head (ch. 16); a row without entries leaves the flag clear and carries
+nothing extra. A receiver validates each cell against its schema and
+stores the image unchanged, in `G`'s union case: its entries must be exactly
+`G`'s stored extras there, as the shared catalogue order guarantees. The image
+keeps its identity, so what the receiver serves or compares later is Core's
+record. Commit units carry no union cells.
+
 ### 10.4 Writes: authored schema variants
 
 New local writes carry the schema selected by `current_write_schema` as their
@@ -590,7 +551,9 @@ selection is deterministic over the schema-version graph. The chosen path is the
 shortest path by lens count. Ties are broken by a stable ordering of candidate
 endpoints and lens content ids; publication or storage iteration order must not
 affect the chosen path. Schema updates are rare, so this is specified as a
-clarity-first graph walk rather than a hot-path optimization.
+clarity-first graph walk rather than a hot-path optimization. Each step can traverse its
+lens forward or backward: B-to-C translation through `A → B` and `A → C` applies
+the reverse A-to-B transformation followed by the forward A-to-C transformation.
 
 RLS policy evaluation under lenses uses the permission-evaluation schema pinned
 by the node/admin policy bundle. Row data is translated into that schema before
@@ -657,6 +620,148 @@ refuses unresolved drafts upstream.
 Database-local `PhysicalTableId` and `PhysicalColumnId` values never cross
 API/wire boundaries; local resolution happens only at the storage boundary.
 
+### 10.7 Stored identities (SQLite engine)
+
+On the SQLite engine the catalogue is the stored names (`_jazz_names`,
+`crates/jazz/layers/db/src/names.rs`) and it syncs in `Join`, `Welcome` and
+`Catalogue` (ch. 8). There is no second store of identities: a table's
+identity, and each column's, is a name-based UUID (RFC 9562 version 5) of
+the **authority namespace** and the stored table (and stored column) name.
+`Db::table_identity` and `Db::column_identity` return them under a handle's
+schema version.
+
+- The authority namespace is 16 random bytes an authority with no upstream
+  mints once and keeps in `_jazz_meta`. Every `Catalogue` carries it. A
+  replica keeps the first one it mirrors and refuses an upstream that sends
+  another (another app's authority): its remote reads fail with why and its
+  local reads go on.
+- A version's identities are the authority's only once the authority has
+  confirmed that version's names. `Catalogue.confirmed` lists each version
+  the sender's authority admitted with the digest of its names, and a
+  replica keeps the list in `_jazz_versions.confirmed`. A version stays
+  confirmed while its names keep that digest. Until then, and on a store
+  that has mirrored no catalogue, a lookup fails with `NotObserved`. A
+  replica never mints an identity, and neither does a store marked
+  authority that has an upstream.
+- A rename lens keeps the stored name, so it keeps the identity.
+- Each stored column's value type is kept in `_jazz_stored_columns` when a
+  version storing it is first admitted. A column never changes type under
+  its stored column; that is refused at admission and at open.
+- A column added again without a lens, under a name an earlier version
+  stored in its table, continues the stored column that the last such
+  version kept it in, and keeps that column's identity, only if its type is
+  the recorded one. Otherwise it starts a new stored column, which gives it
+  a new identity. A column a lens adds always starts a new stored column,
+  because the lens says the source lacks it.
+- A new stored column's name is derived, never minted: a column `name`
+  that version `v` introduces (a column of a new table, one a lens adds or
+  copies, one whose type changed, one added without a lens that continues
+  no stored column) is stored as `name~` and the first six hex digits of
+  BLAKE3 over the length-prefixed parts `"column"`, the 16 bytes of `v`'s
+  compatibility id, and `name`. A table a lens adds is stored as `name~`
+  and the same hash over `"table"`, `v`'s compatibility id and `name`. The
+  compatibility id is the version id of `v` with its columns sorted by
+  name and without merge strategies or indexes: versions that differ only
+  in those are compatible (deployment connects them with an empty lens),
+  share it, and so name what they introduce alike, whichever a store
+  admits first. A column or table a version
+  keeps from its source (untouched or renamed) keeps the source's stored
+  one.
+- The app's lenses make the names agree. An app ships its schema versions
+  and the lenses between them (`DbConfig::with_migrations`; the JSON a
+  deployment publishes, which `jazz-tools validate` and `deploy` write to
+  `migrations/index.ts` beside `schema.ts`, and which TypeScript apps pass
+  to `defineApp`). A store opening, or viewing, a version it has not
+  admitted first admits the versions on a lens path to it, starting at one
+  it admitted or at the app's first version, as the authority admitted
+  them. Of several lenses into a version, every store, the authority
+  included, takes the one from the smallest source version id. A version
+  no lens leads into is reached by an empty lens from the smallest
+  compatible version one does (or the store admitted). Deployment may
+  anchor its empty lens on another member of the compatible group; the
+  names agree either way, since compatible versions share a compatibility
+  id and an empty lens keeps every name. Along those lenses every store derives the same names, whatever
+  else it admitted and in whatever order, so a replica stores a version's
+  columns where its authority does without asking, and the authority's
+  `Catalogue.confirmed` digest only checks it.
+- A version admitted without a lens (a store's first version, or one
+  opened without the app's lenses into it) is named against the store's
+  current version: a table or column of a name an admitted version stored
+  continues it (a column only with its type), and a new table keeps its
+  own name where no admitted version stores one. Those names depend on
+  what the store admitted before. A replica never renames what it stores:
+  if its upstream's catalogue names a version it admitted otherwise, the
+  replica refuses that catalogue ("not supported yet"); its remote reads
+  say why and its local reads go on.
+- Two lineages of one table that share a name collide only if their hashes
+  do (one in 2^24 per pair). A store that admits both refuses the second
+  with a typed `Schema` error; a store that only admits one cannot tell,
+  and its upstream's catalogue then refuses it as above.
+
+This is how the SQLite engine meets `INV-LENS-24`: an identity is never
+reused for another column epoch, and only a compatible re-addition keeps its
+predecessor's.
+
+### 10.8 Enum tags (SQLite engine)
+
+An enum column (`s.enum(...)`, or an array of one) stores each variant as an
+INTEGER **tag**, kept per stored column in `_jazz_enum_tags (tbl, col, tag,
+name)` (`crates/jazz/layers/db/src/values.rs`, `EnumTags`). Tags are an
+interning optimisation private to each store. Values are variant names
+everywhere above SQLite: in writes, commits, row images on the wire, the
+catalogue, filters, policies and reads. Only a store's own cells hold tags,
+and no other store ever sees one.
+
+- **Every store tags its own variants.** A store tags each variant a version
+  declares when it admits the version, before any column is added, so an
+  added enum column's DDL default is a tag too. A new name takes the
+  column's next tag, one past its highest. A removed variant keeps a tag,
+  and every name a version ever declared for the stored column still reads
+  back. A name a row carries that no admitted version declares (a removed
+  variant, say) is tagged when it is stored. A store's memory of its tags
+  follows its file: a savepoint that rolls back puts back the tags it
+  interned or renumbered.
+- **The current schema's order is tag order.** When a store makes a version
+  current (activation, or opening under a version newer than any it
+  admitted), it renumbers each of that version's enum columns so its
+  declared variants are tags `0..n` in declaration order and every other
+  name follows in its previous tag order, rewriting the column's cells in
+  every row version in the same transaction. Appending a variant changes
+  no tag. A column added with a default keeps SQLite's `DEFAULT` tag; when
+  a renumbering gives that tag to another variant, the store records the
+  default by name (`_jazz_enum_defaults`), and a row inserted by a version
+  that does not name the column stores that name's tag.
+- **On the wire.** Row images carry enum cells as variant names (a JSON
+  array of names for an array column); the receiving store stores each as
+  its own tag. Two stores may tag a variant differently.
+- **Copies and renames.** A rename keeps the stored column, so it keeps the
+  tags. A copy lens's column is a stored column with tags of its own: it
+  starts with its source's tags, removed variants included, so its cells
+  are its source's and it sorts like its source; either may add variants
+  later.
+- **Order.** `ORDER BY`, `MIN`, `MAX` and range comparisons on an enum
+  column follow the declaration order of the query's schema version. For
+  the current version that is tag order, which an index on the column
+  serves. Another version (an older client during a rollout) reads each
+  cell as its rank in its own declaration order, a `CASE` no index serves,
+  with names it does not declare after its own. A range compared with a
+  name the column never held is refused as a query error. A `GROUP BY` on
+  an enum column identifies each group by its variant name, so a
+  renumbering keeps group identity.
+- **Comparisons.** A variant name compared with an enum column for
+  equality (`=`, `IN`, array containment, a policy literal or session
+  value) is bound as its tag. Anything else, such as text containment or a comparison with another
+  enum column's cells, reads the cell as its name.
+- **Type.** `_jazz_stored_columns` records an enum column as an enum
+  (whatever its variants), so a stored column never holds both tags and
+  another type's values: a column changed between enum and another type is
+  handled like any type change (10.7), as a new stored column or a refusal.
+  Writes are checked against the writing version's declared variants.
+  Enum columns are never large-capable (ch. 19).
+
+Raw SQL (an inspector, a debugging session) reads names by joining
+`_jazz_enum_tags` on the stored table, stored column and cell.
+
 ### 10.9 Subsumed schema-file and schema-subset notes
 
 The former schema manager and schema file notes are folded into the catalogue
@@ -672,6 +777,34 @@ dry-runs and before sealing. Literal defaults are in scope; dynamic defaults suc
 as `now()` require a deterministic authority/origin rule before they can be
 accepted. Merge-strategy-only changes still change schema identity because they
 change future merge behavior.
+
+### Active schema and local schema
+
+The authority's **active schema** selects one structural schema and one explicit
+permission bundle at a single monotone revision. Policy-only updates advance
+that revision without changing structural schema identity or creating migration
+lenses. Admitting structural schemas or lenses does not activate them. Activation
+requires an admitted migration path, traversing each lens in either direction.
+For example, `A → B` and `A → C` permit switching from B to C through A.
+An explicit empty permission bundle is a valid deny-all selection. The node's local API schema remains independent, so
+older clients retain their schema view across authority activations.
+
+The server catalogue retains the existing permissions-bundle/head encodings and
+HTTP endpoints as compatibility boundaries. Internally they describe the active
+schema. Runtime activation persists its selection and authorization source in
+one batch before installing the new authorization view. Structural catalogue
+entries do not need to be rewritten with permissions on policy updates.
+
+Opening a legacy store without an active-schema record recovers its selected
+schema and grants from the old write pointer and schema payload, then persists
+an active-schema record at revision zero. The old independent write counter is
+not an authority revision. Server startup installs the durable administrative
+selection before serving traffic. Reopening the upgraded store preserves its
+active revision; snapshots have no legacy revision exception. Standalone schema
+publications cannot replace grants, and standalone write pointers cannot change
+the active selection. Interoperation with old running nodes is not supported.
+The existing snapshot wire layout is retained: the active authorization source
+is projected into its schema payload at serialization and extracted on receipt.
 
 ## Open Questions
 

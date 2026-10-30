@@ -1,16 +1,14 @@
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
 use axum::{Json, Router, routing::get};
 use base64::Engine;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde_json::{Value as JsonValue, json};
+use std::net::{IpAddr, SocketAddr};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 use crate::middleware::AuthConfig;
-use jazz::node::EdgeCacheBudget;
-use jazz::tools::AppContext;
 use jazz::tools::AppId;
 use jazz::tools::public_schema::Schema;
 
@@ -34,13 +32,8 @@ pub struct JazzServerBuilder {
     data_dir: Option<PathBuf>,
     schema: Option<Schema>,
     persistent_storage: bool,
-    storage_factory: Option<Arc<dyn jazz::groove::storage::StorageFactory>>,
-    native_transport_connector:
-        Option<Arc<dyn jazz::tools::native_transport_connector::NativeTransportConnector>>,
     admin_secret: Option<String>,
     backend_secret: Option<String>,
-    upstream_url: Option<String>,
-    edge_cache_budget: Option<EdgeCacheBudget>,
     jwks_url: Option<String>,
     auth_clock: Option<crate::middleware::auth::AuthClock>,
 }
@@ -86,24 +79,6 @@ impl JazzServerBuilder {
         self
     }
 
-    /// Supply the target-owned adapter used by persistent test storage.
-    pub fn with_storage_factory(
-        mut self,
-        factory: Arc<dyn jazz::groove::storage::StorageFactory>,
-    ) -> Self {
-        self.storage_factory = Some(factory);
-        self.persistent_storage = true;
-        self
-    }
-
-    pub fn with_native_transport_connector(
-        mut self,
-        connector: Arc<dyn jazz::tools::native_transport_connector::NativeTransportConnector>,
-    ) -> Self {
-        self.native_transport_connector = Some(connector);
-        self
-    }
-
     pub fn with_admin_secret(mut self, secret: impl Into<String>) -> Self {
         self.admin_secret = Some(secret.into());
         self
@@ -111,16 +86,6 @@ impl JazzServerBuilder {
 
     pub fn with_backend_secret(mut self, secret: impl Into<String>) -> Self {
         self.backend_secret = Some(secret.into());
-        self
-    }
-
-    pub fn with_upstream_url(mut self, upstream_url: impl Into<String>) -> Self {
-        self.upstream_url = Some(upstream_url.into());
-        self
-    }
-
-    pub fn with_edge_cache_budget(mut self, budget: EdgeCacheBudget) -> Self {
-        self.edge_cache_budget = Some(budget);
         self
     }
 
@@ -243,6 +208,7 @@ pub struct JazzServer {
     data_dir: ServerDataDir,
     admin_secret: String,
     backend_secret: String,
+    host: IpAddr,
     client_data_dirs: Mutex<Vec<OwnedTempDir>>,
     embedded_jwks_server: Option<TestJwtIssuer>,
     auth_clock: crate::middleware::auth::AuthClock,
@@ -272,12 +238,8 @@ impl JazzServer {
             data_dir,
             schema,
             persistent_storage,
-            storage_factory,
-            native_transport_connector,
             admin_secret,
             backend_secret,
-            upstream_url,
-            edge_cache_budget,
             jwks_url,
             auth_clock,
         } = builder;
@@ -313,19 +275,7 @@ impl JazzServer {
             ..Default::default()
         };
 
-        let mut server_builder = ServerBuilder::new(app_id).with_auth_config(auth_config);
-        if let Some(connector) = native_transport_connector {
-            server_builder = server_builder.with_native_transport_connector(connector);
-        }
-        if let Some(factory) = storage_factory {
-            server_builder = server_builder.with_storage_factory(factory);
-        }
-        if let Some(upstream_url) = upstream_url {
-            server_builder = server_builder.with_upstream_url(upstream_url);
-        }
-        if let Some(edge_cache_budget) = edge_cache_budget {
-            server_builder = server_builder.with_edge_cache_budget(edge_cache_budget);
-        }
+        let server_builder = ServerBuilder::new(app_id).with_auth_config(auth_config);
         let mut server_builder =
             apply_storage_mode(server_builder, storage_data_dir, persistent_storage);
 
@@ -337,8 +287,16 @@ impl JazzServer {
             .await
             .map_err(|error| error.to_string())?;
 
-        let mut server =
-            Self::from_built(built, port, app_id, data_dir, admin_secret, backend_secret).await?;
+        let mut server = Self::from_built(
+            built,
+            port,
+            None,
+            app_id,
+            data_dir,
+            admin_secret,
+            backend_secret,
+        )
+        .await?;
         server.embedded_jwks_server = embedded_jwks_server;
         server.auth_clock = auth_clock;
         Ok(server)
@@ -352,18 +310,26 @@ impl JazzServer {
     pub async fn from_built(
         built: BuiltServer,
         port: Option<u16>,
+        host: Option<String>,
         app_id: AppId,
         data_dir: ServerDataDir,
         admin_secret: String,
         backend_secret: String,
     ) -> Result<Self, String> {
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port.unwrap_or(0)))
+        let host = host
+            .unwrap_or_else(|| "127.0.0.1".to_owned())
+            .parse::<IpAddr>()
+            .map_err(|error| format!("invalid server host: {error}"))?;
+        if host.is_unspecified() {
+            return Err("invalid server host: wildcard addresses are not supported".to_owned());
+        }
+        let listener = tokio::net::TcpListener::bind(SocketAddr::new(host, port.unwrap_or(0)))
             .await
             .map_err(|error| format!("bind server listener: {error}"))?;
-        let port = listener
+        let local_addr = listener
             .local_addr()
-            .map_err(|error| format!("read server listener local address: {error}"))?
-            .port();
+            .map_err(|error| format!("read server listener local address: {error}"))?;
+        let port = local_addr.port();
 
         let (serve_shutdown_tx, serve_shutdown_rx) = oneshot::channel();
         let shutdown_state = built.state.clone();
@@ -375,7 +341,7 @@ impl JazzServer {
             phase
         });
         let task = tokio::spawn(async move {
-            axum::serve(listener, built.app)
+            axum::serve(crate::tcp::low_latency_listener(listener), built.app)
                 .with_graceful_shutdown(async {
                     let _ = serve_shutdown_rx.await;
                 })
@@ -390,6 +356,7 @@ impl JazzServer {
             app_id,
             data_dir,
             admin_secret,
+            host,
             backend_secret,
             client_data_dirs: Mutex::new(Vec::new()),
             embedded_jwks_server: None,
@@ -412,7 +379,11 @@ impl JazzServer {
     }
 
     pub fn base_url(&self) -> String {
-        format!("http://127.0.0.1:{}", self.port)
+        let host = match self.host {
+            IpAddr::V4(host) => host.to_string(),
+            IpAddr::V6(host) => format!("[{host}]"),
+        };
+        format!("http://{host}:{}", self.port)
     }
 
     pub fn admin_secret(&self) -> &str {
@@ -429,52 +400,94 @@ impl JazzServer {
         self.state.clone()
     }
 
-    fn require_built_in_jwt_helpers(&self) {
-        if self.embedded_jwks_server.is_none() {
-            panic!(
-                "JazzServer uses an external JWKS URL; built-in JWT helpers are unavailable. Mint JWTs from your external JWKS test fixture instead."
-            );
-        }
+    /// A JWT for `user_id` from the embedded test issuer, at the server's
+    /// auth clock. Subjects are opaque strings, kept intact so callers
+    /// exercise the same issuer-scoped identity boundary as production.
+    pub fn jwt_for_user(&self, user_id: impl AsRef<str>) -> String {
+        self.require_built_in_jwt_helpers();
+        let now = UNIX_EPOCH + Duration::from_secs(self.auth_clock.now_seconds());
+        TestJwtIssuer::jwt_for_user_with_options_at(
+            user_id.as_ref(),
+            json!({"role": "user"}),
+            TestJwtOptions::default(),
+            now,
+        )
     }
 
+    /// A client context for `user_id` with a JWT from the embedded issuer,
+    /// in-memory storage and a fresh data directory kept until the server
+    /// drops.
     pub fn make_client_context_for_user(
         &self,
         schema: Schema,
         user_id: impl AsRef<str>,
-    ) -> AppContext {
-        self.require_built_in_jwt_helpers();
-        let user_id = user_id.as_ref();
-        // Subjects are opaque strings. Keep the test caller's subject intact
-        // so this helper exercises the same issuer-scoped identity boundary as
-        // production external sessions.
-        let user_id = user_id.to_owned();
-
+    ) -> jazz::tools::AppContext {
         let client_data_dir = OwnedTempDir::new("jazz-tools-testing-client");
         let data_dir = client_data_dir.path().to_path_buf();
         self.client_data_dirs
             .lock()
             .expect("lock test client data dirs")
             .push(client_data_dir);
-
-        let now = UNIX_EPOCH + Duration::from_secs(self.auth_clock.now_seconds());
-        let jwt_token = TestJwtIssuer::jwt_for_user_with_options_at(
-            &user_id,
-            json!({"role": "user"}),
-            TestJwtOptions::default(),
-            now,
-        );
-        AppContext {
+        jazz::tools::AppContext {
             app_id: self.app_id,
             client_id: None,
             schema,
             server_url: self.base_url(),
             data_dir,
             storage: jazz::tools::ClientStorage::Memory,
-            storage_factory: None,
             account_id: None,
-            jwt_token: Some(jwt_token),
+            jwt_token: Some(self.jwt_for_user(user_id)),
             backend_secret: Some(self.backend_secret().to_string()),
             admin_secret: None,
+            migrations: self.published_migrations(),
+        }
+    }
+
+    /// The versions and lenses published to this server so far, as an app
+    /// that deployed them ships them (SPEC 10.7).
+    pub fn published_migrations(&self) -> jazz::db::Migrations {
+        let state = &self.state;
+        let store = &state.catalogue_store;
+        let mut schemas = std::collections::HashMap::new();
+        for hash in state
+            .catalogue
+            .known_schema_hashes(store)
+            .expect("read published schema hashes")
+        {
+            if let Some(schema) = state
+                .catalogue
+                .known_schema(store, &hash)
+                .expect("read published schema")
+            {
+                schemas.insert(hash, schema);
+            }
+        }
+        let lenses = state
+            .catalogue
+            .known_lenses(store)
+            .expect("read published lenses")
+            .iter()
+            .filter_map(|lens| {
+                let source = schemas.get(&lens.source_hash)?;
+                let target = schemas.get(&lens.target_hash)?;
+                Some(
+                    jazz::tools::schema_lens::runtime::compile_lens(lens, source, target)
+                        .expect("lower a published lens"),
+                )
+            })
+            .collect();
+        let schemas = schemas
+            .values()
+            .map(|schema| jazz::schema::JazzSchema::new(schema).expect("lower a published schema"))
+            .collect();
+        jazz::db::Migrations { schemas, lenses }
+    }
+
+    fn require_built_in_jwt_helpers(&self) {
+        if self.embedded_jwks_server.is_none() {
+            panic!(
+                "JazzServer uses an external JWKS URL; built-in JWT helpers are unavailable. Mint JWTs from your external JWKS test fixture instead."
+            );
         }
     }
 
@@ -725,10 +738,7 @@ mod tests {
     #[tokio::test]
     async fn default_jazz_server_keeps_built_in_jwt_helpers_enabled() {
         let server = JazzServer::start().await.expect("start test server");
-        let context = server.make_client_context_for_user(Schema::new(), "default-helper-user");
-
-        assert!(context.jwt_token.is_some());
-        assert!(context.admin_secret.is_none());
+        assert!(!server.jwt_for_user("default-helper-user").is_empty());
 
         assert_eq!(server.shutdown().await, ShutdownPhase::StorageClosed);
     }
@@ -750,7 +760,7 @@ mod tests {
         assert_eq!(health.status(), StatusCode::OK);
 
         let panic = catch_unwind(AssertUnwindSafe(|| {
-            server.make_client_context_for_user(Schema::new(), "external-helper-user")
+            server.jwt_for_user("external-helper-user")
         }))
         .expect_err("external JWKS mode should reject built-in JWT helpers");
         let message = if let Some(message) = panic.downcast_ref::<String>() {
@@ -784,6 +794,7 @@ mod tests {
             .expect("enter active request");
         let server = JazzServer::from_built(
             built,
+            None,
             None,
             app_id,
             ServerDataDir::in_memory(),

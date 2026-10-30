@@ -1,0 +1,94 @@
+---
+title: "Collaborative text editing"
+description: Let several people edit the same text, online or offline, with a text merge column.
+reviewedAt: "a955a56742"
+---
+
+Having text fields that can be edited by multiple users at the same time is a common need. In Jazz,
+declare the column as a text merge column and keep writing it as a plain string.
+
+## Why a plain string column is not enough
+
+A plain string column works well for replacing a value. When two people change it at the same time,
+[one edit wins the whole field](/docs/concepts/how-sync-works#concurrent-edits). The other edit stays
+in the row's history, but it disappears from the text.
+
+## Declare a text merge column
+
+A text merge column (`s.string().merge("text")`, or `"markdown"` / `"html"`) keeps storing a plain
+string, and the server merges concurrent edits inside it. Concurrent edits to different words all
+survive; where two people replaced the same words, the later edit wins that part.
+
+```ts title="schema.ts"
+import { schema as s } from "jazz-tools";
+import { migrations } from "./migrations";
+
+const schema = {
+  notes: s.table(
+    {
+      title: s.string(),
+      body: s.string().merge("markdown").default(""),
+    },
+    {},
+  ),
+};
+
+type AppSchema = s.Schema<typeof schema>;
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
+```
+
+Pick the format that matches what the column holds: `"text"` for prose, `"markdown"` for Markdown
+(what most rich text editors can import and export), `"html"` for HTML. The format decides which
+pieces a merge keeps whole, such as Markdown markers or HTML tags; see
+[mergeable text columns](/docs/schemas/column-types#mergeable-text-columns).
+
+A text merge column can be optional. Two people adding text to a `null` column at the same time
+both keep their text, while clearing it to `null` against someone else's edit goes to whichever
+write reaches the server later. If you don't need to tell "no text yet" from empty text, a required
+column with `.default("")` is simpler; see
+[mergeable text columns](/docs/schemas/column-types#mergeable-text-columns).
+
+## Write and read it like any string
+
+There is no extra library and no special write API. Write the whole current value with
+`db.update(...)`, and read it with a normal query:
+
+```ts
+db.update(app.notes, noteId, { body: nextBody });
+```
+
+Queries, filters and permissions see the text itself. Large values work too: a long note is stored
+and synced like any other large string.
+
+## Editing offline
+
+Each edit is merged against the version its writer had seen, so a device that edits offline for a
+while merges its whole session when it reconnects, including its own chain of edits. Until the
+server's result arrives, the device shows its own text, then switches to the merged value.
+
+## Connecting an editor
+
+A few habits keep an editor pleasant to use with a text merge column:
+
+- **Debounce writes.** Write the editor's value after a short pause in typing (a few hundred
+  milliseconds) rather than on every keystroke. Each write is still merged correctly; fewer writes
+  just mean less work and less history.
+- **Apply incoming values as a change, not a reset.** When the merged value arrives, compute the
+  difference from what the editor shows and apply only that, so the cursor and selection stay where
+  they are. Replacing the editor's whole content moves the cursor to the start.
+- **Keep the serialization stable.** If your editor converts between its own document model and
+  Markdown or HTML, check that loading a value and saving it again without edits gives back the
+  same string. Otherwise every open editor rewrites the text, and those rewrites compete with real
+  edits.
+
+## What to expect from a merge
+
+- Edits to different parts of the text all survive, and an edit both people made applies once.
+- Two insertions at the same spot both stay, the earlier one first.
+- Where both people replaced the same words, the edit the server receives later wins that part.
+  The other version stays in the row's history.
+- The merge keeps Markdown and HTML markup intact but is not tree-aware: it does not check that the
+  merged result is well formed.
+
+See [how text merges work](/docs/concepts/how-sync-works#text-merges) for the full rules, including
+what happens when a very large value is rewritten heavily on both sides.

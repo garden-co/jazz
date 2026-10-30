@@ -1,10 +1,10 @@
 import { startCoreObservationControl } from "./core-observation-control.mjs";
-import { boundedHarnessOutput, startLocalEdgeSessionHarness } from "./edge-session-harness.mjs";
+import { boundedHarnessOutput, startLocalServerSessionHarness } from "./server-session-harness.mjs";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { assertDeviceReceipt } from "./device-driver.mjs";
+import { assertDeviceReceipt, deviceMetricsLines } from "./device-driver.mjs";
 import {
   boundedDiagnostic,
   parseLaunchProcessId,
@@ -43,7 +43,7 @@ const trySimctl = (args) => {
   }
 };
 const runNonce = process.env.JAZZ_DEVICE_RUN_NONCE ?? randomUUID();
-const localSession = await startLocalEdgeSessionHarness({
+const localSession = await startLocalServerSessionHarness({
   device: udid,
   runNonce,
   host: "127.0.0.1",
@@ -146,7 +146,9 @@ try {
     };
     for (let attempt = 0; attempt < 90; attempt += 1) {
       try {
-        return assertDeviceReceipt(receiptFile(), expected);
+        const results = assertDeviceReceipt(receiptFile(), expected);
+        for (const line of deviceMetricsLines(results)) console.log(line);
+        return results;
       } catch (error) {
         if (attempt === 89) {
           const detail = error instanceof Error ? error.message : String(error);

@@ -2,58 +2,54 @@
 resolver = "2"
 members = [
   "crates/benchmark-guard",
-  "crates/idb-tree",
-  "crates/groove",
   "crates/jazz",
+  "crates/jazz/layers/db",
+  "crates/jazz/layers/model",
+  "crates/jazz/layers/protocol",
+  "crates/jazz/layers/types",
   "crates/jazz-compression",
+  "crates/wasm-tracing",
+  "crates/jazz-wasm",
   "crates/jazz-native-transport",
   "crates/jazz-native-relay",
   "crates/jazz-cli",
   "crates/jazz-server",
-  "crates/jazz-storage-rocksdb",
-  "crates/jazz-storage-sqlite",
   "crates/jazz-testkit",
   "crates/jazz-otel",
   "crates/jazz-sim",
-  "crates/jazz-wasm",
   "crates/jazz-napi",
-  "crates/wasm-tracing",
-  # The old Axum todo server examples expect a Send + Sync JazzClient in shared
-  # router state. Core Db ownership is currently local-thread by design;
-  # keep these examples as integration targets, but out of workspace-wide green
-  # gates until they are rebuilt around the new server boundary.
+  # The Axum todo server examples need a Send + Sync JazzClient in shared
+  # router state, and Db is thread-local by design, so they stay outside the
+  # workspace.
   # "examples/todo-server-rs",
   # "examples/docs/todo-server-rs",
-  "examples/todo-client-localfirst-ts/benchmarks",
+  "examples/stage-plan/benchmarks",
+  "examples/band-book/benchmarks",
   "examples/permissioned-resources/benchmarks",
   "examples/big-label/benchmarks",
   "examples/epic-drop/benchmarks",
   "examples/band-chat/benchmarks",
   "examples/music-agent/benchmarks",
   "examples/record-player/benchmarks",
+  "examples/doc-shelf/benchmarks",
   "examples/world-tour/benchmarks",
   "examples/poster-shop/benchmarks",
   "examples/jamazon-warehouse/benchmarks",
   "examples/wequencer/benchmarks",
-  "examples/benchmarks/smoke",
-  "examples/benchmarks/w1",
-  "dev/benchmarks/storage/bench-core",
 ]
-exclude = ["examples/todo-server-rs", "examples/docs/todo-server-rs"]
+exclude = ["examples/todo-server-rs", "examples/docs/todo-server-rs", "vendor/ruzstd"]
 
 [workspace.dependencies]
-groove = { path = "crates/groove", default-features = false }
 jazz = { path = "crates/jazz", default-features = false }
+jazz-db = { path = "crates/jazz/layers/db", default-features = false }
+jazz-model = { path = "crates/jazz/layers/model", default-features = false }
+jazz-protocol = { path = "crates/jazz/layers/protocol", default-features = false }
+jazz-types = { path = "crates/jazz/layers/types", default-features = false }
 jazz-compression = { path = "crates/jazz-compression", default-features = false }
 jazz-otel = { path = "crates/jazz-otel" }
-jazz-storage-rocksdb = { path = "crates/jazz-storage-rocksdb" }
-jazz-storage-sqlite = { path = "crates/jazz-storage-sqlite" }
 jazz-native-transport = { path = "crates/jazz-native-transport" }
 rustc-hash = "2.1.1"
 divan = { package = "codspeed-divan-compat", version = "5.0.1" }
-
-[patch.crates-io]
-rust-rocksdb = { git = "https://github.com/zaidoon1/rust-rocksdb.git", tag = "v0.48.0" }
 
 # Keep useful file/line information in normal dev and test builds without
 # generating full debugger metadata. Tests inherit the dev profile.
@@ -67,6 +63,19 @@ debug = false
 [profile.debugging]
 inherits = "dev"
 debug = true
+
+# The Linux jazz-tools server binary keeps line tables for Jazz's own crates
+# so heap profiles, CPU profiles and panics resolve to file:line in production. Everything else
+# (optimization, codegen units) matches `release`; other release artifacts
+# (NAPI, WASM) stay without debug info.
+[profile.release-server]
+inherits = "release"
+debug = "line-tables-only"
+
+# Dependencies, including bundled C such as SQLite (cc-rs turns any debug
+# level into full `-g`), keep only their symbol names.
+[profile.release-server.package."*"]
+debug = false
 
 [profile.perf]
 inherits = "release"
@@ -83,15 +92,17 @@ codegen-units = 256
 # `jazz-native-relay` must keep `crate-type = ["rlib", "staticlib"]` because
 # `jazz-napi` depends on the rlib. Fat LTO is only real in a staticlib-only build.
 #
-# `panic = "abort"` is deliberate and worth ~7 MB of unwind tables. Consequence:
-# a panic in a relay tokio task terminates the host process instead of being
-# contained by that task. Panics already abort at the crate's `extern "C"`
-# boundary since Rust 1.81 (unconditional for `extern "C"`, not an edition
-# rule), so this narrows, not introduces, the exposure.
+# `panic = "abort"` is deliberate. On the SQLite engine it is worth ~2.2 MB of
+# unwind tables on the link proxy below. Consequence: a panic in a relay tokio
+# task terminates the host process instead of being contained by that task.
+# Panics already abort at the crate's `extern "C"` boundary since Rust 1.81
+# (unconditional for `extern "C"`, not an edition rule), so this narrows, not
+# introduces, the exposure.
 #
-# Measured on a fully stripped arm64 link proxy referencing all 27 exported
-# symbols: 37.7 MB -> 15.7 MB executable, 15.7 MB -> 7.7 MB gzip, device `.a`
-# 107 MB -> 30 MB. Full table in https://github.com/garden-co/jazz/issues/3008.
+# Measured on a fully stripped arm64 link proxy referencing all 28 exported
+# symbols (SQLite engine, no RocksDB): 16.7 MB -> 8.1 MB executable, 7.2 MB ->
+# 4.1 MB gzip, device `.a` 69.6 MB -> 18.4 MB. Full table in
+# https://github.com/garden-co/jazz/pull/3016.
 # ponytail: `debug`/`strip` are already the `release` defaults, so they are not
 # restated; the `.a` ships as built (nothing in the normal pipeline strips it)
 # and the inherited `debug = false` is what keeps debuginfo out.

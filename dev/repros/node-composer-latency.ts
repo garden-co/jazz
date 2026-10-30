@@ -28,10 +28,13 @@ NapiDb.prototype.setTickScheduler = function (callback) {
   });
 };
 
-const app = s.defineApp({
-  drafts: s.table({ text: s.string() }),
-  messages: s.table({ channel: s.string(), text: s.string() }),
-});
+const app = s.defineApp(
+  {
+    drafts: s.table({ text: s.string() }, {}),
+    messages: s.table({ channel: s.string(), text: s.string() }, {}),
+  },
+  { migrations: "none" },
+);
 const permissions = s.definePermissions(app, ({ policy }) => {
   for (const table of [policy.drafts, policy.messages]) {
     table.allowRead.always();

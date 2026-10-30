@@ -1,15 +1,15 @@
 use jazz_example_band_chat_benchmark::{FastResumeFixture, Fixture, expected_counts};
 
 #[test]
-fn caught_up_fast_resume_emits_no_membership_or_version_payload() {
+fn caught_up_fast_resume_ships_no_rows() {
     for message_count in [100, 1_000] {
         let mut fixture = FastResumeFixture::new(message_count);
         let receipt = fixture.caught_up_fast_resume();
         assert!(
-            receipt.is_body_deduplicated_reset(),
+            receipt.ships_no_rows(),
             "{message_count} messages leaked a caught-up resume payload: {receipt:?}"
         );
-        assert_eq!(receipt.covered_inputs, message_count);
+        assert_eq!(receipt.rows_held, message_count);
     }
 }
 
@@ -43,5 +43,14 @@ fn representative_loads_have_exact_cardinality_and_order() {
             .rev()
             .collect::<Vec<_>>();
         assert_eq!(fixture.author_history_sent_at(), author_messages);
+    }
+}
+
+#[test]
+fn a_new_message_changes_only_the_busy_room_view() {
+    use jazz_example_band_chat_benchmark::live_rooms::LiveRoomsFixture;
+    for rooms in [1, 10] {
+        let open = LiveRoomsFixture::seeded(rooms).open_all().new_message();
+        assert!(open.unrelated_messages_are_quiet());
     }
 }

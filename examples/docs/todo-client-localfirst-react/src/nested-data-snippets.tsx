@@ -3,22 +3,31 @@ import { useAll, useDb, useSession } from "jazz-tools/react";
 
 // #region nested-schema
 const schema = {
-  projects: s.table({
-    name: s.string(),
-  }),
-  tasks: s.table({
-    title: s.string(),
-    done: s.boolean(),
-    projectId: s.ref("projects"),
-  }),
-  comments: s.table({
-    body: s.string(),
-    taskId: s.ref("tasks"),
-  }),
+  projects: s.table(
+    {
+      name: s.string(),
+    },
+    { tasks: s.reverse("tasks", "project") },
+  ),
+  tasks: s.table(
+    {
+      title: s.string(),
+      done: s.boolean(),
+      projectId: s.uuid(),
+    },
+    { project: s.rel("projects", "projectId"), comments: s.reverse("comments", "task") },
+  ),
+  comments: s.table(
+    {
+      body: s.string(),
+      taskId: s.uuid(),
+    },
+    { task: s.rel("tasks", "taskId") },
+  ),
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema);
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
 // #endregion nested-schema
 
 // #region nested-permissions
@@ -30,14 +39,14 @@ s.definePermissions(app, ({ policy, allowedTo, session }) => {
   policy.projects.allowDelete.where({ "$createdBy.account": session.user.account });
 
   // Tasks: inherit from project
-  policy.tasks.allowRead.where(allowedTo.read("projectId"));
-  policy.tasks.allowInsert.where(allowedTo.read("projectId"));
-  policy.tasks.allowUpdate.where(allowedTo.update("projectId"));
-  policy.tasks.allowDelete.where(allowedTo.delete("projectId"));
+  policy.tasks.allowRead.where(allowedTo.read("project"));
+  policy.tasks.allowInsert.where(allowedTo.read("project"));
+  policy.tasks.allowUpdate.where(allowedTo.update("project"));
+  policy.tasks.allowDelete.where(allowedTo.delete("project"));
 
   // Comments: inherit from task
-  policy.comments.allowRead.where(allowedTo.read("taskId"));
-  policy.comments.allowInsert.where(allowedTo.read("taskId"));
+  policy.comments.allowRead.where(allowedTo.read("task"));
+  policy.comments.allowInsert.where(allowedTo.read("task"));
   policy.comments.allowUpdate.where({ "$createdBy.account": session.user.account });
   policy.comments.allowDelete.where({ "$createdBy.account": session.user.account });
 });

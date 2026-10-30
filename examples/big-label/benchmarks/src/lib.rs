@@ -3,14 +3,16 @@
 //! This deliberately duplicates the small schema surface needed by the
 //! benchmark. It does not import an application runtime or fixture helper.
 
+pub mod live_view;
+pub mod policy_graph;
+
 use std::collections::BTreeMap;
 
-use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, MergeableTxOps, PreparedQuery, block_on};
-use jazz::groove::records::Value;
-use jazz::groove::storage::MemoryStorage;
+use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions, PreparedQuery, block_on};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
-use jazz::schema::{JazzSchema, TableSchema};
+use jazz::records::Value;
+use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 
@@ -18,13 +20,12 @@ const LABELS: usize = 8;
 const ARTISTS: usize = 32;
 const CATALOGS: usize = 4;
 
-type BenchDb = Db<MemoryStorage>;
+type BenchDb = Db;
 
 /// Prepared BigLabel fixture. Construction and seeding are intentionally kept
 /// outside the measured closure.
 pub struct Fixture {
     db: BenchDb,
-    release_table: TableSchema,
     label_load: PreparedQuery,
     artist_load: PreparedQuery,
     catalog_load: PreparedQuery,
@@ -33,7 +34,7 @@ pub struct Fixture {
 impl Fixture {
     pub fn new(release_count: usize) -> Self {
         assert!(release_count > 0, "fixture requires at least one release");
-        let (db, release_table) = open_db();
+        let db = open_db();
 
         seed_labels_and_artists(&db);
         for release in 0..release_count {
@@ -45,7 +46,6 @@ impl Fixture {
         let catalog_load = prepare_release_load(&db, "catalog", row_id(3, 0));
         Self {
             db,
-            release_table,
             label_load,
             artist_load,
             catalog_load,
@@ -80,7 +80,7 @@ impl Fixture {
             .read(query)
             .expect("BigLabel benchmark read succeeds")
             .into_iter()
-            .map(|row| match row.cell(&self.release_table, "released_at") {
+            .map(|row| match row.cell("released_at") {
                 Some(Value::U64(released_at)) => released_at,
                 other => panic!("release has unexpected released_at value: {other:?}"),
             })
@@ -92,14 +92,13 @@ impl Fixture {
 /// the measured ingest operation.
 pub struct IngestFixture {
     db: BenchDb,
-    release_table: TableSchema,
 }
 
 impl IngestFixture {
     pub fn new() -> Self {
-        let (db, release_table) = open_db();
+        let db = open_db();
         seed_labels_and_artists(&db);
-        Self { db, release_table }
+        Self { db }
     }
 
     pub fn ingest_releases(&self, release_count: usize, batch_size: usize) -> usize {
@@ -129,11 +128,11 @@ impl IngestFixture {
             .expect("read imported releases by label")
             .into_iter()
             .map(|row| {
-                let title = match row.cell(&self.release_table, "title") {
+                let title = match row.cell("title") {
                     Some(Value::String(title)) => title,
                     other => panic!("release has unexpected title value: {other:?}"),
                 };
-                let released_at = match row.cell(&self.release_table, "released_at") {
+                let released_at = match row.cell("released_at") {
                     Some(Value::U64(released_at)) => released_at,
                     other => panic!("release has unexpected released_at value: {other:?}"),
                 };
@@ -179,25 +178,19 @@ fn schema() -> JazzSchema {
                 .fk_column("artist", "artists")
                 .fk_column("catalog", "catalogs")
                 .column("released_at", ColumnType::Timestamp)
-                .index_only(["label", "artist", "catalog", "released_at"]),
+                .index_only(["label", "artist", "catalog", "released_at"])
+                .composite_index(["label", "released_at"])
+                .composite_index(["artist", "released_at"])
+                .composite_index(["catalog", "released_at"]),
         )
         .build();
     JazzSchema::new(&source).expect("BigLabel benchmark schema compiles")
 }
 
-fn open_db() -> (BenchDb, TableSchema) {
+fn open_db() -> BenchDb {
     let schema = schema();
-    let release_table = schema
-        .tables()
-        .iter()
-        .find(|table| table.name == "releases")
-        .expect("BigLabel schema has releases")
-        .clone();
-    let families = schema.column_families();
-    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let db = block_on(Db::open(DbConfig::new(
         schema,
-        MemoryStorage::new(&family_refs).expect("valid memory storage families"),
         DbIdentity {
             node: NodeUuid::from_bytes([0xb1; 16]),
             author: AuthorSubject::SYSTEM,
@@ -216,7 +209,7 @@ fn open_db() -> (BenchDb, TableSchema) {
             )]),
         );
     }
-    (db, release_table)
+    db
 }
 
 fn insert(db: &BenchDb, table: &str, id: RowUuid, cells: BTreeMap<String, Value>) {

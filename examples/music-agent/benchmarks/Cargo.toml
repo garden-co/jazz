@@ -6,11 +6,12 @@ publish = false
 
 [dependencies]
 jazz = { workspace = true, features = ["testing"] }
-groove = { workspace = true, features = ["test"] }
+jazz-benchmark-guard = { path = "../../../crates/benchmark-guard" }
+tempfile = "3.27.0"
 
 [dev-dependencies]
 divan = { workspace = true }
 
 [[bench]]
-name = "loads"
+name = "walltime"
 harness = false

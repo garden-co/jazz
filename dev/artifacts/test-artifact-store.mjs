@@ -321,7 +321,11 @@ export function snapshotCorrectnessArtifacts(rootInput, { beforePublish } = {}) 
       try {
         renameSync(stage, destination);
       } catch (error) {
-        if (error.code !== "EEXIST" && error.code !== "ENOTEMPTY") throw error;
+        // macOS reports EACCES when the competing destination is already sealed.
+        // A winner must exist and still pass the full snapshot validation below.
+        const sealedCollision =
+          process.platform === "darwin" && error.code === "EACCES" && existsSync(destination);
+        if (error.code !== "EEXIST" && error.code !== "ENOTEMPTY" && !sealedCollision) throw error;
         removeOwnedStage(stage);
       }
     } finally {
@@ -330,6 +334,8 @@ export function snapshotCorrectnessArtifacts(rootInput, { beforePublish } = {}) 
   }
 
   const receipt = parseJsonFile(join(destination, "receipt.json"), "stored receipt");
+  if (receipt.fingerprint !== fingerprint)
+    throw new Error("correctness artifacts: snapshot fingerprint mismatch");
   validateStoredSnapshot(root, receipt); // Fail closed on collision or stale reuse.
   const pointer = correctnessArtifactPointer(root);
   const temporary = `${pointer}.${process.pid}.${Date.now()}.tmp`;

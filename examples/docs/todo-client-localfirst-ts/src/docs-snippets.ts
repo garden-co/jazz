@@ -18,6 +18,13 @@ export async function readTodosOneshot(db: Db) {
 }
 // #endregion reading-oneshot-ts
 
+// #region reading-one-ts
+export async function readTodo(db: Db, id: string) {
+  // Resolves to the first matching row, or null if no row matches or you can't read it
+  return db.one(app.todos.where({ id }));
+}
+// #endregion reading-one-ts
+
 // #region reading-subscriptions-ts
 export function subscribeTodos(db: Db, onCount: (count: number) => void) {
   return db.subscribe(app.todos.where({ done: false }), (todos) => onCount(todos.length));
@@ -207,15 +214,18 @@ export async function readTodoEditMetadata(db: Db, author: RowAuthor, updatedSin
 
 // #region reading-reverse-relation-ts
 export async function readProjectsWithTodos(db: Db) {
-  return db.all(app.projects.include({ todosViaProject: app.todos.where({ done: false }) }));
+  return db.all(app.projects.include({ todos: app.todos.where({ done: false }) }));
 }
 // #endregion reading-reverse-relation-ts
 
 // #region reading-require-includes-ts
-const requiredReferences = s.defineApp({
-  customers: s.table({ name: s.string() }),
-  orders: s.table({ customerId: s.ref("customers") }),
-});
+const requiredReferences = s.defineApp(
+  {
+    customers: s.table({ name: s.string() }, { orders: s.reverse("orders", "customer") }),
+    orders: s.table({ customerId: s.uuid() }, { customer: s.rel("customers", "customerId") }),
+  },
+  { migrations: "none" },
+);
 
 export async function readOrdersWithRequiredCustomer(db: Db) {
   return db.all(requiredReferences.orders.include({ customer: true }).requireIncludes());
@@ -234,9 +244,9 @@ export function buildTodoLineageQuery() {
 
 // #region reading-seeding-ts
 export async function seedDefaultProject(db: Db) {
-  // Wait for the global core before reading — prevents duplicate seeding
+  // Read from the server before seeding — prevents duplicate seeding
   // from concurrent fresh clients on first visit.
-  const existing = await db.all(app.projects, { tier: "global" });
+  const existing = await db.all(app.projects, { tier: "remote" });
 
   if (existing.length === 0) {
     db.insert(app.projects, { name: "Default" });
@@ -264,7 +274,7 @@ export async function upsertTodo(db: Db, importedTodoId: string) {
     done: false,
   });
 
-  await write.wait({ tier: "edge" });
+  await write.wait({ tier: "global" });
 }
 // #endregion writing-upsert-ts
 
@@ -302,7 +312,7 @@ export async function writeTodoWithDurabilityTiers(db: Db) {
       owner_id: EXAMPLE_OWNER_ID,
       projectId: EXAMPLE_PROJECT_ID,
     })
-    .wait({ tier: "edge" });
+    .wait({ tier: "global" });
 
   await db.update(app.todos, id, { done: true }).wait({ tier: "global" });
   await db.delete(app.todos, id).wait({ tier: "global" });
@@ -360,14 +370,14 @@ export async function groupTodoWrites(db: Db, existingTodoId: string) {
     return staged.id;
   });
 
-  await result.wait({ tier: "edge" });
+  await result.wait({ tier: "global" });
   return result.value;
 }
 // #endregion writing-transaction-ts
 
-// #region writing-exclusive-transaction-ts
-export async function finishTodoExclusively(db: Db, todoId: string) {
-  const result = await db.exclusiveTransaction(async (tx) => {
+// #region writing-serializable-transaction-ts
+export async function finishTodoSerializably(db: Db, todoId: string) {
+  const result = await db.serializableTransaction(async (tx) => {
     const todo = await tx.one(app.todos.where({ id: todoId }));
     if (!todo) throw new Error("Todo not found");
 
@@ -377,7 +387,7 @@ export async function finishTodoExclusively(db: Db, todoId: string) {
 
   return result.wait();
 }
-// #endregion writing-exclusive-transaction-ts
+// #endregion writing-serializable-transaction-ts
 
 // #region writing-transaction-errors-ts
 export async function completeTodoInTransaction(db: Db, todoId: string) {
@@ -386,7 +396,7 @@ export async function completeTodoInTransaction(db: Db, todoId: string) {
       tx.update(app.todos, todoId, { done: true });
     });
 
-    await result.wait({ tier: "edge" });
+    await result.wait({ tier: "global" });
   } catch (error) {
     if (error instanceof PersistedWriteRejectedError) {
       console.error(error.code, error.reason);
@@ -415,7 +425,7 @@ export async function stageTodoAcrossSteps(db: Db, shouldCancel: boolean) {
   }
 
   const result = await tx.commit();
-  await result.wait({ tier: "edge" });
+  await result.wait({ tier: "global" });
 }
 // #endregion writing-manual-transaction-ts
 

@@ -9,6 +9,9 @@
 extern "C" {
 #endif
 
+/* The relay ABI this header describes (Rust `NATIVE_RELAY_ABI_V1`). */
+#define JAZZ_NATIVE_RELAY_ABI_VERSION 4
+
 /*
  * Return the shared native relay ABI version embedded in this artifact.
  *
@@ -17,11 +20,15 @@ extern "C" {
  */
 uint16_t jazz_native_relay_abi_version(void);
 
+/* Optional foreground capture support, a feature query outside the command layout. */
+bool jazz_native_relay_supports_snapshot_capture(void);
+
 typedef struct jazz_native_relay_bytes {
   uint8_t *data;
   size_t len;
 } jazz_native_relay_bytes;
 
+/* Stable C ABI status classes: append values; never renumber existing codes. */
 typedef enum jazz_native_relay_status {
   JAZZ_NATIVE_RELAY_OK = 0,
   JAZZ_NATIVE_RELAY_INVALID_ARGUMENT = 1,
@@ -32,6 +39,10 @@ typedef enum jazz_native_relay_status {
   JAZZ_NATIVE_RELAY_INVALID_ABI_RANGE = 6,
   JAZZ_NATIVE_RELAY_INCOMPATIBLE_ABI = 7,
   JAZZ_NATIVE_RELAY_BACKPRESSURE = 8,
+  JAZZ_NATIVE_RELAY_REMOTE_PLAINTEXT_ENDPOINT = 9,
+  /* The local store was written in a storage format this build does not read.
+   * Wrappers surface it with the stable code "unsupported_storage_codecs". */
+  JAZZ_NATIVE_RELAY_UNSUPPORTED_STORAGE_CODECS = 10,
 } jazz_native_relay_status;
 
 /* Stateless account crypto. No database or network is opened. Secret output
@@ -164,7 +175,7 @@ jazz_native_relay_status jazz_native_relay_host_lease_set_foreground_wake_callba
 /* Execute one complete postcard foreground NativeDb command against a live
  * attached foreground handle. This is private to native binding adapters: it
  * is not part of the public relay TurboModule command channel. ABI V1 includes
- * the existing core mergeable/exclusive transaction semantics and full-cell
+ * the existing core mergeable/serializable transaction semantics and full-cell
  * mutations, using the shared encoded-cell record envelope. Transaction
  * handles are opaque and scoped to this foreground; commits return the public
  * 16-byte txId in the postcard response. Requests are bounded to 1 MiB. The

@@ -1,0 +1,2542 @@
+//! Versioned transport frames around Jazz sync semantics.
+//!
+//! The wire layer is intentionally thinner than [`crate::protocol`]: it owns
+//! link/session negotiation, feature discovery, binary framing, and structured
+//! protocol errors. Channel payloads carry the canonical encoding of
+//! [`crate::protocol::SyncMessage`]; current v6 byte fixtures pin both the
+//! transport frames and semantic messages.
+
+pub mod channel_credit;
+pub mod channels;
+pub mod stream_backend;
+
+use postcard::{take_from_bytes, to_allocvec};
+use serde::{Deserialize, Serialize};
+
+use crate::ids::{AuthorSubject, NodeUuid};
+use crate::protocol::{SyncMessage, with_message_descriptor_table};
+use crate::protocol_limits::{
+    MAX_WIRE_BATCH_FRAMES, validate_logical_message_len, validate_wire_frame_len,
+};
+
+/// Current Jazz wire protocol version.
+///
+/// This is the sole supported wire version. It is independent of the v1
+/// storage, catalogue, and binding formats: those labels name their own
+/// formats and are not wire-protocol compatibility aliases.
+pub const WIRE_PROTOCOL_VERSION: u16 = 6;
+
+/// Frozen v6 full-frame artifact rejection corpus. NAPI and WASM execute every
+/// frame in the complete Rust message/Hello fixtures, plus these explicit
+/// rejection cases, through this module's production decoders. This is
+/// test-only input, not a second wire format.
+pub const WIRE_FRAME_ARTIFACT_CORPUS: &str =
+    include_str!("../../../fixtures/wire_frame_artifact_corpus_v6.json");
+
+/// No optional features.
+pub const FEATURE_NONE: WireFeatures = 0;
+/// Message frame payloads may be LZ4-compressed at the transport frame seam.
+pub const FEATURE_PAYLOAD_LZ4: WireFeatures = 1 << 3;
+/// Message frame payloads may be Zstandard-compressed at the transport frame seam.
+pub const FEATURE_PAYLOAD_ZSTD: WireFeatures = 1 << 4;
+/// Authority-owned authorization scope hydration.  Unlike the first receipt
+/// experiment this never accepts caller supplied support query identities.
+pub const FEATURE_AUTHORIZATION_SCOPE_VIEWS: WireFeatures = 1 << 7;
+/// The endpoint understands a server-admitted, scope-isolated client-relay
+/// link.  This is a transport-admission capability only: a peer's advertised
+/// role and semantic frames never create the capability.
+pub const FEATURE_SCOPE_ISOLATED_CLIENT_RELAY: WireFeatures = 1 << 9;
+
+/// Bitset of optional protocol features advertised by one peer.
+pub type WireFeatures = u64;
+
+/// One transport frame exchanged between Jazz runtimes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WireFrame {
+    /// Capability and version negotiation frame.
+    Hello(WireHello),
+    /// Structured protocol/session error.
+    Error(WireError),
+    /// One ordered channel extent. Postcard-v1 enum tag 2 within wire v6.
+    Channel(WireChannelEnvelope),
+    /// Receiver-consumption byte grant. Postcard-v1 enum tag 3 within wire v6.
+    ChannelCredit(WireChannelCredit),
+}
+
+/// Which independently bounded transport resource this grant releases.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WireCreditKind {
+    /// Bytes removed from a physical frame queue.
+    Frames,
+    /// Decoded byte-message buffers whose last owner released them.
+    Messages {
+        /// Number of released buffer reservations.
+        count: u32,
+        /// Whether these buffers used the bulk byte window.
+        bulk: bool,
+    },
+}
+
+/// Uncompressed connection-scoped receiver buffer credit; never authority.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireChannelCredit {
+    /// Admitted protocol version.
+    pub protocol_version: u16,
+    /// Admitted capability bits.
+    pub features: WireFeatures,
+    /// Immutable admitted session metadata.
+    pub session: Option<WireSession>,
+    /// Credit class (Writes also represents the shared large-value bulk pool).
+    pub class: channels::ChannelClass,
+    /// Contiguous grant sequence in this connection direction.
+    pub sequence: u64,
+    /// Exact returned physical-byte charges, including the tiny-frame floor.
+    pub consumed_bytes: u64,
+    /// Physical queue capacity or retained decoded byte-message capacity.
+    pub kind: WireCreditKind,
+}
+
+/// Authenticated metadata around one independently compressed channel extent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireChannelEnvelope {
+    /// Admitted wire protocol version.
+    pub protocol_version: u16,
+    /// Admitted features with exactly the active directional codec bit.
+    pub features: WireFeatures,
+    /// Immutable admitted session metadata.
+    pub session: Option<WireSession>,
+    /// Explicit postcard-v1 channel metadata and bounded payload.
+    pub extent: channels::ChannelFrame,
+}
+
+/// Link role advertised during handshake.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WirePeerRole {
+    /// End-user or local application runtime.
+    Client,
+    /// Durable server or authority runtime.
+    Core,
+    /// Local relay/cache runtime without independent fate authority.
+    Relay,
+}
+
+/// Handshake payload used to negotiate a common wire version and feature set.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireHello {
+    /// Lowest protocol version this peer can speak.
+    pub min_protocol_version: u16,
+    /// Highest protocol version this peer can speak.
+    pub max_protocol_version: u16,
+    /// Optional features supported by this peer.
+    pub features: WireFeatures,
+    /// Runtime/link role for topology and admission decisions.
+    pub role: WirePeerRole,
+    /// Authority endpoint bound by the authenticated handshake when the
+    /// authorization-scope view feature is offered.  Semantic sync frames
+    /// never self-assert this identity.
+    #[serde(default)]
+    pub authority: Option<WireAuthorityEndpoint>,
+}
+
+/// Fresh, authenticated authority endpoint identity for one negotiated link.
+///
+/// The session/admission layer allocates this nonce before constructing the
+/// eventual sync connection; receipts use it to reject reconnect replay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireAuthorityEndpoint {
+    /// Stable authority node identity authenticated by the transport.
+    pub node: NodeUuid,
+    /// Fresh non-resumable epoch for this accepted connection.
+    pub epoch: u64,
+}
+
+impl WireAuthorityEndpoint {
+    /// Allocate a nonzero random incarnation, independent of process lifetime.
+    /// Epochs identify connections; their numeric order has no meaning. A
+    /// process-local counter would reuse durable receipt identities on restart.
+    pub fn fresh(node: NodeUuid) -> Self {
+        Self::fresh_with_entropy(node, rand::random::<u64>)
+    }
+
+    fn fresh_with_entropy(node: NodeUuid, mut entropy: impl FnMut() -> u64) -> Self {
+        loop {
+            let epoch = entropy();
+            if epoch != 0 {
+                return Self { node, epoch };
+            }
+        }
+    }
+}
+
+impl WireHello {
+    /// Construct a hello frame for the current implementation.
+    pub fn current(role: WirePeerRole, features: WireFeatures) -> Self {
+        Self {
+            min_protocol_version: WIRE_PROTOCOL_VERSION,
+            max_protocol_version: WIRE_PROTOCOL_VERSION,
+            features,
+            role,
+            authority: None,
+        }
+    }
+
+    /// Attach the endpoint allocated by authenticated session admission.
+    pub fn with_authority(mut self, node: NodeUuid, epoch: u64) -> Self {
+        self.authority = Some(WireAuthorityEndpoint { node, epoch });
+        self
+    }
+}
+
+/// Agreed version and optional features for one peer link.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WireNegotiated {
+    /// Highest mutually supported protocol version.
+    pub protocol_version: u16,
+    /// Intersection of both peers' optional features.
+    pub features: WireFeatures,
+}
+
+/// Transport payload compression codec.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WireCompression {
+    /// No transport compression.
+    None,
+    /// LZ4 stream payload compression.
+    Lz4,
+    /// Zstandard stream payload compression.
+    Zstd,
+}
+
+impl WireCompression {
+    /// Select the active codec from negotiated feature bits.
+    ///
+    /// LZ4 wins ties intentionally: it is the default low-CPU transport codec.
+    pub fn from_features(features: WireFeatures) -> Self {
+        if features & FEATURE_PAYLOAD_LZ4 != 0 {
+            Self::Lz4
+        } else if features & FEATURE_PAYLOAD_ZSTD != 0 {
+            Self::Zstd
+        } else {
+            Self::None
+        }
+    }
+
+    /// Feature bit carried on frames using this codec.
+    pub fn feature(self) -> WireFeatures {
+        match self {
+            Self::None => FEATURE_NONE,
+            Self::Lz4 => FEATURE_PAYLOAD_LZ4,
+            Self::Zstd => FEATURE_PAYLOAD_ZSTD,
+        }
+    }
+}
+
+/// Session metadata carried by message frames after handshake/admission.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireSession {
+    /// Binding/server assigned resumable session id.
+    pub session_id: String,
+    /// Monotone session incarnation. Reconnects that abandon prior ordering use a new epoch.
+    pub epoch: u64,
+    /// Authenticated user identity for client links, once admission succeeds.
+    pub identity: Option<AuthorSubject>,
+}
+
+impl std::fmt::Debug for WireSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let fingerprint = blake3::hash(self.session_id.as_bytes()).to_hex();
+        let identity_fingerprint = self.identity.map(|identity| {
+            blake3::hash(identity.canonical().as_bytes()).to_hex()[..12].to_owned()
+        });
+        f.debug_struct("WireSession")
+            .field("session_id_len", &self.session_id.len())
+            .field("session_id_fingerprint", &&fingerprint[..12])
+            .field("epoch", &self.epoch)
+            .field("identity_fingerprint", &identity_fingerprint)
+            .finish()
+    }
+}
+
+/// Immutable admission requirements for complete inbound envelopes.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct WireInboundContext {
+    expected_protocol_version: u16,
+    negotiated_features: WireFeatures,
+    expected_session: Option<WireSession>,
+    trusted_encoder: bool,
+}
+
+impl WireInboundContext {
+    pub fn new(
+        expected_protocol_version: u16,
+        negotiated_features: WireFeatures,
+        expected_session: Option<WireSession>,
+    ) -> Self {
+        Self {
+            expected_protocol_version,
+            negotiated_features,
+            expected_session,
+            trusted_encoder: false,
+        }
+    }
+
+    pub fn set_trusted_encoder(&mut self, trusted: bool) {
+        self.trusted_encoder = trusted;
+    }
+
+    /// Whether semantic payloads admitted through this context pass the
+    /// checked decoder, which validates every carried version receipt.
+    pub fn validates_receipts(&self) -> bool {
+        !self.trusted_encoder
+    }
+
+    pub fn decode_semantic_payload(&self, bytes: &[u8]) -> Result<SyncMessage, WireError> {
+        if self.trusted_encoder {
+            let message = decode_sync_message_trusted(bytes).map_err(|error| {
+                WireError::new(
+                    WireErrorCode::MalformedFrame,
+                    WireRetry::Never,
+                    error.to_string(),
+                )
+            })?;
+            ensure_sync_message_features(&message, self.negotiated_features)?;
+            Ok(message)
+        } else {
+            decode_sync_message_for_features(bytes, self.negotiated_features)
+        }
+    }
+
+    pub fn validate_channel_metadata(&self, frame: &WireChannelEnvelope) -> Result<(), WireError> {
+        self.validate_metadata(
+            frame.protocol_version,
+            frame.features,
+            frame.session.as_ref(),
+        )
+    }
+
+    pub fn decode_frame(&self, bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
+        if self.trusted_encoder {
+            postcard::from_bytes(bytes)
+        } else {
+            decode_frame(bytes)
+        }
+    }
+
+    pub fn expected_protocol_version(&self) -> u16 {
+        self.expected_protocol_version
+    }
+
+    pub fn negotiated_features(&self) -> WireFeatures {
+        self.negotiated_features
+    }
+
+    pub fn expected_session(&self) -> Option<&WireSession> {
+        self.expected_session.as_ref()
+    }
+
+    fn validate_metadata(
+        &self,
+        protocol_version: u16,
+        features: WireFeatures,
+        session: Option<&WireSession>,
+    ) -> Result<(), WireError> {
+        if protocol_version != self.expected_protocol_version {
+            return Err(WireError::new(
+                WireErrorCode::UnsupportedProtocolVersion,
+                WireRetry::AfterResume,
+                format!(
+                    "wire message protocol version {protocol_version} does not match negotiated {}",
+                    self.expected_protocol_version
+                ),
+            ));
+        }
+        let unnegotiated = features & !self.negotiated_features;
+        if unnegotiated != 0 {
+            return Err(WireError::new(
+                WireErrorCode::UnsupportedFeature,
+                WireRetry::AfterResume,
+                format!("wire message declares unnegotiated features {unnegotiated:#x}"),
+            ));
+        }
+        let Some(expected) = &self.expected_session else {
+            return Ok(());
+        };
+        let Some(actual) = session else {
+            return Err(WireError::new(
+                WireErrorCode::AuthFailed,
+                WireRetry::AfterAuth,
+                "missing wire session metadata",
+            ));
+        };
+        if actual.session_id != expected.session_id {
+            return Err(WireError::new(
+                WireErrorCode::AuthFailed,
+                WireRetry::AfterResume,
+                "wire session id does not match this connection",
+            ));
+        }
+        if actual.identity != expected.identity {
+            return Err(WireError::new(
+                WireErrorCode::AuthFailed,
+                WireRetry::AfterAuth,
+                "wire session identity does not match this connection",
+            ));
+        }
+        if actual.epoch < expected.epoch {
+            return Err(WireError::new(
+                WireErrorCode::AuthFailed,
+                WireRetry::AfterResume,
+                "stale wire session epoch",
+            ));
+        }
+        if actual.epoch != expected.epoch {
+            return Err(WireError::new(
+                WireErrorCode::AuthFailed,
+                WireRetry::AfterResume,
+                "wire session epoch does not match this connection",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Structured wire error code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WireErrorCode {
+    /// Peers do not share a supported protocol version.
+    UnsupportedProtocolVersion,
+    /// A required feature was not negotiated.
+    UnsupportedFeature,
+    /// The frame could not be decoded or violates the envelope contract.
+    MalformedFrame,
+    /// Authentication or authorization failed.
+    AuthFailed,
+    /// Receiver is currently overloaded.
+    Backpressure,
+    /// Internal implementation error.
+    Internal,
+    /// The runtime has not completed bootstrap yet; reconnect later.
+    NotReady,
+}
+
+/// Retry guidance for bindings and transports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WireRetry {
+    /// Retrying the same operation cannot succeed.
+    Never,
+    /// Retry after refreshing credentials or re-running admission.
+    AfterAuth,
+    /// Retry after reconnecting/resuming the session.
+    AfterResume,
+    /// Retry later with transport backoff.
+    Later,
+}
+
+/// Structured protocol/session error frame.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireError {
+    /// Machine-readable error code.
+    pub code: WireErrorCode,
+    /// Binding-facing retry guidance.
+    pub retry: WireRetry,
+    /// Human-readable diagnostic. Not part of semantic compatibility.
+    pub message: String,
+}
+
+impl WireError {
+    /// Construct a wire error.
+    pub fn new(code: WireErrorCode, retry: WireRetry, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            retry,
+            message: message.into(),
+        }
+    }
+
+    /// Whether this error ends a link without ending the client: the peer is
+    /// overloaded or still bootstrapping and asks to be reconnected with
+    /// backoff. `Later` alone is not enough, since an authentication or
+    /// malformed-frame error can carry it and retrying those cannot succeed.
+    pub fn asks_reconnect_later(&self) -> bool {
+        self.retry == WireRetry::Later
+            && matches!(
+                self.code,
+                WireErrorCode::Backpressure | WireErrorCode::NotReady
+            )
+    }
+}
+
+/// Serialize a wire frame with the canonical Jazz frame codec.
+pub fn encode_frame(frame: &WireFrame) -> Result<Vec<u8>, postcard::Error> {
+    to_allocvec(frame)
+}
+
+/// Whether encoded frame bytes carry a [`WireFrame::ChannelCredit`] grant,
+/// judged by its pinned postcard-v1 enum tag (3) alone. Callers still decode
+/// and validate the grant; this only lets a receiver route credit frames
+/// without decoding every channel payload.
+pub fn is_channel_credit_frame(bytes: &[u8]) -> bool {
+    bytes.first() == Some(&3)
+}
+
+/// Decode a wire frame serialized by [`encode_frame`].
+pub fn decode_frame(bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
+    if validate_wire_frame_len(bytes.len()).is_err() {
+        return Err(postcard::Error::DeserializeUnexpectedEnd);
+    }
+    decode_postcard_exact(bytes)
+}
+
+/// Exercise the owning v6 frame and payload decoders for the generated-host
+/// compatibility matrix.
+///
+/// This deliberately has no transport, queue, or session side effects.  The
+/// test bridges in NAPI and WASM pass frozen complete frame bytes here so the
+/// matrix proves that both generated artifacts reach the same exact-decoding,
+/// version-negotiation, feature, and compression seams as a real peer.  It is
+/// not a public host API.
+#[doc(hidden)]
+pub fn validate_frame_for_artifact_corpus(
+    bytes: &[u8],
+    negotiated_features: WireFeatures,
+) -> Result<(), String> {
+    validate_frames_for_artifact_corpus(&[bytes.to_vec()], negotiated_features)
+}
+
+/// Execute a complete frozen frame sequence through the production channel decoder.
+#[doc(hidden)]
+pub fn validate_frames_for_artifact_corpus(
+    frames: &[Vec<u8>],
+    negotiated_features: WireFeatures,
+) -> Result<(), String> {
+    let context = WireInboundContext::new(WIRE_PROTOCOL_VERSION, negotiated_features, None);
+    let mut receiver = stream_backend::OrderedChannelBackend::new(context.clone())?;
+    let mut pending = std::collections::BTreeSet::new();
+    for bytes in frames {
+        // A Hello's version range is read before its version-scoped body
+        // (`INV-WIRE-2`), as a real peer does.
+        if wire_hello_version_range(bytes).is_some() {
+            decode_hello_frame(bytes)
+                .and_then(|hello| negotiate_wire(&hello, negotiated_features))
+                .map_err(|error| format!("hello negotiation rejected: {}", error.message))?;
+            continue;
+        }
+        match decode_frame(bytes).map_err(|error| format!("malformed wire frame: {error}"))? {
+            WireFrame::Hello(hello) => {
+                negotiate_wire(&hello, negotiated_features)
+                    .map_err(|error| format!("hello negotiation rejected: {}", error.message))?;
+            }
+            WireFrame::Channel(envelope) => {
+                let channel = envelope.extent.channel;
+                pending.insert(channel);
+                if let Some(message) = receiver.receive(envelope, bytes.len())? {
+                    context
+                        .decode_semantic_payload(&message.payload)
+                        .map_err(|error| format!("semantic payload rejected: {}", error.message))?;
+                    pending.remove(&channel);
+                }
+            }
+            WireFrame::Error(_) => {}
+            WireFrame::ChannelCredit(_) => {
+                return Err("credit frames require a persistent admitted endpoint".to_owned());
+            }
+        }
+    }
+    if !pending.is_empty() {
+        return Err("incomplete channel message in artifact corpus".to_owned());
+    }
+    Ok(())
+}
+
+/// Serialize a semantic sync message with the canonical Jazz payload codec.
+///
+/// Every row version in the message shares one descriptor table: a row
+/// descriptor is written once, at its first use, and later rows reference it
+/// (`JVRR` v3, SPEC 16).
+pub fn encode_sync_message(message: &SyncMessage) -> Result<Vec<u8>, postcard::Error> {
+    // Our encoder owns correctness; do not decode/revalidate its input rows.
+    if matches!(message, SyncMessage::ViewUpdate(_)) {
+        // A view update can carry a whole snapshot. Growing the buffer while
+        // encoding it holds the old and new allocation at each doubling and
+        // leaves up to twice its bytes queued, so size it exactly first.
+        let len = encoded_sync_message_len(message)?;
+        return with_message_descriptor_table(|| {
+            postcard::to_extend(message, Vec::with_capacity(len))
+        });
+    }
+    with_message_descriptor_table(|| to_allocvec(message))
+}
+
+/// Exact byte length `encode_sync_message` would produce, without allocating
+/// or copying the encoding. For diagnostics that only need the size.
+pub fn encoded_sync_message_len(message: &SyncMessage) -> Result<usize, postcard::Error> {
+    with_message_descriptor_table(|| {
+        postcard::serialize_with_flavor(message, postcard::ser_flavors::Size::default())
+    })
+}
+
+/// Serialize a semantic message only when its required capabilities were
+/// negotiated for this link.
+///
+/// Keep this check immediately adjacent to the canonical codec.  Postcard
+/// encodes Rust enums by ordinal, so allowing an unsupported variant past this
+/// seam would make an older peer decode a different message (or fail after it
+/// has already accepted a semantic frame).
+pub fn encode_sync_message_for_features(
+    message: &SyncMessage,
+    negotiated_features: WireFeatures,
+) -> Result<Vec<u8>, WireError> {
+    ensure_sync_message_features(message, negotiated_features)?;
+    encode_sync_message(message).map_err(|error| {
+        WireError::new(
+            WireErrorCode::MalformedFrame,
+            WireRetry::Never,
+            format!("failed to encode sync message payload: {error}"),
+        )
+    })
+}
+
+/// Decode a semantic sync message serialized by [`encode_sync_message`].
+pub fn decode_sync_message(bytes: &[u8]) -> Result<SyncMessage, postcard::Error> {
+    if validate_logical_message_len(bytes.len()).is_err() {
+        return Err(postcard::Error::DeserializeUnexpectedEnd);
+    }
+    // Wire receipts and replay fixtures name bytes, not only deserialized
+    // values. `decode_postcard_exact` already rejects any alternate postcard
+    // representation of the same transaction/version message.
+    let message: SyncMessage = with_message_descriptor_table(|| decode_postcard_exact(bytes))?;
+    message
+        .validate_wire_contract()
+        .map_err(|_| postcard::Error::DeserializeBadOption)?;
+    Ok(message)
+}
+
+/// Decode output from a topology-trusted encoder without representation checks.
+/// Trust is assigned locally when the transport is installed, never on the wire.
+#[doc(hidden)]
+pub fn decode_sync_message_trusted(bytes: &[u8]) -> Result<SyncMessage, postcard::Error> {
+    with_message_descriptor_table(|| postcard::from_bytes(bytes))
+}
+
+pub use crate::postcard_exact::decode_postcard_exact;
+pub use crate::postcard_exact::encodes_exactly;
+
+/// Decode one canonical WebSocket carrier of raw wire frames without first
+/// allocating an attacker-declared outer `Vec`.
+///
+/// A batch is postcard's `Vec<Vec<u8>>` spelling: a canonical outer count,
+/// followed by a canonical byte length and payload for each frame. The count
+/// and every frame length are admitted before their corresponding allocation;
+/// the carrier also has to consume its complete input. This is the shared
+/// boundary for every WebSocket adapter, so no adapter can accidentally use
+/// postcard's general-purpose `Vec` decoder before enforcing the protocol
+/// cardinality limit.
+pub fn decode_websocket_frame_batch(bytes: &[u8]) -> Result<Vec<Vec<u8>>, postcard::Error> {
+    if validate_wire_frame_len(bytes.len()).is_err() {
+        return Err(postcard::Error::DeserializeUnexpectedEnd);
+    }
+
+    let mut remaining = bytes;
+    let count = take_canonical_postcard_usize(&mut remaining)?;
+    if count == 0 || count > MAX_WIRE_BATCH_FRAMES {
+        return Err(postcard::Error::DeserializeBadEncoding);
+    }
+
+    let mut frames = Vec::with_capacity(count);
+    for _ in 0..count {
+        let frame_len = take_canonical_postcard_usize(&mut remaining)?;
+        if validate_wire_frame_len(frame_len).is_err() {
+            return Err(postcard::Error::DeserializeUnexpectedEnd);
+        }
+        if frame_len > remaining.len() {
+            return Err(postcard::Error::DeserializeUnexpectedEnd);
+        }
+        let (frame, tail) = remaining.split_at(frame_len);
+        frames.push(frame.to_vec());
+        remaining = tail;
+    }
+
+    if remaining.is_empty() {
+        Ok(frames)
+    } else {
+        Err(postcard::Error::DeserializeBadEncoding)
+    }
+}
+
+/// Encode one canonical, complete WebSocket carrier of raw wire frames.
+///
+/// The physical carrier ceiling includes postcard's outer count and each
+/// frame-length prefix, so a raw frame at the frame ceiling can still be too
+/// large to carry by itself.
+pub fn encode_websocket_frame_batch(frames: &[Vec<u8>]) -> Result<Vec<u8>, postcard::Error> {
+    if frames.is_empty()
+        || frames.len() > MAX_WIRE_BATCH_FRAMES
+        || frames
+            .iter()
+            .any(|frame| validate_wire_frame_len(frame.len()).is_err())
+    {
+        return Err(postcard::Error::SerializeBufferFull);
+    }
+
+    let encoded = to_allocvec(frames)?;
+    if validate_wire_frame_len(encoded.len()).is_err() {
+        return Err(postcard::Error::SerializeBufferFull);
+    }
+    Ok(encoded)
+}
+
+fn take_canonical_postcard_usize(bytes: &mut &[u8]) -> Result<usize, postcard::Error> {
+    let source = *bytes;
+    let (value, remaining) = take_from_bytes::<usize>(source)?;
+    let consumed = source.len() - remaining.len();
+    if !encodes_exactly(&value, &source[..consumed]) {
+        return Err(postcard::Error::DeserializeBadEncoding);
+    }
+    *bytes = remaining;
+    Ok(value)
+}
+
+/// Decode a semantic message only when its required capabilities were
+/// negotiated for this link.
+pub fn decode_sync_message_for_features(
+    bytes: &[u8],
+    negotiated_features: WireFeatures,
+) -> Result<SyncMessage, WireError> {
+    let message = decode_sync_message(bytes).map_err(|error| {
+        WireError::new(
+            WireErrorCode::MalformedFrame,
+            WireRetry::Never,
+            format!("failed to decode sync message payload: {error}"),
+        )
+    })?;
+    ensure_sync_message_features(&message, negotiated_features)?;
+    Ok(message)
+}
+
+/// Decode a semantic sync message for receiver apply.
+pub fn decode_sync_message_for_receive(bytes: &[u8]) -> Result<SyncMessage, postcard::Error> {
+    decode_sync_message(bytes)
+}
+
+/// Reject semantic extensions that this connection did not negotiate.
+pub fn ensure_sync_message_features(
+    message: &SyncMessage,
+    negotiated_features: WireFeatures,
+) -> Result<(), WireError> {
+    let required = message.required_wire_features();
+    let missing = required & !negotiated_features;
+    if missing == 0 {
+        return Ok(());
+    }
+    Err(WireError::new(
+        WireErrorCode::UnsupportedFeature,
+        WireRetry::AfterResume,
+        format!("sync message requires unnegotiated features {missing:#x}"),
+    ))
+}
+
+/// Optional transport compression features enabled for this process.
+pub fn runtime_transport_compression_features() -> WireFeatures {
+    let Ok(value) = std::env::var("JAZZ_TRANSPORT_COMPRESSION") else {
+        return default_transport_compression_features();
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "0" | "false" | "off" | "none" | "disabled" => FEATURE_NONE,
+        "lz4" => cfg_lz4_feature(),
+        "zstd" | "zstd-3" => cfg_zstd_feature(),
+        "1" | "true" | "on" | "auto" => cfg_lz4_feature() | cfg_zstd_feature(),
+        _ => FEATURE_NONE,
+    }
+}
+
+fn default_transport_compression_features() -> WireFeatures {
+    #[cfg(any(
+        all(not(target_arch = "wasm32"), feature = "transport-compression-zstd"),
+        all(
+            target_arch = "wasm32",
+            any(
+                feature = "transport-compression-zstd",
+                feature = "transport-compression-ruzstd"
+            )
+        )
+    ))]
+    {
+        FEATURE_PAYLOAD_ZSTD
+    }
+    #[cfg(not(any(
+        all(not(target_arch = "wasm32"), feature = "transport-compression-zstd"),
+        all(
+            target_arch = "wasm32",
+            any(
+                feature = "transport-compression-zstd",
+                feature = "transport-compression-ruzstd"
+            )
+        )
+    )))]
+    {
+        FEATURE_NONE
+    }
+}
+
+/// Base sync frame features plus any runtime-enabled transport compression.
+pub fn current_wire_features() -> WireFeatures {
+    FEATURE_AUTHORIZATION_SCOPE_VIEWS
+        | FEATURE_SCOPE_ISOLATED_CLIENT_RELAY
+        | runtime_transport_compression_features()
+}
+
+fn cfg_lz4_feature() -> WireFeatures {
+    #[cfg(feature = "transport-compression-lz4")]
+    {
+        FEATURE_PAYLOAD_LZ4
+    }
+    #[cfg(not(feature = "transport-compression-lz4"))]
+    {
+        FEATURE_NONE
+    }
+}
+
+fn cfg_zstd_feature() -> WireFeatures {
+    #[cfg(feature = "transport-compression-zstd")]
+    {
+        FEATURE_PAYLOAD_ZSTD
+    }
+    #[cfg(not(feature = "transport-compression-zstd"))]
+    {
+        FEATURE_NONE
+    }
+}
+
+/// Binding-supplied byte transport for one wire-framed peer link.
+///
+/// Implementations own the actual socket, worker port, or host channel. The
+/// core only sees already-buffered postcard frame bytes and never blocks inside
+/// this trait.
+pub trait WireTransport {
+    /// Hand an encoded [`WireFrame`] to the binding's wire.
+    fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError>;
+    /// Pull the next encoded [`WireFrame`] staged by the binding, if any.
+    fn try_recv_frame(&mut self) -> Option<Vec<u8>>;
+}
+
+impl WireTransport for Box<dyn WireTransport + Send> {
+    fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
+        (**self).send_frame(frame)
+    }
+
+    fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+        (**self).try_recv_frame()
+    }
+}
+
+/// Fallible local transport result.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TransportError {
+    /// Bounded local queue cannot accept more data right now.
+    Backpressure,
+    /// The local transport failed before accepting the message.
+    Failed(String),
+}
+
+impl std::fmt::Display for TransportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Backpressure => f.write_str("backpressure"),
+            Self::Failed(why) => f.write_str(why),
+        }
+    }
+}
+
+fn check_wire_protocol_range(min: u16, max: u16) -> Result<(), WireError> {
+    if min == WIRE_PROTOCOL_VERSION && max == WIRE_PROTOCOL_VERSION {
+        return Ok(());
+    }
+    Err(WireError::new(
+        WireErrorCode::UnsupportedProtocolVersion,
+        WireRetry::Never,
+        format!(
+            "unsupported wire protocol advertisement: remote {min}..={max}, expected {}..={}",
+            WIRE_PROTOCOL_VERSION, WIRE_PROTOCOL_VERSION
+        ),
+    ))
+}
+
+/// The cross-version prefix of a `Hello` frame: the `WireFrame::Hello` tag and
+/// the advertised `min_protocol_version..=max_protocol_version` range.
+///
+/// This prefix, and the complete `WireFrame::Error` layout with its baseline
+/// codes, are the only bytes every wire version shares. Everything after the
+/// range is scoped to the advertised version, so a receiver reads the range
+/// before it decodes the rest (SPEC 8 §8.1.1, "Forward compatibility of tagged
+/// unions"). Returns `None` when the bytes do not start with that prefix.
+pub fn wire_hello_version_range(bytes: &[u8]) -> Option<(u16, u16)> {
+    let (tag, rest) = take_from_bytes::<u32>(bytes).ok()?;
+    if tag != 0 {
+        return None;
+    }
+    let ((min, max), _) = take_from_bytes::<(u16, u16)>(rest).ok()?;
+    Some((min, max))
+}
+
+/// Decode a peer's handshake frame, reporting a foreign wire version as
+/// `UnsupportedProtocolVersion` before decoding the version-scoped body.
+///
+/// A peer on another wire version may lay out the rest of its `Hello`
+/// differently. Decoding that body with this version's layout would turn a
+/// version mismatch into `MalformedFrame` and hide the actionable error from
+/// both sides.
+pub fn decode_hello_frame(bytes: &[u8]) -> Result<WireHello, WireError> {
+    if let Some((min, max)) = wire_hello_version_range(bytes) {
+        check_wire_protocol_range(min, max)?;
+    }
+    match decode_frame(bytes) {
+        Ok(WireFrame::Hello(hello)) => Ok(hello),
+        Ok(_) => Err(WireError::new(
+            WireErrorCode::MalformedFrame,
+            WireRetry::Never,
+            "expected the first wire frame to be WireFrame::Hello",
+        )),
+        Err(error) => Err(WireError::new(
+            WireErrorCode::MalformedFrame,
+            WireRetry::Never,
+            format!("malformed WireFrame::Hello: {error}"),
+        )),
+    }
+}
+
+/// Negotiate the sole wire version and optional feature intersection.
+pub fn negotiate_wire(
+    remote: &WireHello,
+    local_features: WireFeatures,
+) -> Result<WireNegotiated, WireError> {
+    check_wire_protocol_range(remote.min_protocol_version, remote.max_protocol_version)?;
+    let features = remote.features & local_features;
+    Ok(WireNegotiated {
+        protocol_version: WIRE_PROTOCOL_VERSION,
+        features,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    // The entropy boundary needs a controlled internal test: a real process
+    // restart cannot deterministically assert random allocation or zero retry.
+    fn test_channel_frame(version: u16, features: u64, payload: Vec<u8>) -> WireFrame {
+        WireFrame::Channel(WireChannelEnvelope {
+            protocol_version: version,
+            features,
+            session: None,
+            extent: channels::ChannelFrame {
+                channel: 0,
+                generation: 0,
+                sequence: 0,
+                class: channels::ChannelClass::Control,
+                first: true,
+                last: true,
+                message_len: payload.len() as u32,
+                decoded_len: payload.len() as u32,
+                payload,
+            },
+        })
+    }
+
+    #[test]
+    fn authority_incarnations_use_fresh_entropy_across_allocator_restarts() {
+        let node = super::NodeUuid::from_bytes([91; 16]);
+        let mut first_process = [0, 900].into_iter();
+        let old = super::WireAuthorityEndpoint::fresh_with_entropy(node, || {
+            first_process.next().expect("retry zero")
+        });
+        let mut restarted_process = [0, 7].into_iter();
+        let fresh = super::WireAuthorityEndpoint::fresh_with_entropy(node, || {
+            restarted_process.next().expect("retry zero after restart")
+        });
+        assert_eq!(old.epoch, 900);
+        assert_eq!(fresh.epoch, 7);
+        assert_eq!(old.node, fresh.node);
+        assert_ne!(old, fresh);
+    }
+
+    use std::collections::BTreeMap;
+
+    use jazz_types::column_schema::ColumnType;
+    use serde_json::json;
+
+    use super::*;
+    use crate::ids::SchemaVersionId;
+    use crate::ids::{NodeUuid, RowUuid};
+    use crate::protocol::{
+        AuthorizationSupportScopeKey, PermissionAdviceRequestId, RegisterShapeOptions, ShapeAst,
+        Subscribe, SubscribeRejectReason, SubscriptionKey, VersionBundle, VersionBundleRun,
+        VersionBundleRunError, VersionCarrier, VersionRecord,
+        build_version_bundle_runs_from_singletons, expand_version_carriers,
+    };
+    use crate::protocol_limits::{
+        MAX_POLICY_EXPRESSION_DEPTH, MAX_POLICY_EXPRESSION_NODES, MAX_WIRE_FRAME_BYTES,
+    };
+    use crate::query::{BindingId, Operand, Predicate, Query, ShapeId};
+    use crate::schema::{ColumnSchema, TableSchema};
+    use crate::time::{GlobalTime, TxTime};
+    use crate::tx::{DurabilityTier, Fate, RejectionReason, Transaction, TxId, TxKind};
+
+    /// A serializable transaction's aggregate read travels with the result it
+    /// observed (garden-co/jazz#3768). The wire form of `PredicateRead` ends
+    /// with `aggregate_result` as a postcard option of length-prefixed bytes:
+    /// `00` when absent, `01 <len> <jazz.aggregate-read-result.v1 bytes>` when
+    /// present. The layout is pinned here because a serializer's default is
+    /// not a contract; the result bytes themselves are opaque at this layer.
+    #[test]
+    fn predicate_read_aggregate_result_wire_bytes_are_pinned() {
+        use crate::tx::{AggregateReadResult, PredicateRead};
+        let read = |aggregate_result| PredicateRead {
+            table: "t".to_owned(),
+            shape_id: ShapeId(uuid::Uuid::from_bytes([0x44; 16])),
+            shape: Query::from("t"),
+            binding_id: BindingId(uuid::Uuid::from_bytes([0x55; 16])),
+            binding_values: BTreeMap::new(),
+            aggregate_result,
+        };
+        let hex =
+            |bytes: &[u8]| -> String { bytes.iter().map(|byte| format!("{byte:02x}")).collect() };
+        let without = postcard::to_allocvec(&read(None)).unwrap();
+        let result = AggregateReadResult(vec![0x01, 0xab, 0xcd]);
+        let with = postcard::to_allocvec(&read(Some(result.clone()))).unwrap();
+        assert_eq!(hex(&without), PREDICATE_READ_WITHOUT_RESULT_HEX);
+        assert_eq!(hex(&with), PREDICATE_READ_WITH_RESULT_HEX);
+        assert_eq!(&without[..without.len() - 1], &with[..without.len() - 1]);
+        assert_eq!(&with[without.len() - 1..], [0x01, 0x03, 0x01, 0xab, 0xcd]);
+        assert_eq!(
+            decode_postcard_exact::<PredicateRead>(&with).unwrap(),
+            read(Some(result))
+        );
+        // A present result cannot be cut short or padded.
+        assert!(decode_postcard_exact::<PredicateRead>(&with[..with.len() - 1]).is_err());
+        let mut padded = with.clone();
+        padded.push(0);
+        assert!(decode_postcard_exact::<PredicateRead>(&padded).is_err());
+    }
+
+    const PREDICATE_READ_WITHOUT_RESULT_HEX: &str = "01741044444444444444444444444444444444017400000000000000000000000000000010555555555555555555555555555555550000";
+    const PREDICATE_READ_WITH_RESULT_HEX: &str = "017410444444444444444444444444444444440174000000000000000000000000000000105555555555555555555555555555555500010301abcd";
+
+    /// Wire layout is tested internally because enum tags are not a query API.
+    #[test]
+    fn wire_v5_peer_role_tags() {
+        for (role, tag, name) in [
+            (WirePeerRole::Client, 0, "client"),
+            (WirePeerRole::Core, 1, "core"),
+            (WirePeerRole::Relay, 2, "relay"),
+        ] {
+            assert_eq!(postcard::to_allocvec(&role).unwrap(), vec![tag]);
+            assert_eq!(postcard::from_bytes::<WirePeerRole>(&[tag]).unwrap(), role);
+            assert_eq!(serde_json::to_value(role).unwrap(), name);
+        }
+        assert!(postcard::from_bytes::<WirePeerRole>(&[3]).is_err());
+        assert!(serde_json::from_str::<WirePeerRole>(r#""unknown""#).is_err());
+    }
+
+    #[test]
+    fn hello_json_shape_is_stable() {
+        let frame = WireFrame::Hello(WireHello::current(WirePeerRole::Client, 0));
+
+        assert_eq!(
+            serde_json::to_value(frame).unwrap(),
+            json!({
+                "Hello": {
+                    "min_protocol_version": WIRE_PROTOCOL_VERSION,
+                    "max_protocol_version": WIRE_PROTOCOL_VERSION,
+                    "features": 0,
+                    "role": "client",
+                    "authority": null
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn wire_session_debug_stays_bounded() {
+        let session = WireSession {
+            session_id: "credential-bearing-session-id".repeat(10_000),
+            epoch: 3,
+            identity: Some(AuthorSubject::for_test_bytes([0x42; 16])),
+        };
+        let distinct_session = WireSession {
+            session_id: "credential-bearing-session-ix".repeat(10_000),
+            ..session.clone()
+        };
+        let session_debug = format!("{session:?}");
+        assert!(session_debug.contains("session_id_len: 290000"));
+        assert!(session_debug.len() < 256);
+        assert!(!session_debug.contains("credential-bearing-session-id"));
+        assert_ne!(session_debug, format!("{distinct_session:?}"));
+    }
+
+    #[test]
+    fn frame_round_trips_through_postcard_codec() {
+        let frame = WireFrame::Error(WireError::new(
+            WireErrorCode::Backpressure,
+            WireRetry::Later,
+            "receiver overloaded",
+        ));
+
+        let encoded = encode_frame(&frame).unwrap();
+        let decoded = decode_frame(&encoded).unwrap();
+
+        assert_eq!(decoded, frame);
+    }
+
+    #[test]
+    fn canonical_wire_decoders_reject_suffixes_and_overlong_varints() {
+        let frame = WireFrame::Error(WireError::new(
+            WireErrorCode::Backpressure,
+            WireRetry::Later,
+            "receiver overloaded",
+        ));
+        let mut frame_bytes = encode_frame(&frame).expect("frame encodes");
+        frame_bytes.push(0);
+        assert!(
+            postcard::from_bytes::<WireFrame>(&frame_bytes).is_ok(),
+            "planted sensitivity: postcard accepts a valid prefix and ignores its suffix"
+        );
+        assert_eq!(
+            decode_frame(&frame_bytes),
+            Err(postcard::Error::DeserializeBadEncoding),
+            "a physical frame is exactly one postcard value"
+        );
+
+        let canonical_frame = encode_frame(&frame).expect("frame encodes");
+        assert_eq!(canonical_frame[0], 1, "WireFrame::Error is tag 1");
+        let nonminimal_frame = [vec![0x81, 0], canonical_frame[1..].to_vec()].concat();
+        assert!(
+            postcard::from_bytes::<WireFrame>(&nonminimal_frame).is_ok(),
+            "planted sensitivity: postcard accepts the overlong 02 -> 82 00 tag"
+        );
+        assert_eq!(
+            decode_frame(&nonminimal_frame),
+            Err(postcard::Error::DeserializeBadEncoding),
+            "the frozen frame codec admits only canonical varints"
+        );
+
+        let message = SyncMessage::FateUpdate {
+            tx_id: TxId::new(TxTime(12), NodeUuid::from_bytes([0x11; 16])),
+            fate: Fate::Accepted,
+            global_time: Some(GlobalTime(7)),
+            durability: Some(DurabilityTier::Global),
+        };
+        let mut payload = encode_sync_message(&message).expect("message encodes");
+        payload.push(0);
+        assert!(
+            postcard::from_bytes::<SyncMessage>(&payload).is_ok(),
+            "planted sensitivity: postcard accepts a valid prefix and ignores its suffix"
+        );
+        assert_eq!(
+            decode_sync_message(&payload),
+            Err(postcard::Error::DeserializeBadEncoding),
+            "a logical payload is exactly one postcard value"
+        );
+
+        let canonical_payload = encode_sync_message(&message).expect("message encodes");
+        assert_eq!(canonical_payload[0], 2, "FateUpdate is tag 2");
+        let nonminimal_payload = [vec![0x82, 0], canonical_payload[1..].to_vec()].concat();
+        assert!(
+            postcard::from_bytes::<SyncMessage>(&nonminimal_payload).is_ok(),
+            "planted sensitivity: postcard accepts the overlong SyncMessage tag"
+        );
+        assert_eq!(
+            decode_sync_message(&nonminimal_payload),
+            Err(postcard::Error::DeserializeBadEncoding),
+            "the frozen semantic codec admits only canonical varints"
+        );
+    }
+
+    #[test]
+    fn websocket_batch_decoder_bounds_and_canonicalizes_before_outer_allocation() {
+        // This stays internal because it verifies the untrusted WebSocket
+        // carrier before an adapter has accepted any frame bytes.
+        let valid = [0x01, 0x01, 0x42];
+        assert_eq!(
+            decode_websocket_frame_batch(&valid).expect("canonical batch decodes"),
+            vec![vec![0x42]],
+        );
+
+        assert!(
+            decode_websocket_frame_batch(&[0]).is_err(),
+            "empty batch rejects"
+        );
+
+        // The outer count is rejected while it is still only a postcard
+        // varint; no attacker-declared Vec<Vec<u8>> has been allocated.
+        let count_flood = postcard::to_allocvec(&vec![Vec::<u8>::new(); MAX_WIRE_BATCH_FRAMES + 1])
+            .expect("encode count flood below physical byte cap");
+        assert!(
+            decode_websocket_frame_batch(&count_flood).is_err(),
+            "count flood rejects before element decoding"
+        );
+
+        // `postcard` accepts these overlong lengths, but the frozen carrier
+        // contract admits only the encoder's shortest spelling.
+        assert!(
+            decode_websocket_frame_batch(&[0x81, 0x00, 0x01, 0x42]).is_err(),
+            "noncanonical outer count rejects"
+        );
+        assert!(
+            decode_websocket_frame_batch(&[0x01, 0x81, 0x00, 0x42]).is_err(),
+            "noncanonical frame length rejects"
+        );
+        assert!(
+            decode_websocket_frame_batch(&[0x01, 0x80]).is_err(),
+            "truncated frame length rejects"
+        );
+        assert!(
+            decode_websocket_frame_batch(&[0x01, 0x02, 0x42]).is_err(),
+            "truncated frame body rejects"
+        );
+
+        let mut oversized_frame = vec![0x01];
+        oversized_frame.extend(
+            postcard::to_allocvec(&(MAX_WIRE_FRAME_BYTES + 1))
+                .expect("encode oversized frame length"),
+        );
+        assert!(
+            decode_websocket_frame_batch(&oversized_frame).is_err(),
+            "oversized frame rejects before frame allocation"
+        );
+
+        let mut suffixed = valid.to_vec();
+        suffixed.push(0);
+        assert!(
+            decode_websocket_frame_batch(&suffixed).is_err(),
+            "trailing carrier bytes reject"
+        );
+    }
+
+    #[test]
+    fn websocket_batch_encoder_accounts_for_postcard_carrier_prefixes() {
+        // 2^21 - 4 remains a three-byte postcard length, so the outer count
+        // plus length prefix exactly fill the 2 MiB physical carrier limit.
+        let largest_singleton = vec![0x42; MAX_WIRE_FRAME_BYTES - 4];
+        let encoded = encode_websocket_frame_batch(std::slice::from_ref(&largest_singleton))
+            .expect("largest singleton carrier fits exactly");
+        assert_eq!(encoded.len(), MAX_WIRE_FRAME_BYTES);
+        assert_eq!(
+            decode_websocket_frame_batch(&encoded).expect("decode exact carrier"),
+            vec![largest_singleton],
+        );
+
+        assert!(
+            encode_websocket_frame_batch(&[vec![0x42; MAX_WIRE_FRAME_BYTES]]).is_err(),
+            "a raw frame at the raw-frame ceiling cannot carry its postcard prefixes"
+        );
+    }
+
+    #[test]
+    fn oversized_wire_frame_rejects_before_postcard_decode() {
+        let oversized = vec![0_u8; MAX_WIRE_FRAME_BYTES + 1];
+
+        assert!(decode_frame(&oversized).is_err());
+    }
+
+    #[test]
+    fn sync_message_round_trips_through_postcard_codec() {
+        let tx_id = TxId::new(TxTime(12), NodeUuid::from_bytes([0x11; 16]));
+        let message = SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Rejected(RejectionReason::Cascade { root: tx_id }),
+            global_time: Some(GlobalTime(7)),
+            durability: Some(DurabilityTier::Global),
+        };
+
+        let encoded = encode_sync_message(&message).unwrap();
+        let decoded = decode_sync_message(&encoded).unwrap();
+
+        assert_eq!(decoded, message);
+    }
+
+    // This stays a codec-level test: exact transport bytes are intentionally
+    // not observable through the public database API.  The fixture is written
+    // independently of the encoder call so a field reordering, enum-tag drift,
+    // UUID-width change, or fate/durability swap cannot update its own oracle.
+    #[test]
+    fn transaction_fate_receipt_has_one_canonical_postcard_spelling() {
+        const ACCEPTED_GLOBAL_RECEIPT_HEX: &str =
+            "020c10111111111111111111111111111111110101070102";
+        let tx_id = TxId::new(TxTime(12), NodeUuid::from_bytes([0x11; 16]));
+        let expected = SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            global_time: Some(GlobalTime(7)),
+            durability: Some(DurabilityTier::Global),
+        };
+        let fixture = hex::decode(ACCEPTED_GLOBAL_RECEIPT_HEX).expect("fixture hex");
+
+        // semantic -> bytes
+        assert_eq!(encode_sync_message(&expected).unwrap(), fixture);
+        // independent bytes -> semantic
+        assert_eq!(decode_sync_message(&fixture).unwrap(), expected);
+
+        // The former Global tag is invalid in the compact v2 durability encoding.
+        let mut invalid = fixture.clone();
+        *invalid.last_mut().expect("non-empty fixture") = 3;
+        assert!(decode_sync_message(&invalid).is_err());
+        assert!(decode_sync_message_trusted(&invalid).is_err());
+    }
+
+    #[test]
+    fn transaction_fate_receipt_rejects_trailing_and_noncanonical_bytes() {
+        let canonical =
+            hex::decode("020c10111111111111111111111111111111110101070102").expect("fixture hex");
+
+        let mut trailing = canonical.clone();
+        trailing.push(0);
+        assert!(decode_sync_message(&trailing).is_err());
+
+        // `12` has the one-byte varint spelling `0x0c`; `0x8c, 0x00` is the
+        // same number in a permissive LEB128 decoder.  Whether postcard
+        // rejects it directly or after decode, Jazz must reject it.
+        let mut noncanonical = canonical;
+        noncanonical.splice(1..2, [0x8c, 0x00]);
+        assert!(decode_sync_message(&noncanonical).is_err());
+    }
+
+    fn nested_policy_predicate(nodes: usize) -> Predicate {
+        assert!(nodes > 0);
+        (1..nodes).fold(
+            Predicate::IsNull(Operand::Column("owner".to_owned())),
+            |predicate, _| Predicate::Not(Box::new(predicate)),
+        )
+    }
+
+    fn wide_policy_predicate(nodes: usize) -> Predicate {
+        assert!(nodes > 0);
+        Predicate::All(
+            (1..nodes)
+                .map(|_| Predicate::IsNull(Operand::Column("owner".to_owned())))
+                .collect(),
+        )
+    }
+
+    fn register_shape_with_policy_predicate(predicate: Predicate) -> SyncMessage {
+        SyncMessage::RegisterShape {
+            shape_id: ShapeId(uuid::Uuid::from_bytes([0x22; 16])),
+            ast: ShapeAst::new(
+                Query::from("documents").filter(predicate),
+                SchemaVersionId::from_bytes([0x33; 16]),
+            ),
+            opts: RegisterShapeOptions::default(),
+        }
+    }
+
+    #[test]
+    fn policy_predicate_wire_decode_enforces_depth_and_total_node_boundaries() {
+        // This stays internal because postcard decode is the untrusted wire
+        // boundary; public query builders only construct already-owned trees.
+        let at_depth_limit = register_shape_with_policy_predicate(nested_policy_predicate(
+            MAX_POLICY_EXPRESSION_DEPTH,
+        ));
+        let encoded = encode_sync_message(&at_depth_limit).expect("encode depth-limit policy");
+        assert_eq!(
+            decode_sync_message(&encoded).expect("exact policy depth boundary remains valid"),
+            at_depth_limit
+        );
+
+        let over_depth_limit = register_shape_with_policy_predicate(nested_policy_predicate(
+            MAX_POLICY_EXPRESSION_DEPTH + 1,
+        ));
+        let encoded =
+            encode_sync_message(&over_depth_limit).expect("encode over-depth policy fixture");
+        assert!(
+            decode_sync_message(&encoded).is_err(),
+            "policy depth must be rejected while postcard is parsing"
+        );
+
+        let at_node_limit = register_shape_with_policy_predicate(wide_policy_predicate(
+            MAX_POLICY_EXPRESSION_NODES,
+        ));
+        let encoded = encode_sync_message(&at_node_limit).expect("encode node-limit policy");
+        assert_eq!(
+            decode_sync_message(&encoded).expect("exact policy node boundary remains valid"),
+            at_node_limit
+        );
+
+        let over_node_limit = register_shape_with_policy_predicate(wide_policy_predicate(
+            MAX_POLICY_EXPRESSION_NODES + 1,
+        ));
+        let encoded =
+            encode_sync_message(&over_node_limit).expect("encode over-node policy fixture");
+        assert!(
+            decode_sync_message(&encoded).is_err(),
+            "policy node count must be rejected while postcard is parsing"
+        );
+    }
+
+    #[test]
+    fn ordinary_policy_predicate_variants_keep_their_postcard_roundtrip() {
+        let operands = || {
+            (
+                Operand::Column("owner".to_owned()),
+                Operand::Param("subject".to_owned()),
+            )
+        };
+        let (eq_left, eq_right) = operands();
+        let (ne_left, ne_right) = operands();
+        let (gt_left, gt_right) = operands();
+        let (gte_left, gte_right) = operands();
+        let (lt_left, lt_right) = operands();
+        let (lte_left, lte_right) = operands();
+        let (contains_left, contains_right) = operands();
+        let predicate = Predicate::All(vec![
+            Predicate::Any(Vec::new()),
+            Predicate::Eq(eq_left, eq_right),
+            Predicate::Ne(ne_left, ne_right),
+            Predicate::In(
+                Operand::Column("team".to_owned()),
+                vec![Operand::Param("team".to_owned())],
+            ),
+            Predicate::Gt(gt_left, gt_right),
+            Predicate::Gte(gte_left, gte_right),
+            Predicate::Lt(lt_left, lt_right),
+            Predicate::Lte(lte_left, lte_right),
+            Predicate::Contains(contains_left, contains_right),
+            Predicate::EnumMatch {
+                column: "status".to_owned(),
+                case: "active".to_owned(),
+                payload: Box::new(Predicate::IsNull(Operand::Column("deleted_at".to_owned()))),
+            },
+        ]);
+        let message = register_shape_with_policy_predicate(predicate);
+        let encoded = encode_sync_message(&message).expect("encode ordinary policy variants");
+
+        assert_eq!(
+            decode_sync_message(&encoded).expect("decode ordinary policy variants"),
+            message
+        );
+    }
+
+    #[test]
+    fn authorization_scope_view_has_a_nonrecursive_view_update_payload() {
+        let view = crate::protocol::ViewUpdatePayload::from_view_update(view_update_with_carriers(
+            Vec::new(),
+        ))
+        .expect("fixture is a view update");
+        let message = SyncMessage::AuthorizationScopeView {
+            request_id: PermissionAdviceRequestId([0x11; 16]),
+            key: AuthorizationSupportScopeKey {
+                support_shape_digest: [0x22; 32],
+                subject: AuthorSubject::for_test_bytes([0x33; 16]),
+                claims_digest: [0x44; 32],
+                policy_digest: [0x55; 32],
+            },
+            clause_index: 0,
+            clause_count: 1,
+            view,
+        };
+        let encoded = encode_sync_message(&message).expect("encode scope view fixture");
+        assert_eq!(
+            decode_sync_message(&encoded).expect("decode scope view fixture"),
+            message,
+            "the scope wrapper admits only its dedicated, non-recursive payload"
+        );
+    }
+
+    #[test]
+    fn shared_view_update_payload_preserves_postcard_shape() {
+        #[allow(dead_code)]
+        #[derive(serde::Serialize)]
+        enum FlatSyncMessage {
+            V0,
+            V1,
+            V2,
+            V3,
+            V4,
+            V5,
+            V6,
+            V7,
+            V8,
+            V9,
+            V10,
+            ViewUpdate {
+                subscription: SubscriptionKey,
+                settled_through: GlobalTime,
+                version_carriers: Vec<VersionCarrier>,
+                peer_payload_inventory: crate::protocol::PeerPayloadInventory,
+                supporting_rows: crate::protocol::SupportingRowsUpdate,
+            },
+        }
+
+        let SyncMessage::ViewUpdate(payload) = view_update_with_carriers(Vec::new()) else {
+            unreachable!()
+        };
+        let flat = FlatSyncMessage::ViewUpdate {
+            subscription: payload.subscription,
+            settled_through: payload.settled_through,
+            version_carriers: payload.version_carriers.clone(),
+            peer_payload_inventory: payload.peer_payload_inventory.clone(),
+            supporting_rows: payload.supporting_rows.clone(),
+        };
+        let current = SyncMessage::ViewUpdate(payload);
+
+        assert_eq!(
+            encode_sync_message(&current).unwrap(),
+            postcard::to_allocvec(&flat).unwrap(),
+            "a newtype struct is postcard-transparent relative to the former struct variant"
+        );
+    }
+
+    #[test]
+    fn view_update_mixed_version_carrier_runs_round_trip_and_survive_receive_decode() {
+        let bundles = version_bundles(4);
+        let singleton_run = VersionCarrier::Run(
+            build_version_bundle_runs_from_singletons(&bundles[..1])
+                .unwrap()
+                .remove(0),
+        );
+        let multi_run = VersionCarrier::Run(
+            build_version_bundle_runs_from_singletons(&bundles[1..])
+                .unwrap()
+                .remove(0),
+        );
+        let message = view_update_with_carriers(vec![singleton_run, multi_run]);
+
+        let encoded = encode_sync_message(&message).unwrap();
+        assert_eq!(decode_sync_message(&encoded).unwrap(), message);
+
+        assert_eq!(decode_sync_message_for_receive(&encoded).unwrap(), message);
+        let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+            version_carriers, ..
+        }) = message
+        else {
+            panic!("expected view update");
+        };
+        assert_eq!(expand_version_carriers(&version_carriers).unwrap(), bundles);
+    }
+
+    #[test]
+    fn large_version_carrier_run_round_trips() {
+        let bundles = version_bundles(128);
+        let run = build_version_bundle_runs_from_singletons(&bundles)
+            .unwrap()
+            .remove(0);
+        let message = view_update_with_carriers(vec![VersionCarrier::Run(run)]);
+        let encoded = encode_sync_message(&message).unwrap();
+
+        assert_eq!(decode_sync_message_for_receive(&encoded).unwrap(), message);
+        let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+            version_carriers, ..
+        }) = message
+        else {
+            panic!("expected view update");
+        };
+        assert_eq!(expand_version_carriers(&version_carriers).unwrap(), bundles);
+    }
+
+    #[test]
+    fn malformed_version_carrier_run_body_count_is_rejected() {
+        let mut run = build_version_bundle_runs_from_singletons(&version_bundles(2))
+            .unwrap()
+            .remove(0);
+        run.header.body_count = 3;
+
+        assert_eq!(
+            run.validate(),
+            Err(VersionBundleRunError::BodyCountMismatch {
+                declared: 3,
+                actual: 2
+            })
+        );
+        assert!(encode_then_decode_run(run).is_err());
+    }
+
+    #[test]
+    fn malformed_version_carrier_run_is_rejected_in_ordinary_and_scope_views() {
+        let mut run = build_version_bundle_runs_from_singletons(&version_bundles(2))
+            .unwrap()
+            .remove(0);
+        run.header.body_count = 3;
+
+        let ordinary = view_update_with_carriers(vec![VersionCarrier::Run(run.clone())]);
+        let scope_view = SyncMessage::AuthorizationScopeView {
+            request_id: PermissionAdviceRequestId([0x11; 16]),
+            key: AuthorizationSupportScopeKey {
+                support_shape_digest: [0x22; 32],
+                subject: AuthorSubject::for_test_bytes([0x33; 16]),
+                claims_digest: [0x44; 32],
+                policy_digest: [0x55; 32],
+            },
+            clause_index: 0,
+            clause_count: 1,
+            view: crate::protocol::ViewUpdatePayload::from_view_update(view_update_with_carriers(
+                vec![VersionCarrier::Run(run)],
+            ))
+            .expect("fixture is a view update"),
+        };
+
+        for message in [ordinary, scope_view] {
+            // Hostile peers are not constrained by the semantic encoder.  Use
+            // postcard directly to construct the malformed bytes so this
+            // exercises receive-side validation rather than merely proving
+            // the guarded sender rejects its own invalid value.
+            let encoded = with_message_descriptor_table(|| to_allocvec(&message))
+                .expect("serialize malformed fixture bytes");
+            assert!(
+                decode_sync_message(&encoded).is_err(),
+                "malformed runs must be rejected at either view-update seam"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_version_carrier_run_override_index_is_rejected() {
+        let mut run = build_version_bundle_runs_from_singletons(&version_bundles(2))
+            .unwrap()
+            .remove(0);
+        run.overrides
+            .push(crate::protocol::VersionBundleRunOverride {
+                body_index: 2,
+                tx: None,
+                scope: None,
+                fate: Some(Fate::Pending),
+                global_time: None,
+                durability: None,
+            });
+
+        assert_eq!(
+            run.validate(),
+            Err(VersionBundleRunError::OverrideIndexOutOfRange {
+                index: 2,
+                body_count: 2
+            })
+        );
+        assert!(encode_then_decode_run(run).is_err());
+    }
+
+    #[test]
+    fn build_expand_version_carrier_run_preserves_singletons() {
+        let bundles = version_bundles(6);
+        let run = build_version_bundle_runs_from_singletons(&bundles)
+            .unwrap()
+            .remove(0);
+
+        assert_eq!(run.expand().unwrap(), bundles);
+        assert_eq!(
+            VersionCarrier::Run(run).expand().unwrap(),
+            bundles,
+            "expanded run applies the same singleton carrier sequence at the type level"
+        );
+    }
+
+    fn encode_then_decode_run(run: VersionBundleRun) -> Result<SyncMessage, postcard::Error> {
+        let message = view_update_with_carriers(vec![VersionCarrier::Run(run)]);
+        // Deliberately bypass `encode_sync_message`: this helper is used only
+        // for receiver-boundary tests of malformed data which a remote peer
+        // can serialize without our sender-side guard.
+        decode_sync_message(&with_message_descriptor_table(|| to_allocvec(&message)).unwrap())
+    }
+
+    fn view_update_with_carriers(version_carriers: Vec<VersionCarrier>) -> SyncMessage {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+            subscription: SubscriptionKey {
+                shape_id: ShapeId(uuid::Uuid::from_bytes([0x22; 16])),
+                binding_id: BindingId(uuid::Uuid::from_bytes([0x33; 16])),
+                read_view: Default::default(),
+            },
+            settled_through: GlobalTime(500),
+            version_carriers,
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+            supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(Vec::new()),
+        })
+    }
+
+    // Internal work accounting is needed: decoded values alone cannot expose
+    // a redundant receipt pass or prove the locally selected trust boundary.
+    #[test]
+    fn trusted_encoder_skips_receipt_validation_but_session_admission_keeps_it() {
+        let message = view_update_with_carriers(
+            version_bundles(2)
+                .into_iter()
+                .map(VersionCarrier::Bundle)
+                .collect(),
+        );
+        crate::protocol::RECEIPT_VALIDATIONS.with(|count| count.set(0));
+        let payload = encode_sync_message(&message).unwrap();
+        assert_eq!(
+            crate::protocol::RECEIPT_VALIDATIONS.with(|count| count.get()),
+            0
+        );
+        let mut trusted = WireInboundContext::new(WIRE_PROTOCOL_VERSION, FEATURE_NONE, None);
+        trusted.set_trusted_encoder(true);
+        assert_eq!(trusted.decode_semantic_payload(&payload).unwrap(), message);
+        assert_eq!(
+            crate::protocol::RECEIPT_VALIDATIONS.with(|count| count.get()),
+            0
+        );
+        let session = WireInboundContext::new(WIRE_PROTOCOL_VERSION, FEATURE_NONE, None);
+        assert_eq!(session.decode_semantic_payload(&payload).unwrap(), message);
+        assert!(crate::protocol::RECEIPT_VALIDATIONS.with(|count| count.get()) > 0);
+    }
+
+    // Byte-level: the descriptor table is a wire encoding property (#3380).
+    /// A 1k-row x 10-column view update writes its row descriptor once: the
+    /// first row defines it and every later row references it, so the message
+    /// is smaller than the per-row-descriptor encoding by at least one
+    /// descriptor per extra row, and it decodes back to the same rows.
+    #[test]
+    fn view_update_rows_share_one_descriptor_definition() {
+        let columns = (0..10)
+            .map(|column| ColumnSchema::new(format!("column_{column}"), ColumnType::String))
+            .collect::<Vec<_>>();
+        let table = TableSchema::new("wide", columns);
+        let schema_version = SchemaVersionId::from_bytes([0x44; 16]);
+        let node = NodeUuid::from_bytes([0x11; 16]);
+        let author = AuthorSubject::for_test_bytes([0x55; 16]);
+        let bundles = (0..1_000u64)
+            .map(|index| {
+                let cells = (0..10)
+                    .map(|column| (format!("column_{column}"), format!("{index}-{column}")))
+                    .collect::<BTreeMap<_, _>>();
+                let mut bundle = version_bundles(1).remove(0);
+                bundle.tx.tx_id = TxId::new(TxTime(1_000 + index), node);
+                bundle.versions = vec![
+                    VersionRecord::from_cells(
+                        &table,
+                        schema_version,
+                        RowUuid::from_bytes(uuid::Uuid::from_u128(u128::from(index)).into_bytes()),
+                        author,
+                        1_000 + index,
+                        author,
+                        1_000 + index,
+                        &cells,
+                        None,
+                    )
+                    .unwrap(),
+                ];
+                bundle
+            })
+            .collect::<Vec<_>>();
+        let descriptor = jazz_types::records::encode_persisted_record_descriptor(
+            bundles[0].versions[0].record().descriptor(),
+        )
+        .unwrap();
+        let message = view_update_with_carriers(
+            crate::protocol::build_version_carriers_from_singletons(bundles).unwrap(),
+        );
+
+        let encoded = encode_sync_message(&message).unwrap();
+        assert_eq!(encoded.len(), encoded_sync_message_len(&message).unwrap());
+        let definitions = encoded
+            .windows(descriptor.len())
+            .filter(|window| *window == descriptor.as_slice())
+            .count();
+        assert_eq!(definitions, 1);
+        // Without a message scope every row defines its descriptor inline,
+        // which is the previous per-row layout's size.
+        let per_row = to_allocvec(&message).unwrap();
+        assert!(
+            encoded.len() + 999 * descriptor.len() <= per_row.len(),
+            "table {} bytes vs per-row {} bytes ({} byte descriptor)",
+            encoded.len(),
+            per_row.len(),
+            descriptor.len()
+        );
+        assert_eq!(decode_sync_message(&encoded).unwrap(), message);
+        assert_eq!(decode_sync_message_trusted(&encoded).unwrap(), message);
+        // Per-row inline definitions of one descriptor are not this
+        // encoder's spelling and are rejected.
+        assert!(decode_sync_message(&per_row).is_err());
+    }
+
+    fn version_bundles(count: usize) -> Vec<VersionBundle> {
+        let table = TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)]);
+        let schema_version = SchemaVersionId::from_bytes([0x44; 16]);
+        let node = NodeUuid::from_bytes([0x11; 16]);
+        let author = AuthorSubject::for_test_bytes([0x55; 16]);
+        (0..count)
+            .map(|index| {
+                let tx_id = TxId::new(TxTime(1_000 + index as u64), node);
+                VersionBundle {
+                    tx: Transaction {
+                        tx_id,
+                        kind: TxKind::Mergeable,
+                        n_total_writes: 1,
+                        made_by: author,
+                        permission_subject: None,
+                        base_snapshot: None,
+                        row_read_set: None,
+                        absent_read_set: None,
+                        predicate_read_set: None,
+                        user_metadata_json: None,
+                        contribution_merge: None,
+                    },
+                    versions: vec![
+                        VersionRecord::from_cells(
+                            &table,
+                            schema_version,
+                            RowUuid::from_bytes([index as u8; 16]),
+                            author,
+                            1_000 + index as u64,
+                            author,
+                            1_000 + index as u64,
+                            &BTreeMap::from([("title".to_owned(), format!("todo-{index}"))]),
+                            None,
+                        )
+                        .unwrap(),
+                    ],
+                    scope: crate::protocol::VersionBundleScope::CompleteTransaction,
+                    fate: Fate::Accepted,
+                    global_time: Some(GlobalTime(10_000 + index as u64)),
+                    // A sequence is the global-authority receipt, and so its
+                    // companion durability is Global in every valid fixture.
+                    durability: DurabilityTier::Global,
+                }
+            })
+            .collect()
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "transport-compression-zstd"))]
+    #[test]
+    fn native_default_transport_compression_advertises_zstd() {
+        assert_eq!(
+            default_transport_compression_features(),
+            FEATURE_PAYLOAD_ZSTD
+        );
+    }
+
+    fn channel_backend(features: WireFeatures) -> stream_backend::OrderedChannelBackend {
+        stream_backend::OrderedChannelBackend::new(WireInboundContext::new(
+            WIRE_PROTOCOL_VERSION,
+            features,
+            None,
+        ))
+        .unwrap()
+    }
+
+    fn next_channel_message(
+        sender: &mut stream_backend::OrderedChannelBackend,
+        payload: &[u8],
+    ) -> (WireChannelEnvelope, usize) {
+        sender
+            .enqueue(0, 0, channels::ChannelClass::Control, payload.to_vec())
+            .unwrap();
+        let bytes = sender
+            .peek_outbound()
+            .unwrap()
+            .expect("small message fits one extent");
+        sender.accept_outbound().unwrap();
+        let WireFrame::Channel(frame) = decode_frame(&bytes).unwrap() else {
+            unreachable!()
+        };
+        (frame, bytes.len())
+    }
+
+    fn channel_round_trips_messages(features: WireFeatures) {
+        let mut sender = channel_backend(features);
+        let mut receiver = channel_backend(features);
+        for (sequence, payload) in [
+            b"alpha alpha alpha".as_slice(),
+            b"alpha alpha beta",
+            b"alpha alpha gamma",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (frame, len) = next_channel_message(&mut sender, payload);
+            assert_eq!(frame.extent.sequence, sequence as u64);
+            assert_eq!(frame.features, features);
+            assert_eq!(
+                receiver.receive(frame, len).unwrap().unwrap().payload,
+                payload
+            );
+        }
+    }
+
+    /// Alice's uncompressed messages reach Bob in order on one channel.
+    /// The byte backend is tested directly to observe message boundaries.
+    #[test]
+    fn uncompressed_channel_round_trips_message_boundaries() {
+        channel_round_trips_messages(FEATURE_NONE);
+    }
+
+    /// Bob can receive Alice's raw channel even when their link offers zstd.
+    /// This byte-level test covers peers without an outbound compression encoder.
+    #[cfg(feature = "transport-compression-zstd")]
+    #[test]
+    fn compressed_channel_receiver_accepts_raw_extents() {
+        let payload = b"client without outbound zstd encoder";
+        let (frame, len) = next_channel_message(&mut channel_backend(FEATURE_NONE), payload);
+        let mut receiver = channel_backend(FEATURE_PAYLOAD_ZSTD);
+        assert_eq!(
+            receiver.receive(frame, len).unwrap().unwrap().payload,
+            payload
+        );
+    }
+
+    /// Alice selects LZ4 when Bob negotiates both codecs, and zstd when Bob
+    /// offers only zstd. A byte-level test checks the actual emitted feature bit.
+    #[cfg(all(
+        feature = "transport-compression-lz4",
+        feature = "transport-compression-zstd"
+    ))]
+    #[test]
+    fn dual_compression_negotiation_gives_outbound_lz4_precedence() {
+        let both = FEATURE_PAYLOAD_LZ4 | FEATURE_PAYLOAD_ZSTD;
+        for (offered, expected) in [
+            (both, FEATURE_PAYLOAD_LZ4),
+            (FEATURE_PAYLOAD_ZSTD, FEATURE_PAYLOAD_ZSTD),
+        ] {
+            let remote = WireHello::current(WirePeerRole::Core, offered);
+            let negotiated = negotiate_wire(&remote, both).unwrap();
+            assert_eq!(negotiated.features, offered);
+            let payload = b"negotiated channel payload";
+            let (frame, len) =
+                next_channel_message(&mut channel_backend(negotiated.features), payload);
+            assert_eq!(
+                frame.features & (FEATURE_PAYLOAD_LZ4 | FEATURE_PAYLOAD_ZSTD),
+                expected
+            );
+            assert_eq!(
+                channel_backend(negotiated.features)
+                    .receive(frame, len)
+                    .unwrap()
+                    .unwrap()
+                    .payload,
+                payload
+            );
+        }
+    }
+
+    /// Bob rejects Mallory's corrupt compressed channel before semantic decode.
+    /// Direct frame injection is required to exercise the codec failure boundary.
+    #[cfg(feature = "transport-compression-zstd")]
+    #[test]
+    fn zstd_channel_receiver_rejects_corrupt_compressed_payload() {
+        let WireFrame::Channel(frame) = test_channel_frame(
+            WIRE_PROTOCOL_VERSION,
+            FEATURE_PAYLOAD_ZSTD,
+            b"not a zstd frame".to_vec(),
+        ) else {
+            unreachable!()
+        };
+        assert!(
+            channel_backend(FEATURE_PAYLOAD_ZSTD)
+                .receive(frame, 64)
+                .is_err()
+        );
+    }
+
+    /// Alice's successive zstd messages reach Bob using one persistent channel.
+    /// Direct backend coverage pins the streaming codec's message boundaries.
+    #[cfg(feature = "transport-compression-zstd")]
+    #[test]
+    fn zstd_channel_round_trips_multiple_message_boundaries() {
+        channel_round_trips_messages(FEATURE_PAYLOAD_ZSTD);
+    }
+
+    /// Alice's successive LZ4 messages reach Bob using one persistent channel.
+    /// Direct backend coverage pins the streaming codec's message boundaries.
+    #[cfg(feature = "transport-compression-lz4")]
+    #[test]
+    fn lz4_channel_round_trips_multiple_message_boundaries() {
+        channel_round_trips_messages(FEATURE_PAYLOAD_LZ4);
+    }
+
+    /// Bob rejects Mallory's compressed extent when it expands beyond its
+    /// declared output size. Frame injection tests the pre-semantic output cap
+    /// with a small payload instead of allocating a near-limit decompression bomb.
+    #[cfg(any(
+        feature = "transport-compression-lz4",
+        feature = "transport-compression-zstd"
+    ))]
+    #[test]
+    fn compressed_channel_rejects_output_beyond_declared_extent() {
+        let codecs: &[WireFeatures] = &[
+            #[cfg(feature = "transport-compression-lz4")]
+            FEATURE_PAYLOAD_LZ4,
+            #[cfg(feature = "transport-compression-zstd")]
+            FEATURE_PAYLOAD_ZSTD,
+        ];
+        for &features in codecs {
+            let (mut frame, len) =
+                next_channel_message(&mut channel_backend(features), &[42; 1024]);
+            frame.extent.decoded_len = 1;
+            frame.extent.message_len = 1;
+            let error = channel_backend(features)
+                .receive(frame, len)
+                .err()
+                .expect("decompression must respect declared extent size");
+            assert!(
+                error.contains("exceeded declared decoded extent"),
+                "{error}"
+            );
+        }
+    }
+
+    /// `last_resume_bytes` reports this length for diagnostics and receipts,
+    /// so it must equal the real encoding's length for every message shape.
+    #[test]
+    fn encoded_sync_message_len_matches_the_encoding() {
+        for message in sync_message_payload_variants() {
+            assert_eq!(
+                encoded_sync_message_len(&message).unwrap(),
+                encode_sync_message(&message).unwrap().len(),
+                "{message:?}"
+            );
+        }
+    }
+
+    fn sync_message_payload_variants() -> Vec<SyncMessage> {
+        let node = NodeUuid::from_bytes([0x11; 16]);
+        let tx_id = TxId::new(TxTime(12), node);
+        let shape_id = ShapeId(uuid::Uuid::from_bytes([0x22; 16]));
+        let binding_id = BindingId(uuid::Uuid::from_bytes([0x33; 16]));
+        let schema_version = SchemaVersionId::from_bytes([0x44; 16]);
+        let subscription = SubscriptionKey {
+            shape_id,
+            binding_id,
+            read_view: Default::default(),
+        };
+        vec![
+            SyncMessage::RegisterShape {
+                shape_id,
+                ast: ShapeAst::new(Query::from("todos"), schema_version),
+                opts: RegisterShapeOptions::default(),
+            },
+            SyncMessage::Subscribe(Subscribe {
+                shape_id,
+                subscription,
+                values: Vec::new(),
+                known_state: None,
+                delegated_session: None,
+            }),
+            SyncMessage::SubscribeRejected {
+                subscription,
+                reason: SubscribeRejectReason::UnsupportedShapeCapability {
+                    detail: "SourceGap::BranchOverlay".to_owned(),
+                },
+            },
+            SyncMessage::SubscribeRejected {
+                subscription,
+                reason: SubscribeRejectReason::ServerFailure {
+                    code: crate::protocol::SubscribeServerFailureCode::TableNotFound,
+                },
+            },
+            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+                subscription,
+                settled_through: GlobalTime(7),
+                version_carriers: Vec::new(),
+                peer_payload_inventory: crate::protocol::PeerPayloadInventory {
+                    complete_tx_payloads: vec![tx_id],
+                    authorization_progress: None,
+                    opening_pending: false,
+                },
+                supporting_rows: crate::protocol::SupportingRowsUpdate::snapshot(Vec::new()),
+            }),
+            SyncMessage::CommitUnit {
+                tx: Transaction {
+                    tx_id,
+                    kind: TxKind::Mergeable,
+                    n_total_writes: 0,
+                    made_by: AuthorSubject::for_test_bytes([0x55; 16]),
+                    permission_subject: None,
+                    base_snapshot: None,
+                    row_read_set: None,
+                    absent_read_set: None,
+                    predicate_read_set: None,
+                    user_metadata_json: None,
+                    contribution_merge: None,
+                },
+                versions: Vec::new(),
+            },
+            SyncMessage::FateUpdate {
+                tx_id,
+                fate: Fate::Accepted,
+                global_time: Some(GlobalTime(7)),
+                durability: Some(DurabilityTier::Global),
+            },
+        ]
+    }
+
+    #[test]
+    fn message_frame_round_trips_sync_message_payload_variants() {
+        let messages = sync_message_payload_variants();
+
+        for message in messages {
+            let payload = encode_sync_message(&message).unwrap();
+            let frame = test_channel_frame(WIRE_PROTOCOL_VERSION, 0, payload);
+
+            let decoded = decode_frame(&encode_frame(&frame).unwrap()).unwrap();
+            let WireFrame::Channel(envelope) = decoded else {
+                panic!("expected message frame");
+            };
+
+            assert_eq!(
+                decode_sync_message(&envelope.extent.payload).unwrap(),
+                message
+            );
+        }
+    }
+
+    /// `decode_postcard_exact` compares while serializing instead of
+    /// allocating a re-encode (#3376). Pin that it accepts exactly what the
+    /// old decode-then-`to_allocvec` equality accepted, across truncations,
+    /// insertions, substitutions, overlong varints and deletions of every
+    /// payload variant and of canonical maps and sets. This is a white-box
+    /// differential test because the equivalence is a property of one
+    /// internal function that no public path can enumerate.
+    #[test]
+    fn canonical_postcard_check_matches_allocating_re_encode() {
+        fn allocating_exact<T: serde::de::DeserializeOwned + Serialize>(bytes: &[u8]) -> bool {
+            match postcard::take_from_bytes::<T>(bytes) {
+                Ok((value, rest)) => {
+                    rest.is_empty()
+                        && postcard::to_allocvec(&value).is_ok_and(|encoded| encoded == bytes)
+                }
+                Err(_) => false,
+            }
+        }
+        fn streaming_exact<T: serde::de::DeserializeOwned + Serialize>(bytes: &[u8]) -> bool {
+            decode_postcard_exact::<T>(bytes).is_ok()
+        }
+        fn mutations_agree<T: serde::de::DeserializeOwned + Serialize>(canonical: &[u8]) {
+            let check = |bytes: &[u8]| {
+                assert_eq!(
+                    allocating_exact::<T>(bytes),
+                    streaming_exact::<T>(bytes),
+                    "canonical check diverges on {bytes:02x?}"
+                );
+            };
+            assert!(streaming_exact::<T>(canonical));
+            for i in 0..=canonical.len() {
+                check(&canonical[..i]);
+                for byte in 0..=u8::MAX {
+                    let mut inserted = canonical.to_vec();
+                    inserted.insert(i, byte);
+                    check(&inserted);
+                    if i < canonical.len() {
+                        let mut substituted = canonical.to_vec();
+                        substituted[i] = byte;
+                        check(&substituted);
+                    }
+                    if i + 1 < canonical.len() {
+                        let mut overlong = canonical.to_vec();
+                        overlong[i] = byte | 0x80;
+                        overlong.insert(i + 1, 0);
+                        check(&overlong);
+                    }
+                }
+                if i < canonical.len() {
+                    let mut removed = canonical.to_vec();
+                    removed.remove(i);
+                    check(&removed);
+                }
+            }
+        }
+
+        for message in sync_message_payload_variants() {
+            mutations_agree::<SyncMessage>(&encode_sync_message(&message).unwrap());
+        }
+        type Map = std::collections::BTreeMap<u32, String>;
+        let map: Map = [(1, "a".to_owned()), (2, "b".to_owned())].into();
+        mutations_agree::<Map>(&postcard::to_allocvec(&map).unwrap());
+        let duplicate_key = [vec![2u8], vec![1, 1, b'a'], vec![1, 1, b'b']].concat();
+        let unsorted_keys = [vec![2u8], vec![2, 1, b'b'], vec![1, 1, b'a']].concat();
+        assert!(!streaming_exact::<Map>(&duplicate_key));
+        assert!(!streaming_exact::<Map>(&unsorted_keys));
+        let set: std::collections::BTreeSet<u64> = [1, 300, 70_000].into();
+        mutations_agree::<std::collections::BTreeSet<u64>>(&postcard::to_allocvec(&set).unwrap());
+    }
+
+    #[test]
+    fn view_update_rejects_invalid_supporting_row_reference() {
+        let SyncMessage::ViewUpdate(mut payload) = view_update_with_carriers(Vec::new()) else {
+            unreachable!()
+        };
+        payload
+            .supporting_rows
+            .added_rows_mut()
+            .push(crate::protocol::SupportingRow {
+                is_current: true,
+                physical_table: crate::ids::GlobalPhysicalTableId(uuid::Uuid::from_bytes(
+                    [0x21; 16],
+                )),
+                version_table: "todos".to_owned().into(),
+                row: RowUuid::from_bytes([0x22; 16]),
+                version: crate::protocol::RowVersionRefEntry {
+                    tx: TxId::new(TxTime(21), NodeUuid::from_bytes([0x33; 16])),
+                    schema_version: None,
+                    layer: crate::protocol::ResultRowLayer::ContentOrDeletion,
+                    batch: None,
+                    branch_or_prefix: None,
+                    row_digest: None,
+                },
+            });
+        assert!(
+            SyncMessage::ViewUpdate(payload)
+                .validate_wire_contract()
+                .is_err(),
+            "an exact snapshot reference must name one native register layer"
+        );
+    }
+
+    #[test]
+    fn negotiation_requires_an_exact_v6_advertisement_and_intersects_features() {
+        let remote = WireHello {
+            min_protocol_version: 6,
+            max_protocol_version: 6,
+            features: FEATURE_AUTHORIZATION_SCOPE_VIEWS | FEATURE_PAYLOAD_ZSTD,
+            role: WirePeerRole::Relay,
+            authority: None,
+        };
+
+        let negotiated = negotiate_wire(
+            &remote,
+            FEATURE_AUTHORIZATION_SCOPE_VIEWS | FEATURE_SCOPE_ISOLATED_CLIENT_RELAY,
+        )
+        .unwrap();
+
+        assert_eq!(
+            negotiated,
+            WireNegotiated {
+                protocol_version: WIRE_PROTOCOL_VERSION,
+                features: FEATURE_AUTHORIZATION_SCOPE_VIEWS
+            }
+        );
+    }
+
+    #[test]
+    fn v2_supporting_transition_encoding_and_v1_rejection_are_pinned() {
+        // Internal wire-level corpus: public row equality cannot pin enum tags,
+        // fixed-array revision bytes or rejection before semantic decoding.
+        use crate::protocol::SupportingRowsUpdate;
+        let snapshot = SupportingRowsUpdate::Snapshot {
+            revision: [0x51; 16],
+            rows: vec![],
+        };
+        let delta = SupportingRowsUpdate::Delta {
+            predecessor: [0x51; 16],
+            revision: [0x52; 16],
+            adds: vec![],
+            removes: vec![],
+        };
+        let snapshot_bytes = [vec![0], vec![0x51; 16], vec![0]].concat();
+        let delta_bytes = [vec![1], vec![0x51; 16], vec![0x52; 16], vec![0, 0]].concat();
+        assert_eq!(postcard::to_allocvec(&snapshot).unwrap(), snapshot_bytes);
+        assert_eq!(postcard::to_allocvec(&delta).unwrap(), delta_bytes);
+        assert_eq!(
+            postcard::from_bytes::<SupportingRowsUpdate>(&snapshot_bytes).unwrap(),
+            snapshot
+        );
+        assert_eq!(
+            postcard::from_bytes::<SupportingRowsUpdate>(&delta_bytes).unwrap(),
+            delta
+        );
+        for end in 0..delta_bytes.len() {
+            assert!(postcard::from_bytes::<SupportingRowsUpdate>(&delta_bytes[..end]).is_err());
+        }
+        let old = WireHello {
+            min_protocol_version: 1,
+            max_protocol_version: 1,
+            features: current_wire_features(),
+            role: WirePeerRole::Core,
+            authority: None,
+        };
+        assert_eq!(
+            negotiate_wire(&old, current_wire_features())
+                .unwrap_err()
+                .code,
+            WireErrorCode::UnsupportedProtocolVersion
+        );
+    }
+
+    #[test]
+    fn negotiation_rejects_version_ranges_even_when_they_include_v6() {
+        for (min_protocol_version, max_protocol_version) in
+            [(0, 6), (3, 6), (4, 6), (5, 6), (6, 15)]
+        {
+            let remote = WireHello {
+                min_protocol_version,
+                max_protocol_version,
+                features: FEATURE_NONE,
+                role: WirePeerRole::Core,
+                authority: None,
+            };
+
+            let err = negotiate_wire(&remote, FEATURE_NONE).unwrap_err();
+
+            assert_eq!(err.code, WireErrorCode::UnsupportedProtocolVersion);
+            assert_eq!(err.retry, WireRetry::Never);
+        }
+    }
+
+    /// Alice's v6 Core rejects Bob's v5 Core, which carries read-tier durability
+    /// tags but predates linear row-state history, before any payload decoding.
+    /// Internal boundary coverage is required because old bytes cannot be authored by v6 APIs.
+    #[test]
+    fn wire_v6_rejects_v5_read_tier_peers_before_linear_history_decode() {
+        let old = decode_frame(&[0, 5, 5, 0, 1, 0]).unwrap();
+        let WireFrame::Hello(hello) = old else {
+            panic!("historical Hello")
+        };
+        let error = negotiate_wire(&hello, FEATURE_NONE).unwrap_err();
+        assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
+        assert_eq!(error.retry, WireRetry::Never);
+    }
+
+    /// Alice's v6 Core rejects Bob's v4 Core, which predates linear row-state
+    /// history and the compact durability tags, before any row payload decoding.
+    #[test]
+    fn wire_v6_rejects_dag_history_v4_peers() {
+        let old = decode_frame(&[0, 4, 4, 0, 1, 0]).unwrap();
+        let WireFrame::Hello(hello) = old else {
+            panic!("historical Hello")
+        };
+        let error = negotiate_wire(&hello, FEATURE_NONE).unwrap_err();
+        assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
+        assert_eq!(error.retry, WireRetry::Never);
+    }
+
+    /// Alice's v6 Core rejects Bob's v3 Core before predecessor snapshot decoding.
+    #[test]
+    fn wire_v6_rejects_single_predecessor_v3_peers() {
+        let hello = WireHello {
+            min_protocol_version: 3,
+            max_protocol_version: 3,
+            features: 0,
+            role: WirePeerRole::Core,
+            authority: None,
+        };
+        assert!(negotiate_wire(&hello, 0).is_err());
+    }
+
+    /// Alice's v6 Core rejects Bob's v2 Core before policy snapshot decoding.
+    /// This internal boundary test pins negotiation, which row equality cannot observe.
+    #[test]
+    fn wire_v6_rejects_v2_before_policy_snapshot_decode() {
+        assert_eq!(WIRE_PROTOCOL_VERSION, 6);
+        let remote = WireHello {
+            min_protocol_version: 2,
+            max_protocol_version: 2,
+            features: current_wire_features(),
+            role: WirePeerRole::Core,
+            authority: None,
+        };
+        let error = negotiate_wire(&remote, current_wire_features()).unwrap_err();
+        assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
+        assert_eq!(error.retry, WireRetry::Never);
+        let current = WireHello::current(WirePeerRole::Core, current_wire_features());
+        assert_eq!(
+            negotiate_wire(&current, current_wire_features())
+                .unwrap()
+                .protocol_version,
+            6
+        );
+    }
+
+    #[test]
+    fn wire_v6_rejects_v14_without_compatibility_negotiation() {
+        assert_eq!(WIRE_PROTOCOL_VERSION, 6);
+        let remote = WireHello {
+            min_protocol_version: 14,
+            max_protocol_version: 14,
+            features: 0,
+            role: WirePeerRole::Core,
+            authority: None,
+        };
+
+        let error = negotiate_wire(&remote, 0)
+            .expect_err("current wire protocol must not negotiate with an old peer");
+
+        assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
+        assert_eq!(error.retry, WireRetry::Never);
+    }
+
+    #[test]
+    fn wire_v6_rejects_v15_peer_before_payload_decode() {
+        let v15_peer = WireHello {
+            min_protocol_version: 15,
+            max_protocol_version: 15,
+            features: current_wire_features(),
+            role: WirePeerRole::Core,
+            authority: None,
+        };
+
+        let error = negotiate_wire(&v15_peer, current_wire_features())
+            .expect_err("v15 encoding must fail during the v6 handshake");
+
+        assert_eq!(WIRE_PROTOCOL_VERSION, 6);
+        assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
+        assert_eq!(error.retry, WireRetry::Never);
+    }
+
+    /// Bob's later wire version keeps the cross-version `Hello` prefix but may
+    /// lay out the rest differently. Alice reads only the prefix and reports a
+    /// version mismatch instead of a malformed frame (#2468).
+    #[test]
+    fn hello_version_range_is_read_before_the_version_scoped_body() {
+        let current = encode_frame(&WireFrame::Hello(WireHello::current(
+            WirePeerRole::Core,
+            current_wire_features(),
+        )))
+        .unwrap();
+        assert_eq!(
+            wire_hello_version_range(&current),
+            Some((WIRE_PROTOCOL_VERSION, WIRE_PROTOCOL_VERSION))
+        );
+        assert_eq!(
+            decode_hello_frame(&current).unwrap().role,
+            WirePeerRole::Core
+        );
+
+        let next = WIRE_PROTOCOL_VERSION + 1;
+        for (min, max) in [(next, next), (WIRE_PROTOCOL_VERSION, next), (1, 1)] {
+            let mut foreign = postcard::to_allocvec(&(0u32, min, max)).unwrap();
+            foreign.extend_from_slice(&[0x7f, 0xff, 0xff, 0x03, 0x2a]);
+            assert!(
+                decode_frame(&foreign).is_err(),
+                "body is not this version's layout"
+            );
+            assert_eq!(wire_hello_version_range(&foreign), Some((min, max)));
+            let error = decode_hello_frame(&foreign).unwrap_err();
+            assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
+            assert_eq!(error.retry, WireRetry::Never);
+            assert!(
+                validate_frame_for_artifact_corpus(&foreign, FEATURE_NONE)
+                    .unwrap_err()
+                    .contains("unsupported wire protocol advertisement")
+            );
+        }
+    }
+
+    #[test]
+    fn hello_decoder_keeps_exact_decoding_for_this_version() {
+        let mut suffixed = encode_frame(&WireFrame::Hello(WireHello::current(
+            WirePeerRole::Client,
+            FEATURE_NONE,
+        )))
+        .unwrap();
+        suffixed.push(0);
+        assert_eq!(
+            decode_hello_frame(&suffixed).unwrap_err().code,
+            WireErrorCode::MalformedFrame
+        );
+
+        let error_frame = encode_frame(&WireFrame::Error(WireError::new(
+            WireErrorCode::Internal,
+            WireRetry::Never,
+            "",
+        )))
+        .unwrap();
+        assert_eq!(wire_hello_version_range(&error_frame), None);
+        assert_eq!(
+            decode_hello_frame(&error_frame).unwrap_err().code,
+            WireErrorCode::MalformedFrame
+        );
+        assert_eq!(wire_hello_version_range(&[]), None);
+        assert_eq!(wire_hello_version_range(&[0, 6]), None);
+    }
+
+    /// The bytes every wire version shares: the `Hello` version prefix and the
+    /// complete `Error` frame with its baseline codes and retries. A peer that
+    /// rejects a foreign version answers with these, so they can never change
+    /// in any later version (SPEC 8 §8.1.1, #2468).
+    #[test]
+    fn cross_version_handshake_bytes_are_frozen() {
+        let hello = encode_frame(&WireFrame::Hello(WireHello::current(
+            WirePeerRole::Client,
+            FEATURE_NONE,
+        )))
+        .unwrap();
+        assert_eq!(
+            &hello[..3],
+            &[0, WIRE_PROTOCOL_VERSION as u8, WIRE_PROTOCOL_VERSION as u8]
+        );
+
+        let codes = [
+            (WireErrorCode::UnsupportedProtocolVersion, 0u8),
+            (WireErrorCode::UnsupportedFeature, 1),
+            (WireErrorCode::MalformedFrame, 2),
+            (WireErrorCode::AuthFailed, 3),
+            (WireErrorCode::Backpressure, 4),
+            (WireErrorCode::Internal, 5),
+            (WireErrorCode::NotReady, 6),
+        ];
+        let retries = [
+            (WireRetry::Never, 0u8),
+            (WireRetry::AfterAuth, 1),
+            (WireRetry::AfterResume, 2),
+            (WireRetry::Later, 3),
+        ];
+        for (code, code_tag) in codes {
+            for (retry, retry_tag) in retries {
+                let frame = WireFrame::Error(WireError::new(code, retry, "v"));
+                let bytes = encode_frame(&frame).unwrap();
+                assert_eq!(bytes, [1, code_tag, retry_tag, 1, b'v']);
+                assert_eq!(decode_frame(&bytes).unwrap(), frame);
+            }
+        }
+        for unassigned in [[1, 7, 0, 0], [1, 0, 4, 0]] {
+            assert!(decode_frame(&unassigned).is_err());
+        }
+    }
+
+    #[test]
+    fn negotiation_keeps_directional_scope_capability_without_remote_authority() {
+        let feature = FEATURE_AUTHORIZATION_SCOPE_VIEWS;
+        let unbound = WireHello::current(WirePeerRole::Core, feature);
+        assert_eq!(
+            negotiate_wire(&unbound, feature).unwrap().features & feature,
+            feature
+        );
+        let accepted = WireHello::current(WirePeerRole::Core, feature)
+            .with_authority(NodeUuid::from_bytes([0x71; 16]), 9);
+        assert_ne!(
+            negotiate_wire(&accepted, feature).unwrap().features & feature,
+            0
+        );
+    }
+
+    /// Alice cannot send Bob a scope receipt without its negotiated capability.
+    /// This codec-level test pins rejection before semantic dispatch.
+    #[test]
+    fn authorization_scope_semantics_fail_closed_without_negotiated_feature() {
+        let message = SyncMessage::AuthorizationScopeAggregateReceipt {
+            request_id: PermissionAdviceRequestId([1; 16]),
+            receipt: crate::protocol::AuthorizationScopeReceipt {
+                key: AuthorizationSupportScopeKey {
+                    support_shape_digest: [4; 32],
+                    subject: AuthorSubject::SYSTEM,
+                    claims_digest: [5; 32],
+                    policy_digest: [6; 32],
+                },
+                authority: [3; 16],
+                link: AuthorSubject::SYSTEM,
+                authority_epoch: 1,
+                claims_revision: 0,
+                policy_epoch: 0,
+                settled_through: GlobalTime(0),
+                authorization_progress: 0,
+            },
+        };
+        let old_features = 0;
+        assert_eq!(
+            encode_sync_message_for_features(&message, old_features)
+                .unwrap_err()
+                .code,
+            WireErrorCode::UnsupportedFeature
+        );
+
+        let encoded = encode_sync_message_for_features(
+            &message,
+            old_features | FEATURE_AUTHORIZATION_SCOPE_VIEWS,
+        )
+        .unwrap();
+        assert_eq!(
+            decode_sync_message_for_features(&encoded, old_features)
+                .unwrap_err()
+                .code,
+            WireErrorCode::UnsupportedFeature
+        );
+    }
+}

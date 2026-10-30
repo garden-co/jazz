@@ -1,9 +1,11 @@
 import { useMemo, useState, type ChangeEvent, type FormEvent, type ReactNode } from "react";
 import { parseSignedBigInt64 } from "./parse-signed-bigint.js";
+import { parseBoolean } from "./row-mutation-form.js";
 import type { ColumnDescriptor, ColumnType } from "jazz-tools";
 import {
   getSupportedWhereOperatorsForColumn,
   type WhereOperator,
+  type WhereOperatorColumn,
 } from "../../utility/where-operators.js";
 import styles from "./TableFilterBuilder.module.css";
 
@@ -16,13 +18,7 @@ export interface TableFilterClause {
   value: unknown;
 }
 
-interface FilterableColumn {
-  name: string;
-  columnType: ColumnType;
-  nullable: boolean;
-  references?: string;
-  implicitId?: boolean;
-}
+type FilterableColumn = WhereOperatorColumn;
 
 interface TableFilterBuilderProps {
   schemaColumns: ColumnDescriptor[];
@@ -35,13 +31,6 @@ interface DraftState {
   column: string;
   operator: FilterOperator;
   valueText: string;
-}
-
-function parseBoolean(value: string): boolean | null {
-  const normalized = value.trim().toLowerCase();
-  if (normalized === "true" || normalized === "1") return true;
-  if (normalized === "false" || normalized === "0") return false;
-  return null;
 }
 
 function parseBytea(value: string): Uint8Array {
@@ -109,6 +98,45 @@ function parseScalarValue(columnType: ColumnType, value: string): unknown {
   }
 }
 
+function splitTopLevelCommaSeparated(value: string): string[] {
+  const items: string[] = [];
+  const nesting: string[] = [];
+  let itemStart = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (character === "\\") {
+        escaped = true;
+      } else if (character === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (character === '"') {
+      inString = true;
+    } else if (character === "[" || character === "{") {
+      nesting.push(character);
+    } else if (
+      (character === "]" && nesting[nesting.length - 1] === "[") ||
+      (character === "}" && nesting[nesting.length - 1] === "{")
+    ) {
+      nesting.pop();
+    } else if (character === "," && nesting.length === 0) {
+      items.push(value.slice(itemStart, index));
+      itemStart = index + 1;
+    }
+  }
+
+  items.push(value.slice(itemStart));
+  return items.map((item) => item.trim()).filter((item) => item.length > 0);
+}
+
 function parseFilterValue(
   column: FilterableColumn,
   operator: FilterOperator,
@@ -123,10 +151,7 @@ function parseFilterValue(
   }
 
   if (operator === "in" || operator === "notIn") {
-    const items = value
-      .split(",")
-      .map((item) => item.trim())
-      .filter((item) => item.length > 0);
+    const items = splitTopLevelCommaSeparated(value);
     if (items.length === 0) {
       throw new Error(`The "${operator}" operator requires at least one value.`);
     }

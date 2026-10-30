@@ -1,0 +1,12 @@
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--color-background-body);
+}
+
+/* The native audio control fills its card; Astryx has no audio player. */
+.attachment-audio {
+  display: block;
+  width: 100%;
+}

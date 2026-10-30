@@ -25,12 +25,30 @@ import {
   artifactLockPath,
   verifyArtifactBuildLease,
 } from "../gates/build-test-artifacts.mjs";
+import { stripSymbolHashesInFile } from "./wasm-names.mjs";
 
 const root = resolve(fileURLToPath(new URL(".", import.meta.url)), "../..");
 const commands = {
   wasm: {
     fast: ["wasm-pack", ["build", "crates/jazz-wasm", "--target", "web", "--dev"]],
-    release: ["wasm-pack", ["build", "crates/jazz-wasm", "--target", "web", "--release"]],
+    // Browser releases link the whole engine with fat LTO in one codegen unit.
+    // That removes duplicate generic instantiations across crates: about 28%
+    // smaller raw and 22% smaller gzip, with no measured read/write slowdown.
+    // jazz-wasm, the final crate, is built for size: its opt-level picks the
+    // whole LTO pipeline, which makes the bundle about 9% smaller gzip for
+    // IndexedDB reads up to 7% slower. Native release builds are unaffected.
+    release: [
+      "wasm-pack",
+      ["build", "crates/jazz-wasm", "--target", "web", "--release"],
+      [
+        "--config",
+        'profile.release.lto="fat"',
+        "--config",
+        "profile.release.codegen-units=1",
+        "--config",
+        'profile.release.package.jazz-wasm.opt-level="s"',
+      ],
+    ],
     profiling: ["wasm-pack", ["build", "crates/jazz-wasm", "--target", "web", "--profiling"]],
   },
   napi: {
@@ -47,12 +65,14 @@ const commands = {
 };
 const napiBindingForTarget = {
   "x86_64-unknown-linux-gnu": "jazz-napi.linux-x64-gnu.node",
+  "aarch64-unknown-linux-gnu": "jazz-napi.linux-arm64-gnu.node",
   "x86_64-pc-windows-msvc": "jazz-napi.win32-x64-msvc.node",
   "x86_64-apple-darwin": "jazz-napi.darwin-x64.node",
   "aarch64-apple-darwin": "jazz-napi.darwin-arm64.node",
 };
 const hostTarget = {
   "linux-x64": "x86_64-unknown-linux-gnu",
+  "linux-arm64": "aarch64-unknown-linux-gnu",
   "win32-x64": "x86_64-pc-windows-msvc",
   "darwin-x64": "x86_64-apple-darwin",
   "darwin-arm64": "aarch64-apple-darwin",
@@ -473,7 +493,7 @@ export function buildArtifact(kind, profile = "release", extraArgs = []) {
     throw new Error("usage: build.mjs <wasm fast|release|profiling | napi debug|release>");
   if (kind !== "napi" && extraArgs.length)
     throw new Error("only napi builds accept extra napi CLI arguments");
-  const [command, selectedArgs] = selected;
+  const [command, selectedArgs, cargoArgs = []] = selected;
   const targetIndex = extraArgs.indexOf("--target");
   const target = targetIndex === -1 ? undefined : extraArgs[targetIndex + 1];
   const resolvedNapiTarget = target ?? hostTarget;
@@ -499,6 +519,8 @@ export function buildArtifact(kind, profile = "release", extraArgs = []) {
     ...extraArgs,
     ...(wasmStage ? ["--out-dir", wasmStage.outDir] : []),
     ...(napiStage ? ["--output-dir", napiStage] : []),
+    // wasm-pack forwards everything after `--` to cargo, so this goes last.
+    ...(cargoArgs.length ? ["--", ...cargoArgs] : []),
   ];
   try {
     if (kind === "napi" && process.env.JAZZ_NAPI_BUILD_FAULT === "producer")
@@ -519,6 +541,7 @@ export function buildArtifact(kind, profile = "release", extraArgs = []) {
       return;
     }
     if (wasmStage) {
+      if (profile === "release") stripSymbolHashesInFile(join(wasmStage.path, "jazz_wasm_bg.wasm"));
       writeWasmStageManifest(wasmStage.path, profile);
       publishWasmPackage(wasmStage.path, join(root, "crates", "jazz-wasm", "pkg"), {
         profile,

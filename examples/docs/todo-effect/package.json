@@ -1,0 +1,25 @@
+{
+  "name": "todo-effect-docs",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "build": "pnpm run check",
+    "start": "tsx src/server.ts",
+    "test": "vitest run",
+    "typecheck": "pnpm run check"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.19.11",
+    "effect": "4.0.0-rc.118",
+    "jazz-napi": "workspace:*",
+    "jazz-tools": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:default",
+    "tsx": "^4.0.0",
+    "typescript": "catalog:default",
+    "vitest": "catalog:default"
+  }
+}

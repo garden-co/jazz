@@ -4,18 +4,15 @@
 
 jazz is a local-first, distributed, real-time database with full edit history,
 RLS-authorized sync, and two transaction kinds: eventually-consistent
-`mergeable` transactions and serializable `exclusive` transactions. Its query
-and maintenance semantics are defined by **lowering everything onto
-[`groove`](../../groove/SPEC/1_intro.md)**, the incremental-view-maintenance
-engine. jazz adds distribution, history, and authorization around that engine;
-it is not a second query engine. This document is both the design and the
-contract.
+`mergeable` transactions and `serializable` transactions. Its storage and
+query execution are SQLite: Jazz schemas become SQLite tables, queries and
+policies compile to SQL, and a live subscription re-runs when a commit touches
+a table it depends on and delivers the difference. jazz adds history,
+distribution and authorization on top. This document is both the design and
+the contract.
 
 Invariant digest:
 
-- `INV-EDGE-8`: Edge acceptance of a mergeable transaction MUST be a final authorization outcome; core MUST NOT re-evaluate or reject it solely because policy changed concurrently aft...
-- `INV-EDGE-12`: Topology v1 MUST be star-shaped: edges connect upstream to core; edges MUST NOT sync with other edges as peers for authority or merge coordination.
-- `groove/SPEC/INVARIANTS.md::INV-SHAPE-16`: Prepared shapes MUST retain their output graph nodes while the shape remains registered.
 - `INV-TX-1`: A transaction MUST NOT expose `open` writes to ordinary reads or subscriptions before commit.
 
 ## Details
@@ -46,13 +43,13 @@ decisions. Guidance appendices are entirely non-normative.
 | --- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
 | 1   | Introduction                                                                          | this file: what jazz is, principles, conventions                               |
 | 2   | Data model & identity                                                                 | tables, columns, schema, rows, the id types                                    |
-| 3   | Transactions & durability                                                             | mergeable/exclusive, fates, durability tiers, commit units                     |
+| 3   | Transactions & durability                                                             | mergeable/serializable, fates, durability tiers, commit units                  |
 | 4   | History, domination & merging                                                         | argmax history, column-LWW, current state                                      |
 | 5   | Reads & snapshots                                                                     | current, point-in-time, visibility                                             |
 | 6   | Queries                                                                               | shapes, bindings, content-addressing, matched include paths, query-driven sync |
 | 7   | Authorization (RLS)                                                                   | policies as shapes; read/write; claim-binding                                  |
 | 8   | Sync protocol                                                                         | the peer layer: view updates, commit units, fates, subscriptions               |
-| 9   | Topology & the edge tier                                                              | client/relay/edge/core trust ladder; edge authority & cache                    |
+| 9   | Core, clients, and local relays                                                       | Core authority; client state and non-authoritative local persistence           |
 | 10  | Schema evolution: lenses & migrations                                                 | multi-schema coexistence                                                       |
 | 11  | Partitioned history, overlay views & time travel                                      | schema branch columns; live/frozen bases; contribution merges                  |
 | 13  | The high-level `Db` API                                                               | the runtime-typed surface, subscriptions, sync/serve, identity/auth            |
@@ -61,16 +58,16 @@ decisions. Guidance appendices are entirely non-normative.
 | 16  | Maintained subscription views                                                         | target serving architecture for query-driven sync                              |
 | 17  | Integrability roadmap                                                                 | TS/WASM/NAPI, server shell, protocol, storage, topology                        |
 | 18  | Representation ownership                                                              | public, wire, binding and internal carrier boundaries                          |
-| 19  | Large-value capabilities                                                              | authorization, proxy, publication and retention of Groove chunks               |
+| 19  | Large-value capabilities                                                              | authorization, proxy, publication and retention of chunks                      |
 | A–E | _guidance:_ implementation discipline · benchmarks · performance · testing · glossary |
 | —   | _registry:_ `INVARIANTS.md`                                                           | out-of-band: every `INV-` id → test + impl                                     |
 
 **If you are not reading front to back:** to build an app on jazz, read ch. 1
 and then **ch. 13 (the `Db` API)**. The API chapter appears late in the
 normative order because it depends on the concepts below it, but it is the
-surface an application calls. Dip back into 2–8 as the API references them. You
-do not need the groove spec to build an app: lowering to groove (ch. 14) is an
-implementation concern, not an app-facing one. A rough reading path: minimum
+surface an application calls. Dip back into 2–8 as the API references them.
+The storage mapping (ch. 14) is an implementation concern, not an app-facing
+one. A rough reading path: minimum
 for a local app is ch. 1, 13, §2.3, §7.1; add §3.3 / §5.1 / §8.1 / §9.2 for
 client–server sync. `string` and `bytes` use the ordinary-value baseline in
 §2.3.1. To operate a deployment, read ch. 3, 8, and 9.
@@ -80,22 +77,21 @@ client–server sync. `string` and `bytes` use the ordinary-value baseline in
 The following principles define the shape of jazz before any individual
 mechanism is specified. They are normative intent, not mechanism.
 
-1. **Everything queryable lowers to groove.** jazz has one query substrate.
-   Schemas become groove schemas, mutations become groove batches, queries and
-   sync views become groove subscriptions, and RLS policies become groove
-   prepared shapes (ch. 14).
-2. **One sync protocol; tiers are roles, not code.** Distribution is expressed
-   through roles in a single protocol. Every hop (UI ↔ worker, worker ↔ edge,
-   edge ↔ core) speaks that protocol; tiers differ only in role flags (fate
-   authority, durability guarantee, eviction). Inserting a tier is a deployment
-   change, not a protocol change (ch. 8–9).
+1. **Everything queryable runs on SQLite.** jazz has one query substrate.
+   Schemas become SQLite tables, mutations become SQLite transactions, and
+   queries, sync views and RLS policies compile to SQL (ch. 14).
+2. **One sync protocol; one authority.** Clients connect to Core, optionally
+   through a browser or native local persistence relay. UI ↔ local worker and
+   client ↔ Core use the same protocol. Core alone authorizes reads and writes
+   and assigns final transaction fates. A local relay owns persistence and
+   transport, not an intermediate authorization or durability tier (ch. 8–9).
 3. **Transactions are atomic upstream units.** A transaction is assembled locally
    in an `open` state and syncs upstream _only at commit_, as one idempotent
    `CommitUnit`; the core holds no open-transaction state (ch. 3). Downstream
    subscription delivery is view-atomic, not transport-atomic: a `ViewUpdate` may
-   carry only the subset of an exclusive transaction needed by the maintained
+   carry only the subset of a serializable transaction needed by the maintained
    subscription view, and those rows become visible only when that view's
-   required exclusive payload is complete (ch. 8).
+   required serializable payload is complete (ch. 8).
 4. **Full history is first-class — at the core.** The core is
    history-complete; downstream nodes may hold arbitrary evicted or partial
    subsets. No protocol step may assume a downstream node has complete history
@@ -137,26 +133,23 @@ implementation anchors and tests; it does not determine the contract.
 decisions, each marked and linked to its GitHub issue. There is no central
 TODO: a missing test or an implementation gap belongs in a Details status note,
 while an unsettled intended contract belongs beside the thing it qualifies as an
-open question and in its issue discussion. A reference to an invariant owned by
-the other spec is written with its spec name, for example
-`groove/SPEC/INVARIANTS.md::INV-SHAPE-16`.
+open question and in its issue discussion.
 
 ### 1.4 Terminology
 
 Terms are defined where they are introduced. The load-bearing terms needed
 up front are listed here; the full set is in appendix E:
 
-- **mergeable / exclusive** — the two transaction kinds: eventually-consistent
+- **mergeable / serializable** — the two transaction kinds: eventually-consistent
   column-LWW vs serializable compare-and-set (ch. 3).
 - **fate** — an upstream authority's verdict on a transaction: `Pending` /
   `Accepted` / `Rejected` (ch. 3).
-- **durability tier** — how far a write has settled: `None` / `Local` / `Edge`
-  / `Global` (ch. 3).
+- **durability tier** — how far a write has settled: `None` / `Local` / `Global` (ch. 3).
 - **shape / binding** — a content-addressed query graph and a concrete
   parameter assignment against it; the unit of query-driven sync (ch. 6).
 - **policy** — an RLS read/write rule expressed as a shape, claim-bound to an
   identity (ch. 7).
-- **node roles** — client / relay / edge / core, the trust ladder (ch. 9).
+- **node roles** — client / local relay / Core, the authority boundary (ch. 9).
 
 ## Open Questions
 

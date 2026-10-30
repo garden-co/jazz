@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { reconcileArray } from "./reconcile-array.js";
+import { applyDelta, reconcileArray } from "./reconcile-array.js";
+import {
+  applySubscriptionDelta,
+  RowChangeKind,
+  type RowDelta,
+  type SubscriptionDelta,
+} from "./runtime/subscription-manager.js";
 
 describe("reconcileArray", () => {
   it("preserves identity for matched items", () => {
@@ -250,5 +256,131 @@ describe("deepMerge (via reconcileArray)", () => {
 
     expect(target[0]!.name).toBe("Alice");
     expect("legacy" in target[0]!).toBe(false);
+  });
+});
+
+describe("applyDelta", () => {
+  type Row = { id: string; name: string; tags: string[] };
+  const row = (id: string, name: string): Row => ({ id, name, tags: [name] });
+
+  /** Rows that record whether anything enumerated or wrote to them. */
+  function watched(rows: Row[]): { rows: Row[]; touched: Set<string> } {
+    const touched = new Set<string>();
+    return {
+      touched,
+      rows: rows.map(
+        (item) =>
+          new Proxy(item, {
+            ownKeys(target) {
+              touched.add(target.id);
+              return Reflect.ownKeys(target);
+            },
+            set(target, key, value) {
+              touched.add(target.id);
+              return Reflect.set(target, key, value);
+            },
+          }),
+      ),
+    };
+  }
+
+  it("merges only the changed row of a one-row update", () => {
+    const { rows, touched } = watched(Array.from({ length: 100 }, (_, i) => row(`${i}`, `r${i}`)));
+    const target = [...rows];
+    const all = [...rows];
+    all[42] = row("42", "changed");
+
+    applyDelta(target, {
+      delta: [{ kind: RowChangeKind.Updated, id: "42", index: 42, item: all[42] }],
+      all,
+    });
+
+    expect(target[42]).toBe(rows[42]);
+    expect(target[42]!.name).toBe("changed");
+    expect([...touched]).toEqual(["42"]);
+  });
+
+  it("matches reconciling against the full result for random deltas", () => {
+    let seed = 7;
+    const rnd = (n: number) => {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      return (seed >>> 8) % n;
+    };
+    let nextId = 0;
+    const expected: Row[] = [];
+    const incremental: Row[] = [];
+    const reconciled: Row[] = [];
+    for (let step = 0; step < 400; step++) {
+      const changes: RowDelta<Row>[] = [];
+      const used = new Set<string>();
+      for (let n = rnd(5); n > 0; n--) {
+        const kind = expected.length === 0 ? 0 : rnd(3);
+        if (kind === 0) {
+          const id = `${nextId++}`;
+          changes.push({
+            kind: RowChangeKind.Added,
+            id,
+            index: rnd(expected.length + 2),
+            item: row(id, `a${step}`),
+          });
+          used.add(id);
+          continue;
+        }
+        const id = expected[rnd(expected.length)]!.id;
+        if (used.has(id)) continue;
+        used.add(id);
+        changes.push(
+          kind === 1
+            ? { kind: RowChangeKind.Removed, id, index: rnd(expected.length) }
+            : {
+                kind: RowChangeKind.Updated,
+                id,
+                index: rnd(expected.length),
+                ...(rnd(2) ? { item: row(id, `u${step}`) } : {}),
+              },
+        );
+      }
+      changes.sort((a, b) => a.index - b.index);
+      applySubscriptionDelta(expected, { delta: changes });
+      const delta: SubscriptionDelta<Row> = { delta: changes, all: [...expected] };
+      const before = new Map(incremental.map((item) => [item.id, item]));
+
+      applyDelta(incremental, delta);
+      reconcileArray(reconciled, delta.all!);
+
+      expect(incremental).toEqual(expected);
+      expect(incremental).toEqual(reconciled);
+      for (const item of incremental) {
+        const previous = before.get(item.id);
+        if (previous) expect(item).toBe(previous);
+      }
+    }
+  });
+
+  it("falls back to a full reconcile when the result disagrees with the target", () => {
+    const target = [row("1", "one"), row("2", "two")];
+    const all = [row("0", "zero"), row("1", "one"), row("2", "two"), row("3", "three")];
+
+    applyDelta(target, {
+      delta: [{ kind: RowChangeKind.Added, id: "3", index: 3, item: all[3]! }],
+      all,
+    });
+
+    expect(target).toEqual(all);
+  });
+
+  it("applies a delta without a full result by id and index", () => {
+    const target = [row("1", "one"), row("2", "two"), row("3", "three")];
+    const first = target[0]!;
+
+    applyDelta(target, {
+      delta: [
+        { kind: RowChangeKind.Removed, id: "2", index: 1 },
+        { kind: RowChangeKind.Updated, id: "1", index: 1, item: row("1", "uno") },
+      ],
+    });
+
+    expect(target.map((item) => item.name)).toEqual(["three", "uno"]);
+    expect(target[1]).toBe(first);
   });
 });

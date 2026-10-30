@@ -18,8 +18,6 @@ import {
   setTrustedReservedSession,
 } from "../runtime/db-internal-session.js";
 import { authorBytesForSession } from "../runtime/author-id.js";
-import type { ReactNativeSqliteStorageDriver } from "./storage.js";
-import { REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR } from "./storage.js";
 import { assertAccountConfig } from "../accounts/config-capability.js";
 import {
   beginNativeAccountSession,
@@ -27,6 +25,11 @@ import {
   resolveNativeSession,
 } from "./account-session.js";
 import { serializeSchemaSource } from "../drivers/schema-wire.js";
+import {
+  REACT_NATIVE_MEMORY_RUNTIME_UNSUPPORTED_ERROR,
+  REACT_NATIVE_NATIVE_RELAY_MEMORY_ONLY_ERROR,
+  REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR,
+} from "./errors.js";
 import {
   NativeForegroundDb,
   type NativeForegroundFactory,
@@ -44,17 +47,6 @@ export type ReactNativeRelayConfig = Readonly<{
 
 export type ReactNativeDbConfig = DbConfig & {
   /**
-   * Proposal-only SQLite storage hook for a future native v2 runtime.
-   *
-   * The current runtime does not install or open this driver. Every persistent
-   * configuration is rejected before `sqliteStorage.open()` can run. Supplying
-   * it with an explicit memory driver is also rejected rather than ignored.
-   *
-   * @deprecated Ignored and rejected; do not supply this option until the
-   * native ordered-KV runtime exists.
-   */
-  sqliteStorage?: ReactNativeSqliteStorageDriver;
-  /**
    * Opaque authority issued by trusted native platform admission. The normal
    * persistent RN runtime consumes it through its installed JSI foreground
    * engine; application JavaScript cannot construct scope configuration.
@@ -62,22 +54,11 @@ export type ReactNativeDbConfig = DbConfig & {
   nativeRelay?: ReactNativeRelayConfig;
 };
 
-export const REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR =
-  "React Native persistent runtime requires the installed JazzRelay native artifact and its platform-provided opaque nativeRelay capability";
-export const REACT_NATIVE_NATIVE_RELAY_MEMORY_ONLY_ERROR =
-  "React Native nativeRelay is only valid with persistent storage; remove nativeRelay when driver.type='memory'";
-export const REACT_NATIVE_MEMORY_RUNTIME_UNSUPPORTED_ERROR =
-  "React Native requires the installed JazzRelay native runtime; driver.type='memory' is not supported";
-
 function shouldRequireSqliteDriver(config: ReactNativeDbConfig): boolean {
   return (config.driver?.type ?? "persistent") === "persistent";
 }
 
 export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig> {
-  override get defaultDurabilityTier(): "local" {
-    return "local";
-  }
-
   private admittedSession: Session | null = null;
   private admittedCapability: Uint8Array | null = null;
   private foregroundModule: NativeForegroundModule | null = null;
@@ -88,15 +69,12 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
   private explicitlyOffline = false;
 
   override async load(config: ReactNativeDbConfig): Promise<void> {
-    if (config.sqliteStorage !== undefined) {
-      throw new Error(REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR);
-    }
     if (shouldRequireSqliteDriver(config)) {
       if (!config.nativeRelay && config.accountId && config.accountRegistryAuthority) {
         if (this.pendingCapability || this.admittedCapability) return;
         assertAccountConfig(config);
         const session = resolveNativeSession(config);
-        const module = (await import("jazz-rn/relay")) as unknown as NativeForegroundModule;
+        const module = await import("jazz-rn/relay");
         const factory = module.installNativeForegroundRuntime();
         if (factory.accountSecret) installNativeRuntimeEntropy(factory.accountSecret);
         this.pendingCapability = beginNativeAccountSession(factory, config, session);
@@ -126,7 +104,7 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
         // Capture before the first await: caller-owned bytes must never select
         // a different scope after native identity preflight.
         const capability = new Uint8Array(config.nativeRelay.capability);
-        const foreground = (await import("jazz-rn/relay")) as unknown as NativeForegroundModule;
+        const foreground = await import("jazz-rn/relay");
         this.foregroundFactory = foreground.installNativeForegroundRuntime();
         if (this.foregroundFactory.accountSecret)
           installNativeRuntimeEntropy(this.foregroundFactory.accountSecret);
@@ -189,10 +167,6 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
         this.admittedCapability = capability;
         return;
       }
-      // A ReactNativeSqliteStorageDriver cannot yet be installed into the v2
-      // Rust ordered-KV runtime. Opening one here and then delegating to WASM
-      // only preflights an unrelated database and falsely implies that Jazz
-      // rows are persisted there.
       throw new Error(REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR);
     }
 
@@ -262,6 +236,12 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
           authorBytesForSession(session),
           1,
           false,
+          {
+            slowQueryLog: {
+              appId: context.config.appId,
+              thresholdMs: context.config.slowQueryThresholdMs,
+            },
+          },
         );
         const appContext: AppContext = {
           appId: context.config.appId,
@@ -272,8 +252,6 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
           env: context.config.env,
           jwtToken: context.config.jwtToken,
           cookieSession: context.config.cookieSession,
-          tier: "local",
-          defaultDurabilityTier: this.defaultDurabilityTier,
         };
         setTrustedReservedSession(appContext, getTrustedReservedSession(context.config));
         return JazzRuntimeClient.connectWithRuntime(runtime, appContext, {

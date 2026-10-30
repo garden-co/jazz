@@ -10,6 +10,58 @@ Any column can be made nullable by chaining `.optional()`.
 
 <AvailableColumnTypes />
 
+## Mergeable Text Columns
+
+By default, a string column keeps one value: when two people edit it at the same time from the same
+starting point, [one edit wins the whole field](/docs/concepts/how-sync-works#concurrent-edits).
+For prose that several people edit at once, opt the column into a text merge strategy instead:
+
+```ts title="schema.ts"
+import { schema as s } from "jazz-tools";
+
+const schema = {
+  docs: s.table(
+    {
+      title: s.string(), // one value: a concurrent edit replaces it whole
+      body: s.string().merge("text"),
+      notes: s.string().merge("markdown"),
+      page: s.string().merge("html"),
+    },
+    {},
+  ),
+};
+```
+
+The column still stores and syncs a plain string, so you read and write it like any other string,
+large values included. What changes is what happens when edits meet: the server merges them, so
+Alice adding a sentence at the top while Bob fixes a typo at the bottom keeps both changes.
+
+The three formats differ in what the merge keeps whole. An edit never splits one of these pieces:
+
+| Strategy            | Kept whole                                                                                                                                                                                                               |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `merge("text")`     | Words, single spaces and punctuation marks. In scripts written without spaces (Chinese, Japanese, Thai and the like) and for emoji, each character. Accents, emoji modifiers and joined emoji stay with their character. |
+| `merge("markdown")` | Everything `text` keeps, plus runs of markup characters such as `**` or `##`, list markers like `1.`, and link targets like `](https://example.com)`.                                                                    |
+| `merge("html")`     | Everything `text` keeps, plus whole tags (`<p class="intro">`) and entities (`&amp;`).                                                                                                                                   |
+
+The merge works on these pieces, not on a document tree: it keeps markup intact but does not check
+that the merged Markdown or HTML is well formed. See
+[Collaborative text editing](/docs/recipes/data-patterns/collaborative-text-editing) for how to use
+one with an editor.
+
+A text merge column can be optional (`s.string().optional().merge("text")`). `null` means no text
+yet, and an empty string is ordinary text:
+
+- Two people adding text to a `null` column at the same time both keep their text, the earlier write
+  first, just as they would on an empty string.
+- Clearing the column to `null` while someone else edits it is not merged: whichever write reaches
+  the server later wins the whole value.
+
+<Callout type="warn">
+  `merge("text")`, `merge("markdown")` and `merge("html")` are only valid on **string columns**.
+  Calling them on any other type throws at schema construction time.
+</Callout>
+
 ## Transformed Columns
 
 > **Experimental:** Transformed columns are an early TypeScript API and may change before the stable release.
@@ -24,13 +76,16 @@ import { schema as s } from "jazz-tools";
 type Priority = "low" | "medium" | "high";
 
 const schema = {
-  tasks: s.table({
-    title: s.string(),
-    priority: s.int().transform<Priority>({
-      from: (score) => (score >= 8 ? "high" : score >= 4 ? "medium" : "low"),
-      to: (priority) => ({ low: 1, medium: 5, high: 10 })[priority],
-    }),
-  }),
+  tasks: s.table(
+    {
+      title: s.string(),
+      priority: s.int().transform<Priority>({
+        from: (score) => (score >= 8 ? "high" : score >= 4 ? "medium" : "low"),
+        to: (priority) => ({ low: 1, medium: 5, high: 10 })[priority],
+      }),
+    },
+    {},
+  ),
 };
 ```
 
@@ -57,3 +112,69 @@ await db.all(app.tasks.where({ priority: { gte: 8 } }));
 ```
 
 Transforms are TypeScript-client behavior. They do not change the generated SQL schema, migrations, permissions, indexes, or values stored on disk.
+
+### Depending on other columns
+
+Declare `dependsOn` when a conversion needs other columns in the same row:
+
+```ts
+const products = s.table(
+  {
+    price: s.float().transform({
+      dependsOn: ["denomination"],
+      from(value, context: Readonly<{ denomination: string }>) {
+        return context.denomination === "cents" ? value / 100 : value;
+      },
+      to(value: number, context: Readonly<{ denomination: string }>) {
+        return context.denomination === "cents" ? value * 100 : value;
+      },
+    }),
+    denomination: s.string().default("cents"),
+  },
+  {},
+);
+```
+
+`from` receives decoded **stored** dependency values, before their column transforms run. `to` receives **app-facing** dependency values. If the write supplies a dependency, that value takes precedence over the existing value. Explicit context annotations are checked against the completed table; without annotations, dependency values have type `unknown`. Both callbacks must be synchronous and must not mutate their inputs.
+
+Jazz fetches missing dependencies automatically. Reads, included rows, relationship hops and subscriptions fetch the stored context they need even when you select only `price`. Internally fetched fields do not appear in the result. A partial text, JSON or byte selection still returns the requested slice, while a dependent transform receives the complete dependency value.
+
+Updates and upserts fetch only the missing dependency columns in the mutation's session, branch and transaction view. Insert, restore and the creation branch of upsert can use schema defaults; an explicit `null` is preserved. Fetched dependencies are context only and are never written back. Lookup and conversion failures reject the write handle or transaction. Transaction updates retain their existing calling style, including unawaited updates inside a transaction callback.
+
+If a transform callback or dependency lookup fails inside an explicit transaction, that transaction cannot commit, even if you catch the error. Roll it back and start a new transaction. This also applies to one-argument transform callbacks. A caught synchronous input validation error before staging does not, by itself, invalidate the transaction.
+
+On a serving host, an empty user-scoped lookup may mean the row is hidden by permissions. Jazz rejects that upsert rather than assuming the row is absent and using creation defaults. Supply the transform's dependencies explicitly when creating a row through that scope.
+
+Changing only `denomination` leaves the stored `price` untouched. Subsequent reads and subscription updates reinterpret it using the new denomination. To preserve the app-facing price while changing denomination, supply both fields in the same write.
+
+Dependencies can name same-table columns and `id`. Unknown names, self-dependencies and dependency cycles are rejected. Dependencies are client metadata and do not affect the structural schema hash. Filtering, sorting, permissions and indexes continue to use stored values. Automatic lookup preserves the existing mergeable or serializable transaction semantics; a mergeable write gains no read-conflict guarantee.
+
+Transforms add client-side conversion work. Tables without transforms use ordinary row decoding and write conversion; included and hopped rows use their own table's transforms. Dependency metadata is prepared once per table, and row projections once per query or subscription. Stored contexts contain only declared dependencies. Declaring fewer dependencies can reduce fetching, decoding and context preparation, especially for large values. For a few small values already available, the difference may be small. Supplying dependencies in the write avoids an automatic lookup. While a lookup is pending, following operations in the same runtime retain their order and may have to wait for its preparation to finish.
+
+Explicit transactions retain the native runtime's read restrictions. For example, if a transaction cannot read a branch view, a missing dependency in that view rejects the transaction rather than falling back to another branch. Standalone mutations can use the ordinary scoped branch-read path before staging their write.
+
+A combined write cannot convert `price` if its new dependency value is supplied only as a stream or partial edit. Supply a whole-value replacement for that dependency instead. Streaming or partially editing a dependency on its own is allowed, and subsequent reads recompute the dependent value.
+
+## Computed Columns
+
+Use `s.computed(callback)` in `s.table`'s second argument, alongside relationships, to derive values when a row is read. A computed field has no stored column and is read-only. Keep `.transform({ from, to })` for converting a stored, writable column between the database and your app.
+
+TypeScript infers the callback's row type from the columns in the first argument:
+
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/docs/todo-client-localfirst-ts/src/computed-columns.ts#computed-columns-ts
+</include>
+
+The callback above receives a read-only row with `id`, `title` and `score`. The returned row has a read-only `priority` property; computed object and array values also have read-only result types. This is a TypeScript contract, not a deep runtime freeze.
+
+Computed fields receive app-facing values, after any stored column transforms. To build on an earlier computed field, pass the earlier table's `.columns` to another `s.table` declaration; callbacks infer those existing fields too. A stored column transform cannot depend on a virtual field.
+
+Computed callbacks run synchronously in the TypeScript client. Jazz tracks which fields each callback accesses through a read-only proxy, so there is no `dependsOn` list. When a complete value is missing, Jazz expands the selection and retries the scoped read and callback. Callbacks must be pure: do not mutate inputs, perform side effects or capture the proxy in a closure for later use. Returning the row directly or nested in result data completes a snapshot before delivering the result, loading all of that callback's input fields. Unknown fields and dependency cycles fail when evaluated.
+
+Hidden dependencies stay out of the returned row. Ordinary reads, transaction reads, included rows and relationship hops use the same preparation. Subscriptions retain the dependencies they observe and expand their native selection when a callback takes a new branch. A dependency-only update recomputes the result without writing a computed value.
+
+Reads use complete dependency values. To return a partial value alongside a computed field, pass the partial projection first and the computed field name afterwards, for example `app.tasks.select({ title: { from: 0, to: 10 } }, "priority")`. A computation accessing `title` still receives the complete title. Accessing a large text, JSON or byte value can therefore load the entire value. Streaming and partial edits to stored dependencies remain available.
+
+Computed fields cannot be inserted, updated, filtered, sorted, indexed, used as relationship keys or used for branching. Filter and sort by stored columns. Permission callbacks expose only stored column references; computed fields cannot be referenced in a permission row context. Computed declarations do not change the structural schema hash, migrations or permission rules; the ordinary permissions on their dependencies still apply.
+
+Computed fields add proxy and callback work when requested. Accessing fields already selected needs no extra read. Jazz caches discovered dependency names per computed definition in memory, so later reads and subscriptions can fetch known dependencies up front. Values are always fetched using the current read's session, branch and transaction scope. First use or a previously unseen conditional branch can still require several reads as dependencies are discovered; each retry batches missing fields across rows. Subscriptions may also need replacement native subscriptions when encountering new dependencies. Later reads can fetch dependencies learned from different branches together, so access only the fields you need, especially for large values or remote reads. Tables without transforms or computed fields retain the ordinary read and write path.

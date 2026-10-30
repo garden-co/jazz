@@ -1,16 +1,21 @@
 //! Self-contained RecordPlayer metadata and playlist-window workloads.
 
-use jazz::db::{Db, DbConfig, DbIdentity, PreparedQuery, block_on};
-use jazz::groove::records::Value;
-use jazz::groove::storage::MemoryStorage;
+pub mod audio;
+
+use jazz::db::{
+    Db, DbConfig, DbIdentity, PreparedQuery, ReadOpts, SubscriptionEvent, SubscriptionStream,
+    block_on,
+};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
+use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
+use std::cell::Cell;
 use std::collections::BTreeMap;
 
-type BenchDb = Db<MemoryStorage>;
+type BenchDb = Db;
 
 /// Deterministic record catalogue and one ordered playlist.
 pub struct Fixture {
@@ -18,17 +23,21 @@ pub struct Fixture {
     coverflow: PreparedQuery,
     track_metadata: PreparedQuery,
     playlist_window: PreparedQuery,
+    track_count: usize,
+    added_entries: Cell<usize>,
+}
+
+/// The visible playlist window a listener keeps subscribed.
+pub struct LivePlaylist {
+    window: SubscriptionStream,
 }
 
 impl Fixture {
     pub fn new(track_count: usize) -> Self {
         assert!(track_count >= 32, "fixture needs a useful playlist window");
         let schema = schema();
-        let families = schema.column_families();
-        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
         let db = block_on(Db::open(DbConfig::new(
             schema,
-            MemoryStorage::new(&refs).expect("valid memory storage families"),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x52; 16]),
                 author: AuthorSubject::SYSTEM,
@@ -116,7 +125,64 @@ impl Fixture {
             coverflow,
             track_metadata,
             playlist_window,
+            track_count,
+            added_entries: Cell::new(0),
         }
+    }
+
+    /// Opening the library: subscribe to the 20-album CoverFlow shelf and the
+    /// focused album's metadata-only track list, and receive both first
+    /// results. Returns the rows delivered.
+    pub fn open_coverflow(&self) -> usize {
+        self.open(&self.coverflow) + self.open(&self.track_metadata)
+    }
+
+    /// Opening a playlist: subscribe to its visible 16-entry window and
+    /// receive the first result.
+    pub fn open_playlist(&self) -> usize {
+        self.open(&self.playlist_window)
+    }
+
+    pub fn live_playlist(&self) -> LivePlaylist {
+        let mut window = self.subscribe(&self.playlist_window);
+        assert_eq!(initial_rows(&mut window), 16);
+        LivePlaylist { window }
+    }
+
+    /// Adds a track inside the visible playlist window and waits until the
+    /// live window shows it. Returns the number of rows the window added.
+    pub fn add_to_playlist(&self, live: &mut LivePlaylist) -> usize {
+        let added = self.added_entries.get();
+        self.added_entries.set(added + 1);
+        // Between the first and second visible entries, so every addition is
+        // visible; fractional positions mirror the app's ordering keys.
+        let position = 8.0 + 1.0 / (added as f64 + 2.0);
+        insert(
+            &self.db,
+            "playlist_entries",
+            row_id(5, added),
+            BTreeMap::from([
+                ("playlist_id".into(), Value::Uuid(row_id(1, 0).0)),
+                (
+                    "track_id".into(),
+                    Value::Uuid(row_id(3, added % self.track_count).0),
+                ),
+                ("position".into(), Value::F64(position)),
+            ]),
+        );
+        match block_on(live.window.next_event()).expect("playlist window observes the addition") {
+            SubscriptionEvent::Delta { added, .. } => added.len(),
+            event => panic!("unexpected playlist event: {event:?}"),
+        }
+    }
+
+    fn open(&self, query: &PreparedQuery) -> usize {
+        initial_rows(&mut self.subscribe(query))
+    }
+
+    fn subscribe(&self, query: &PreparedQuery) -> SubscriptionStream {
+        block_on(self.db.subscribe(query, ReadOpts::default()))
+            .expect("open RecordPlayer subscription")
     }
     pub fn coverflow_count(&self) -> usize {
         self.db.read(&self.coverflow).expect("read albums").len()
@@ -137,7 +203,6 @@ impl Fixture {
 
     pub fn track_metadata_projection(&self) -> &[String] {
         self.track_metadata
-            .shape()
             .query()
             .select
             .as_deref()
@@ -163,6 +228,15 @@ impl Fixture {
     }
 }
 
+fn initial_rows(stream: &mut SubscriptionStream) -> usize {
+    match block_on(stream.next_event()).expect("subscription has an initial result") {
+        SubscriptionEvent::Delta {
+            reset: true, added, ..
+        } => added.len(),
+        event => panic!("unexpected initial RecordPlayer event: {event:?}"),
+    }
+}
+
 fn schema() -> JazzSchema {
     JazzSchema::new(
         &SchemaBuilder::new()
@@ -179,7 +253,8 @@ fn schema() -> JazzSchema {
                     .column("ordinal", ColumnType::Integer)
                     .column("duration_ms", ColumnType::Integer)
                     .nullable_column("audio_bytes", ColumnType::Bytea)
-                    .index_only(["album_id", "ordinal"]),
+                    .index_only(["album_id", "ordinal"])
+                    .composite_index(["album_id", "ordinal"]),
             )
             .table(TableSchemaBuilder::new("playlists").column("name", ColumnType::Text))
             .table(
@@ -187,7 +262,8 @@ fn schema() -> JazzSchema {
                     .fk_column("playlist_id", "playlists")
                     .fk_column("track_id", "tracks")
                     .column("position", ColumnType::Double)
-                    .index_only(["playlist_id", "position"]),
+                    .index_only(["playlist_id", "position"])
+                    .composite_index(["playlist_id", "position"]),
             )
             .build(),
     )

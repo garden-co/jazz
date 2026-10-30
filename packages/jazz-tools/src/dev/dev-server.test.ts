@@ -5,9 +5,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import { WebSocket } from "undici";
 import { schema as s } from "../index.js";
 import { JazzClient } from "../runtime/client.js";
-import { encodeSchema } from "../runtime/native-runtime/native-runtime-adapter.js";
 import { createWasmRuntime, hasJazzWasmBuild } from "../runtime/testing/wasm-runtime-test-utils.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "./dev-server.js";
+import { mergePermissionsIntoWasmSchema } from "../schema-permissions.js";
 import { getAvailablePort } from "./test-helpers.js";
 
 const maybeIt = hasJazzWasmBuild() ? it : it.skip;
@@ -24,9 +24,9 @@ describe("dev-server re-export compatibility", () => {
     const dev = await import("./index.js");
     expect(typeof dev.startLocalJazzServer).toBe("function");
     expect(typeof dev.watchSchema).toBe("function");
-    expect(typeof dev.pushSchema).toBe("function");
-    expect(typeof dev.pushPermissions).toBe("function");
-    expect(typeof dev.pushMigration).toBe("function");
+    expect(dev).not.toHaveProperty("pushSchema");
+    expect(dev).not.toHaveProperty("pushPermissions");
+    expect(dev).not.toHaveProperty("pushMigration");
     expect(typeof dev.deploy).toBe("function");
   });
 
@@ -60,6 +60,23 @@ describe("startLocalJazzServer via JazzServer", () => {
     const healthResponse = await fetch(`${handle.url}/health`);
     expect(healthResponse.ok).toBe(true);
   }, 30_000);
+  it("binds and advertises an explicit loopback host", async () => {
+    handle = await startLocalJazzServer({
+      host: "127.0.0.1",
+      inMemory: true,
+    });
+
+    expect(handle.url).toMatch(/^http:\/\/127\.0\.0\.1:[1-9]\d*$/);
+    expect((await fetch(`${handle.url}/health`)).ok).toBe(true);
+  }, 30_000);
+  it.each(["0.0.0.0", "::", "127.0.0.1:1234", "http://127.0.0.1"])(
+    "rejects non-concrete server host %s",
+    async (host) => {
+      await expect(startLocalJazzServer({ host, inMemory: true })).rejects.toThrow(
+        "Invalid Jazz server host",
+      );
+    },
+  );
 
   it("rejects direct NAPI startup on an occupied explicit port without killing the process", async () => {
     const blocker = createServer();
@@ -95,17 +112,27 @@ describe("startLocalJazzServer via JazzServer", () => {
   }, 30_000);
 
   maybeIt(
-    "boots a client with app, query, raw, and encoded schema sources",
+    "boots a client with app, query, and raw schema sources",
     async () => {
       globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
-      const app = s.defineApp({
-        todos: s.table({ title: s.string(), done: s.boolean() }),
+      const app = s.defineApp(
+        {
+          todos: s.table({ title: s.string(), done: s.boolean() }, {}),
+        },
+        { migrations: "none" },
+      );
+      const permissions = s.definePermissions(app, ({ policy }) => {
+        policy.todos.allowRead.always();
+        policy.todos.allowInsert.always();
+      });
+      const embeddedDenial = s.definePermissions(app, ({ policy }) => {
+        policy.todos.allowRead.never();
+        policy.todos.allowInsert.never();
       });
       const sources = [
         app,
         app.todos.where({ done: { eq: false } }),
-        app.wasmSchema,
-        encodeSchema(app.wasmSchema),
+        mergePermissionsIntoWasmSchema(app.wasmSchema, embeddedDenial),
       ] as const;
 
       try {
@@ -119,6 +146,7 @@ describe("startLocalJazzServer via JazzServer", () => {
               inMemory: true,
               allowLocalFirstAuth: true,
               schema: source,
+              permissions,
             });
             const runtime = await createWasmRuntime(app.wasmSchema, {
               appId: server.appId,
@@ -134,7 +162,7 @@ describe("startLocalJazzServer via JazzServer", () => {
               title: { type: "Text", value: "schema-source startup" },
               done: { type: "Boolean", value: false },
             });
-            await expect(inserted.wait({ tier: "edge" })).resolves.toBeDefined();
+            await expect(inserted.wait({ tier: "global" })).resolves.toBeDefined();
           } finally {
             await client?.shutdown();
             await server?.stop();
@@ -179,22 +207,15 @@ describe("startLocalJazzServer via JazzServer", () => {
     }
   }, 30_000);
 
-  it("passes edge upstream options through JazzServer with admin secret only", async () => {
-    const port = await getAvailablePort();
-    handle = await startLocalJazzServer({
-      port,
-      upstreamUrl: "ws://127.0.0.1:9",
-      adminSecret: "admin-secret",
-      inMemory: true,
-    });
-    const healthResponse = await fetch(`${handle.url}/health`);
-    expect(handle.port).toBe(port);
-    expect(healthResponse.status).toBe(503);
-    await expect(healthResponse.json()).resolves.toEqual({
-      status: "not_ready",
-      component: "runtime",
-    });
-  }, 30_000);
+  it("rejects removed edge startup instead of silently creating another Core", async () => {
+    await expect(
+      startLocalJazzServer({
+        upstreamUrl: "ws://127.0.0.1:9",
+        adminSecret: "admin-secret",
+        inMemory: true,
+      } as Parameters<typeof startLocalJazzServer>[0]),
+    ).rejects.toThrow("Server edges are no longer supported");
+  });
   it("uses an isolated temp data dir by default and cleans it up on stop", async () => {
     let first: LocalJazzServerHandle | null = null;
     let second: LocalJazzServerHandle | null = null;

@@ -1,189 +1,25 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import {
-  getDbSubscriptionSource,
-  type Db,
-  type QueryBuilder,
-  type TableProxy,
-} from "../../src/runtime/db.js";
+import { getDbSubscriptionSource, type Db } from "../../src/runtime/db.js";
 import { createBrowserTestDb as createDb } from "./support.js";
 import type { SubscriptionDelta } from "../../src/runtime/subscription-manager.js";
-import type { WasmSchema } from "../../src/drivers/types.js";
-
-const schema: WasmSchema = {
-  orgs: {
-    columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
-  },
-  teams: {
-    columns: [
-      { name: "name", column_type: { type: "Text" }, nullable: false },
-      { name: "org_id", column_type: { type: "Uuid" }, nullable: true, references: "orgs" },
-      {
-        name: "parent_id",
-        column_type: { type: "Uuid" },
-        nullable: true,
-        references: "teams",
-      },
-    ],
-  },
-  users: {
-    columns: [
-      { name: "name", column_type: { type: "Text" }, nullable: false },
-      { name: "team_id", column_type: { type: "Uuid" }, nullable: true, references: "teams" },
-    ],
-  },
-  todos: {
-    columns: [
-      { name: "title", column_type: { type: "Text" }, nullable: false },
-      { name: "done", column_type: { type: "Boolean" }, nullable: false },
-      { name: "priority", column_type: { type: "Integer" }, nullable: true },
-      { name: "owner_id", column_type: { type: "Uuid" }, nullable: true, references: "users" },
-      {
-        name: "tags",
-        column_type: { type: "Array", element: { type: "Text" } },
-        nullable: false,
-      },
-      { name: "payload", column_type: { type: "Bytea" }, nullable: true },
-    ],
-  },
-  bundle_items: {
-    columns: [{ name: "label", column_type: { type: "Text" }, nullable: false }],
-  },
-  bundles: {
-    columns: [
-      { name: "name", column_type: { type: "Text" }, nullable: false },
-      {
-        name: "items",
-        column_type: { type: "Array", element: { type: "Uuid" } },
-        nullable: false,
-        references: "bundle_items",
-      },
-    ],
-  },
-};
-
-interface Org {
-  id: string;
-  name: string;
-}
-
-interface Team {
-  id: string;
-  name: string;
-  org_id?: string;
-  parent_id?: string;
-}
-
-interface User {
-  id: string;
-  name: string;
-  team_id?: string;
-}
-
-interface Todo {
-  id: string;
-  title: string;
-  done: boolean;
-  priority?: number;
-  owner_id?: string;
-  tags: string[];
-  payload?: Uint8Array;
-}
-
-interface BundleItem {
-  id: string;
-  label: string;
-}
-
-interface Bundle {
-  id: string;
-  name: string;
-  items: string[];
-}
-
-const orgs: TableProxy<Org, Omit<Org, "id">> = {
-  _table: "orgs",
-  _schema: schema,
-  _rowType: {} as Org,
-  _initType: {} as Omit<Org, "id">,
-};
-
-const teams: TableProxy<Team, Omit<Team, "id">> = {
-  _table: "teams",
-  _schema: schema,
-  _rowType: {} as Team,
-  _initType: {} as Omit<Team, "id">,
-};
-
-const users: TableProxy<User, Omit<User, "id">> = {
-  _table: "users",
-  _schema: schema,
-  _rowType: {} as User,
-  _initType: {} as Omit<User, "id">,
-};
-
-const todos: TableProxy<Todo, Omit<Todo, "id">> = {
-  _table: "todos",
-  _schema: schema,
-  _rowType: {} as Todo,
-  _initType: {} as Omit<Todo, "id">,
-};
-
-const bundleItems: TableProxy<BundleItem, Omit<BundleItem, "id">> = {
-  _table: "bundle_items",
-  _schema: schema,
-  _rowType: {} as BundleItem,
-  _initType: {} as Omit<BundleItem, "id">,
-};
-
-const bundles: TableProxy<Bundle, Omit<Bundle, "id">> = {
-  _table: "bundles",
-  _schema: schema,
-  _rowType: {} as Bundle,
-  _initType: {} as Omit<Bundle, "id">,
-};
-
-const CONDITION_OWNER_ID = "00000000-0000-0000-0000-000000000201";
-const CONDITION_TODO_ID = "00000000-0000-0000-0000-000000000202";
+import {
+  orgs,
+  teams,
+  users,
+  todos,
+  bundleItems,
+  bundles,
+  type BundleItem,
+  type Org,
+  type Team,
+  type User,
+  type Todo,
+  liveConditionCases as conditionCases,
+  makeLocalQuery as makeQuery,
+} from "../shared/local-query-scenarios.js";
 
 function uniqueDbName(label: string): string {
   return `db-subscribe-all-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function makeQuery<T>(
-  table: string,
-  body: {
-    conditions?: Array<{ column: string; op: string; value?: unknown }>;
-    includes?: Record<string, boolean | object>;
-    orderBy?: Array<[string, "asc" | "desc"]>;
-    limit?: number;
-    offset?: number;
-    hops?: string[];
-    gather?: {
-      max_depth: number;
-      step_table: string;
-      step_current_column: string;
-      step_conditions: Array<{ column: string; op: string; value: unknown }>;
-      step_hops: string[];
-    };
-  },
-): QueryBuilder<T> {
-  return {
-    _table: table,
-    _schema: schema,
-    _rowType: {} as T,
-    _build() {
-      return JSON.stringify({
-        table,
-        conditions: body.conditions ?? [],
-        includes: body.includes ?? {},
-        orderBy: body.orderBy ?? [],
-        limit: body.limit,
-        offset: body.offset,
-        hops: body.hops,
-        gather: body.gather,
-      });
-    },
-  };
 }
 
 async function waitForCondition(
@@ -226,167 +62,6 @@ describe("internal subscription delta browser integration", () => {
   const dbs: Db[] = [];
   const unsubscribes: Array<() => void> = [];
   let conditionsDb: Db;
-  const conditionCases: Array<{
-    name: string;
-    query: QueryBuilder<Todo>;
-    insert: Omit<Todo, "id">;
-    insertId?: string;
-  }> = [
-    {
-      name: "eq",
-      query: makeQuery<Todo>("todos", {
-        conditions: [{ column: "title", op: "eq", value: "eq-hit" }],
-      }),
-      insert: { title: "eq-hit", done: false, priority: 1, owner_id: undefined, tags: ["x"] },
-    },
-    {
-      name: "ne",
-      query: makeQuery<Todo>("todos", {
-        conditions: [{ column: "title", op: "ne", value: "blocked" }],
-      }),
-      insert: { title: "ne-hit", done: false, priority: 2, owner_id: undefined, tags: ["x"] },
-    },
-    {
-      name: "gt",
-      query: makeQuery<Todo>("todos", {
-        conditions: [{ column: "priority", op: "gt", value: 10 }],
-      }),
-      insert: { title: "gt-hit", done: false, priority: 11, owner_id: undefined, tags: ["x"] },
-    },
-    {
-      name: "gte",
-      query: makeQuery<Todo>("todos", {
-        conditions: [{ column: "priority", op: "gte", value: 10 }],
-      }),
-      insert: { title: "gte-hit", done: false, priority: 10, owner_id: undefined, tags: ["x"] },
-    },
-    {
-      name: "lt",
-      query: makeQuery<Todo>("todos", {
-        conditions: [{ column: "priority", op: "lt", value: 2 }],
-      }),
-      insert: { title: "lt-hit", done: false, priority: 1, owner_id: undefined, tags: ["x"] },
-    },
-    {
-      name: "lte",
-      query: makeQuery<Todo>("todos", {
-        conditions: [{ column: "priority", op: "lte", value: 0 }],
-      }),
-      insert: { title: "lte-hit", done: false, priority: 0, owner_id: undefined, tags: ["x"] },
-    },
-    {
-      name: "isNull",
-      query: makeQuery<Todo>("todos", {
-        conditions: [{ column: "priority", op: "isNull" }],
-      }),
-      insert: {
-        title: "null-hit",
-        done: false,
-        priority: undefined,
-        owner_id: undefined,
-        tags: ["x"],
-      },
-    },
-    {
-      name: "contains-array",
-      query: makeQuery<Todo>("todos", {
-        conditions: [{ column: "tags", op: "contains", value: "needle" }],
-      }),
-      insert: {
-        title: "contains-array-hit",
-        done: false,
-        priority: 1,
-        owner_id: undefined,
-        tags: ["needle", "hay"],
-      },
-    },
-    {
-      name: "contains-text",
-      query: makeQuery<Todo>("todos", {
-        conditions: [{ column: "title", op: "contains", value: "needle" }],
-      }),
-      insert: {
-        title: "hay-needle-title",
-        done: false,
-        priority: 1,
-        owner_id: undefined,
-        tags: ["x"],
-      },
-    },
-    {
-      name: "contains-text-empty",
-      query: makeQuery<Todo>("todos", {
-        conditions: [{ column: "title", op: "contains", value: "" }],
-      }),
-      insert: {
-        title: "any-title",
-        done: false,
-        priority: 1,
-        owner_id: undefined,
-        tags: ["x"],
-      },
-    },
-    {
-      name: "in-id",
-      query: makeQuery<Todo>("todos", {
-        conditions: [
-          {
-            column: "id",
-            op: "in",
-            value: [CONDITION_TODO_ID, "00000000-0000-0000-0000-000000000299"],
-          },
-        ],
-      }),
-      insert: {
-        title: "in-id-hit",
-        done: false,
-        priority: 1,
-        owner_id: undefined,
-        tags: ["x"],
-      },
-      insertId: CONDITION_TODO_ID,
-    },
-    {
-      name: "in-text",
-      query: makeQuery<Todo>("todos", {
-        conditions: [{ column: "title", op: "in", value: ["in-text-hit", "other"] }],
-      }),
-      insert: {
-        title: "in-text-hit",
-        done: false,
-        priority: 1,
-        owner_id: undefined,
-        tags: ["x"],
-      },
-    },
-    {
-      name: "in-reference",
-      query: makeQuery<Todo>("todos", {
-        conditions: [{ column: "owner_id", op: "in", value: [CONDITION_OWNER_ID] }],
-      }),
-      insert: {
-        title: "in-reference-hit",
-        done: false,
-        priority: 1,
-        owner_id: CONDITION_OWNER_ID,
-        tags: ["x"],
-      },
-    },
-    {
-      name: "eq-bytea",
-      query: makeQuery<Todo>("todos", {
-        conditions: [{ column: "payload", op: "eq", value: [1, 2, 3] }],
-      }),
-      insert: {
-        title: "eq-bytea-hit",
-        done: false,
-        priority: 1,
-        owner_id: undefined,
-        tags: ["x"],
-        payload: new Uint8Array([1, 2, 3]),
-      },
-    },
-  ];
 
   function track(db: Db): Db {
     dbs.push(db);
@@ -1014,7 +689,7 @@ describe("internal subscription delta browser integration", () => {
       getDbSubscriptionSource(db).subscribeDelta(
         makeQuery<BundleItem>("bundles", {
           conditions: [{ column: "id", op: "eq", value: bundleId }],
-          hops: ["items"],
+          hops: ["itemsRelation"],
         }),
         (delta) => deltas.push(delta),
       ),

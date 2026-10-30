@@ -1,9 +1,10 @@
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import { loadEnvFileIntoProcessEnv, resolveViteEnvDir, type ViteEnvConfig } from "./env-file.js";
-import { buildInspectorLink } from "./inspector-link.js";
+import { logInspectorLink } from "./inspector-link.js";
 import { wireInspectorOverlay, type OverlayDevServer } from "./inspector-overlay/serve.js";
 import { ManagedDevRuntime } from "./managed-runtime.js";
+import { RuntimeOwners } from "./runtime-owners.js";
 import type { TelemetryOptions } from "../runtime/sync-telemetry.js";
 
 // jazz-tools contains a dynamic `import("jazz-wasm")` that we intentionally
@@ -24,6 +25,8 @@ export function resolveJazzWasmEntry(): string | null {
 
 export interface JazzServerOptions {
   port?: number;
+  /** Concrete IP address used for both listener binding and the advertised URL. */
+  host?: string;
   adminSecret?: string;
   appId?: string;
   allowLocalFirstAuth?: boolean;
@@ -74,15 +77,23 @@ export interface ViteDevServer {
   restart?(forceOptimize?: boolean): Promise<void>;
 }
 
+// Vite only surfaces VITE_*-prefixed vars to the client bundle, so the
+// scaffolder writes the two client-facing keys under the VITE_ prefix.
+// Use the same names here so process.env lookups match what's in `.env`.
+//
+// The runtime is process-wide so the plugin instances Vite creates on a
+// dev-server restart adopt the running runtime instead of racing the old
+// server for its port or attaching to a URL that is about to be stopped.
+const runtime = new ManagedDevRuntime({
+  appId: "VITE_JAZZ_APP_ID",
+  serverUrl: "VITE_JAZZ_SERVER_URL",
+  telemetryCollectorUrl: "VITE_JAZZ_TELEMETRY_COLLECTOR_URL",
+});
+const owners = new RuntimeOwners<ViteDevServer>(() => runtime.dispose());
+
 export function jazzPlugin(options: JazzPluginOptions = {}) {
-  // Vite only surfaces VITE_*-prefixed vars to the client bundle, so the
-  // scaffolder writes the two client-facing keys under the VITE_ prefix.
-  // Use the same names here so process.env lookups match what's in `.env`.
-  const runtime = new ManagedDevRuntime({
-    appId: "VITE_JAZZ_APP_ID",
-    serverUrl: "VITE_JAZZ_SERVER_URL",
-    telemetryCollectorUrl: "VITE_JAZZ_TELEMETRY_COLLECTOR_URL",
-  });
+  // Identity of this plugin instance in the shared runtime's owner set.
+  const holder = {};
   let envLoaded = false;
 
   async function ensureEnvLoaded(envDir: string | false, mode: string): Promise<void> {
@@ -152,15 +163,19 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
       const schemaDir = options.schemaDir ?? viteServer.config.root;
 
       let managed;
+      await owners.acquire(holder);
       try {
         managed = await runtime.initialize({
           ...options,
           schemaDir,
+          // The runtime keeps this callback across Vite restarts, so it
+          // resolves the live dev servers from the owner set on every push.
           onSchemaPush: () => {
-            viteServer.ws.send({ type: "full-reload" });
+            for (const server of owners.servers()) server.ws.send({ type: "full-reload" });
           },
         });
       } catch (error) {
+        await owners.release(holder).catch(() => undefined);
         const message = error instanceof Error ? error.message : String(error);
         viteServer.ws.send({
           type: "error",
@@ -175,21 +190,23 @@ export function jazzPlugin(options: JazzPluginOptions = {}) {
       // Vite only exposes VITE_*-prefixed keys to the client bundle via
       // import.meta.env. process.env gets the same values via the managed
       // runtime's own write below.
-      viteServer.config.env ??= {};
-      viteServer.config.env.VITE_JAZZ_APP_ID = managed.appId;
-      viteServer.config.env.VITE_JAZZ_SERVER_URL = managed.serverUrl;
-      if (managed.telemetryCollectorUrl) {
-        viteServer.config.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL = managed.telemetryCollectorUrl;
-      }
-      console.log(
-        `${LOG_PREFIX} Open the inspector: ${buildInspectorLink(managed.serverUrl, managed.appId)}`,
-      );
+      owners.attachServer(holder, viteServer);
+
+      Object.assign((viteServer.config.env ??= {}), runtime.clientEnv(managed));
+      logInspectorLink(managed);
 
       if (options.inspector !== false) wireInspectorOverlay(viteServer);
 
+      // On a restart Vite closes the old httpServer only after the new
+      // server's plugins have adopted the runtime; the last owner disposes it.
       viteServer.httpServer?.once("close", async () => {
-        await runtime.dispose();
+        await owners.release(holder);
       });
     },
   };
+}
+
+export async function __resetJazzVitePluginForTests(): Promise<void> {
+  owners.resetForTests();
+  await runtime.resetForTests();
 }

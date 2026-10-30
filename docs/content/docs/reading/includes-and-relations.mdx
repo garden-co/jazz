@@ -4,8 +4,6 @@ description: Resolve references with include(), pick columns with select(), insp
 reviewedAt: "b29b48d1a"
 ---
 
-import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
-
 ## Includes
 
 Use `include(...)` to load related rows as nested objects in a single query result. Pass `true` to resolve a relation, or a nested object to follow multi-hop references.
@@ -22,10 +20,15 @@ Including a relation adds the resolved object alongside the foreign-key column&h
   ../examples/docs/todo-client-localfirst-ts/schema.ts#schema-todo-client-ts
 </include>
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-includes-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts">
+      ../examples/docs/todo-effect/src/docs-snippets.ts#reading-includes-effect
     </include>
   </Tab>
   <Tab value="Rust">
@@ -37,13 +40,21 @@ Including a relation adds the resolved object alongside the foreign-key column&h
 
 ### Reverse relations
 
-When table A has a ref column pointing to table B, Jazz auto-derives a reverse relation on B that returns all matching A rows as an array. The naming convention is `{sourceTable}Via{RelationName}`&hairsp;—&hairsp;for example, if `todos` has `projectId: s.ref("projects")`,
-then `projects` gets a `todosViaProject` reverse relation.
+Declare reverse relations explicitly on the target table. For example, if `todos` declares
+`project: s.rel("projects", "projectId")`, `projects` can declare
+`todos: s.reverse("todos", "project")` and load it with `include({ todos: true })`.
+The reverse relation returns matching source rows as an array. Its name is your choice;
+Jazz does not generate an inverse or infer names from UUID columns.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-reverse-relation-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts">
+      ../examples/docs/todo-effect/src/docs-snippets.ts#reading-reverse-relation-effect
     </include>
   </Tab>
   <Tab value="Rust">
@@ -67,10 +78,15 @@ data must be returned.
 
 Use `select(...)` to narrow a row to `id` plus the columns you pick. You can combine it with `include(...)`, and select within included rows too.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-select-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts">
+      ../examples/docs/todo-effect/src/docs-snippets.ts#reading-select-effect
     </include>
   </Tab>
   <Tab value="Rust">
@@ -112,10 +128,71 @@ relation may select complete fields by name, but rejects object-form partial
 selections until Jazz can carry terminal-specific demand through relation
 evaluation ([#2090](https://github.com/garden-co/jazz/issues/2090)).
 
-Until exact chunk demand reaches every query terminal, Jazz may materialize the
-selected carrier column before applying the requested slice. It never needs to
-materialize unselected columns; exact chunk-demand propagation is tracked in
-[#2090](https://github.com/garden-co/jazz/issues/2090).
+Jazz reads only the part you select. A range or pointer select loads, and
+syncs from the server, just the chunks that part covers, so reading the last
+page of a 100 MB value costs about as much as reading a small one. Edits
+elsewhere in the value don't make a range select fetch anything new. A few
+selections read more than their part:
+
+- A text range counts UTF-16 code units, which don't map to byte offsets
+  without reading the text, so `{ from, to }` reads up to the first `3 * to`
+  bytes.
+- A JSON pointer reads the document up to where the pointer points, and the
+  work grows with the square of that distance. Only an index into a top-level
+  array is read in part; a pointer into a nested array reads the document to
+  its end.
+- A field that a computed field or a field transform depends on is read whole,
+  and your selection is cut from the whole value.
+
+### Live changes as splices
+
+A subscription can also tell you _how_ a `string` or `bytes` column changed,
+not just its new value. Name the columns in the `splices` option, and each
+update's second argument maps a changed row's `id` to that row's splices:
+
+```ts
+const unsubscribe = db.subscribe(
+  app.documents.where({ id: documentId }),
+  {
+    onUpdate: (rows, { splices }) => {
+      const edits = splices.get(documentId)?.text;
+      if (edits) {
+        for (const { at, delete: length, insert } of edits) {
+          editor.replace(at, at + length, insert);
+        }
+      } else if (rows[0]) {
+        editor.setValue(rows[0].text);
+      }
+    },
+  },
+  { splices: ["text"] },
+);
+```
+
+The splices turn the value the previous update showed into the new one. They
+apply in order, so each splice's offsets are in the value the earlier ones
+produced. A `string` column's splices count UTF-16 code units (like
+`String.prototype.slice`) and insert a string. A `bytes` column's splices count
+bytes and insert a `Uint8Array`. They work the same for your own writes and for
+changes that arrive from other clients. Jazz computes them by comparing the
+value's chunk trees, so a small edit to a large value only reads the chunks
+that changed.
+
+On a range select, the splices are relative to the selected window and turn
+the window's old contents into its new contents. An insert before the window
+shifts its contents, and the splices describe that shift too.
+
+A column that didn't change has an empty list. When a row has no entry for a
+column, read its new value from `rows`: Jazz couldn't compute splices locally,
+for example because the old version isn't stored on this device anymore.
+Splices are only supported for `string` and `bytes` columns without a column
+transform. Other columns, including `json`, are rejected with a "not supported
+yet" error when you subscribe, and so is a range-selected column that a
+computed field or field transform depends on, since that column is read whole.
+A computed field's dependencies can first show up on a later update; if one
+of them is such a column, the subscription ends then with the same error
+through `onError`.
+One-shot reads ignore the option.
 
 ## Missing references
 
@@ -137,10 +214,15 @@ readable child row matches.
 Use `.requireIncludes()` when every included, non-nullable forward reference must resolve. It drops
 a source row if one of those required targets is unavailable.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-require-includes-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts">
+      ../examples/docs/todo-effect/src/docs-snippets.ts#reading-require-includes-effect
     </include>
   </Tab>
   <Tab value="Rust">
@@ -151,7 +233,7 @@ a source row if one of those required targets is unavailable.
 </Tabs>
 
 `requireIncludes()` only filters non-nullable forward references (FK &rarr; row). Nullable forward
-references and reverse relations (`todosViaOwner`, etc.) are unaffected. When used inside a nested
+references and reverse relations (such as `authoredPosts`) are unaffected. When used inside a nested
 `include`, it applies at that nesting level only.
 
 In Rust, set the corresponding correlated `ArraySubquery` to
@@ -161,7 +243,7 @@ to keep the parent and return an empty array.
 
 ## Magic columns
 
-Jazz exposes computed columns for permission introspection (`$canRead`, `$canEdit`, `$canDelete`) and edit metadata (`$createdBy`, `$createdAt`, `$updatedBy`, `$updatedAt`). See [Magic columns](/docs/reading/queries#magic-columns) for details and examples.
+Jazz exposes computed columns for edit metadata (`$createdBy`, `$createdAt`, `$updatedBy`, `$updatedAt`). See [Magic columns](/docs/reading/queries#magic-columns) for details and examples.
 
 ## Recursive queries with `gather` and `hopTo`
 

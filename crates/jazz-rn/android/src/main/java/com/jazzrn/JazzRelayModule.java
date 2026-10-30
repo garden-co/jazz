@@ -73,6 +73,8 @@ public class JazzRelayModule extends NativeJazzRelaySpec implements TurboModuleW
     }
     try {
       promise.resolve(bridge.execute(encodedCommand));
+    } catch (JazzRelayUnsupportedStorageCodecsException error) {
+      promise.reject("unsupported_storage_codecs", error);
     } catch (Throwable error) {
       promise.reject("E_JAZZ_RELAY_COMMAND", error);
     }

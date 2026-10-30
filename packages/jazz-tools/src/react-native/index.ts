@@ -6,6 +6,13 @@ export {
   JazzReactNativeProvider,
 } from "../classic-api.js";
 export { createDb, Db, type DbConfig } from "./create-db.js";
+export {
+  type SnapshotRef,
+  parseSnapshotRef,
+  serializeSnapshotRef,
+  SnapshotRefFormatError,
+  UnsupportedSnapshotError,
+} from "../runtime/snapshot-ref.js";
 export { createJazzClient, type JazzClientConfig, type JazzClient } from "./create-jazz-client.js";
 export {
   JazzProvider,
@@ -24,40 +31,27 @@ export {
   type LocalFirstAuth,
   type UseLocalFirstAuthOptions,
 } from "./use-local-first-auth.js";
-export {
-  REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR,
-  REACT_NATIVE_SQLITE_STORAGE_UNIMPLEMENTED_ERROR,
-  UnimplementedSqliteStorageDriver,
-  type ReactNativeSqliteConnection,
-  type ReactNativeSqliteStorageDriver,
-  type ReactNativeSqliteTransaction,
-} from "./storage.js";
 export type { QueryOptions, RuntimeSourcesConfig } from "../runtime/index.js";
 export type { AuthSecretStore } from "../runtime/auth-secret-store.js";
 export { schema } from "../schema-namespace.js";
+export { migration } from "../migration-namespace.js";
 export {
   REACT_NATIVE_MEMORY_RUNTIME_UNSUPPORTED_ERROR,
   REACT_NATIVE_NATIVE_RELAY_MEMORY_ONLY_ERROR,
   REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR,
-} from "./runtime-source.js";
-export { REACT_NATIVE_UNSUPPORTED_ERROR } from "./native-foreground-db.js";
+  REACT_NATIVE_UNSUPPORTED_ERROR,
+} from "./errors.js";
+export {
+  UnsupportedStorageCodecsError,
+  isUnsupportedStorageCodecsError,
+} from "../runtime/unsupported-storage-codecs-error.js";
 
 export { useAccountState } from "../react-core/use-account-state.js";
+export { useSyncStatus } from "../react-core/use-sync-status.js";
+export type { LinkStatus, SyncStatus } from "../runtime/sync-status.js";
 
 export { createAccountManager, type AccountManagerConfig } from "./create-account-manager.js";
-export type {
-  AccountHandle,
-  AccountIdentity,
-  AccountSnapshot,
-  AccountManager,
-} from "../accounts/state.js";
-export type { AccountStore } from "../accounts/persistence.js";
-export {
-  AccountAuthError,
-  exportLocalFirstSecret,
-  type BackendAuth,
-  type JWTAuth,
-} from "../accounts/enrollment.js";
+export * from "../accounts/exports.js";
 
 export {
   createJazzSession,
@@ -76,3 +70,10 @@ export { useJazzSessionOwner, type JazzSessionOwnerResult } from "./session.js";
 export { useJazzAuth, type JazzAuthState } from "../react-core/app.js";
 export { betterAuth, jwtAuth, type JazzAuth } from "../session/app.js";
 export type { JazzAppProviderProps } from "./provider.js";
+
+export type {
+  ForwardRelationship,
+  ReverseRelationship,
+  Relationship,
+  Relationships,
+} from "../relationships.js";

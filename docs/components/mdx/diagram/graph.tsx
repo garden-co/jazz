@@ -59,7 +59,6 @@ export type GraphOverlay = (ctx: GraphOverlayCtx) => ReactNode;
 export type GraphGeometryListener = (ctx: GraphOverlayCtx) => void;
 
 export type GraphProps = {
-  eyebrow: string;
   description: ReactNode;
   direction: RouteDirection;
   nodes: GraphNode[];
@@ -104,7 +103,6 @@ const DEFAULT_GAP = "2.5rem";
 const MIN_SCALE = 0.6;
 
 export function Graph({
-  eyebrow,
   description,
   direction,
   nodes,
@@ -273,7 +271,7 @@ export function Graph({
   }
 
   return (
-    <DiagramFrame eyebrow={eyebrow} description={description} responsive>
+    <DiagramFrame description={description} responsive>
       <DiagramStyles />
       <div ref={fitRef} style={{ width: "100%", overflowX: fit.scroll ? "auto" : "visible" }}>
         <div

@@ -1,13 +1,26 @@
+import { canonicalJsonSchema, columnTypeSignature } from "../runtime/schema-metadata.js";
+import { structuralValuesEqual } from "../runtime/structural-values.js";
 import type {
   ColumnDescriptor,
+  ColumnMergeStrategy,
   ColumnType as WasmColumnType,
   Value,
   WasmSchema,
 } from "../drivers/types.js";
 import { blake3 } from "@noble/hashes/blake3.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
+import { parseUuidBytes } from "../runtime/hex.js";
 
 const SHORT_SCHEMA_HASH_LENGTH = 12;
+
+// Must match the merge-strategy bytes in Rust's schema hash (branch.rs).
+const MERGE_STRATEGY_HASH_BYTES: Record<ColumnMergeStrategy, number> = {
+  Counter: 1,
+  GSet: 2,
+  Text: 3,
+  Markdown: 4,
+  Html: 5,
+};
 
 export function normalizeSchemaHashInput(hash: string, label: string): string {
   const normalized = hash.trim().toLowerCase();
@@ -19,6 +32,37 @@ export function normalizeSchemaHashInput(hash: string, label: string): string {
 
 export function shortSchemaHash(hash: string): string {
   return normalizeSchemaHashInput(hash, "schema hash").slice(0, SHORT_SCHEMA_HASH_LENGTH);
+}
+
+/**
+ * Rust's canonical composite-index order: lexicographic over column names
+ * compared as UTF-8 bytes, i.e. by Unicode code point. JavaScript's `<` on
+ * strings compares UTF-16 code units, which orders U+E000..U+FFFF after
+ * astral characters and would diverge from Rust's schema hash.
+ */
+export function canonicalCompositeIndexOrder(indexes: readonly (readonly string[])[]): string[][] {
+  return indexes
+    .map((columns) => [...columns])
+    .sort((left, right) => {
+      for (let index = 0; index < Math.min(left.length, right.length); index++) {
+        const order = compareCodePoints(left[index]!, right[index]!);
+        if (order !== 0) {
+          return order;
+        }
+      }
+      return left.length - right.length;
+    });
+}
+
+function compareCodePoints(left: string, right: string): number {
+  const leftPoints = Array.from(left, (char) => char.codePointAt(0)!);
+  const rightPoints = Array.from(right, (char) => char.codePointAt(0)!);
+  for (let index = 0; index < Math.min(leftPoints.length, rightPoints.length); index++) {
+    if (leftPoints[index] !== rightPoints[index]) {
+      return leftPoints[index]! - rightPoints[index]!;
+    }
+  }
+  return leftPoints.length - rightPoints.length;
 }
 
 export function structuralSchemaHash(schema: WasmSchema): string {
@@ -38,14 +82,21 @@ export function structuralSchemaHash(schema: WasmSchema): string {
         writer.byte(0);
       }
     }
+    if (table.composite_indexes?.length) {
+      writer.stringBytes("composite_indexes\0");
+      writer.stringBytes(JSON.stringify(canonicalCompositeIndexOrder(table.composite_indexes)));
+    }
+    if (table.branchBy?.length) {
+      writer.stringBytes("branch_by\0");
+      writer.stringBytes(JSON.stringify(table.branchBy));
+      writer.byte(0);
+    }
   }
 
   return bytesToHex(blake3(writer.bytes()));
 }
 
-export function columnTypeSignature(columnType: WasmColumnType): string {
-  return JSON.stringify(columnType);
-}
+export { columnTypeSignature };
 
 class StructuralHashWriter {
   private chunks: number[] = [];
@@ -75,6 +126,12 @@ class StructuralHashWriter {
   u64(value: number): void {
     const bytes = new Uint8Array(8);
     new DataView(bytes.buffer).setBigUint64(0, BigInt(value), true);
+    this.bytes(bytes);
+  }
+
+  i32(value: number): void {
+    const bytes = new Uint8Array(4);
+    new DataView(bytes.buffer).setInt32(0, value, true);
     this.bytes(bytes);
   }
 
@@ -108,16 +165,15 @@ function hashColumns(writer: StructuralHashWriter, columns: ColumnDescriptor[]):
     if (column.default) {
       writer.byte(1);
       hashValue(writer, column.default);
-    } else {
-      writer.byte(0);
     }
 
     if (column.merge_strategy) {
       writer.byte(1);
-      writer.byte(column.merge_strategy === "Counter" ? 1 : 2);
+      writer.byte(MERGE_STRATEGY_HASH_BYTES[column.merge_strategy]);
     } else {
       writer.byte(0);
     }
+    writer.byte(0); // Column delimiter, including when a default is present.
   }
 }
 
@@ -125,7 +181,7 @@ function hashValue(writer: StructuralHashWriter, value: Value): void {
   switch (value.type) {
     case "Integer":
       writer.byte(1);
-      writer.i64(value.value);
+      writer.i32(value.value);
       return;
     case "BigInt":
       writer.byte(2);
@@ -171,10 +227,19 @@ function hashValue(writer: StructuralHashWriter, value: Value): void {
         hashValue(writer, inner);
       }
       return;
+    case "Enum":
+      writer.byte(14);
+      writer.stringBytes(value.value.case);
+      writer.byte(0);
+      writer.u64(value.value.values.length);
+      for (const inner of value.value.values) hashValue(writer, inner);
+      return;
     case "Null":
       writer.byte(9);
       return;
   }
+  const exhaustive: never = value;
+  throw new Error(`Unhandled schema default: ${String(exhaustive)}`);
 }
 
 function hashColumnType(writer: StructuralHashWriter, columnType: WasmColumnType): void {
@@ -236,7 +301,7 @@ function hashColumnType(writer: StructuralHashWriter, columnType: WasmColumnType
       writer.byte(11);
       if (columnType.schema) {
         writer.byte(1);
-        const encoded = new TextEncoder().encode(JSON.stringify(columnType.schema));
+        const encoded = new TextEncoder().encode(canonicalJsonSchema(columnType.schema));
         writer.u64(encoded.length);
         writer.bytes(encoded);
       } else {
@@ -258,14 +323,8 @@ function hashColumnType(writer: StructuralHashWriter, columnType: WasmColumnType
 }
 
 function uuidBytes(value: string): Uint8Array {
-  const hex = value.replace(/-/g, "");
-  if (!/^[0-9a-fA-F]{32}$/.test(hex)) {
-    throw new Error(`Invalid UUID default value: ${value}`);
-  }
-  const bytes = new Uint8Array(16);
-  for (let index = 0; index < bytes.length; index += 1) {
-    bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
-  }
+  const bytes = parseUuidBytes(value);
+  if (!bytes) throw new Error(`Invalid UUID default value: ${value}`);
   return bytes;
 }
 
@@ -275,6 +334,7 @@ function columnsEqual(left: ColumnDescriptor, right: ColumnDescriptor): boolean 
     left.nullable === right.nullable &&
     left.references === right.references &&
     left.merge_strategy === right.merge_strategy &&
+    structuralValuesEqual(left.default, right.default) &&
     columnTypeSignature(left.column_type) === columnTypeSignature(right.column_type)
   );
 }
@@ -295,6 +355,15 @@ function indexedColumnsEqual(
   return leftColumns.every((column, index) => column === rightColumns[index]);
 }
 
+function compositeIndexesEqual(
+  left: readonly (readonly string[])[] | undefined,
+  right: readonly (readonly string[])[] | undefined,
+): boolean {
+  const a = (left ?? []).map((columns) => JSON.stringify(columns)).sort();
+  const b = (right ?? []).map((columns) => JSON.stringify(columns)).sort();
+  return a.length === b.length && a.every((index, position) => index === b[position]);
+}
+
 export function tableSchemasEqual(
   left: WasmSchema[string] | undefined,
   right: WasmSchema[string] | undefined,
@@ -308,6 +377,9 @@ export function tableSchemasEqual(
   }
 
   if (!indexedColumnsEqual(left.indexed_columns, right.indexed_columns)) {
+    return false;
+  }
+  if (!compositeIndexesEqual(left.composite_indexes, right.composite_indexes)) {
     return false;
   }
   if (!indexedColumnsEqual(left.branchBy, right.branchBy)) {

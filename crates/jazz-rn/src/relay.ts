@@ -63,6 +63,8 @@ export type NativeForegroundRuntimeFactory = {
  * contract onto these commands.
  */
 export type NativeForegroundRuntime = {
+  /** Additive capability; absent on native builds predating snapshot capture. */
+  readonly supportsSnapshotCapture?: boolean;
   execute(command: Uint8Array): Uint8Array;
   tick(): void;
   /** Native typed liveness; unexpected native failures still throw. */
@@ -101,6 +103,7 @@ export type NativeForegroundCommand =
       transaction?: number;
     }
   | { type: "localCurrentRow"; table: string; rowId: Uint8Array }
+  | { type: "captureSnapshot" }
   | {
       type: "subscribe";
       query: Uint8Array;
@@ -161,6 +164,14 @@ export type NativeForegroundCommand =
   | { type: "nativeSessionMetadata" }
   | { type: "writeState"; txId: Uint8Array }
   | { type: "drainMutationErrors" }
+  /** Mutation errors and the current credential refusal, drained after a tick. */
+  | { type: "drainTickEvents" }
+  /** The slow-query report due now, naming the app (append-only command). */
+  | { type: "takeSlowQueryReport"; app?: string }
+  /** Report query runs of at least `ms` milliseconds; 0 turns the log off. */
+  | { type: "setSlowQueryThresholdMs"; ms: number }
+  /** Commits still waiting for the server's verdict (append-only command). */
+  | { type: "pendingUploadCount" }
   | {
       type: "beginStreamingMutation";
       mutation: "insert" | "update" | "upsert";
@@ -181,7 +192,7 @@ export type NativeForegroundCommand =
       updatedAtMs?: number;
     };
 /** The existing core transaction semantics selected by the foreground codec. */
-export type NativeForegroundTransactionKind = "mergeable" | "exclusive";
+export type NativeForegroundTransactionKind = "mergeable" | "serializable";
 
 export type NativeForegroundResponse =
   | {
@@ -197,6 +208,8 @@ export type NativeForegroundResponse =
       configured: boolean;
       explicitlyOffline: boolean;
       connected: boolean;
+      /** The upstream refused the scope's credential, with its reason. */
+      authRejected: string | null;
     }
   | { type: "probe"; abiVersion: number }
   | { type: "ticked" }
@@ -206,7 +219,14 @@ export type NativeForegroundResponse =
   | { type: "unsubscribed"; closed: boolean }
   | { type: "closed"; closed: boolean }
   | { type: "pending"; operation: number }
-  | { type: "operationError"; reason: string }
+  | {
+      type: "operationError";
+      reason: string;
+      /** The stable core `ErrorCode` string when a core error caused the failure. */
+      code?: string;
+      /** The stable core `Reason` name when the core error has one. */
+      reasonName?: string;
+    }
   | { type: "cancelled"; cancelled: boolean }
   | { type: "transactionOpened"; transaction: number }
   | { type: "inserted"; rowId: Uint8Array }
@@ -216,11 +236,30 @@ export type NativeForegroundResponse =
   | { type: "transactionSettled"; txId: Uint8Array }
   | { type: "writeState"; stateJson: string }
   | { type: "mutationErrors"; eventsJson: string }
+  | {
+      type: "tickEvents";
+      eventsJson: string;
+      /**
+       * The upstream's current refusal of the scope's credential. Each refusal
+       * has a new `sequence`, even when its reason repeats.
+       */
+      authRejection: { sequence: number; reason: string } | null;
+      /**
+       * The upstream's current connection failure other than a refused
+       * credential, and whether the native socket is still retrying it. Each
+       * failure has a new `sequence`.
+       */
+      upstreamFailure: { sequence: number; reason: string; retrying: boolean } | null;
+    }
   | { type: "streamingMutationOpened"; upload: number }
   | { type: "streamingMutationPushed" }
   | { type: "streamingMutationAborted"; aborted: boolean }
   | { type: "mutationCommitted"; txId: Uint8Array; rowId: Uint8Array }
-  | { type: "permissionAdvice"; advice: "allowed" | "denied" | "unknown" };
+  | { type: "permissionAdvice"; advice: "allowed" | "denied" | "unknown" }
+  /** One line per slow query shape; empty between reports. */
+  | { type: "slowQueryReport"; lines: string[] }
+  | { type: "slowQueryThresholdSet" }
+  | { type: "pendingUploadCount"; count: number };
 
 export type NativeForegroundSubscriptionEvent =
   | {
@@ -302,6 +341,9 @@ export function installNativeForegroundRuntime(): NativeForegroundRuntimeFactory
       if (!(capability instanceof Uint8Array) || capability.byteLength !== 32) {
         throw new Error("Jazz native foreground runtime requires a 32-byte admitted capability");
       }
+      // A relay store written in a storage format this build does not read
+      // is thrown unchanged as an Error with `code` "unsupported_storage_codecs",
+      // the stable code every platform uses for that refusal.
       const foreground = installed.openAttached(capability) as Partial<NativeForegroundRuntime>;
       if (
         !foreground ||
@@ -321,6 +363,7 @@ export function installNativeForegroundRuntime(): NativeForegroundRuntimeFactory
             }
           : undefined;
       return {
+        supportsSnapshotCapture: foreground.supportsSnapshotCapture === true,
         isClosed:
           typeof foreground.isClosed === "function" ? () => foreground.isClosed!() : undefined,
         execute(command: Uint8Array): Uint8Array {
@@ -361,6 +404,20 @@ export function encodeNativeForegroundCommand(command: NativeForegroundCommand):
   if (command.type === "nativeConnectionStatus") return Uint8Array.of(21);
   if (command.type === "nativeSessionMetadata") return Uint8Array.of(22);
   if (command.type === "drainMutationErrors") return Uint8Array.of(24);
+  if (command.type === "captureSnapshot") return Uint8Array.of(34);
+  if (command.type === "drainTickEvents") return Uint8Array.of(35);
+  if (command.type === "pendingUploadCount") return Uint8Array.of(38);
+  if (command.type === "takeSlowQueryReport") {
+    return concatForegroundBytes(
+      Uint8Array.of(36),
+      command.app === undefined
+        ? Uint8Array.of(0)
+        : concatForegroundBytes(Uint8Array.of(1), encodeForegroundString(command.app)),
+    );
+  }
+  if (command.type === "setSlowQueryThresholdMs") {
+    return concatForegroundBytes(Uint8Array.of(37), encodeForegroundU64(command.ms));
+  }
   if (command.type === "waitForPendingWrites") {
     return concatForegroundBytes(Uint8Array.of(33), encodeForegroundString(command.tier));
   }
@@ -410,8 +467,8 @@ export function encodeNativeForegroundCommand(command: NativeForegroundCommand):
     return concatForegroundBytes(Uint8Array.of(8), encodeForegroundU64(command.operation));
   }
   if (command.type === "beginTransaction") {
-    if (command.kind !== "mergeable" && command.kind !== "exclusive") {
-      throw new Error("Jazz native foreground transaction kind must be mergeable or exclusive");
+    if (command.kind !== "mergeable" && command.kind !== "serializable") {
+      throw new Error("Jazz native foreground transaction kind must be mergeable or serializable");
     }
     return Uint8Array.of(9, command.kind === "mergeable" ? 0 : 1);
   }
@@ -675,16 +732,84 @@ export function decodeNativeForegroundResponse(bytes: Uint8Array): NativeForegro
     };
   if (tag === 22 && bytes.length === 2 && (bytes[1] === 0 || bytes[1] === 1))
     return { type: "streamingMutationAborted", aborted: bytes[1] === 1 };
+  if (tag === 25) {
+    // CodedOperationError: postcard code string, optional reason name, then
+    // the reason string.
+    const [code, afterCode] = decodeForegroundPrefixedString(bytes, 1, "error code");
+    const option = bytes[afterCode];
+    let reasonName: string | undefined;
+    let next = afterCode + 1;
+    if (option === 1) {
+      [reasonName, next] = decodeForegroundPrefixedString(bytes, next, "error reason name");
+    } else if (option !== 0) {
+      throw new Error("Malformed native operation error reason name");
+    }
+    const reason = decodeForegroundString(bytes.subarray(next), "operation error");
+    return reasonName === undefined
+      ? { type: "operationError", code, reason }
+      : { type: "operationError", code, reasonName, reason };
+  }
+  if (tag === 26) {
+    // TickEvents: postcard events string, then `Option<NativeAuthRejection>`
+    // (0, or 1, the sequence varint and the reason string), then
+    // `Option<NativeUpstreamFailure>` (the same, then a retrying bool).
+    const [eventsJson, afterEvents] = decodeForegroundPrefixedString(bytes, 1, "tick events");
+    const readSequenced = (offset: number, label: string): [number, string, number] | null => {
+      const option = bytes[offset];
+      if (option === 0) return null;
+      if (option !== 1) throw new Error(`Malformed native operation ${label}`);
+      let sequenceEnd = offset + 1;
+      while (sequenceEnd < bytes.length && (bytes[sequenceEnd]! & 0x80) !== 0) sequenceEnd++;
+      const sequence = decodeForegroundU64(
+        bytes.subarray(offset + 1, sequenceEnd + 1),
+        `${label} sequence`,
+      );
+      const [reason, next] = decodeForegroundPrefixedString(bytes, sequenceEnd + 1, label);
+      return [sequence, reason, next];
+    };
+    const rejection = readSequenced(afterEvents, "auth rejection");
+    const afterRejection = rejection ? rejection[2] : afterEvents + 1;
+    const failure = readSequenced(afterRejection, "upstream failure");
+    const retrying = failure ? bytes[failure[2]] : undefined;
+    const end = failure ? failure[2] + 1 : afterRejection + 1;
+    if (end !== bytes.length || (failure && retrying !== 0 && retrying !== 1))
+      throw new Error("Malformed native operation tick events");
+    return {
+      type: "tickEvents",
+      eventsJson,
+      authRejection: rejection ? { sequence: rejection[0], reason: rejection[1] } : null,
+      upstreamFailure: failure
+        ? { sequence: failure[0], reason: failure[1], retrying: retrying === 1 }
+        : null,
+    };
+  }
+  if (tag === 27) {
+    const lines = JSON.parse(decodeForegroundString(bytes.subarray(1), "slow query report"));
+    if (!Array.isArray(lines) || !lines.every((line) => typeof line === "string"))
+      throw new Error("Malformed native slow query report");
+    return { type: "slowQueryReport", lines };
+  }
+  if (tag === 28 && bytes.length === 1) return { type: "slowQueryThresholdSet" };
+  if (tag === 29) {
+    return {
+      type: "pendingUploadCount",
+      count: decodeForegroundU64(bytes.subarray(1), "pending upload count"),
+    };
+  }
   if (
     tag === 16 &&
-    bytes.length === 4 &&
-    bytes.subarray(1).every((value) => value === 0 || value === 1)
+    bytes.length >= 5 &&
+    bytes.subarray(1, 5).every((value) => value === 0 || value === 1) &&
+    (bytes[4] === 1 || bytes.length === 5)
   ) {
+    // Three flags, then postcard `Option<String>`: 0, or 1 and the string.
     return {
       type: "nativeConnectionStatus",
       configured: bytes[1] === 1,
       explicitlyOffline: bytes[2] === 1,
       connected: bytes[3] === 1,
+      authRejected:
+        bytes[4] === 1 ? decodeForegroundString(bytes.subarray(5), "auth rejection") : null,
     };
   }
   if (tag === 14 && bytes.length === 2 && (bytes[1] === 0 || bytes[1] === 1)) {
@@ -795,6 +920,21 @@ function decodeForegroundBytes(bytes: Uint8Array, label: string): Uint8Array {
   throw new Error(`Jazz native foreground returned malformed ${label}`);
 }
 
+/** A postcard length-prefixed string at `start`, and the offset after it. */
+function decodeForegroundPrefixedString(
+  bytes: Uint8Array,
+  start: number,
+  label: string,
+): [string, number] {
+  let lengthEnd = start;
+  while (lengthEnd < bytes.length && (bytes[lengthEnd]! & 0x80) !== 0) lengthEnd++;
+  if (lengthEnd >= bytes.length) throw new Error(`Malformed native operation ${label}`);
+  const length = decodeForegroundU64(bytes.subarray(start, lengthEnd + 1), `${label} length`);
+  const next = lengthEnd + 1 + length;
+  if (next > bytes.length) throw new Error(`Malformed native operation ${label}`);
+  return [decodeForegroundUtf8(bytes, lengthEnd + 1, length, label), next];
+}
+
 function decodeForegroundString(bytes: Uint8Array, label: string): string {
   const encoded = decodeForegroundBytes(bytes, label);
   return decodeForegroundUtf8(encoded, 0, encoded.byteLength, label);
@@ -868,6 +1008,9 @@ function decodeForegroundSubscriptionEvents(
   return events;
 }
 
+// Bounded so `fromCharCode.apply` stays well under engine argument limits.
+const ASCII_DECODE_CHUNK = 8192;
+
 function decodeForegroundUtf8(
   bytes: Uint8Array,
   start: number,
@@ -877,6 +1020,26 @@ function decodeForegroundUtf8(
   const slice = bytes.subarray(start, start + length);
   if (slice.byteLength !== length)
     throw new Error(`Jazz native foreground returned truncated ${label}`);
+  // Terminal operations arrive as JSON number arrays, so these payloads are
+  // almost always ASCII. ASCII is valid UTF-8 and maps byte-for-code-unit, so
+  // skip the per-byte `%xx` round trip below (#3369).
+  let ascii = true;
+  for (let index = 0; index < slice.length; index += 1) {
+    if (slice[index]! >= 0x80) {
+      ascii = false;
+      break;
+    }
+  }
+  if (ascii) {
+    let text = "";
+    for (let offset = 0; offset < slice.length; offset += ASCII_DECODE_CHUNK) {
+      text += String.fromCharCode.apply(
+        null,
+        slice.subarray(offset, offset + ASCII_DECODE_CHUNK) as unknown as number[],
+      );
+    }
+    return text;
+  }
   // React Native's configured TS lib deliberately does not promise
   // `TextDecoder`; `decodeURIComponent` is available in Hermes and gives us a
   // strict UTF-8 decode without adding a platform polyfill to this tiny ABI.

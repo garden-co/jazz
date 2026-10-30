@@ -6,18 +6,22 @@
 
 use std::collections::BTreeMap;
 
-use jazz::db::{Db, DbConfig, DbIdentity, PreparedQuery, block_on};
-use jazz::groove::records::Value;
-use jazz::groove::storage::MemoryStorage;
+use std::cell::Cell;
+
+use jazz::db::CurrentRow;
+use jazz::db::{
+    Db, DbConfig, DbIdentity, PreparedQuery, ReadOpts, SubscriptionEvent, SubscriptionStream,
+    UpdateOptions, block_on,
+};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::node::CurrentRow;
 use jazz::query::{OrderDirection, Query, col, eq, lit};
+use jazz::records::Value;
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 
 const EDITORS: usize = 8;
-type BenchDb = Db<MemoryStorage>;
+type BenchDb = Db;
 
 pub struct Fixture {
     db: BenchDb,
@@ -28,6 +32,16 @@ pub struct Fixture {
     layer_shapes: PreparedQuery,
     asset_metadata: PreparedQuery,
     checkpoints: PreparedQuery,
+    next_shape: Cell<usize>,
+    cursor_moves: Cell<i32>,
+}
+
+/// The canvas and cursor surfaces an editor keeps subscribed while working.
+/// Layer, asset and checkpoint shelves are opened by [`Fixture::open_canvas`]
+/// but are not needed to observe shape or cursor edits.
+pub struct LiveCanvas {
+    canvas: SubscriptionStream,
+    cursors: SubscriptionStream,
 }
 
 impl Fixture {
@@ -156,7 +170,92 @@ impl Fixture {
             layer_shapes,
             asset_metadata,
             checkpoints,
+            next_shape: Cell::new(shape_count),
+            cursor_moves: Cell::new(0),
         }
+    }
+
+    /// Opens every surface the canvas page subscribes to (ordered shapes,
+    /// layers, cursors, asset shelf and checkpoint shelf) and waits for each
+    /// one's first result. Returns the total number of rows delivered, so the
+    /// caller can prove the whole canvas was materialized.
+    pub fn open_canvas(&self) -> usize {
+        [
+            &self.ordered_shapes,
+            &self.layers,
+            &self.cursor_fanout,
+            &self.asset_metadata,
+            &self.checkpoints,
+        ]
+        .into_iter()
+        .map(|query| {
+            let mut stream = self.subscribe(query);
+            initial_rows(&mut stream)
+        })
+        .sum()
+    }
+
+    /// Opens the ordered canvas and cursor subscriptions an editor keeps live.
+    pub fn live_canvas(&self) -> LiveCanvas {
+        let mut canvas = self.subscribe(&self.ordered_shapes);
+        let mut cursors = self.subscribe(&self.cursor_fanout);
+        assert_eq!(initial_rows(&mut canvas), self.next_shape.get());
+        assert_eq!(initial_rows(&mut cursors), EDITORS);
+        LiveCanvas { canvas, cursors }
+    }
+
+    /// Adds one shape on top of the canvas and waits until the live canvas
+    /// subscription shows it. Returns the number of rows the subscription added.
+    pub fn add_shape(&self, live: &mut LiveCanvas) -> usize {
+        let shape = self.next_shape.get();
+        self.next_shape.set(shape + 1);
+        insert(
+            &self.db,
+            "shapes",
+            row_id(4, shape),
+            BTreeMap::from([
+                ("canvas".into(), Value::Uuid(row_id(1, 0).0)),
+                ("layer".into(), Value::Uuid(row_id(2, shape % 4).0)),
+                ("z_index".into(), Value::I32(shape as i32)),
+                ("x".into(), Value::I32(shape as i32)),
+                ("y".into(), Value::I32((shape / 4) as i32)),
+                ("kind".into(), Value::String("rect".into())),
+            ]),
+        );
+        match block_on(live.canvas.next_event()).expect("canvas observes the new shape") {
+            SubscriptionEvent::Delta { added, .. } => added.len(),
+            event => panic!("unexpected canvas event: {event:?}"),
+        }
+    }
+
+    /// Moves one collaborator's cursor and waits until the live cursor
+    /// subscription shows it. Returns the number of cursor rows updated.
+    pub fn move_cursor(&self, live: &mut LiveCanvas) -> usize {
+        let step = self.cursor_moves.get() + 1;
+        self.cursor_moves.set(step);
+        let write = block_on(self.db.update(
+            "cursors",
+            row_id(3, 1),
+            BTreeMap::from([
+                // Off the seeded positions, so every move changes the row:
+                // a write that leaves the cells as they were shows no delta.
+                ("x".into(), Value::I32(1_000 + step)),
+                ("y".into(), Value::I32(1_000 + step * 2)),
+            ]),
+            UpdateOptions::default(),
+        ))
+        .expect("move PosterShop cursor");
+        block_on(write.wait(DurabilityTier::Local)).expect("cursor move reaches local durability");
+        match block_on(live.cursors.next_event()).expect("cursor surface observes the move") {
+            SubscriptionEvent::Delta { updated, .. } => updated.len(),
+            event => panic!("unexpected cursor event: {event:?}"),
+        }
+    }
+
+    /// Whether the live canvas subscription has an undelivered event. Cursor
+    /// moves must not wake the canvas.
+    pub fn canvas_has_pending_event(live: &mut LiveCanvas) -> bool {
+        live.canvas.try_next_event().is_some()
     }
 
     pub fn ordered_shape_count(&self) -> usize {
@@ -174,7 +273,7 @@ impl Fixture {
     pub fn ordered_z_indices(&self) -> Vec<i32> {
         self.read(&self.ordered_shapes)
             .into_iter()
-            .map(|row| match row.cell(&self.shapes, "z_index") {
+            .map(|row| match row.cell("z_index") {
                 Some(Value::I32(value)) => value,
                 value => panic!("unexpected z_index: {value:?}"),
             })
@@ -192,8 +291,21 @@ impl Fixture {
     pub fn shape_indexed_columns(&self) -> Vec<String> {
         self.shapes.indexed_columns.iter().cloned().collect()
     }
+    fn subscribe(&self, query: &PreparedQuery) -> SubscriptionStream {
+        block_on(self.db.subscribe(query, ReadOpts::default()))
+            .expect("open PosterShop subscription")
+    }
     fn read(&self, query: &PreparedQuery) -> Vec<CurrentRow> {
         self.db.read(query).expect("PosterShop benchmark read")
+    }
+}
+
+fn initial_rows(stream: &mut SubscriptionStream) -> usize {
+    match block_on(stream.next_event()).expect("subscription has an initial result") {
+        SubscriptionEvent::Delta {
+            reset: true, added, ..
+        } => added.len(),
+        event => panic!("unexpected initial PosterShop event: {event:?}"),
     }
 }
 
@@ -205,7 +317,8 @@ fn schema() -> JazzSchema {
                 TableSchemaBuilder::new("layers")
                     .fk_column("canvas", "canvases")
                     .column("z_index", ColumnType::Integer)
-                    .index_only(["canvas", "z_index"]),
+                    .index_only(["canvas", "z_index"])
+                    .composite_index(["canvas", "z_index"]),
             )
             .table(
                 TableSchemaBuilder::new("shapes")
@@ -218,7 +331,9 @@ fn schema() -> JazzSchema {
                     // Mirrors the app's `indexOnly([canvasId, zIndex])` and
                     // `indexOnly([layerId, zIndex])` paths. Do not collapse
                     // this to an imagined triple-key workload.
-                    .index_only(["canvas", "layer", "z_index"]),
+                    .index_only(["canvas", "layer", "z_index"])
+                    .composite_index(["canvas", "z_index"])
+                    .composite_index(["layer", "z_index"]),
             )
             .table(
                 TableSchemaBuilder::new("cursors")
@@ -226,20 +341,23 @@ fn schema() -> JazzSchema {
                     .column("editor", ColumnType::Integer)
                     .column("x", ColumnType::Integer)
                     .column("y", ColumnType::Integer)
-                    .index_only(["canvas", "editor"]),
+                    .index_only(["canvas", "editor"])
+                    .composite_index(["canvas", "editor"]),
             )
             .table(
                 TableSchemaBuilder::new("assets")
                     .fk_column("canvas", "canvases")
                     .column("name", ColumnType::Text)
                     .column("byte_length", ColumnType::Integer)
-                    .index_only(["canvas", "name"]),
+                    .index_only(["canvas", "name"])
+                    .composite_index(["canvas", "name"]),
             )
             .table(
                 TableSchemaBuilder::new("checkpoints")
                     .fk_column("canvas", "canvases")
                     .column("label", ColumnType::Text)
-                    .index_only(["canvas", "label"]),
+                    .index_only(["canvas", "label"])
+                    .composite_index(["canvas", "label"]),
             )
             .build(),
     )
@@ -254,11 +372,8 @@ fn open_db() -> (BenchDb, TableSchema) {
         .find(|table| table.name == "shapes")
         .expect("shapes table")
         .clone();
-    let families = schema.column_families();
-    let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let db = block_on(Db::open(DbConfig::new(
         schema,
-        MemoryStorage::new(&family_refs).expect("valid memory storage families"),
         DbIdentity {
             node: NodeUuid::from_bytes([0x51; 16]),
             author: AuthorSubject::SYSTEM,

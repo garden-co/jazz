@@ -15,8 +15,10 @@ use support::{TestingClient, has_row, wait_for_rows};
 const NOT_REACHED_WINDOW: Duration = Duration::from_millis(1200);
 
 fn document_schema() -> Schema {
+    use jazz::tools::test_support::AllowAll;
     SchemaBuilder::new()
         .table(TableSchema::builder("documents").column("title", ColumnType::Text))
+        .allow_all()
         .build()
 }
 
@@ -127,30 +129,25 @@ async fn offline_durable_write_keeps_global_target_and_replays_on_reconnect() {
 /// ```
 #[test]
 fn detaching_the_upstream_keeps_global_wait_pending_until_reconnected_authority_confirms() {
-    use std::cell::Cell;
-    use std::rc::Rc;
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
 
     use jazz::db::{Db, DbConfig, DbIdentity, block_on};
-    use jazz::groove::records::Value;
-    use jazz::groove::storage::MemoryStorage;
     use jazz::ids::{AuthorSubject, NodeUuid};
+    use jazz::records::Value;
     use jazz::schema::JazzSchema;
     use jazz::tools::{ColumnType, SchemaBuilder, TableSchema};
-    use jazz::tx::{DurabilityTier, Fate};
+    use jazz::tx::DurabilityTier;
     use jazz_testkit::duplex_transport::duplex;
 
+    use jazz::tools::test_support::AllowAll;
     let source = SchemaBuilder::new()
         .table(TableSchema::builder("documents").column("title", ColumnType::Text))
+        .allow_all()
         .build();
     let schema = JazzSchema::new(&source).expect("reconnect durability public schema compiles");
-    let column_families = schema.column_families();
-    let refs = column_families
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
     let node = block_on(Db::open(DbConfig::new(
         schema.clone(),
-        MemoryStorage::new(&refs).expect("valid memory storage families"),
         DbIdentity {
             node: NodeUuid::from_bytes([0x51; 16]),
             author: AuthorSubject::for_test_bytes([0xa9; 16]),
@@ -172,23 +169,26 @@ fn detaching_the_upstream_keeps_global_wait_pending_until_reconnected_authority_
     .expect("insert local document");
     let tx_id = write.mergeable_tx_id();
     assert_eq!(
-        node.write_state(tx_id)
-            .expect("local write state")
-            .durability,
-        DurabilityTier::Local,
-        "the write must be locally durable immediately"
+        block_on(node.wait_for_transaction(tx_id, DurabilityTier::Local))
+            .expect("the write must be locally durable immediately"),
+        tx_id,
     );
 
-    let global_wait = Rc::new(Cell::new(None));
-    let observed_wait = Rc::clone(&global_wait);
-    node.wait_for_transaction_with(tx_id, DurabilityTier::Global, move |result| {
-        observed_wait.set(Some(result.is_ok()));
-    });
+    // The engine's wait re-checks the write's fate on every poll, so the
+    // test polls it once after each round of ticks.
+    let mut global_wait = Box::pin(node.wait_for_transaction(tx_id, DurabilityTier::Global));
+    let mut poll_global = || match global_wait
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()))
+    {
+        Poll::Ready(result) => Some(result.is_ok()),
+        Poll::Pending => None,
+    };
     for _ in 0..3 {
         block_on(node.tick()).expect("queue the write for the silent upstream");
     }
     assert_eq!(
-        global_wait.get(),
+        poll_global(),
         None,
         "the global wait must stay pending while the upstream is installed"
     );
@@ -198,7 +198,7 @@ fn detaching_the_upstream_keeps_global_wait_pending_until_reconnected_authority_
         block_on(node.tick()).expect("process the detached connection");
     }
     assert_eq!(
-        global_wait.get(),
+        poll_global(),
         None,
         "detaching must not complete or downgrade the pending Global wait"
     );
@@ -207,14 +207,9 @@ fn detaching_the_upstream_keeps_global_wait_pending_until_reconnected_authority_
             .expect("Local durability remains available after detach"),
         tx_id,
     );
-    let state = node.write_state(tx_id).expect("write state after detach");
-    assert_eq!(state.fate, Fate::Pending);
-    assert_eq!(state.durability, DurabilityTier::Local);
-    assert_eq!(state.global_time, None);
 
     let authority = block_on(Db::open_history_complete(DbConfig::new(
         schema,
-        MemoryStorage::new(&refs).expect("valid authority storage families"),
         DbIdentity {
             node: NodeUuid::from_bytes([0x52; 16]),
             author: AuthorSubject::SYSTEM,
@@ -223,36 +218,33 @@ fn detaching_the_upstream_keeps_global_wait_pending_until_reconnected_authority_
     .expect("open authority database");
     let (replacement_transport, authority_transport) = duplex();
     let _replacement = block_on(node.connect_upstream(replacement_transport));
-    let _subscriber = authority.accept_subscriber(
-        authority_transport,
-        AuthorSubject::for_test_bytes([0xa9; 16]),
-    );
+    let _subscriber = authority
+        .accept_subscriber(
+            authority_transport,
+            AuthorSubject::for_test_bytes([0xa9; 16]),
+        )
+        .unwrap();
     for _ in 0..3 {
         block_on(node.tick()).expect("queue replay without an authority response");
     }
     assert_eq!(
-        global_wait.get(),
+        poll_global(),
         None,
         "attaching a replacement must not satisfy Global without confirmation"
     );
 
+    let mut confirmed = None;
     for _ in 0..100 {
         block_on(authority.tick()).expect("authority processes the replayed write");
         block_on(node.tick()).expect("alice receives authority confirmation");
-        if global_wait.get().is_some() {
+        confirmed = poll_global();
+        if confirmed.is_some() {
             break;
         }
     }
     assert_eq!(
-        global_wait.get(),
+        confirmed,
         Some(true),
         "the original Global wait must succeed after authority confirmation"
-    );
-    let state = node.write_state(tx_id).expect("confirmed write state");
-    assert_eq!(state.fate, Fate::Accepted);
-    assert_eq!(state.durability, DurabilityTier::Global);
-    assert!(
-        state.global_time.is_some(),
-        "Global requires an authority timestamp"
     );
 }

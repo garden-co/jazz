@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Keep the Jazz and Groove invariant registries mechanically honest.
+# Keep the Jazz invariant registry mechanically honest.
 # `now` + `untested` is intentionally visible documented debt, not a failure.
 
 # Do not inherit errexit: expected missing citations are accumulated below and
@@ -113,11 +113,13 @@ citation_matches_test_source() {
     leaf=${modules[${#modules[@]} - 1]}
     case $crate in
         jazz) [[ $source_path == crates/jazz/* ]] || return 1 ;;
-        groove) [[ $source_path == crates/groove/* ]] || return 1 ;;
         jazz_tools) [[ $source_path == crates/jazz-testkit/* ]] || return 1 ;;
         jazz_server) [[ $source_path == crates/jazz-server/* ]] || return 1 ;;
+        # Jazz layer crates (crates/jazz/layers/<layer>, package jazz-<layer>).
+        jazz_types | jazz_model | jazz_protocol | jazz_db)
+            [[ $source_path == "crates/jazz/layers/${crate#jazz_}/"* ]] || return 1 ;;
     esac
-    if [[ $crate != jazz && $crate != groove && $crate != jazz_tools && $crate != jazz_server ]]; then
+    if [[ $crate != jazz && $crate != jazz_tools && $crate != jazz_server && $source_path != crates/jazz/layers/* ]]; then
         [[ $source_path == "crates/"*"/tests/$crate.rs" ]] && return 0
         return 1
     fi
@@ -186,7 +188,7 @@ check_registry() {
     parse_registry "$registry"
     while IFS=$'\x1f' read -r domain id invariant tests impl status coverage; do
         [[ -n $id ]] || continue
-        if [[ ! $domain =~ ^(jazz|groove)$ ]]; then
+        if [[ ! $domain =~ ^jazz$ ]]; then
             fail "$registry: invalid invariant domain '$domain'"
             continue
         fi

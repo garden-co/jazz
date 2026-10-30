@@ -4,7 +4,6 @@
 
 import type {
   Schema,
-  Column,
   ScalarSqlType,
   SqlType,
   TablePolicies as DslTablePolicies,
@@ -24,7 +23,9 @@ import type {
   Value,
 } from "../drivers/types.js";
 import { analyzeRelations } from "./relation-analyzer.js";
+import { mapPolicyExpr, type PolicyLeafMappers } from "../policy-expr-map.js";
 import { toValue } from "../runtime/value-converter.js";
+import { assertSchemaNameAllowed } from "../schema-name.js";
 
 const map: Record<ScalarSqlType, ColumnType> = {
   TEXT: { type: "Text" },
@@ -40,7 +41,7 @@ const map: Record<ScalarSqlType, ColumnType> = {
 /**
  * Convert a DSL SqlType to WasmColumnType format.
  */
-function sqlTypeToWasm(sqlType: SqlType): ColumnType {
+export function sqlTypeToWasm(sqlType: SqlType): ColumnType {
   if (typeof sqlType !== "string") {
     if (sqlType.kind === "ENUM") {
       if (sqlType.cases) {
@@ -120,6 +121,12 @@ function columnMergeStrategyToWasm(
       return "Counter";
     case "g-set":
       return "GSet";
+    case "text":
+      return "Text";
+    case "markdown":
+      return "Markdown";
+    case "html":
+      return "Html";
   }
 }
 
@@ -134,96 +141,18 @@ function clonePolicyLiteralValue(value: DslPolicyLiteralValue): PolicyLiteralVal
   return literalToWasmValue(value.value);
 }
 
+const clonePolicyLeaves: PolicyLeafMappers = {
+  value: clonePolicyValue,
+  literal: clonePolicyLiteralValue,
+  rel: () => {
+    throw new Error(
+      "Policy ExistsRel is not supported in schemaToWasm(). Use definePermissions() relation IR path instead.",
+    );
+  },
+};
+
 function clonePolicyExpr(expr: DslPolicyExpr): PolicyExpr {
-  switch (expr.type) {
-    case "Cmp":
-      return {
-        type: "Cmp",
-        column: expr.column,
-        op: expr.op,
-        value: clonePolicyValue(expr.value),
-      };
-    case "SessionCmp":
-      return {
-        type: "SessionCmp",
-        path: [...expr.path],
-        op: expr.op,
-        value: clonePolicyLiteralValue(expr.value),
-      };
-    case "IsNull":
-      return { type: "IsNull", column: expr.column };
-    case "SessionIsNull":
-      return { type: "SessionIsNull", path: [...expr.path] };
-    case "IsNotNull":
-      return { type: "IsNotNull", column: expr.column };
-    case "SessionIsNotNull":
-      return { type: "SessionIsNotNull", path: [...expr.path] };
-    case "Contains":
-      return {
-        type: "Contains",
-        column: expr.column,
-        value: clonePolicyValue(expr.value),
-      };
-    case "SessionContains":
-      return {
-        type: "SessionContains",
-        path: [...expr.path],
-        value: clonePolicyLiteralValue(expr.value),
-      };
-    case "In":
-      return {
-        type: "In",
-        column: expr.column,
-        session_path: [...expr.session_path],
-      };
-    case "InList":
-      return {
-        type: "InList",
-        column: expr.column,
-        values: expr.values.map(clonePolicyValue),
-      };
-    case "SessionInList":
-      return {
-        type: "SessionInList",
-        path: [...expr.path],
-        values: expr.values.map(clonePolicyLiteralValue),
-      };
-    case "Exists":
-      return {
-        type: "Exists",
-        table: expr.table,
-        condition: clonePolicyExpr(expr.condition),
-      };
-    case "ExistsRel":
-      throw new Error(
-        "Policy ExistsRel is not supported in schemaToWasm(). Use definePermissions() relation IR path instead.",
-      );
-    case "Inherits":
-      return {
-        type: "Inherits",
-        operation: expr.operation,
-        via_column: expr.via_column,
-        ...(expr.max_depth === undefined ? {} : { max_depth: expr.max_depth }),
-      };
-    case "InheritsReferencing":
-      return {
-        type: "InheritsReferencing",
-        operation: expr.operation,
-        source_table: expr.source_table,
-        via_column: expr.via_column,
-        ...(expr.max_depth === undefined ? {} : { max_depth: expr.max_depth }),
-      };
-    case "And":
-      return { type: "And", exprs: expr.exprs.map(clonePolicyExpr) };
-    case "Or":
-      return { type: "Or", exprs: expr.exprs.map(clonePolicyExpr) };
-    case "Not":
-      return { type: "Not", expr: clonePolicyExpr(expr.expr) };
-    case "True":
-      return { type: "True" };
-    case "False":
-      return { type: "False" };
-  }
+  return mapPolicyExpr(expr, clonePolicyLeaves);
 }
 
 function cloneOperationPolicy(
@@ -258,8 +187,16 @@ function clonePolicies(policies: DslTablePolicies): TablePolicies {
  */
 export function schemaToWasm(schema: Schema): WasmSchema {
   const tables: Record<string, TableSchema> = {};
+  const tableNames = new Set<string>();
 
   for (const table of schema.tables) {
+    assertSchemaNameAllowed(table.name);
+    if (tableNames.has(table.name)) {
+      throw new Error(
+        `Duplicate table name "${table.name}" in schema. Table names must be unique.`,
+      );
+    }
+    tableNames.add(table.name);
     const columns: ColumnDescriptor[] = table.columns.map((col) => {
       const columnType = sqlTypeToWasm(col.sqlType);
       if (
@@ -275,6 +212,14 @@ export function schemaToWasm(schema: Schema): WasmSchema {
         (col.nullable || typeof col.sqlType !== "object" || col.sqlType.kind !== "ARRAY")
       ) {
         throw new Error("g-set merge strategy is only supported on non-nullable ARRAY columns.");
+      }
+      if (
+        (col.mergeStrategy === "text" ||
+          col.mergeStrategy === "markdown" ||
+          col.mergeStrategy === "html") &&
+        col.sqlType !== "TEXT"
+      ) {
+        throw new Error(`${col.mergeStrategy} merge strategy is only supported on TEXT columns.`);
       }
       const descriptor: ColumnDescriptor = {
         name: col.name,
@@ -295,7 +240,11 @@ export function schemaToWasm(schema: Schema): WasmSchema {
 
     tables[table.name] = {
       columns,
+      ...(table.relations ? { relations: table.relations } : {}),
       ...(table.indexedColumns ? { indexed_columns: [...table.indexedColumns] } : {}),
+      ...(table.compositeIndexes
+        ? { composite_indexes: table.compositeIndexes.map((columns) => [...columns]) }
+        : {}),
       ...(table.branchBy ? { branchBy: [...table.branchBy] } : {}),
       policies: table.policies ? clonePolicies(table.policies) : undefined,
     };
@@ -304,6 +253,19 @@ export function schemaToWasm(schema: Schema): WasmSchema {
   // Relation names become keys in the public row shape when an include is
   // materialized. Validate their namespace while compiling a schema rather
   // than allowing consumers to discover a collision later during lowering.
+  for (const [tableName, table] of Object.entries(tables)) {
+    for (const [name, relation] of Object.entries(table.relations ?? {})) {
+      if (relation.kind !== "forward") continue;
+      const column = table.columns.find((c) => c.name === relation.column);
+      if (!column)
+        throw new Error(
+          `Relationship "${tableName}.${name}" references unknown column "${relation.column}".`,
+        );
+      if (column.references && column.references !== relation.table)
+        throw new Error(`Conflicting relationship targets for "${tableName}.${column.name}".`);
+      column.references = relation.table;
+    }
+  }
   analyzeRelations(tables);
   return tables;
 }

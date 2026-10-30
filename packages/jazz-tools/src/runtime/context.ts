@@ -111,17 +111,11 @@ export interface AppContext {
   /** Application identifier (used for isolation) */
   appId: string;
 
-  /** Optional client ID (generated if not provided) */
-  clientId?: string;
-
   /** Schema definition */
   schema: WasmSchema;
 
   /** Optional server URL for sync */
   serverUrl?: string;
-
-  /** Optional runtime source overrides for WASM loading. */
-  runtimeSources?: RuntimeSourcesConfig;
 
   /** Storage driver mode (defaults to persistent). */
   driver?: StorageDriver;
@@ -156,14 +150,10 @@ export interface AppContext {
   adminSecret?: string;
 
   /**
-   * Durability tier identity for this node (or identities for multi-role nodes).
-   * Set for server nodes to enable durability notifications.
-   * Clients typically leave this undefined.
+   * Slow-query log: queries whose runs take at least this many milliseconds
+   * are reported with `console.warn`, one line per query shape with its plan
+   * and the index that would likely make it fast (default 50; 0 turns the
+   * log off).
    */
-  tier?: "local" | "edge" | "global" | Array<"local" | "edge" | "global">;
-
-  /**
-   * Default durability tier for reads and writes when no explicit tier is provided.
-   */
-  defaultDurabilityTier?: "local" | "edge" | "global";
+  slowQueryThresholdMs?: number;
 }

@@ -20,14 +20,20 @@ import {
 } from "./support.js";
 import { getJazzServerInfo } from "./testing-server.js";
 
-const app = s.defineApp({
-  values: s.table({
-    name: s.string(),
-    text: s.string().optional(),
-    bytes: s.bytes().optional(),
-    control: s.boolean(),
-  }),
-});
+const app = s.defineApp(
+  {
+    values: s.table(
+      {
+        name: s.string(),
+        text: s.string().optional(),
+        bytes: s.bytes().optional(),
+        control: s.boolean(),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 
 const permissions = s.definePermissions(app, ({ policy }) => [
   policy.values.allowRead.always(),
@@ -36,23 +42,32 @@ const permissions = s.definePermissions(app, ({ policy }) => [
   policy.values.allowDelete.always(),
 ]);
 
-// This deliberately keeps the ordinary write API: `body` crosses Groove's
+// This deliberately keeps the ordinary write API: `body` crosses the
 // automatic 64 KiB promotion boundary during one user transaction which also
 // authors a referenced project. It is distinct from the streaming receipts
 // below, which each create one row in their own transaction.
-const transactionApp = s.defineApp({
-  projects: s.table({
-    name: s.string(),
-  }),
-  documents: s
-    .table({
-      branch: s.string(),
-      title: s.string(),
-      projectId: s.ref("projects"),
-      body: s.string(),
-    })
-    .branchBy("branch"),
-});
+const transactionApp = s.defineApp(
+  {
+    projects: s.table(
+      {
+        name: s.string(),
+      },
+      { documentsViaProject: s.reverse("documents", "project") },
+    ),
+    documents: s
+      .table(
+        {
+          branch: s.string(),
+          title: s.string(),
+          projectId: s.uuid(),
+          body: s.string(),
+        },
+        { project: s.rel("projects", "projectId") },
+      )
+      .branchBy("branch"),
+  },
+  { migrations: "none" },
+);
 
 const transactionPermissions = s.definePermissions(transactionApp, ({ policy }) => [
   policy.projects.allowRead.always(),
@@ -149,7 +164,7 @@ describe("browser persistent-worker large-value relay", () => {
       (rows) => rows.length === 3 && rows.some((row) => row.name === "control"),
       "direct-memory reader did not receive the persistent-worker receipt",
       20_000,
-      "edge",
+      "remote",
     );
     expect(directValues.find((row) => row.name === "streamed-text")?.text).toBe(text);
     expect(directValues.find((row) => row.name === "streamed-bytes")?.bytes).toEqual(bytes);
@@ -160,7 +175,7 @@ describe("browser persistent-worker large-value relay", () => {
       (rows) => rows.length === 3 && rows.some((row) => row.name === "control"),
       "persistent reader did not receive a direct-memory-verified streamed receipt",
       20_000,
-      "edge",
+      "remote",
     );
     const receivedText = values.find((row) => row.name === "streamed-text");
     const receivedBytes = values.find((row) => row.name === "streamed-bytes");
@@ -223,7 +238,7 @@ describe("browser persistent-worker large-value relay", () => {
     );
 
     const documents = await withTimeout(
-      writer.all(transactionApp.documents, { branch: "main", tier: "edge" }),
+      writer.all(transactionApp.documents, { branch: "main", tier: "remote" }),
       20_000,
       "writer could not read its globally settled large document",
     );
@@ -241,7 +256,7 @@ describe("browser persistent-worker large-value relay", () => {
       "reopened writer did not attach to persisted IndexedDB storage",
     );
     const reopenedDocuments = await withTimeout(
-      reopened.all(transactionApp.documents, { branch: "main", tier: "edge" }),
+      reopened.all(transactionApp.documents, { branch: "main", tier: "remote" }),
       20_000,
       "reopened writer could not hydrate the settled large document",
     );

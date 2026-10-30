@@ -23,7 +23,7 @@ function requireEnv(env) {
 }
 
 export function buildDeploymentsUrl(env) {
-  const branch = env.VERCEL_DEPLOY_BRANCH || "main";
+  const branch = env.VERCEL_DEPLOY_BRANCH || "release";
   const params = new URLSearchParams({
     projectId: env.VERCEL_PROJECT_ID,
     target: "production",
@@ -90,8 +90,7 @@ async function listDeployments({ fetchImpl, listUrl, token, requestTimeoutMs }) 
   }
 
   if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`Vercel deployment lookup failed (${response.status}): ${body}`);
+    throw new Error(`Vercel deployment lookup failed (${response.status}).`);
   }
 
   let body;
@@ -155,7 +154,7 @@ export async function resolveInspectorDeployment({
     }
 
     log(
-      `No staged inspector production deployment on ${env.VERCEL_DEPLOY_BRANCH || "main"} yet (${attempt}/${attempts}).`,
+      `No staged inspector production deployment on ${env.VERCEL_DEPLOY_BRANCH || "release"} yet (${attempt}/${attempts}).`,
     );
 
     if (lastDeployments.length > 0) {
@@ -170,11 +169,12 @@ export async function resolveInspectorDeployment({
     }
   }
 
-  const branch = env.VERCEL_DEPLOY_BRANCH || "main";
+  const branch = env.VERCEL_DEPLOY_BRANCH || "release";
   throw new Error(
     [
       `No staged inspector production deployment found on ${branch}.`,
-      "Make sure the inspector Vercel project has a ready production deployment from the target branch and has auto-assign custom production domains disabled.",
+      "Vercel's Git integration does not build this branch; run Stage Inspector production for this SHA first, or pass its deployment URL to the promotion.",
+      "See packages/inspector/README.md, 'Staging a release on Vercel'.",
       lastDeployments.length > 0
         ? `Last matching deployments:\n${lastDeployments
             .map((deployment) => `- ${describeDeployment(deployment)}`)

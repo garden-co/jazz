@@ -8,8 +8,12 @@ export class JazzLifecycle {
   private client: JazzClient | undefined;
   private activePrincipal: string | undefined;
   private activeSessionId: string | undefined;
+  /** The session whose enrollment completed, even if its reconciliation was superseded. */
+  private enrolledSessionId: string | undefined;
   private chain = Promise.resolve();
   private closed = false;
+  /** Bumped by close() and transition(), which cancel reconciliations queued before them. */
+  private epoch = 0;
   private reconciliation: Promise<void> | undefined;
   private reconcilingPrincipal: string | undefined;
   private requestedSessionId: string | undefined;
@@ -31,7 +35,9 @@ export class JazzLifecycle {
     this.closed = false;
     this.requestedSessionId = sessionId;
     if (this.reconciliation && this.reconcilingPrincipal === sessionId) return this.reconciliation;
+    const epoch = this.epoch;
     const reconciliation = this.enqueue(async () => {
+      if (epoch !== this.epoch) return;
       const selected = this.accounts.getLoggedIn();
       if (
         this.client &&
@@ -46,9 +52,15 @@ export class JazzLifecycle {
       const current = this.accounts.getLoggedIn();
       // A Better Auth session is an authentication boundary even if its `sub`
       // repeats: loginJWT validates and selects the issuer/sub handle anew.
-      if (current?.identity.subject !== principal || this.activeSessionId !== sessionId)
+      const enrolled = this.activeSessionId === sessionId || this.enrolledSessionId === sessionId;
+      if (current?.identity.subject !== principal || !enrolled) {
         await enroll(this.accounts);
-      if (this.requestedSessionId !== sessionId) return;
+        // A close and remount during the enrollment supersede this
+        // reconciliation, but the next one reuses its enrollment: registering
+        // the same identity twice fails.
+        this.enrolledSessionId = sessionId;
+      }
+      if (epoch !== this.epoch || this.requestedSessionId !== sessionId) return;
       await this.openSelected(principal, sessionId);
     });
     this.reconciliation = reconciliation;
@@ -61,14 +73,17 @@ export class JazzLifecycle {
   }
 
   transition(action: (accounts: Accounts) => Promise<unknown> | unknown): Promise<void> {
+    this.cancelReconciliation();
     return this.enqueue(async () => {
       await this.closeCurrent(true);
+      this.enrolledSessionId = undefined;
       await action(this.accounts);
     });
   }
 
   close(): Promise<void> {
     this.closed = true;
+    this.cancelReconciliation();
     return this.enqueue(() => this.closeCurrent(false));
   }
 
@@ -105,6 +120,19 @@ export class JazzLifecycle {
     const task = this.chain.then(operation);
     this.chain = task.catch(() => {});
     return task;
+  }
+
+  /**
+   * A close or transition supersedes any reconciliation queued before it: that
+   * reconciliation must not enroll or open, and a later reconcile for the same
+   * session queues a new one instead of reusing it. React development mode does
+   * this on every mount: reconcile, clean up (close), reconcile again. Letting
+   * the first one run would enroll twice, which registration rejects.
+   */
+  private cancelReconciliation(): void {
+    this.epoch += 1;
+    this.reconciliation = undefined;
+    this.reconcilingPrincipal = undefined;
   }
 
   private clearReconciliation(reconciliation: Promise<void>): void {

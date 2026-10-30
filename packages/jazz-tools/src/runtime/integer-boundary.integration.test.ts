@@ -2,9 +2,12 @@ import { describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
 import { createPolicyTestApp } from "../testing/index.js";
 
-const app = s.defineApp({
-  ints: s.table({ value: s.int() }),
-});
+const app = s.defineApp(
+  {
+    ints: s.table({ value: s.int() }, {}),
+  },
+  { migrations: "none" },
+);
 
 const permissions = s.definePermissions(app, ({ policy }) => {
   policy.ints.allowInsert.always();

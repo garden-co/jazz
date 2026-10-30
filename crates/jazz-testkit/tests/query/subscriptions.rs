@@ -112,6 +112,7 @@ async fn subscribe_all_emits_add_update_remove_and_tracks_current_results() {
 
     pair.writer
         .update(
+            "todos",
             todo_id,
             vec![(
                 "title".to_string(),
@@ -130,7 +131,7 @@ async fn subscribe_all_emits_add_update_remove_and_tracks_current_results() {
     .await;
 
     pair.writer
-        .update(todo_id, vec![("done".to_string(), Value::Boolean(true))])
+        .update("todos", todo_id, vec![("done".to_string(), Value::Boolean(true))])
         .expect("mark todo done");
 
     wait_for_subscription_update(
@@ -309,6 +310,7 @@ async fn subscription_reflects_final_state_after_rapid_bulk_updates() {
     for revision in 1..=RAPID_UPDATES {
         pair.writer
             .update(
+                "todos",
                 todo_id,
                 vec![(
                     "title".to_string(),
@@ -414,6 +416,7 @@ async fn reset_replacement_preserves_update_category_and_prior_order() {
         let prefix = if revision % 2 == 0 { 'z' } else { 'a' };
         pair.writer
             .update(
+                "todos",
                 moving_id,
                 vec![(
                     "title".to_owned(),
@@ -555,7 +558,7 @@ async fn authoritative_reconnect_reset_omits_prior_facade_member() {
     );
     let deleted_tx = pair
         .writer
-        .delete(removed_id)
+        .delete("todos", removed_id)
         .expect("delete row at authority")
         .expect("ordinary delete commits immediately");
     pair.writer
@@ -857,6 +860,7 @@ async fn local_subscription_preserves_final_state_under_rapid_updates() {
     for revision in 1..=RAPID_UPDATES {
         client
             .update(
+                "todos",
                 todo_id,
                 vec![(
                     "title".to_string(),
@@ -870,7 +874,7 @@ async fn local_subscription_preserves_final_state_under_rapid_updates() {
     let rows = wait_for_query(
         &client,
         query.clone(),
-        None,
+        jazz::tools::ReadTier::LocalFirst,
         QUERY_TIMEOUT,
         format!("local client sees final bulk title {final_title}"),
         |rows| {
@@ -963,7 +967,7 @@ local_tokio_test! {
 ///
 /// The writer inserts a todo with a title that does not include "needle". The
 /// subscriber's query result must remain empty and no add delta must appear.
-/// An EdgeServer query on the subscriber is used as the causal barrier before
+/// An GlobalServer query on the subscriber is used as the causal barrier before
 /// draining the stream: once the server confirms the empty result set, any
 /// notification it was going to send has already been sent or withheld.
 ///
@@ -996,7 +1000,7 @@ async fn subscribe_all_does_not_emit_add_for_non_matching_contains_query() {
     )
     .await;
 
-    // The EdgeServer query returning empty is the causal barrier: by the time
+    // The GlobalServer query returning empty is the causal barrier: by the time
     // the server confirms no matching rows, it has already decided whether to
     // send a subscription notification. The drain then flushes any buffered
     // messages before the negative assertion.

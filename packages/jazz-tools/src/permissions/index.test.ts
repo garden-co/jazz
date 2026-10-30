@@ -251,6 +251,15 @@ const app = {
   resource_access_edges: new ResourceAccessEdgeQueryBuilder(),
   wasmSchema: {
     todos: {
+      relations: {
+        project: { kind: "forward" as const, table: "projects", column: "projectId" },
+        todoSharesViaTodo: { kind: "reverse" as const, table: "todoShares", relation: "todo" },
+        resource_access_edgesViaResource: {
+          kind: "reverse" as const,
+          table: "resource_access_edges",
+          relation: "resourceRelation",
+        },
+      },
       columns: [
         { name: "id", column_type: { type: "Uuid" }, nullable: false },
         { name: "ownerId", column_type: { type: "Text" }, nullable: false },
@@ -265,12 +274,16 @@ const app = {
       ],
     },
     projects: {
+      relations: {
+        todosViaProject: { kind: "reverse" as const, table: "todos", relation: "project" },
+      },
       columns: [
         { name: "id", column_type: { type: "Uuid" }, nullable: false },
         { name: "ownerId", column_type: { type: "Text" }, nullable: false },
       ],
     },
     todoShares: {
+      relations: { todo: { kind: "forward" as const, table: "todos", column: "todoId" } },
       columns: [
         { name: "id", column_type: { type: "Uuid" }, nullable: false },
         {
@@ -284,6 +297,28 @@ const app = {
       ],
     },
     teams: {
+      relations: {
+        user_team_edgesViaTeam: {
+          kind: "reverse" as const,
+          table: "user_team_edges",
+          relation: "teamRelation",
+        },
+        team_team_edgesViaChild_team: {
+          kind: "reverse" as const,
+          table: "team_team_edges",
+          relation: "child_teamRelation",
+        },
+        team_team_edgesViaParent_team: {
+          kind: "reverse" as const,
+          table: "team_team_edges",
+          relation: "parent_teamRelation",
+        },
+        resource_access_edgesViaTeam: {
+          kind: "reverse" as const,
+          table: "resource_access_edges",
+          relation: "teamRelation",
+        },
+      },
       columns: [
         { name: "id", column_type: { type: "Uuid" }, nullable: false },
         { name: "kind", column_type: { type: "Text" }, nullable: false },
@@ -291,6 +326,7 @@ const app = {
       ],
     },
     user_team_edges: {
+      relations: { teamRelation: { kind: "forward" as const, table: "teams", column: "team" } },
       columns: [
         { name: "id", column_type: { type: "Uuid" }, nullable: false },
         { name: "user_id", column_type: { type: "Text" }, nullable: false },
@@ -304,6 +340,10 @@ const app = {
       ],
     },
     team_team_edges: {
+      relations: {
+        child_teamRelation: { kind: "forward" as const, table: "teams", column: "child_team" },
+        parent_teamRelation: { kind: "forward" as const, table: "teams", column: "parent_team" },
+      },
       columns: [
         { name: "id", column_type: { type: "Uuid" }, nullable: false },
         {
@@ -321,6 +361,10 @@ const app = {
       ],
     },
     resource_access_edges: {
+      relations: {
+        teamRelation: { kind: "forward" as const, table: "teams", column: "team" },
+        resourceRelation: { kind: "forward" as const, table: "todos", column: "resource" },
+      },
       columns: [
         { name: "id", column_type: { type: "Uuid" }, nullable: false },
         {
@@ -356,6 +400,7 @@ const documentApp = {
   projects: new ProjectQueryBuilder(),
   wasmSchema: {
     documents: {
+      relations: { project: { kind: "forward" as const, table: "projects", column: "projectId" } },
       columns: [
         { name: "id", column_type: { type: "Uuid" }, nullable: false },
         { name: "type", column_type: { type: "Text" }, nullable: false },
@@ -369,6 +414,9 @@ const documentApp = {
       ],
     },
     projects: {
+      relations: {
+        documentsViaProject: { kind: "reverse" as const, table: "documents", relation: "project" },
+      },
       columns: [
         { name: "id", column_type: { type: "Uuid" }, nullable: false },
         { name: "ownerId", column_type: { type: "Uuid" }, nullable: false },
@@ -383,9 +431,25 @@ const socialApp = {
   friendships: new FriendshipQueryBuilder(),
   wasmSchema: {
     profiles: {
+      relations: {
+        peopleViaProfile: { kind: "reverse" as const, table: "people", relation: "profile" },
+      },
       columns: [{ name: "id", column_type: { type: "Uuid" }, nullable: false }],
     },
     people: {
+      relations: {
+        profile: { kind: "forward" as const, table: "profiles", column: "profileId" },
+        friendshipsViaPersonA: {
+          kind: "reverse" as const,
+          table: "friendships",
+          relation: "personA",
+        },
+        friendshipsViaPersonB: {
+          kind: "reverse" as const,
+          table: "friendships",
+          relation: "personB",
+        },
+      },
       columns: [
         { name: "id", column_type: { type: "Uuid" }, nullable: false },
         {
@@ -397,6 +461,10 @@ const socialApp = {
       ],
     },
     friendships: {
+      relations: {
+        personA: { kind: "forward" as const, table: "people", column: "personAId" },
+        personB: { kind: "forward" as const, table: "people", column: "personBId" },
+      },
       columns: [
         { name: "id", column_type: { type: "Uuid" }, nullable: false },
         {
@@ -427,20 +495,6 @@ const creatorCondition = {
 };
 
 describe("permissions DSL", () => {
-  it("rejects duplicate generated relation names while compiling the schema", () => {
-    expect(() =>
-      s.defineApp({
-        users: s.table({ name: s.string() }),
-        todos: s.table({
-          ownerId: s.ref("users"),
-          owner_id: s.ref("users"),
-        }),
-      }),
-    ).toThrow(
-      /Generated relation name "owner" is ambiguous on table "todos".*"todos.ownerId".*"todos.owner_id"/,
-    );
-  });
-
   it("rejects an unbranded policy expression on a table without a type column", () => {
     // Simulate plain JavaScript or an outdated structurally typed helper bypassing the type brand.
     const unbrandedExpression = { type: "True" };
@@ -624,7 +678,7 @@ describe("permissions DSL", () => {
   it("composes a type-column row predicate with allowedTo", () => {
     const compiled = definePermissions(documentApp, ({ policy, allOf, allowedTo }) => [
       policy.documents.allowUpdate.where(
-        allOf([{ type: "Inherits" }, allowedTo.update("projectId")]),
+        allOf([{ type: "Inherits" }, allowedTo.update("project")]),
       ),
     ]);
 
@@ -652,8 +706,8 @@ describe("permissions DSL", () => {
       policy.todos.allowRead.where({ ownerId: session.claims["sub"] }),
       policy.todos.allowInsert.where({ ownerId: session.claims["sub"] }),
       policy.todos.allowUpdate
-        .whereOld(allOf([allowedTo.update("projectId"), { archived: false }]))
-        .whereNew(allowedTo.update("projectId")),
+        .whereOld(allOf([allowedTo.update("project"), { archived: false }]))
+        .whereNew(allowedTo.update("project")),
       policy.todos.allowDelete.where({ ownerId: session.claims["sub"] }),
     ]);
 
@@ -875,7 +929,7 @@ describe("permissions DSL", () => {
   it("supports plural action aliases and OR-merges repeated rules", () => {
     const compiled = definePermissions(app, ({ policy, anyOf, allowedTo, session }) => [
       policy.todos.allowReads.where({ ownerId: session.claims["sub"] }),
-      policy.todos.allowReads.where(anyOf([{ done: true }, allowedTo.read("projectId")])),
+      policy.todos.allowReads.where(anyOf([{ done: true }, allowedTo.read("project")])),
       policy.todos.allowInserts.where({ ownerId: session.claims["sub"] }),
     ]);
 
@@ -959,8 +1013,8 @@ describe("permissions DSL", () => {
 
   it("supports allowedTo.insert and allowedTo.delete helpers", () => {
     const compiled = definePermissions(app, ({ policy, allowedTo }) => [
-      policy.todos.allowInsert.where(allowedTo.insert("projectId")),
-      policy.todos.allowDelete.where(allowedTo.delete("projectId")),
+      policy.todos.allowInsert.where(allowedTo.insert("project")),
+      policy.todos.allowDelete.where(allowedTo.delete("project")),
     ]);
 
     expect(compiled.todos!.insert?.with_check).toEqual({
@@ -1007,7 +1061,7 @@ describe("permissions DSL", () => {
 
   it("supports allowedTo.readReferencing helper", () => {
     const compiled = definePermissions(app, ({ policy, allowedTo }) => [
-      policy.projects.allowRead.where(allowedTo.readReferencing(policy.todos, "projectId")),
+      policy.projects.allowRead.where(allowedTo.readReferencing(policy.todos, "project")),
     ]);
 
     expect(compiled.projects!.select?.using).toEqual({
@@ -1018,28 +1072,22 @@ describe("permissions DSL", () => {
     });
   });
 
-  it("supports zero recursive referencing inherits depth", () => {
-    const compiled = definePermissions(app, ({ policy, allowedTo }) => [
-      policy.projects.allowRead.where(
-        allowedTo.readReferencing(policy.todos, "projectId", { maxDepth: 0 }),
-      ),
-    ]);
-
-    expect(compiled.projects!.select?.using).toEqual({
-      type: "InheritsReferencing",
-      operation: "Select",
-      source_table: "todos",
-      via_column: "projectId",
-      max_depth: 0,
-    });
+  it("rejects unsupported reverse depth bounds", () => {
+    expect(() =>
+      definePermissions(app, ({ policy, allowedTo }) => [
+        policy.projects.allowRead.where(
+          allowedTo.readReferencing(policy.todos, "project", { maxDepth: 0 }),
+        ),
+      ]),
+    ).toThrow(/reverse relationships do not support maxDepth/);
   });
 
   it("rejects referencing inherits when source FK does not target current table", () => {
     expect(() =>
       definePermissions(app, ({ policy, allowedTo }) => [
-        policy.projects.allowRead.where(allowedTo.readReferencing(policy.todoShares, "todoId")),
+        policy.projects.allowRead.where(allowedTo.readReferencing(policy.todoShares, "todo")),
       ]),
-    ).toThrow(/references "todos" but this rule is for "projects"/i);
+    ).toThrow(/requires a declared forward relationship targeting "projects"/i);
   });
 
   it("supports split friend-profile chain style (friendships + readReferencing)", () => {
@@ -1056,7 +1104,7 @@ describe("permissions DSL", () => {
           }),
         ]),
       ),
-      policy.profiles.allowRead.where(allowedTo.readReferencing(policy.people, "profileId")),
+      policy.profiles.allowRead.where(allowedTo.readReferencing(policy.people, "profile")),
     ]);
 
     expect(compiled.profiles!.select?.using).toEqual({
@@ -1326,7 +1374,7 @@ describe("permissions DSL", () => {
         const reachableTeams = policy.teams.gather({
           start: { kind: "individual" },
           step: ({ current }) =>
-            policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+            policy.team_team_edges.where({ child_team: current }).hopTo("parent_teamRelation"),
         });
         return [
           policy.todos.allowRead.where(
@@ -1392,7 +1440,7 @@ describe("permissions DSL", () => {
 
   it("supports zero bounded recursive inherits depth and rejects invalid overrides", () => {
     const compiled = definePermissions(app, ({ policy, allowedTo }) => [
-      policy.todos.allowRead.where(allowedTo.read("projectId", { maxDepth: 0 })),
+      policy.todos.allowRead.where(allowedTo.read("project", { maxDepth: 0 })),
     ]);
 
     expect(compiled.todos!.select?.using).toEqual({
@@ -1404,7 +1452,7 @@ describe("permissions DSL", () => {
     for (const maxDepth of [-1, 1.5]) {
       expect(() =>
         definePermissions(app, ({ policy, allowedTo }) => [
-          policy.todos.allowRead.where(allowedTo.read("projectId", { maxDepth })),
+          policy.todos.allowRead.where(allowedTo.read("project", { maxDepth })),
         ]),
       ).toThrow(/maxdepth must be a non-negative integer/i);
     }
@@ -1418,7 +1466,7 @@ describe("permissions DSL", () => {
           identity_key: session.claims["sub"],
         },
         step: ({ current }) =>
-          policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+          policy.team_team_edges.where({ child_team: current }).hopTo("parent_teamRelation"),
         maxDepth: 0,
       });
 
@@ -1462,7 +1510,7 @@ describe("permissions DSL", () => {
       const reachableTeams = policy.teams.gather({
         start: { type: "True" } as Record<string, unknown>,
         step: ({ current }) =>
-          policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+          policy.team_team_edges.where({ child_team: current }).hopTo("parent_teamRelation"),
         maxDepth: 3,
       });
 
@@ -1483,7 +1531,7 @@ describe("permissions DSL", () => {
           identity_key: session.claims["sub"],
         },
         step: ({ current }) =>
-          policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+          policy.team_team_edges.where({ child_team: current }).hopTo("parent_teamRelation"),
         maxDepth: 3,
       });
 
@@ -1515,7 +1563,9 @@ describe("permissions DSL", () => {
   it("lowers hop relation plans to relation IR join + project", () => {
     let relation: PermissionRelation | undefined;
     definePermissions(app, ({ policy }) => {
-      relation = policy.team_team_edges.where({ child_team: "team-a" }).hopTo("parent_team");
+      relation = policy.team_team_edges
+        .where({ child_team: "team-a" })
+        .hopTo("parent_teamRelation");
       return [];
     });
     if (!relation) {
@@ -1561,7 +1611,7 @@ describe("permissions DSL", () => {
           identity_key: session.claims["sub"],
         },
         step: ({ current }) =>
-          policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+          policy.team_team_edges.where({ child_team: current }).hopTo("parent_teamRelation"),
         maxDepth: 3,
       });
       relation = reachableTeams.hopTo("resource_access_edgesViaTeam").where({
@@ -1611,7 +1661,7 @@ describe("permissions DSL", () => {
           "child_team",
           "parent_team",
         )
-        .seeded_by("user_team_edges", "user_id", "sub", "team");
+        .seeded_by("user_team_edges", "user_id", session.claims["sub"], "team");
       return [];
     });
     if (!relation) {
@@ -1663,10 +1713,10 @@ describe("permissions DSL", () => {
     definePermissions(app, ({ policy }) => {
       const directParents = policy.team_team_edges
         .where({ child_team: "team-a" })
-        .hopTo("parent_team");
+        .hopTo("parent_teamRelation");
       relation = directParents.gather({
         step: ({ current }) =>
-          policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+          policy.team_team_edges.where({ child_team: current }).hopTo("parent_teamRelation"),
         maxDepth: 3,
       });
       return [];
@@ -1699,13 +1749,13 @@ describe("permissions DSL", () => {
     definePermissions(app, ({ policy, session }) => {
       const directParents = policy.team_team_edges
         .where({ child_team: session.claims["sub"] })
-        .hopTo("parent_team");
+        .hopTo("parent_teamRelation");
       relation = policy.teams.gather({
         start: directParents,
         step: ({ current }) =>
           policy.team_team_edges
             .where({ child_team: current, administrator: false })
-            .hopTo("parent_team"),
+            .hopTo("parent_teamRelation"),
         maxDepth: 3,
       });
       return [];
@@ -1745,16 +1795,16 @@ describe("permissions DSL", () => {
     definePermissions(app, ({ policy }) => {
       const directParents = policy.team_team_edges
         .where({ child_team: "team-a" })
-        .hopTo("parent_team");
+        .hopTo("parent_teamRelation");
       const adminReachableTeams = policy.teams.gather({
         start: { kind: "individual" },
         step: ({ current }) =>
-          policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+          policy.team_team_edges.where({ child_team: current }).hopTo("parent_teamRelation"),
         maxDepth: 3,
       });
       relation = policy.union([directParents, adminReachableTeams]).gather({
         step: ({ current }) =>
-          policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+          policy.team_team_edges.where({ child_team: current }).hopTo("parent_teamRelation"),
         maxDepth: 3,
       });
       return [];
@@ -1783,7 +1833,7 @@ describe("permissions DSL", () => {
       relation = policy.teams.gather({
         start: { "team_team_edges.child_team": "team-a" },
         step: ({ current }) =>
-          policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+          policy.team_team_edges.where({ child_team: current }).hopTo("parent_teamRelation"),
         maxDepth: 3,
       });
       return [];
@@ -1968,7 +2018,7 @@ describe("permissions DSL", () => {
           identity_key: session.claims["sub"],
         },
         step: ({ current }) =>
-          policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+          policy.team_team_edges.where({ child_team: current }).hopTo("parent_teamRelation"),
         maxDepth: 3,
       });
 
@@ -2002,7 +2052,7 @@ describe("permissions DSL", () => {
           identity_key: session.claims["sub"],
         },
         step: ({ current }) =>
-          policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+          policy.team_team_edges.where({ child_team: current }).hopTo("parent_teamRelation"),
         maxDepth: 3,
       });
 
@@ -2057,7 +2107,8 @@ describe("permissions DSL", () => {
       definePermissions(app, ({ policy }) => {
         const reachableTeams = policy.teams.gather({
           start: { kind: "individual" },
-          step: () => policy.team_team_edges.where({ child_team: "literal" }).hopTo("parent_team"),
+          step: () =>
+            policy.team_team_edges.where({ child_team: "literal" }).hopTo("parent_teamRelation"),
         });
         return [policy.todos.allowRead.where(policy.exists(reachableTeams))];
       }),
@@ -2068,14 +2119,14 @@ describe("permissions DSL", () => {
         const reachableTeams = policy.teams.gather({
           start: { "team_team_edges.id": session.claims["sub"] },
           step: ({ current }) =>
-            policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+            policy.team_team_edges.where({ child_team: current }).hopTo("parent_teamRelation"),
         });
         return [policy.todos.allowRead.where(policy.exists(reachableTeams))];
       }),
     ).toThrow(/qualified.*start|ambiguous/i);
   });
 
-  it("resolves allowedTo without Id suffix to the FK column", () => {
+  it("resolves declared allowedTo relationship names to the FK column", () => {
     const compiled = definePermissions(app, ({ policy, allowedTo }) => [
       policy.todos.allowRead.where(allowedTo.read("project")),
     ]);
@@ -2087,7 +2138,7 @@ describe("permissions DSL", () => {
     });
   });
 
-  it("resolves allowedTo without Id suffix for insert/update/delete", () => {
+  it("resolves declared allowedTo relationship names for insert/update/delete", () => {
     const compiled = definePermissions(app, ({ policy, allowedTo }) => [
       policy.todos.allowInsert.where(allowedTo.insert("project")),
       policy.todos.allowDelete.where(allowedTo.delete("project")),
@@ -2113,7 +2164,7 @@ describe("permissions DSL", () => {
     });
   });
 
-  it("resolves readReferencing without Id suffix", () => {
+  it("resolves readReferencing by the declared forward name", () => {
     const compiled = definePermissions(app, ({ policy, allowedTo }) => [
       policy.projects.allowRead.where(allowedTo.readReferencing(policy.todos, "project")),
     ]);
@@ -2126,16 +2177,12 @@ describe("permissions DSL", () => {
     });
   });
 
-  it("still accepts the full FK column name with Id suffix", () => {
-    const compiled = definePermissions(app, ({ policy, allowedTo }) => [
-      policy.todos.allowRead.where(allowedTo.read("projectId")),
-    ]);
-
-    expect(compiled.todos!.select?.using).toEqual({
-      type: "Inherits",
-      operation: "Select",
-      via_column: "projectId",
-    });
+  it("rejects the raw FK column even when it has a declared relationship", () => {
+    expect(() =>
+      definePermissions(app, ({ policy, allowedTo }) => [
+        policy.todos.allowRead.where(allowedTo.read("projectId")),
+      ]),
+    ).toThrow(/Unknown relation "projectId"/);
   });
 
   it("rejects allowedTo when column is not a foreign key", () => {
@@ -2143,15 +2190,15 @@ describe("permissions DSL", () => {
       definePermissions(app, ({ policy, allowedTo }) => [
         policy.todos.allowRead.where(allowedTo.read("ownerId")),
       ]),
-    ).toThrow(/available fk columns: projectId/i);
+    ).toThrow(/Unknown relation "ownerId"/);
   });
 
   it("rejects allowedTo when app.wasmSchema metadata is missing", () => {
     expect(() =>
       definePermissions(appWithoutSchema, ({ policy, allowedTo }) => [
-        policy.todos.allowRead.where(allowedTo.read("projectId")),
+        policy.todos.allowRead.where(allowedTo.read("project")),
       ]),
-    ).toThrow(/table metadata is missing in app\.wasmSchema/i);
+    ).toThrow(/Unknown relation/);
   });
 
   it("rejects row references outside exists clauses", () => {
@@ -2437,7 +2484,7 @@ describe("permissions DSL", () => {
     const compiled = definePermissions(app, ({ policy, anyOf, allowedTo, session }) => [
       policy.todos.allowRead.where((todo) =>
         anyOf([
-          allowedTo.read("projectId"),
+          allowedTo.read("project"),
           policy.todoShares.exists.where({
             todoId: todo.id,
             userId: session.claims["sub"],

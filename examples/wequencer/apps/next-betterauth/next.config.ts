@@ -1,10 +1,13 @@
 import { withJazz } from "jazz-tools/dev/next";
+import { APP_ORIGIN as appOrigin } from "./lib/app-origin";
 
 export default withJazz(
   {},
   {
     server: {
-      jwksUrl: `${process.env.NEXT_PUBLIC_APP_ORIGIN ?? "http://127.0.0.1:3000"}/api/auth/jwks`,
+      jwksUrl: `${appOrigin}/api/auth/jwks`,
+      jwtIssuer: appOrigin,
+      jwtAudience: appOrigin,
     },
   },
 );

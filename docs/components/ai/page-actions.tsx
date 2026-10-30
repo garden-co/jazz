@@ -1,10 +1,9 @@
 "use client";
-import { useMemo, useState } from "react";
-import { Check, ChevronDown, Copy, ExternalLinkIcon } from "lucide-react";
-import { cn } from "@/lib/cn";
-import { useCopyButton } from "fumadocs-ui/utils/use-copy-button";
-import { buttonVariants } from "fumadocs-ui/components/ui/button";
-import { Popover, PopoverContent, PopoverTrigger } from "fumadocs-ui/components/ui/popover";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { Check, ChevronDown, Copy } from "lucide-react";
+import { Button } from "@astryxdesign/core/Button";
+import { DropdownMenu } from "@astryxdesign/core/DropdownMenu";
+import { Icon } from "@astryxdesign/core/Icon";
 
 const cache = new Map<string, string>();
 
@@ -16,45 +15,45 @@ export function LLMCopyButton({
 }: {
   markdownUrl: string;
 }) {
-  const [isLoading, setLoading] = useState(false);
-  const [checked, onClick] = useCopyButton(async () => {
+  const [checked, setChecked] = useState(false);
+
+  useEffect(() => {
+    if (!checked) return;
+    const timer = setTimeout(() => setChecked(false), 1500);
+    return () => clearTimeout(timer);
+  }, [checked]);
+
+  const copy = async () => {
     const cached = cache.get(markdownUrl);
-    if (cached) return navigator.clipboard.writeText(cached);
-
-    setLoading(true);
-
-    try {
+    if (cached) {
+      await navigator.clipboard.writeText(cached);
+    } else {
       await navigator.clipboard.write([
         new ClipboardItem({
           "text/plain": fetch(markdownUrl).then(async (res) => {
             const content = await res.text();
             cache.set(markdownUrl, content);
-
             return content;
           }),
         }),
       ]);
-    } finally {
-      setLoading(false);
     }
-  });
+    setChecked(true);
+  };
 
   return (
-    <button
-      disabled={isLoading}
-      className={cn(
-        buttonVariants({
-          color: "secondary",
-          size: "sm",
-          className: "gap-2 [&_svg]:size-3.5 [&_svg]:text-fd-muted-foreground",
-        }),
-      )}
-      onClick={onClick}
-    >
-      {checked ? <Check /> : <Copy />}
-      Copy Markdown
-    </button>
+    <Button
+      label={checked ? "Copied" : "Copy Markdown"}
+      variant="secondary"
+      size="sm"
+      icon={<Icon icon={checked ? Check : Copy} size="sm" />}
+      clickAction={copy}
+    />
   );
+}
+
+function MenuIcon({ children }: { children: ReactNode }) {
+  return <span className="inline-flex size-4 [&_svg]:size-4">{children}</span>;
 }
 
 export function ViewOptions({
@@ -207,34 +206,20 @@ export function ViewOptions({
   }, [githubUrl, markdownUrl]);
 
   return (
-    <Popover>
-      <PopoverTrigger
-        className={cn(
-          buttonVariants({
-            color: "secondary",
-            size: "sm",
-            className: "gap-2",
-          }),
-        )}
-      >
-        Open
-        <ChevronDown className="size-3.5 text-fd-muted-foreground" />
-      </PopoverTrigger>
-      <PopoverContent className="flex flex-col">
-        {items.map((item) => (
-          <a
-            key={item.href}
-            href={item.href}
-            rel="noreferrer noopener"
-            target="_blank"
-            className="text-sm p-2 rounded-lg inline-flex items-center gap-2 hover:text-fd-accent-foreground hover:bg-fd-accent [&_svg]:size-4"
-          >
-            {item.icon}
-            {item.title}
-            <ExternalLinkIcon className="text-fd-muted-foreground size-3.5 ms-auto" />
-          </a>
-        ))}
-      </PopoverContent>
-    </Popover>
+    <DropdownMenu
+      button={{
+        label: "Open",
+        variant: "secondary",
+        size: "sm",
+        endContent: <Icon icon={ChevronDown} size="sm" />,
+      }}
+      hasChevron={false}
+      items={items.map((item) => ({
+        id: item.href,
+        label: item.title,
+        icon: <MenuIcon>{item.icon}</MenuIcon>,
+        onClick: () => window.open(item.href, "_blank", "noopener,noreferrer"),
+      }))}
+    />
   );
 }

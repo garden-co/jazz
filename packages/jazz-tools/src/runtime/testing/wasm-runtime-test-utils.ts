@@ -8,7 +8,9 @@ import { onTestFinished } from "vitest";
 import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
 import { testAuthorBytes } from "./account-fixtures.js";
 import { assertNativeArtifactCompatibility } from "../native-artifact-compatibility.js";
+import { installJsonSchemaValidator } from "../json-schema-validator.js";
 import { readCorrectnessArtifactSnapshot } from "../../../../../dev/artifacts/test-artifact-store.mjs";
+import { deterministicBytes } from "../deterministic-bytes.js";
 
 export type TestRuntime = Runtime & {
   free?(): void;
@@ -108,7 +110,12 @@ export function loadWasmModuleForTest(): Promise<any> {
 
       const wasmModule: any = await import(pathToFileURL(paths.modulePath).href);
       wasmModule.initSync({ module: readFileSync(paths.wasmPath) });
-      assertNativeArtifactCompatibility(wasmModule, "WASM", ["initSync", "WasmDb"]);
+      assertNativeArtifactCompatibility(wasmModule, "WASM", [
+        "initSync",
+        "WasmDb",
+        "setJsonSchemaValidator",
+      ]);
+      installJsonSchemaValidator(wasmModule);
       return wasmModule;
     })();
   }
@@ -140,18 +147,4 @@ export async function createWasmRuntime(
   });
 
   return runtime;
-}
-
-function deterministicBytes(seed: string): Uint8Array {
-  let hash = 0x811c9dc5;
-  const bytes = new Uint8Array(16);
-  const view = new DataView(bytes.buffer);
-  for (let round = 0; round < 4; round += 1) {
-    for (let i = 0; i < seed.length; i += 1) {
-      hash ^= seed.charCodeAt(i) + round;
-      hash = Math.imul(hash, 0x01000193);
-    }
-    view.setUint32(round * 4, hash >>> 0, true);
-  }
-  return bytes;
 }

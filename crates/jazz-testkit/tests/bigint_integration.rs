@@ -4,10 +4,10 @@ use std::time::Duration;
 
 use jazz::query::{OrderDirection, col, gt, lit, lt};
 use jazz::row_input;
-use jazz::tools::{ColumnType, DurabilityTier, Schema, SchemaBuilder, TableSchema, Value};
+use jazz::tools::{ColumnType, Schema, SchemaBuilder, TableSchema, Value};
 use jazz_server::JazzServer;
 use support::{
-    TestingClient, has_added_id, wait_for_edge_query_ready, wait_for_query,
+    TestingClient, has_added_id, wait_for_query, wait_for_remote_query_ready,
     wait_for_subscription_update,
 };
 
@@ -15,12 +15,14 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(25);
 const BIG_SAFE_PLUS_ONE: i64 = 9_007_199_254_740_993;
 
 fn bigint_schema() -> Schema {
+    use jazz::tools::test_support::AllowAll;
     SchemaBuilder::new()
         .table(
             TableSchema::builder("metrics")
                 .column("label", ColumnType::Text)
                 .column("amount", ColumnType::BigInt),
         )
+        .allow_all()
         .build()
 }
 
@@ -52,7 +54,7 @@ async fn bigint_insert_query_order_predicate_and_subscribe_are_lossless() {
                     .expect("insert bigint row");
                 txs.push(transaction_id.expect("ordinary mutation commits immediately"));
             }
-            support::wait_for_edge_txs(&client, &txs).await;
+            support::wait_for_global_txs(&client, &txs).await;
 
             let ordered_query = jazz::query::Query::from("metrics")
                 .select(["label", "amount"])
@@ -60,7 +62,7 @@ async fn bigint_insert_query_order_predicate_and_subscribe_are_lossless() {
             wait_for_query(
                 &client,
                 ordered_query,
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 QUERY_TIMEOUT,
                 "BIGINT rows order by signed amount",
                 |rows| {
@@ -93,7 +95,7 @@ async fn bigint_insert_query_order_predicate_and_subscribe_are_lossless() {
             wait_for_query(
                 &client,
                 filtered_query,
-                Some(DurabilityTier::EdgeServer),
+                jazz::tools::ReadTier::Remote,
                 QUERY_TIMEOUT,
                 "BIGINT predicates coerce integer literals and preserve i64 literals",
                 |rows| {
@@ -128,7 +130,7 @@ async fn bigint_insert_query_order_predicate_and_subscribe_are_lossless() {
                     row_input!("label" => "later", "amount" => BIG_SAFE_PLUS_ONE + 1),
                 )
                 .expect("insert subscribed bigint row");
-            support::wait_for_edge_txs(
+            support::wait_for_global_txs(
                 &client,
                 &[transaction_id.expect("ordinary mutation commits immediately")],
             )
@@ -143,7 +145,7 @@ async fn bigint_insert_query_order_predicate_and_subscribe_are_lossless() {
             )
             .await;
 
-            wait_for_edge_query_ready(&client, "metrics", QUERY_TIMEOUT).await;
+            wait_for_remote_query_ready(&client, "metrics", QUERY_TIMEOUT).await;
             server.shutdown().await;
         })
         .await;

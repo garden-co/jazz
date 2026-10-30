@@ -91,14 +91,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let total_call_indirect: u32 = rows.iter().map(|row| row.call_indirect_sites).sum();
     let total_return_call_indirect: u32 = rows.iter().map(|row| row.return_call_indirect_sites).sum();
-    let groove_call_indirect: u32 = rows
+    let jazz_db_call_indirect: u32 = rows
         .iter()
-        .filter(|row| row.name.contains("groove"))
+        .filter(|row| row.name.contains("jazz_db"))
         .map(|row| row.call_indirect_sites)
         .sum();
-    let groove_return_call_indirect: u32 = rows
+    let jazz_db_return_call_indirect: u32 = rows
         .iter()
-        .filter(|row| row.name.contains("groove"))
+        .filter(|row| row.name.contains("jazz_db"))
         .map(|row| row.return_call_indirect_sites)
         .sum();
     let top = env::var("WASM_CALL_INDIRECT_TOP")
@@ -113,11 +113,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  \"totalCallIndirectSites\": {total_call_indirect},");
     println!("  \"totalReturnCallIndirectSites\": {total_return_call_indirect},");
     println!("  \"functionsWithIndirectCalls\": {},", rows.len());
-    println!("  \"grooveCallIndirectSites\": {groove_call_indirect},");
-    println!("  \"grooveReturnCallIndirectSites\": {groove_return_call_indirect},");
+    println!("  \"jazzDbCallIndirectSites\": {jazz_db_call_indirect},");
+    println!("  \"jazzDbReturnCallIndirectSites\": {jazz_db_return_call_indirect},");
     println!(
-        "  \"grooveFunctionsWithIndirectCalls\": {},",
-        rows.iter().filter(|row| row.name.contains("groove")).count()
+        "  \"jazzDbFunctionsWithIndirectCalls\": {},",
+        rows.iter().filter(|row| row.name.contains("jazz_db")).count()
     );
     println!("  \"top\": [");
     for (index, row) in rows.iter().take(top).enumerate() {

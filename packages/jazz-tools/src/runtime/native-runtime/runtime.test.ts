@@ -31,6 +31,7 @@ import {
   type Transport,
 } from "./native-runtime-adapter.js";
 import { encodeSchema } from "./schema-codec.js";
+import { createUpstreamLink } from "../testing/napi-runtime-test-utils.js";
 import { applySubscriptionDelta, SubscriptionManager } from "../subscription-manager.js";
 import { setNamedRowValuesEnumerable } from "./row-values-transport.js";
 import { encodeNativeNullValue, storageColumnValueType } from "./native-row-codec.js";
@@ -137,8 +138,8 @@ function runtimeDeltaChanges(delta: RuntimeSubscriptionDelta) {
 
 function runtimeResultId(sourceId: string, occurrenceKey: Uint8Array): string {
   if (
-    occurrenceKey.length === 25 &&
-    occurrenceKey[0] === 1 &&
+    occurrenceKey.length === 26 &&
+    occurrenceKey[0] === 2 &&
     occurrenceKey.subarray(17).every((byte) => byte === 0)
   )
     return sourceId;
@@ -326,7 +327,7 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
     let settled = false;
-    const read = runtime.query(JSON.stringify({ table: "todos" }), null, "edge").then((rows) => {
+    const read = runtime.query(JSON.stringify({ table: "todos" }), null, "remote").then((rows) => {
       settled = true;
       return rows;
     });
@@ -414,7 +415,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     const read = runtime.query(
       JSON.stringify({ table: "todos", relation_ir: supportedGatherRelationIr("todos") }),
       null,
-      "edge",
+      "remote",
     );
     await Promise.resolve();
 
@@ -474,7 +475,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     const read = runtime.query(
       JSON.stringify({ table: "todos", relation_ir: supportedGatherRelationIr("todos") }),
       null,
-      "edge",
+      "remote",
     );
     await vi.advanceTimersByTimeAsync(25);
     await waitForFakeWebSocketNegotiation();
@@ -566,11 +567,11 @@ describe("NativeRuntimeAdapter server transport", () => {
       runtime.query(
         JSON.stringify({ table: "todos", relation_ir: supportedGatherRelationIr("todos") }),
         null,
-        "edge",
+        "remote",
       ),
     ).resolves.toEqual([]);
     expect(calls).toHaveLength(1);
-    expect(calls[0]?.[1]).toEqual({ tier: "edge" });
+    expect(calls[0]?.[1]).toEqual({ tier: "remote" });
   });
 
   it("moves a strict relation query from a stalled handshake to its auth-refresh replacement", async () => {
@@ -616,7 +617,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     const read = runtime.query(
       JSON.stringify({ table: "todos", relation_ir: supportedGatherRelationIr("todos") }),
       null,
-      "edge",
+      "remote",
     );
     await waitForFakeWebSocketNegotiation();
     expect(relationQueries).toBe(0);
@@ -668,7 +669,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     const read = runtime.query(
       JSON.stringify({ table: "todos", relation_ir: supportedGatherRelationIr("todos") }),
       null,
-      "edge",
+      "remote",
     );
     await waitForFakeWebSocketNegotiation();
     sockets[0]!.emitMessage(
@@ -712,7 +713,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     const read = runtime.query(
       JSON.stringify({ table: "todos", relation_ir: supportedGatherRelationIr("todos") }),
       null,
-      "edge",
+      "remote",
     );
     await waitForFakeWebSocketNegotiation();
     expect(relationQueries).toBe(0);
@@ -783,6 +784,223 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(authFailures).toEqual(["expired"]);
     expect(transport.received).toEqual([]);
   });
+
+  // #4248, #4296: a React Native foreground whose upstream refuses its bearer
+  // reports that as auth state, as the web socket path does. Ticks keep
+  // running, the app renews from the auth failure, and any other tick failure
+  // still surfaces.
+  it("reports a native upstream's refused credential as an auth failure, not a crash", async () => {
+    const thrown: unknown[] = [];
+    const queue = globalThis.queueMicrotask;
+    const spy = vi.spyOn(globalThis, "queueMicrotask").mockImplementation((callback) =>
+      queue(() => {
+        try {
+          callback();
+        } catch (error) {
+          thrown.push(error);
+        }
+      }),
+    );
+    try {
+      let schedule: ((urgency: "immediate" | "deferred") => void) | undefined;
+      let reportAuthRejected: ((reason: string) => void) | undefined;
+      let tickFailure: Error | undefined;
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () =>
+            fakeDb({
+              setTickScheduler: (callback: (urgency: "immediate" | "deferred") => void) => {
+                schedule = callback;
+              },
+              tick: () => {
+                if (tickFailure) throw tickFailure;
+              },
+              onAuthRejected: (callback: (reason: string) => void) => {
+                reportAuthRejected = callback;
+              },
+              nativeConnectionStatus: () => ({
+                configured: true,
+                explicitlyOffline: false,
+                connected: false,
+                authRejected: "websocket rejected: AuthFailed: token expired",
+              }),
+              isNativeForegroundClosed: () => false,
+            }),
+          openBrowser: async () => {
+            throw new Error("not used");
+          },
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      const authFailures: string[] = [];
+      runtime.onAuthFailure((reason) => authFailures.push(reason));
+
+      reportAuthRejected!("websocket rejected: AuthFailed: token expired");
+      schedule!("immediate");
+      for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+      expect(authFailures).toEqual(["websocket rejected: AuthFailed: token expired"]);
+      expect(thrown).toEqual([]);
+
+      tickFailure = new Error("Jazz native foreground lifecycle failure");
+      schedule!("immediate");
+      for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+      expect(authFailures).toHaveLength(1);
+      expect(thrown).toEqual([tickFailure]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // #4337: a native upstream that refuses the connection for another reason
+  // than the credential (TLS behind a captive portal, a proxy refusing the
+  // upgrade) is connection state, as on the web socket path: the remote link
+  // is unavailable and the server-transport-error path hears of it once,
+  // nothing is thrown, and the link recovers with the connection.
+  it("reports a native upstream's refused connection as connection state, not a crash", async () => {
+    const thrown: unknown[] = [];
+    const queue = globalThis.queueMicrotask;
+    const spy = vi.spyOn(globalThis, "queueMicrotask").mockImplementation((callback) =>
+      queue(() => {
+        try {
+          callback();
+        } catch (error) {
+          thrown.push(error);
+        }
+      }),
+    );
+    try {
+      let schedule: ((urgency: "immediate" | "deferred") => void) | undefined;
+      let reportUpstreamFailure:
+        | ((failure: { reason: string; retrying: boolean } | null) => void)
+        | undefined;
+      let connected = false;
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () =>
+            fakeDb({
+              setTickScheduler: (callback: (urgency: "immediate" | "deferred") => void) => {
+                schedule = callback;
+              },
+              tick: () => undefined,
+              onUpstreamFailure: (
+                callback: (failure: { reason: string; retrying: boolean } | null) => void,
+              ) => {
+                reportUpstreamFailure = callback;
+              },
+              nativeConnectionStatus: () => ({
+                configured: true,
+                explicitlyOffline: false,
+                connected,
+                authRejected: null,
+              }),
+              isNativeForegroundClosed: () => false,
+            }),
+          openBrowser: async () => {
+            throw new Error("not used");
+          },
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      const transportErrors: string[] = [];
+      runtime.onServerTransportError((error) => transportErrors.push(error.message));
+      expect(runtime.remoteLinkState()).toBe("connecting");
+
+      const refusal = "native relay socket connect failed: TLS handshake failed";
+      reportUpstreamFailure!({ reason: refusal, retrying: true });
+      schedule!("immediate");
+      for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+      expect(runtime.remoteLinkState()).toBe("unavailable");
+      expect(transportErrors).toEqual([refusal]);
+      expect(thrown).toEqual([]);
+
+      connected = true;
+      reportUpstreamFailure!(null);
+      expect(runtime.remoteLinkState()).toBe("connected");
+      expect(transportErrors).toEqual([refusal]);
+      expect(thrown).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // The native host stops its link on a refused credential and reports a
+  // terminal upstream failure. A credential the app can renew restarts it,
+  // so the refusal counts as retrying, as it does on the web socket path
+  // (#3923); one no credential fixes stays terminal.
+  it.each([
+    ["authentication expired", true, true],
+    ["authentication expired", false, false],
+    ["account disabled", true, false],
+  ] as const)(
+    "treats a native refusal (%s, renewed: %s) as retrying: %s",
+    async (reason, renewed, retrying) => {
+      let reportAuthRejected: ((reason: string) => void) | undefined;
+      let reportUpstreamFailure:
+        | ((failure: { reason: string; retrying: boolean } | null) => void)
+        | undefined;
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () =>
+            fakeDb({
+              setTickScheduler: () => undefined,
+              tick: () => undefined,
+              onAuthRejected: (callback: (reason: string) => void) => {
+                reportAuthRejected = callback;
+              },
+              onUpstreamFailure: (
+                callback: (failure: { reason: string; retrying: boolean } | null) => void,
+              ) => {
+                reportUpstreamFailure = callback;
+              },
+              nativeConnectionStatus: () => ({
+                configured: true,
+                explicitlyOffline: false,
+                connected: false,
+                authRejected: null,
+              }),
+              isNativeForegroundClosed: () => false,
+            }),
+          openBrowser: async () => {
+            throw new Error("not used");
+          },
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      const authFailures: string[] = [];
+      runtime.onAuthFailure((failure) => {
+        authFailures.push(failure);
+        // As JazzClient does when no renewer is registered.
+        if (!renewed) runtime.endCredentialWait();
+      });
+      const transportErrors: Array<{ message: string; retrying: boolean }> = [];
+      runtime.onServerTransportError((error, state) =>
+        transportErrors.push({ message: error.message, retrying: state.retrying }),
+      );
+
+      reportAuthRejected!(reason);
+      reportUpstreamFailure!({ reason, retrying: false });
+      expect(authFailures).toEqual([reason]);
+      expect(transportErrors).toEqual([{ message: reason, retrying }]);
+
+      // A renewed credential reconnects and clears the refusal.
+      reportUpstreamFailure!(null);
+      reportUpstreamFailure!({ reason: "socket reset", retrying: false });
+      expect(transportErrors.at(-1)).toEqual({ message: "socket reset", retrying: false });
+      await runtime.close();
+    },
+  );
 
   it("reports pre-hello auth failures and reconnects with refreshed auth", async () => {
     const sockets: FakeWebSocket[] = [];
@@ -882,7 +1100,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
-    const read = runtime.query(JSON.stringify({ table: "todos" }), null, "edge");
+    const read = runtime.query(JSON.stringify({ table: "todos" }), null, "remote");
     await waitForFakeWebSocketNegotiation();
 
     sockets[0]!.emitMessage(
@@ -971,7 +1189,7 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
     await waitForFakeWebSocketNegotiation();
-    const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "edge");
+    const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "remote");
     const updates = vi.fn();
     runtime.executeSubscription(handle, updates);
     await Promise.resolve();
@@ -986,7 +1204,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(updates.mock.calls[0]).toHaveLength(1);
   });
 
-  it.each(["local", "edge", "global"] as const)(
+  it.each(["local-first", "remote"] as const)(
     "forwards the core's ready %s subscription reset directly",
     (tier) => {
       const rowId = uuidBytes("00000000-0000-0000-0000-000000000123");
@@ -1259,15 +1477,15 @@ describe("NativeRuntimeAdapter server transport", () => {
         values: [{ type: "Text", value: "fresh local write" }],
       },
     ]);
-    await expect(runtime.query(JSON.stringify({ table: "todos" }), null, "local")).resolves.toEqual(
-      [
-        {
-          table: "todos",
-          id: "00000000-0000-0000-0000-000000000000",
-          values: [{ type: "Text", value: "fresh local write" }],
-        },
-      ],
-    );
+    await expect(
+      runtime.query(JSON.stringify({ table: "todos" }), null, "local-first"),
+    ).resolves.toEqual([
+      {
+        table: "todos",
+        id: "00000000-0000-0000-0000-000000000000",
+        values: [{ type: "Text", value: "fresh local write" }],
+      },
+    ]);
   });
 
   it("routes exact and head-over-base mutation targets to branch-aware bindings", () => {
@@ -1329,7 +1547,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(calls[2]?.at(-1)).toMatchObject({ head, base });
   });
 
-  it("runs scheduled core ticks before post-wait edge reads", async () => {
+  it("runs scheduled core ticks before post-wait global reads", async () => {
     let schedulerCallback: ((urgency: "immediate" | "deferred") => void) | undefined;
     let ticked = false;
     let subscriptionDrained = false;
@@ -1385,7 +1603,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       true,
     );
     const deltas: unknown[] = [];
-    const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "edge");
+    const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "remote");
     runtime.executeSubscription(handle, (delta: unknown) => {
       deltas.push(delta);
     });
@@ -1399,9 +1617,11 @@ describe("NativeRuntimeAdapter server transport", () => {
       "00000000-0000-0000-0000-000000000123",
     );
 
-    await runtime.waitForTransaction(await committedTxId(inserted), "edge");
+    await runtime.waitForTransaction(await committedTxId(inserted), "global");
 
-    await expect(runtime.query(JSON.stringify({ table: "todos" }), null, "edge")).resolves.toEqual([
+    await expect(
+      runtime.query(JSON.stringify({ table: "todos" }), null, "remote"),
+    ).resolves.toEqual([
       {
         table: "todos",
         id: "00000000-0000-0000-0000-000000000123",
@@ -1464,7 +1684,7 @@ describe("NativeRuntimeAdapter server transport", () => {
           issuer: "https://issuer.example",
           authMode: "external",
         }),
-        "local",
+        "local-first",
       ),
     ).resolves.toEqual([
       {
@@ -1479,7 +1699,10 @@ describe("NativeRuntimeAdapter server transport", () => {
   it.each(["query", "subscription"] as const)(
     "installs client correlation claims before opening a %s without preparing a native plan",
     async (kind) => {
-      const app = s.defineApp({ todos: s.table({ title: s.string() }) });
+      const app = s.defineApp(
+        { todos: s.table({ title: s.string() }, {}) },
+        { migrations: "none" },
+      );
       let releaseClaims!: () => void;
       const installed = new Promise<void>((resolve) => {
         releaseClaims = resolve;
@@ -1503,8 +1726,8 @@ describe("NativeRuntimeAdapter server transport", () => {
       });
       const open = () =>
         kind === "query"
-          ? runtime.query(app.todos._build(), session, "local")
-          : runtime.createSubscription(app.todos._build(), session, "local");
+          ? runtime.query(app.todos._build(), session, "local-first")
+          : runtime.createSubscription(app.todos._build(), session, "local-first");
       try {
         const pending = open();
         expect(setSessionClaims).toHaveBeenCalledOnce();
@@ -1849,7 +2072,7 @@ describe("NativeRuntimeAdapter server transport", () => {
           issuer: externalIssuer,
           authMode: "external",
         }),
-        "local",
+        "local-first",
       ),
     ).resolves.toEqual([
       {
@@ -1907,15 +2130,15 @@ describe("NativeRuntimeAdapter server transport", () => {
       { readAuthorizationHost: "trusted-serving" },
     );
 
-    await expect(runtime.query(JSON.stringify({ table: "todos" }), null, "local")).resolves.toEqual(
-      [
-        {
-          table: "todos",
-          id: "00000000-0000-0000-0000-000000000000",
-          values: [{ type: "Text", value: "private trusted identity" }],
-        },
-      ],
-    );
+    await expect(
+      runtime.query(JSON.stringify({ table: "todos" }), null, "local-first"),
+    ).resolves.toEqual([
+      {
+        table: "todos",
+        id: "00000000-0000-0000-0000-000000000000",
+        values: [{ type: "Text", value: "private trusted identity" }],
+      },
+    ]);
     expect(authors).toEqual([privateSystemAuthor]);
 
     for (const issuer of RESERVED_TEST_ISSUERS) {
@@ -1931,10 +2154,10 @@ describe("NativeRuntimeAdapter server transport", () => {
               : "external",
       });
       await expect(
-        runtime.query(JSON.stringify({ table: "todos" }), sessionJson, "local"),
+        runtime.query(JSON.stringify({ table: "todos" }), sessionJson, "local-first"),
       ).rejects.toThrow("reserved issuer");
       expect(() =>
-        runtime.createSubscription(JSON.stringify({ table: "todos" }), sessionJson, "local"),
+        runtime.createSubscription(JSON.stringify({ table: "todos" }), sessionJson, "local-first"),
       ).toThrow("reserved issuer");
     }
   });
@@ -1979,7 +2202,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     await expect(
-      runtime.query(JSON.stringify({ table: "todos" }), runtimeSessionJson, "local"),
+      runtime.query(JSON.stringify({ table: "todos" }), runtimeSessionJson, "local-first"),
     ).resolves.toEqual([
       {
         table: "todos",
@@ -2039,7 +2262,7 @@ describe("NativeRuntimeAdapter server transport", () => {
             ...trustedSession,
             [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: trustedReservedSessionToken(trustedSession),
           }),
-          "local",
+          "local-first",
         ),
       ).resolves.toHaveLength(1);
     }
@@ -2055,7 +2278,7 @@ describe("NativeRuntimeAdapter server transport", () => {
           claims: {},
           authMode: "local-first",
         }),
-        "local",
+        "local-first",
       ),
     ).rejects.toThrow("reserved issuer");
 
@@ -2340,7 +2563,10 @@ describe("NativeRuntimeAdapter server transport", () => {
               close,
             };
       const runtime = runtimeWithSubscriptionSource(source);
-      const app = s.defineApp({ todos: s.table({ title: s.string() }) });
+      const app = s.defineApp(
+        { todos: s.table({ title: s.string() }, {}) },
+        { migrations: "none" },
+      );
       const handle = runtime.createSubscription(app.todos._build());
       const callback = vi.fn();
       runtime.executeSubscription(handle, callback);
@@ -2388,7 +2614,10 @@ describe("NativeRuntimeAdapter server transport", () => {
               },
             });
       const runtime = runtimeWithSubscriptionSource(source);
-      const app = s.defineApp({ todos: s.table({ title: s.string() }) });
+      const app = s.defineApp(
+        { todos: s.table({ title: s.string() }, {}) },
+        { migrations: "none" },
+      );
       const handle = runtime.createSubscription(app.todos._build());
       const replacement = vi.fn();
       const callback = vi.fn(() => {
@@ -2435,7 +2664,10 @@ describe("NativeRuntimeAdapter server transport", () => {
       const runtime = runtimeWithSubscriptionSource({
         getReader: () => ({ read: () => pending, cancel }),
       });
-      const app = s.defineApp({ todos: s.table({ title: s.string() }) });
+      const app = s.defineApp(
+        { todos: s.table({ title: s.string() }, {}) },
+        { migrations: "none" },
+      );
       const handle = runtime.createSubscription(app.todos._build());
       const callback = vi.fn();
       runtime.executeSubscription(handle, callback);
@@ -2608,8 +2840,9 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     expect(queryBytes).toBeDefined();
-    expect(Array.from(queryBytes!.slice(-10))).toEqual([
-      4, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0xf8, 0x3f,
+    // The literal 1.0 (tag 4, LEB128 f64 bits), then the query's empty partial selects.
+    expect(Array.from(queryBytes!.slice(-11))).toEqual([
+      4, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0xf8, 0x3f, 0,
     ]);
   });
 
@@ -2760,7 +2993,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     });
   });
 
-  it("encodes integer query literals with the Groove I32 tag", () => {
+  it("encodes integer query literals with the I32 tag", () => {
     let preparedBytes: Uint8Array | undefined;
     const runtime = new NativeRuntimeAdapter(
       {
@@ -3346,7 +3579,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(calls).toEqual(["subscribe"]);
   });
 
-  it("passes supported read tiers and propagation through native read options", async () => {
+  it("passes the local-only read tier through native read options", async () => {
     const readOptions: unknown[] = [];
     const runtime = new NativeRuntimeAdapter(
       {
@@ -3370,15 +3603,10 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     await expect(
-      runtime.query(
-        JSON.stringify({ table: "todos" }),
-        null,
-        "edge",
-        JSON.stringify({ propagation: "local-only" }),
-      ),
+      runtime.query(JSON.stringify({ table: "todos" }), null, "local-only"),
     ).resolves.toEqual([]);
 
-    expect(readOptions).toEqual([{ tier: "edge", propagation: "local_only" }]);
+    expect(readOptions).toEqual([{ tier: "local-only" }]);
   });
 
   it("selects one backend authority context for plain, relation, subscription, and transaction reads", async () => {
@@ -3509,7 +3737,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(all).toHaveBeenCalledOnce();
   });
 
-  it("hydrates broad Edge members with one native read", async () => {
+  it("hydrates broad Global members with one native read", async () => {
     const readOptions: unknown[] = [];
     const row = {
       table: "todos",
@@ -3539,7 +3767,9 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
     runtime.connectUpstreamPeer();
 
-    await expect(runtime.query(JSON.stringify({ table: "todos" }), null, "edge")).resolves.toEqual([
+    await expect(
+      runtime.query(JSON.stringify({ table: "todos" }), null, "remote"),
+    ).resolves.toEqual([
       {
         id: "00000000-0000-0000-0000-000000000001",
         table: "todos",
@@ -3547,10 +3777,10 @@ describe("NativeRuntimeAdapter server transport", () => {
       },
     ]);
 
-    expect(readOptions).toEqual([{ tier: "edge" }]);
+    expect(readOptions).toEqual([{ tier: "remote" }]);
   });
 
-  it("forwards a standalone exact Edge read through all", async () => {
+  it("forwards a standalone exact Global read through all", async () => {
     const readOptions: unknown[] = [];
     const runtime = new NativeRuntimeAdapter(
       {
@@ -3582,11 +3812,11 @@ describe("NativeRuntimeAdapter server transport", () => {
           conditions: [{ column: "id", op: "eq", value: "00000000-0000-0000-0000-000000000001" }],
         }),
         null,
-        "edge",
+        "remote",
       ),
     ).resolves.toEqual([]);
 
-    expect(readOptions).toEqual([{ tier: "edge" }]);
+    expect(readOptions).toEqual([{ tier: "remote" }]);
   });
 
   it("ignores the removed propagate read option", async () => {
@@ -3616,12 +3846,12 @@ describe("NativeRuntimeAdapter server transport", () => {
       runtime.query(
         JSON.stringify({ table: "todos" }),
         null,
-        "edge",
+        "remote",
         JSON.stringify({ propagate: false }),
       ),
     ).resolves.toEqual([]);
 
-    expect(readOptions).toEqual([{ tier: "edge" }]);
+    expect(readOptions).toEqual([{ tier: "remote" }]);
   });
 
   it("keeps concurrent client reads on the raw client path", async () => {
@@ -3659,7 +3889,7 @@ describe("NativeRuntimeAdapter server transport", () => {
           issuer: "https://issuer.example",
           user_id: "00000000-0000-0000-0000-0000000000a1",
         }),
-        "edge",
+        "remote",
       ),
       runtime.query(
         JSON.stringify({ table: "todos" }),
@@ -3667,7 +3897,7 @@ describe("NativeRuntimeAdapter server transport", () => {
           issuer: "https://issuer.example",
           user_id: "00000000-0000-0000-0000-0000000000b2",
         }),
-        "edge",
+        "remote",
       ),
     ]);
 
@@ -3677,9 +3907,9 @@ describe("NativeRuntimeAdapter server transport", () => {
   it("passes supported read tiers and branch views through", async () => {
     const runtime = emptyNativeRuntime();
 
-    await expect(runtime.query(JSON.stringify({ table: "todos" }), null, "edge")).resolves.toEqual(
-      [],
-    );
+    await expect(
+      runtime.query(JSON.stringify({ table: "todos" }), null, "remote"),
+    ).resolves.toEqual([]);
     await expect(
       runtime.query(JSON.stringify({ table: "todos" }), null, "planetary"),
     ).rejects.toThrow("unsupported read tier");
@@ -3687,15 +3917,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       runtime.query(
         JSON.stringify({ table: "todos" }),
         null,
-        "local",
-        JSON.stringify({ propagation: "local" }),
-      ),
-    ).rejects.toThrow("does not support read propagation");
-    await expect(
-      runtime.query(
-        JSON.stringify({ table: "todos" }),
-        null,
-        "local",
+        "local-first",
         JSON.stringify({ read_view: { source: "branch" } }),
       ),
     ).resolves.toEqual([]);
@@ -3703,7 +3925,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       runtime.query(
         JSON.stringify({ table: "todos" }),
         null,
-        "local",
+        "local-first",
         JSON.stringify({ readView: { source: "branch" } }),
       ),
     ).resolves.toEqual([]);
@@ -3733,10 +3955,10 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     await expect(
-      runtime.query(JSON.stringify({ table: "todos", include_deleted: true }), null, "edge"),
+      runtime.query(JSON.stringify({ table: "todos", include_deleted: true }), null, "remote"),
     ).resolves.toEqual([]);
 
-    expect(readOptions).toEqual([{ tier: "edge", include_deleted: true }]);
+    expect(readOptions).toEqual([{ tier: "remote", include_deleted: true }]);
   });
 
   it("polls a pending binding-owned read until it completes", async () => {
@@ -3747,6 +3969,7 @@ describe("NativeRuntimeAdapter server transport", () => {
           fakeDb({
             all: () => ({
               poll: () => (++polls < 2 ? null : encodeRows([])),
+              cancel: () => {},
             }),
             connectUpstream: () => new FakeTransport([]),
             tick: () => undefined,
@@ -3763,9 +3986,9 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
     runtime.connectUpstreamPeer();
 
-    await expect(runtime.query(JSON.stringify({ table: "todos" }), null, "edge")).resolves.toEqual(
-      [],
-    );
+    await expect(
+      runtime.query(JSON.stringify({ table: "todos" }), null, "remote"),
+    ).resolves.toEqual([]);
     expect(polls).toBe(2);
   });
 
@@ -3799,9 +4022,9 @@ describe("NativeRuntimeAdapter server transport", () => {
     runtime.connectUpstreamPeer();
     runtime.notifyPeerTransportActivity();
 
-    await expect(runtime.query(JSON.stringify({ table: "todos" }), null, "local")).resolves.toEqual(
-      [],
-    );
+    await expect(
+      runtime.query(JSON.stringify({ table: "todos" }), null, "local-first"),
+    ).resolves.toEqual([]);
   });
 
   it("rejects a pending binding-owned read when its server transport errors", async () => {
@@ -3816,7 +4039,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            all: () => ({ poll: () => null }),
+            all: () => ({ poll: () => null, cancel: () => {} }),
             connectUpstream: () => new FakeTransport([]),
             tick: () => undefined,
           }),
@@ -3833,7 +4056,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     await runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
     await waitForFakeWebSocketNegotiation();
 
-    const query = runtime.query(JSON.stringify({ table: "todos" }), null, "edge");
+    const query = runtime.query(JSON.stringify({ table: "todos" }), null, "remote");
     await Promise.resolve();
     sockets[0]!.emitMessage(encodeWebSocketFrameBatch([encodeWireError(4, 3, "server busy")]));
 
@@ -3844,19 +4067,11 @@ describe("NativeRuntimeAdapter server transport", () => {
     const runtime = emptyNativeRuntime();
 
     expect(() =>
-      runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "edge"),
+      runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "remote"),
     ).not.toThrow();
     expect(() =>
       runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "planetary"),
     ).toThrow("unsupported read tier");
-  });
-
-  it("rejects include_deleted subscription query intent", () => {
-    const runtime = emptyNativeRuntime();
-
-    expect(() =>
-      runtime.createSubscription(JSON.stringify({ table: "todos", include_deleted: true })),
-    ).toThrow("include_deleted subscriptions");
   });
 
   it("rejects permission introspection selected columns before preparing flat queries", async () => {
@@ -4174,7 +4389,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(calls).toEqual(["all"]);
   });
 
-  it("passes local-only subscription propagation through native read options", () => {
+  it("passes the local-only subscription tier through native read options", () => {
     const readOptions: unknown[] = [];
     const runtime = new NativeRuntimeAdapter(
       {
@@ -4198,15 +4413,10 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     expect(() =>
-      runtime.createSubscription(
-        JSON.stringify({ table: "todos" }),
-        null,
-        "edge",
-        JSON.stringify({ propagation: "local-only" }),
-      ),
+      runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "local-only"),
     ).not.toThrow();
 
-    expect(readOptions).toEqual([{ tier: "edge", propagation: "local_only" }]);
+    expect(readOptions).toEqual([{ tier: "local-only" }]);
   });
 
   it("passes non-default read_view subscription options through", () => {
@@ -4216,7 +4426,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       runtime.createSubscription(
         JSON.stringify({ table: "todos" }),
         null,
-        "edge",
+        "remote",
         JSON.stringify({ read_view: { source: "branch" } }),
       ),
     ).not.toThrow();
@@ -4224,7 +4434,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       runtime.createSubscription(
         JSON.stringify({ table: "todos" }),
         null,
-        "edge",
+        "remote",
         JSON.stringify({ readView: { source: "branch" } }),
       ),
     ).not.toThrow();
@@ -4938,8 +5148,8 @@ describe("NativeRuntimeAdapter server transport", () => {
   it("materializes typed-occurrence resets instead of collapsing them in the packed path", () => {
     const rowId = uuidBytes("00000000-0000-0000-0000-000000000124");
     const key = (suffix: number) => {
-      const bytes = new Uint8Array(50);
-      bytes[0] = 1;
+      const bytes = new Uint8Array(52);
+      bytes[0] = 2;
       bytes.set(rowId, 1);
       new DataView(bytes.buffer).setUint32(17, 1);
       bytes.fill(2, 21, 37);
@@ -4970,8 +5180,8 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(decoded).toHaveLength(2);
     expect(decoded[0]!.id).not.toBe(decoded[1]!.id);
     expect(decoded.map((change) => change.id)).toEqual([
-      expect.stringContaining("result:01"),
-      expect.stringContaining("result:01"),
+      expect.stringContaining("result:02"),
+      expect.stringContaining("result:02"),
     ]);
     runtime.close();
   });
@@ -5207,7 +5417,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     { name: "truncated record", provenanceBytes: encodedAuthorFixture().subarray(0, 4) },
     {
       name: "malformed UTF-8 subject",
-      provenanceBytes: encodedAuthorFixture(Uint8Array.of(2, 255)),
+      provenanceBytes: encodedAuthorFixture(Uint8Array.of(0, 255)),
     },
     { name: "ASCII-blank component", provenanceBytes: encodedAuthorFixture(inlineScalar(" ")) },
   ])("rejects malformed public provenance author bytes: $name", ({ provenanceBytes }) => {
@@ -5468,7 +5678,7 @@ describe("NativeRuntimeAdapter server transport", () => {
   });
 });
 describe("NativeRuntimeAdapter read and subscription lifecycle", () => {
-  const app = s.defineApp({ todos: s.table({ title: s.string() }) });
+  const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) }, { migrations: "none" });
   const query = app.todos.where({ title: "lifecycle" })._build();
   const openRuntime = (overrides: Partial<NativeDbForTest>) =>
     new NativeRuntimeAdapter(
@@ -5576,36 +5786,40 @@ describe("NativeRuntimeAdapter read and subscription lifecycle", () => {
     const runtime = openRuntime({ all, connectUpstream: () => new FakeTransport([]) });
     try {
       await runtime.connectUpstreamPeer();
-      await expect(runtime.query(query, null, "edge")).rejects.toBe(failure);
-      await expect(runtime.query(query, null, "local")).resolves.toEqual([]);
+      await expect(runtime.query(query, null, "remote")).rejects.toBe(failure);
+      await expect(runtime.query(query, null, "local-first")).resolves.toEqual([]);
       expect(all).toHaveBeenCalledTimes(2);
     } finally {
       await runtime.close();
     }
   });
 
-  it("reports a background coverage failure while keeping local-only reads usable", async () => {
+  it("drops a background coverage failure while keeping local-only reads usable", async () => {
     const failure = new Error("background coverage failure");
+    let globalReads = 0;
     const runtime = openRuntime({
       all: (_query, options) => {
-        if ((options as { tier?: string }).tier === "edge") throw failure;
+        if ((options as { tier?: string }).tier === "remote") {
+          globalReads += 1;
+          throw failure;
+        }
         return encodeRows([]);
       },
     });
-    const failed = new Promise<Error>((resolve) => runtime.onServerTransportError(resolve));
+    const terminal = vi.fn();
+    runtime.onServerTransportError(terminal);
     Object.assign(runtime, {
       serverTransport: new FakeTransport([]),
       serverCarrier: { close() {} },
       serverCarrierPromise: Promise.resolve(),
     });
     try {
-      await expect(
-        runtime.query(query, null, "local", JSON.stringify({ propagation: "full" })),
-      ).resolves.toEqual([]);
-      await expect(failed).resolves.toBe(failure);
-      await expect(
-        runtime.query(query, null, "local", JSON.stringify({ propagation: "local-only" })),
-      ).resolves.toEqual([]);
+      await expect(runtime.query(query, null, "local-first")).resolves.toEqual([]);
+      await vi.waitFor(() => expect(globalReads).toBe(1));
+      for (let turn = 0; turn < 5; turn += 1) await Promise.resolve();
+      // A best-effort refresh failure is not a transport failure (#3692).
+      expect(terminal).not.toHaveBeenCalled();
+      await expect(runtime.query(query, null, "local-only")).resolves.toEqual([]);
     } finally {
       await runtime.close();
     }
@@ -5868,10 +6082,10 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     expect(transactionCall?.[2]).toBeUndefined();
     expect(new TextDecoder().decode(transactionCall?.[3])).toBe(attribution);
 
-    runtime.beginTransaction("exclusive", "attributed-exclusive" as never, context);
-    const exclusiveCall = beginTransaction.mock.calls[1];
-    expect(exclusiveCall?.[1]).toBe("exclusive");
-    expect(new TextDecoder().decode(exclusiveCall?.[3])).toBe(attribution);
+    runtime.beginTransaction("serializable", "attributed-serializable" as never, context);
+    const serializableCall = beginTransaction.mock.calls[1];
+    expect(serializableCall?.[1]).toBe("serializable");
+    expect(new TextDecoder().decode(serializableCall?.[3])).toBe(attribution);
 
     await runtime.streamingMutation(
       "insert",
@@ -6285,12 +6499,18 @@ const testSchema = {
   },
 } satisfies WasmSchema;
 
-const bigintQuerySchema = s.defineApp({
-  metrics: s.table({
-    largeCount: s.bigint(),
-    largeCounts: s.array(s.bigint()),
-  }),
-}).wasmSchema;
+const bigintQuerySchema = s.defineApp(
+  {
+    metrics: s.table(
+      {
+        largeCount: s.bigint(),
+        largeCounts: s.array(s.bigint()),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+).wasmSchema;
 
 // Capture native bytes for valid queries through the serialized adapter interface.
 async function captureNativeQuery(schema: WasmSchema, query: object): Promise<Uint8Array> {
@@ -6943,7 +7163,7 @@ class FakeWebSocket {
 
 function encodeWireError(code: number, retry: number, message: string): Uint8Array {
   const writer = new PostcardWriter();
-  writer.u64(2);
+  writer.u64(1);
   writer.u64(code);
   writer.u64(retry);
   writer.string(message);
@@ -7070,7 +7290,7 @@ function encodeTerminalSubscriptionDelta(schema: WasmSchema): Uint8Array {
   suffix.vec(() => {}, 0); // updated rows
   suffix.vec(() => {}, 0); // removed rows
   const rowId = uuidBytes("00000000-0000-0000-0000-000000000001");
-  const resultKey = Uint8Array.from([1, ...rowId, 0, 0, 0, 0, 0, 0, 0, 0]);
+  const resultKey = Uint8Array.from([2, ...rowId, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
   suffix.vec((key) => key.bytes(resultKey), 1); // added occurrence keys
   suffix.vec(() => {}, 0); // updated occurrence keys
   suffix.vec(() => {}, 0); // removed occurrence keys
@@ -7078,6 +7298,7 @@ function encodeTerminalSubscriptionDelta(schema: WasmSchema): Uint8Array {
   suffix.vec(() => {}, 0); // updated previous indices
   suffix.vec(() => {}, 0); // updated indices
   suffix.vec(() => {}, 0); // removed indices
+  suffix.vec(() => {}, 0); // updated splices
   return concatBytes([rowBatches, suffix.finish()]);
 }
 
@@ -7163,7 +7384,7 @@ function encodeSubscriptionDelta(delta: {
     removed.string(source.table);
     removed.bytes(source.rowId);
   }, delta.removed.length);
-  const rowKey = (rowId: Uint8Array) => Uint8Array.from([1, ...rowId, 0, 0, 0, 0, 0, 0, 0, 0]);
+  const rowKey = (rowId: Uint8Array) => Uint8Array.from([2, ...rowId, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
   for (const keys of [
     delta.addedOccurrenceKeys ?? delta.added.map((row) => rowKey(row.rowId)),
     delta.updatedOccurrenceKeys ?? delta.updated.map((row) => rowKey(row.rowId)),
@@ -7179,6 +7400,8 @@ function encodeSubscriptionDelta(delta: {
   ]) {
     writer.vec((indexWriter, index) => indexWriter.u64(indices[index]!), indices.length);
   }
+  // No opted-in splices on any updated row.
+  writer.vec((row) => row.vec(() => {}, 0), delta.updated.length);
   return writer.finish();
 }
 
@@ -7186,8 +7409,8 @@ it("keeps same-row union occurrences distinct through apply, removal, and reopen
   const rowId = new Uint8Array(16).fill(7);
   const typedKey = (label: string) => {
     const labelBytes = inlineScalar(label);
-    const key = new Uint8Array(1 + 16 + 4 + 16 + 4 + 4 + 4 + labelBytes.length);
-    key[0] = 1;
+    const key = new Uint8Array(1 + 16 + 4 + 16 + 4 + 4 + 4 + labelBytes.length + 2);
+    key[0] = 2;
     key.fill(7, 1, 17);
     new DataView(key.buffer).setUint32(17, 1);
     key.fill(8, 21, 37);
@@ -7214,8 +7437,8 @@ it("keeps same-row union occurrences distinct through apply, removal, and reopen
   const first = decodeSubscriptionDelta(initial, testSchema);
   const firstDelta = runtimeDeltaChanges(first);
   expect(firstDelta.map((change) => change.id)).toEqual([
-    expect.stringContaining("result:01"),
-    expect.stringContaining("result:01"),
+    expect.stringContaining("result:02"),
+    expect.stringContaining("result:02"),
   ]);
   expect(firstDelta[0]!.id).not.toBe(firstDelta[1]!.id);
   const manager = new SubscriptionManager<{ id: string; title: string }>();
@@ -7451,13 +7674,14 @@ function encodeUserWrappedSubscriptionDelta(row: {
   }, 1);
   delta.vec(() => undefined, 0);
   delta.vec(() => undefined, 0);
-  delta.vec((key) => key.bytes(Uint8Array.from([1, ...row.rowId, 0, 0, 0, 0, 0, 0, 0, 0])), 1);
+  delta.vec((key) => key.bytes(Uint8Array.from([2, ...row.rowId, 0, 0, 0, 0, 0, 0, 0, 0, 0])), 1);
   delta.vec(() => undefined, 0);
   delta.vec(() => undefined, 0);
   delta.vec((index) => index.u64(0), 1);
   delta.vec(() => undefined, 0);
   delta.vec(() => undefined, 0);
   delta.vec(() => undefined, 0);
+  delta.vec(() => undefined, 0); // updated splices
   return delta.finish();
 }
 
@@ -7485,9 +7709,9 @@ function encodeTeamGatherSubscriptionDelta(delta: {
   writer.vec(() => undefined, 0);
   for (const keys of [
     delta.addedOccurrenceKeys ??
-      added.map((row) => Uint8Array.from([1, ...row.rowId, 0, 0, 0, 0, 0, 0, 0, 0])),
+      added.map((row) => Uint8Array.from([2, ...row.rowId, 0, 0, 0, 0, 0, 0, 0, 0, 0])),
     delta.updatedOccurrenceKeys ??
-      updated.map((row) => Uint8Array.from([1, ...row.rowId, 0, 0, 0, 0, 0, 0, 0, 0])),
+      updated.map((row) => Uint8Array.from([2, ...row.rowId, 0, 0, 0, 0, 0, 0, 0, 0, 0])),
     [],
   ]) {
     writer.vec((key, index) => key.bytes(keys[index]!), keys.length);
@@ -7496,6 +7720,7 @@ function encodeTeamGatherSubscriptionDelta(delta: {
   writer.vec((indexWriter, index) => indexWriter.u64(index), updated.length);
   writer.vec((indexWriter, index) => indexWriter.u64(index), updated.length);
   writer.vec(() => undefined, 0);
+  writer.vec((row) => row.vec(() => undefined, 0), updated.length); // updated splices
   return writer.finish();
 }
 
@@ -7541,8 +7766,8 @@ function writeTeamGatherBatches(
 
 function typedOccurrenceKey(label: string): Uint8Array {
   const labelBytes = inlineScalar(label);
-  const key = new Uint8Array(1 + 16 + 4 + 16 + 4 + 4 + 4 + labelBytes.length);
-  key[0] = 1;
+  const key = new Uint8Array(1 + 16 + 4 + 16 + 4 + 4 + 4 + labelBytes.length + 2);
+  key[0] = 2;
   key.fill(1, 1, 17);
   new DataView(key.buffer).setUint32(17, 1);
   key.fill(2, 21, 37);
@@ -7561,7 +7786,7 @@ function presentBytes(bytes: Uint8Array): Uint8Array {
 }
 
 function inlineScalar(value: string): Uint8Array {
-  return Uint8Array.from([2, ...new TextEncoder().encode(value)]);
+  return Uint8Array.from([0, ...new TextEncoder().encode(value)]);
 }
 
 function encodeArrayRows(): Uint8Array {
@@ -7592,7 +7817,7 @@ function encodeArrayRows(): Uint8Array {
 
 function fakeDb<T extends object>(db: T): T & NativeDbForTest {
   type FakeOpenBatch = {
-    kind: "mergeable" | "exclusive";
+    kind: "mergeable" | "serializable";
     author?: Uint8Array;
   };
   const implementation = db as T & {
@@ -7606,6 +7831,7 @@ function fakeDb<T extends object>(db: T): T & NativeDbForTest {
   };
   let upstream: Transport | undefined;
   const result: Record<string, unknown> = {
+    createUpstreamLink,
     // A real native binding always advertises the wire features compiled into
     // it. Individual tests can still explicitly set this to `undefined` when
     // exercising the missing-binding diagnostic.
@@ -7892,7 +8118,7 @@ it("isolates throwing callbacks when replaying a deferred subscription failure",
 });
 
 it("passes different claims independently on same-query reads", async () => {
-  const app = s.defineApp({ todos: s.table({ title: s.string() }) });
+  const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) }, { migrations: "none" });
   const rows = [
     { table: "todos", rowId: new Uint8Array(16), title: "Draft proposal", team: "team-a" },
     { table: "todos", rowId: new Uint8Array(16), title: "Review budget", team: "team-b" },
@@ -7947,7 +8173,7 @@ it("passes different claims independently on same-query reads", async () => {
         runtime.query(
           app.todos._build(),
           JSON.stringify({ ...session, claims: { team } }),
-          "local",
+          "local-first",
         ),
       ).resolves.toMatchObject([{ values: [{ type: "Text", value: title }] }]);
     }
@@ -7959,4 +8185,114 @@ it("passes different claims independently on same-query reads", async () => {
   } finally {
     await runtime.close();
   }
+});
+
+it("surfaces the native slow-query report on console.warn after each core tick, naming the app", async () => {
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  const reports = [["slow query in app app-1 on todos: 1 slow run(s)"], []];
+  const takeSlowQueryReport = vi.fn((_app?: string) => reports.shift() ?? []);
+  const setSlowQueryThresholdMs = vi.fn();
+  const runtime = NativeRuntimeAdapter.fromDb(
+    fakeDb({ tick: () => undefined, takeSlowQueryReport, setSlowQueryThresholdMs }),
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+    { slowQueryLog: { appId: "app-1", thresholdMs: 200 } },
+  );
+  try {
+    expect(setSlowQueryThresholdMs).toHaveBeenCalledExactlyOnceWith(200);
+    await runtime.progressPeerTransport();
+    expect(takeSlowQueryReport).toHaveBeenCalledWith("app-1");
+    expect(warn).toHaveBeenCalledExactlyOnceWith(
+      "[jazz] slow query in app app-1 on todos: 1 slow run(s)",
+    );
+    await runtime.progressPeerTransport();
+    expect(warn).toHaveBeenCalledOnce();
+  } finally {
+    warn.mockRestore();
+    await runtime.close();
+  }
+});
+
+it("rejects a negative slow-query threshold and leaves the native default without one", async () => {
+  const setSlowQueryThresholdMs = vi.fn();
+  expect(() =>
+    NativeRuntimeAdapter.fromDb(
+      fakeDb({ tick: () => undefined, setSlowQueryThresholdMs }),
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+      { slowQueryLog: { thresholdMs: -1 } },
+    ),
+  ).toThrow("slowQueryThresholdMs must be a non-negative number of milliseconds");
+  const runtime = NativeRuntimeAdapter.fromDb(
+    fakeDb({ tick: () => undefined, setSlowQueryThresholdMs }),
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+    { slowQueryLog: { appId: "app-1" } },
+  );
+  try {
+    expect(setSlowQueryThresholdMs).not.toHaveBeenCalled();
+  } finally {
+    await runtime.close();
+  }
+});
+
+describe("NativeRuntimeAdapter waitForPendingWrites cancellation", () => {
+  const open = (db: object) =>
+    new NativeRuntimeAdapter(
+      { openMemory: () => fakeDb(db) },
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+  it("cancels a pollable binding wait when the caller gives up", async () => {
+    const cancel = vi.fn();
+    const runtime = open({
+      tick: () => undefined,
+      waitForPendingWrites: () => ({ poll: () => null, cancel }),
+    });
+    const control = new AbortController();
+    const wait = runtime.waitForPendingWrites("global", {
+      throughOutage: true,
+      signal: control.signal,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(cancel).not.toHaveBeenCalled();
+    control.abort(new Error("gave up"));
+    await expect(wait).rejects.toThrow("gave up");
+    await vi.waitFor(() => expect(cancel).toHaveBeenCalled());
+    await runtime.close();
+  });
+
+  it("settles a promise-shaped binding wait's cancel token when the caller gives up", async () => {
+    let cancelled: Promise<void> | undefined;
+    const runtime = open({
+      tick: () => undefined,
+      waitForPendingWrites: (_tier: string, token?: Promise<void>) => {
+        cancelled = token;
+        return new Promise<never>(() => undefined);
+      },
+    });
+    const control = new AbortController();
+    const wait = runtime.waitForPendingWrites("global", {
+      throughOutage: true,
+      signal: control.signal,
+    });
+    await vi.waitFor(() => expect(cancelled).toBeDefined());
+    control.abort(new Error("gave up"));
+    await expect(wait).rejects.toThrow("gave up");
+    await expect(cancelled).resolves.toBeUndefined();
+    await runtime.close();
+  });
 });

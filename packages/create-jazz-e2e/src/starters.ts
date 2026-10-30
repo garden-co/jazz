@@ -22,6 +22,8 @@ export const KNOWN_STARTERS = [
   "ts-betterauth",
   "ts-localfirst",
   "ts-hybrid",
+  "ts-effect-localfirst",
+  "ts-effect-betterauth",
 ] as const;
 
 export type StarterName = (typeof KNOWN_STARTERS)[number];
@@ -58,12 +60,12 @@ export function getStarterConfig(name: StarterName): StarterConfig {
       appOrigin: "http://localhost:5173",
     };
   }
-  // react-* and ts-* both serve from Vite (preview) or a Hono server bound to
-  // 5173, matching their playwright BASE_URL.
+  // React/TS auth starters serve the production UI and auth endpoints from
+  // Hono on 3001. Local-first starters use Vite preview on 5173.
   return {
     name,
     envPrefix: "VITE",
     schemaPath: "schema.ts",
-    appOrigin: "http://localhost:5173",
+    appOrigin: name.endsWith("-localfirst") ? "http://localhost:5173" : "http://localhost:3001",
   };
 }

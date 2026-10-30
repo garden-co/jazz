@@ -40,8 +40,9 @@ const allowedInheritedCiJazzEnv = new Set(ALLOWED_INHERITED_CI_JAZZ_ENV);
 export const ciPartitionJobs = Object.freeze({
   lint: "lint",
   "rust-workspace": "test-rust-workspace",
-  "rust-differential": "test-rust-differential",
+  "rust-differential": "test-storage-compat",
   "storage-compat": "test-storage-compat",
+  "durable-object-limits": "test-storage-compat",
   typescript: "test-ts",
   "react-native": "test-react-native",
 });
@@ -49,20 +50,21 @@ export const ciPartitionJobs = Object.freeze({
 const command = (label, executable, args, options = {}) =>
   Object.freeze({ label, executable, args: Object.freeze(args), ...options });
 
-const m3DifferentialCommand = command(
-  "bounded maintained-vs-one-shot differential oracle",
-  "bash",
-  [
-    "-lc",
-    String.raw`set -euo pipefail
-test_binary="$(cargo test -p jazz --lib --features testing,transport-compression-zstd --no-run --message-format=json | node -e '
+// Build with dev/t's exact selection (`--no-default-features`, the same
+// features): the oracle's integration test then links the `jazz` library
+// storage-compat's dev/t receipts just built in the same job, instead of a
+// second, otherwise identical build of it.
+const differentialCommand = command("bounded maintained-vs-one-shot differential oracle", "bash", [
+  "-lc",
+  String.raw`set -euo pipefail
+test_binary="$(cargo test -p jazz --test maintained_differential --no-default-features --features testing,transport-compression-zstd --no-run --message-format=json | node -e '
   const readline = require("node:readline");
   let executable;
   const lines = readline.createInterface({ input: process.stdin });
   lines.on("line", (line) => {
     try {
       const message = JSON.parse(line);
-      if (message.reason === "compiler-artifact" && message.target.name === "jazz" && message.executable)
+      if (message.reason === "compiler-artifact" && message.target.name === "maintained_differential" && message.executable)
         executable = message.executable;
     } catch {}
   });
@@ -75,10 +77,9 @@ test -x "$test_binary"
 timeout 60s env \
   JAZZ_SEED=11 \
   JAZZ_DIFFERENTIAL_CHURN_DEPTHS=10,1000 \
-  JAZZ_DIFFERENTIAL_STEP_COUNT=3 \
-  "$test_binary" node::tests::harness::m3_maintained_one_shot_differential_oracle --exact --ignored`,
-  ],
-);
+  JAZZ_DIFFERENTIAL_STEP_COUNT=60 \
+  "$test_binary" maintained_one_shot_differential_oracle --exact --ignored`,
+]);
 
 /**
  * CI partitions are the source of truth for both CI and `--ci-equivalent`.
@@ -89,13 +90,39 @@ export const ciPartitions = Object.freeze({
   lint: Object.freeze([
     command("format check", "pnpm", ["format:check"]),
     command("lint", "pnpm", ["lint"]),
+    // Ready PRs run only this partition, so it carries the TypeScript
+    // typecheck too. The binding declarations it needs are committed.
+    command("jazz-tools typecheck", "pnpm", ["--filter", "jazz-tools", "check"]),
     command("crate publication selector contract", "bash", [
       "dev/scripts/publish-crates-alpha.test.sh",
     ]),
     command("CI workflow contracts", "pnpm", ["test:ci-workflow"]),
     command("Turbo cache-input contracts", "pnpm", ["test:turbo-cache-inputs"]),
     command("invariant registry", "bash", ["dev/gates/invariant-registry.sh"]),
-    command("ignored-test inventory", "node", ["dev/gates/ignored-tests.mjs"]),
+    command("SPEC issue links", "node", ["dev/gates/spec-open-questions.mjs"]),
+    command("jazz module layers", "node", ["dev/gates/jazz-module-layers.mjs"]),
+    // The exhaustive target-class compile lives here rather than in front of
+    // the TypeScript artifact build: it gates the same push, but no longer
+    // delays the longest job's native artifacts by a serial workspace check.
+    command("all Rust workspace target classes", "cargo", [
+      "check",
+      "--workspace",
+      ...RUST_WORKSPACE_TARGETS,
+      "--features",
+      RUST_CI_FEATURES,
+    ]),
+    // Cold-load phase attribution is opt-in and off in every other build, so
+    // without this its cfg'd spans and counters would rot unnoticed.
+    command("cold-settle attribution compile", "cargo", [
+      "check",
+      "-p",
+      "jazz-sim",
+      "--lib",
+      "--bins",
+      "--tests",
+      "--features",
+      "cold-settle-attribution",
+    ]),
   ]),
   "rust-workspace": Object.freeze([
     command("workspace Rust tests", "node", [
@@ -106,15 +133,15 @@ export const ciPartitions = Object.freeze({
       // explicit here: the standalone smoke gate remains available to callers
       // that do not already run this partition.
       "--require-nextest-test",
-      "jazz::legacy_benchmark_smoke=cold_subscription_correctness_smoke",
+      "jazz-sim::core_benchmark_smoke=cold_subscription_correctness_smoke",
       "--require-nextest-test",
-      "jazz::legacy_benchmark_smoke=sync_correctness_smoke",
+      "jazz-sim::core_benchmark_smoke=sync_correctness_smoke",
       "--require-nextest-test",
-      "jazz::legacy_benchmark_smoke=validation_correctness_smoke",
+      "jazz-sim::core_benchmark_smoke=validation_correctness_smoke",
       "--require-nextest-test",
-      "jazz::legacy_benchmark_smoke=relation_include_delivery_correctness_smoke",
+      "jazz-sim::core_benchmark_smoke=relation_include_delivery_correctness_smoke",
       "--require-nextest-test",
-      "jazz::legacy_benchmark_smoke=route_subscription_curve_correctness_smoke",
+      "jazz-sim::core_benchmark_smoke=route_subscription_curve_correctness_smoke",
       "--require-nextest-test",
       "jazz-sim::scenario_smoke=s1_saas_smoke",
       "--require-nextest-test",
@@ -147,20 +174,16 @@ export const ciPartitions = Object.freeze({
       "--features",
       RUST_CI_FEATURES,
     ]),
+    // Runs after the workspace tests with the same feature selection, so its
+    // `cargo nextest list` reuses the test binaries that were just built.
+    command("ignored-test inventory", "node", ["dev/gates/ignored-tests.mjs"]),
     command("Nextest partition coverage", "node", [
       "--test",
       "dev/gates/test/nextest-partitions.test.mjs",
     ]),
   ]),
-  "rust-differential": Object.freeze([m3DifferentialCommand]),
+  "rust-differential": Object.freeze([differentialCommand]),
   typescript: Object.freeze([
-    command("all Rust workspace target classes", "cargo", [
-      "check",
-      "--workspace",
-      ...RUST_WORKSPACE_TARGETS,
-      "--features",
-      RUST_CI_FEATURES,
-    ]),
     command("native correctness-artifact producer", "node", [
       "dev/gates/ensure-correctness-artifacts.mjs",
     ]),
@@ -176,6 +199,30 @@ export const ciPartitions = Object.freeze({
       // own harness tests. A CI-equivalent invocation must not inherit one.
       env: { JAZZ_REQUIRE_CI_TEST_COMMANDS: "1" },
     }),
+    // An exact, named historical-storage receipt rather than an incidental
+    // member of the broad browser suite: a green TypeScript partition must mean
+    // current code handled the pinned real-browser corpora as designed (opens
+    // and appends to the current linear-history corpus, refuses pre-linear
+    // roots with a typed error).
+    command("browser storage compatibility corpus", "pnpm", [
+      "--dir",
+      "packages/jazz-tools",
+      "test:browser:focused",
+      "--",
+      "tests/browser/indexeddb-jazz-compat.test.ts",
+    ]),
+    // Vitest strips types without checking them, so without this step an
+    // example can break against a jazz-tools API change while its tests pass.
+    // It runs last, against the jazz-tools build the consumers produced.
+    command("example typecheck", "pnpm", [
+      "--recursive",
+      "--no-bail",
+      "--workspace-concurrency=4",
+      "--filter",
+      "./examples/**",
+      "run",
+      "typecheck",
+    ]),
   ]),
   "react-native": Object.freeze([
     // React Native's bridge is deliberately opt-in. This producer must be
@@ -221,24 +268,22 @@ export const ciPartitions = Object.freeze({
       { env: { JAZZ_RN_TEST_BRIDGE: "1" } },
     ),
   ]),
+  // The exact browser corpus receipt runs in the TypeScript partition, which
+  // already produces and seals the NAPI/WASM pair it needs; building that pair
+  // again here only to open one IndexedDB fixture cost ~3 minutes per run.
   "storage-compat": Object.freeze([
     command("native storage compatibility corpus", "bash", ["dev/gates/storage-compat.sh"]),
-    command("native correctness-artifact producer", "node", [
-      "dev/gates/ensure-correctness-artifacts.mjs",
-    ]),
-    command("preinstalled Chromium", "pnpm", [
-      "exec",
-      "playwright",
-      "install",
-      "--dry-run",
-      "chromium",
-    ]),
-    command("browser storage compatibility corpus", "pnpm", [
-      "--dir",
-      "packages/jazz-tools",
-      "test:browser:focused",
-      "--",
-      "tests/browser/indexeddb-jazz-compat.test.ts",
+  ]),
+  // The whole suite on native SQLite with Cloudflare Durable Object SQLite's
+  // limits (100 bound parameters, 100 KB statements, expression depth 100,
+  // ...), so SQL that would fail there fails here. See
+  // dev/durable-objects/README.md.
+  "durable-object-limits": Object.freeze([
+    command("Durable Object SQLite limits", "cargo", [
+      "test",
+      "--workspace",
+      "--features",
+      "jazz/durable-object-limits",
     ]),
   ]),
 });
@@ -246,6 +291,7 @@ export const ciPartitions = Object.freeze({
 export const focusedCommands = Object.freeze([
   command("format check", "pnpm", ["format:check"]),
   command("invariant registry", "bash", ["dev/gates/invariant-registry.sh"]),
+  command("jazz module layers", "node", ["dev/gates/jazz-module-layers.mjs"]),
   command("ignored-test validator self-test", "node", [
     "dev/gates/ignored-tests.mjs",
     "--self-test",
