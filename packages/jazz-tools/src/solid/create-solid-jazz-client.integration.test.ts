@@ -10,15 +10,18 @@ import {
 } from "./create-solid-jazz-client.js";
 import { getSubscriptionStore } from "../subscription-store-internal.js";
 
-const app = s.defineApp({
-  todos: s.table(
-    {
-      title: s.string(),
-      done: s.boolean(),
-    },
-    {},
-  ),
-});
+const app = s.defineApp(
+  {
+    todos: s.table(
+      {
+        title: s.string(),
+        done: s.boolean(),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 
 function makeAppId(scope: string): string {
   return `solid-create-jazz-client-${scope}-${randomUUID()}`;

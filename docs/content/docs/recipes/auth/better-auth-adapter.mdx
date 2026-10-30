@@ -39,7 +39,7 @@ export const auth = betterAuth({
     db: async () => {
       throw new Error("The generation config cannot query the database");
     },
-    schema: s.defineApp({}).wasmSchema,
+    schema: s.defineApp({}, { migrations: "none" }).wasmSchema,
   }),
 });
 ```
@@ -59,6 +59,7 @@ Import the generated tables in your app's `schema.ts` and merge them into the ap
 
 ```ts title="schema.ts"
 import { schema as s } from "jazz-tools";
+import { migrations } from "./migrations";
 import { schema as betterauthSchema } from "./schema-better-auth/schema";
 
 const schema = {
@@ -76,7 +77,7 @@ const schema = {
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema);
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
 ```
 
 The generated `schema-better-auth/schema.ts` also ships a `permissions` export that denies all operations on the Better Auth tables. Merge it with your own permissions so regular client sessions can't read or write Better Auth rows — the adapter itself uses the admitted backend client's `db`, which has backend permissions.

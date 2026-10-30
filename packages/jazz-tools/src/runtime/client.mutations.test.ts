@@ -309,7 +309,10 @@ describe("JazzClient write attribution", () => {
           return "prepared-transaction" as TxId;
         },
       });
-      const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) });
+      const app = s.defineApp(
+        { todos: s.table({ title: s.string() }, {}) },
+        { migrations: "none" },
+      );
       const tx = new Transaction(kind, () => client, null, client);
       client.prepareTransaction(tx.openTransactionId(), async () => {
         await ready;
@@ -369,7 +372,10 @@ describe("JazzClient write attribution", () => {
           await id;
         },
       });
-      const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) });
+      const app = s.defineApp(
+        { todos: s.table({ title: s.string() }, {}) },
+        { migrations: "none" },
+      );
       const tx = new Transaction(kind, () => client, null, client);
       const first = tx.all(app.todos, { tier: "local-first" });
       const second = tx.all(app.todos, { tier: "local-first" });
@@ -400,7 +406,10 @@ describe("JazzClient write attribution", () => {
         complete = resolve;
       });
       const { client } = makeClient({ commitTransaction: () => pending });
-      const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) });
+      const app = s.defineApp(
+        { todos: s.table({ title: s.string() }, {}) },
+        { migrations: "none" },
+      );
       const tx = new Transaction(kind, () => client, null, client);
       const committed = tx.commit();
       try {

@@ -224,9 +224,12 @@ fn run(seed: u64, rows: usize, emit: bool) {
     }
     let migrate_us = migrate.elapsed().as_micros() as u64;
 
-    // Live clients on the oldest and the newest version.
+    // Live clients on the oldest and the newest version, each shipping the
+    // app's versions and lenses as an app does (SPEC 10.7).
     for (name, n, version) in [("writer-v1", 1, 0), ("writer-v4", 4, 3)] {
-        sim.add(name, open(schemas[version].clone(), n, user(n)));
+        let config = jazz_sim::support::config(schemas[version].clone(), n, user(n))
+            .with_migrations(schemas.clone(), lenses(&schemas));
+        sim.add(name, block_on(Db::open(config)).expect("open scenario db"));
         sim.connect(name, "core", user(n), link.clone());
     }
     let mut v1_live = Live::subscribe(

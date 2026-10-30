@@ -4,18 +4,21 @@ import { migration as m } from "../migration-namespace.js";
 import { definePermissions } from "../permissions/index.js";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
+import { appMigrations } from "../testing/client-migrations.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 
 it("accepts a serializable read of an unchanged table after migration", async () => {
   const projects = s.table({ title: s.string() }, {});
   const before = { projects, notes: s.table({ title: s.string() }, {}) };
   const after = { projects, notes: s.table({ body: s.string() }, {}) };
-  const oldApp = s.defineApp(before);
-  const newApp = s.defineApp(after);
   const migration = m.defineMigration({
     from: before,
     to: after,
     migrate: { notes: { body: m.renameFrom("title") } },
+  });
+  const oldApp = s.defineApp(before, { migrations: await appMigrations(before) });
+  const newApp = s.defineApp(after, {
+    migrations: await appMigrations(before, { to: after, migration }),
   });
   const permissions = (app: typeof oldApp | typeof newApp) =>
     definePermissions(app, ({ policy }) => {
@@ -49,12 +52,14 @@ it("accepts a serializable read of an unchanged table after migration", async ()
 it("preserves serializable conflict detection after renaming the queried table", async () => {
   const before = { projects: s.table({ title: s.string() }, {}) };
   const after = { initiatives: s.table({ title: s.string() }, {}) };
-  const oldApp = s.defineApp(before);
-  const newApp = s.defineApp(after);
   const migration = m.defineMigration({
     from: before,
     to: after,
     renameTables: { initiatives: m.renameTableFrom("projects") },
+  });
+  const oldApp = s.defineApp(before, { migrations: await appMigrations(before) });
+  const newApp = s.defineApp(after, {
+    migrations: await appMigrations(before, { to: after, migration }),
   });
   const oldPermissions = definePermissions(oldApp, ({ policy }) => {
     policy.projects.allowRead.always();

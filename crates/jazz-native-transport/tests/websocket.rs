@@ -371,6 +371,7 @@ async fn public_jazz_client_syncs_through_explicit_native_adapter() {
                     jwt_token: None,
                     backend_secret: None,
                     admin_secret: Some("secret".to_owned()),
+                    migrations: Default::default(),
                 },
                 Arc::new(NativeWebSocketConnector),
             )

@@ -31,15 +31,23 @@ it("validates all branches before writing, deploys the converged history, and se
     appId: server.appId,
     adminSecret: server.adminSecret,
   };
-  const columns = [[], ["a"], ["b"], ["a", "b"]];
+  // Two branches off v1 merged in v3. Both keep v1's `a`; merging branches
+  // that each add a column the other lacks is refused (not supported yet).
+  const columns = [[], ["a"], ["a", "tmp"], ["a", "b"]];
   const versions = await Promise.all(
     columns.map(async (added) => {
-      const app = s.defineApp({
-        notes: s.table(
-          { title: s.string(), ...Object.fromEntries(added.map((column) => [column, s.string()])) },
-          {},
-        ),
-      });
+      const app = s.defineApp(
+        {
+          notes: s.table(
+            {
+              title: s.string(),
+              ...Object.fromEntries(added.map((column) => [column, s.string()])),
+            },
+            {},
+          ),
+        },
+        { migrations: "none" },
+      );
       return { schema: app.wasmSchema, hash: await computeSchemaHash(app.wasmSchema) };
     }),
   );
@@ -48,7 +56,7 @@ it("validates all branches before writing, deploys the converged history, and se
   const writeCurrent = (index: number) =>
     writeFile(
       join(root, "schema.ts"),
-      `import { schema as s } from "jazz-tools"; export const app = s.defineApp({ notes: s.table({ ${fields(index)} }, {}) });`,
+      `import { schema as s } from "jazz-tools"; export const app = s.defineApp({ notes: s.table({ ${fields(index)} }, {}) }, { migrations: "none" });`,
     );
   await writeCurrent(0);
   await writeFile(join(root, "permissions.ts"), "export default {};");
@@ -61,23 +69,24 @@ it("validates all branches before writing, deploys the converged history, and se
     );
   }
   await writeCurrent(3);
-  const writeMigration = (from: number, to: number, column: string) =>
+  const writeMigration = (from: number, to: number, migrate: string) =>
     writeFile(
       join(
         migrationsDir,
-        `20260922-add-${column}-${versions[from]!.hash.slice(0, 12)}-${versions[to]!.hash.slice(0, 12)}.ts`,
+        `20260922-${from}-${to}-${versions[from]!.hash.slice(0, 12)}-${versions[to]!.hash.slice(0, 12)}.ts`,
       ),
       `import { schema as s, migration as m } from "jazz-tools";
     export default m.defineMigration({ fromHash: "${versions[from]!.hash}", toHash: "${versions[to]!.hash}",
       from: { notes: s.table({ ${fields(from)} }, {}) }, to: { notes: s.table({ ${fields(to)} }, {}) },
-      migrate: { notes: { ${column}: m.add.string({ default: "" }) } } });`,
+      migrate: { notes: { ${migrate} } } });`,
     );
-  await writeMigration(0, 1, "a");
-  await writeMigration(0, 2, "b");
+  const add = (column: string) => `${column}: m.add.string({ default: "" })`;
+  await writeMigration(0, 1, add("a"));
+  await writeMigration(1, 2, add("tmp"));
   await expect(deploy(options)).rejects.toThrow("migrations create");
   expect(await fetchMigrationGraph(options)).toEqual(initial);
-  await writeMigration(1, 3, "b");
-  await writeMigration(2, 3, "a");
+  await writeMigration(1, 3, add("b"));
+  await writeMigration(2, 3, `tmp: m.drop.string({ backwardsDefault: "" }), ${add("b")}`);
 
   const requests: DeploymentRequest[] = [];
   const fetch = globalThis.fetch;

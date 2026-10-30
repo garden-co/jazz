@@ -4,14 +4,17 @@ import { applyColumnTransforms } from "./row-transformer.js";
 
 describe("column transform input access", () => {
   it("does not inspect unrelated tables when guarding hopped stored-transform queries", () => {
-    const app = s.defineApp({
-      sources: s.table({ targetId: s.uuid() }, { target: s.rel("targets", "targetId") }),
-      targets: s.table(
-        { value: s.int().transform({ from: (value) => value, to: (value: number) => value }) },
-        {},
-      ),
-      unrelated: s.table({ text: s.string() }, {}),
-    });
+    const app = s.defineApp(
+      {
+        sources: s.table({ targetId: s.uuid() }, { target: s.rel("targets", "targetId") }),
+        targets: s.table(
+          { value: s.int().transform({ from: (value) => value, to: (value: number) => value }) },
+          {},
+        ),
+        unrelated: s.table({ text: s.string() }, {}),
+      },
+      { migrations: "none" },
+    );
     const unrelated = app.wasmSchema.unrelated!;
     const original = Object.getOwnPropertyDescriptor(unrelated, "columns")!;
     let unrelatedReads = 0;
@@ -40,19 +43,22 @@ describe("column transform input access", () => {
   });
 
   it("reads only declared dependencies when preserving stored context", () => {
-    const app = s.defineApp({
-      prices: s.table(
-        {
-          amount: s.float().transform({
-            dependsOn: ["unit"],
-            from: (value, context: Readonly<{ unit: number }>) => value / context.unit,
-            to: (value: number, context: Readonly<{ unit: number }>) => value * context.unit,
-          }),
-          unit: s.float(),
-        },
-        {},
-      ),
-    });
+    const app = s.defineApp(
+      {
+        prices: s.table(
+          {
+            amount: s.float().transform({
+              dependsOn: ["unit"],
+              from: (value, context: Readonly<{ unit: number }>) => value / context.unit,
+              to: (value: number, context: Readonly<{ unit: number }>) => value * context.unit,
+            }),
+            unit: s.float(),
+          },
+          {},
+        ),
+      },
+      { migrations: "none" },
+    );
     const row = {
       amount: 250,
       unit: 100,

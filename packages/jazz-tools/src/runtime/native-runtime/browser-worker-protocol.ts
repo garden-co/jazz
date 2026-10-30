@@ -1,3 +1,4 @@
+import type { ClientMigrations } from "../client-migrations.js";
 import type { WasmSchema, Value } from "../../drivers/types.js";
 import type { RuntimeSourcesConfig } from "../context.js";
 import type { MutationErrorEvent } from "../client.js";
@@ -361,6 +362,8 @@ export interface BrowserWorkerInitOptions {
   author: Uint8Array;
   selfSignedClientProof?: NativeSelfSignedClientProof;
   initialSyncFlushEvery: number;
+  /** The app's versions and migrations: see {@link ClientMigrations}. */
+  migrations?: ClientMigrations;
   appId: string;
   /** Slow-query log threshold for the worker's store; 0 turns the log off. */
   slowQueryThresholdMs?: number;
