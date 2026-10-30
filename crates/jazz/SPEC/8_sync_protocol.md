@@ -759,23 +759,41 @@ connection that sends any other frame after its `Hello` ends with
   governed by the current schema's policies, as a sync session's declared
   version is (§8.9). A version the store has not admitted is refused with
   `SchemaNotDeployed`; nothing else is served before a version.
+- Request options are the JSON the native bindings take for the same call:
+  read options (`tier`, `include_deleted`, `read_view` with branch head and
+  frozen base, ...) on `Query` and `Subscribe`, and write options (`rowId`,
+  `branch`, `head`, `base`, `updatedAtMs`) on writes. Options that name an
+  author or attribution are refused: a thin write always runs as its session.
 - `Query` answers once with binding-codec row batches (a relation snapshot
   for a query with array relations). `Subscribe` answers with a stream of
   binding-codec subscription deltas, the same bytes the WASM and Node
   bindings hand to JavaScript, until `Unsubscribe` (answered `Closed` on the
   live query's id, then `Ok`) or an error that ends it.
-- `Insert`, `Update`, `Upsert` and `Delete` commit on the authority and answer
-  `Written` with the row and the server seq of the version they left; the
-  write is globally durable when the answer arrives. A client-chosen row id
-  is honored on insert.
+- `Insert`, `Update`, `Upsert`, `Delete`, `Restore` and `UpdateLargeValues`
+  outside a transaction commit on the authority and answer `Written` with the
+  row and the server seq of the version they left; the write is globally
+  durable when the answer arrives. A client-chosen row id is honored on
+  insert.
+- `Begin` opens a mergeable or serializable transaction under a
+  client-chosen open-transaction id, owned by that session. A write naming it
+  is staged and answered `Staged`; a refusal while staging is kept and
+  reported by `Commit`, as the bindings report it. A `Query` naming it reads
+  the transaction's own staged writes. `Commit` answers `Written` with the
+  commit's seq; `Rollback` abandons it. A connection that closes abandons its
+  open transactions.
+- `CaptureSnapshot` answers `Snapshot` with the persisted snapshot reference
+  of the authority's current frontier, for frozen branch bases.
+- `BeginStream` starts a large-value insert or upsert of one column,
+  `StreamChunk` appends to it in order, and `FinishStream` commits the row
+  (answered `Written`) or `AbortStream` drops it. A stream is named by its
+  `BeginStream` request id and ends with its connection.
 - While no permissions head is published, an untrusted thin session's
   requests are answered `NotReady`.
 - A thin session's answers share its connection's egress budget: a live
   query's events wait on the owner while the budget is spent.
 
-Not supported yet: transactions, branch and snapshot views, large-value
-streaming, and offline writes. A thin client asks for those by upgrading to a
-replica.
+Not supported yet: offline writes and attributed writes. A thin client asks
+for offline work by upgrading to a replica.
 
 ## Open Questions
 

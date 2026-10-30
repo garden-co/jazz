@@ -6,8 +6,9 @@
  * same query and write API as `jazz-tools`' local-first `createDb`, without
  * WASM, workers or local storage.
  *
- * Not supported yet: offline use, transactions, branch and snapshot views,
- * large-value streaming. Upgrade to the local-first client for those.
+ * Transactions, branch and snapshot views and large-value streaming run on
+ * the server too. Not supported yet: offline use and attributed writes.
+ * Upgrade to the local-first client for offline use.
  */
 import type { AccountManagerConfig } from "../accounts/create-account-manager.js";
 import {

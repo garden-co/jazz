@@ -8,15 +8,23 @@ import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "../testing/index.js";
 import { createAccountManager, createDb, upgradeToLocalFirst } from "./index.js";
 import { LOCAL_FIRST_ISSUER, mintSelfSignedToken } from "./self-signed-token.js";
+import { parseSnapshotRef, serializeSnapshotRef } from "../runtime/snapshot-ref.js";
 
 const app = s.defineApp({
   notes: s.table({ text: s.string(), done: s.boolean() }, {}),
+  documents: s.table({ branch: s.string(), title: s.string() }, {}).branchBy("branch"),
+  files: s.table({ name: s.string(), data: s.bytes() }, {}),
 });
 const permissions = definePermissions(app, ({ policy, session }) => {
   policy.notes.allowRead.where({ $createdBy: session.user });
   policy.notes.allowInsert.always();
   policy.notes.allowUpdate.where({ $createdBy: session.user });
   policy.notes.allowDelete.where({ $createdBy: session.user });
+  policy.documents.allowRead.where({ $createdBy: session.user });
+  policy.documents.allowInsert.always();
+  policy.documents.allowUpdate.where({ $createdBy: session.user });
+  policy.files.allowRead.where({ $createdBy: session.user });
+  policy.files.allowInsert.always();
 });
 
 const opened: Db[] = [];
@@ -175,13 +183,87 @@ describe("thin client", () => {
     await expect(thin.all(app.notes)).rejects.toThrow(/shutting down or closed/);
   }, 60_000);
 
-  it("says plainly what it does not support yet", async () => {
+  it("commits a transaction's writes as one and discards a rolled-back one", async () => {
     const server = await startServer();
     const db = await thinDb(server);
-    await expect(
-      db.transaction((tx) => {
-        tx.insert(app.notes, { text: "in a transaction", done: false });
-      }),
-    ).rejects.toThrow(/does not support transactions/);
+    const committed = await db.transaction((tx) => {
+      tx.insert(app.notes, { text: "first", done: false });
+      tx.insert(app.notes, { text: "second", done: false });
+      return "done";
+    });
+    expect(committed.value).toBe("done");
+    await committed.wait({ tier: "global" });
+    expect((await db.all(app.notes)).map((row) => row.text).sort()).toEqual(["first", "second"]);
+
+    const discarded = db.beginTransaction();
+    discarded.insert(app.notes, { text: "discarded", done: false });
+    discarded.rollback();
+    const serializable = await db.serializableTransaction((tx) => {
+      tx.insert(app.notes, { text: "serializable", done: true });
+    });
+    await serializable.wait();
+    expect((await db.all(app.notes)).map((row) => row.text).sort()).toEqual([
+      "first",
+      "second",
+      "serializable",
+    ]);
+  }, 60_000);
+
+  it("reads its own staged writes inside a transaction", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    const tx = db.beginTransaction();
+    tx.insert(app.notes, { text: "staged", done: false });
+    expect((await tx.all(app.notes)).map((row) => row.text)).toEqual(["staged"]);
+    expect(await db.all(app.notes)).toEqual([]);
+    await tx.commit().wait({ tier: "global" });
+    expect((await db.all(app.notes)).map((row) => row.text)).toEqual(["staged"]);
+  }, 60_000);
+
+  it("writes and reads through branch views and frozen snapshots", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    const original = db.insert(
+      app.documents,
+      { branch: "main", title: "Original" },
+      { branch: "main" },
+    );
+    await original.wait({ tier: "global" });
+    const snapshot = parseSnapshotRef(serializeSnapshotRef(await db.captureSnapshot()));
+    await db
+      .update(app.documents, original.value.id, { title: "Changed" }, { branch: "main" })
+      .wait({ tier: "global" });
+
+    const frozen = { branch: "draft", base: ["main", snapshot] } as const;
+    expect(await db.one(app.documents, frozen)).toMatchObject({
+      id: original.value.id,
+      branch: "draft",
+      title: "Original",
+    });
+    expect(await db.one(app.documents, { branch: "draft", base: "main" })).toMatchObject({
+      title: "Changed",
+    });
+    await db
+      .update(app.documents, original.value.id, { title: "Draft" }, frozen)
+      .wait({ tier: "global" });
+    expect(await db.one(app.documents, frozen)).toMatchObject({ title: "Draft" });
+    expect(await db.one(app.documents, { branch: "main" })).toMatchObject({ title: "Changed" });
+  }, 60_000);
+
+  it("streams a large value into a row", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    const size = 200 * 1024;
+    const expected = new Uint8Array(size).map((_, index) => index % 251);
+    async function* chunks(): AsyncGenerator<Uint8Array> {
+      for (let offset = 0; offset < size; offset += 50_000) {
+        yield expected.subarray(offset, offset + 50_000);
+      }
+    }
+    const written = await db.insertStreaming(app.files, { name: "blob", data: chunks() });
+    await written.wait({ tier: "global" });
+    const row = await db.one(app.files.where({ id: written.value.id }));
+    expect(row?.name).toBe("blob");
+    expect(row?.data).toEqual(expected);
   }, 60_000);
 });

@@ -23,16 +23,14 @@ pub struct ThinRequest {
     pub op: ThinOp,
 }
 
-/// Which result a read reflects.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ThinReadTier {
-    /// Everything the server holds now.
-    LocalFirst,
-    /// Only what the global authority confirmed.
-    Remote,
-}
-
 /// A thin client's request.
+///
+/// Options travel as the JSON objects the native bindings take (byte arrays
+/// as arrays of numbers): read options `{ tier?, include_deleted?,
+/// read_view?, first_load_remote_wait_ms?, splices? }` and write options
+/// `{ rowId?, branch?, head?, base?, updatedAtMs? }`. They never name an
+/// identity: every write runs as the session, and every read reads as it.
+/// `transaction` is an open transaction this session began, as its id text.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ThinOp {
     /// Bind the connection to the schema the client was built against,
@@ -50,10 +48,9 @@ pub enum ThinOp {
         /// Postcard `Query`.
         #[serde(with = "serde_bytes")]
         query: Vec<u8>,
-        /// Include soft-deleted rows.
-        include_deleted: bool,
-        /// Read tier.
-        tier: ThinReadTier,
+        /// JSON read options.
+        #[serde(with = "serde_bytes")]
+        options: Vec<u8>,
     },
     /// Close the live query opened by request `subscription`. Answered
     /// with [`ThinBody::Closed`] for that request.
@@ -61,29 +58,34 @@ pub enum ThinOp {
         /// The `id` of the `Subscribe` request.
         subscription: u64,
     },
-    /// Run a query once. Answered with [`ThinBody::Rows`].
+    /// Run a query once, inside `transaction` if given (read-your-writes,
+    /// and recorded for a serializable commit). Answered with
+    /// [`ThinBody::Rows`].
     Query {
         /// Postcard `Query`.
         #[serde(with = "serde_bytes")]
         query: Vec<u8>,
-        /// Include soft-deleted rows.
-        include_deleted: bool,
-        /// Read tier.
-        tier: ThinReadTier,
+        /// JSON read options.
+        #[serde(with = "serde_bytes")]
+        options: Vec<u8>,
+        /// Open transaction id.
+        transaction: Option<String>,
     },
-    /// Insert a row. Answered with [`ThinBody::Written`].
+    /// Insert a row. Answered with [`ThinBody::Written`], or
+    /// [`ThinBody::Staged`] inside a transaction.
     Insert {
         /// Table name, in the bound schema.
         table: String,
-        /// Client-chosen row id; the server picks one when absent.
-        row: Option<[u8; 16]>,
         /// Binding-codec named cells.
         #[serde(with = "serde_bytes")]
         cells: Vec<u8>,
-        /// `$updatedAt` override, in ms.
-        updated_at_ms: Option<u64>,
+        /// JSON write options.
+        #[serde(with = "serde_bytes")]
+        options: Vec<u8>,
+        /// Open transaction id.
+        transaction: Option<String>,
     },
-    /// Update a row. Answered with [`ThinBody::Written`].
+    /// Update a row. Answered as [`ThinOp::Insert`].
     Update {
         /// Table name, in the bound schema.
         table: String,
@@ -92,10 +94,13 @@ pub enum ThinOp {
         /// Binding-codec named cells to change.
         #[serde(with = "serde_bytes")]
         patch: Vec<u8>,
-        /// `$updatedAt` override, in ms.
-        updated_at_ms: Option<u64>,
+        /// JSON write options.
+        #[serde(with = "serde_bytes")]
+        options: Vec<u8>,
+        /// Open transaction id.
+        transaction: Option<String>,
     },
-    /// Insert or update a row. Answered with [`ThinBody::Written`].
+    /// Insert or update a row. Answered as [`ThinOp::Insert`].
     Upsert {
         /// Table name, in the bound schema.
         table: String,
@@ -104,17 +109,117 @@ pub enum ThinOp {
         /// Binding-codec named cells.
         #[serde(with = "serde_bytes")]
         cells: Vec<u8>,
-        /// `$updatedAt` override, in ms.
-        updated_at_ms: Option<u64>,
+        /// JSON write options.
+        #[serde(with = "serde_bytes")]
+        options: Vec<u8>,
+        /// Open transaction id.
+        transaction: Option<String>,
     },
-    /// Soft-delete a row. Answered with [`ThinBody::Written`].
+    /// Soft-delete a row. Answered as [`ThinOp::Insert`].
     Delete {
         /// Table name, in the bound schema.
         table: String,
         /// Row id.
         row: [u8; 16],
+        /// JSON write options.
+        #[serde(with = "serde_bytes")]
+        options: Vec<u8>,
+        /// Open transaction id.
+        transaction: Option<String>,
+    },
+    /// Undelete a row, with `cells` or the values it was deleted with.
+    /// Answered as [`ThinOp::Insert`].
+    Restore {
+        /// Table name, in the bound schema.
+        table: String,
+        /// Row id.
+        row: [u8; 16],
+        /// Binding-codec named cells.
+        cells: Option<serde_bytes::ByteBuf>,
+        /// JSON write options.
+        #[serde(with = "serde_bytes")]
+        options: Vec<u8>,
+        /// Open transaction id.
+        transaction: Option<String>,
+    },
+    /// Partial large-value updates with an ordinary patch. Answered as
+    /// [`ThinOp::Insert`].
+    UpdateLargeValues {
+        /// Table name, in the bound schema.
+        table: String,
+        /// Row id.
+        row: [u8; 16],
+        /// Binding-codec named cells to change.
+        #[serde(with = "serde_bytes")]
+        patch: Vec<u8>,
+        /// JSON partial-value update descriptors, as the bindings take them.
+        #[serde(with = "serde_bytes")]
+        mutations: Vec<u8>,
         /// `$updatedAt` override, in ms.
         updated_at_ms: Option<u64>,
+        /// Open transaction id.
+        transaction: Option<String>,
+    },
+    /// Begin a transaction (`kind` is `mergeable` or `serializable`) under
+    /// the client-chosen id. Answered with [`ThinBody::Ok`]; it ends with
+    /// the connection unless committed or rolled back first.
+    Begin {
+        /// Open transaction id text.
+        transaction: String,
+        /// Transaction kind.
+        kind: String,
+    },
+    /// Commit an open transaction. Answered with [`ThinBody::Written`]
+    /// (with a zero row), or the error that rejected it.
+    Commit {
+        /// Open transaction id text.
+        transaction: String,
+    },
+    /// Roll back an open transaction. Answered with [`ThinBody::Ok`].
+    Rollback {
+        /// Open transaction id text.
+        transaction: String,
+    },
+    /// Capture a snapshot for snapshot read views. Answered with
+    /// [`ThinBody::Snapshot`].
+    CaptureSnapshot,
+    /// Begin uploading one large value of a row mutation in chunks; the
+    /// request's `id` names the upload. Answered with [`ThinBody::Ok`].
+    BeginStream {
+        /// Table name, in the bound schema.
+        table: String,
+        /// Row id.
+        row: [u8; 16],
+        /// Binding-codec named cells, without the streamed column.
+        #[serde(with = "serde_bytes")]
+        cells: Vec<u8>,
+        /// The streamed column.
+        column: String,
+        /// `insert`, `update` or `upsert`.
+        mutation: String,
+        /// JSON write options.
+        #[serde(with = "serde_bytes")]
+        options: Vec<u8>,
+    },
+    /// The next chunk of upload `stream`. Answered with [`ThinBody::Ok`]
+    /// once applied.
+    StreamChunk {
+        /// The `id` of the `BeginStream` request.
+        stream: u64,
+        /// Value bytes.
+        #[serde(with = "serde_bytes")]
+        chunk: Vec<u8>,
+    },
+    /// Publish upload `stream` as its row mutation. Answered with
+    /// [`ThinBody::Written`].
+    FinishStream {
+        /// The `id` of the `BeginStream` request.
+        stream: u64,
+    },
+    /// Drop upload `stream`. Answered with [`ThinBody::Ok`].
+    AbortStream {
+        /// The `id` of the `BeginStream` request.
+        stream: u64,
     },
 }
 
@@ -155,6 +260,17 @@ pub enum ThinBody {
     },
     /// The live query ended (unsubscribed, or the server closed it).
     Closed,
+    /// A write staged in an open transaction; it commits with it.
+    Staged {
+        /// The written row.
+        row: [u8; 16],
+    },
+    /// A captured snapshot, as its persisted text's bytes.
+    Snapshot {
+        /// Persisted snapshot reference.
+        #[serde(with = "serde_bytes")]
+        snapshot: Vec<u8>,
+    },
     /// A write committed on the server.
     Written {
         /// The written row.

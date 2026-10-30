@@ -4497,7 +4497,7 @@ function recordWrite(write: Write, writes: Map<string, Write>): TxId {
   return id as TxId;
 }
 
-function txIdFromContext(writeContext?: string | null): OpenTransactionId | undefined {
+export function txIdFromContext(writeContext?: string | null): OpenTransactionId | undefined {
   if (!writeContext) return undefined;
   try {
     const parsed = JSON.parse(writeContext) as { transaction_id?: unknown };
@@ -4509,9 +4509,11 @@ function txIdFromContext(writeContext?: string | null): OpenTransactionId | unde
   }
 }
 
-type EncodedBranchView = { head: unknown; base?: unknown };
+export type EncodedBranchView = { head: unknown; base?: unknown };
 
-function branchViewFromWriteContext(writeContext?: string | null): EncodedBranchView | undefined {
+export function branchViewFromWriteContext(
+  writeContext?: string | null,
+): EncodedBranchView | undefined {
   if (!writeContext) return undefined;
   try {
     const parsed = JSON.parse(writeContext) as { branch_view?: unknown };
@@ -4689,7 +4691,7 @@ function updatedAtMsFromWriteContext(writeContext?: string | null): number | und
   return parsed.updated_at;
 }
 
-function effectiveUpdatedAtMs(writeContext?: string | null): number | null {
+export function effectiveUpdatedAtMs(writeContext?: string | null): number | null {
   return updatedAtMsFromWriteContext(writeContext) ?? Date.now();
 }
 
@@ -4744,7 +4746,9 @@ function pendingTxFromOptions(
   return openTransactionId ? pendingTxs.get(openTransactionId) : undefined;
 }
 
-function openTransactionIdFromOptions(optionsJson?: string | null): OpenTransactionId | undefined {
+export function openTransactionIdFromOptions(
+  optionsJson?: string | null,
+): OpenTransactionId | undefined {
   if (!optionsJson) return undefined;
   try {
     const parsed = JSON.parse(optionsJson) as { transaction_id?: unknown };
@@ -4756,7 +4760,7 @@ function openTransactionIdFromOptions(optionsJson?: string | null): OpenTransact
   }
 }
 
-function readOptions(
+export function readOptions(
   tier?: string | null,
   includeDeleted = false,
   optionsJson?: string | null,
@@ -6384,7 +6388,7 @@ export function encodeCellsForRow(
   return encodeCells(columns, (column) => row[column.name], true);
 }
 
-function encodeCellsForStreamingRow(
+export function encodeCellsForStreamingRow(
   definition: { columns: ColumnDescriptor[]; policies?: TablePolicies },
   row: InsertValues,
   streamedColumn: string,
@@ -6401,7 +6405,7 @@ function encodeCellsForStreamingRow(
   return encodeCells(columns, (column) => row[column.name], true);
 }
 
-function encodeCellsForStreamingPatch(
+export function encodeCellsForStreamingPatch(
   definition: { columns: ColumnDescriptor[]; policies?: TablePolicies },
   row: InsertValues,
   streamedColumn: string,

@@ -4714,6 +4714,27 @@ mod tests {
         postcard::to_allocvec(&jazz::query::Query::from("docs")).expect("encode docs query")
     }
 
+    fn remote_read() -> Vec<u8> {
+        br#"{"tier":"remote"}"#.to_vec()
+    }
+
+    async fn thin_titles(ws: &mut TestWs, id: u64, transaction: Option<&str>) -> Vec<String> {
+        send_thin(
+            ws,
+            id,
+            jazz::thin::ThinOp::Query {
+                query: docs_query(),
+                options: remote_read(),
+                transaction: transaction.map(str::to_owned),
+            },
+        )
+        .await;
+        let jazz::thin::ThinBody::Rows { rows, .. } = thin_answer(ws, id).await else {
+            panic!("the query must answer rows");
+        };
+        titles_of(jazz::binding_codec::decode_rows(&rows).unwrap())
+    }
+
     fn titles_of(batches: Vec<jazz::binding_codec::DecodedRowBatch>) -> Vec<String> {
         let mut titles: Vec<String> = batches
             .into_iter()
@@ -4741,7 +4762,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn thin_client_reads_results_under_its_own_policies() {
-        use jazz::thin::{ThinBody, ThinOp, ThinReadTier};
+        use jazz::thin::{ThinBody, ThinOp};
         let (state, schema) = private_docs_state().await;
         let addr = start_ws_test_server(state.clone()).await;
         let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
@@ -4754,9 +4775,9 @@ mod tests {
             1,
             ThinOp::Insert {
                 table: "docs".to_owned(),
-                row: None,
                 cells: doc_cells("alice private", alice),
-                updated_at_ms: None,
+                options: Vec::new(),
+                transaction: None,
             },
         )
         .await;
@@ -4770,8 +4791,8 @@ mod tests {
             2,
             ThinOp::Query {
                 query: docs_query(),
-                include_deleted: false,
-                tier: ThinReadTier::Remote,
+                options: remote_read(),
+                transaction: None,
             },
         )
         .await;
@@ -4791,8 +4812,8 @@ mod tests {
             1,
             ThinOp::Query {
                 query: docs_query(),
-                include_deleted: false,
-                tier: ThinReadTier::Remote,
+                options: remote_read(),
+                transaction: None,
             },
         )
         .await;
@@ -4807,7 +4828,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn thin_subscription_receives_results_for_writes_from_other_sessions() {
-        use jazz::thin::{ThinBody, ThinOp, ThinReadTier};
+        use jazz::thin::{ThinBody, ThinOp};
         let (state, schema) = private_docs_state().await;
         let addr = start_ws_test_server(state.clone()).await;
         let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
@@ -4819,8 +4840,7 @@ mod tests {
             7,
             ThinOp::Subscribe {
                 query: docs_query(),
-                include_deleted: false,
-                tier: ThinReadTier::LocalFirst,
+                options: br#"{"tier":"local-first"}"#.to_vec(),
             },
         )
         .await;
@@ -4847,9 +4867,10 @@ mod tests {
             1,
             ThinOp::Insert {
                 table: "docs".to_owned(),
-                row: Some([0x42; 16]),
                 cells: doc_cells("from elsewhere", alice),
-                updated_at_ms: None,
+                options: serde_json::to_vec(&serde_json::json!({ "rowId": vec![0x42_u8; 16] }))
+                    .unwrap(),
+                transaction: None,
             },
         )
         .await;
@@ -4885,7 +4906,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn thin_client_must_declare_a_deployed_schema_first() {
-        use jazz::thin::{ThinBody, ThinOp, ThinReadTier};
+        use jazz::thin::{ThinBody, ThinOp};
         let (state, _) = private_docs_state().await;
         let addr = start_ws_test_server(state.clone()).await;
         let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
@@ -4896,8 +4917,8 @@ mod tests {
             1,
             ThinOp::Query {
                 query: docs_query(),
-                include_deleted: false,
-                tier: ThinReadTier::Remote,
+                options: remote_read(),
+                transaction: None,
             },
         )
         .await;
@@ -4928,6 +4949,153 @@ mod tests {
             thin_answer(&mut ws, 2).await,
             ThinBody::Error { code, .. } if code == "SchemaNotDeployed"
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_transactions_commit_or_roll_back_as_one() {
+        use jazz::thin::{ThinBody, ThinOp};
+        let (state, schema) = private_docs_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let mut ws = open_thin_ws(addr, &state, alice).await;
+        bind_thin_schema(&mut ws, &schema).await;
+
+        for (kind, tx, title) in [
+            ("serializable", "0190f3e4000070008000000000000001", "kept"),
+            ("mergeable", "0190f3e4000070008000000000000002", "dropped"),
+        ] {
+            send_thin(
+                &mut ws,
+                1,
+                ThinOp::Begin {
+                    transaction: tx.to_owned(),
+                    kind: kind.to_owned(),
+                },
+            )
+            .await;
+            assert_eq!(thin_answer(&mut ws, 1).await, ThinBody::Ok);
+            send_thin(
+                &mut ws,
+                2,
+                ThinOp::Insert {
+                    table: "docs".to_owned(),
+                    cells: doc_cells(title, alice),
+                    options: Vec::new(),
+                    transaction: Some(tx.to_owned()),
+                },
+            )
+            .await;
+            assert!(matches!(
+                thin_answer(&mut ws, 2).await,
+                ThinBody::Staged { .. }
+            ));
+            // The transaction reads its own write; nobody else sees it yet.
+            assert!(
+                thin_titles(&mut ws, 3, Some(tx))
+                    .await
+                    .contains(&title.to_owned())
+            );
+            assert!(
+                !thin_titles(&mut ws, 4, None)
+                    .await
+                    .contains(&title.to_owned())
+            );
+            if kind == "serializable" {
+                send_thin(
+                    &mut ws,
+                    5,
+                    ThinOp::Commit {
+                        transaction: tx.to_owned(),
+                    },
+                )
+                .await;
+                assert!(matches!(
+                    thin_answer(&mut ws, 5).await,
+                    ThinBody::Written { .. }
+                ));
+            } else {
+                send_thin(
+                    &mut ws,
+                    5,
+                    ThinOp::Rollback {
+                        transaction: tx.to_owned(),
+                    },
+                )
+                .await;
+                assert_eq!(thin_answer(&mut ws, 5).await, ThinBody::Ok);
+            }
+        }
+        assert_eq!(thin_titles(&mut ws, 6, None).await, vec!["kept".to_owned()]);
+
+        // Another session cannot use a transaction it did not begin.
+        let mut other = open_thin_ws(addr, &state, alice).await;
+        bind_thin_schema(&mut other, &schema).await;
+        send_thin(
+            &mut ws,
+            7,
+            ThinOp::Begin {
+                transaction: "0190f3e4000070008000000000000003".to_owned(),
+                kind: "mergeable".to_owned(),
+            },
+        )
+        .await;
+        assert_eq!(thin_answer(&mut ws, 7).await, ThinBody::Ok);
+        send_thin(
+            &mut other,
+            1,
+            ThinOp::Commit {
+                transaction: "0190f3e4000070008000000000000003".to_owned(),
+            },
+        )
+        .await;
+        assert!(matches!(
+            thin_answer(&mut other, 1).await,
+            ThinBody::Error { code, .. } if code == "Argument"
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_writes_cannot_choose_their_author() {
+        use jazz::thin::{ThinBody, ThinOp};
+        let (state, schema) = private_docs_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
+        let mut ws = open_thin_ws(addr, &state, alice).await;
+        bind_thin_schema(&mut ws, &schema).await;
+        send_thin(
+            &mut ws,
+            1,
+            ThinOp::Insert {
+                table: "docs".to_owned(),
+                cells: doc_cells("as bob", bob),
+                options: serde_json::to_vec(&serde_json::json!({
+                    "author": bob.canonical().as_bytes(),
+                }))
+                .unwrap(),
+                transaction: None,
+            },
+        )
+        .await;
+        assert!(matches!(
+            thin_answer(&mut ws, 1).await,
+            ThinBody::Error { code, .. } if code == "Argument"
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_client_captures_snapshots() {
+        use jazz::thin::{ThinBody, ThinOp};
+        let (state, schema) = private_docs_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let mut ws = open_thin_ws(addr, &state, alice).await;
+        bind_thin_schema(&mut ws, &schema).await;
+        send_thin(&mut ws, 1, ThinOp::CaptureSnapshot).await;
+        let ThinBody::Snapshot { snapshot } = thin_answer(&mut ws, 1).await else {
+            panic!("a snapshot must be captured");
+        };
+        assert!(!snapshot.is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
