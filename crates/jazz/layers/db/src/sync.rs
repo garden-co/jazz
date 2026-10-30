@@ -7862,10 +7862,7 @@ impl Inner {
         let mut version = self.sessions[index].version;
         let mut refused = Vec::new();
         held.retain(|message| match message {
-            SyncMessage::Schema { version: declared }
-            | SyncMessage::Join {
-                version: declared, ..
-            } => {
+            SyncMessage::Schema { version: declared } => {
                 version = Some(crate::ids::SchemaVersionId::from_bytes(*declared));
                 true
             }
