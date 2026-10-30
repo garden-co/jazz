@@ -4937,6 +4937,25 @@ impl Inner {
         Ok(owner == author)
     }
 
+    /// Whether `node` is one `identity` writes as (see [`Inner::claim_node`]),
+    /// without claiming it.
+    pub(super) fn writes_as(
+        &self,
+        node: [u8; 16],
+        identity: &AuthorSubject,
+    ) -> Result<bool, Error> {
+        let author = self.author_code(&author_key(identity))?;
+        match self.conn.cached_row(
+            "SELECT author FROM _jazz_nodes WHERE node = ?1",
+            [node.to_vec()],
+            |r| r.get::<_, Option<i64>>(0),
+        ) {
+            Ok(owner) => Ok(owner == Some(author)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+            Err(error) => Err(storage(error)),
+        }
+    }
+
     /// Whether the commit that landed at `at` was written as a node that
     /// belongs to `identity` (see [`Inner::claim_node`]).
     fn committed_by(&self, at: Pos, identity: &AuthorSubject) -> Result<bool, Error> {
@@ -9986,7 +10005,7 @@ impl Db {
                 // trusted link (a relay forwarding its sessions' commits)
                 // may send any.
                 let identity = self.inner.borrow().sessions[index].identity;
-                if !self.inner.borrow().claim_node(node, &identity)? && policy.is_some() {
+                if policy.is_some() && !self.inner.borrow().claim_node(node, &identity)? {
                     let mut inner = self.inner.borrow_mut();
                     let through = inner.served_through();
                     let by = inner.served_by();
@@ -10636,7 +10655,7 @@ impl Db {
                 })
             } else {
                 inner
-                    .resolve_bases(id, &ops, &bases)
+                    .resolve_bases(id, identity.as_ref(), &ops, &bases)
                     .map(|built| (Vec::new(), built, HashMap::new()))
             };
             match resolved {

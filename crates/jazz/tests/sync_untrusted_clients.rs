@@ -312,6 +312,78 @@ fn a_commit_as_another_identitys_node_is_refused_and_claims_nothing() {
     assert_eq!(count(&server), 2, "alice's second write landed");
 }
 
+/// A base on another identity's commit tells its sender nothing: whether
+/// the commit exists, was accepted or was rejected, the write is refused
+/// alike.
+#[test]
+fn a_base_on_another_identitys_commit_is_refused_whether_or_not_it_exists() {
+    let server = server();
+    let write = |node: u8, tx: u64, op: WireWrite, bases: Vec<WireBase>| SyncMessage::Commit {
+        id: TxId::new(TxTime(tx), NodeUuid::from_bytes([node; 16])),
+        kind: WireKind::Mergeable,
+        ops: vec![WireOp { bases, ..op.into() }],
+        acting: Acting::Own,
+    };
+    let body = |text: &str| -> BTreeMap<String, Value> {
+        [("body".to_owned(), Value::String(text.into()))].into()
+    };
+    let (_a_client, a_server, a_up, a_down) = pipe();
+    server.accept_subscriber(a_server, user(1)).unwrap();
+    a_up.borrow_mut().push_back(write(
+        1,
+        1,
+        WireWrite::Insert {
+            table: "messages".to_owned(),
+            row: [7; 16],
+            cells: body("alice's"),
+            target: WireTarget::Root,
+            at: None,
+        },
+        Vec::new(),
+    ));
+    block_on(server.tick()).unwrap();
+    assert_eq!(fates(&a_down), vec![(1, true)]);
+
+    let (_m_client, m_server, m_up, m_down) = pipe();
+    server.accept_subscriber(m_server, user(9)).unwrap();
+    for (tx, named) in [(1, 1), (2, 99)] {
+        m_up.borrow_mut().push_back(write(
+            9,
+            tx,
+            WireWrite::Update {
+                table: "messages".to_owned(),
+                row: [7; 16],
+                cells: body("mallory's"),
+                target: WireTarget::Root,
+                at: None,
+            },
+            vec![WireBase {
+                key: Vec::new(),
+                on: BuiltOn::Commit {
+                    node: [1; 16],
+                    tx: named,
+                },
+            }],
+        ));
+    }
+    block_on(server.tick()).unwrap();
+    let refusals: Vec<String> = m_down
+        .borrow()
+        .iter()
+        .filter_map(|m| match m {
+            SyncMessage::Fate { outcome, .. } => Some(format!("{:?}", outcome.result())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(refusals.len(), 2, "{refusals:?}");
+    assert_eq!(
+        refusals[0], refusals[1],
+        "the existing commit is not told apart"
+    );
+    assert!(refusals[0].contains("predecessor_rejected"), "{refusals:?}");
+    assert!(rows(&server).contains("alice's"));
+}
+
 #[test]
 fn an_upsert_over_a_row_deleted_in_the_same_commit_is_checked_as_an_insert() {
     let locked = JazzSchema::new(

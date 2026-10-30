@@ -380,10 +380,14 @@ impl Inner {
     /// history, keyed by the row: an accepted seq, or where the commit it
     /// names landed (the sender's own, or another's a relay shipped it). A
     /// base on a commit rejected, or one of the sender's never received,
-    /// rejects the upload.
+    /// rejects the upload. Over a session link (`identity`), a base on
+    /// another node's commit counts only for a node that identity writes as:
+    /// any other, and one never received, rejects the upload alike, so a
+    /// base cannot probe for another identity's commits.
     pub(super) fn resolve_bases(
         &self,
         sender: ([u8; 16], u64),
+        identity: Option<&AuthorSubject>,
         ops: &[StagedOp],
         bases: &[(usize, WireBase)],
     ) -> Result<HashMap<RowKey, Built>, Error> {
@@ -399,11 +403,18 @@ impl Inner {
                         .ok_or_else(|| unknown_base("a commit"))?;
                     Built::On(predecessor(self.settled(sender.0, tx)?)?.seq)
                 }
-                BuiltOn::Commit { node, tx } => match self.settled(node, tx)? {
-                    None if node != sender.0 => {
-                        return Err(unknown_base("another node's commit"));
+                BuiltOn::Commit { node, tx } if node == sender.0 => {
+                    Built::On(predecessor(self.settled(node, tx)?)?.seq)
+                }
+                BuiltOn::Commit { node, tx } => match identity {
+                    Some(identity) if !self.writes_as(node, identity)? => {
+                        return Err(predecessor_rejected());
                     }
-                    landed => Built::On(predecessor(landed)?.seq),
+                    Some(_) => Built::On(predecessor(self.settled(node, tx)?)?.seq),
+                    None => match self.settled(node, tx)? {
+                        None => return Err(unknown_base("another node's commit")),
+                        landed => Built::On(predecessor(landed)?.seq),
+                    },
                 },
             };
             built.insert((table.to_owned(), row, base.key.clone()), on);
