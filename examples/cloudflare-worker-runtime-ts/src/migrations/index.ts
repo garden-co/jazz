@@ -2,4 +2,4 @@
 // `jazz-tools validate` and `deploy` rewrite it.
 import type { ClientMigrations } from "jazz-tools";
 
-export const migrations: ClientMigrations = { schemas: [], migrations: [] };
+export const migrations: ClientMigrations = {"schemas":[],"migrations":[]};

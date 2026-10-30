@@ -2693,7 +2693,7 @@ impl Inner {
     ///
     /// It then keeps the authority's `namespace` (refusing an upstream of
     /// another app) and the versions the authority `confirmed`. Returns
-    /// whether any version's names changed here.
+    /// whether it took any version.
     pub(crate) fn mirror_catalogue(
         &mut self,
         namespace: Option<[u8; 16]>,
@@ -2710,8 +2710,8 @@ impl Inner {
                 "the upstream's catalogue is another app's: this store keeps a different authority namespace",
             ));
         }
-        let renamed = !versions.is_empty();
-        if renamed {
+        let mirrored = !versions.is_empty();
+        if mirrored {
             self.mirror_versions(versions, cells)?;
         }
         let learned = known.is_none() && namespace.is_some();
@@ -2722,12 +2722,12 @@ impl Inner {
         let told = self.names.confirm(conn, confirmed)? || learned;
         // This store's own sessions (a worker's tabs) are told what it now
         // knows of the authority's catalogue.
-        if told && !renamed {
+        if told && !mirrored {
             for session in &mut self.sessions {
                 session.owe_catalogue();
             }
         }
-        Ok(renamed)
+        Ok(mirrored)
     }
 
     /// Take the upstream's versions, names and lens cells: whole or not at
@@ -2758,9 +2758,8 @@ impl Inner {
         self.schema = owner.clone();
         self.owner = owner;
         self.reset_everything();
-        // This store's own sessions (a worker's tabs) store rows by its
-        // names, which may have just changed: each is sent the versions
-        // it now names otherwise.
+        // This store's own sessions (a worker's tabs) are sent the versions
+        // it just took.
         for session in &mut self.sessions {
             session.owe_catalogue();
         }
@@ -7895,6 +7894,15 @@ fn outside_migrations(
     )))
 }
 
+/// The versions to admit, each with the lens it is admitted along, to
+/// reach `target` along the app's migrations: every store takes the same
+/// path, so each derives the names its authority did (SPEC 10.7).
+///
+/// Of several lenses into a version, the one from the smallest source
+/// version is taken, as the authority's `Names::resolve` picks it. A
+/// version no lens leads into but compatible with one some lens does (the
+/// same tables and columns, see `compatibility_id`) is reached from that
+/// one by an empty lens, as deployment connects them.
 fn migration_path(
     migrations: &Migrations,
     target: &JazzSchema,
@@ -7904,51 +7912,78 @@ fn migration_path(
         migrations: &Migrations,
         schema: &JazzSchema,
         admitted: &dyn Fn(&crate::ids::SchemaVersionId) -> bool,
-        seen: &mut BTreeSet<crate::ids::SchemaVersionId>,
+        visiting: &mut BTreeSet<crate::ids::SchemaVersionId>,
     ) -> Option<Vec<(JazzSchema, Vec<MigrationLens>)>> {
         let version = schema.version_id();
         if admitted(&version) {
             return Some(vec![(schema.clone(), Vec::new())]);
         }
-        if !seen.insert(version) {
+        if !visiting.insert(version) {
             return None;
         }
-        let into: Vec<&MigrationLens> = migrations
+        let path = step(migrations, schema, admitted, visiting);
+        visiting.remove(&version);
+        path
+    }
+    fn step(
+        migrations: &Migrations,
+        schema: &JazzSchema,
+        admitted: &dyn Fn(&crate::ids::SchemaVersionId) -> bool,
+        visiting: &mut BTreeSet<crate::ids::SchemaVersionId>,
+    ) -> Option<Vec<(JazzSchema, Vec<MigrationLens>)>> {
+        let version = schema.version_id();
+        let source_of = |id: crate::ids::SchemaVersionId| {
+            migrations.schemas.iter().find(|s| s.version_id() == id)
+        };
+        let mut into: Vec<&MigrationLens> = migrations
             .lenses
             .iter()
             .filter(|lens| lens.target == version)
             .collect();
-        if into.is_empty() {
-            return Some(vec![(schema.clone(), Vec::new())]);
-        }
-        // A path from an admitted version beats one from the first.
-        let mut found: Option<Vec<(JazzSchema, Vec<MigrationLens>)>> = None;
-        for lens in into {
-            let Some(source) = migrations
-                .schemas
-                .iter()
-                .find(|s| s.version_id() == lens.source)
-            else {
+        into.sort_by_key(|lens| lens.source);
+        for lens in &into {
+            let Some(source) = source_of(lens.source) else {
                 continue;
             };
-            let Some(mut path) = walk(migrations, source, admitted, seen) else {
-                continue;
-            };
-            path.push((schema.clone(), vec![lens.clone()]));
-            let from_admitted = admitted(&path[0].0.version_id());
-            if from_admitted {
+            if let Some(mut path) = walk(migrations, source, admitted, visiting) {
+                path.push((schema.clone(), vec![(*lens).clone()]));
                 return Some(path);
             }
-            found.get_or_insert(path);
         }
-        found
+        if !into.is_empty() {
+            return None;
+        }
+        // No lens leads here: from the smallest compatible version one
+        // leads into (or this store admitted), by an empty lens.
+        let compatibility = schema.compatibility_id();
+        let mut anchors: Vec<&JazzSchema> = migrations
+            .schemas
+            .iter()
+            .filter(|s| s.version_id() != version && s.compatibility_id() == compatibility)
+            .filter(|s| {
+                let id = s.version_id();
+                admitted(&id) || migrations.lenses.iter().any(|lens| lens.target == id)
+            })
+            .collect();
+        anchors.sort_by_key(|s| s.version_id());
+        for anchor in anchors {
+            let Ok(empty) = MigrationLens::new(anchor.version_id(), version, Vec::new()) else {
+                continue;
+            };
+            if let Some(mut path) = walk(migrations, anchor, admitted, visiting) {
+                path.push((schema.clone(), vec![empty]));
+                return Some(path);
+            }
+        }
+        // A first version: admitted without a lens.
+        Some(vec![(schema.clone(), Vec::new())])
     }
-    if admitted(&target.version_id()) || migrations.lenses.is_empty() {
+    if admitted(&target.version_id()) {
         return Vec::new();
     }
-    let mut seen = BTreeSet::new();
-    match walk(migrations, target, &admitted, &mut seen) {
-        Some(path) if path.len() > 1 => path,
+    let mut visiting = BTreeSet::new();
+    match walk(migrations, target, &admitted, &mut visiting) {
+        Some(path) if path.len() > 1 || !path[0].1.is_empty() => path,
         _ => Vec::new(),
     }
 }

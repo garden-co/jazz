@@ -197,11 +197,15 @@ pub(crate) fn identity(namespace: [u8; 16], table: &str, column: Option<&str>) -
 }
 
 /// The stored column a column named `name` starts in when `version`
-/// introduces it: `name~` and six hex digits of a hash of both. Every store
-/// derives it alike, whatever else it admitted and in whatever order, so a
-/// replica stores a version's new columns where its authority does without
-/// asking (SPEC 10.7). A column keeps its stored column across renames and
-/// later versions; only a new lineage (a column added or retyped) starts one.
+/// introduces it: `name~` and six hex digits of a hash of both, where
+/// `version` is the introducing schema's compatibility id (versions that
+/// differ only in column order, merge strategies or indexes share it, so
+/// whichever of them a store admits first names the column alike). Every
+/// store derives it alike, whatever else it admitted and in whatever order,
+/// so a replica stores a version's new columns where its authority does
+/// without asking (SPEC 10.7). A column keeps its stored column across
+/// renames and later versions; only a new lineage (a column added or
+/// retyped) starts one.
 pub(crate) fn stored_column(version: &SchemaVersionId, name: &str) -> String {
     stored_name(b"column", version, name)
 }
@@ -968,10 +972,13 @@ impl Names {
     /// lens into `schema` (`lenses` may name others; only lenses targeting
     /// `schema` count) where one says it was renamed, else the source's
     /// table or column of the same name, if it has the type that stored
-    /// column holds (a type changed in place starts a new column). Without
-    /// a lens from an admitted source, the source is `base`.
+    /// column holds (a type changed in place starts a new column). Of
+    /// several lenses into `schema`, the source is the smallest admitted
+    /// version, as every store picks it. Without a lens from an admitted
+    /// source, the source is `base`.
     ///
-    /// What starts a lineage is named after `schema`'s version (SPEC 10.7):
+    /// What starts a lineage is named after `schema`'s compatibility id
+    /// (SPEC 10.7):
     /// a new column `name~<hash>` ([`stored_column`]), a table a lens adds
     /// `name~<hash>` ([`stored_table`]). Followed along the app's lenses,
     /// every store derives the same names. Without a lens (a store's first
@@ -993,8 +1000,12 @@ impl Names {
         if let Some(names) = self.get(&version) {
             return Ok(Schema::stored_as(schema, names, &self.tags));
         }
-        let into: Vec<&MigrationLens> = lenses.iter().filter(|l| l.target == version).collect();
-        // The first lens whose source this store admitted; else the base.
+        let naming = schema.compatibility_id();
+        let mut into: Vec<&MigrationLens> = lenses.iter().filter(|l| l.target == version).collect();
+        // Of several lenses into `schema`, the one from the smallest source
+        // version this store admitted, as every store picks it (see
+        // `migration_path`); else the base.
+        into.sort_by_key(|lens| lens.source);
         let lens = into
             .iter()
             .find(|lens| self.versions.contains_key(&lens.source))
@@ -1044,7 +1055,7 @@ impl Names {
                     } else if plain {
                         (name.clone(), None)
                     } else {
-                        let stored = stored_table(&version, name);
+                        let stored = stored_table(&naming, name);
                         if taken_tables.contains(&stored) || self.claims_table(&stored, "", true) {
                             return Err(collision(format!("table {name}"), &stored));
                         }
@@ -1118,7 +1129,7 @@ impl Names {
                 let stored_column = match previous {
                     Some(previous) => previous.to_owned(),
                     None => {
-                        let candidate = stored_column(&version, &column.name);
+                        let candidate = stored_column(&naming, &column.name);
                         // Only a hash collision (one in 2^24 per pair of
                         // same-named lineages of a table) lands here: every
                         // store refuses the version alike.

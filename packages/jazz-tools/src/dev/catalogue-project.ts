@@ -1612,8 +1612,8 @@ async function writeLocalClientMigrations(schemaDir: string, migrationsDir: stri
         fromHash = known(migration.fromHash);
         toHash = known(migration.toHash);
       } catch {
-        // A migration from a version only the server holds: deploy fetches
-        // it and writes the module whole.
+        // A migration from a version this project has no snapshot of is
+        // left out: run `migrations create` to snapshot it, or deploy.
         continue;
       }
       if (fromHash && toHash) edges.push({ fromHash, toHash, migration });

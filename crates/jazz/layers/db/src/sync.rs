@@ -7033,8 +7033,10 @@ impl Db {
                         confirmed,
                     } => {
                         match inner.mirror_catalogue(namespace, versions, cells, &confirmed) {
-                            Ok(renamed) => {
-                                rebase |= renamed;
+                            // Versions it took rebuilt the store's
+                            // schema: its pending commits replay on top.
+                            Ok(mirrored) => {
+                                rebase |= mirrored;
                                 let client = inner.client.as_mut().expect("client");
                                 client.catalogued = true;
                                 client.uncatalogued = None;

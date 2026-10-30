@@ -82,9 +82,11 @@ pub struct AppContext {
     /// On `/ws`, a valid admin secret authenticates this client as the backend.
     pub admin_secret: Option<String>,
     /// The app's schema versions and the lenses between them, as
-    /// `jazz-tools deploy` writes them to `migrations/bundle.json`: the
-    /// store reaches `schema` along them, so it stores each version as the
-    /// server does (SPEC 10.7).
+    /// `jazz-tools validate` and `deploy` write them to `migrations/index.ts`
+    /// beside schema.ts (load it with
+    /// [`deployment::published::client_migrations_module`]): the store
+    /// reaches `schema` along them, so it stores each version as the server
+    /// does (SPEC 10.7).
     pub migrations: crate::db::Migrations,
 }
 

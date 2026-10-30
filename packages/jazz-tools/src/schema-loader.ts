@@ -544,7 +544,7 @@ export async function writeClientMigrationsModule(
     "// `jazz-tools validate` and `deploy` rewrite it.",
     'import type { ClientMigrations } from "jazz-tools";',
     "",
-    `export const migrations: ClientMigrations = ${bundle ?? "{ schemas: [], migrations: [] }"};`,
+    `export const migrations: ClientMigrations = ${bundle ?? JSON.stringify({ schemas: [], migrations: [] })};`,
     "",
   ].join("\n");
   if ((await readFile(path, "utf8").catch(() => null)) === contents) return;

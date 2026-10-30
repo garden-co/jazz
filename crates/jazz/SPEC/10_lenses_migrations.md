@@ -658,17 +658,27 @@ schema version.
   copies, one whose type changed, one added without a lens that continues
   no stored column) is stored as `name~` and the first six hex digits of
   BLAKE3 over the length-prefixed parts `"column"`, the 16 bytes of `v`'s
-  id, and `name`. A table a lens adds is stored as `name~` and the same
-  hash over `"table"`, `v`'s id and `name`. A column or table a version
+  compatibility id, and `name`. A table a lens adds is stored as `name~`
+  and the same hash over `"table"`, `v`'s compatibility id and `name`. The
+  compatibility id is the version id of `v` with its columns sorted by
+  name and without merge strategies or indexes: versions that differ only
+  in those are compatible (deployment connects them with an empty lens),
+  share it, and so name what they introduce alike, whichever a store
+  admits first. A column or table a version
   keeps from its source (untouched or renamed) keeps the source's stored
   one.
 - The app's lenses make the names agree. An app ships its schema versions
   and the lenses between them (`DbConfig::with_migrations`; the JSON a
-  deployment publishes, which `jazz-tools deploy` writes to
-  `migrations/bundle.json`). A store opening, or viewing, a version it has
-  not admitted first admits the versions on a lens path to it, starting at
-  one it admitted or at the app's first version, as the authority admitted
-  them. Along those lenses every store derives the same names, whatever
+  deployment publishes, which `jazz-tools validate` and `deploy` write to
+  `migrations/index.ts` beside `schema.ts`, and which TypeScript apps pass
+  to `defineApp`). A store opening, or viewing, a version it has not
+  admitted first admits the versions on a lens path to it, starting at one
+  it admitted or at the app's first version, as the authority admitted
+  them. Of several lenses into a version, every store, the authority
+  included, takes the one from the smallest source version id. A version
+  no lens leads into is reached by an empty lens from the smallest
+  compatible version one does (or the store admitted), as deployment
+  connects compatible versions. Along those lenses every store derives the same names, whatever
   else it admitted and in whatever order, so a replica stores a version's
   columns where its authority does without asking, and the authority's
   `Catalogue.confirmed` digest only checks it.

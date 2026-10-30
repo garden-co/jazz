@@ -98,6 +98,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         schema.len()
     );
 
+    // The app's schema versions and lenses, as `jazz-tools validate` writes
+    // them beside schema.ts, so this client stores each version as the
+    // server does.
+    let migrations = jazz::tools::deployment::published::client_migrations_module(
+        &std::fs::read_to_string(format!("{schema_root}/migrations/index.ts"))?,
+    )?;
+
     // Create Jazz client
     // #region context-setup-rust-backend
     let context = AppContext {
@@ -111,7 +118,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         jwt_token: Some(jwt_token),
         backend_secret: None,
         admin_secret: None,
-        migrations: Default::default(),
+        migrations,
     };
     // #endregion context-setup-rust-backend
 
