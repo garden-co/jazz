@@ -3809,8 +3809,8 @@ mod tests {
                     .borrow_mut()
                     .drain(..)
                     .filter_map(|message| {
-                        if let SyncMessage::Fate { tx, .. } = message {
-                            Some(tx)
+                        if let SyncMessage::Fate { id, .. } = message {
+                            Some(id.time.0)
                         } else {
                             None
                         }
