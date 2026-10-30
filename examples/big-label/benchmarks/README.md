@@ -37,9 +37,28 @@ compilation, database opening, and dimension-row seeding are supplied as untimed
 per-iteration Divan inputs. Read fixtures keep their one-transaction-per-release
 history shape.
 
+## Contention (`benches/contention.rs`, nightly)
+
+Two labels share one durable server, as tenants of one app do. A member of
+label B opens their newest releases (`big_label_open_releases_*`) or renames
+one (`big_label_rename_release_*`, timed until the server acknowledges it).
+Each runs idle and `during_search`, while a member of label A searches its
+300,000-release back catalogue back to back. The search is the app's
+`contains` filter on `search_key` with a term that matches nothing, so it reads
+every release of label A. All clients are ordinary JWT users over WebSockets,
+each on its own thread, so every request passes the row policies. The fixture
+is in [src/contention.rs](src/contention.rs); the server and client threads come
+from `jazz_testkit::contention`.
+
+The difference between the two arms is how long one tenant's slow query holds
+up another tenant's cheap request. On a 4-core development VM on 2026-10-28,
+a search took about 85 ms, and both requests went from about 3 ms idle to
+about 80 to 90 ms during the search.
+
 Run locally with:
 
 ```sh
 cargo test -p jazz-example-big-label-benchmark
 cargo bench -p jazz-example-big-label-benchmark --bench loads
+cargo bench -p jazz-example-big-label-benchmark --bench contention
 ```

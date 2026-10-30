@@ -1,5 +1,7 @@
 //! Public-API document sharing fixture, adapted from Tobias Lins's #2996.
 //! Query-only timing with a separate reopen/first-read receipt. See the example README.
+pub mod contention;
+
 use std::{collections::BTreeMap, path::Path, time::Instant};
 
 use jazz::db::{

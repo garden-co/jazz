@@ -54,8 +54,9 @@ const workloadSpecs = {
   "band-chat": nativeExample("band-chat"),
   "band-book": {
     ...nativeExample("band-book"),
-    // The rest of the policy sweep: the other arms and the 10k table.
-    nightly: { benches: ["nightly"], env: {}, timeout: 20 },
+    // The rest of the policy sweep: the other arms and the 10k table. Also
+    // one band's workspace opens against another band's requests on a server.
+    nightly: { benches: ["nightly", "contention"], env: {}, timeout: 25 },
   },
   "world-tour": nativeExample("world-tour"),
   wequencer: nativeExample("wequencer"),
@@ -70,6 +71,9 @@ const workloadSpecs = {
     features: null,
     minStack: null,
     timeout: 25,
+    // One label's catalogue search against another label's requests on a
+    // server.
+    nightly: { benches: ["contention"], env: {}, timeout: 15 },
   },
   "permissioned-resources": nativeExample("permissioned-resources"),
 };
