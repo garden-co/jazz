@@ -11,7 +11,7 @@ use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, gte, lit, lte};
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
-use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+use jazz::tools::{ColumnMergeStrategy, ColumnType, SchemaBuilder, TableName, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 
 type BenchDb = Db;
@@ -216,29 +216,36 @@ impl Fixture {
 }
 
 fn schema() -> JazzSchema {
-    JazzSchema::new(
-        &SchemaBuilder::new()
-            .table(TableSchemaBuilder::new("bands").column("name", ColumnType::Text))
-            .table(
-                TableSchemaBuilder::new("venues")
-                    .column("name", ColumnType::Text)
-                    .column("city", ColumnType::Text)
-                    .column("country", ColumnType::Text)
-                    .column("lat", ColumnType::Double)
-                    .column("lng", ColumnType::Double),
-            )
-            .table(
-                TableSchemaBuilder::new("stops")
-                    .fk_column("bandId", "bands")
-                    .fk_column("venueId", "venues")
-                    .column("date", ColumnType::Timestamp)
-                    .column("status", ColumnType::Text)
-                    .column("publicDescription", ColumnType::Text)
-                    .index_only(["date"]),
-            )
-            .build(),
-    )
-    .expect("WorldTour benchmark schema compiles")
+    let mut schema = SchemaBuilder::new()
+        .table(TableSchemaBuilder::new("bands").column("name", ColumnType::Text))
+        .table(
+            TableSchemaBuilder::new("venues")
+                .column("name", ColumnType::Text)
+                .column("city", ColumnType::Text)
+                .column("country", ColumnType::Text)
+                .column("lat", ColumnType::Double)
+                .column("lng", ColumnType::Double),
+        )
+        .table(
+            TableSchemaBuilder::new("stops")
+                .fk_column("bandId", "bands")
+                .fk_column("venueId", "venues")
+                .column("date", ColumnType::Timestamp)
+                .column("status", ColumnType::Text)
+                .column("publicDescription", ColumnType::Text)
+                .index_only(["date"]),
+        )
+        .build();
+    // As the app declares it: a Markdown merge column.
+    let stops = schema
+        .get_mut(&TableName::new("stops"))
+        .expect("stops table");
+    for column in &mut stops.columns.columns {
+        if column.name_str() == "publicDescription" {
+            *column = column.clone().merge_strategy(ColumnMergeStrategy::Markdown);
+        }
+    }
+    JazzSchema::new(&schema).expect("WorldTour benchmark schema compiles")
 }
 
 fn insert(db: &BenchDb, table: &str, id: RowUuid, cells: BTreeMap<String, Value>) {
