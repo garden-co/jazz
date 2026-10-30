@@ -1,5 +1,4 @@
 import { copyAccountConfigAdmission } from "../../accounts/config-capability.js";
-import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
 import { getRuntimeSchemaCacheKey } from "../../drivers/schema-wire.js";
 import type { WasmSchema } from "../../drivers/types.js";
 import { setCredentialRenewal } from "../client.js";
@@ -318,8 +317,7 @@ export abstract class ConnectionManager {
   async waitForSync(signal?: AbortSignal): Promise<void> {
     const runtime = this.getCurrentClient()?.getRuntime();
     if (!runtime || this.linkStatus().state === "local-only") return;
-    if (!(runtime instanceof NativeRuntimeAdapter))
-      throw new Error("Runtime does not support waiting for sync");
+    if (!runtime.waitForPendingWrites) throw new Error("Runtime does not support waiting for sync");
     await runtime.waitForPendingWrites("global", {
       throughOutage: true,
       signal,
@@ -412,7 +410,7 @@ export abstract class ConnectionManager {
   async waitForPendingWrites(): Promise<void> {
     const runtime = this.getCurrentClient()?.getRuntime();
     if (!runtime) return;
-    if (!(runtime instanceof NativeRuntimeAdapter))
+    if (!runtime.waitForPendingWrites)
       throw new Error("Runtime does not support graceful sync shutdown");
     await runtime.waitForPendingWrites("global");
   }

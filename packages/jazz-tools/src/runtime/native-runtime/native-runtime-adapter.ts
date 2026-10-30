@@ -674,7 +674,7 @@ type SubscriptionState = {
   cancelled: boolean;
 };
 
-type SubscriptionOutputColumns = {
+export type SubscriptionOutputColumns = {
   rootTable: string;
   rootColumns: readonly ColumnDescriptor[];
 };
@@ -4889,7 +4889,7 @@ function closeSubscriptionSource(source: SubscriptionSource): void {
   source.close();
 }
 
-function queryIncludesDeleted(queryJson: string): boolean {
+export function queryIncludesDeleted(queryJson: string): boolean {
   try {
     return (JSON.parse(queryJson) as { include_deleted?: unknown }).include_deleted === true;
   } catch {
@@ -4897,7 +4897,7 @@ function queryIncludesDeleted(queryJson: string): boolean {
   }
 }
 
-function queryHasArraySubqueries(queryJson: string): boolean {
+export function queryHasArraySubqueries(queryJson: string): boolean {
   try {
     const value = (JSON.parse(queryJson) as { array_subqueries?: unknown }).array_subqueries;
     return Array.isArray(value) && value.length > 0;
@@ -5053,7 +5053,7 @@ function unqualifiedColumn(column: string): string {
   return stripColumnQualifier(column);
 }
 
-function subscriptionOutputColumns(
+export function subscriptionOutputColumns(
   queryJson: string,
   schema: WasmSchema,
 ): SubscriptionOutputColumns {
@@ -5224,7 +5224,7 @@ function outputColumnsForTable(
   return columns;
 }
 
-function addNestedOuterColumns(queryJson: string): string {
+export function addNestedOuterColumns(queryJson: string): string {
   const parsed = JSON.parse(queryJson) as { array_subqueries?: unknown };
   addNestedOuterColumnsToSubqueries(parsed.array_subqueries);
   return JSON.stringify(parsed);
@@ -5450,7 +5450,7 @@ function extractWriteRejectedReason(message: string): string | null {
   return match ? match[1]! : null;
 }
 
-function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
+export function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
   const parsed = JSON.parse(queryJson) as {
     array_subqueries?: unknown;
     conditions?: unknown;
@@ -6481,11 +6481,11 @@ function encodeCellValue(
   return encodeNativeColumnValue(column, resolved);
 }
 
-function readRowBatches(payload: Uint8Array): NativeRowBatch[] {
+export function readRowBatches(payload: Uint8Array): NativeRowBatch[] {
   return new PostcardReader(payload).readVec(readNativeRowBatch);
 }
 
-function readRelationSnapshot(payload: Uint8Array): NativeRelationSubscriptionSnapshot {
+export function readRelationSnapshot(payload: Uint8Array): NativeRelationSubscriptionSnapshot {
   return readNativeRelationSubscriptionSnapshot(new PostcardReader(payload));
 }
 
@@ -6570,7 +6570,7 @@ function nativeRowFieldPlans(
   return plans;
 }
 
-function rowsFromRelationSnapshot(
+export function rowsFromRelationSnapshot(
   snapshot: NativeRelationSubscriptionSnapshot,
   schema: WasmSchema,
   projectedColumns?: readonly ColumnDescriptor[],
