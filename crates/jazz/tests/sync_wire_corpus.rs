@@ -27,8 +27,9 @@ use std::task::{Context, Poll, Waker};
 
 use jazz::db::{
     Acting, CorpusReader, Db, DbConfig, DbIdentity, FrameJoiner, InsertOptions, Outcome, ReadOpts,
-    ReadSpan, ReadTier, Reason, SyncMessage, Transport, UpdateOptions, WireError as SyncWireError,
-    WriteIdentity, block_on, encode_frames, validate_frame_batch_for_corpus,
+    ReadSpan, ReadTier, Reason, RemoteLinkHint, SyncMessage, Transport, UpdateOptions,
+    WireError as SyncWireError, WireKind, WriteIdentity, block_on, encode_frames,
+    validate_frame_batch_for_corpus,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::model::transaction::OpenTransactionId;
@@ -371,8 +372,9 @@ impl Transport for Recording {
 /// attributed author and as a session, a live `Read` in a branch view
 /// over a live base, over a frozen base, and of a head alone, and a hidden
 /// `AccessLost` (a branch view's row whose head version the reader may not
-/// read).
-const SHAPES: [&str; 9] = [
+/// read), and serializable `Commit`s with a snapshot the authority served
+/// and one a worker with no server numbered.
+const SHAPES: [&str; 11] = [
     "Read/once",
     "Rows/tx_ids",
     "Catalogue/versions",
@@ -382,6 +384,8 @@ const SHAPES: [&str; 9] = [
     "Read/live-branch-view-frozen",
     "Read/live-branch-head",
     "AccessLost/hidden",
+    "Commit/serializable",
+    "Commit/serializable-by",
 ];
 
 fn shape(message: &SyncMessage) -> Option<&'static str> {
@@ -429,6 +433,14 @@ fn shape(message: &SyncMessage) -> Option<&'static str> {
             _ => None,
         },
         SyncMessage::AccessLost { hidden: true, .. } => Some(SHAPES[8]),
+        SyncMessage::Commit {
+            kind: WireKind::Serializable { by: None, .. },
+            ..
+        } => Some(SHAPES[9]),
+        SyncMessage::Commit {
+            kind: WireKind::Serializable { by: Some(_), .. },
+            ..
+        } => Some(SHAPES[10]),
         _ => None,
     }
 }
@@ -682,6 +694,56 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
         alice.tx_ref(open_tx).all_prepared(&notes),
     );
     alice.abandon_transaction_handle(open_tx).unwrap();
+
+    // Commit (serializable): a transaction that read the notes writes one,
+    // at the snapshot the authority served.
+    let open_tx = OpenTransactionId::new();
+    block_on(alice.begin_serializable(open_tx)).unwrap();
+    let _ = drive(
+        &[&alice, &server, &alice],
+        alice.tx_ref(open_tx).all_prepared(&notes),
+    );
+    drive(
+        &[&alice, &server, &alice],
+        alice
+            .tx_ref(open_tx)
+            .insert("notes", note(1, vec![9]), InsertOptions::default()),
+    )
+    .unwrap();
+    drive(
+        &[&alice, &server, &alice],
+        alice.commit_serializable_handle(open_tx),
+    )
+    .unwrap();
+    pump(&[&alice, &server, &alice]);
+
+    // Commit (serializable, at a snapshot a worker numbered): a tab of a
+    // worker with no server pins at the worker's position.
+    let wendy = open(0x57, user(1), false);
+    wendy.set_remote_link_hint(RemoteLinkHint::NoServer);
+    let tab = open(0x58, user(1), false);
+    tab.set_non_durable_client();
+    tab.set_remote_link_hint(RemoteLinkHint::Live);
+    connect(&tab, &wendy, user(1), &recorded);
+    let tab_notes = tab.prepare_query(&Query::from("notes")).unwrap();
+    let open_tx = OpenTransactionId::new();
+    block_on(tab.begin_serializable(open_tx)).unwrap();
+    let _ = drive(
+        &[&tab, &wendy, &tab],
+        tab.tx_ref(open_tx).all_prepared(&tab_notes),
+    );
+    drive(
+        &[&tab, &wendy, &tab],
+        tab.tx_ref(open_tx)
+            .insert("notes", note(1, vec![10]), InsertOptions::default()),
+    )
+    .unwrap();
+    drive(
+        &[&tab, &wendy, &tab],
+        tab.commit_serializable_handle(open_tx),
+    )
+    .unwrap();
+    pump(&[&tab, &wendy, &tab]);
 
     // A history subscription ships superseded versions, with the commits
     // behind them.

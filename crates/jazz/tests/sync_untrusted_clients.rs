@@ -9,8 +9,8 @@ use std::rc::Rc;
 
 use jazz::db::{
     Acting, BuiltOn, Db, DbConfig, DbIdentity, DeleteOptions, ErrorCode, FileOptions,
-    InsertOptions, LOCAL_BASE, ReadOpts, ReadTier, SyncMessage, Transport, TransportError,
-    WireBase, WireKind, WireOp, WireTarget, WireWrite, block_on,
+    InsertOptions, ReadOpts, ReadTier, SyncMessage, Transport, TransportError, WireBase, WireKind,
+    WireOp, WireTarget, WireWrite, block_on,
 };
 use jazz::ids::RowUuid;
 use jazz::ids::{AuthorSubject, NodeUuid};
@@ -346,7 +346,7 @@ fn an_upsert_over_a_row_deleted_in_the_same_commit_is_checked_as_an_insert() {
     server.accept_subscriber(m_server, user(1)).unwrap();
     m_up.borrow_mut().push_back(SyncMessage::Commit {
         node: [1; 16],
-        tx: LOCAL_BASE + 1,
+        tx: 1,
         kind: WireKind::Mergeable,
         ops: vec![
             WireWrite::Delete {
@@ -369,7 +369,7 @@ fn an_upsert_over_a_row_deleted_in_the_same_commit_is_checked_as_an_insert() {
         origin: None,
     });
     block_on(server.tick()).unwrap();
-    assert_eq!(fates(&m_down), vec![(LOCAL_BASE + 1, false)]);
+    assert_eq!(fates(&m_down), vec![(1, false)]);
     assert!(rows(&server).contains("original"), "{}", rows(&server));
 }
 
@@ -384,7 +384,7 @@ fn the_authority_refuses_cells_that_are_not_of_their_columns_type() {
     {
         m_up.borrow_mut().push_back(SyncMessage::Commit {
             node: [2; 16],
-            tx: LOCAL_BASE + 1 + i as u64,
+            tx: 1 + i as u64,
             kind: WireKind::Mergeable,
             ops: vec![
                 WireWrite::Insert {
@@ -432,14 +432,14 @@ fn a_reopened_authority_continues_after_the_seq_of_a_rowless_commit() {
     server.accept_subscriber(r_server, user(2)).unwrap();
     r_up.borrow_mut().push_back(SyncMessage::Commit {
         node: [2; 16],
-        tx: LOCAL_BASE + 1,
+        tx: 1,
         kind: WireKind::Mergeable,
         ops: Vec::new(),
         acting: Acting::Own,
         origin: None,
     });
     block_on(server.tick()).unwrap();
-    assert_eq!(fates(&r_down), vec![(LOCAL_BASE + 1, true)]);
+    assert_eq!(fates(&r_down), vec![(1, true)]);
     let before = server.seq_high_water();
     block_on(server.close()).unwrap();
     drop(server);
@@ -528,7 +528,7 @@ fn the_authority_refuses_misplaced_bases() {
     };
     let commit = |n: u64, ops: Vec<WireOp>| SyncMessage::Commit {
         node: [1; 16],
-        tx: LOCAL_BASE + n,
+        tx: n,
         kind: WireKind::Mergeable,
         ops,
         acting: Acting::Own,
@@ -626,7 +626,7 @@ fn a_session_link_may_not_attribute_and_its_session_writes_are_its_own() {
     let other = user(3).canonical().to_owned();
     m_up.borrow_mut().extend([
         insert(
-            LOCAL_BASE + 1,
+            1,
             1,
             "attributed",
             Acting::Attributed {
@@ -634,7 +634,7 @@ fn a_session_link_may_not_attribute_and_its_session_writes_are_its_own() {
             },
         ),
         insert(
-            LOCAL_BASE + 2,
+            2,
             2,
             "as a session",
             Acting::Session {
@@ -644,10 +644,7 @@ fn a_session_link_may_not_attribute_and_its_session_writes_are_its_own() {
         ),
     ]);
     block_on(server.tick()).unwrap();
-    assert_eq!(
-        fates(&m_down),
-        vec![(LOCAL_BASE + 1, false), (LOCAL_BASE + 2, true)]
-    );
+    assert_eq!(fates(&m_down), vec![(1, false), (2, true)]);
     let (_, link) = user(2).principal_parts();
     assert_eq!(creators(&server), vec![("as a session".to_owned(), link)]);
 }

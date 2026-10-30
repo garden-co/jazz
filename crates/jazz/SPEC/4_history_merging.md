@@ -517,21 +517,22 @@ On SQLite a commit carries, beside its operations, the base of each row it
 writes over an image its writer held (`WireBase`: the row, by the index of
 the commit's first op that writes it and its branch key, and the version it
 was built on as `BuiltOn`). A non-durable session (a worker's tab) may hold
-its relay's unsettled version of a row and send it as `Seq` of a seq at or
-above the local base. A relay renames every base into names its upstream
-knows before it forwards the commit: an upstream seq stays; its own
+its relay's unsettled version of a row (stored at the relay's node, the
+position of the relay's commit that wrote it) and send it as
+`Commit { relay node, tx }`. A relay renames every base into names its
+upstream knows before it forwards the commit: an upstream seq stays; its own
 unsettled version (one of its own commits, pending or settled), the
 session's `Own` predecessor and the session's own `Commit` all become
 `Commit { relay node, tx }` of the relay's own commit that carries them, or
 the upstream seq that commit already landed at, so Core never sees a
-relay's local seqs. A version in the relay's local range that is no commit of
+relay's own positions. A version at the relay's node that is no commit of
 its own (one from before the relay's store was reset) cannot be named
 upstream: the write counts as built
 on the newest version of the row the relay holds accepted upstream, so it may
 be flagged over a version its writer saw but never the other way round. A
 base on a commit the relay rejected or never received rejects the write there
-(`predecessor_rejected`); a `Commit` of another node than the sender's is
-refused.
+(`predecessor_rejected`); a `Commit` of another node than the relay's or the
+sender's is refused.
 
 Core resolves each base before it applies the commit: `Seq(S)` is the
 accepted version at `S` (not checked against the row's history: a seq the
@@ -545,7 +546,7 @@ columns as a bitmask over their positions in the row table (stored tables
 only grow by `ADD COLUMN`, so a position never moves). A delete or restore
 authors `_st`, the version's state bits (bit 0: its commit wrote no content;
 bit 1: deleted; bit 2, in history only: a merged text write as sent, §4.3). An app column cannot take the name of a stored row column
-(`id`, `rid`, `_b`, `_seq`, `_st`, `_base`, `_cols`). `_base` and `_cols`
+(`id`, `rid`, `_b`, `_n`, `_seq`, `_st`, `_base`, `_cols`). `_base` and `_cols`
 are NULL on every other replica and for Core's own writes: those are made over the current image, so they are never maybe
 conflicting, and in another write's analysis they author every column. The
 flag, the walk and the merge base are derived on demand

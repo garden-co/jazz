@@ -225,7 +225,7 @@ fn snapshot_of(db: &Db, table: &str, opts: ReadOpts) -> Vec<String> {
         .iter()
         .map(|r| {
             let cells: Vec<String> = r.cells().map(|(n, v)| format!("{n}={v:?}")).collect();
-            format!("{:?} @{} {}", r.row_uuid(), r.seq(), cells.join(" "))
+            format!("{:?} @{:?} {}", r.row_uuid(), r.seq(), cells.join(" "))
         })
         .collect()
 }
