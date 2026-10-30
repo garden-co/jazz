@@ -502,6 +502,32 @@ impl Names {
         !self.lens_cells.is_empty()
     }
 
+    /// The copies a row a replicated insert (one by stored names, from
+    /// whichever version) writes into stored `table` fills, decided by the
+    /// stored columns it `given`s rather than by its writer's version: a
+    /// copy it leaves out, which a later version than its writer's made,
+    /// takes the value of a source it gives, as (source, copy). A dropped
+    /// column's backwards default is never filled here: only a writer whose
+    /// version descends from the drop names it, and it sends that default
+    /// itself (see `Inner::stored_op`), so an older writer's row takes the
+    /// stored column's own default.
+    pub(crate) fn stored_copies(
+        &self,
+        table: &str,
+        given: impl Fn(&str) -> bool,
+    ) -> Vec<(String, String)> {
+        self.lens_cells
+            .iter()
+            .filter(|cell| cell.table == table && !given(&cell.column))
+            .filter_map(|cell| match &cell.rule {
+                LensCellRule::Copy(source) if given(source) => {
+                    Some((source.clone(), cell.column.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The lens cells a row admitted `version` inserts into `table` fills:
     /// (column, stored copy) for copies later versions' lenses made of its
     /// columns, and (stored column, backwards default) for columns earlier

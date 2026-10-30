@@ -753,7 +753,7 @@ fn a_relays_commit_a_write_was_built_on_is_what_its_writer_saw() {
             ..WireWrite::Update {
                 table: "todos".to_owned(),
                 row: target,
-                cells: cells(&[("title", title)]),
+                cells: cells(&[(&common::stored(&core, "todos", "title"), title)]),
                 target: WireTarget::Root,
                 at: None,
             }
