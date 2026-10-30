@@ -374,7 +374,7 @@ impl Transport for Recording {
 /// `AccessLost` (a branch view's row whose head version the reader may not
 /// read), and serializable `Commit`s with a snapshot the authority served
 /// and one a worker with no server numbered.
-const SHAPES: [&str; 11] = [
+const SHAPES: [&str; 12] = [
     "Read/once",
     "Rows/tx_ids",
     "Catalogue/versions",
@@ -386,10 +386,16 @@ const SHAPES: [&str; 11] = [
     "AccessLost/hidden",
     "Commit/serializable",
     "Commit/serializable-by",
+    "Read/once-resumed",
 ];
 
 fn shape(message: &SyncMessage) -> Option<&'static str> {
     match message {
+        SyncMessage::Read {
+            since,
+            span: ReadSpan::Once { at },
+            ..
+        } if !since.is_empty() && at.is_empty() => Some(SHAPES[11]),
         SyncMessage::Read {
             span: ReadSpan::Once { .. },
             ..
@@ -410,7 +416,7 @@ fn shape(message: &SyncMessage) -> Option<&'static str> {
         } if !claims.is_empty() => Some(SHAPES[4]),
         SyncMessage::Read {
             view,
-            span: ReadSpan::Live { .. },
+            span: ReadSpan::Live,
             ..
         } if matches!(
             **view,
@@ -424,7 +430,7 @@ fn shape(message: &SyncMessage) -> Option<&'static str> {
         }
         SyncMessage::Read {
             view,
-            span: ReadSpan::Live { .. },
+            span: ReadSpan::Live,
             ..
         } => match **view {
             ReadViewSourceSpec::BranchView {
@@ -892,7 +898,8 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
             tier: ReadTier::LocalFirst,
             wait: None,
             view: Box::new(ReadViewSourceSpec::Current),
-            span: ReadSpan::Live { since: Vec::new() },
+            since: Vec::new(),
+            span: ReadSpan::Live,
         },
     ])));
     server
@@ -1043,6 +1050,18 @@ fn produce_sqlite_sync_wire_corpus_v1() {
         "malformed frame",
     )))
     .unwrap();
+    // Encoding boundary fixture: the scenario's one-shot read with a
+    // checkpoint exercises the moved Option's Some discriminant and seq.
+    let (reader, bytes) = recorded.get("Read/once").unwrap();
+    let mut resumed: SyncMessage = postcard::from_bytes(bytes).unwrap();
+    if let SyncMessage::Read { since, span, .. } = &mut resumed {
+        *since = vec![(None, 123)];
+        *span = ReadSpan::Once { at: Vec::new() };
+    }
+    recorded.insert(
+        "Read/once-resumed".to_owned(),
+        (reader.clone(), postcard::to_allocvec(&resumed).unwrap()),
+    );
     let shapes: Vec<(&str, String, Vec<u8>)> = SHAPES
         .iter()
         .map(|name| {

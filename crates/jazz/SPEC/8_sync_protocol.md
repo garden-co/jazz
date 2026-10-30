@@ -421,8 +421,8 @@ for one query's result:
   another read's, so the replica asks for the head's and the base's row
   whole (`ResendWhole`) instead, and the answer brings the head row that masks it
   or the base row as it is now, or their evictions.
-- `span: Live { since }` keeps it current until `Unsubscribe` (§8.5);
-  `since` resumes it (§8.11).
+- `span: Live` keeps it current until `Unsubscribe` (§8.5).
+- `since` on `Read` resumes a live or current-state one-shot read (§8.11).
 - `span: Once { at }` answers it once, at the current state (`at` empty) or
   as of position `at`.
 - `tier` says how far the read reaches past a relay: `LocalOnly` is served
@@ -686,15 +686,18 @@ or a stored column it keeps with another type than the upstream's (each added
 a column again under the same fresh stored name while apart): values of one
 type are never read as another's.
 
-### 8.11 Resuming live reads from `since`
+### 8.11 Resuming reads from `since`
 
-A replica persists, per live read, the positions its result last settled
+A replica persists, per read identity, the positions its result last settled
 through, in `_jazz_watermarks` (one row per sequencer, by its node code as in
 `_n`) keyed by a digest of the query, binding,
 `include_deleted` flag, the view it asked for and reader identity (not the tier or wait, and not the
 schema version: the key is over stored names). On reconnect or reopen, it
-sends `Read { span: Live { since } }` with those positions. A `since` at
+sends `Read { since, span }` with those positions. A `since` at
 another sequencer than the one the store serves at opens fresh.
+Repeated current-state one-shot reads reuse the same checkpoint as live reads.
+Historical one-shot reads (`at` nonempty) and one-shot reads of non-current
+views always open fully.
 
 The authority opens a resumed read one of three ways:
 

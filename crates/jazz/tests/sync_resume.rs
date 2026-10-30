@@ -685,3 +685,203 @@ fn a_row_readable_through_a_commit_in_the_resumes_tick_ships() {
         "alice receives m1, unchanged since her resume point"
     );
 }
+
+/// Alice repeats a remote one-shot read without keeping a subscription. A
+/// settled checkpoint suppresses unchanged rows; reconnect catches changes.
+/// alice --read--> server --rows/settled--> alice --read since--> server
+#[test]
+fn one_shot_reads_resume_and_catch_changes_after_reconnect() {
+    let server = seeded(3);
+    let client = open(1, alice());
+    let (up, down, shipped) = pipe();
+    let connection = block_on(client.connect_upstream(up));
+    server.accept_subscriber(down, alice()).unwrap();
+    assert_eq!(read_once(&server, &client).len(), 3);
+    let before = *shipped.borrow();
+    assert_eq!(read_once(&server, &client).len(), 3);
+    assert_eq!(
+        *shipped.borrow(),
+        before,
+        "unchanged one-shot result is not resent"
+    );
+    assert!(client.detach_connection(&connection));
+    block_on(server.update(
+        "messages",
+        id(3, 0),
+        cells(&[("body", Value::String("changed".into()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    block_on(server.delete("messages", id(3, 2), Default::default())).unwrap();
+    let (up, down, shipped) = pipe();
+    let _connection = block_on(client.connect_upstream(up));
+    server.accept_subscriber(down, alice()).unwrap();
+    assert_eq!(read_once(&server, &client).len(), 2);
+    assert!(*shipped.borrow() > 0, "changed result is delivered");
+    let before = *shipped.borrow();
+    assert_eq!(read_once(&server, &client).len(), 2);
+    assert_eq!(*shipped.borrow(), before);
+}
+
+fn read_once(server: &Db, client: &Db) -> Vec<RowUuid> {
+    read_once_via(&[server], client)
+}
+
+fn read_once_via(upstream: &[&Db], client: &Db) -> Vec<RowUuid> {
+    use std::future::Future;
+    use std::pin::pin;
+    use std::task::{Context, Poll, Waker};
+    let query = postcard::to_allocvec(&Query::from("messages")).unwrap();
+    let mut read = pin!(client.all_serialized_query(
+        &query,
+        ReadOpts {
+            tier: ReadTier::Remote,
+            ..ReadOpts::default()
+        },
+        None,
+        None,
+        None
+    ));
+    for _ in 0..30 {
+        if let Poll::Ready(rows) = read.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+            let jazz::db::SerializedReadResult::Rows(rows) = rows.unwrap() else {
+                panic!("flat read");
+            };
+            let mut ids: Vec<_> = rows.iter().map(|row| row.row_uuid()).collect();
+            ids.sort();
+            return ids;
+        }
+        for server in upstream {
+            pump(server, client);
+        }
+    }
+    panic!("one-shot read did not settle");
+}
+
+/// Alice's previously readable messages leave a repeated one-shot result
+/// when Bob revokes membership, although the message rows did not change.
+#[test]
+fn one_shot_resume_rechecks_permissions() {
+    let server = seeded(3);
+    let client = open(1, alice());
+    let (up, down, _) = pipe();
+    let connection = block_on(client.connect_upstream(up));
+    server.accept_subscriber(down, alice()).unwrap();
+    assert_eq!(read_once(&server, &client).len(), 3);
+    assert!(client.detach_connection(&connection));
+    block_on(server.delete("memberships", id(2, 0), Default::default())).unwrap();
+    let (up, down, _) = pipe();
+    let _connection = block_on(client.connect_upstream(up));
+    server.accept_subscriber(down, alice()).unwrap();
+    assert!(read_once(&server, &client).is_empty());
+    assert!(
+        ids(&client, None).is_empty(),
+        "revoked cached rows are removed"
+    );
+}
+
+/// Alice closes her durable replica after a one-shot read, then reopens it.
+/// Its persisted rows and checkpoint let Bob's server skip unchanged images.
+#[test]
+fn one_shot_checkpoint_survives_reopen() {
+    let server = seeded(3);
+    let dir = std::env::temp_dir().join(format!("jazz-once-resume-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("store.sqlite");
+    let open = || {
+        block_on(Db::open_at(
+            DbConfig::new(
+                schema(),
+                DbIdentity {
+                    node: NodeUuid::from_bytes([1; 16]),
+                    author: alice(),
+                },
+            ),
+            &path,
+            Default::default(),
+        ))
+        .unwrap()
+    };
+    {
+        let client = open();
+        let (up, down, _) = pipe();
+        let connection = block_on(client.connect_upstream(up));
+        server.accept_subscriber(down, alice()).unwrap();
+        assert_eq!(read_once(&server, &client).len(), 3);
+        assert!(client.detach_connection(&connection));
+    }
+    {
+        let client = open();
+        let (up, down, shipped) = pipe();
+        let _connection = block_on(client.connect_upstream(up));
+        server.accept_subscriber(down, alice()).unwrap();
+        assert_eq!(read_once(&server, &client).len(), 3);
+        assert_eq!(
+            *shipped.borrow(),
+            0,
+            "durable checkpoint suppresses cached images"
+        );
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Bob grants Alice access while she is offline. A repeated one-shot read
+/// must ship newly readable messages even though their row seqs are old.
+#[test]
+fn one_shot_resume_includes_unchanged_new_members() {
+    let server = seeded(1);
+    let client = open(1, alice());
+    let (up, down, _) = pipe();
+    let connection = block_on(client.connect_upstream(up));
+    server.accept_subscriber(down, alice()).unwrap();
+    assert_eq!(read_once(&server, &client), [id(3, 0)]);
+    assert!(client.detach_connection(&connection));
+    server
+        .seed_settled_mergeable_for_bootstrap(
+            "memberships",
+            id(2, 1),
+            AuthorSubject::SYSTEM,
+            cells(&[
+                ("room", Value::Uuid(id(1, 1).0)),
+                ("member", Value::String(subject())),
+            ]),
+        )
+        .unwrap();
+    let (up, down, shipped) = pipe();
+    let _connection = block_on(client.connect_upstream(up));
+    server.accept_subscriber(down, alice()).unwrap();
+    assert_eq!(read_once(&server, &client), [id(3, 0), id(3, 1)]);
+    assert!(*shipped.borrow() > 0);
+}
+
+/// Alice reads through a relay. The relay resumes from its own cached result,
+/// while the foreground still receives the rows it needs from that relay.
+#[test]
+fn one_shot_relay_reuses_its_own_checkpoint() {
+    let server = seeded(3);
+    let relay = open(2, alice());
+    let client = open(1, alice());
+    let (up, down, shipped) = pipe();
+    let _upstream = block_on(relay.connect_upstream(up));
+    server.accept_subscriber(down, alice()).unwrap();
+    let (up, down, _) = pipe();
+    let _downstream = block_on(client.connect_upstream(up));
+    relay.accept_subscriber(down, alice()).unwrap();
+    assert_eq!(read_once_via(&[&relay, &server], &client).len(), 3);
+    let before = *shipped.borrow();
+    assert_eq!(read_once_via(&[&relay, &server], &client).len(), 3);
+    assert_eq!(
+        *shipped.borrow(),
+        before,
+        "authority does not resend relay's cached rows"
+    );
+
+    // A cold foreground must still get the relay's complete result.
+    let cold = open(3, alice());
+    let (up, down, _) = pipe();
+    let _downstream = block_on(cold.connect_upstream(up));
+    relay.accept_subscriber(down, alice()).unwrap();
+    assert_eq!(read_once_via(&[&relay, &server], &cold).len(), 3);
+    assert_eq!(*shipped.borrow(), before);
+}
