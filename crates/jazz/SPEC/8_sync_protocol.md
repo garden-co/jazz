@@ -129,11 +129,12 @@ Messages, with their postcard variant tags:
 | 11  | `Fate`               | server → client | A commit's outcome (§8.3)                                        |
 | 12  | `CheckAllowed`       | client → server | Permission preflight                                             |
 | 13  | `CheckAllowedResult` | server → client | Its answer: `Allowed`, `Denied` or `Unknown`                     |
-| 14  | `Schema`             | client → server | The schema version the session reads and writes by (§8.9)        |
-| 15  | `SchemaAdmission`    | server → client | Whether that version is admitted                                 |
+| 14  | `Schema`             | client → server | Switch the version commits are read by (§8.9)                    |
+| 15  | `SchemaAdmission`    | server → client | That version's admission changed (§8.9)                          |
 | 16  | `Stored`             | relay → session | A relay holds the session's commit and uploads it (§8.3)         |
-| 17  | `KnownCatalogue`     | client → server | The schema versions and names the replica keeps (§8.10)          |
+| 17  | `Join`               | client → server | Open: the session's version and the catalogue it keeps (§8.9)    |
 | 18  | `Catalogue`          | server → client | Admitted versions, stored names and lens cells (§8.10)           |
+| 19  | `Welcome`            | server → client | The answer to `Join`: admission and catalogue (§8.9, §8.10)      |
 
 Tags before `Commit` keep their numbers: a replica stores each pending
 upload's header as an encoded `Commit` message (`_jazz_pending`, see §8.3),
@@ -574,14 +575,21 @@ There is no transport compression on the SQLite path.
 
 ### 8.9 Schema versions and write admission
 
-`Schema { version }` is the first message on every connection: the schema
-version the session reads and writes by. Its queries and writes use that
-version's names, which the server resolves to stored names; images and
-evictions travel by stored names either way (§8.4.1). A version the server has
-not admitted is named like the server's current schema.
+The version handshake is one exchange, on every link (a socket, or a worker
+and its tab). `Join { version, known }` is the first message on every
+connection: `version` is the schema version the session reads and writes by,
+and `known` the catalogue the replica keeps (§8.10). Its queries and writes
+use that version's names, which the server resolves to stored names; images
+and evictions travel by stored names either way (§8.4.1). A version the server
+has not admitted is named like the server's current schema. The server never
+holds a `Join` behind an unadmitted version, and answers it with one
+`Welcome { admitted, catalogue }` ahead of any row: whether the version is
+admitted, and the catalogue the replica lacks. This is a sync message, not
+part of `WireFrame::Hello`: in-process links have no wire Hello, and a
+catalogue may need splitting (§8.8), which a Hello cannot.
 
-`SchemaAdmission { admitted }` tells the session whether its version is
-admitted, whenever that changes. Until it is, the server holds the session's
+`SchemaAdmission { admitted }` tells the session when its version's admission
+changes after the `Welcome`. Until it is admitted, the server holds the session's
 reads (a draft awaiting its lens), so a read that needs the server fails
 with the reason rather than waiting out its budget, and refuses its commits
 (below).
@@ -589,8 +597,9 @@ with the reason rather than waiting out its budget, and refuses its commits
 Each pending commit records the schema version it was written under
 (`_jazz_pending_versions`): the version of the schema view that wrote it, or
 the store's current version. Before uploading pending commits staged under
-another version than the session's current one, the replica sends a `Schema`
-switch for them, so an offline write made before an upgrade, or through a view
+another version than the session's current one, the replica sends a
+`Schema { version }` switch for them, and one back to its own version after
+them, so an offline write made before an upgrade, or through a view
 of a version the server has not admitted yet, is resolved under the names it
 was written with (`INV-SYNC-52`). Offline, such a commit stays pending, and
 the replica replays it under its version while it holds it (a registered view),
@@ -605,7 +614,7 @@ worker serving tabs) refuses only while it is linked to an upstream that sent
 its catalogue on that connection, so it knows every version the authority
 deployed; until then, and while offline, it holds such commits. A store with no
 upstream at all is the top of its tree and refuses at once, so a worker that
-will sync becomes a replica (or is given a link hint) before its tabs write. Its `KnownCatalogue` lists only the versions whose schema it holds
+will sync becomes a replica (or is given a link hint) before its tabs write. Its `Join` lists only the versions whose schema it holds
 in this process, so a version an earlier process mirrored is sent again and
 the relay serves it as before. A pending commit written under the version
 current until a newer one is made current uploads under the version it was
@@ -618,12 +627,13 @@ keep and retry pending writes but cannot accept them or make them `Global`.
 
 ### 8.10 Catalogue
 
-After its first `Schema`, a replica sends `KnownCatalogue { versions }`: the
-schema versions whose stored names it keeps, each with `names_digest` of those names.
-The server answers with `Catalogue { namespace, versions, cells, confirmed }`,
+A replica's `Join` lists in `known` the schema versions whose stored names it
+keeps, each with `names_digest` of those names. The server answers in its
+`Welcome` with the catalogue `{ namespace, versions, cells, confirmed }`,
 carrying every admitted version the replica lacks or names otherwise, in
-admission order, ahead of any row; and again whenever its store admits a
-version or learns more of its authority's catalogue.
+admission order, ahead of any row; and again, as a `Catalogue` of the same
+fields, whenever its store admits a version or learns more of its authority's
+catalogue.
 
 - A `CatalogueVersion` is a structural schema (without permissions) plus, per
   table, its name and stored name and, per column, its name and stored name.
