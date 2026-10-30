@@ -18,7 +18,11 @@ import { ProfileAvatar, useDirectory } from "../lib/profiles";
 
 export interface RoomSummary {
   room: Room & { $createdAt: Date; $createdBy: { account: string } };
+  /** The room's newest message, if it has any. */
+  newest: { id: string; senderId: string; text: string; $createdAt: Date } | undefined;
+  /** When the newest message was sent, or the room created. */
   activityAt: Date;
+  /** This reader's marker: the `$createdAt` of the newest message they saw. */
   readAt: Date | undefined;
   isCreator: boolean;
   hasUnread: boolean;
@@ -94,7 +98,7 @@ function RoomNavItem({
 }) {
   const { me } = useDirectory();
   const { room, readAt, hasUnread } = summary;
-  // Only rooms with activity newer than this reader's marker pay for a count.
+  // Only rooms whose newest message is unread pay for a count.
   const { data: unread = [] } = useAll(
     hasUnread && !isSelected
       ? app.messages
