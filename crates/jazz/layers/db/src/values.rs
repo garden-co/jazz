@@ -193,6 +193,11 @@ pub(crate) fn end_savepoint(
             if conn.is_autocommit() {
                 close_tag_undo(conn, false, true);
             }
+            // The `ROLLBACK TO` may have run before its `RELEASE` failed:
+            // counting one too many only drops a cache entry.
+            if !keep {
+                note_rollback(undo_key(conn));
+            }
             if !keep && conn.is_autocommit() {
                 Ok(())
             } else {

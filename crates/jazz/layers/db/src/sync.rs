@@ -3800,10 +3800,17 @@ impl Inner {
             .iter()
             .map(|version| (*version, Vec::new()))
             .collect();
-        for chunk in versions.chunks(CHUNK) {
+        // Each row once: a row in two chunks would match twice.
+        let rows: Vec<RowUuid> = versions
+            .iter()
+            .map(|(row, _)| *row)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        for chunk in rows.chunks(CHUNK) {
             let mut ids = String::with_capacity(2 + chunk.len() * 35);
             ids.push('[');
-            for (i, (row, _)) in chunk.iter().enumerate() {
+            for (i, row) in chunk.iter().enumerate() {
                 if i > 0 {
                     ids.push(',');
                 }
@@ -3820,7 +3827,11 @@ impl Inner {
                 "id IN (SELECT unhex(value) FROM json_each(?1))",
                 &[&ids],
             )? {
-                let at = self.pos(&image)?;
+                // A read: a node no version names yet is not interned.
+                let Some(n) = self.known_code(image.by)? else {
+                    continue;
+                };
+                let at = Pos { n, seq: image.seq };
                 if let Some(images) = found.get_mut(&(RowUuid::from_bytes(image.id), at)) {
                     images.push(image);
                 }
