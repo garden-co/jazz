@@ -971,3 +971,143 @@ fn settled_writes_go_cold_but_live_reads_stay_current() {
     assert_eq!(ids(&client, None), [id(3, 2)]);
     assert!(read_once(&server, &client).is_empty());
 }
+
+/// Alice cancels one-shot reads before send, after send, and after link loss.
+/// Internal counts are needed because leaked request metadata does not change query results.
+#[test]
+fn cancelled_one_shot_reads_release_request_state() {
+    use std::future::Future;
+    use std::task::{Context, Waker};
+    let server = seeded(1);
+    let client = open(1, alice());
+    let query = postcard::to_allocvec(&Query::from("messages")).unwrap();
+    for stage in 0..3 {
+        let (up, down, _) = pipe();
+        let connection = block_on(client.connect_upstream(up));
+        server.accept_subscriber(down, alice()).unwrap();
+        let mut read = Box::pin(client.all_serialized_query(
+            &query,
+            ReadOpts::for_read_tier(ReadTier::Remote),
+            None,
+            None,
+            None,
+        ));
+        assert!(
+            read.as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        assert_eq!(client.pending_once_state_for_test(), (1, 1, 1));
+        if stage > 0 {
+            block_on(client.tick()).unwrap(); // Send, but Bob's server does not answer yet.
+            assert_eq!(client.pending_once_state_for_test(), (1, 1, 0));
+        }
+        if stage == 2 {
+            assert!(client.detach_connection(&connection));
+            assert_eq!(client.pending_once_state_for_test(), (0, 1, 0));
+        }
+        drop(read);
+        assert_eq!(client.pending_once_state_for_test(), (0, 0, 0));
+        pump(&server, &client); // A late answer cannot resurrect the request.
+        assert_eq!(client.pending_once_state_for_test(), (0, 0, 0));
+    }
+}
+
+/// Alice's tab reads LocalFirst through Bob's worker while its authority link
+/// keeps dropping. Background refreshes have no waiting future to clean them.
+/// Internal counts verify that query clones are released, which results cannot show.
+#[test]
+fn relay_background_checkpoints_end_with_their_connection() {
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+    let relay = open(2, alice());
+    let tab = open(1, alice());
+    tab.set_non_durable_client();
+    let (up, _down, _) = pipe();
+    let mut upstream = block_on(relay.connect_upstream(up));
+    let (up, down, _) = pipe();
+    let _tab_link = block_on(tab.connect_upstream(up));
+    relay.accept_subscriber(down, alice()).unwrap();
+    let query = postcard::to_allocvec(&Query::from("messages")).unwrap();
+    for round in 0..4 {
+        let mut read = Box::pin(tab.all_serialized_query(
+            &query,
+            ReadOpts::for_read_tier(ReadTier::LocalFirst),
+            None,
+            None,
+            None,
+        ));
+        let mut answered = false;
+        for _ in 0..20 {
+            if let Poll::Ready(result) = read.as_mut().poll(&mut Context::from_waker(Waker::noop()))
+            {
+                result.unwrap();
+                answered = true;
+                break;
+            }
+            pump(&relay, &tab);
+        }
+        assert!(answered, "LocalFirst does not await the upstream refresh");
+        drop(read);
+        assert_eq!(relay.pending_once_state_for_test(), (1, 0, 0));
+        if round % 2 == 0 {
+            assert!(relay.detach_connection(&upstream));
+            assert_eq!(relay.pending_once_state_for_test(), (0, 0, 0));
+        }
+        // Also cover replacement without an explicit detach.
+        let (up, _down, _) = pipe();
+        upstream = block_on(relay.connect_upstream(up));
+        assert_eq!(relay.pending_once_state_for_test(), (0, 0, 0));
+    }
+}
+
+/// Alice's waiting Remote read through Bob's relay is retried after link loss.
+/// Internal counts check cleanup, and the returned rows prove the retry still works.
+#[test]
+fn pending_relay_read_rebuilds_its_checkpoint_after_reconnect() {
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+    let server = seeded(1);
+    let relay = open(2, alice());
+    let tab = open(1, alice());
+    let (up, _down, _) = pipe();
+    let upstream = block_on(relay.connect_upstream(up));
+    let (up, down, _) = pipe();
+    let _tab_link = block_on(tab.connect_upstream(up));
+    relay.accept_subscriber(down, alice()).unwrap();
+    let query = postcard::to_allocvec(&Query::from("messages")).unwrap();
+    let mut read = Box::pin(tab.all_serialized_query(
+        &query,
+        ReadOpts::for_read_tier(ReadTier::Remote),
+        None,
+        None,
+        None,
+    ));
+    assert!(
+        read.as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    pump(&relay, &tab);
+    assert_eq!(relay.pending_once_state_for_test(), (1, 1, 0));
+    assert!(relay.detach_connection(&upstream));
+    assert_eq!(relay.pending_once_state_for_test(), (0, 1, 0));
+    let (up, down, _) = pipe();
+    let _upstream = block_on(relay.connect_upstream(up));
+    server.accept_subscriber(down, alice()).unwrap();
+    assert_eq!(relay.pending_once_state_for_test(), (1, 1, 1));
+    for _ in 0..30 {
+        pump(&server, &relay);
+        pump(&relay, &tab);
+        if let Poll::Ready(result) = read.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+            let jazz::db::SerializedReadResult::Rows(rows) = result.unwrap() else {
+                panic!("flat read")
+            };
+            assert_eq!(rows.len(), 1);
+            assert_eq!(relay.pending_once_state_for_test(), (0, 0, 0));
+            assert_eq!(tab.pending_once_state_for_test(), (0, 0, 0));
+            return;
+        }
+    }
+    panic!("retried read did not settle");
+}
