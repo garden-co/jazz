@@ -459,6 +459,13 @@ struct Inner {
     staging: LargeValueStagingPolicy,
     /// Dropped uploads queue cleanup without recursively borrowing the owner.
     upload_cleanup: Rc<RefCell<Vec<[u8; 32]>>>,
+    /// `conn.total_changes()` after the last large-value reclaim pass that
+    /// committed and left nothing queued: until a row changes again (a
+    /// trigger's change counts), a pass would find nothing. `None` runs the
+    /// next pass, as an opened store does, for work a crash left queued.
+    reclaimed_at: Option<u64>,
+    /// Large-value reclaim passes run (diagnostics).
+    reclaim_passes: u64,
     /// The staging ingress window: (start ms, encoded bytes admitted).
     ingress: RefCell<(u64, u64)>,
     /// The schema the current operation runs under: the owner's, or the
@@ -1317,6 +1324,8 @@ impl Db {
                 possession: None,
                 staging: LargeValueStagingPolicy::default(),
                 upload_cleanup: Rc::default(),
+                reclaimed_at: None,
+                reclaim_passes: 0,
                 ingress: RefCell::new((0, 0)),
                 schema: owner.clone(),
                 owner_version: owner.jazz.version_id(),
@@ -1758,6 +1767,12 @@ impl Db {
                 |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
             )
             .map_err(storage)
+    }
+
+    /// Diagnostics: large-value reclaim passes this store ran.
+    #[doc(hidden)]
+    pub fn large_value_reclaim_passes_for_test(&self) -> u64 {
+        self.inner().reclaim_passes
     }
 
     /// Diagnostics: (epochs, encoded edit bytes they hold).
@@ -4635,11 +4650,26 @@ impl Inner {
     }
 
     /// Delete up to `budget` large-value nodes no cell or branch references.
+    /// A pass runs only when one could find work: a row changed since the
+    /// last pass that emptied the queue, or an upload was dropped.
     fn reclaim_large_values(&mut self, budget: usize) -> Result<usize, Error> {
+        if self.reclaimed_at == Some(self.conn.total_changes())
+            && self.upload_cleanup.borrow().is_empty()
+        {
+            return Ok(0);
+        }
+        self.reclaim_passes += 1;
+        self.reclaimed_at = None;
         self.release_dropped_uploads()?;
-        in_savepoint(&self.conn, "reclaim", || {
+        let deleted = in_savepoint(&self.conn, "reclaim", || {
             crate::large::reclaim(&self.conn, &self.chunks, budget)
-        })
+        })?;
+        // A pass inside an open transaction may yet roll back, and one
+        // that ran out of budget left work queued: both run again.
+        if self.conn.is_autocommit() && !crate::large::reclaim_queued(&self.conn)? {
+            self.reclaimed_at = Some(self.conn.total_changes());
+        }
+        Ok(deleted)
     }
 
     /// A written cell must be of its column's type: writes from any replica
