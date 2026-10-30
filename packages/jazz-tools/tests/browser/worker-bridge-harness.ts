@@ -22,6 +22,7 @@ import { getJazzServerInfo, type JazzServerInfo } from "./testing-server.js";
 import { closeRemoteBrowserDb, waitForRemoteBrowserDbTitle } from "./remote-browser-db.js";
 import { CompiledPermissions, schema as s, migration as m } from "../../src/";
 import { computeSchemaHash, deploy } from "../../src/dev/catalogue.js";
+import { appMigrations } from "../../src/testing/client-migrations.js";
 import {
   deserializeBrowserRelayError,
   type BrowserInspectorContext,
@@ -293,8 +294,22 @@ export const catalogueSchemaV2 = {
   ),
 };
 
-export const catalogueAppV1 = s.defineApp(catalogueSchemaV1, { migrations: "none" });
-export const catalogueAppV2 = s.defineApp(catalogueSchemaV2, { migrations: "none" });
+const catalogueMigrate = {
+  todos: {
+    description: m.add.string({ default: null }),
+  },
+};
+// Both versions ship the family's lens, as the app's generated module holds it.
+const catalogueMigrations = await appMigrations(catalogueSchemaV1, {
+  to: catalogueSchemaV2,
+  migration: m.defineMigration({
+    from: catalogueSchemaV1,
+    to: catalogueSchemaV2,
+    migrate: catalogueMigrate,
+  }),
+});
+export const catalogueAppV1 = s.defineApp(catalogueSchemaV1, { migrations: catalogueMigrations });
+export const catalogueAppV2 = s.defineApp(catalogueSchemaV2, { migrations: catalogueMigrations });
 export const { todos: catalogueTodos } = catalogueAppV2;
 export type CatalogueTodo = s.RowOf<typeof catalogueTodos>;
 export const allCatalogueTodos: QueryBuilder<CatalogueTodo> = catalogueAppV2.todos;
@@ -449,11 +464,7 @@ export async function publishCatalogueSchemaFamily(scope: string): Promise<JazzS
     toHash: await computeSchemaHash(catalogueAppV2.wasmSchema),
     from: catalogueSchemaV1,
     to: catalogueSchemaV2,
-    migrate: {
-      todos: {
-        description: m.add.string({ default: null }),
-      },
-    },
+    migrate: catalogueMigrate,
   });
 
   await deploy({
