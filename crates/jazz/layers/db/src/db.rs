@@ -7945,9 +7945,7 @@ fn migration_path(
             // A lens from a version the app's migrations lack: taking the
             // next one would name this version otherwise than the
             // authority, so there is no path.
-            let Some(source) = source_of(lens.source) else {
-                return None;
-            };
+            let source = source_of(lens.source)?;
             if let Some(mut path) = walk(migrations, source, admitted, visiting) {
                 path.push((schema.clone(), vec![(*lens).clone()]));
                 return Some(path);
