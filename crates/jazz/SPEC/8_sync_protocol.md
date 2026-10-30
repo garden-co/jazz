@@ -59,7 +59,7 @@ source of truth and names each invariant's tests):
 - `INV-SYNC-49`: A server MUST process a session's messages in the order sent, so a read sent after a commit is served after that commit.
 - `INV-SYNC-50`: A non-durable client's local versions MUST NOT collide with its relay's: each is stored at the position of the node that numbered it.
 - `INV-SYNC-51`: A store that committed writes before it became a replica MUST keep them and refuse every upstream, saying why.
-- `INV-SYNC-52`: A replica MUST upload each commit under the schema version of the view that wrote it, keeping it pending while offline; a server MUST refuse a commit under a version it has not deployed, at once, with reason `schema_version_not_deployed`.
+- `INV-SYNC-52`: A replica MUST upload each commit's ops by stored names, as the schema view that wrote them stores them, keeping it pending while offline; a server MUST refuse a commit naming a stored table or column of a version it has not deployed, at once, with reason `schema_version_not_deployed`.
 - `INV-SYNC-53`: The authority MUST NOT name a writer's own row as written (instead of shipping it) unless the commit applied unmerged over the very version the writer built on and that version is still current (§8.3); every other row ships, and a writer whose image differs from the digest asks for the row whole.
 - `INV-TX-2`, `INV-TX-11`, `INV-TX-23`: commit, seq and relay rules (ch. 3).
 - `INV-WIRE-1`, `INV-WIRE-2`: exact postcard frames and Hello version negotiation (§8.1.1).
@@ -129,7 +129,7 @@ Messages, with their postcard variant tags:
 | 11  | `Fate`               | server → client | A commit's outcome (§8.3)                                        |
 | 12  | `CheckAllowed`       | client → server | Permission preflight                                             |
 | 13  | `CheckAllowedResult` | server → client | Its answer: `Allowed`, `Denied` or `Unknown`                     |
-| 14  | `Schema`             | client → server | The schema version the session reads and writes by (§8.9)        |
+| 14  | `Schema`             | client → server | The schema version the session reads by (§8.9)                   |
 | 15  | `SchemaAdmission`    | server → client | Whether that version is admitted                                 |
 | 16  | `Stored`             | relay → session | A relay holds the session's commit and uploads it (§8.3)         |
 | 17  | `KnownCatalogue`     | client → server | The schema versions and names the replica keeps (§8.10)          |
@@ -196,10 +196,12 @@ messages at 2 MiB, the prelude included.
 A committed transaction travels as one `Commit { id, kind, ops, … }`, `id`
 its writer's transaction id `tx@node`, which it keeps at every hop;
 open transactions never ship (ch. 3, `INV-TX-2`). Each op is a write
-(`Insert`, `Update`, `Upsert`, `Delete`, `Restore`, `Move`) by the session
-schema's table and column names, which the authority resolves to stored names
-under the schema version the commit was written under (§8.9), with what its
-writer knew of the row it writes:
+(`Insert`, `Update`, `Upsert`, `Delete`, `Restore`, `Move`) by stored table
+and column names (branch selectors included), as the schema view that wrote it
+stores them, so a commit is the same whichever version wrote it (§8.9). An
+`Insert` names every column of the writer's version, its default or null where
+the app gave none, so a receiver fills only what that version lacks. Each op
+carries what its writer knew of the row it writes:
 
 - `bases`: on the commit's first op that writes a row, for each branch key it
   writes the row under over an image the writer held, the base of that image
@@ -326,26 +328,20 @@ only if all of these hold:
    the commit moves the row between branches.
 3. The version is still the row's current one when fan-out ships the
    session's rows.
-4. The commit was sent under the schema version the session declared first,
-   the one the writer's store holds rows by (not through a view of another
-   version, whose images the writer cannot compare).
-
-The writer checks the inference on every such row: each carries the
-authority's 16-byte digest of its version (everything but its seq and the
-stamps). A row whose image matches is installed. One whose image differs, or
-that the writer holds no image of to compare (the commit was written under
-another schema version than the store's own, through a view of another
-version or before a reopen with a newer one, or a catalogue with new versions
-arrived while it was pending), or whose create stamp it lacks, is asked for
-with `ResendWhole` (§8.12), naming the fate's seq: the server ships the row
-whole and, if a later version superseded it, that seq's version too. The fate
-waits until those rows arrive, and every later fate waits behind it, so the
-commit stays pending meanwhile: its writes never drop out locally and later
-writes build on it as on any pending commit. A miss therefore costs one fetch
-of the row, never a divergent cache. A replica whose configured author is not
-the identity its link was accepted as has every row stamped otherwise, so each
-of its writes costs that fetch. Mismatches are counted per replica
-(`as_written_mismatches`); tests of honest writers assert there are none.
+   The writer checks the inference on every such row: each carries the
+   authority's 16-byte digest of its version (everything but its seq and the
+   stamps). A row whose image matches is installed. One whose image differs, or
+   that the writer holds no image of to compare (a catalogue with new versions
+   arrived while it was pending), or whose create stamp it lacks, is asked for
+   with `ResendWhole` (§8.12), naming the fate's seq: the server ships the row
+   whole and, if a later version superseded it, that seq's version too. The fate
+   waits until those rows arrive, and every later fate waits behind it, so the
+   commit stays pending meanwhile: its writes never drop out locally and later
+   writes build on it as on any pending commit. A miss therefore costs one fetch
+   of the row, never a divergent cache. A replica whose configured author is not
+   the identity its link was accepted as has every row stamped otherwise, so each
+   of its writes costs that fetch. Mismatches are counted per replica
+   (`as_written_mismatches`); tests of honest writers assert there are none.
 
 `Stored { id }` is durability progress from a relay to a non-durable session:
 the relay holds the commit in its store and uploads it, so it is `Local` for a
@@ -574,10 +570,11 @@ There is no transport compression on the SQLite path.
 
 ### 8.9 Schema versions and write admission
 
-`Schema { version }` is the first message on every connection: the schema
-version the session reads and writes by. Its queries and writes use that
-version's names, which the server resolves to stored names; images and
-evictions travel by stored names either way (§8.4.1). A version the server has
+`Schema { version }` is the first message on every connection, and the only
+one: the schema version the session reads by. Its queries use that version's
+names, which the server resolves to stored names, and the server serves them
+in that version (its result order and lens). Writes and images travel by
+stored names whatever the session's version (§8.4.1). A version the server has
 not admitted is named like the server's current schema.
 
 `SchemaAdmission { admitted }` tells the session whether its version is
@@ -586,32 +583,38 @@ reads (a draft awaiting its lens), so a read that needs the server fails
 with the reason rather than waiting out its budget, and refuses its commits
 (below).
 
-Each pending commit records the schema version it was written under
-(`_jazz_pending_versions`): the version of the schema view that wrote it, or
-the store's current version. Before uploading pending commits staged under
-another version than the session's current one, the replica sends a `Schema`
-switch for them, so an offline write made before an upgrade, or through a view
-of a version the server has not admitted yet, is resolved under the names it
-was written with (`INV-SYNC-52`). Offline, such a commit stays pending, and
-the replica replays it under its version while it holds it (a registered view),
-so the columns only that version has stay visible there. A commit that reaches
-a server which has not deployed its version is refused there, at once, with
-reason `schema_version_not_deployed` (code `write_rejected`): the app that
-wrote it was released ahead of its schema, a deploy error that waiting would
-hide. The replica rolls it back like any refused write; the session goes on,
-and the commits after it upload. A server holding a session's reads behind an
-unadmitted version refuses the commits behind them the same way. A relay (a
-worker serving tabs) refuses only while it is linked to an upstream that sent
-its catalogue on that connection, so it knows every version the authority
-deployed; until then, and while offline, it holds such commits. A store with no
-upstream at all is the top of its tree and refuses at once, so a worker that
-will sync becomes a replica (or is given a link hint) before its tabs write. Its `KnownCatalogue` lists only the versions whose schema it holds
-in this process, so a version an earlier process mirrored is sent again and
-the relay serves it as before. A pending commit written under the version
-current until a newer one is made current uploads under the version it was
-written under.
-One commit uploads under one version, so a replica refuses a transaction
-written through views of different versions.
+A commit names no schema version. Its writer resolves each op's table and
+column names to stored names under the schema view that wrote it when it
+records the commit, so a pending commit is the same after an upgrade or a
+reopen, and one transaction may write through views of several versions.
+The receiver (the authority, a relay, or the replica replaying its own
+pending commits) applies ops under its stored view: the current schema named
+by stored names, with the stored columns only other admitted versions name,
+governed by the current policies. A column an insert leaves out, which the
+writer's version lacks, takes a lens cell (a copy of a source it gives, a
+dropped column's backwards default) or the stored column's default; a branch
+column it leaves out keys the row by its immutable default (`INV-BVIEW-19`).
+Offline, a pending commit replays the same way, so the columns only its
+version has stay visible through that version's view. A serializable
+commit's reads stay in a version: each names the version its query is in,
+and the authority evaluates it there.
+
+A commit naming a stored table or column a server does not hold was written
+under a version it has not deployed (`INV-SYNC-52`), and is refused there, at
+once, with reason `schema_version_not_deployed` (code `write_rejected`): the
+app that wrote it was released ahead of its schema, a deploy error that
+waiting would hide. The replica rolls it back like any refused write; the
+session goes on, and the commits after it upload. A server holding a
+session's reads behind an unadmitted version refuses the commits behind them
+the same way. A relay (a worker serving tabs) refuses only while it is linked
+to an upstream that sent its catalogue on that connection, so it knows every
+version the authority deployed; until then, and while offline, it holds such
+commits. A store with no upstream at all is the top of its tree and refuses at
+once, so a worker that will sync becomes a replica (or is given a link hint)
+before its tabs write. Its `KnownCatalogue` lists only the versions whose
+schema it holds in this process, so a version an earlier process mirrored is
+sent again and the relay serves it as before. A refusal's message names
+tables and columns as the current schema does.
 
 The authority evaluates every write against its own policy data. A relay may
 keep and retry pending writes but cannot accept them or make them `Global`.

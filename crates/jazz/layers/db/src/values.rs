@@ -1364,6 +1364,15 @@ impl Schema {
                 })
                 .collect();
             if let Some(stored) = physical.tables.get(&table.stored) {
+                // A column a lens added keeps the lens's default in the
+                // store (its DDL default), though the schema declares none.
+                for column in &mut view.columns {
+                    if column.default.is_none() {
+                        column.default = stored
+                            .column(&column.stored)
+                            .and_then(|stored| stored.default.clone());
+                    }
+                }
                 for column in &stored.columns {
                     if view.columns.iter().all(|c| c.stored != column.stored) {
                         view.columns.push(other_versions_column(column));

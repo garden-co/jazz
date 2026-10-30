@@ -780,14 +780,16 @@ impl From<WireWrite> for WireOp {
 }
 
 impl WireOp {
-    /// The table the op writes, as the sender's schema names it.
+    /// The stored table the op writes.
     pub fn table(&self) -> &str {
         self.write.table()
     }
 }
 
-/// A replicated write. `at`: its explicit provenance timestamp (Unix ms),
-/// if the writer gave one; each write in a commit carries its own.
+/// A replicated write, by stored table and column names (branch selectors
+/// too), whichever schema version wrote it; an insert names every column of
+/// that version. `at`: its explicit provenance timestamp (Unix ms), if the
+/// writer gave one; each write in a commit carries its own.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum WireWrite {
     Insert {
@@ -833,7 +835,7 @@ pub enum WireWrite {
 }
 
 impl WireWrite {
-    /// The table the write names, as the sender's schema names it.
+    /// The stored table the write names.
     pub fn table(&self) -> &str {
         match self {
             WireWrite::Insert { table, .. }
@@ -1132,12 +1134,12 @@ pub enum SyncMessage {
         result: PermissionAdvice,
     },
     // client → server
-    /// The schema version the client reads and writes by, sent first on
-    /// every connection and again ahead of commits staged under another
-    /// version. Its queries and writes use that version's table and column
-    /// names, which the server resolves to its stored names; row images
-    /// and evictions travel by stored names either way. A version the
-    /// server has not admitted is named like the server's current schema.
+    /// The schema version the client reads by, sent first on every
+    /// connection. Its queries use that version's table and column names,
+    /// which the server resolves to its stored names, and are served in
+    /// that version; writes, row images and evictions travel by stored
+    /// names whatever the version. A version the server has not admitted
+    /// is named like the server's current schema.
     Schema {
         version: [u8; 16],
     },
@@ -1915,11 +1917,6 @@ pub(crate) struct Session {
     backlog_reads: (Option<Rc<Schema>>, HashMap<u64, Option<BTreeSet<String>>>),
     /// The schema version the client declared (`None`: the current one).
     version: Option<crate::ids::SchemaVersionId>,
-    /// The version the client declared first, the one its own store holds
-    /// rows by: a commit sent under another (written through a view of
-    /// another version) names no row as written, since the client holds no
-    /// image of it to compare.
-    home_version: Option<crate::ids::SchemaVersionId>,
     /// Fetches whose upstream answer arrived, or that this relay already
     /// asked its upstream to refresh: served from this store.
     fetched_upstream: BTreeSet<u64>,
@@ -1985,7 +1982,6 @@ impl Session {
             backlog: VecDeque::new(),
             backlog_reads: (None, HashMap::new()),
             version: None,
-            home_version: None,
             fetched_upstream: BTreeSet::new(),
             parked_pulls: Vec::new(),
             deferred_pulls: Vec::new(),
@@ -9459,15 +9455,14 @@ impl Db {
             None => prepared,
         };
         let policy = self.inner.borrow().session_policy(index);
-        // Queries, writes and held rows name tables and columns as the
-        // client's schema version does.
+        // Queries and held rows name tables and columns as the client's
+        // schema version does; commits by stored names (see below).
         let db = self.session_db(index);
         match message {
             SyncMessage::Schema { version } => {
                 let mut inner = self.inner.borrow_mut();
                 let session = &mut inner.sessions[index];
                 session.version = Some(crate::ids::SchemaVersionId::from_bytes(version));
-                session.home_version = session.home_version.or(session.version);
                 session.schema = None;
             }
             SyncMessage::Read {
@@ -10118,7 +10113,7 @@ impl Db {
                     // current, and the writer checks each by its digest.
                     // A replica's last word ships its versions instead.
                     let session = &mut inner.sessions[index];
-                    if result.is_ok() && global && session.version == session.home_version {
+                    if result.is_ok() && global {
                         for Echoable { row: row_key, op } in echoable {
                             let (table, row, key) = row_key;
                             session.echoes.push(Echo {
