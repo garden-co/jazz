@@ -1,0 +1,237 @@
+[
+  {
+    "name": "cursor survives an edit earlier in the paragraph",
+    "side": "after",
+    "old": "Load-in at 2pm, soundcheck at 5pm. Doors open at ‸8pm and we play at 9.",
+    "new": "Load-in at 1pm sharp, soundcheck at 5pm. Doors open at ‸8pm and we play at 9."
+  },
+  {
+    "name": "cursor survives an edit later in the paragraph",
+    "side": "after",
+    "old": "Load-in at 2pm, ‸soundcheck at 5pm. Doors open at 8pm and we play at 9.",
+    "new": "Load-in at 2pm, ‸soundcheck at 5pm. Doors open at 7:30pm and we play at 9:15 sharp."
+  },
+  {
+    "name": "cursor survives edits on both sides",
+    "side": "after",
+    "old": "Bring the spare snare, the long XLR cables, and ‸the merch table cloth. Ask Sam about the van.",
+    "new": "Bring the spare snare, two long XLR cables, and ‸the merch table cloth. Ask Priya about the van."
+  },
+  {
+    "name": "typing at a cursor that sticks to what follows",
+    "side": "after",
+    "old": "Setlist: Intro, ‸Night Drive, Glass Hearts, Encore.",
+    "new": "Setlist: Intro, New Song, ‸Night Drive, Glass Hearts, Encore."
+  },
+  {
+    "name": "typing at a range end that sticks to what precedes",
+    "side": "before",
+    "old": "Setlist: Intro, Night Drive‸, Glass Hearts, Encore.",
+    "new": "Setlist: Intro, Night Drive‸ (extended), Glass Hearts, Encore."
+  },
+  {
+    "name": "a paragraph inserted above moves the cursor far",
+    "side": "after",
+    "old": "# Tour notes\n\nDay one went well. The crowd in ‸Leeds was loud.\n",
+    "new": "# Tour notes\n\nA long new paragraph about the drive up from London, the motorway services, the coffee, the weather, the broken wiper, and how we nearly missed the ferry but did not.\n\nDay one went well. The crowd in ‸Leeds was loud.\n"
+  },
+  {
+    "name": "cursor at the very start stays at the start after an append",
+    "side": "after",
+    "old": "‸Opening line of the song.",
+    "new": "‸Opening line of the song. Second line added later."
+  },
+  {
+    "name": "cursor at the very end stays at the end after an edit above",
+    "side": "before",
+    "old": "First verse.\nSecond verse.‸",
+    "new": "First verse, reworked.\nSecond verse.‸"
+  },
+  {
+    "name": "cursor inside a word whose letters changed nearby",
+    "side": "after",
+    "old": "The guitarist plays a Telecaster thro‸ugh a Vox amp.",
+    "new": "The guitarist plays a Telecaster thro‸ugh an old Vox AC30 amp."
+  },
+  {
+    "name": "repeated text: the nearer copy wins",
+    "side": "after",
+    "old": "Chorus: la la la.\nVerse.\nChorus: ‸la la la.\nOutro.",
+    "new": "Chorus: la la la.\nVerse two.\nChorus: ‸la la la.\nOutro."
+  },
+  {
+    "name": "repeated text with a long insert between copies",
+    "side": "after",
+    "old": "- [ ] bring cables\n- [ ] ‸bring cables\n",
+    "new": "- [ ] bring cables\n- [ ] tune guitars\n- [ ] ‸bring cables\n"
+  },
+  {
+    "name": "markdown bold added around the anchored word",
+    "side": "after",
+    "old": "Remember the ‸setlist printouts for everyone.",
+    "new": "Remember the **‸setlist** printouts for everyone."
+  },
+  {
+    "name": "html tag wrapped around the anchored sentence",
+    "side": "after",
+    "old": "<p>Doors at 8. ‸Bring ID.</p>",
+    "new": "<p>Doors at 8. <strong>‸Bring ID.</strong></p>"
+  },
+  {
+    "name": "paragraph split right before the cursor",
+    "side": "after",
+    "old": "We drove to Leeds. ‸The show was sold out.",
+    "new": "We drove to Leeds.\n\n‸The show was sold out."
+  },
+  {
+    "name": "paragraphs joined around the cursor",
+    "side": "after",
+    "old": "We drove to Leeds.\n\n‸The show was sold out.",
+    "new": "We drove to Leeds. ‸The show was sold out."
+  },
+  {
+    "name": "anchored block moved below another block",
+    "side": "after",
+    "old": "## Monday\nRehearsal at the studio.\n\n## Tuesday\nInterview with ‸the local radio station at noon.\n",
+    "new": "## Tuesday\nInterview with ‸the local radio station at noon.\n\n## Monday\nRehearsal at the studio.\n"
+  },
+  {
+    "name": "anchored sentence deleted entirely",
+    "side": "after",
+    "old": "Intro paragraph stays. This whole sentence about the ‸cancelled Glasgow date goes away. Outro stays too.",
+    "new": "Intro paragraph stays. Outro stays too."
+  },
+  {
+    "name": "whole document replaced",
+    "side": "after",
+    "old": "Packing list: amps, ‸cables, pedals, spare strings, drum keys.",
+    "new": "Completely different content about catering and rider requests for the venue."
+  },
+  {
+    "name": "the word at the cursor retyped with a typo fix",
+    "side": "after",
+    "old": "Teh ‸venue is in Manchester.",
+    "new": "The ‸venue is in Manchester."
+  },
+  {
+    "name": "emoji before the anchor counts as two units",
+    "side": "after",
+    "old": "🎸 Gear: ‸Fender, Marshall.",
+    "new": "🎸🥁 Gear: ‸Fender, Marshall."
+  },
+  {
+    "name": "accented text before the anchor",
+    "side": "after",
+    "old": "Café Olé in Zürich: ‸soundcheck 4pm.",
+    "new": "Café Olé in Zürich, Switzerland: ‸soundcheck 4pm."
+  },
+  {
+    "name": "anchor in an empty document gets text typed after it",
+    "side": "before",
+    "old": "‸",
+    "new": "‸Hello"
+  },
+  {
+    "name": "list item reordered with the cursor in it",
+    "side": "after",
+    "old": "1. Soundcheck\n2. Dinner\n3. Show at ‸nine\n",
+    "new": "1. Show at ‸nine\n2. Soundcheck\n3. Dinner\n"
+  },
+  {
+    "name": "heavy rewrite of the sentence around the cursor keeps it near",
+    "side": "after",
+    "old": "Can somebody please confirm whether the ‸hotel booking for Friday includes breakfast?",
+    "new": "Could someone confirm if the ‸hotel booking for Friday includes breakfast and parking?",
+    "min_confidence": 0.6
+  },
+  {
+    "name": "both contexts rewritten: orphaned",
+    "side": "after",
+    "old": "Meet at the ‸stage door at six.",
+    "new": "Rendezvous by the loading bay around eighteen hundred hours."
+  },
+  {
+    "name": "comment range start in a long document after many edits elsewhere",
+    "side": "after",
+    "old": "Paragraph one about logistics.\n\nParagraph two about the ‸budget, which is tight this year because the van broke.\n\nParagraph three about merch.",
+    "new": "Paragraph one about logistics and timing, updated Tuesday.\n\nParagraph two about the ‸budget, which is tight this year because the van broke.\n\nParagraph three about merch and the new tote bags."
+  },
+  {
+    "name": "whitespace-only change next to the anchor",
+    "side": "after",
+    "old": "Bring:  ‸water,  towels,  snacks.",
+    "new": "Bring: ‸water, towels, snacks."
+  },
+  {
+    "name": "code block content changed below the cursor",
+    "side": "after",
+    "old": "Run ‸this before the show:\n\n```\nnpm run lights\n```\n",
+    "new": "Run ‸this before the show:\n\n```\nnpm run lights -- --venue=leeds\n```\n"
+  },
+  {
+    "name": "authored: context on both sides finds the spot",
+    "side": "after",
+    "authored": {
+      "before": "Doors open at ",
+      "after": "8pm"
+    },
+    "new": "Load-in at 2pm, soundcheck at 5pm. Doors open at ‸8pm and we play at 9.",
+    "ambiguous": false
+  },
+  {
+    "name": "authored: only the text after, unique",
+    "side": "after",
+    "authored": {
+      "after": "hotel booking for Friday"
+    },
+    "new": "Could someone confirm if the ‸hotel booking for Friday includes breakfast?",
+    "ambiguous": false
+  },
+  {
+    "name": "authored: only the text before, unique",
+    "side": "before",
+    "authored": {
+      "before": "Setlist: Intro, Night Drive"
+    },
+    "new": "Setlist: Intro, Night Drive‸, Glass Hearts, Encore.",
+    "ambiguous": false
+  },
+  {
+    "name": "authored: repeated text is ambiguous",
+    "side": "after",
+    "authored": {
+      "after": "bring cables"
+    },
+    "new": "- [ ] ‸bring cables\n- [ ] tune guitars\n- [ ] bring cables\n",
+    "ambiguous": true
+  },
+  {
+    "name": "authored: context disambiguates repeated text",
+    "side": "after",
+    "authored": {
+      "before": "tune guitars\n- [ ] ",
+      "after": "bring cables"
+    },
+    "new": "- [ ] bring cables\n- [ ] tune guitars\n- [ ] ‸bring cables\n",
+    "ambiguous": false
+  },
+  {
+    "name": "authored: slightly misquoted context still lands",
+    "side": "after",
+    "authored": {
+      "before": "the crowd in ",
+      "after": "Leeds was so loud"
+    },
+    "new": "# Tour notes\n\nDay one went well. The crowd in ‸Leeds was loud.\n",
+    "min_confidence": 0.6
+  },
+  {
+    "name": "authored: quoted text that is not there is orphaned",
+    "side": "after",
+    "authored": {
+      "before": "Meet at the ",
+      "after": "stage door at six"
+    },
+    "new": "Rendezvous by the loading bay around eighteen hundred hours."
+  }
+]

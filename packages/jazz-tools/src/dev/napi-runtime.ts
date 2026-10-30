@@ -15,6 +15,8 @@ const napi = nodeModule.createRequire(import.meta.url)("jazz-napi") as typeof Ja
 
 export default napi;
 export const {
+  captureTextAnchor,
+  captureTextRange,
   E2EeSodiumStream,
   e2eeSodiumDecrypt,
   e2eeSodiumEncrypt,
@@ -36,5 +38,7 @@ export const {
   mintLocalFirstToken,
   verifyLocalFirstIdentityProof,
   nativeArtifactFingerprint,
+  resolveTextAnchor,
+  resolveTextRange,
   validateSchema,
 } = napi;

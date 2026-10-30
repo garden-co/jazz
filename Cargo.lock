@@ -1999,6 +1999,7 @@ dependencies = [
  "futures",
  "jazz-model",
  "jazz-protocol",
+ "jazz-text",
  "jazz-types",
  "postcard",
  "rusqlite",
@@ -2152,6 +2153,7 @@ dependencies = [
  "blake3",
  "hex",
  "internment",
+ "jazz-text",
  "jazz-types",
  "jsonschema",
  "postcard",
@@ -2172,6 +2174,7 @@ dependencies = [
  "jazz-native-relay",
  "jazz-otel",
  "jazz-server",
+ "jazz-text",
  "libsodium-sys-stable",
  "mimalloc-safe",
  "napi",
@@ -2195,6 +2198,7 @@ dependencies = [
  "jazz-native-transport",
  "jazz-server",
  "jazz-testkit",
+ "jazz-text",
  "libc",
  "postcard",
  "reqwest",
@@ -2343,6 +2347,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-text"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "jazz-types"
 version = "0.1.0"
 dependencies = [
@@ -2377,6 +2389,7 @@ dependencies = [
  "getrandom 0.2.17",
  "getrandom 0.3.4",
  "jazz",
+ "jazz-text",
  "jazz-wasm-tracing",
  "js-sys",
  "postcard",

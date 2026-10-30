@@ -136,6 +136,10 @@ both wherever they touch different parts of the text. An edit both people made a
 insertions at the same spot both stay, the earlier one first. A long offline session merges the
 same way: each edit is compared with what that device had seen, including its own earlier edits.
 
+When someone **moves** a paragraph, list item or sentence (cuts it and pastes it elsewhere) while
+someone else edits inside it, the edit moves with it. In HTML columns the merge never leaves an
+unmatched tag behind.
+
 Where both people **replaced the same words**, Core cannot keep both. The edit it receives later wins
 that part of the text. Note that this is the opposite of an ordinary field, where the first edit
 Core receives wins. The rest of the text still merges, and the other person's version stays in the
