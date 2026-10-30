@@ -931,3 +931,68 @@ fn partial_updates_inside_a_transaction_build_on_its_earlier_writes() {
     assert_eq!(read("/title"), Some(serde_json::json!("final")));
     assert_eq!(read("/items/3999/n"), Some(serde_json::json!(3999)));
 }
+
+/// Reclaiming large values costs a tick nothing while nothing changed: a
+/// pass runs only after a write (or a dropped upload) could have left a
+/// node unreferenced, and keeps running on later idle ticks until the
+/// queue is empty, however many nodes one write released.
+///
+/// ```
+/// tick, tick, ...              no pass: nothing changed
+/// failed streaming insert ──►  its tree is unreferenced
+/// tick, tick, ...              passes until the whole tree is gone,
+///                              then none again
+/// ```
+///
+/// White-box on purpose: the pass count is the contract (idle ticks do no
+/// reclaim work), which no read observes.
+#[test]
+fn idle_ticks_run_no_reclaim_pass_until_something_is_released() {
+    let db = db();
+    insert(&db, 1, &text(50, LARGE), b"");
+    block_on(db.tick()).unwrap();
+    let kept = db.large_value_nodes_for_test().unwrap();
+    let passes = db.large_value_reclaim_passes_for_test();
+    for _ in 0..20 {
+        block_on(db.tick()).unwrap();
+    }
+    assert_eq!(
+        db.large_value_reclaim_passes_for_test(),
+        passes,
+        "idle ticks run no reclaim pass"
+    );
+
+    // A tree larger than one tick's budget (256 nodes), left unreferenced
+    // at once.
+    let blob = text(51, LARGE * 120).into_bytes();
+    assert!(
+        block_on(db.insert_streaming_value_with_id(
+            "docs",
+            row(2),
+            BTreeMap::from([("nonexistent".to_owned(), Value::String("x".into()))]),
+            "blob",
+            std::io::Cursor::new(blob),
+        ))
+        .is_err()
+    );
+    let (released, _) = db.large_value_nodes_for_test().unwrap();
+    assert!(
+        released - kept.0 > 256,
+        "the tree outlasts one pass: {released} nodes"
+    );
+    let mut ticks = 0;
+    while db.large_value_nodes_for_test().unwrap() != kept {
+        block_on(db.tick()).unwrap();
+        ticks += 1;
+        assert!(ticks < 100, "reclaim stalled");
+    }
+    assert!(ticks > 1, "one pass reclaims at most its budget");
+    let passes = db.large_value_reclaim_passes_for_test();
+    for _ in 0..20 {
+        block_on(db.tick()).unwrap();
+    }
+    assert!(
+        db.large_value_reclaim_passes_for_test() <= passes + 1,
+        "once the queue is empty, idle ticks run no pass"
+    );
+}
