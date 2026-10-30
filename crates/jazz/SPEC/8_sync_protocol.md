@@ -704,7 +704,12 @@ Repeated current-state one-shot reads reuse the same checkpoint as live reads.
 Historical one-shot reads (`at` nonempty) and one-shot reads of non-current
 views always open fully.
 
-The authority opens a resumed read one of three ways:
+A store with an upstream connection ignores downstream `since`: its partial
+cache may lack the history needed to reconstruct prior membership and access.
+Thus a SharedWorker sends tabs full supporting-row sets for both read spans,
+but uses its own checkpoints to reduce responses from the authority.
+
+The responder opens a resumed read one of three ways:
 
 - **Fresh**, when it cannot resume: the store is a relay (its store may be
   cold, and its seqs are not the ones its sessions resume from), the read is

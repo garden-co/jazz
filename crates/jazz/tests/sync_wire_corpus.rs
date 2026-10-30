@@ -366,7 +366,7 @@ impl Transport for Recording {
 }
 
 /// Message shapes the one frame per variant leaves unpinned: a one-shot
-/// `Read` (as of a seq or a snapshot), `Rows` carrying the commits behind
+/// `Read` (fresh, resumed, or historical), `Rows` carrying the commits behind
 /// history versions, a `Catalogue` carrying versions with their stored
 /// names and a lens's cells, a trusted link's `Commit`s acting as an
 /// attributed author and as a session, a live `Read` in a branch view
@@ -374,7 +374,7 @@ impl Transport for Recording {
 /// `AccessLost` (a branch view's row whose head version the reader may not
 /// read), and serializable `Commit`s with a snapshot the authority served
 /// and one a worker with no server numbered.
-const SHAPES: [&str; 12] = [
+const SHAPES: [&str; 13] = [
     "Read/once",
     "Rows/tx_ids",
     "Catalogue/versions",
@@ -387,6 +387,7 @@ const SHAPES: [&str; 12] = [
     "Commit/serializable",
     "Commit/serializable-by",
     "Read/once-resumed",
+    "Read/once-historical",
 ];
 
 fn shape(message: &SyncMessage) -> Option<&'static str> {
@@ -397,9 +398,14 @@ fn shape(message: &SyncMessage) -> Option<&'static str> {
             ..
         } if !since.is_empty() && at.is_empty() => Some(SHAPES[11]),
         SyncMessage::Read {
-            span: ReadSpan::Once { .. },
+            span: ReadSpan::Once { at },
             ..
-        } => Some(SHAPES[0]),
+        } if !at.is_empty() => Some(SHAPES[12]),
+        SyncMessage::Read {
+            since,
+            span: ReadSpan::Once { at },
+            ..
+        } if since.is_empty() && at.is_empty() => Some(SHAPES[0]),
         SyncMessage::Rows { tx_ids, .. } if !tx_ids.is_empty() => Some(SHAPES[1]),
         SyncMessage::Catalogue(catalogue)
             if !catalogue.versions.is_empty() && !catalogue.cells.is_empty() =>
@@ -927,6 +933,19 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
         .insert("ResendWhole".to_owned(), ("server".to_owned(), frame));
 
     hidden_in_a_view(&recorded);
+
+    // Alice's fresh client records a plain one-shot, then repeats it using
+    // the checkpoint saved from the first response.
+    let alice = open(0x59, user(1), false);
+    connect(&alice, &server, user(1), &recorded);
+    let notes = alice.prepare_query(&Query::from("notes")).unwrap();
+    for _ in 0..2 {
+        drive(
+            &[&alice, &server, &alice],
+            alice.all(&notes, ReadOpts::for_read_tier(ReadTier::Remote)),
+        )
+        .unwrap();
+    }
     recorded.borrow().clone()
 }
 
@@ -1050,18 +1069,6 @@ fn produce_sqlite_sync_wire_corpus_v1() {
         "malformed frame",
     )))
     .unwrap();
-    // Encoding boundary fixture: the scenario's one-shot read with a
-    // checkpoint exercises the moved Option's Some discriminant and seq.
-    let (reader, bytes) = recorded.get("Read/once").unwrap();
-    let mut resumed: SyncMessage = postcard::from_bytes(bytes).unwrap();
-    if let SyncMessage::Read { since, span, .. } = &mut resumed {
-        *since = vec![(None, 123)];
-        *span = ReadSpan::Once { at: Vec::new() };
-    }
-    recorded.insert(
-        "Read/once-resumed".to_owned(),
-        (reader.clone(), postcard::to_allocvec(&resumed).unwrap()),
-    );
     let shapes: Vec<(&str, String, Vec<u8>)> = SHAPES
         .iter()
         .map(|name| {

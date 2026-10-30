@@ -513,13 +513,7 @@ test("CI uses the correctness artifact path while package builds keep release WA
   for (const task of ["jazz-wasm#build", "jazz-wasm#build:fast"])
     assert.deepEqual(
       turbo.tasks[task].passThroughEnv,
-      [
-        "AR_wasm32-unknown-unknown",
-        "AR_wasm32_unknown_unknown",
-        "TARGET_AR",
-        "AR",
-        ...expectedLease,
-      ],
+      ["AR_wasm32-unknown-unknown", "AR_wasm32_unknown_unknown", ...expectedLease],
       `${task} must preserve archiver selection and the aggregate parent's artifact lease and sealed test surface`,
     );
   for (const task of ["build"])

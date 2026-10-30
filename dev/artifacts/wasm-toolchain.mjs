@@ -1,18 +1,18 @@
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 
-// cc-rs checks these in order before choosing its own archiver.
-export const wasmArchiverVariables = [
-  "AR_wasm32-unknown-unknown",
-  "AR_wasm32_unknown_unknown",
-  "TARGET_AR",
-  "AR",
-];
+// Target-specific overrides, in cc-rs precedence order.
+export const wasmArchiverVariables = ["AR_wasm32-unknown-unknown", "AR_wasm32_unknown_unknown"];
 
 export function wasmBuildEnvironment(
   env = process.env,
   { platform = process.platform, run = spawnSync } = {},
 ) {
+  // A native archiver from the shell must not override the WASM toolchain.
+  // Copy first so native builds keep their original environment.
+  env = { ...env };
+  delete env.AR;
+  delete env.TARGET_AR;
   if (platform !== "darwin" || wasmArchiverVariables.some((key) => env[key] !== undefined))
     return { ...env };
 
