@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::db::Pos;
 use crate::ids::{AuthorSubject, RowUuid};
 use crate::options::Error;
 use crate::query::{
@@ -227,15 +228,15 @@ pub struct Ctx<'a> {
     next_alias: usize,
 }
 
-/// A frozen snapshot: the state as of commit `seq`, plus the open
-/// transaction's own staged writes (written at `own`), plus the versions
-/// written by the individual commits in `extra` (a replica's own writes
-/// that were not yet in `seq` when the snapshot was taken).
+/// A frozen snapshot: every version at or before position `seq`, plus the
+/// open transaction's own staged writes (written at `own`), plus the
+/// versions written by the individual commits in `extra` (a replica's own
+/// writes that were not yet in `seq` when the snapshot was taken).
 #[derive(Clone, Debug, Default)]
 pub struct Cut {
-    pub seq: u64,
-    pub own: u64,
-    pub extra: Vec<u64>,
+    pub seq: Pos,
+    pub own: Pos,
+    pub extra: Vec<Pos>,
     /// A write check's evidence (SPEC 7, WITH CHECK): which of the
     /// versions at `own` are overlaid. `None` overlays them all.
     pub overlay: Option<Overlay>,
@@ -257,16 +258,16 @@ pub enum Overlay {
 }
 
 impl Cut {
-    pub fn at(seq: u64) -> Self {
+    pub fn at(seq: Pos) -> Self {
         Self {
             seq,
             ..Self::default()
         }
     }
 
-    /// Whether a version written at `seq` is in the cut.
-    pub fn sees(&self, seq: u64) -> bool {
-        seq <= self.seq || seq == self.own || self.extra.contains(&seq)
+    /// Whether a version at `at` is in the cut.
+    pub fn sees(&self, at: Pos) -> bool {
+        at <= self.seq || at == self.own || self.extra.contains(&at)
     }
 }
 
@@ -351,7 +352,7 @@ impl<'a> Ctx<'a> {
         match cut {
             Some(cut) => self.cut = Some(cut),
             None if settled_only => {
-                self.cut = Some(Cut::at(crate::db::LOCAL_BASE - 1));
+                self.cut = Some(Cut::at(Pos::SETTLED));
                 self.settled_only = true;
             }
             None => {}
@@ -372,13 +373,20 @@ impl<'a> Ctx<'a> {
         let Some(cut) = cut else {
             return name;
         };
-        let seq = self.bind(Sql::Integer(cut.seq as i64));
-        let own = self.bind(Sql::Integer(cut.own as i64));
-        // Seqs are integers, so the extra commits are inlined.
+        let seq = format!(
+            "({}, {})",
+            self.bind(Sql::Integer(cut.seq.n)),
+            self.bind(Sql::Integer(cut.seq.seq as i64))
+        );
+        let own_n = self.bind(Sql::Integer(cut.own.n));
+        let own_seq = self.bind(Sql::Integer(cut.own.seq as i64));
+        let own = format!("_n = {own_n} AND _seq = {own_seq}");
+        let c_own = format!("c._n = {own_n} AND c._seq = {own_seq}");
+        // Positions are integers, so the extra commits are inlined.
         let extra = cut
             .extra
             .iter()
-            .map(u64::to_string)
+            .map(|at| format!("({}, {})", at.n, at.seq))
             .collect::<Vec<_>>()
             .join(", ");
         // The versions at `own` that are overlaid: all of them, or for a
@@ -387,7 +395,7 @@ impl<'a> Ctx<'a> {
             self.overlay_tables.insert(table.stored.clone());
         }
         let (overlaid_here, overlaid_c) = match &cut.overlay {
-            None => (format!("_seq = {own}"), format!("c._seq = {own}")),
+            None => (format!("({own})"), format!("({c_own})")),
             Some(Overlay::Grounded(grounded)) => {
                 match grounded.get(&table.stored).filter(|ids| !ids.is_empty()) {
                     None => ("0".to_owned(), "0".to_owned()),
@@ -399,11 +407,9 @@ impl<'a> Ctx<'a> {
                             .collect::<Vec<_>>()
                             .join(", ");
                         (
+                            format!("({own} AND (_st & {STATE_DELETED}) = 0 AND id IN ({ids}))"),
                             format!(
-                                "(_seq = {own} AND (_st & {STATE_DELETED}) = 0 AND id IN ({ids}))"
-                            ),
-                            format!(
-                                "(c._seq = {own} AND (c._st & {STATE_DELETED}) = 0 AND c.id IN ({ids}))"
+                                "({c_own} AND (c._st & {STATE_DELETED}) = 0 AND c.id IN ({ids}))"
                             ),
                         )
                     }
@@ -420,29 +426,32 @@ impl<'a> Ctx<'a> {
                 let key = self.bind(Sql::Blob(key.clone()));
                 (
                     format!(
-                        "(_seq = {own} AND (_st & {STATE_DELETED}) = 0 AND (id <> {row} OR _b <> {key}))"
+                        "({own} AND (_st & {STATE_DELETED}) = 0 AND (id <> {row} OR _b <> {key}))"
                     ),
                     format!(
-                        "(c._seq = {own} AND (c._st & {STATE_DELETED}) = 0 AND (c.id <> {row} OR c._b <> {key}))"
+                        "({c_own} AND (c._st & {STATE_DELETED}) = 0 AND (c.id <> {row} OR c._b <> {key}))"
                     ),
                 )
             }
             Some(Overlay::Except { .. }) => (
-                format!("(_seq = {own} AND (_st & {STATE_DELETED}) = 0)"),
-                format!("(c._seq = {own} AND (c._st & {STATE_DELETED}) = 0)"),
+                format!("({own} AND (_st & {STATE_DELETED}) = 0)"),
+                format!("({c_own} AND (c._st & {STATE_DELETED}) = 0)"),
             ),
         };
         let (visible, h_visible, newer) = if extra.is_empty() {
             (
-                format!("_seq <= {seq} OR {overlaid_here}"),
-                format!("h2._seq <= {seq}"),
-                format!("c._seq > {seq} AND NOT {overlaid_c}"),
+                format!("(_n, _seq) <= {seq} OR {overlaid_here}"),
+                format!("(h2._n, h2._seq) <= {seq}"),
+                format!("(c._n, c._seq) > {seq} AND NOT {overlaid_c}"),
             )
         } else {
             (
-                format!("_seq <= {seq} OR {overlaid_here} OR _seq IN ({extra})"),
-                format!("(h2._seq <= {seq} OR h2._seq IN ({extra}))"),
-                format!("c._seq > {seq} AND NOT {overlaid_c} AND c._seq NOT IN ({extra})"),
+                format!("(_n, _seq) <= {seq} OR {overlaid_here} OR (_n, _seq) IN (VALUES {extra})"),
+                format!("((h2._n, h2._seq) <= {seq} OR (h2._n, h2._seq) IN (VALUES {extra}))"),
+                format!(
+                    "(c._n, c._seq) > {seq} AND NOT {overlaid_c} \
+                     AND (c._n, c._seq) NOT IN (VALUES {extra})"
+                ),
             )
         };
         let history = quote(&format!("{}__h", table.stored));
@@ -465,8 +474,9 @@ impl<'a> Ctx<'a> {
             "(SELECT {columns} FROM {name} WHERE {visible} \
              UNION ALL SELECT CAST(NULL AS INTEGER), {h_columns} FROM {name} AS c \
              CROSS JOIN {history} AS h ON c.id = h.id AND c._b = h._b WHERE {newer} \
-             AND h._seq = (SELECT MAX(h2._seq) FROM {history} AS h2 \
-             WHERE h2.id = h.id AND h2._b = h._b AND (h2._st & {STATE_AS_SENT}) = 0 AND {h_visible}))"
+             AND (h._n, h._seq) = (SELECT h2._n, h2._seq FROM {history} AS h2 \
+             WHERE h2.id = h.id AND h2._b = h._b AND (h2._st & {STATE_AS_SENT}) = 0 AND {h_visible} \
+             ORDER BY h2._n DESC, h2._seq DESC LIMIT 1))"
         )
     }
 
@@ -477,7 +487,7 @@ impl<'a> Ctx<'a> {
     pub(crate) fn source(&mut self, table: &Table) -> Result<String, Error> {
         // Explicit columns: a schema view reads its own columns of the
         // physical (unioned) table.
-        let mut columns = "rid, id, _b, _seq, _st".to_owned();
+        let mut columns = "rid, id, _b, _n, _seq, _st".to_owned();
         for column in table.stored() {
             columns.push_str(&format!(", {}", quote(&column.stored)));
         }
@@ -497,7 +507,7 @@ impl<'a> Ctx<'a> {
                 // branch columns are the head's, so predicates, policies and
                 // projections see one effective branch.
                 let head_cells = table.selector_cells(&view.head)?;
-                let mut inherited = format!("m.rid, m.id, {head}, m._seq, m._st");
+                let mut inherited = format!("m.rid, m.id, {head}, m._n, m._seq, m._st");
                 for column in table.stored() {
                     match head_cells.get(&column.name) {
                         Some(value) => {
@@ -728,7 +738,7 @@ impl<'a> Ctx<'a> {
         let limit = self.bind(Sql::Integer(query.limit.map_or(-1, |l| l as i64)));
         let offset = self.bind(Sql::Integer(query.offset as i64));
         let sql = format!(
-            "SELECT {key}, 0, 0, {} FROM {from} AS {alias} WHERE {}{group_by}{order} \
+            "SELECT {key}, 0, 0, 0, {} FROM {from} AS {alias} WHERE {}{group_by}{order} \
              LIMIT {limit} OFFSET {offset}",
             outputs.join(", "),
             and(wheres),
@@ -819,7 +829,7 @@ impl<'a> Ctx<'a> {
         let source = self.source(table)?;
         let statement = |order: &str| {
             format!(
-                "SELECT {alias}.id, {alias}._seq, {alias}._st{columns} FROM {source} AS {alias} \
+                "SELECT {alias}.id, {alias}._n, {alias}._seq, {alias}._st{columns} FROM {source} AS {alias} \
                  WHERE {} ORDER BY {order} LIMIT {limit} OFFSET {offset}",
                 and(&wheres),
             )
@@ -946,7 +956,7 @@ impl<'a> Ctx<'a> {
                 .collect();
             let source = self.source(table)?;
             let mut body = format!(
-                "SELECT {alias}.id AS id, {alias}._seq AS _seq, {alias}._st AS _st, \
+                "SELECT {alias}.id AS id, {alias}._n AS _n, {alias}._seq AS _seq, {alias}._st AS _st, \
                  {label} AS _arm{columns}{keys_sql} FROM {source} AS {alias} WHERE {}",
                 and(&wheres)
             );
@@ -977,7 +987,7 @@ impl<'a> Ctx<'a> {
         let offset = self.bind(Sql::Integer(plan.offset as i64));
         let columns: String = (0..projection.len()).map(|i| format!(", c{i}")).collect();
         let sql = format!(
-            "SELECT id, _seq, _st, _arm{columns} FROM ({}) ORDER BY {} \
+            "SELECT id, _n, _seq, _st, _arm{columns} FROM ({}) ORDER BY {} \
              LIMIT {limit} OFFSET {offset}",
             arms.join(" UNION ALL "),
             order.join(", ")
@@ -1230,7 +1240,7 @@ impl<'a> Ctx<'a> {
             }
         }
         let sql = format!(
-            "SELECT t.id, t._seq, t._st{ids}{columns} FROM {} AS t{joins} \
+            "SELECT t.id, t._n, t._seq, t._st{ids}{columns} FROM {} AS t{joins} \
              WHERE {} ORDER BY {}",
             sql_of(&sources[0]),
             and(&wheres),
@@ -1408,7 +1418,7 @@ impl<'a> Ctx<'a> {
         };
         let statement = |order: &str| {
             format!(
-                "SELECT {alias}.id, {alias}._seq, {alias}._st{columns} FROM {source} AS {alias} \
+                "SELECT {alias}.id, {alias}._n, {alias}._seq, {alias}._st{columns} FROM {source} AS {alias} \
                  WHERE {} ORDER BY {order} LIMIT {limit} OFFSET {offset}",
                 and(&wheres),
             )

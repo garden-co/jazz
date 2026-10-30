@@ -589,3 +589,700 @@ fn a_tabs_write_is_local_once_its_worker_stored_it() {
     block_on(tab.tick()).unwrap();
     assert!(local.as_mut().poll(&mut context).is_ready());
 }
+
+/// A worker with no server validates a tab's serializable commit against
+/// the tab's snapshot in its own positions: a row it accepted before the
+/// snapshot (here another tab's insert) is in it, so a blind delete of it
+/// holds.
+#[test]
+fn a_worker_without_a_server_keeps_a_tabs_blind_delete_of_a_row_from_before_its_snapshot() {
+    let net = Net::with_worker_hint(2, RemoteLinkHint::NoServer);
+    let mut cells = holder("");
+    cells.insert("show".to_owned(), Value::String("s".to_owned()));
+    let write = block_on(net.tab(0).insert("seats", cells, Default::default())).unwrap();
+    let seat = write.row_uuid();
+    net.never_global(net.tab(0), write.mergeable_tx_id());
+    let tab = net.tab(1);
+    // A remote read: the tab learns its worker's position past the insert.
+    let audit = tab.prepare_query(&Query::from("audit")).unwrap();
+    net.drive(tab.all(&audit, ReadOpts::for_read_tier(jazz::db::ReadTier::Remote)))
+        .unwrap();
+    let open = net.begin_pinned(tab);
+    net.drive(tab.tx_ref(open).delete("seats", seat, Default::default()))
+        .unwrap();
+    let receipt = net
+        .drive(tab.commit_serializable_handle(open))
+        .expect("the tab holds no version of the seat: no local conflict");
+    net.never_global(tab, receipt.0);
+    let seats = net.worker.prepare_query(&Query::from("seats")).unwrap();
+    assert!(
+        block_on(net.worker.all(&seats, ReadOpts::default()))
+            .unwrap()
+            .is_empty(),
+        "the worker applied the delete"
+    );
+}
+
+/// A tab pins its snapshot while its worker has a server (at an authority
+/// seq). The authority then accepts a foreign update of a seat, which the
+/// worker syncs, and the worker's server is removed. The tab's snapshot
+/// counts the authority's positions, which the worker no longer serves: a
+/// blind delete of the seat it never saw updated is a serialization
+/// conflict, and the update stays.
+#[test]
+fn a_snapshot_pinned_before_the_workers_server_was_removed_misses_an_authority_update() {
+    let mut net = Net::new(2);
+    let _watch = net.watch_seats(&net.worker);
+    let mut cells = holder("");
+    cells.insert("show".to_owned(), Value::String("s".to_owned()));
+    let write = block_on(net.direct.insert("seats", cells, Default::default())).unwrap();
+    let seat = write.row_uuid();
+    net.settle(&net.direct, write.mergeable_tx_id()).unwrap();
+    for _ in 0..5 {
+        net.pump();
+    }
+    let open = net.begin_pinned(net.tab(1));
+    let update = block_on(
+        net.direct
+            .update("seats", seat, holder("direct"), Default::default()),
+    )
+    .unwrap();
+    net.settle(&net.direct, update.mergeable_tx_id()).unwrap();
+    for _ in 0..5 {
+        net.pump();
+    }
+    net.worker_offline();
+    net.worker.set_remote_link_hint(RemoteLinkHint::NoServer);
+    let tab = net.tab(1);
+    net.drive(tab.tx_ref(open).delete("seats", seat, Default::default()))
+        .unwrap();
+    let receipt = net
+        .drive(tab.commit_serializable_handle(open))
+        .expect("the tab holds no version of the seat: no local conflict");
+    common::assert_serialization_conflict(&net.settle(tab, receipt.0).unwrap_err());
+    let seats = net.worker.prepare_query(&Query::from("seats")).unwrap();
+    let rows = block_on(net.worker.all(&seats, ReadOpts::default())).unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "the worker kept the update the tab never saw"
+    );
+}
+
+/// As above, but the write the tab never saw is the other tab's, which the
+/// worker accepted after its server was removed, at its own position.
+#[test]
+fn a_snapshot_pinned_before_the_workers_server_was_removed_misses_another_tabs_write() {
+    let mut net = Net::new(2);
+    let _watch = net.watch_seats(&net.worker);
+    let _watch0 = net.watch_seats(net.tab(0));
+    let mut cells = holder("");
+    cells.insert("show".to_owned(), Value::String("s".to_owned()));
+    let write = block_on(net.direct.insert("seats", cells, Default::default())).unwrap();
+    let seat = write.row_uuid();
+    net.settle(&net.direct, write.mergeable_tx_id()).unwrap();
+    // The authority's seq passes the worker's own counter: the other tab's
+    // write lands at a worker seq below the snapshot's.
+    for i in 0..5 {
+        let note = BTreeMap::from([("note".to_owned(), Value::String(format!("{i}")))]);
+        let audit = block_on(net.direct.insert("audit", note, Default::default())).unwrap();
+        net.settle(&net.direct, audit.mergeable_tx_id()).unwrap();
+    }
+    for _ in 0..5 {
+        net.pump();
+    }
+    let open = net.begin_pinned(net.tab(1));
+    net.worker_offline();
+    net.worker.set_remote_link_hint(RemoteLinkHint::NoServer);
+    for _ in 0..3 {
+        net.pump();
+    }
+    block_on(
+        net.tab(0)
+            .update("seats", seat, holder("tab0"), Default::default()),
+    )
+    .unwrap();
+    for _ in 0..10 {
+        net.pump();
+    }
+    let tab = net.tab(1);
+    net.drive(tab.tx_ref(open).delete("seats", seat, Default::default()))
+        .unwrap();
+    let receipt = net
+        .drive(tab.commit_serializable_handle(open))
+        .expect("the tab holds no version of the seat: no local conflict");
+    common::assert_serialization_conflict(&net.settle(tab, receipt.0).unwrap_err());
+    let seats = net.worker.prepare_query(&Query::from("seats")).unwrap();
+    let rows = block_on(net.worker.all(&seats, ReadOpts::default())).unwrap();
+    assert_eq!(rows.len(), 1, "the worker kept the other tab's write");
+}
+
+/// Pump until `db`'s `tx` reaches Global, or MAX_TURNS pass: its fate, if any.
+fn fate_within_turns(net: &Net, db: &Db, tx: u64) -> Option<Result<u64, jazz::db::Error>> {
+    let mut wait = pin!(db.wait_for_transaction(tx, DurabilityTier::Global));
+    let mut context = Context::from_waker(Waker::noop());
+    for _ in 0..MAX_TURNS {
+        if let Poll::Ready(fate) = wait.as_mut().poll(&mut context) {
+            return Some(fate);
+        }
+        net.pump();
+    }
+    None
+}
+
+/// A worker (or a serverless client) with no server commits
+/// serializably on its own, and a server is added later: the snapshot it
+/// numbered itself holds every authority version, and nothing else wrote
+/// the row, so the authority accepts it.
+#[test]
+fn a_serverless_workers_own_serializable_commit_lands_once_a_server_is_added() {
+    let mut net = Net::with_worker_hint(0, RemoteLinkHint::NoServer);
+    let open = OpenTransactionId::new();
+    block_on(net.worker.begin_serializable(open)).unwrap();
+    let mut cells = holder("w");
+    cells.insert("show".to_owned(), Value::String("s".to_owned()));
+    net.drive(
+        net.worker
+            .tx_ref(open)
+            .insert("seats", cells, Default::default()),
+    )
+    .unwrap();
+    let receipt = net
+        .drive(net.worker.commit_serializable_handle(open))
+        .expect("local commit");
+    for _ in 0..5 {
+        net.pump();
+    }
+    net.worker_online();
+    let fate = fate_within_turns(&net, &net.worker, receipt.0);
+    assert!(matches!(fate, Some(Ok(_))), "the first server accepts it");
+    assert_eq!(net.count(&Query::from("seats")), 1);
+}
+
+/// A worker synced rows from its server (authority seqs above its own
+/// counter), then its server is removed. A serializable update of a
+/// synced row it begins after that is no local conflict: authority
+/// versions precede its own snapshot.
+#[test]
+fn a_serverless_workers_own_serializable_update_of_a_synced_row_holds() {
+    let mut net = Net::new(0);
+    let _watch = net.watch_seats(&net.worker);
+    let mut cells = holder("");
+    cells.insert("show".to_owned(), Value::String("s".to_owned()));
+    let write = block_on(net.direct.insert("seats", cells, Default::default())).unwrap();
+    let seat = write.row_uuid();
+    net.settle(&net.direct, write.mergeable_tx_id()).unwrap();
+    for i in 0..5 {
+        let note = BTreeMap::from([("note".to_owned(), Value::String(format!("{i}")))]);
+        let audit = block_on(net.direct.insert("audit", note, Default::default())).unwrap();
+        net.settle(&net.direct, audit.mergeable_tx_id()).unwrap();
+    }
+    let update = block_on(
+        net.direct
+            .update("seats", seat, holder("d"), Default::default()),
+    )
+    .unwrap();
+    net.settle(&net.direct, update.mergeable_tx_id()).unwrap();
+    for _ in 0..5 {
+        net.pump();
+    }
+    net.worker_offline();
+    net.worker.set_remote_link_hint(RemoteLinkHint::NoServer);
+    for _ in 0..3 {
+        net.pump();
+    }
+    let open = OpenTransactionId::new();
+    block_on(net.worker.begin_serializable(open)).unwrap();
+    net.drive(
+        net.worker
+            .tx_ref(open)
+            .update("seats", seat, holder("w"), Default::default()),
+    )
+    .unwrap();
+    let local = net.drive(net.worker.commit_serializable_handle(open));
+    let receipt = local.expect("no local conflict: nothing changed the seat after the snapshot");
+    net.worker_online();
+    let fate = fate_within_turns(&net, &net.worker, receipt.0);
+    assert!(matches!(fate, Some(Ok(_))), "the authority accepts it");
+}
+
+/// As above, but the writer is a tab of the worker whose
+/// server was removed. The tab holds the seat at an authority seq. It
+/// begins after the removal (no race), pins via a read, updates the seat.
+/// The worker (last word) accepts it.
+#[test]
+fn a_tab_of_a_worker_whose_server_was_removed_updates_a_synced_row() {
+    let mut net = Net::new(1);
+    let _watch = net.watch_seats(&net.worker);
+    let _watch_tab = net.watch_seats(net.tab(0));
+    let mut cells = holder("");
+    cells.insert("show".to_owned(), Value::String("s".to_owned()));
+    let write = block_on(net.direct.insert("seats", cells, Default::default())).unwrap();
+    let seat = write.row_uuid();
+    net.settle(&net.direct, write.mergeable_tx_id()).unwrap();
+    for i in 0..5 {
+        let note = BTreeMap::from([("note".to_owned(), Value::String(format!("{i}")))]);
+        let audit = block_on(net.direct.insert("audit", note, Default::default())).unwrap();
+        net.settle(&net.direct, audit.mergeable_tx_id()).unwrap();
+    }
+    let update = block_on(
+        net.direct
+            .update("seats", seat, holder("d"), Default::default()),
+    )
+    .unwrap();
+    net.settle(&net.direct, update.mergeable_tx_id()).unwrap();
+    for _ in 0..5 {
+        net.pump();
+    }
+    net.worker_offline();
+    net.worker.set_remote_link_hint(RemoteLinkHint::NoServer);
+    for _ in 0..3 {
+        net.pump();
+    }
+    let tab = net.tab(0);
+    let open = net.begin_pinned(tab);
+    net.drive(
+        tab.tx_ref(open)
+            .update("seats", seat, holder("tab"), Default::default()),
+    )
+    .unwrap();
+    let local = net.drive(tab.commit_serializable_handle(open));
+    let receipt = local.expect("no local conflict: nothing changed the seat after the snapshot");
+    fate_within_turns(&net, tab, receipt.0);
+    let seats = net.worker.prepare_query(&Query::from("seats")).unwrap();
+    let rows = block_on(net.worker.all(&seats, ReadOpts::default())).unwrap();
+    let held = format!("{rows:?}");
+    assert!(
+        held.contains("\"tab\""),
+        "the worker applied the tab's update"
+    );
+}
+
+/// a tab's pinning read is answered
+/// by its Live worker at authority seq S, but the read future is polled
+/// only after the tab has processed a later message from the worker with
+/// `by = worker` (its server was removed meanwhile).
+/// The worker meanwhile synced an authority update of the seat at S+1,
+/// which the tab never saw. The snapshot is the position the answer
+/// counted, (authority, S), so the tab's blind delete is a serialization
+/// conflict and the update stays.
+#[test]
+fn a_snapshot_pins_at_the_sequencer_that_answered_its_read() {
+    let core = open(0xc0, AuthorSubject::SYSTEM);
+    let worker = open(WORKER, author(WORKER));
+    worker.set_remote_link_hint(RemoteLinkHint::Live);
+    let (c, s) = duplex();
+    let worker_up = block_on(worker.connect_upstream(c));
+    core.accept_subscriber(s, author(WORKER)).unwrap();
+    let direct = open(DIRECT, author(DIRECT));
+    let (c, s) = duplex();
+    let _direct_up = block_on(direct.connect_upstream(c));
+    core.accept_subscriber(s, author(DIRECT)).unwrap();
+    let tab = open(WORKER + 1, author(WORKER));
+    tab.set_non_durable_client();
+    tab.set_remote_link_hint(RemoteLinkHint::Live);
+    let (c, s) = duplex();
+    let _tab_up = block_on(tab.connect_upstream(c));
+    worker.accept_subscriber(s, author(WORKER)).unwrap();
+    let pump = |n: usize| {
+        for _ in 0..n {
+            block_on(tab.tick()).unwrap();
+            block_on(worker.tick()).unwrap();
+            block_on(direct.tick()).unwrap();
+            block_on(core.tick()).unwrap();
+            block_on(direct.tick()).unwrap();
+            block_on(worker.tick()).unwrap();
+            block_on(tab.tick()).unwrap();
+        }
+    };
+    // The worker holds the seats, so the authority's update reaches it.
+    let seats = worker.prepare_query(&Query::from("seats")).unwrap();
+    let _watch =
+        block_on(worker.subscribe(&seats, ReadOpts::for_read_tier(jazz::db::ReadTier::Remote)))
+            .unwrap();
+    pump(5);
+    let mut cells = holder("");
+    cells.insert("show".to_owned(), Value::String("s".to_owned()));
+    let write = block_on(direct.insert("seats", cells, Default::default())).unwrap();
+    let seat = write.row_uuid();
+    pump(10);
+    let open_tx = OpenTransactionId::new();
+    block_on(tab.begin_serializable(open_tx)).unwrap();
+    let audit = tab.prepare_query(&Query::from("audit")).unwrap();
+    let txr = tab.tx_ref(open_tx);
+    let mut context = Context::from_waker(Waker::noop());
+    {
+        let mut read = pin!(txr.all_prepared(&audit));
+        assert!(
+            read.as_mut().poll(&mut context).is_pending(),
+            "the read asks the worker"
+        );
+        // The answer (at authority seq S) reaches the tab; the read is not
+        // polled again yet.
+        pump(5);
+        block_on(direct.update("seats", seat, holder("direct"), Default::default())).unwrap();
+        pump(10);
+        // The worker's server is removed.
+        assert!(worker.detach_connection(&worker_up));
+        worker.set_remote_link_hint(RemoteLinkHint::NoServer);
+        // A fate from the worker after its switch (by = worker).
+        block_on(tab.insert("invites", code("x"), Default::default())).unwrap();
+        pump(5);
+        let mut done = None;
+        for _ in 0..MAX_TURNS {
+            if let Poll::Ready(rows) = read.as_mut().poll(&mut context) {
+                done = Some(rows);
+                break;
+            }
+            pump(1);
+        }
+        done.expect("read resumes").unwrap();
+    }
+    let mut delete = pin!(txr.delete("seats", seat, Default::default()));
+    let deleted = loop {
+        if let Poll::Ready(r) = delete.as_mut().poll(&mut context) {
+            break r;
+        }
+        pump(1);
+    };
+    deleted.unwrap();
+    let mut commit = pin!(tab.commit_serializable_handle(open_tx));
+    let committed = loop {
+        if let Poll::Ready(r) = commit.as_mut().poll(&mut context) {
+            break r;
+        }
+        pump(1);
+    };
+    let receipt = committed.expect("the tab holds no version of the seat");
+    let mut wait = pin!(tab.wait_for_transaction(receipt.0, DurabilityTier::Global));
+    let mut fate = None;
+    for _ in 0..MAX_TURNS {
+        if let Poll::Ready(f) = wait.as_mut().poll(&mut context) {
+            fate = Some(f);
+            break;
+        }
+        pump(1);
+    }
+    common::assert_serialization_conflict(&fate.expect("the worker decides").unwrap_err());
+    let rows = block_on(worker.all(&seats, ReadOpts::default())).unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "the worker kept the update the tab never saw"
+    );
+}
+
+/// A fresh tab of a worker with no server commits a serializable insert
+/// before it has heard anything from its worker (its known position is
+/// still the authority's 0). The worker accepts it: a new row cannot
+/// conflict.
+#[test]
+fn a_fresh_tab_of_a_serverless_worker_inserts_serializably() {
+    let net = Net::with_worker_hint(1, RemoteLinkHint::NoServer);
+    let tab = net.tab(0);
+    let open = OpenTransactionId::new();
+    block_on(tab.begin_serializable(open)).unwrap();
+    let mut cells = holder("t");
+    cells.insert("show".to_owned(), Value::String("s".to_owned()));
+    net.drive(tab.tx_ref(open).insert("seats", cells, Default::default()))
+        .unwrap();
+    let receipt = net
+        .drive(tab.commit_serializable_handle(open))
+        .expect("local commit");
+    fate_within_turns(&net, tab, receipt.0);
+    let seats = net.worker.prepare_query(&Query::from("seats")).unwrap();
+    let rows = block_on(net.worker.all(&seats, ReadOpts::default())).unwrap();
+    assert_eq!(rows.len(), 1, "the worker accepted the insert");
+}
+
+/// A tab resends a commit its worker already settled upstream at
+/// authority seq S, while the worker, now offline from
+/// its server, holds unsettled commits of its own whose local tx numbers
+/// cover S. The resend is not taken for one of the worker's own pending
+/// uploads: it reaches Global while the worker is offline.
+#[test]
+fn a_resend_of_a_settled_commit_is_not_parked_on_an_unrelated_pending_commit() {
+    let core = open(0xc0, AuthorSubject::SYSTEM);
+    let worker = open(WORKER, author(WORKER));
+    worker.set_remote_link_hint(RemoteLinkHint::Live);
+    let (c, s) = duplex();
+    let worker_up = block_on(worker.connect_upstream(c));
+    core.accept_subscriber(s, author(WORKER)).unwrap();
+    let tab = open(WORKER + 1, author(WORKER));
+    tab.set_non_durable_client();
+    tab.set_remote_link_hint(RemoteLinkHint::Live);
+    let (c, s) = duplex();
+    let tab_up = block_on(tab.connect_upstream(c));
+    worker.accept_subscriber(s, author(WORKER)).unwrap();
+    let pump = |n: usize| {
+        for _ in 0..n {
+            block_on(tab.tick()).unwrap();
+            block_on(worker.tick()).unwrap();
+            block_on(core.tick()).unwrap();
+            block_on(worker.tick()).unwrap();
+            block_on(tab.tick()).unwrap();
+        }
+    };
+    let seats = worker.prepare_query(&Query::from("seats")).unwrap();
+    let _watch =
+        block_on(worker.subscribe(&seats, ReadOpts::for_read_tier(jazz::db::ReadTier::Remote)))
+            .unwrap();
+    pump(5);
+    // Move the authority's seq past the worker's first own tx numbers.
+    for i in 0..3 {
+        let note = BTreeMap::from([("note".to_owned(), Value::String(format!("c{i}")))]);
+        block_on(core.insert("audit", note, Default::default())).unwrap();
+    }
+    pump(5);
+    let mut cells = holder("tab");
+    cells.insert("show".to_owned(), Value::String("s".to_owned()));
+    let write = block_on(tab.insert("seats", cells, Default::default())).unwrap();
+    let tx = write.mergeable_tx_id();
+    block_on(tab.tick()).unwrap();
+    block_on(worker.tick()).unwrap();
+    assert!(tab.detach_connection(&tab_up));
+    tab.set_remote_link_hint(RemoteLinkHint::Failed);
+    for _ in 0..10 {
+        block_on(worker.tick()).unwrap();
+        block_on(core.tick()).unwrap();
+        block_on(worker.tick()).unwrap();
+    }
+    // The worker goes offline and writes commits of its own, still pending.
+    assert!(worker.detach_connection(&worker_up));
+    worker.set_remote_link_hint(RemoteLinkHint::Failed);
+    for i in 0..30 {
+        let note = BTreeMap::from([("note".to_owned(), Value::String(format!("w{i}")))]);
+        block_on(worker.insert("audit", note, Default::default())).unwrap();
+    }
+    block_on(worker.tick()).unwrap();
+    // The tab reconnects and resends.
+    let (c, s) = duplex();
+    let _tab_up = block_on(tab.connect_upstream(c));
+    tab.set_remote_link_hint(RemoteLinkHint::Live);
+    worker.accept_subscriber(s, author(WORKER)).unwrap();
+    let mut wait = pin!(tab.wait_for_transaction(tx, DurabilityTier::Global));
+    let mut context = Context::from_waker(Waker::noop());
+    let mut fate = None;
+    for _ in 0..MAX_TURNS {
+        if let Poll::Ready(f) = wait.as_mut().poll(&mut context) {
+            fate = Some(f);
+            break;
+        }
+        block_on(tab.tick()).unwrap();
+        block_on(worker.tick()).unwrap();
+        block_on(tab.tick()).unwrap();
+    }
+    assert!(
+        matches!(fate, Some(Ok(_))),
+        "the resent, already accepted commit reaches Global"
+    );
+}
+
+/// a tab's commit is carried by its worker and accepted by
+/// the authority, but the tab's link drops before the worker relays the
+/// fate. The tab reconnects and resends; the worker answers from what it
+/// recorded. The tab's commit must still reach Global.
+#[test]
+fn a_resent_commit_settled_upstream_reaches_global_and_the_tab_commits_on() {
+    let core = open(0xc0, AuthorSubject::SYSTEM);
+    let worker = open(WORKER, author(WORKER));
+    worker.set_remote_link_hint(RemoteLinkHint::Live);
+    let (c, s) = duplex();
+    let _worker_up = block_on(worker.connect_upstream(c));
+    core.accept_subscriber(s, author(WORKER)).unwrap();
+    let tab = open(WORKER + 1, author(WORKER));
+    tab.set_non_durable_client();
+    tab.set_remote_link_hint(RemoteLinkHint::Live);
+    let (c, s) = duplex();
+    let tab_up = block_on(tab.connect_upstream(c));
+    worker.accept_subscriber(s, author(WORKER)).unwrap();
+    let pump = |n: usize| {
+        for _ in 0..n {
+            block_on(tab.tick()).unwrap();
+            block_on(worker.tick()).unwrap();
+            block_on(core.tick()).unwrap();
+            block_on(worker.tick()).unwrap();
+            block_on(tab.tick()).unwrap();
+        }
+    };
+    // Keep the worker holding seats so the authority's Rows (with tx ids)
+    // reach it.
+    let seats = worker.prepare_query(&Query::from("seats")).unwrap();
+    let _watch =
+        block_on(worker.subscribe(&seats, ReadOpts::for_read_tier(jazz::db::ReadTier::Remote)))
+            .unwrap();
+    pump(5);
+    let mut cells = holder("tab");
+    cells.insert("show".to_owned(), Value::String("s".to_owned()));
+    let write = block_on(tab.insert("seats", cells, Default::default())).unwrap();
+    let tx = write.mergeable_tx_id();
+    // The tab sends; the worker applies and uploads.
+    block_on(tab.tick()).unwrap();
+    block_on(worker.tick()).unwrap();
+    // The tab's link drops before any fate comes back.
+    assert!(tab.detach_connection(&tab_up));
+    tab.set_remote_link_hint(RemoteLinkHint::Failed);
+    for _ in 0..10 {
+        block_on(worker.tick()).unwrap();
+        block_on(core.tick()).unwrap();
+        block_on(worker.tick()).unwrap();
+    }
+    // Reconnect: the tab resends its pending commit.
+    let (c, s) = duplex();
+    let _tab_up = block_on(tab.connect_upstream(c));
+    tab.set_remote_link_hint(RemoteLinkHint::Live);
+    worker.accept_subscriber(s, author(WORKER)).unwrap();
+    let mut wait = pin!(tab.wait_for_transaction(tx, DurabilityTier::Global));
+    let mut context = Context::from_waker(Waker::noop());
+    let mut fate = None;
+    for _ in 0..MAX_TURNS {
+        if let Poll::Ready(f) = wait.as_mut().poll(&mut context) {
+            fate = Some(f);
+            break;
+        }
+        pump(1);
+    }
+    assert!(
+        matches!(fate, Some(Ok(_))),
+        "the resent commit reaches Global"
+    );
+    // The tab's next serializable insert lands too.
+    let open_tx = OpenTransactionId::new();
+    block_on(tab.begin_serializable(open_tx)).unwrap();
+    let mut cells = holder("next");
+    cells.insert("show".to_owned(), Value::String("s".to_owned()));
+    let mut context = Context::from_waker(Waker::noop());
+    {
+        let txr = tab.tx_ref(open_tx);
+        let mut insert = pin!(txr.insert("seats", cells, Default::default()));
+        let inserted = loop {
+            if let Poll::Ready(r) = insert.as_mut().poll(&mut context) {
+                break r;
+            }
+            pump(1);
+        };
+        inserted.unwrap();
+    }
+    let mut commit = pin!(tab.commit_serializable_handle(open_tx));
+    let receipt = loop {
+        if let Poll::Ready(r) = commit.as_mut().poll(&mut context) {
+            break r;
+        }
+        pump(1);
+    }
+    .unwrap();
+    let mut wait = pin!(tab.wait_for_transaction(receipt.0, DurabilityTier::Global));
+    let mut next = None;
+    for _ in 0..MAX_TURNS {
+        if let Poll::Ready(f) = wait.as_mut().poll(&mut context) {
+            next = Some(f);
+            break;
+        }
+        pump(1);
+    }
+    assert!(
+        matches!(next, Some(Ok(_))),
+        "an unrelated insert from the tab reaches Global"
+    );
+}
+
+/// The authority's seats, as debug strings.
+fn core_seats(net: &Net) -> Vec<String> {
+    let prepared = net.core.prepare_query(&Query::from("seats")).unwrap();
+    block_on(net.core.all(&prepared, ReadOpts::default()))
+        .unwrap()
+        .iter()
+        .map(|row| format!("{row:?}"))
+        .collect()
+}
+
+/// A synced seat the direct client inserted.
+fn synced_seat(net: &Net) -> RowUuid {
+    let mut cells = holder("");
+    cells.insert("show".to_owned(), Value::String("s".to_owned()));
+    let write = block_on(net.direct.insert("seats", cells, Default::default())).unwrap();
+    net.settle(&net.direct, write.mergeable_tx_id()).unwrap();
+    for _ in 0..5 {
+        net.pump();
+    }
+    write.row_uuid()
+}
+
+/// A worker pins its own serializable snapshot while it has no server: at
+/// the authority's position it knows, not one it numbered itself. A server
+/// is added and a foreign update of a seat syncs in; the worker's blind
+/// delete of the seat it never saw updated does not land.
+#[test]
+fn a_serverless_workers_own_snapshot_misses_an_update_synced_after_a_server_is_added() {
+    let mut net = Net::new(0);
+    let _watch = net.watch_seats(&net.worker);
+    let seat = synced_seat(&net);
+    net.worker_offline();
+    net.worker.set_remote_link_hint(RemoteLinkHint::NoServer);
+    for _ in 0..3 {
+        net.pump();
+    }
+    let open = net.begin_pinned(&net.worker);
+    net.worker_online();
+    for _ in 0..10 {
+        net.pump();
+    }
+    let update = block_on(
+        net.direct
+            .update("seats", seat, holder("direct"), Default::default()),
+    )
+    .unwrap();
+    net.settle(&net.direct, update.mergeable_tx_id()).unwrap();
+    for _ in 0..10 {
+        net.pump();
+    }
+    net.drive(
+        net.worker
+            .tx_ref(open)
+            .delete("seats", seat, Default::default()),
+    )
+    .unwrap();
+    if let Ok(receipt) = net.drive(net.worker.commit_serializable_handle(open)) {
+        fate_within_turns(&net, &net.worker, receipt.0);
+    }
+    assert_eq!(core_seats(&net).len(), 1, "the authority kept the update");
+}
+
+/// Offline first: a worker synced a seat and lost its server, and the
+/// authority then accepted a foreign update of it. The serverless worker's
+/// blind delete commits locally, and once a server is added the authority
+/// refuses it: the snapshot was the authority position the worker knew.
+#[test]
+fn a_serverless_workers_own_blind_delete_over_an_update_it_never_synced_is_refused() {
+    let mut net = Net::new(0);
+    let _watch = net.watch_seats(&net.worker);
+    let seat = synced_seat(&net);
+    net.worker_offline();
+    net.worker.set_remote_link_hint(RemoteLinkHint::NoServer);
+    for _ in 0..3 {
+        net.pump();
+    }
+    let update = block_on(
+        net.direct
+            .update("seats", seat, holder("direct"), Default::default()),
+    )
+    .unwrap();
+    net.settle(&net.direct, update.mergeable_tx_id()).unwrap();
+    let open = net.begin_pinned(&net.worker);
+    net.drive(
+        net.worker
+            .tx_ref(open)
+            .delete("seats", seat, Default::default()),
+    )
+    .unwrap();
+    let receipt = net
+        .drive(net.worker.commit_serializable_handle(open))
+        .expect("no local conflict: the worker never saw the update");
+    for _ in 0..5 {
+        net.pump();
+    }
+    net.worker_online();
+    let fate = fate_within_turns(&net, &net.worker, receipt.0).expect("the authority decides");
+    common::assert_serialization_conflict(&fate.unwrap_err());
+    assert_eq!(core_seats(&net).len(), 1, "the authority kept the update");
+}
