@@ -130,6 +130,39 @@ describe("cli deploy", () => {
   );
 
   it.each([false, true])(
+    "sends allowDroppingHistory only when confirmed (%s)",
+    async (allowDroppingHistory) => {
+      const { root } = await createWorkspace();
+      await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+      await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
+      const hash = await computeTestSchemaHash((await loadCompiledSchema(root)).wasmSchema);
+      let body: Record<string, unknown> | undefined;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: string, init?: RequestInit) => {
+          if (input.endsWith("/migrations/graph"))
+            return new Response(
+              JSON.stringify({ schemas: [hash], migrations: [], activeSchemaHash: hash }),
+            );
+          body = JSON.parse(String(init?.body));
+          return new Response(
+            JSON.stringify({ changed: false, published: { schemas: [], migrations: [] } }),
+          );
+        }),
+      );
+      await captureConsoleLogs(() =>
+        deploy({
+          serverUrl: "http://localhost:1625",
+          adminSecret: "admin-secret",
+          schemaDir: root,
+          allowDroppingHistory,
+        }),
+      );
+      expect(body?.allowDroppingHistory).toBe(allowDroppingHistory ? true : undefined);
+    },
+  );
+
+  it.each([false, true])(
     "explains revert and merge options (target already published: %s)",
     async (published) => {
       const { root } = await createWorkspace();

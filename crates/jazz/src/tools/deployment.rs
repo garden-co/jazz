@@ -12,7 +12,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::protocol::SchemaVersion;
 use crate::schema::JazzSchema;
-use crate::tools::public_schema::{Schema, SchemaHash, TableName, TablePolicies, Value};
+use crate::tools::public_schema::{
+    HistoryRetention, Schema, SchemaHash, TableName, TablePolicies, Value,
+};
 use crate::tools::schema_lens::{Lens, LensOp, runtime::compile_lens};
 use migration_validation::{validate_lineage_table_partition, validate_migration_lens_between};
 
@@ -35,6 +37,9 @@ pub struct DeploymentRequest {
     pub schemas: Vec<(SchemaHash, Schema)>,
     pub migrations: Vec<Lens>,
     pub permissions: HashMap<TableName, TablePolicies>,
+    /// Confirms switching tables of the active schema to latest-only history
+    /// (SPEC 4 §4.9), which drops their past versions for good.
+    pub allow_dropping_history: bool,
 }
 
 /// Validated combined history, ordered so parents precede children. This does not
@@ -97,6 +102,26 @@ pub enum DeploymentError {
         first: Vec<SchemaHash>,
         second: Vec<SchemaHash>,
     },
+    #[error(
+        "deploying schema {target} switches {} to latest-only history, which drops each row's past versions at its next write and cannot be undone. Deploy again with --allow-dropping-history to confirm.",
+        display_tables(.tables)
+    )]
+    DropsHistory {
+        target: SchemaHash,
+        tables: Vec<TableName>,
+    },
+}
+
+fn display_tables(tables: &[TableName]) -> String {
+    let names = tables
+        .iter()
+        .map(|table| format!("`{}`", table.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    match tables.len() {
+        1 => format!("table {names}"),
+        _ => format!("tables {names}"),
+    }
 }
 
 fn display_hashes(hashes: &[SchemaHash], separator: &str) -> String {
@@ -136,6 +161,17 @@ pub fn prepare_deployment(
     {
         if !schemas.contains_key(&hash.0) {
             return Err(DeploymentError::MissingSchema { schema: hash });
+        }
+    }
+    if !request.allow_dropping_history
+        && let Some(active) = stored.active_schema_hash
+    {
+        let tables = drops_history(&schemas[&active.0], &schemas[&request.target_schema_hash.0]);
+        if !tables.is_empty() {
+            return Err(DeploymentError::DropsHistory {
+                target: request.target_schema_hash,
+                tables,
+            });
         }
     }
     let compiled = schemas
@@ -249,6 +285,22 @@ pub fn prepare_deployment(
         migrations,
         active_schema,
     })
+}
+
+/// The tables `target` keeps latest-only that `active` keeps in full, by
+/// name: switching them drops their past versions (SPEC 4 §4.9). A table
+/// renamed in the same deploy is not caught.
+fn drops_history(active: &Schema, target: &Schema) -> Vec<TableName> {
+    target
+        .iter()
+        .filter(|(name, table)| {
+            table.history == HistoryRetention::Latest
+                && active
+                    .get(*name)
+                    .is_some_and(|before| before.history == HistoryRetention::Full)
+        })
+        .map(|(name, _)| name.clone())
+        .collect()
 }
 
 fn topological_order(

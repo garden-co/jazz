@@ -88,6 +88,8 @@ export interface DeployOptions {
   adminSecret: string;
   schemaDir: string;
   migrationsDir?: string;
+  /** Confirms switching existing tables to latest-only history. */
+  allowDroppingHistory?: boolean;
 }
 
 // Framework bundlers (Vite, SvelteKit, Next.js, Expo) expose public env vars
@@ -442,6 +444,9 @@ function printHelp(): void {
   console.log("  --fromHash <hash>     Optional source schema hash (defaults to latest snapshot)");
   console.log("  --toHash <hash>       Optional target schema hash (defaults to current schema)");
   console.log("  --name <name>         Optional migration filename label (default: unnamed)");
+  console.log(
+    "  --allow-dropping-history  Deploy: confirm switching existing tables to latest-only history",
+  );
   console.log("\nGlobal options:");
   console.log(
     "  --env-file <path>     Load env vars from this file (repeatable; first file wins per key). Defaults to .env in cwd.",
@@ -562,6 +567,7 @@ if (isMainModule()) {
         ...requireMigrationServerOptions(options),
         schemaDir: options.schemaDir ?? process.cwd(),
         migrationsDir: options.migrationsDir,
+        allowDroppingHistory: commandArgs.includes("--allow-dropping-history"),
       }),
     );
   } else {

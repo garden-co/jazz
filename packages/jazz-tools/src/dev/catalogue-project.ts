@@ -97,6 +97,11 @@ export interface DeployOptions extends CatalogueProjectOptions {
    * Directory containing migration files. Defaults to `<schemaDir>/migrations`.
    */
   migrationsDir?: string;
+  /**
+   * Confirms switching tables of the active schema to latest-only history,
+   * which drops their past versions for good.
+   */
+  allowDroppingHistory?: boolean;
 }
 
 export interface ValidateProjectOptions {

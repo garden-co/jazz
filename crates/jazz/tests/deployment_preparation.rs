@@ -50,6 +50,7 @@ fn request(target: &Schema, schemas: &[Schema], migrations: Vec<Lens>) -> Deploy
             .collect(),
         migrations,
         permissions: HashMap::new(),
+        allow_dropping_history: false,
     }
 }
 
@@ -105,8 +106,14 @@ fn retention_only_changes_deploy_without_a_migration_in_both_directions() {
             active_schema_hash: Some(SchemaHash::compute(from)),
             ..Default::default()
         };
-        let prepared = prepare_deployment(&stored, request(to, std::slice::from_ref(to), vec![]))
-            .expect("a retention change needs no migration");
+        let prepared = prepare_deployment(
+            &stored,
+            DeploymentRequest {
+                allow_dropping_history: true,
+                ..request(to, std::slice::from_ref(to), vec![])
+            },
+        )
+        .expect("a retention change needs no migration");
         assert_eq!(
             prepared.active_schema().tables()[0].history,
             to[&TableName::from("notes")].history
@@ -119,6 +126,63 @@ fn retention_only_changes_deploy_without_a_migration_in_both_directions() {
             "schemas differing only in retention are joined by an empty lens"
         );
     }
+}
+
+/// Switching a table of the active schema to latest-only drops its past
+/// versions for good, so the deploy is refused until it says so; a new
+/// latest-only table, or switching back to full history, needs no flag.
+#[test]
+fn switching_an_active_table_to_latest_only_needs_an_explicit_flag() {
+    let full = schema(&[]);
+    let mut latest = full.clone();
+    latest.get_mut(&TableName::from("notes")).unwrap().history = HistoryRetention::Latest;
+    let active = |schema: &Schema| DeploymentCatalogue {
+        schemas: vec![schema.clone()],
+        active_schema_hash: Some(SchemaHash::compute(schema)),
+        ..Default::default()
+    };
+
+    let error = prepare_deployment(
+        &active(&full),
+        request(&latest, std::slice::from_ref(&latest), vec![]),
+    )
+    .expect_err("an unconfirmed switch drops history");
+    assert_eq!(
+        error,
+        DeploymentError::DropsHistory {
+            target: SchemaHash::compute(&latest),
+            tables: vec![TableName::from("notes")],
+        }
+    );
+    assert!(
+        error.to_string().contains(
+            "switches table `notes` to latest-only history, which drops each row's past versions"
+        ),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("--allow-dropping-history"),
+        "{error}"
+    );
+
+    prepare_deployment(
+        &active(&full),
+        DeploymentRequest {
+            allow_dropping_history: true,
+            ..request(&latest, std::slice::from_ref(&latest), vec![])
+        },
+    )
+    .expect("a confirmed switch deploys");
+    prepare_deployment(
+        &DeploymentCatalogue::default(),
+        request(&latest, std::slice::from_ref(&latest), vec![]),
+    )
+    .expect("a first deploy has no history to drop");
+    prepare_deployment(
+        &active(&latest),
+        request(&full, std::slice::from_ref(&full), vec![]),
+    )
+    .expect("switching back to full history drops nothing");
 }
 
 #[test]

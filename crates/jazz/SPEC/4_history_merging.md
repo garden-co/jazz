@@ -18,7 +18,7 @@ Invariant digest:
 - `INV-HIST-9`: `MergeStrategy::Counter` MUST be declared only on non-nullable integer user columns.
 - `INV-HIST-10`: For `MergeStrategy::Counter`, a write MUST travel as its delta from the row image it was made over, and Core MUST add each accepted delta to the current value, so concurrent increments from the same base sum exactly. Core MUST reject a write whose delta would take the counter outside its column type's range rather than wrap, and a write that does not author a merge column MUST NOT replace that column's accepted ops with the writer's snapshot, also across schema versions.
 - `INV-HIST-24`: A text-merging column (`MergeStrategy::Text`, `Markdown` or `Html`) MUST be declared only on a string user column, nullable or not, and MUST store a plain string or NULL; writes to it travel as plain values. Only Core merges: when a version before the write that its writer never saw (§4.6) authored the column, Core MUST three-way merge the value its writer last saw of the column (the newest commit on its chain that authored the column, as that commit sent it, or else the accepted version the chain was built on), the value it holds and the write's value at token boundaries: changes to disjoint parts of the base all apply, a change both sides made applies once, inserts at one point apply in seq order, overlapping pure inserts and deletes union (as do one side's inserts with the other's replacements), and of two overlapping replacements the write sequenced later wins. Otherwise, or when the merge would spend more than a fixed budget of diff steps, the write's value stands as sent. On a nullable column a NULL base merges as the empty string, and a write of NULL or a write over a held NULL stands as sent: the later write wins the whole value. For a version whose value a merge changed, Core MUST also keep that version as its writer sent it, flagged as sent in its state bits, and MUST NOT list, sync or read it as a version.
-- `INV-HIST-25`: A table MAY declare latest-only history retention. Retention MUST NOT change the table's `SchemaVersionId`, the structural `SchemaHash` MUST cover it only when it is latest-only, and a schema MUST fail to compile when a latest-only table declares `branchBy` or a text-merging column.
+- `INV-HIST-25`: A table MAY declare latest-only history retention. Retention MUST NOT change the table's `SchemaVersionId`, the structural `SchemaHash` MUST cover it only when it is latest-only, a schema MUST fail to compile when a latest-only table declares `branchBy` or a text-merging column, and a deploy MUST be refused when it switches a table of the active schema to latest-only without confirming that it drops history.
 - `INV-HIST-26`: For each row of a latest-only table a node MUST keep its current version, the newest accepted version it superseded, and every version above that (its own or a relay's unsettled ones), and SHOULD drop the older accepted versions when it writes or receives the next one. A value large enough to be chunked MUST be refused there with a typed not-supported error, since its chunks name versions the table drops.
 - `INV-HIST-27`: A read of a latest-only table that needs a version the table drops MUST fail with a typed not-supported error or ship whole, never answer with another version; a subscription resuming over a latest-only input that changed since it settled MUST open fresh; and a write to a latest-only table is never maybe conflicting.
 - `INV-HIST-11`: Content and deletion state MUST be separate layers; content writes MUST NOT change the deletion register, and a current `DeletionEvent::Deleted` MUST hide the content-current row until a current `DeletionEvent::Restored` reveals it.
@@ -798,8 +798,12 @@ a schema that differs from its predecessor only in its structural hash; it
 deploys without a migration, joined by an empty lens like an index-only
 change. The newest deployed schema decides a stored table's retention.
 Turning latest-only on loses the history a row had, at that row's next
-write, and cannot be undone; turning it off keeps every version from then
-on (`INV-HIST-25`).
+write, and cannot be undone, so a deploy that switches a table of the
+active schema to latest-only is refused (`drops_history`, naming the
+tables) unless it confirms with `--allow-dropping-history`
+(`allowDroppingHistory` in the deploy API). Tables are matched by name, so
+a table renamed in the same deploy is not caught. Turning it off keeps
+every version from then on (`INV-HIST-25`).
 
 A latest-only node keeps each row's current version, the newest accepted
 version it superseded, and the versions above that: its own unsettled
