@@ -225,7 +225,7 @@ as the shared handle; optional ws/wss transport URLs normalize to HTTP(S) only
 for comparison. The exact acting principal and active transport are excluded
 from the filename. Linked principals share the durable account root only after
 the prior live identity closes. Same-principal contexts share the relay while
-each drawing its own foreground node and owning its own shutdown lifetime.
+owning independent foreground node leases and shutdown lifetimes.
 
 The shared TypeScript JWT decoder supplies local advisory provider claims to
 native admission and same-identity refresh. Rust uses the common JavaScript
@@ -270,15 +270,18 @@ backend admission adapter.
 Backend handles use the nil SYSTEM account UUID and exact identity
 `{ issuer: "urn:jazz:system", subject: backendNodeUUID }`, and SYSTEM
 provenance on rows the backend writes names that same UUID. A persistent
-backend's runtime also writes transactions as that node; a memory backend's
-runtime draws a fresh node per open (its counter starts over), so its
-transaction ids name that node while its provenance keeps the backend's. Backend credential material lives in a
+backend's runtime also writes transactions as that node. A memory backend's
+counter starts over on every open, so the handle pools one random version-4
+node of its own: its transaction ids name that node while its provenance keeps
+the backend's. Backend credential material lives in a
 private WeakMap; it never enters snapshots or persisted account preferences.
 Graceful backend shutdown fences all request scopes and waits for every
 transaction originating on its node, regardless of the credited user. Trusted
 backend reopen recovers those same pending uploads. Ordinary user barriers
 remain author-scoped. Reopening an in-memory backend handle after a failed
-transition opens a fresh runtime node, so it carries no clock state over.
+transition reuses its pooled node and seeds that node's retained clock
+high-water before accepting new writes; an incomplete clock handoff prevents
+reuse. This receipt is process-local and adds no durable encoding.
 
 Copied handles and SYSTEM identity objects confer no authority. Ordinary JWT
 registration, login, linking, and token extraction cannot mint or use backend

@@ -42,21 +42,12 @@ import {
   createBrowserWorkerFingerprint,
 } from "./browser-worker-config.js";
 import { getRuntimeSchemaCacheKey } from "../drivers/schema-wire.js";
-import { deterministicBytes } from "./deterministic-bytes.js";
+import { randomNodeUuidBytes } from "./runtime-entropy.js";
 
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 
 function setGlobalWasmLogLevel(level?: DbConfig["logLevel"]): void {
   (globalThis as any).__JAZZ_WASM_LOG_LEVEL = level ?? DEFAULT_WASM_LOG_LEVEL;
-}
-
-function randomBytes(): Uint8Array {
-  const bytes = new Uint8Array(16);
-  if (globalThis.crypto?.getRandomValues) {
-    globalThis.crypto.getRandomValues(bytes);
-    return bytes;
-  }
-  return deterministicBytes(`${Date.now()}:${Math.random()}`);
 }
 
 function sessionFromConfig(config: DbConfig) {
@@ -195,9 +186,11 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     const selfSignedClientProof = selfSignedClientProofFromConfig(config, session);
     const backendMode = isBackendRuntime(config);
     // The persistent worker owns durable recovery. A foreground runtime owns
-    // only its live optimistic writes and counts its transactions from 1, so
-    // every open draws a node of its own: transaction ids are `seq@node`.
-    const node = randomBytes();
+    // only its live optimistic writes, so every new runtime needs a fresh node
+    // identity. Reusing a deterministic node across independently opened tabs
+    // would let their fresh HLC registers mint the same TxId before either has
+    // observed the other's first commit.
+    const node = foregroundNodeLease?.node.slice() ?? randomNodeUuidBytes();
     const author = authorBytesForSession(runtimeAuthorFromConfig(config));
     const flushEvery = initialSyncFlushEvery(config);
     const browserMode = isPersistentBrowserConfig(config);
@@ -212,6 +205,9 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       { appId: config.appId, thresholdMs: config.slowQueryThresholdMs },
       migrations,
     );
+    if (foregroundNodeLease) {
+      mainThreadPeerRuntime.seedForegroundTxTimeHighWater(foregroundNodeLease.confirmedTxTime);
+    }
     if (browserMode) {
       mainThreadPeerRuntime.setNonDurableClient();
       if (!foregroundNodeLease) {
@@ -256,6 +252,22 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       runtimeSources: browserWorkerRuntimeSources(config),
       dbName,
       storageOwner: createBrowserStorageOwner(config),
+    });
+  }
+
+  override async acquireForegroundNodeLease(config: DbConfig) {
+    if (!isNodeRuntime() || (config.driver?.type ?? "persistent") !== "persistent") {
+      return undefined;
+    }
+    // This guarded dynamic import keeps Node filesystem code out of the path
+    // executed by browser/RN bundles while remaining visible to Node test and
+    // package tooling.
+    const { acquireNodeForegroundNodeLease } =
+      await import("./native-runtime/node-foreground-node-lease.js");
+    return await acquireNodeForegroundNodeLease({
+      appId: config.appId,
+      env: config.env ?? "dev",
+      authScope: createBrowserAuthSessionKey(config),
     });
   }
 
@@ -435,6 +447,10 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
 
 function isBrowserRuntime(): boolean {
   return typeof window !== "undefined" && typeof Worker !== "undefined";
+}
+
+function isNodeRuntime(): boolean {
+  return typeof process !== "undefined" && Boolean(process.versions?.node);
 }
 
 function isPersistentBrowserConfig(config: DbConfig): boolean {

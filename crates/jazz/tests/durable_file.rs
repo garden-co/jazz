@@ -373,6 +373,54 @@ fn a_reopened_replica_whose_uploads_settled_continues_after_its_own_seqs() {
     );
 }
 
+/// A node handed to a fresh in-memory database (a browser tab's
+/// main-thread peer under a leased node) continues after the previous
+/// holder's seqs: the authority deduplicates uploads by transaction id, so a
+/// reused one would silently drop the new write.
+#[test]
+fn a_fresh_database_under_a_reused_node_continues_after_the_seeded_floor() {
+    let server = block_on(Db::open_history_complete(config(0xed))).unwrap();
+    let connect = |client: &Db| {
+        let (client_side, server_side) = duplex();
+        block_on(client.connect_upstream(client_side));
+        server
+            .accept_subscriber(server_side, AuthorSubject::SYSTEM)
+            .unwrap();
+    };
+    let insert = |db: &Db, n: u64| {
+        let options = InsertOptions {
+            row_id: Some(row(n)),
+            ..Default::default()
+        };
+        let tx = block_on(db.insert("items", item(n), options))
+            .unwrap()
+            .mergeable_tx_id();
+        drive(
+            &[db, &server, db],
+            db.wait_for_transaction(tx, DurabilityTier::Global),
+        )
+        .unwrap();
+        tx
+    };
+    let high_water = {
+        let first = block_on(Db::open(config(6))).unwrap();
+        connect(&first);
+        for n in 0..2 {
+            insert(&first, n);
+        }
+        first.seq_high_water()
+    };
+    let second = block_on(Db::open(config(6))).unwrap();
+    second.seed_seq_floor(high_water);
+    connect(&second);
+    assert!(insert(&second, 2) > high_water);
+    assert_eq!(
+        count(&server),
+        3,
+        "the new write was applied, not deduplicated"
+    );
+}
+
 #[test]
 fn a_server_restart_between_apply_and_ack_does_not_apply_twice() {
     let server_path = scratch("server");

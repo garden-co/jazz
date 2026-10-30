@@ -180,12 +180,13 @@ it("polls ordered snapshot capture and releases its native observation", async (
   await runtime.close();
 });
 
-it("quiesces foreground mutation admission before handing its lease back", async () => {
+it("quiesces foreground mutation admission before capturing its final HLC", async () => {
   const insert = vi.fn(() => ({ ...fakeWrite(), rowId: new Uint8Array(16) }));
   const runtime = new NativeRuntimeAdapter(
     {
       openMemory: () =>
         fakeDb({
+          foregroundTxTimeHighWater: () => 41n,
           insert,
           tick: () => undefined,
         }),
@@ -200,9 +201,9 @@ it("quiesces foreground mutation admission before handing its lease back", async
     true,
   );
   const preexisting = beginTestBatch(runtime);
-  await runtime.quiesceForeground();
-  // An already-open batch cannot mint after the handoff, nor can a new
-  // synchronous batch start.
+  expect(await runtime.quiesceForegroundTxTimeHighWater()).toBe(41n);
+  // This is the P0 handoff ordering: an already-open batch cannot mint H+1
+  // after the high-water was captured, nor can a new synchronous batch start.
   expect(() => runtime.commitTransaction(preexisting)).toThrow("native runtime is closed");
   expect(() => beginTestBatch(runtime)).toThrow("native runtime is closed");
   expect(() => runtime.insert("todos", { title: { type: "Text", value: "late" } })).toThrow(
@@ -212,7 +213,57 @@ it("quiesces foreground mutation admission before handing its lease back", async
   await runtime.close();
 });
 
-it("drains an already admitted streaming mutation before the foreground handoff", async () => {
+it("keeps core ticks running while a foreground handoff drains started native work", async () => {
+  let scheduleTick: ((urgency: "immediate" | "deferred") => void) | undefined;
+  let releaseNode!: () => void;
+  const nodeReleased = new Promise<void>((resolve) => {
+    releaseNode = resolve;
+  });
+  let ticks = 0;
+  const runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          setTickScheduler: (callback: (urgency: "immediate" | "deferred") => void) => {
+            scheduleTick = callback;
+          },
+          // A started native future holds the node lock until a core tick
+          // completes its host continuation; the HLC readout waits for that lock.
+          foregroundTxTimeHighWater: async () => {
+            scheduleTick?.("immediate");
+            await nodeReleased;
+            return 9n;
+          },
+          tick: () => {
+            ticks += 1;
+            releaseNode();
+          },
+        }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+  );
+  const handoff = runtime.quiesceForegroundTxTimeHighWater();
+  const stalled = new Promise<never>((_resolve, reject) => {
+    setTimeout(() => reject(new Error("the handoff waited for a core tick that never ran")), 1_000);
+  });
+  await expect(Promise.race([handoff, stalled])).resolves.toBe(9n);
+  expect(ticks).toBeGreaterThan(0);
+  // Once the drain has finished, the closed runtime schedules no further ticks.
+  ticks = 0;
+  scheduleTick?.("immediate");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(ticks).toBe(0);
+  await runtime.close();
+});
+
+it("drains an already admitted streaming mutation before returning its foreground HLC", async () => {
   let highWater = 7n;
   let releaseSource!: () => void;
   const sourceGate = new Promise<void>((resolve) => {
@@ -230,6 +281,7 @@ it("drains an already admitted streaming mutation before the foreground handoff"
     {
       openMemory: () =>
         fakeDb({
+          foregroundTxTimeHighWater: () => highWater,
           beginStreamingMutation,
           tick: () => undefined,
         }),
@@ -258,16 +310,16 @@ it("drains an already admitted streaming mutation before the foreground handoff"
   expect(beginStreamingMutation).toHaveBeenCalledOnce();
 
   let handoffResolved = false;
-  const handoff = runtime.quiesceForeground().then(() => {
+  const handoff = runtime.quiesceForegroundTxTimeHighWater().then((value) => {
     handoffResolved = true;
+    return value;
   });
   await Promise.resolve();
   expect(handoffResolved).toBe(false);
 
   releaseSource();
   await stream;
-  await handoff;
-  expect(highWater).toBe(42n);
+  expect(await handoff).toBe(42n);
   await runtime.close();
 });
 
@@ -285,6 +337,7 @@ it("waits for a failed stream's native abort before foreground handoff", async (
     {
       openMemory: () =>
         fakeDb({
+          foregroundTxTimeHighWater: () => 7n,
           beginStreamingMutation: () => ({
             push: () => undefined,
             finish: () => fakeWrite(),
@@ -315,7 +368,7 @@ it("waits for a failed stream's native abort before foreground handoff", async (
     })(),
   );
   await Promise.resolve();
-  const handoff = runtime.quiesceForeground();
+  const handoff = runtime.quiesceForegroundTxTimeHighWater();
   releaseSource();
   await vi.waitFor(() => expect(abort).toHaveBeenCalledOnce());
 
@@ -328,11 +381,11 @@ it("waits for a failed stream's native abort before foreground handoff", async (
 
   releaseAbort();
   await expect(stream).rejects.toThrow("source cancelled");
-  await expect(handoff).resolves.toBeUndefined();
+  await expect(handoff).resolves.toBe(7n);
   await runtime.close();
 });
 
-it("does not let a concurrent close preempt the foreground drain", async () => {
+it("does not let a concurrent close preempt foreground HLC capture", async () => {
   const order: string[] = [];
   let releaseSource!: () => void;
   const sourceGate = new Promise<void>((resolve) => {
@@ -342,12 +395,13 @@ it("does not let a concurrent close preempt the foreground drain", async () => {
     {
       openMemory: () =>
         fakeDb({
+          foregroundTxTimeHighWater: () => {
+            order.push("high-water");
+            return 42n;
+          },
           beginStreamingMutation: () => ({
             push: () => undefined,
-            finish: () => {
-              order.push("finish");
-              return fakeWrite();
-            },
+            finish: () => fakeWrite(),
             abort: () => true,
           }),
           tick: () => undefined,
@@ -377,13 +431,13 @@ it("does not let a concurrent close preempt the foreground drain", async () => {
     })(),
   );
   await Promise.resolve();
-  const handoff = runtime.quiesceForeground();
+  const handoff = runtime.quiesceForegroundTxTimeHighWater();
   const close = runtime.close();
   releaseSource();
   await stream;
-  await expect(handoff).resolves.toBeUndefined();
+  await expect(handoff).resolves.toBe(42n);
   await close;
-  expect(order).toEqual(["finish", "close"]);
+  expect(order).toEqual(["high-water", "close"]);
 });
 
 it("awaits the binding-owned native close promise", async () => {
@@ -395,6 +449,7 @@ it("awaits the binding-owned native close promise", async () => {
     {
       openMemory: () =>
         fakeDb({
+          foregroundTxTimeHighWater: () => 0n,
           tick: () => undefined,
           close: () => closeGate,
         }),
@@ -434,6 +489,7 @@ it("waits for every concurrently admitted stream before foreground handoff", asy
     {
       openMemory: () =>
         fakeDb({
+          foregroundTxTimeHighWater: () => highWater,
           beginStreamingMutation: () => ({
             push: () => undefined,
             finish: () => {
@@ -474,7 +530,7 @@ it("waits for every concurrently admitted stream before foreground handoff", asy
     makeSource(secondGate, "two"),
   );
   await Promise.resolve();
-  const handoff = runtime.quiesceForeground();
+  const handoff = runtime.quiesceForegroundTxTimeHighWater();
   let handoffResolved = false;
   void handoff.then(() => {
     handoffResolved = true;
@@ -487,8 +543,7 @@ it("waits for every concurrently admitted stream before foreground handoff", asy
 
   releaseSecond();
   await second;
-  await handoff;
-  expect(highWater).toBe(9n);
+  await expect(handoff).resolves.toBe(9n);
   await runtime.close();
 });
 

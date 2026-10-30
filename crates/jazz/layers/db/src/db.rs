@@ -1358,11 +1358,19 @@ impl Db {
         Ok(db)
     }
 
-    /// The newest commit seq this database has handed out; its own
-    /// transaction ids are `seq@node`. A fresh database counts from 1 under
-    /// a node drawn for it alone, so no id is ever reused.
+    /// The newest commit seq this database has handed out; its transaction
+    /// ids are `(seq, node)`. A host that later gives the same node to a
+    /// fresh (in-memory) database seeds it with this through
+    /// [`Db::seed_seq_floor`], so no transaction id is reused: the
+    /// authority deduplicates uploads by id and would drop the new write.
     pub fn seq_high_water(&self) -> u64 {
         self.inner.borrow().seq
+    }
+
+    /// Never hand out a commit seq at or below `floor`.
+    pub fn seed_seq_floor(&self, floor: u64) {
+        let mut inner = self.inner.borrow_mut();
+        inner.seq = inner.seq.max(floor);
     }
 
     /// Every SQLite store holds complete history; this one is also the

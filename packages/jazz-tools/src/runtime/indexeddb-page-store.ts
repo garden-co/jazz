@@ -3,6 +3,7 @@ import {
   type BrowserPhysicalDatabaseEpoch,
 } from "./browser-physical-database-epoch.js";
 import { UnsupportedStorageCodecsError } from "./unsupported-storage-codecs-error.js";
+import { randomNodeUuidBytes } from "./runtime-entropy.js";
 
 export { UnsupportedStorageCodecsError };
 
@@ -739,14 +740,14 @@ function relaxedReadWriteTransaction(db: IDBDatabase, stores: string[]): IDBTran
 }
 
 function randomReplicaNodeBytes(): Uint8Array {
-  const bytes = new Uint8Array(INDEXEDDB_REPLICA_NODE_BYTES);
   if (!globalThis.crypto?.getRandomValues) {
     throw new Error(
       "Browser storage requires cryptographic random values for its replica identity",
     );
   }
-  globalThis.crypto.getRandomValues(bytes);
-  return bytes;
+  return randomNodeUuidBytes(
+    globalThis.crypto.getRandomValues(new Uint8Array(INDEXEDDB_REPLICA_NODE_BYTES)),
+  );
 }
 
 function nodeBytesToBuffer(bytes: Uint8Array): ArrayBuffer {

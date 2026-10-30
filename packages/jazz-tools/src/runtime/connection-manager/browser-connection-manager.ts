@@ -571,14 +571,14 @@ export class BrowserConnectionManager extends ConnectionManager {
                 // Even after an ordinary flush failure, close mutation admission
                 // and drain started writes before releasing this identity. A
                 // failed flush cannot establish a clean durable handoff.
-                await runtime.quiesceForeground();
+                const highWater = await runtime.quiesceForegroundTxTimeHighWater();
                 if (scope?.resetReason) return;
                 if (scope?.leaseWorkerReplaced && lease.releaseAfterWorkerReplacement) {
                   lease.releaseAfterWorkerReplacement(
                     new Error("Foreground lease owner was replaced"),
                   );
                 } else if (flushFailed) await lease.retire();
-                else await lease.returnWithHighWater(lease.confirmedTxTime);
+                else await lease.returnWithHighWater(highWater);
               }
             } catch (error) {
               if (error === scope?.resetReason) return;

@@ -1,4 +1,3 @@
-import { randomBytes } from "node:crypto";
 import { accountRegistryUrl } from "../accounts/context.js";
 import { NapiDb } from "jazz-napi";
 import type { JWK } from "jose";
@@ -15,6 +14,7 @@ import type { AppContext, Session } from "../runtime/context.js";
 import { RuntimeSource, type RuntimeClientContext } from "../runtime/runtime-source.js";
 import { Db, type DbConfig } from "../runtime/db.js";
 import { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
+import { randomNodeUuidBytes } from "../runtime/runtime-entropy.js";
 import { shippedMigrations, type ClientMigrations } from "../runtime/client-migrations.js";
 import { DbAccessContext } from "../runtime/db-access-context.js";
 import { canonicalAuthorSubject, withCanonicalUser } from "../runtime/author-id.js";
@@ -95,6 +95,18 @@ type ResolvedBackendContextConfig = BackendContextConfig & {
   allowLocalFirstAuth: boolean;
 };
 
+/**
+ * @internal A memory handle retains its node, and that node's clock, across
+ * failed-transition reopen: its runtimes reuse one pooled node rather than
+ * minting a new one per open.
+ */
+export interface BackendNodeClock {
+  /** The pooled node, a random version-4 UUID. */
+  node: Uint8Array;
+  initialHighWater?: bigint;
+  closed(highWater: bigint): void;
+}
+
 type FlushableRuntime = Runtime & { flush?: () => void };
 
 /** Pre-listener mutation errors a backend context retains for its first listener. */
@@ -141,6 +153,7 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
     private readonly config: ResolvedBackendContextConfig,
     private readonly nodeIdentityScope: string,
     private readonly nodeIdentity?: Uint8Array,
+    private readonly nodeClock?: BackendNodeClock,
   ) {
     super();
     this.nativeConnection = {
@@ -197,8 +210,9 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
     this.initializedSchemaJson = schemaJson;
     const env = this.config.env ?? "dev";
     // SYSTEM provenance names this stable node. A persistent store keeps its
-    // transaction counter, so it writes as that node too; a memory store
-    // starts its counter over on every open, so it draws a node of its own
+    // transaction counter, so it writes as that node too. A memory store
+    // starts its counter over on every open, so it writes as a random node:
+    // its handle's pooled one (with that node's clock), or else a fresh one
     // (transaction ids are `seq@node`).
     const systemNode =
       this.nodeIdentity ??
@@ -207,7 +221,7 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
     this.runtime = new NativeRuntimeAdapter(
       NapiDb,
       schema,
-      persistent ? systemNode : new Uint8Array(randomBytes(16)),
+      persistent ? systemNode : (this.nodeClock?.node.slice() ?? randomNodeUuidBytes()),
       authorBytesForSession({ issuer: "https://jazz.invalid", user_id: "backend-open" }),
       1,
       true,
@@ -226,6 +240,11 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
       },
     );
 
+    if (this.nodeClock?.initialHighWater !== undefined) {
+      if (!(this.runtime instanceof NativeRuntimeAdapter))
+        throw new Error("Backend node clock requires the native runtime");
+      this.runtime.seedForegroundTxTimeHighWater(this.nodeClock.initialHighWater);
+    }
     this.client = JazzClient.connectWithRuntime(
       this.runtime,
       {
@@ -318,7 +337,12 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
     this.rejectReconnectWaiters(this.shutdownError());
     const client = this.client;
     const shutdown = this.enqueueTransportTransition(async () => {
+      const highWater =
+        this.nodeClock && this.runtime instanceof NativeRuntimeAdapter
+          ? await this.runtime.quiesceForegroundTxTimeHighWater()
+          : (this.nodeClock?.initialHighWater ?? 0n);
       await client?.shutdown();
+      this.nodeClock?.closed(highWater);
       this.client = undefined;
       this.runtime = undefined;
       this.initializedSchemaJson = undefined;
@@ -572,7 +596,11 @@ export class JazzContext {
   private readonly nodeIdentityScope: string;
   private readonly coreSource: BackendRuntimeSource;
 
-  constructor(config: BackendContextConfig, nodeIdentity?: Uint8Array) {
+  constructor(
+    config: BackendContextConfig,
+    nodeIdentity?: Uint8Array,
+    nodeClock?: BackendNodeClock,
+  ) {
     assertValidBackendConfig(config);
     this.config = {
       ...config,
@@ -583,7 +611,12 @@ export class JazzContext {
       config.driver.type === "persistent"
         ? config.driver.dataPath
         : `memory:${Date.now()}:${Math.random()}`;
-    this.coreSource = new BackendRuntimeSource(this.config, this.nodeIdentityScope, nodeIdentity);
+    this.coreSource = new BackendRuntimeSource(
+      this.config,
+      this.nodeIdentityScope,
+      nodeIdentity,
+      nodeClock,
+    );
   }
 
   /** The migrations the app behind `source` ships (see {@link ClientMigrations}). */

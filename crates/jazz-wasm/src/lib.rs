@@ -1603,6 +1603,23 @@ impl WasmDb {
             .map_err(host_error)
     }
 
+    /// The newest transaction time this database handed out under its
+    /// node (a `TxTime` is the commit seq). A leased node's next holder
+    /// seeds it through `seedForegroundTxTimeHighWater`.
+    #[wasm_bindgen(js_name = foregroundTxTimeHighWater)]
+    pub fn foreground_tx_time_high_water(&self) -> Result<js_sys::Promise, JsValue> {
+        let high_water = self.binding()?.db.seq_high_water();
+        Ok(js_sys::Promise::resolve(&JsValue::from(high_water)))
+    }
+
+    /// Continue after a previous holder of this node: no transaction time
+    /// at or below `high_water` is reused.
+    #[wasm_bindgen(js_name = seedForegroundTxTimeHighWater)]
+    pub fn seed_foreground_tx_time_high_water(&self, high_water: u64) -> Result<(), JsValue> {
+        self.binding()?.db.seed_seq_floor(high_water);
+        Ok(())
+    }
+
     /// Connect to the server over byte frames the host carries: each frame
     /// is one postcard `SyncMessage`.
     #[wasm_bindgen(js_name = connectUpstream)]
