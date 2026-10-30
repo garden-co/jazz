@@ -2198,6 +2198,7 @@ dependencies = [
  "jazz-native-transport",
  "jazz-server",
  "jazz-testkit",
+ "jazz-text",
  "libc",
  "postcard",
  "reqwest",
