@@ -8,8 +8,9 @@
  */
 export type TextSide = "before" | "after";
 
-/** A position in a text value (W3C text quote selector, plus a side). */
-export interface TextAnchor {
+/** A position in a text value (W3C text quote selector, plus a side). Plain
+ * JSON, so it can be stored in a `s.json()` column as is. */
+export type TextAnchor = {
   /** The value's version that `position` counts in, if known. */
   version?: number;
   /** Where to look first. */
@@ -18,32 +19,32 @@ export interface TextAnchor {
   side: TextSide;
   before: string;
   after: string;
-}
+};
 
 /** A span of a text value: the text it covered and the text around it. */
-export interface TextRange {
+export type TextRange = {
   version?: number;
   start?: number;
   end?: number;
   before: string;
   matched: string;
   after: string;
-}
+};
 
 /** Where an anchor landed: `confidence` falls as its text changed, and
  * `ambiguous` says another place matched about as well. */
-export interface ResolvedTextAnchor {
+export type ResolvedTextAnchor = {
   position: number;
   confidence: number;
   ambiguous: boolean;
-}
+};
 
-export interface ResolvedTextRange {
+export type ResolvedTextRange = {
   start: number;
   end: number;
   confidence: number;
   ambiguous: boolean;
-}
+};
 
 export interface TextAnchors {
   captureAnchor(text: string, position: number, side: TextSide, version?: number): TextAnchor;

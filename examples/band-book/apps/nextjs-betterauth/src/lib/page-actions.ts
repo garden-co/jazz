@@ -15,6 +15,28 @@ export function createPage(
   }).value;
 }
 
+/** A song sheet is a page plus its rich-text body, written together. */
+export async function createSongSheet(
+  db: Db,
+  input: { workspaceId: string; parentId: string | null; title?: string; body?: string },
+): Promise<Page> {
+  const result = await db.transaction((tx) => {
+    const page = tx.insert(app.pages, {
+      workspaceId: input.workspaceId,
+      parentId: input.parentId,
+      title: input.title ?? "",
+      kind: "song",
+    });
+    tx.insert(app.songSheets, {
+      workspaceId: input.workspaceId,
+      pageId: page.id,
+      body: input.body ?? "",
+    });
+    return page;
+  });
+  return result.value;
+}
+
 /**
  * An issue is a page under the issues database plus a row of properties. Both
  * rows commit together, so no client ever sees an issue page without its
@@ -71,18 +93,25 @@ export async function deletePageTree(
   const byDepthDesc = [...ids].sort((a, b) => tree.depth(b) - tree.depth(a));
   const inTree = { pageId: { in: ids } };
   const result = await db.transaction(async (tx) => {
-    const [blocks, attachments, issues, grants, invites] = await Promise.all([
-      tx.all(app.blocks.where(inTree).select("pageId")),
-      tx.all(app.attachments.where(inTree).select("pageId")),
-      tx.all(app.issues.where(inTree).select("pageId")),
-      tx.all(app.pageGrants.where(inTree).select("pageId")),
-      tx.all(app.invites.where(inTree).select("pageId")),
-    ]);
+    const [blocks, attachments, issues, grants, invites, sheets, comments, presence] =
+      await Promise.all([
+        tx.all(app.blocks.where(inTree).select("pageId")),
+        tx.all(app.attachments.where(inTree).select("pageId")),
+        tx.all(app.issues.where(inTree).select("pageId")),
+        tx.all(app.pageGrants.where(inTree).select("pageId")),
+        tx.all(app.invites.where(inTree).select("pageId")),
+        tx.all(app.songSheets.where(inTree).select("pageId")),
+        tx.all(app.sheetComments.where(inTree).select("pageId")),
+        tx.all(app.sheetPresence.where(inTree).select("pageId")),
+      ]);
     for (const row of blocks) tx.delete(app.blocks, row.id);
     for (const row of attachments) tx.delete(app.attachments, row.id);
     for (const row of issues) tx.delete(app.issues, row.id);
     for (const row of grants) tx.delete(app.pageGrants, row.id);
     for (const row of invites) tx.delete(app.invites, row.id);
+    for (const row of sheets) tx.delete(app.songSheets, row.id);
+    for (const row of comments) tx.delete(app.sheetComments, row.id);
+    for (const row of presence) tx.delete(app.sheetPresence, row.id);
     for (const id of byDepthDesc) tx.delete(app.pages, id);
   });
   await result.wait(durability);

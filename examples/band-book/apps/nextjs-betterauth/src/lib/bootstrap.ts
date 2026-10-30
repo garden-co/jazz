@@ -86,6 +86,32 @@ export async function ensureDemoWorkspace(
             { id: id(`issue:${page.key}`), ...at() },
           );
         }
+        if (page.sheet !== undefined) {
+          tx.insert(
+            app.songSheets,
+            { workspaceId, pageId, body: page.sheet },
+            { id: id(`sheet:${page.key}`), ...at() },
+          );
+          (page.comments ?? []).forEach((comment, index) =>
+            tx.insert(
+              app.sheetComments,
+              {
+                workspaceId,
+                pageId,
+                author: account,
+                // An authored range: the quote alone finds its place.
+                range: {
+                  before: comment.before ?? "",
+                  matched: comment.matched,
+                  after: comment.after ?? "",
+                },
+                text: comment.text,
+                resolved: false,
+              },
+              { id: id(`comment:${page.key}:${index}`), ...at() },
+            ),
+          );
+        }
         const insertBlocks = (blocks: SeedBlock[], parentBlockId: string | null, path: string) =>
           blocks.forEach((block, index) => {
             const blockId = id(`block:${page.key}:${path}${index}`);

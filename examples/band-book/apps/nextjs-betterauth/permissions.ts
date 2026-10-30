@@ -169,6 +169,70 @@ const bandBookPermissions = definePermissions(
     policy.attachments.allowUpdate.never();
     policy.attachments.allowDelete.where(allowedTo.update("page"));
 
+    // Song sheets ---------------------------------------------------------------
+    // The sheet's text belongs to its page. Anyone who can read the page can
+    // comment and be seen there; comments are changed by their author or by
+    // the page's editors, and presence rows only by their own account.
+    const onSongPage = (row: {
+      pageId: RowContext<Page>["id"];
+      workspaceId: RowContext<Page>["workspaceId"];
+    }) => policy.pages.exists.where({ id: row.pageId, workspaceId: row.workspaceId, kind: "song" });
+    policy.songSheets.allowRead.where(allowedTo.read("page"));
+    policy.songSheets.allowInsert.where((sheet) =>
+      allOf([allowedTo.update("page"), onSongPage(sheet)]),
+    );
+    policy.songSheets.allowUpdate.whereOld(allowedTo.update("page")).whereNew((sheet) =>
+      allOf([
+        allowedTo.update("page"),
+        policy.songSheets.exists.where({
+          id: sheet.id,
+          pageId: sheet.pageId,
+          workspaceId: sheet.workspaceId,
+        }),
+      ]),
+    );
+    policy.songSheets.allowDelete.where(allowedTo.update("page"));
+
+    policy.sheetComments.allowRead.where(allowedTo.read("page"));
+    policy.sheetComments.allowInsert.where((comment) =>
+      allOf([{ author: me }, allowedTo.read("page"), onSongPage(comment)]),
+    );
+    policy.sheetComments.allowUpdate
+      .whereOld((comment) => anyOf([{ author: me }, allowedTo.update("page")]))
+      .whereNew((comment) =>
+        allOf([
+          allowedTo.read("page"),
+          policy.sheetComments.exists.where({
+            id: comment.id,
+            pageId: comment.pageId,
+            workspaceId: comment.workspaceId,
+            author: comment.author,
+          }),
+        ]),
+      );
+    policy.sheetComments.allowDelete.where((comment) =>
+      anyOf([{ author: me }, allowedTo.update("page")]),
+    );
+
+    policy.sheetPresence.allowRead.where(allowedTo.read("page"));
+    policy.sheetPresence.allowInsert.where((presence) =>
+      allOf([{ account: me }, allowedTo.read("page"), onSongPage(presence)]),
+    );
+    policy.sheetPresence.allowUpdate.whereOld({ account: me }).whereNew((presence) =>
+      allOf([
+        { account: me },
+        policy.sheetPresence.exists.where({
+          id: presence.id,
+          pageId: presence.pageId,
+          workspaceId: presence.workspaceId,
+        }),
+      ]),
+    );
+    // Page editors can clear presence too, so deleting a page leaves nothing.
+    policy.sheetPresence.allowDelete.where((presence) =>
+      anyOf([{ account: me }, allowedTo.update("page")]),
+    );
+
     // Issues ------------------------------------------------------------------
     policy.issues.allowRead.where(allowedTo.read("page"));
     policy.issues.allowInsert.where((issue) =>
