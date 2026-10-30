@@ -47,6 +47,14 @@ uuid_id! {
     NodeUuid
 }
 
+impl NodeUuid {
+    /// A random version-4 node (RFC 9562) from 16 CSPRNG bytes: the form
+    /// every runtime mints its transaction-issuing nodes in.
+    pub fn random_from(bytes: [u8; 16]) -> Self {
+        Self(uuid::Builder::from_random_bytes(bytes).into_uuid())
+    }
+}
+
 id_newtype! {
     /// Node-local integer alias for compact storage.
     NodeAlias(u64)

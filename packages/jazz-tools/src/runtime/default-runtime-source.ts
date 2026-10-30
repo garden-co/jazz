@@ -42,21 +42,12 @@ import {
   createBrowserWorkerFingerprint,
 } from "./browser-worker-config.js";
 import { getRuntimeSchemaCacheKey } from "../drivers/schema-wire.js";
-import { deterministicBytes } from "./deterministic-bytes.js";
+import { randomNodeUuidBytes } from "./runtime-entropy.js";
 
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 
 function setGlobalWasmLogLevel(level?: DbConfig["logLevel"]): void {
   (globalThis as any).__JAZZ_WASM_LOG_LEVEL = level ?? DEFAULT_WASM_LOG_LEVEL;
-}
-
-function randomBytes(): Uint8Array {
-  const bytes = new Uint8Array(16);
-  if (globalThis.crypto?.getRandomValues) {
-    globalThis.crypto.getRandomValues(bytes);
-    return bytes;
-  }
-  return deterministicBytes(`${Date.now()}:${Math.random()}`);
 }
 
 function sessionFromConfig(config: DbConfig) {
@@ -199,7 +190,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     // identity. Reusing a deterministic node across independently opened tabs
     // would let their fresh HLC registers mint the same TxId before either has
     // observed the other's first commit.
-    const node = foregroundNodeLease?.node.slice() ?? randomBytes();
+    const node = foregroundNodeLease?.node.slice() ?? randomNodeUuidBytes();
     const author = authorBytesForSession(runtimeAuthorFromConfig(config));
     const flushEvery = initialSyncFlushEvery(config);
     const browserMode = isPersistentBrowserConfig(config);
