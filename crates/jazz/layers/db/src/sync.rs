@@ -2086,6 +2086,19 @@ pub(crate) struct Session {
     first_load: BTreeMap<u64, FirstLoadWait>,
     /// The last [`SyncMessage::ConnectionSettled`] position it was sent.
     connection_settled: Option<(Option<[u8; 16]>, u64)>,
+    /// On a relay, how far each relayed subscription was told it is
+    /// settled: as far as its upstream read's own settle, which may pass
+    /// what the relay knows of the connection.
+    settles: BTreeMap<u64, RelayedSettle>,
+}
+
+/// A relayed subscription's settle, forwarded from its upstream read.
+struct RelayedSettle {
+    /// The upstream live read's key.
+    key: String,
+    /// The position the session was last told, once the result settled.
+    sent: Option<u64>,
+    global: bool,
 }
 
 /// A relayed LocalFirst subscription's first-load wait: once `until`
@@ -2136,6 +2149,7 @@ impl Session {
             relayed: BTreeMap::new(),
             first_load: BTreeMap::new(),
             connection_settled: None,
+            settles: BTreeMap::new(),
         }
     }
 
@@ -5665,6 +5679,23 @@ impl Inner {
         })
     }
 
+    /// Whether a relay owes session `index` a position its upstream
+    /// moved: the connection's (`at`), once the session was told one, or
+    /// a settled result's upstream read's.
+    fn owes_positions(&self, index: usize, at: (Option<[u8; 16]>, u64)) -> bool {
+        let session = &self.sessions[index];
+        let Some(client) = &self.client else {
+            return false;
+        };
+        session.connection_settled.is_some_and(|sent| sent != at)
+            || self.relays_upstream()
+                && session.settles.values().any(|settle| {
+                    settle
+                        .sent
+                        .is_some_and(|sent| sent < client.settled_through(&settle.key))
+                })
+    }
+
     /// The seq this store tells its sessions it is complete through. A
     /// relay tells them the authority's seq it knows (its own local seqs
     /// number nothing the authority can check), so a session's snapshot
@@ -5725,20 +5756,12 @@ impl Inner {
             n: client.known_n,
             seq: client.known,
         };
-        let settled = match &read.position {
-            Position::Remote(key) => client
-                .live_reads
-                .get(key)
-                .and_then(|id| client.reads.get(id))
-                .and_then(|read| match &read.lifetime {
-                    ReadLifetime::Live(live) => live.visible,
-                    ReadLifetime::Once { .. } => None,
-                }),
-            Position::At(at) => Some(*at),
-            _ => None,
-        };
-        let through = match settled {
-            Some(at) if at.n == known.n && at.seq > known.seq => at,
+        let through = match &read.position {
+            Position::Remote(key) => Pos {
+                n: known.n,
+                seq: client.settled_through(key),
+            },
+            Position::At(at) if at.n == known.n && at.seq > known.seq => *at,
             _ => known,
         };
         let past = tables.iter().any(|table| {
@@ -6237,6 +6260,23 @@ impl Client {
             return Some(id.time.0);
         }
         self.pending.iter().find(|p| p.id == *id).map(|p| p.tx)
+    }
+
+    /// How far the live read `key` is settled: its own settle, or the
+    /// connection's position when that is further.
+    fn settled_through(&self, key: &str) -> u64 {
+        let visible = self
+            .live_reads
+            .get(key)
+            .and_then(|id| self.reads.get(id))
+            .and_then(|read| match &read.lifetime {
+                ReadLifetime::Live(live) => live.visible,
+                ReadLifetime::Once { .. } => None,
+            });
+        match visible {
+            Some(at) if at.n == self.known_n => at.seq.max(self.known),
+            _ => self.known,
+        }
     }
 
     /// Its host says there is no server: it is the last word on its store.
@@ -7650,6 +7690,7 @@ impl Db {
                     SyncMessage::Rows { .. }
                         | SyncMessage::AccessLost { .. }
                         | SyncMessage::Settled { .. }
+                        | SyncMessage::ConnectionSettled { .. }
                 )
             }) && !inner.sessions.is_empty()
             {
@@ -9402,6 +9443,7 @@ impl Db {
         let mut inner = self.inner.borrow_mut();
         let through = inner.served_through();
         let by = inner.served_by();
+        let relaying = inner.relays_upstream();
         let mut cache: HashMap<(String, RowUuid, Pos), Vec<Image>> = HashMap::new();
         // Rows written since the last tick, with the watch keys they match.
         let written = std::mem::take(&mut inner.since_tick);
@@ -9515,6 +9557,7 @@ impl Db {
                 && masking.is_empty()
                 && inner.sessions[index].idle()
                 && !inner.sessions[index].catalogue_owed
+                && !(relaying && inner.owes_positions(index, (by, through)))
                 && !written_keys
                     .iter()
                     .any(|(_, keys)| keys.iter().any(|k| inner.sessions[index].watch.contains(k)))
@@ -9873,6 +9916,37 @@ impl Db {
                         .collect()
                 });
                 if answered {
+                    // A relayed result is settled as far as its upstream
+                    // read is, which may pass the connection's position.
+                    let relaying = inner.relays_upstream();
+                    let through = match inner.sessions[index].settles.get(&id) {
+                        Some(settle) if relaying => {
+                            let at = inner
+                                .client
+                                .as_ref()
+                                .map_or(through, |client| client.settled_through(&settle.key));
+                            let settle = inner.sessions[index]
+                                .settles
+                                .get_mut(&id)
+                                .expect("just read");
+                            settle.sent = Some(at);
+                            settle.global = global;
+                            at
+                        }
+                        // Served here with no server: once relaying
+                        // again, its upstream read's settles reach the
+                        // session as they move.
+                        Some(_) => {
+                            let settle = inner.sessions[index]
+                                .settles
+                                .get_mut(&id)
+                                .expect("just read");
+                            settle.sent.get_or_insert(0);
+                            settle.global = global;
+                            through
+                        }
+                        None => through,
+                    };
                     settled.push(SyncMessage::Settled {
                         id,
                         through: positions(by, through),
@@ -9997,6 +10071,25 @@ impl Db {
             }
             unreadable
                 .retain(|(table, row, _)| watch.contains(&id_watch(table, *row.0.as_bytes())));
+            // A relayed result whose upstream read settled further, with no
+            // change to its rows here, is told so: its rows may have arrived
+            // through another read, held back until this one settled them.
+            let relaying = inner.relays_upstream();
+            let state = &mut *inner;
+            if let Some(client) = state.client.as_ref().filter(|_| relaying) {
+                for (&id, settle) in state.sessions[index].settles.iter_mut() {
+                    let at = client.settled_through(&settle.key);
+                    if settle.sent.is_some_and(|sent| sent < at) {
+                        settle.sent = Some(at);
+                        settled.push(SyncMessage::Settled {
+                            id,
+                            through: positions(by, at),
+                            members: None,
+                            global: settle.global,
+                        });
+                    }
+                }
+            }
             let mut out = Vec::new();
             // Rows travel by stored names: the versions they are stored by
             // reach the client first, in the `Welcome` it is owed.
@@ -10097,7 +10190,11 @@ impl Db {
                         | SyncMessage::Fate { .. }
                 )
             });
-            if delivers && session.connection_settled != Some((by, through)) {
+            // A relay also passes on each move of its upstream's position
+            // to a session it has delivered to: that position arrives on
+            // its own, after rows the relay may already have served.
+            let forwards = relaying && session.connection_settled.is_some();
+            if (delivers || forwards) && session.connection_settled != Some((by, through)) {
                 session.connection_settled = Some((by, through));
                 out.push(SyncMessage::ConnectionSettled {
                     through: positions(by, through),
@@ -10481,6 +10578,21 @@ impl Db {
                                 (*view).clone(),
                             );
                             inner.sessions[index].relayed.insert(id, read);
+                            // A read with an upstream read settles as far as
+                            // that read (never short of the connection's
+                            // position) while this store relays: with no
+                            // server it serves the read itself and settles it
+                            // here, and once one is back, as far again.
+                            if let Some((key, _)) = attached.as_ref() {
+                                inner.sessions[index].settles.insert(
+                                    id,
+                                    RelayedSettle {
+                                        key: key.clone(),
+                                        sent: None,
+                                        global: false,
+                                    },
+                                );
+                            }
                         }
                         Err(_) => inner.release_remote(
                             &prepared.query,
@@ -10562,6 +10674,7 @@ impl Db {
                 inner.sessions[index].support.remove(&id);
                 inner.sessions[index].first_load.remove(&id);
                 inner.sessions[index].resume.remove(&id);
+                inner.sessions[index].settles.remove(&id);
                 // Rows only this subscription covered go cold: the client
                 // keeps them, unwatched, until a subscription covers them
                 // again and its opening brings them up to date.
