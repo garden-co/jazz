@@ -10,13 +10,19 @@ description: "Why use a higher-level database, how Jazz compares, and what it ch
 
 ## For developers
 
-- Why use a higher-abstraction-level DB at all? Live queries, permissions and merges instead of an API layer you write and maintain
-- Serverless DBs and the tradeoff of early sharding
-- Unsharded Jazz is MIT and free; when you'd need sharding and what it costs
-- Server-first by default, local-first as an optimization where it pays off
+Think of Jazz as a modern Supabase that you host yourself, right next to your app. You get a relational database, auth integration, permissions and a typed client for backend and frontend, with no API layer of your own to write and maintain. Then it goes further:
+
+- **Yours to run.** Deploy it on Vercel, Cloudflare or your own servers instead of a separate hosted service. It scales from zero for small apps up to many shards for big ones. Unsharded Jazz is MIT and free.
+- **Live queries, not change feeds.** Every query can be a subscription. The server keeps results up to date as rows change, including rows that start or stop matching.
+- **Permissions as code.** Policies live next to your schema in TypeScript and apply the same way to backend, thin-client and local-first reads and writes. They're verbose, but agents are good at writing and checking them.
+- **Built-in collaboration.** Edit metadata (`$createdBy`, `$updatedAt`, …), history, drafts and branches, mergeable text, and files and streams, without bolting on extra services.
+- **Local-first when it pays off.** Start with server-first reads and writes. Switch a client to local-first for instant UI and offline support, with the same schema, queries and policies.
 
 ## Compared to
 
+Rough plan: each comparison answers the questions developers actually ask (lock-in, SQL access, migrations, scaling, cost, offline), carries a "last checked" date and only makes claims we can link to.
+
+- Supabase
 - Postgres
 - Plain SQLite
 - Plain Durable Objects
@@ -24,7 +30,6 @@ description: "Why use a higher-level database, how Jazz compares, and what it ch
 - Zero
 - Neon (sync)
 - TanStack DB
-- Each comparison carries a "last checked" date and only claims we can link to
 
 ## For decision-makers
 
