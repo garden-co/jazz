@@ -403,7 +403,9 @@ impl Inner {
             let on = match base.on {
                 BuiltOn::Seq(seq) => Built::Seq(seq),
                 // Only a relay holds versions it shipped a session unsettled.
-                BuiltOn::Upstream { .. } => return Err(unknown_base("an unsettled upstream version")),
+                BuiltOn::Upstream { .. } => {
+                    return Err(unknown_base("an unsettled upstream version"));
+                }
                 BuiltOn::Own { back } => {
                     let tx = sender
                         .1
@@ -514,10 +516,7 @@ impl Inner {
         let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
         let versions = statement
             .query_map([row.0.as_bytes().to_vec()], |r| {
-                Ok((
-                    r.get::<_, Vec<u8>>(0)?,
-                    Pos::from_t(r.get(1)?),
-                ))
+                Ok((r.get::<_, Vec<u8>>(0)?, Pos::from_t(r.get(1)?)))
             })
             .map_err(storage)?
             .collect::<Result<Vec<_>, _>>()

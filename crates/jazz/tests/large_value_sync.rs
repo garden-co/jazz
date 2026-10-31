@@ -485,15 +485,16 @@ fn pulls_answer_only_for_versions_the_reader_may_read() {
         })
         .expect("the doc's image");
     down.borrow_mut().clear();
-    let pull = |table: &str, id: u8, seq: jazz::db::Pos, root: [u8; 32], nodes: Vec<[u8; 32]>| WirePull {
-        table: table.to_owned(),
-        id: *row(id).0.as_bytes(),
-        key: key.clone(),
-        at: seq,
-        root,
-        nodes,
-        span: Some((0, LARGE as u64)),
-    };
+    let pull =
+        |table: &str, id: u8, seq: jazz::db::Pos, root: [u8; 32], nodes: Vec<[u8; 32]>| WirePull {
+            table: table.to_owned(),
+            id: *row(id).0.as_bytes(),
+            key: key.clone(),
+            at: seq,
+            root,
+            nodes,
+            span: Some((0, LARGE as u64)),
+        };
     let mut pulls = vec![
         // The doc's own tree, through its version: answered.
         pull("docs", 1, seq, doc, vec![doc]),
@@ -504,7 +505,9 @@ fn pulls_answer_only_for_versions_the_reader_may_read() {
         pull("docs", 1, seq, doc, vec![unknown]),
     ];
     // Through the draft's own row, at any version: she may read none.
-    pulls.extend((0..seq.seq + 4).map(|seq| pull("drafts", 2, jazz::db::Pos::at(seq), draft, vec![draft])));
+    pulls.extend(
+        (0..seq.seq + 4).map(|seq| pull("drafts", 2, jazz::db::Pos::at(seq), draft, vec![draft])),
+    );
     up.borrow_mut()
         .push_back(SyncMessage::ChunkRequests { pulls });
     block_on(server.tick()).unwrap();

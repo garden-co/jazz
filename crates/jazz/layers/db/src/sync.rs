@@ -123,7 +123,10 @@ impl Pos {
     }
 
     /// Before every unsettled version, after every accepted one.
-    pub const UNSETTLED: Self = Self { n: UPSTREAM, seq: 0 };
+    pub const UNSETTLED: Self = Self {
+        n: UPSTREAM,
+        seq: 0,
+    };
 
     /// Whether the authority numbered the version.
     pub fn accepted(self) -> bool {
@@ -634,9 +637,7 @@ fn rows_messages(mut images: Vec<Image>, tx_ids: Vec<TxName>, limit: usize) -> V
     let mut batch: Vec<Image> = Vec::new();
     let mut bytes = 0usize;
     for (n, image) in sized {
-        let same_commit = batch
-            .last()
-            .is_some_and(|last| last.at == image.at);
+        let same_commit = batch.last().is_some_and(|last| last.at == image.at);
         if !batch.is_empty() && !same_commit && bytes.saturating_add(n) > limit {
             out.push(SyncMessage::Rows {
                 images: std::mem::take(&mut batch),
@@ -768,7 +769,7 @@ impl AsWritten {
 /// How the authority decided a commit (see [`SyncMessage::Fate`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Outcome {
-    /// The commit landed at `at`, per sequencer. `accepted_at` is the time
+    /// The commit landed at authority seq `at`. `accepted_at` is the time
     /// (Unix ms) the authority's clock stamped its writes with: the
     /// `$createdAt`/`$updatedAt` of every write without an explicit time.
     /// `None` when the authority no longer knows it (a resend's recorded
@@ -790,10 +791,7 @@ pub enum Outcome {
     /// it wrote shipped back ahead of the fate as they are, and the session
     /// is complete through `through` with them: a retry's snapshot reads
     /// at it, so it sees what the commit conflicted with.
-    Refused {
-        through: u64,
-        error: WireError,
-    },
+    Refused { through: u64, error: WireError },
 }
 
 impl Outcome {
@@ -1140,8 +1138,7 @@ pub enum SyncMessage {
     ResendWhole {
         rows: Vec<(String, [u8; 16], Vec<u8>, u64)>,
     },
-    /// A read's result is complete through `through`, per sequencer (a
-    /// replica with no server numbers its versions at its own node). It
+    /// A read's result is complete through authority seq `through`. It
     /// speaks for this read alone: the connection's position is
     /// [`SyncMessage::ConnectionSettled`]'s.
     /// `members`: the result's rows, in order: always for a one-shot
@@ -4544,10 +4541,9 @@ impl Inner {
             );
             let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
             let keys: Vec<Vec<u8>> = statement
-                .query_map(
-                    rusqlite::params![row.0.as_bytes().to_vec(), at.t()],
-                    |r| r.get(0),
-                )
+                .query_map(rusqlite::params![row.0.as_bytes().to_vec(), at.t()], |r| {
+                    r.get(0)
+                })
                 .map_err(storage)?
                 .collect::<Result<_, _>>()
                 .map_err(storage)?;
@@ -5634,7 +5630,6 @@ impl Inner {
         }
     }
 
-
     /// The read a replica runs for `read` over stored `tables`. Its
     /// upstream settles each read apart (SPEC 8 §8.4): a live result is
     /// settled as far as its own read's settle, and the connection as far
@@ -5863,10 +5858,7 @@ impl Inner {
             let newer: Option<i64> = self
                 .conn
                 .cached_row(
-                    &format!(
-                        "SELECT 1 FROM {} WHERE _t > ?1 LIMIT 1",
-                        quote(table)
-                    ),
+                    &format!("SELECT 1 FROM {} WHERE _t > ?1 LIMIT 1", quote(table)),
                     [since as i64],
                     |r| r.get(0),
                 )
@@ -6591,8 +6583,8 @@ impl Db {
         true
     }
 
-    /// Become a replica: its versions from here on are its own node's
-    /// (ordered after every server version), and commits are owed to an
+    /// Become a replica: its versions from here on are in its own-pending
+    /// band (ordered after every server version), and commits are owed to an
     /// upstream (uploaded once one connects). A store that will connect
     /// later becomes one before it writes: what it committed before sits at
     /// the authority's positions, which its upstream numbers its own versions
@@ -7834,11 +7826,7 @@ impl Db {
                                     read.view.clone(),
                                     listed,
                                     through,
-                                    if save_after {
-                                        read.watermark
-                                    } else {
-                                        None
-                                    },
+                                    if save_after { read.watermark } else { None },
                                 ));
                             }
                         }
@@ -8067,7 +8055,9 @@ impl Db {
                                 // refusal restores the upstream versions.
                                 session.touched.extend(rows);
                                 let outcome = match &fate {
-                                    Ok(()) if accepted => Outcome::accepted(landed.seq, accepted_at),
+                                    Ok(()) if accepted => {
+                                        Outcome::accepted(landed.seq, accepted_at)
+                                    }
                                     Ok(()) => {
                                         return Err(unsupported(format!(
                                             "commit {tx} accepted at no seq"
@@ -10060,12 +10050,7 @@ impl Db {
             session.unreadable = unreadable;
             let mut seen = HashSet::new();
             images.retain(|image| {
-                seen.insert((
-                    image.table.clone(),
-                    image.id,
-                    image.key.clone(),
-                    image.at,
-                ))
+                seen.insert((image.table.clone(), image.id, image.key.clone(), image.at))
             });
             // The writer's own rows, still at the version its commit
             // produced and exactly as it holds them, settle by its Fate.
@@ -10138,9 +10123,7 @@ impl Db {
             let forwards = relaying && session.connection_settled.is_some();
             if (delivers || forwards) && session.connection_settled != Some(through) {
                 session.connection_settled = Some(through);
-                out.push(SyncMessage::ConnectionSettled {
-                    through,
-                });
+                out.push(SyncMessage::ConnectionSettled { through });
             }
             // A relay's versions of the session's own commits it still
             // uploads are the session's pending writes, which it holds as
@@ -10175,11 +10158,7 @@ impl Db {
                                 &image.table,
                                 true,
                                 "id = ?1 AND _b = ?2 AND _t >= 0 AND _t < ?3 ORDER BY _t DESC",
-                                &[
-                                    &id,
-                                    &image.key,
-                                    &image.at.t(),
-                                ],
+                                &[&id, &image.key, &image.at.t()],
                             )?
                             .into_iter()
                             .find(|base| !is_own(base));
@@ -11194,10 +11173,7 @@ impl Db {
                     }
                     let outcome = match result {
                         Ok(()) => Outcome::accepted(through, accepted_at),
-                        Err(error) => Outcome::Refused {
-                            through,
-                            error,
-                        },
+                        Err(error) => Outcome::Refused { through, error },
                     };
                     inner.sessions[index].outbox.push(SyncMessage::Fate {
                         id,
@@ -12318,10 +12294,19 @@ mod tests {
             Pos::at(0),
             Pos::at(1),
             Pos::at(MAX_SEQ),
-            Pos { n: UPSTREAM, seq: 0 },
-            Pos { n: UPSTREAM, seq: 7 },
+            Pos {
+                n: UPSTREAM,
+                seq: 0,
+            },
+            Pos {
+                n: UPSTREAM,
+                seq: 7,
+            },
             Pos { n: OWN, seq: 1 },
-            Pos { n: OWN, seq: MAX_SEQ },
+            Pos {
+                n: OWN,
+                seq: MAX_SEQ,
+            },
         ];
         for pair in positions.windows(2) {
             assert!(pair[0] < pair[1] && pair[0].t() < pair[1].t(), "{pair:?}");
@@ -12336,13 +12321,22 @@ mod tests {
         // An accepted position is its seq, as every scalar wire position is.
         assert_eq!(Pos::at(42).t(), 42);
         let past = postcard::to_allocvec(&(3u64 << SEQ_BITS)).unwrap();
-        assert!(postcard::from_bytes::<Pos>(&past).is_err(), "no band past OWN");
+        assert!(
+            postcard::from_bytes::<Pos>(&past).is_err(),
+            "no band past OWN"
+        );
     }
 
     #[test]
     fn an_upstreams_own_versions_are_held_in_the_upstream_band() {
         let shipped = Pos { n: OWN, seq: 3 };
-        assert_eq!(shipped.from_upstream(), Pos { n: UPSTREAM, seq: 3 });
+        assert_eq!(
+            shipped.from_upstream(),
+            Pos {
+                n: UPSTREAM,
+                seq: 3
+            }
+        );
         assert_eq!(shipped.from_upstream().to_upstream(), shipped);
         assert_eq!(Pos::at(3).from_upstream(), Pos::at(3));
         assert_eq!(Pos::at(3).to_upstream(), Pos::at(3));

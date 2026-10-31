@@ -54,8 +54,8 @@ pub use sync::{
     ACCEPTED, AccessProof, Acting, BuiltOn, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad,
     FrameJoiner, Image, OWN, Outcome, Pos, ReadSpan, RejectedTransaction, RelationSnapshot,
     RemoteLinkHint, SerializedReadResult, SubscriberId, SyncMessage, Transport, TransportError,
-    TxName, UPSTREAM, Upstream, WireBase, WireChunk, WireChunkRef, WireDelta, WireError, WireKind, WireOp,
-    WirePull, WireTarget, WireTransport, WireTransportAdapter, WireWrite, WriteConflict,
+    TxName, UPSTREAM, Upstream, WireBase, WireChunk, WireChunkRef, WireDelta, WireError, WireKind,
+    WireOp, WirePull, WireTarget, WireTransport, WireTransportAdapter, WireWrite, WriteConflict,
     decode_message, duplex, encode_frames, validate_frame_batch_for_corpus,
 };
 
@@ -261,7 +261,7 @@ pub enum SubscriptionEvent {
 struct ReadSpec {
     include_deleted: bool,
     /// A replica's `ReadTier::Remote` read: its pending local versions
-    /// (at its own node) are left out, and a row they changed
+    /// (in its own-pending band) are left out, and a row they changed
     /// reads as its settled version, as the server lists it. Unlike a
     /// [`ReadSpec::cut`] it stays live.
     settled_only: bool,
@@ -540,7 +540,7 @@ struct Inner {
     current_batch: RefCell<Option<HashMap<(String, RowUuid, Vec<u8>), Option<sync::Image>>>>,
     ids: Box<dyn RowIdSource>,
     /// The newest commit seq handed out: the authority's seq, or on a
-    /// replica its own node's counter.
+    /// replica its own-pending counter.
     seq: u64,
     /// A replica's own band (of its unsettled versions, see
     /// [`sync::OWN`]); 0 until it becomes one.
@@ -3893,7 +3893,7 @@ impl Inner {
     // ---- write primitives ---------------------------------------------
 
     /// Where this store's own commit `seq` writes its versions: the
-    /// authority's seq, or its own node's on a replica.
+    /// authority's seq, or in its own-pending band on a replica.
     pub(crate) fn own_pos(&self, seq: u64) -> Pos {
         Pos { n: self.me, seq }
     }
@@ -3911,12 +3911,7 @@ impl Inner {
         match self.conn.cached_row(
             &sql,
             rusqlite::params![row.0.as_bytes().to_vec(), key],
-            |r| {
-                Ok((
-                    Pos::from_t(r.get(0)?),
-                    r.get::<_, i64>(1)? != 0,
-                ))
-            },
+            |r| Ok((Pos::from_t(r.get(0)?), r.get::<_, i64>(1)? != 0)),
         ) {
             Ok(found) => Ok(Some(found)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -3988,11 +3983,7 @@ impl Inner {
         self.conn
             .cached_row(
                 &sql,
-                rusqlite::params![
-                    row.0.as_bytes().to_vec(),
-                    key,
-                    cut.seq.t()
-                ],
+                rusqlite::params![row.0.as_bytes().to_vec(), key, cut.seq.t()],
                 |r| Ok(Pos::from_t(r.get(0)?)),
             )
             .optional()
@@ -5577,11 +5568,7 @@ impl Inner {
             };
             self.names.lens_cells(&version, table)
         };
-        let mut names = vec![
-            "id".to_owned(),
-            "_b".to_owned(),
-            "_t".to_owned(),
-        ];
+        let mut names = vec!["id".to_owned(), "_b".to_owned(), "_t".to_owned()];
         let mut values = vec![
             Sql::Blob(row.0.as_bytes().to_vec()),
             Sql::Blob(key.clone()),

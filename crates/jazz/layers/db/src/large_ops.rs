@@ -329,11 +329,7 @@ impl Inner {
                 .conn
                 .cached_row(
                     &sql,
-                    rusqlite::params![
-                        row.0.as_bytes().to_vec(),
-                        Vec::<u8>::new(),
-                        at.t()
-                    ],
+                    rusqlite::params![row.0.as_bytes().to_vec(), Vec::<u8>::new(), at.t()],
                     |r| r.get(0),
                 )
                 .optional()

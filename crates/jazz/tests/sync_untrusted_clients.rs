@@ -11,8 +11,8 @@ use crate::common::stored;
 
 use jazz::db::{
     Acting, BuiltOn, Db, DbConfig, DbIdentity, DeleteOptions, ErrorCode, FileOptions,
-    InsertOptions, ReadOpts, ReadTier, SyncMessage, Transport, TransportError, WireBase,
-    WireKind, WireOp, WireTarget, WireWrite, block_on,
+    InsertOptions, ReadOpts, ReadTier, SyncMessage, Transport, TransportError, WireBase, WireKind,
+    WireOp, WireTarget, WireWrite, block_on,
 };
 use jazz::ids::RowUuid;
 use jazz::ids::{AuthorSubject, NodeUuid};

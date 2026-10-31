@@ -193,8 +193,8 @@ overlapping either way.
 From `The cat sat.`, a concurrent `The black cat sat.` and `The cat
 slept.` merge to `The black cat slept.` in either order. When a merge
 changes a write's value, Core also keeps the write as its writer sent it:
-a hidden history row (in `__h`, at `_seq` = minus the
-commit's seq, so the commit keeps its one seq, with bit 2 of `_st` set,
+a hidden history row (in `__h`, at `_t` = minus the
+commit's position, so the commit keeps its one position, with bit 2 of `_st` set,
 "as sent"), holding the version's cells with the merged columns at their
 values as sent. A later write built on that commit (an offline chain) is
 merged over what its writer saw: the chain walk's link is read from its
@@ -518,16 +518,16 @@ On SQLite a commit carries, beside its operations, the base of each row it
 writes over an image its writer held (`WireBase`: the row, by the index of
 the commit's first op that writes it and its branch key, and the version it
 was built on as `BuiltOn`). A non-durable session (a worker's tab) may hold
-its relay's unsettled version of a row (stored at the relay's node, the
-position of the relay's commit that wrote it) and send it as
-`Commit { relay node, tx }`. A relay forwards a session's commit under the
+its relay's unsettled version of a row (stored in its upstream-pending
+band) and send it as `Upstream { tx }`, the relay's commit that wrote it. A
+relay forwards a session's commit under the
 session's own id, and renames every base into names its upstream knows
 before it does: an upstream seq, the session's `Own` predecessor and the
 session's own `Commit` stay (Core knows the session's commits by their
 ids); its own unsettled version becomes `Commit { node, tx }` of the commit
 that wrote it (its own, or another session's it carries), or the upstream
 seq that commit already landed at, so Core never sees a relay's own
-positions. A version at the relay's node that is no commit of
+positions. A pending version of the relay's that is no commit of
 its own (one from before the relay's store was reset) cannot be named
 upstream: the write counts as built
 on the newest version of the row the relay holds accepted upstream, so it may
@@ -551,7 +551,7 @@ columns as a bitmask over their positions in the row table (stored tables
 only grow by `ADD COLUMN`, so a position never moves). A delete or restore
 authors `_st`, the version's state bits (bit 0: its commit wrote no content;
 bit 1: deleted; bit 2, in history only: a merged text write as sent, §4.3). An app column cannot take the name of a stored row column
-(`id`, `rid`, `_b`, `_n`, `_seq`, `_st`, `_base`, `_cols`). `_base` and `_cols`
+(`id`, `rid`, `_b`, `_t`, `_st`, `_base`, `_cols`). `_base` and `_cols`
 are NULL on every other replica and for Core's own writes: those are made over the current image, so they are never maybe
 conflicting, and in another write's analysis they author every column. The
 flag, the walk and the merge base are derived on demand

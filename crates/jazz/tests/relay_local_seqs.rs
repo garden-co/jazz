@@ -708,8 +708,14 @@ fn a_serverless_workers_tab_commits_stay_pending_until_a_server_is_added() {
     let _up = block_on(worker.connect_upstream(client_side));
     core.accept_subscriber(server_side, author(WORKER)).unwrap();
     worker.set_remote_link_hint(RemoteLinkHint::Live);
-    assert!(matches!(global(&writer, tab_tx), Some(Ok(_))), "the tab's lands");
-    assert!(matches!(global(&worker, own_tx), Some(Ok(_))), "the worker's lands");
+    assert!(
+        matches!(global(&writer, tab_tx), Some(Ok(_))),
+        "the tab's lands"
+    );
+    assert!(
+        matches!(global(&worker, own_tx), Some(Ok(_))),
+        "the worker's lands"
+    );
     assert_eq!(shown(&core), ["tab", "worker"]);
     assert_eq!(worker.pending_upload_count(), 0, "both commits settled");
     assert_eq!(shown(&reader), ["tab", "worker"]);

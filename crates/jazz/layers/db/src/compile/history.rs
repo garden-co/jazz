@@ -160,7 +160,10 @@ impl Ctx<'_> {
         let mut gate = vec!["a.id = v.id".to_owned(), "a._b = v._b".to_owned()];
         let mut keep = vec![
             format!("(v._st & {}) = 0", STATE_NO_CONTENT | STATE_AS_SENT),
-            format!("v._t < {}", crate::db::sync::band_start(crate::db::sync::UPSTREAM)),
+            format!(
+                "v._t < {}",
+                crate::db::sync::band_start(crate::db::sync::UPSTREAM)
+            ),
         ];
         if let Some(view) = &self.view
             && !table.branch_by.is_empty()

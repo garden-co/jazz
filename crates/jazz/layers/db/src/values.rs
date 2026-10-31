@@ -1926,7 +1926,7 @@ impl CurrentRow {
         self.deleted
     }
 
-    /// Where this row version is: its sequencer's code and its seq there.
+    /// Where this row version is: its banded position `_t`.
     pub fn seq(&self) -> crate::db::Pos {
         self.seq
     }
