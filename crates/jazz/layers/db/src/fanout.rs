@@ -370,13 +370,12 @@ impl Inner {
                 .compile(prepared, identity, visible)
                 .and_then(|compiled| self.execute(&compiled, &prepared.query.table)),
         };
-        let (rows, awaiting) = match run
-            .and_then(|rows| self.nest_relations(prepared, identity, &visible, rows))
-        {
-            Ok(rows) => (rows, false),
-            Err(error) if crate::large::is_missing(&error) => (Vec::new(), true),
-            Err(error) => return Err(error),
-        };
+        let (rows, awaiting) =
+            match run.and_then(|rows| self.nest_relations(prepared, identity, &visible, rows)) {
+                Ok(rows) => (rows, false),
+                Err(error) if crate::large::is_missing(&error) => (Vec::new(), true),
+                Err(error) => return Err(error),
+            };
         let watches = self.watches(prepared, identity, &read, &compiled)?;
         let root = prepared
             .schema
