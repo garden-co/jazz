@@ -64,13 +64,18 @@ fn open(node: u8, author: AuthorSubject) -> Db {
 }
 
 fn open_in(schema: JazzSchema, node: u8, author: AuthorSubject) -> Db {
-    block_on(Db::open(DbConfig::new(
-        schema,
-        DbIdentity {
-            node: NodeUuid::from_bytes([node; 16]),
-            author,
-        },
-    )))
+    block_on(Db::open(
+        DbConfig::new(
+            schema,
+            DbIdentity {
+                node: NodeUuid::from_bytes([node; 16]),
+                author,
+            },
+        )
+        // A clock stopped at the hybrid-clock epoch numbers 1, 2, 3, so these
+        // tests can name the seqs they expect.
+        .with_clock(|| jazz::db::shard::HLC_EPOCH_MS),
+    ))
     .unwrap()
 }
 

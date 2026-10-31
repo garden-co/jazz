@@ -505,7 +505,10 @@ fn pulls_answer_only_for_versions_the_reader_may_read() {
         pull("docs", 1, seq, doc, vec![unknown]),
     ];
     // Through the draft's own row, at any version: she may read none.
-    pulls.extend((0..seq + 4).map(|seq| pull("drafts", 2, seq, draft, vec![draft])));
+    // Positions are clock times, so the reader guesses those near the doc's.
+    pulls.extend(
+        (seq.saturating_sub(8)..seq + 4).map(|seq| pull("drafts", 2, seq, draft, vec![draft])),
+    );
     up.borrow_mut()
         .push_back(SyncMessage::ChunkRequests { pulls });
     block_on(server.tick()).unwrap();
@@ -2213,7 +2216,8 @@ fn a_relay_forwards_no_pull_its_tab_may_not_make() {
         span: Some((0, LARGE as u64)),
     };
     let mut pulls = vec![pull("docs", 1, seq, draft)];
-    pulls.extend((0..seq + 4).map(|seq| pull("drafts", 2, seq, draft)));
+    // Positions are clock times, so the tab guesses those near the doc's.
+    pulls.extend((seq.saturating_sub(8)..seq + 4).map(|seq| pull("drafts", 2, seq, draft)));
     up.borrow_mut()
         .push_back(SyncMessage::ChunkRequests { pulls });
     for _ in 0..4 {
