@@ -64,6 +64,25 @@ db.subscribe(app.todos.where({ done: false }), (todos) => {
 });
 ```
 
+Or with React:
+
+```tsx title="Todos.tsx"
+import { useAll, useDb } from "jazz-tools/react";
+import { app } from "./schema";
+
+export function Todos() {
+  const db = useDb();
+  const { data: todos = [] } = useAll(app.todos.where({ done: false }));
+
+  return todos.map((todo) => (
+    <label key={todo.id}>
+      <input type="checkbox" onChange={() => db.update(app.todos, todo.id, { done: true })} />
+      {todo.title}
+    </label>
+  ));
+}
+```
+
 ## Start here
 
 <Cards>
