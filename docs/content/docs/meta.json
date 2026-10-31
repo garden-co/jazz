@@ -27,7 +27,6 @@
     "recipes/auth",
     "recipes/effect",
     "---Reference---",
-    "reference",
-    "faq"
+    "reference"
   ]
 }

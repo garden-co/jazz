@@ -82,6 +82,7 @@ const config = {
     // working. Temporary until the new structure settles.
     return [
       { source: "/perf-timeline", destination: "/examples", permanent: false },
+      { source: "/docs/faq", destination: "/docs/how-jazz-works#faq", permanent: false },
       {
         source: "/docs/setup/deployment/jazz-cloud",
         destination: "/docs/setup/deployment",
