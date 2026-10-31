@@ -8433,8 +8433,10 @@ impl Db {
                 // (another shard answered first) already holds its row. The
                 // writer's version overlays that baseline as it overlays any
                 // other, until the fate: the whole commit still shows as its
-                // writer's. A conflicting insert by someone else is refused
-                // upstream, and the fate drops the whole commit.
+                // writer's. Another writer's version of the same row id lands
+                // here the same way and is overlaid alike: the conflicting
+                // insert is refused upstream, and the fate drops the whole
+                // commit, which uncovers theirs.
                 Err(error) if error.reason == Some(Reason::RowAlreadyExists) => {
                     let StagedOp::Insert(table, _, opts) = op else {
                         return Err(error);

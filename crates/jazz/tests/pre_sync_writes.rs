@@ -557,6 +557,24 @@ fn a_stranded_store_refuses_remote_reads() {
     );
 }
 
+/// A reopened stranded store reads every row it holds: none of its own
+/// versions is past a position it reads as of.
+#[test]
+fn a_reopened_stranded_store_reads_all_its_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = authority_at(v1(), &dir.path().join("server.sqlite"));
+    let path = dir.path().join("client.sqlite");
+    {
+        let client = open_at(v1(), 1, &path);
+        insert(&client, 2, &[("title", "standalone")]);
+        let _link = link(&client, &server);
+        pump(&server, &[&client]);
+        insert(&client, 3, &[("title", "after")]);
+    }
+    let client = open_at(v1(), 1, &path);
+    assert_eq!(ids(&client), vec![2, 3]);
+}
+
 /// Schema work before a store becomes a replica writes no rows: the
 /// store is not stranded.
 #[test]
