@@ -1065,13 +1065,14 @@ fn a_far_future_write_time_neither_stamps_nor_outorders_a_sibling_tabs_later_wri
 }
 
 /// A worker's own write made after it relayed a tab's commit orders
-/// after that commit, though the tab's clock runs ahead of the worker's.
+/// after that commit, though the tab's clock runs ahead of the worker's
+/// (within the 500 ms a store counts a received clock ahead of its own).
 #[test]
 fn a_workers_write_after_a_tabs_relayed_commit_orders_after_it() {
     let notes = Query::from("notes");
     let (worker, tabs, _watches) = serverless(schema, &[WORKER + 1], &notes);
     let tab = &tabs[0];
-    tab.set_clock_for_test(Some(CLOCK + 5_000));
+    tab.set_clock_for_test(Some(CLOCK + 400));
     let row = block_on(tab.insert("notes", body("tab"), Default::default()))
         .unwrap()
         .row_uuid();
@@ -1182,7 +1183,11 @@ fn equal_clock_versions_of_one_row_both_stay_in_history() {
             .iter()
             .filter(|(t, _)| history.iter().filter(|(u, _)| u == t).count() > 1)
             .collect();
-        assert_eq!(shared.len(), 2, "greater first: {greater_first}: {history:?}");
+        assert_eq!(
+            shared.len(),
+            2,
+            "greater first: {greater_first}: {history:?}"
+        );
         let writers: Vec<[u8; 16]> = shared
             .iter()
             .map(|(_, w)| {

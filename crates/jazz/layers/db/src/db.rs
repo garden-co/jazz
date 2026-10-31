@@ -57,8 +57,8 @@ pub use sync::{
     ACCEPTED, AccessProof, Acting, BuiltOn, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad,
     FrameJoiner, Image, Outcome, PENDING, Pos, ReadSpan, RejectedTransaction, RelationSnapshot,
     RemoteLinkHint, SerializedReadResult, SubscriberId, SyncMessage, Transport, TransportError,
-    TxName, Upstream, WireBase, WireChunk, WireChunkRef, WireDelta, WireError, WireKind,
-    WireOp, WirePull, WireTarget, WireTransport, WireTransportAdapter, WireWrite, WriteConflict,
+    TxName, Upstream, WireBase, WireChunk, WireChunkRef, WireDelta, WireError, WireKind, WireOp,
+    WirePull, WireTarget, WireTransport, WireTransportAdapter, WireWrite, WriteConflict,
     decode_message, duplex, encode_frames, validate_frame_batch_for_corpus,
 };
 
@@ -5492,10 +5492,7 @@ impl Inner {
              FROM {source} WHERE id = ?3 AND _b = ?4",
             name = quote(&table.stored),
         );
-        self.exec(
-            &sql,
-            rusqlite::params![to, self.own_pos(seq).t(), id, from],
-        )
+        self.exec(&sql, rusqlite::params![to, self.own_pos(seq).t(), id, from])
             .map_err(storage)?;
         self.set_cells(table, row, to, head_cells, Cells::Carried, seq, None, false)
     }
@@ -7127,7 +7124,9 @@ impl Inner {
 
     /// The HLC a commit begun now would take ([`Inner::next_hlc`]).
     pub(crate) fn peek_hlc(&self) -> u64 {
-        self.hlc_last.saturating_add(1).max(shard::hlc(self.hlc_clock_ms()))
+        self.hlc_last
+            .saturating_add(1)
+            .max(shard::hlc(self.hlc_clock_ms()))
     }
 
     /// Hold this store's HLC past one it received (a position or a commit
@@ -7456,9 +7455,7 @@ impl Db {
                         && inner
                             .newest_seq(schema.stored_table(op.table())?, row)?
                             .is_some_and(|at| {
-                                let ours = inner
-                                    .own_seq_at(at)
-                                    .is_some_and(|tx| own.contains(&tx))
+                                let ours = inner.own_seq_at(at).is_some_and(|tx| own.contains(&tx))
                                     || landed.values().any(|&landed| landed == at);
                                 !(at.accepted() || ours)
                             })

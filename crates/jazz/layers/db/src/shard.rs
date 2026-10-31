@@ -323,7 +323,7 @@ impl Inner {
             .conn
             .query_row(
                 "SELECT 1 FROM _jazz_transactions AS t JOIN _jazz_nodes AS n ON n.n = t.n \
-                 WHERE n.node = ?1 AND t.tx = ?2 AND t.seq IS NOT NULL",
+                 WHERE n.node = ?1 AND t.tx = ?2 AND t.t IS NOT NULL",
                 rusqlite::params![commit.node.to_vec(), commit.tx as i64],
                 |r| r.get(0),
             )

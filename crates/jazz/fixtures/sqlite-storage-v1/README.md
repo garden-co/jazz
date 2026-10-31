@@ -12,9 +12,9 @@ pending uploads moved from one encoded message to a row per op, and
 watermarks became per-sequencer rows).
 
 - `server.sqlite.gz.base64`: an authority (WAL, default page size). SHA-256 of
-  the SQLite file `eac4bfd579ab6772383075457592ac8f83f8ec49259ccaebfb18f9548c5d9f3a`.
+  the SQLite file `a7c6d03d30b668d27f46c39851b8c6ab9f7aae84b528e763e8cd0be00705f792`.
 - `client.sqlite.gz.base64`: a client replica that synced with it. SHA-256
-  `e3ee17c364245078050ae1d7376a5bbd9411a59cb9cf1d47e1343a852e31e445`.
+  `a4f0b758f35e39b73db64105e1766b3d369a5fdc9ef9983160baa6d2d2a960de`.
 
 Producer: `produce_sqlite_storage_corpus_v1` in `crates/jazz/tests/storage_corpus.rs`
 (ignored; `JAZZ_WRITE_SQLITE_STORAGE_CORPUS=1`). It wrote, with fixed row ids,

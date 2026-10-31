@@ -123,14 +123,14 @@ impl Pos {
 
     /// A pending version, by its writer's commit HLC.
     pub const fn pending(hlc: u64) -> Self {
-        Self { n: PENDING, seq: hlc }
+        Self {
+            n: PENDING,
+            seq: hlc,
+        }
     }
 
     /// Before every unsettled version, after every accepted one.
-    pub const UNSETTLED: Self = Self {
-        n: PENDING,
-        seq: 0,
-    };
+    pub const UNSETTLED: Self = Self { n: PENDING, seq: 0 };
 
     /// Whether the authority numbered the version.
     pub fn accepted(self) -> bool {
@@ -4470,7 +4470,11 @@ impl Inner {
                 id,
                 key,
                 from.t(),
-                if self.me == ACCEPTED { 0 } else { band_start(PENDING) }
+                if self.me == ACCEPTED {
+                    0
+                } else {
+                    band_start(PENDING)
+                }
             ],
         )
         .map_err(storage)?;
@@ -4485,10 +4489,9 @@ impl Inner {
     fn merge_image(&self, image: &Image) -> Result<(), Error> {
         let row = RowUuid::from_bytes(image.id);
         let at = rank(image);
-        let current = match self.current_image(&image.table, row, &image.key)? {
-            Some(current) => Some((rank(&current), current)),
-            None => None,
-        };
+        let current = self
+            .current_image(&image.table, row, &image.key)?
+            .map(|current| (rank(&current), current));
         match current {
             None => {
                 self.put_image(image, false)?;
@@ -4542,7 +4545,8 @@ impl Inner {
         key: &[u8],
         at: Rank,
     ) -> Result<(), Error> {
-        let w = at.1.map_or_else(Vec::new, |(node, tx)| writer_bytes(node, tx));
+        let w =
+            at.1.map_or_else(Vec::new, |(node, tx)| writer_bytes(node, tx));
         self.exec(
             &format!(
                 "DELETE FROM {} WHERE id = ?1 AND _b = ?2 AND _t = ?3 AND _w = ?4",
@@ -4807,10 +4811,13 @@ impl Inner {
         let Some((hlc, node, tx)) = image.written.filter(|_| !image.at.accepted()) else {
             return false;
         };
-        self.own_order.values().any(|order| *order == (hlc, node, tx))
-            || self.client.as_ref().is_some_and(|client| {
-                client.pending.iter().any(|p| p.order() == (hlc, node, tx))
-            })
+        self.own_order
+            .values()
+            .any(|order| *order == (hlc, node, tx))
+            || self
+                .client
+                .as_ref()
+                .is_some_and(|client| client.pending.iter().any(|p| p.order() == (hlc, node, tx)))
     }
 }
 
@@ -5739,30 +5746,12 @@ impl Inner {
     /// The sessions' commits this store's own commit `seq` carries, as it
     /// accepted them through a relay.
     fn relayed_origins(&self, seq: u64) -> Result<Vec<([u8; 16], u64)>, Error> {
-        let mut statement = self
-            .conn
-            .prepare_cached(
-                "SELECT n.node, t.tx FROM _jazz_transactions AS t JOIN _jazz_nodes AS n \
-                 ON n.n = t.n WHERE t.t = ?1",
-            )
-            .map_err(storage)?;
-        let rows = statement
-            .query_map([Pos { n: self.me, seq }.t()], |r| {
-                Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?))
-            })
-            .map_err(storage)?;
-        let mut origins = Vec::new();
-        for row in rows {
-            let (node, tx) = row.map_err(storage)?;
-            let node: [u8; 16] = node.try_into().map_err(|_| {
-                Error::new(
-                    ErrorCode::Storage,
-                    "a settled commit's node is not 16 bytes",
-                )
-            })?;
-            origins.push((node, tx as u64));
-        }
-        Ok(origins)
+        // A relay keeps each session commit it carries under that
+        // session's order (see `authorize_commit`).
+        Ok(match self.own_order.get(&seq) {
+            Some(&(_, node, tx)) if node != *self.identity.node.as_bytes() => vec![(node, tx)],
+            _ => Vec::new(),
+        })
     }
 
     /// Where `node`'s commit `tx` landed: `Some(Some(position))`, rejected
@@ -6296,6 +6285,10 @@ impl Inner {
                 continue;
             };
             let (id, clock) = (*id, *clock);
+            // Its versions sit at its commit clock: the rows below are
+            // looked up there.
+            self.own_order
+                .insert(tx, (clock, *id.node.as_bytes(), id.time.0));
             let serializable = matches!(kind, WireKind::Serializable { .. });
             let mut ops = ops
                 .iter()
@@ -6330,8 +6323,6 @@ impl Inner {
                 rows,
                 expected,
             });
-            self.own_order
-                .insert(tx, (clock, *id.node.as_bytes(), id.time.0));
             client.unsent.push(commit);
         }
         // Its own later commits order after every pending one, as they did
@@ -9165,7 +9156,11 @@ impl Inner {
             .iter_mut()
             .filter(|image| !image.at.accepted() && image.written.is_none())
         {
-            let row_key = (image.table.clone(), RowUuid::from_bytes(image.id), image.key.clone());
+            let row_key = (
+                image.table.clone(),
+                RowUuid::from_bytes(image.id),
+                image.key.clone(),
+            );
             image.written = client
                 .pending
                 .iter()
@@ -9188,7 +9183,11 @@ impl Inner {
         for table in &tables {
             let held = self.images_where(table, false, "_t >= ?1", &[&from])?;
             for image in held {
-                let row_key = (table.clone(), RowUuid::from_bytes(image.id), image.key.clone());
+                let row_key = (
+                    table.clone(),
+                    RowUuid::from_bytes(image.id),
+                    image.key.clone(),
+                );
                 let overlaid = self
                     .client
                     .as_ref()
@@ -10531,8 +10530,14 @@ impl Db {
             });
             if !own.is_empty() {
                 // This relay's versions of those commits, in its own band.
-                let me = inner.me;
-                let is_own = |image: &Image| image.at.n == me && own.contains(&image.at.seq);
+                // Named by their writer: the session's commits it carries.
+                let orders: HashSet<Order> = own
+                    .iter()
+                    .filter_map(|seq| inner.own_order.get(seq).copied())
+                    .collect();
+                let is_own = |image: &Image| {
+                    !image.at.accepted() && image.written.is_some_and(|w| orders.contains(&w))
+                };
                 let mut shipped = HashSet::new();
                 for message in &mut out {
                     let SyncMessage::Rows { images, .. } = message else {
@@ -10565,8 +10570,13 @@ impl Db {
                                 .images_where(
                                     &image.table,
                                     true,
-                                    "id = ?1 AND _b = ?2 AND _t = ?3",
-                                    &[&id, &image.key, &Pos { n: me, seq: tx }.t()],
+                                    "id = ?1 AND _b = ?2 AND _t = ?3 AND _w = ?4",
+                                    &[
+                                        &id,
+                                        &image.key,
+                                        &inner.own_pos(tx).t(),
+                                        &inner.own_writer(tx),
+                                    ],
                                 )?
                                 .into_iter()
                                 .next(),
@@ -11576,15 +11586,23 @@ impl Db {
                 // accepts the upload carrying it: the session waits for that
                 // fate, not this store's. A relay its host says has no
                 // server is the last word on it.
-                let upload = result.is_ok()
-                    && inner.client.as_ref().is_some_and(|client| {
-                        landed.n == inner.me && client.pending.iter().any(|p| p.tx == through)
+                let upload = result
+                    .is_ok()
+                    .then(|| inner.client.as_ref())
+                    .flatten()
+                    .filter(|_| !landed.accepted())
+                    .and_then(|client| client.local_tx(&id))
+                    .filter(|tx| {
+                        inner
+                            .client
+                            .as_ref()
+                            .is_some_and(|c| c.pending.iter().any(|p| p.tx == *tx))
                     });
-                if upload {
+                if let Some(local) = upload {
                     let client = inner.client.as_mut().expect("client");
                     client
                         .relayed_fates
-                        .entry(through)
+                        .entry(local)
                         .or_default()
                         .push((index, id, rows));
                     inner.sessions[index]

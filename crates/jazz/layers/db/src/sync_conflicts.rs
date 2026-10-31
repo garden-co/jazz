@@ -290,16 +290,18 @@ impl Inner {
                 // A version this relay shipped the session: one of the
                 // commits it carries, by the writer's id, is its own here.
                 let on = match base.on {
-                    BuiltOn::Commit { node, tx } if node != sender.0 && node != me => {
-                        match pending.commits.iter().find(|p| p.id == super::tx_id(node, tx)) {
-                            Some(p) => BuiltOn::Commit { node: me, tx: p.tx },
-                            None => match self.settled(node, tx)? {
-                                Some(Some(at)) if at.accepted() => BuiltOn::Seq(at.seq),
-                                Some(None) => return Err(predecessor_rejected()),
-                                _ => return Err(unknown_base("another node's commit")),
-                            },
-                        }
-                    }
+                    BuiltOn::Commit { node, tx } if node != sender.0 && node != me => match pending
+                        .commits
+                        .iter()
+                        .find(|p| p.id == super::tx_id(node, tx))
+                    {
+                        Some(p) => BuiltOn::Commit { node: me, tx: p.tx },
+                        None => match self.settled(node, tx)? {
+                            Some(Some(at)) if at.accepted() => BuiltOn::Seq(at.seq),
+                            Some(None) => return Err(predecessor_rejected()),
+                            _ => return Err(unknown_base("another node's commit")),
+                        },
+                    },
                     on => on,
                 };
                 let on = match on {
@@ -785,15 +787,14 @@ impl Db {
             quote(&format!("{}__h", schema_table.stored)),
         );
         let mut statement = inner.conn.prepare_cached(&sql).map_err(storage)?;
-        let rows = statement
+        statement
             .query_map(
                 rusqlite::params![row.0.as_bytes().to_vec(), Vec::<u8>::new()],
                 |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)),
             )
             .map_err(storage)?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(storage);
-        rows
+            .map_err(storage)
     }
 
     /// How many bytes column `column` of `table`'s unbranched row `row`

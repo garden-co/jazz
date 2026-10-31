@@ -515,10 +515,6 @@ fn a_reopened_shard_waits_out_its_offset_bound() {
     let Outcome::Accepted { at, .. } = fate(&sent_down) else {
         panic!("refused");
     };
-    assert_eq!(
-        at,
-        hlc(NOW + HLC_MAX_OFFSET_MS + 1),
-        "at its clock"
-    );
+    assert_eq!(at, hlc(NOW + HLC_MAX_OFFSET_MS + 1), "at its clock");
     assert!(newest(&db) > closed, "nothing lands at or below the close");
 }
