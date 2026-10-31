@@ -113,7 +113,7 @@ reopens (`INV-SYNC-51`).
 
 Positions travel as per-sequencer lists: a `through`, a `since`, a
 serializable snapshot, a one-shot read's `at` and an accepted fate's `at` are
-each a list of `(sequencer, seq)` pairs, the sequencer `None` for the global
+each a list of `(sequencer, seq)` pairs (as is `ConnectionSettled`'s `through`), the sequencer `None` for the global
 authority and a node id for a replica that numbers its own positions (a relay
 with no server, §8.13). Each list holds at most one pair today; a list with
 more is refused as not supported yet, and an empty `since` or `at` means none.
@@ -143,6 +143,7 @@ Messages, with their postcard variant tags:
 | 16  | `Join`               | client → server | Open: the session's version and the catalogue it keeps (§8.9)    |
 | 17  | `Catalogue`          | server → client | Admitted versions, stored names and lens cells (§8.10)           |
 | 18  | `Welcome`            | server → client | The answer to `Join`: admission and catalogue (§8.9, §8.10)      |
+| 19  | `ConnectionSettled`  | server → client | The position the whole connection is settled through (§8.4)      |
 
 Tags before `Commit` keep their numbers: a replica stores each pending
 upload's header as an encoded `Commit` message (`_jazz_pending`, see §8.3),
@@ -444,6 +445,22 @@ Cached rows `members` leaves out are no longer in that result; the replica
 evicts them (a row a pending write touches waits for the server's word on it).
 `global` says the answer is the global authority's (directly, or through
 relays that settle by their upstream), not a relay's own store.
+
+Settles are per read: a `Settled` speaks for its read alone, and an upstream
+may settle two reads at different positions (a sharded gateway settles each
+as far as the shards it reads, SPEC 15). The position the whole connection is
+settled through travels as `ConnectionSettled { through }`: every read the
+upstream settled on the connection is complete through `through`, and nothing
+it later sends for those reads lands at or below it. Only it moves the
+position a replica knows its upstream through (`known`, which snapshot
+references and resumes count from); neither a read's settle nor a commit's
+fate does. A replica's own commits accepted past `known` are named by
+transaction in the snapshot references it captures and the serializable
+transactions it begins, until a `ConnectionSettled` covers them. Every
+upstream sends it, an unsharded authority included (there it names the same
+seq as the tick's settles), after a tick's `Settled` and `Fate` messages
+whenever it moved, so a session that hears a settle or a fate hears it too,
+and an idle session hears nothing.
 
 A replica treats a read as settled only once its connected upstream confirmed
 it with `Settled`; while the upstream is unanswered, offline or failing the
@@ -786,9 +803,11 @@ its sessions with `Image.by` naming that node; a non-durable session numbers
 its own writes at its own node, so the two never collide in the session's
 store (`INV-SYNC-50`). A relay stores a session's commit as its own pending
 commit, answers `Stored`, and relays the authority's `Fate` (§8.3). A relay
-whose host says it has no server is its sessions' last word: its `Fate` and
-`Settled` positions name its own node as their sequencer, since they count
-its positions rather than the authority's.
+whose host says it has no server is its sessions' last word: its `Fate`,
+`Settled` and `ConnectionSettled` positions name its own node as their
+sequencer, since they count its positions rather than the authority's. A
+relay's `ConnectionSettled` to its sessions names the position it knows its
+upstream through (`served_through`).
 
 ## Open Questions
 
