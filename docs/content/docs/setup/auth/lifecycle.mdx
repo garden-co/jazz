@@ -81,19 +81,6 @@ Logout stays signed out until the app chooses another account. It does not erase
 
 Call `await jazz.close()` when retiring an imperatively owned session. Ordinary close preserves local durability and works offline; it does not promise remote sync completed. Account-changing commands use the stronger sync barrier automatically.
 
-## Recovery phrases and passkeys
-
-```ts
-import { exportLocalFirstSecret } from "jazz-tools";
-import { RecoveryPhrase } from "jazz-tools/passphrase";
-
-const secret = exportLocalFirstSecret(jazz.getSnapshot().account!);
-const phrase = RecoveryPhrase.fromSecret(secret);
-await jazz.restoreLocalFirst(RecoveryPhrase.toSecret(recoveredPhrase));
-```
-
-Use the same secret with `BrowserPasskeyBackup` for a passkey backup. Export requires a live local-first handle; external or logged-out handles cannot export it. Secrets never appear in snapshots. Possession of a recovery phrase allows acting as that local-first identity.
-
 ## Lower-level composition
 
 `createAccountManager`, opaque `AccountHandle`, and `createJazzClient` remain available for applications that intentionally own their lifecycle. The manager handles credentials and registry operations only. Contexts accept valid handles and never change identity; low-level callers must arrange graceful shutdown before linking or replacing contexts themselves. The session abstraction composes these primitives in shared TypeScript; framework adapters only observe state and acknowledge consumer cleanup.

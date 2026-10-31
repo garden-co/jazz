@@ -36,7 +36,7 @@ const secret = exportLocalFirstSecret(jazz.getSnapshot().account!);
 const phrase = RecoveryPhrase.fromSecret(secret);
 ```
 
-The recovery phrase encodes the same root; it is not a second password. Keep it out of logs and ordinary account-state UI. Export fails for external or logged-out handles. Signing roots remain retained after logout so explicit recovery can restore them.
+The recovery phrase encodes the same root; it is not a second password. Keep it out of logs and ordinary account-state UI. Export fails for external or logged-out handles, and secrets never appear in snapshots. Signing roots remain retained after logout so explicit recovery can restore them.
 
 ### Recovery passphrase
 
