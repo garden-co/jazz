@@ -5688,11 +5688,12 @@ impl Inner {
             return false;
         };
         session.connection_settled.is_some_and(|sent| sent != at)
-            || self.relays_upstream() && session.settles.values().any(|settle| {
-                settle
-                    .sent
-                    .is_some_and(|sent| sent < client.settled_through(&settle.key))
-            })
+            || self.relays_upstream()
+                && session.settles.values().any(|settle| {
+                    settle
+                        .sent
+                        .is_some_and(|sent| sent < client.settled_through(&settle.key))
+                })
     }
 
     /// The seq this store tells its sessions it is complete through. A
