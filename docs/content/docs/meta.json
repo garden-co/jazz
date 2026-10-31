@@ -27,6 +27,11 @@
     "recipes/auth",
     "recipes/effect",
     "---Reference---",
-    "reference"
+    "reference/where-operators",
+    "reference/durability-tiers",
+    "reference/framework-patterns",
+    "reference/examples",
+    "reference/internals",
+    "reference/local-first-auth-internals"
   ]
 }
