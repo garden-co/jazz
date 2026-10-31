@@ -21,6 +21,7 @@ Invariant digest:
 - `INV-HIST-25`: A table MAY declare latest-only history retention. Retention MUST NOT change the table's `SchemaVersionId`, the structural `SchemaHash` MUST cover it only when it is latest-only, a schema MUST fail to compile when a latest-only table declares `branchBy` or a text-merging column, and a deploy MUST be refused when it switches a table of the active schema to latest-only without confirming that it drops history.
 - `INV-HIST-26`: For each row of a latest-only table a node MUST keep its current version, the newest accepted version it superseded, and every version above that (its own or a relay's unsettled ones), and SHOULD drop the older accepted versions when it writes or receives the next one. A value large enough to be chunked MUST be refused there with a typed not-supported error, since its chunks name versions the table drops.
 - `INV-HIST-27`: A read of a latest-only table that needs a version the table drops MUST fail with a typed not-supported error or ship whole, never answer with another version; a subscription resuming over a latest-only input that changed since it settled MUST open fresh; and a write to a latest-only table is never maybe conflicting.
+- `INV-HIST-28`: On the authority, the dedupe entry of an accepted commit that wrote only latest-only tables MAY be dropped once the same node's next commit is accepted; each node's newest entry and every rejected commit's entry MUST be kept. A resend of a commit whose entry was dropped MUST be answered as accepted without being applied again, and a later write built on such a commit MUST be accepted as a blind write.
 - `INV-HIST-11`: Content and deletion state MUST be separate layers; content writes MUST NOT change the deletion register, and a current `DeletionEvent::Deleted` MUST hide the content-current row until a current `DeletionEvent::Restored` reveals it.
 - `INV-HIST-12`: Accepted globally settled versions that become per-layer winners MUST be reflected in `jazz_{table}_global_current` or `jazz_{table}_register_global_current`.
 - `INV-HIST-13`: Re-ingesting the same commit unit with identical version rows in a different order MUST be idempotent and MUST NOT create a conflict.
@@ -831,6 +832,16 @@ What reads past versions cannot work on a latest-only table:
   gone, so §4.6's conflict analysis has nothing to compare. Plain columns
   still apply per cell in arrival order (`INV-HIST-8`) and counters still
   sum (`INV-HIST-10`).
+
+The authority also drops the dedupe entry (`_jazz_transactions`) of an
+accepted commit that wrote only latest-only tables once the same node's
+next commit is accepted, so it keeps one such entry per node: the newest,
+which holds the node's counter and answers the resend most likely to come.
+A resend of a commit whose entry is gone is answered as accepted, with its
+rows as they are now, rather than applied again: the node's newer accepted
+commit shows it came first (`INV-HIST-23`). A rejected commit's entry is
+never dropped, and a later write built on a dropped commit counts as blind
+(`INV-HIST-28`).
 
 A subscription that resumes over a latest-only input that changed since it
 settled reopens fresh rather than reading its prior result through history

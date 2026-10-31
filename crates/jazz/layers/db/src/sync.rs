@@ -5091,6 +5091,105 @@ impl Inner {
         Ok(())
     }
 
+    /// Whether `node`'s commit `tx`, which this authority keeps no entry
+    /// for, is one it accepted and dropped the entry of: it writes only
+    /// latest-only tables and the node has a newer accepted commit. A
+    /// node's commits arrive in order (`INV-HIST-23`), so a newer one means
+    /// this one came before it; a rejected commit's entry is never dropped.
+    pub(crate) fn dropped(&self, node: [u8; 16], tx: u64, ops: &[WireOp]) -> Result<bool, Error> {
+        if self.client.is_some()
+            || ops.is_empty()
+            || !ops.iter().all(|op| {
+                self.schema
+                    .stored_table(op.table())
+                    .is_ok_and(|stored| self.latest_only(stored))
+            })
+        {
+            return Ok(false);
+        }
+        self.conn
+            .cached_row(
+                "SELECT 1 FROM _jazz_transactions AS t JOIN _jazz_nodes AS n ON n.n = t.n \
+                 WHERE n.node = ?1 AND t.tx > ?2 AND t.sn = 0 AND t.seq IS NOT NULL LIMIT 1",
+                rusqlite::params![node.to_vec(), tx as i64],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()
+            .map(|newer| newer.is_some())
+            .map_err(storage)
+    }
+
+    /// Drop the dedupe entries of accepted commits that wrote only
+    /// latest-only tables (SPEC 4 §4.9), keeping each node's newest. An
+    /// entry stays until the same node's next commit is accepted: it then
+    /// holds the node's counter and answers the resend most likely to come.
+    /// Each node's newest such commit waits in `_jazz_prunable_txs`. A
+    /// resend of a dropped commit is answered as accepted ([`Self::dropped`]);
+    /// a later write built on one counts as blind (`resolve_bases`). A
+    /// store with no latest-only table never creates the table.
+    pub(crate) fn prune_transactions(
+        &self,
+        (node, tx): ([u8; 16], u64),
+        ops: &[StagedOp],
+    ) -> Result<(), Error> {
+        if !self.owner.tables.values().any(|table| table.latest_only) {
+            return Ok(());
+        }
+        self.exec(
+            "CREATE TABLE IF NOT EXISTS _jazz_prunable_txs \
+             (n INTEGER PRIMARY KEY, tx INTEGER NOT NULL)",
+            [],
+        )
+        .map_err(storage)?;
+        let code = self.node_code(node)?;
+        let latest_only = !ops.is_empty()
+            && ops.iter().all(|op| {
+                self.schema
+                    .stored_table(op.table())
+                    .is_ok_and(|stored| self.latest_only(stored))
+            });
+        let waiting: Option<i64> = self
+            .conn
+            .cached_row(
+                "SELECT tx FROM _jazz_prunable_txs WHERE n = ?1",
+                [code],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(storage)?;
+        let forget = |tx: i64| {
+            self.exec(
+                "DELETE FROM _jazz_transactions \
+                 WHERE n = ?1 AND tx = ?2 AND sn = 0 AND seq IS NOT NULL",
+                rusqlite::params![code, tx],
+            )
+            .map_err(storage)
+        };
+        match waiting {
+            // An older commit than the waiting one, which stays the
+            // node's newest (a dropped one's resend never gets here).
+            Some(newest) if newest > tx as i64 => {
+                if latest_only {
+                    forget(tx as i64)?;
+                }
+                return Ok(());
+            }
+            Some(older) => {
+                forget(older)?;
+            }
+            None => {}
+        }
+        match latest_only {
+            true => self.exec(
+                "INSERT OR REPLACE INTO _jazz_prunable_txs (n, tx) VALUES (?1, ?2)",
+                rusqlite::params![code, tx as i64],
+            ),
+            false => self.exec("DELETE FROM _jazz_prunable_txs WHERE n = ?1", [code]),
+        }
+        .map_err(storage)?;
+        Ok(())
+    }
+
     /// Where a commit landed: `Some(at)` once accepted (in the authority's
     /// order, or a relay's own commit carrying it), `None` once rejected.
     /// Kept by the authority for every upload and by a replica for its
@@ -10032,8 +10131,13 @@ impl Db {
                     });
                     return Ok(());
                 }
-                // A resend after a reconnect gets the recorded fate.
-                let known = self.inner.borrow().applied_fate(node, tx)?;
+                // A resend after a reconnect gets the recorded fate, or for
+                // a latest-only commit whose entry was dropped, the accepted
+                // fate it had (SPEC 4 §4.9).
+                let known = match self.inner.borrow().applied_fate(node, tx)? {
+                    None if self.inner.borrow().dropped(node, tx, &ops)? => Some(Ok(())),
+                    known => known,
+                };
                 let resent = known.is_some();
                 // A commit written under a version this server has not
                 // deployed is refused at once, loudly: the app that wrote
@@ -10050,6 +10154,11 @@ impl Db {
                     Some(result) => {
                         let landed = match (&result, self.inner.borrow().settled(node, tx)?) {
                             (Ok(()), Some(Some(at))) => Some(at),
+                            // Dropped: its rows ship as they are now.
+                            (Ok(()), None) => {
+                                let inner = self.inner.borrow();
+                                Some(inner.served_at(inner.served_through()))
+                            }
                             _ => None,
                         };
                         let rows = match landed {
@@ -10728,7 +10837,11 @@ impl Db {
             }
             let recorded = inner
                 .record_fate(id.0, id.1, &Ok(()))
-                .and_then(|()| inner.record_settled(id.0, id.1, Some(inner.own_pos(seq))));
+                .and_then(|()| inner.record_settled(id.0, id.1, Some(inner.own_pos(seq))))
+                .and_then(|()| match relay {
+                    true => Ok(()),
+                    false => inner.prune_transactions(id, &ops),
+                });
             if let Err(error) = recorded {
                 inner.changed.borrow_mut().truncate(mark);
                 end_savepoint(&inner.conn, "upload", false).map_err(|e| (e, Vec::new()))?;

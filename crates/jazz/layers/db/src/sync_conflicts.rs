@@ -394,6 +394,22 @@ impl Inner {
         let mut built = HashMap::new();
         for (op, base) in bases {
             let (table, row) = self.based_row(ops, *op)?;
+            if self.latest_only(table) {
+                // A latest-only write is blind (SPEC 4 §4.9), and the
+                // dedupe entry of the commit it names may be gone: only a
+                // base on the sender's own rejected commit rejects it.
+                let own = match base.on {
+                    BuiltOn::Own { back } => sender.1.checked_sub(back),
+                    BuiltOn::Commit { node, tx } if node == sender.0 => Some(tx),
+                    _ => None,
+                };
+                if let Some(tx) = own
+                    && self.settled(sender.0, tx)? == Some(None)
+                {
+                    return Err(predecessor_rejected());
+                }
+                continue;
+            }
             let on = match base.on {
                 BuiltOn::Seq(seq) => Built::Seq(seq),
                 BuiltOn::Own { back } => {

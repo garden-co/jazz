@@ -466,6 +466,141 @@ fn a_subscription_over_a_moved_latest_only_table_resumes_fresh() {
     assert_eq!(refused(), 0, "the resume is not refused");
 }
 
+/// Accepted commits node `node` uploaded that the authority at `path`
+/// still keeps a dedupe entry for.
+fn transactions_of(path: &Path, node: u8) -> i64 {
+    rusqlite::Connection::open(path)
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM _jazz_transactions AS t JOIN _jazz_nodes AS n ON n.n = t.n \
+             WHERE n.node = ?1 AND t.seq IS NOT NULL",
+            [vec![node; 16]],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+/// [`link`], also handing back the queue of what the server sends the
+/// client, so a test can lose it.
+fn lossy_link(
+    client: &Db,
+    server: &Db,
+) -> (jazz::db::Upstream, Rc<RefCell<VecDeque<SyncMessage>>>) {
+    let up = Rc::new(RefCell::new(VecDeque::new()));
+    let down = Rc::new(RefCell::new(VecDeque::new()));
+    let link = block_on(client.connect_upstream(Box::new(Pipe {
+        out: up.clone(),
+        inbound: down.clone(),
+    })));
+    server
+        .accept_subscriber(
+            Box::new(Pipe {
+                out: down.clone(),
+                inbound: up,
+            }),
+            AuthorSubject::SYSTEM,
+        )
+        .unwrap();
+    (link, down)
+}
+
+/// Alice moves her presence ten times, one upload each, and also edits a
+/// note. The authority keeps a dedupe entry for her newest presence-only
+/// commit alone, and one for every commit that wrote `notes`.
+#[test]
+fn the_authority_keeps_one_dedupe_entry_per_device_for_latest_only_commits() {
+    let dir = tempfile::tempdir().unwrap();
+    let server_path = dir.path().join("server.sqlite");
+    let server = authority_at(&server_path);
+    let alice = open_at(1, &dir.path().join("alice.sqlite"));
+    let _link = link(&alice, &server);
+    insert(&alice, "presence", row(1), "a", "0");
+    pump(&server, &[&alice]);
+    for step in 1..10 {
+        update(&alice, "presence", row(1), "a", &step.to_string());
+        pump(&server, &[&alice]);
+    }
+    drop(server);
+    let server = authority_at(&server_path);
+    assert_eq!(transactions_of(&server_path, 1), 1);
+
+    let _link = link(&alice, &server);
+    insert(&alice, "notes", row(2), "a", "note");
+    pump(&server, &[&alice]);
+    update(&alice, "presence", row(1), "a", "10");
+    pump(&server, &[&alice]);
+    update(&alice, "notes", row(2), "a", "edited");
+    pump(&server, &[&alice]);
+
+    assert_eq!(read(&server, "presence", None), [("a".into(), "10".into())]);
+    assert_eq!(alice.pending_upload_count(), 0);
+    drop(server);
+    // The note's two commits; the presence commit between them went
+    // once the note's edit followed it.
+    assert_eq!(transactions_of(&server_path, 1), 2);
+}
+
+/// Offline, Alice moves her cursor in doc `a`, her row in doc `b`, then her
+/// cursor in `a` again: the third write was built on the first, whose
+/// dedupe entry the authority drops when it accepts the second. It is
+/// accepted as a blind write, and all three converge.
+#[test]
+fn a_write_built_on_a_commit_whose_entry_was_dropped_is_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = authority_at(&dir.path().join("server.sqlite"));
+    let alice = open_at(1, &dir.path().join("alice.sqlite"));
+    let _link = link(&alice, &server);
+    insert(&server, "presence", row(1), "a", "0");
+    insert(&server, "presence", row(2), "b", "0");
+    let all = Query::from("presence");
+    let _sub = block_on(alice.subscribe(&alice.prepare_query(&all).unwrap(), ReadOpts::default()))
+        .unwrap();
+    pump(&server, &[&alice]);
+
+    update(&alice, "presence", row(1), "a", "1");
+    update(&alice, "presence", row(2), "b", "1");
+    update(&alice, "presence", row(1), "a", "2");
+    pump(&server, &[&alice]);
+
+    let expected: Vec<(String, String)> = vec![("a".into(), "2".into()), ("b".into(), "1".into())];
+    assert_eq!(read(&server, "presence", None), expected);
+    assert_eq!(read(&alice, "presence", None), expected);
+    assert_eq!(alice.pending_upload_count(), 0);
+}
+
+/// Alice uploads two cursor moves, but their fates are lost and she
+/// reconnects. Her first commit's dedupe entry is gone, but her second's
+/// shows the first came before it, so its resend is answered as accepted
+/// rather than applied again over the second: the row stays at her newest
+/// write on both sides, and the authority still keeps one entry for her.
+#[test]
+fn a_resent_commit_whose_entry_was_dropped_is_not_applied_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let server_path = dir.path().join("server.sqlite");
+    let server = authority_at(&server_path);
+    let alice = open_at(1, &dir.path().join("alice.sqlite"));
+    let (upstream, down) = lossy_link(&alice, &server);
+    insert(&alice, "presence", row(1), "a", "0");
+    pump(&server, &[&alice]);
+    update(&alice, "presence", row(1), "a", "1");
+    update(&alice, "presence", row(1), "a", "2");
+    block_on(alice.tick()).unwrap();
+    block_on(server.tick()).unwrap();
+    down.borrow_mut().clear();
+    assert!(alice.detach_connection(&upstream));
+    assert_eq!(read(&server, "presence", None), [("a".into(), "2".into())]);
+    assert!(alice.pending_upload_count() > 0, "the fates were lost");
+
+    let _link = link(&alice, &server);
+    pump(&server, &[&alice]);
+
+    assert_eq!(read(&server, "presence", None), [("a".into(), "2".into())]);
+    assert_eq!(read(&alice, "presence", None), [("a".into(), "2".into())]);
+    assert_eq!(alice.pending_upload_count(), 0);
+    drop(server);
+    assert_eq!(transactions_of(&server_path, 1), 1);
+}
+
 /// A chunked value names the version it extends or proves access through,
 /// which a latest-only table drops, so a value over the inline threshold
 /// is refused there with a typed error; the same value fits a full table.
