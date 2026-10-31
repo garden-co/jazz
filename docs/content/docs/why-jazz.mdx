@@ -59,6 +59,7 @@ Rough plan: each comparison answers the questions developers actually ask (lock-
 - Both give reactive queries and a typed schema; Jazz is self-hosted on your own cloud and is MIT when unsharded
 - Jazz queries are declarative relational queries, not server functions you write and deploy
 - Declarative permission policies instead of checks written inside each function
+  - When a rule is too complex for a policy, write it as ordinary code in a backend route that uses the backend client, and close that data off to clients entirely
 - Local-first clients with offline writes
 - Where Convex is stronger: a polished hosted product, server functions co-located with data
 
