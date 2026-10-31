@@ -6,15 +6,13 @@ import { ArrowLeft, ArrowRight } from "lucide-react";
 import { ClickableCard } from "@astryxdesign/core/ClickableCard";
 import { Divider } from "@astryxdesign/core/Divider";
 import { Layout, LayoutContent, LayoutPanel } from "@astryxdesign/core/Layout";
-import { HStack, VStack } from "@astryxdesign/core/Stack";
+import { VStack } from "@astryxdesign/core/Stack";
 import { Heading, Text } from "@astryxdesign/core/Text";
 import { getPageImage, source } from "@/lib/source";
 import { textOf } from "@/lib/docs-nav";
 import { getDocsMDXComponents } from "@/components/docs/mdx";
 import { DocsLink } from "@/components/docs/mdx-client";
 import { DocsToc } from "@/components/docs/docs-toc";
-import { LLMCopyButton, ViewOptions } from "@/components/ai/page-actions";
-import { gitConfig } from "@/lib/layout.shared";
 
 function NeighbourCard({
   direction,
@@ -95,13 +93,6 @@ export default async function Page(props: PageProps<"/docs/[[...slug]]">) {
                   {page.data.description}
                 </Text>
               )}
-              <HStack gap={2} vAlign="center">
-                <LLMCopyButton markdownUrl={`${page.url}.mdx`} />
-                <ViewOptions
-                  markdownUrl={`${page.url}.mdx`}
-                  githubUrl={`https://github.com/${gitConfig.user}/${gitConfig.repo}/blob/${gitConfig.branch}/content/docs/${page.path}`}
-                />
-              </HStack>
             </VStack>
             <Divider className="my-8" />
             <MDX components={getDocsMDXComponents({ a: RelativeLink })} />
