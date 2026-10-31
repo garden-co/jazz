@@ -54,7 +54,7 @@ const FORMAT: &str = "jazz-sqlite-sync-wire-corpus-v1";
 /// Every `SyncMessage` variant, in declaration order. A message too
 /// large for one frame travels in parts below the message layer
 /// (binding_host's frame-split test covers it).
-const VARIANTS: [&str; 19] = [
+const VARIANTS: [&str; 20] = [
     "Read",
     "Unsubscribe",
     "ResendWhole",
@@ -74,6 +74,7 @@ const VARIANTS: [&str; 19] = [
     "Join",
     "Catalogue",
     "Welcome",
+    "ConnectionSettled",
 ];
 
 #[derive(Debug, Serialize, Deserialize)]
