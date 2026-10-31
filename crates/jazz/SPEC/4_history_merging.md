@@ -551,7 +551,9 @@ columns as a bitmask over their positions in the row table (stored tables
 only grow by `ADD COLUMN`, so a position never moves). A delete or restore
 authors `_st`, the version's state bits (bit 0: its commit wrote no content;
 bit 1: deleted; bit 2, in history only: a merged text write as sent, §4.3). An app column cannot take the name of a stored row column
-(`id`, `rid`, `_b`, `_n`, `_seq`, `_st`, `_base`, `_cols`). `_base` and `_cols`
+(`id`, `rid`, `_b`, `_n`, `_seq`, `_st`, `_base`, `_cols`), nor `_p`, the
+partition a sharded deployment stores each row under (SPEC 15; an unsharded
+store never creates it). `_base` and `_cols`
 are NULL on every other replica and for Core's own writes: those are made over the current image, so they are never maybe
 conflicting, and in another write's analysis they author every column. The
 flag, the walk and the merge base are derived on demand
